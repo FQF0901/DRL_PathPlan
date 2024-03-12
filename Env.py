@@ -10,7 +10,7 @@ class Env:
     
     def reset(self):
         self.rectangles.clear()  # 清空之前的矩形数据
-        n_rectangles = np.random.randint(10, 30)  # 随机确定矩形的数量（1~64）
+        n_rectangles = np.random.randint(0, 20)  # 随机确定矩形的数量（1~64）
         
         for _ in range(n_rectangles):
             x = np.random.uniform(-8, 8)  # 中心点坐标在-8到8之间
@@ -33,6 +33,13 @@ class Env:
         self.rectangles = [rect for rect in self.rectangles if not check_overlap(rect, self.slot)]
         
         return self.rectangles, self.slot
+    
+    def step(self, action):
+        new_state = None
+        reward = None
+        done = False
+        info = {}
+        return new_state, reward, done, info
     
     def show(self):
         """绘制所有矩形和slot。"""
