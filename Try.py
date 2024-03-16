@@ -1,45 +1,21 @@
-import math
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import utils
-import numpy as np
+def Path_show(path, obstacles, start, goal):
+    fig, ax = plt.subplots()
 
-class Node:
-    def __init__(self, x, y, theta, g_cost, h_cost, parent=None):
-        self.x = x
-        self.y = y
-        self.theta = theta
-        self.g_cost = g_cost
-        self.h_cost = h_cost
-        self.parent = parent
+    # 绘制障碍物
+    for obstacle in obstacles:
+        rect = patches.Polygon(obstacle, closed=True, linewidth=1, edgecolor='r', facecolor='r')
+        ax.add_patch(rect)
 
-start_node = Node(1, 2, math.radians(45), 0, 0)
-open_list = [start_node]
-current_node = min(open_list, key=lambda node: node.g_cost + node.h_cost)
+    # 绘制路径
+    path_x = [node.x for node in path]
+    path_y = [node.y for node in path]
+    ax.plot(path_x, path_y, 'b-')
 
-expanded_nodes = []
+    # 标记起点和终点
+    ax.plot(start.x, start.y, 'go', markersize=10, label='Start')
+    ax.plot(goal.x, goal.y, 'ro', markersize=10, label='Goal')
 
-# 创建图形和坐标轴
-fig, ax = plt.subplots()
-
-# 绘制起始节点
-ax.plot(start_node.x, start_node.y, 'ro', markersize=5, label='Start Node')
-
-for steer in [-1, 0, 1]:
-    for gear in [-1, 1]:
-        new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steer, gear, 4)
-        
-        # 绘制新节点
-        expanded_nodes.append((new_x, new_y))
-        
-# 绘制扩展节点
-for node in expanded_nodes:
-    ax.plot(node[0], node[1], 'bo', markersize=3, label='Expanded Node')
-
-plt.xlabel('X')
-plt.ylabel('Y')
-plt.title('Expanded Nodes Visualization')
-plt.legend()
-ax.grid(True)
-ax.set_aspect('equal', adjustable='box')
-plt.show()
+    ax.legend()
+    ax.grid(True)
+    ax.set_aspect('equal', adjustable='box')
+    plt.show()
