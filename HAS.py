@@ -3,10 +3,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import utils
 import numpy as np
+import reeds_shepp as rs
+import ParaCfg
 
 # 定义网格大小和边长
-grid_size = 200
-cell_size = 0.2
+grid_num = ParaCfg.MapParam.grid_num
+cell_size = ParaCfg.MapParam.cell_size
 
 class Node:
     def __init__(self, x, y, theta, g_cost, h_cost, parent=None):
@@ -18,9 +20,9 @@ class Node:
         self.parent = parent
 
 def get_grid_index(x, y):
-    grid_x = int((x + 20) / cell_size)
-    grid_y = int((y + 20) / cell_size)
-    return grid_x + grid_y * grid_size
+    grid_x = int((x - -20) / cell_size)
+    grid_y = int((y - -20) / cell_size)
+    return grid_x + grid_y * grid_num
 
 def heuristic(node, goal):
     return math.sqrt((node.x - goal.x)**2 + (node.y - goal.y)**2)
@@ -38,7 +40,7 @@ def hybrid_a_star(start, goal, obstacles):
     closed_list = []
     expanded_nodes = []
     current_nodes = []
-    grid_cells = [[] for _ in range(grid_size ** 2)]
+    grid_cells = [[] for _ in range(grid_num ** 2)]
 
     cnt = 0
     while open_list and cnt < 750:

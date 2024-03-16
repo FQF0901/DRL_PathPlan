@@ -1,21 +1,17 @@
-def Path_show(path, obstacles, start, goal):
-    fig, ax = plt.subplots()
+import math
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import utils
+import numpy as np
+import reeds_shepp as rs
+import numpy as np
+import Env
+# import HAS
+import ParaCfg
 
-    # 绘制障碍物
-    for obstacle in obstacles:
-        rect = patches.Polygon(obstacle, closed=True, linewidth=1, edgecolor='r', facecolor='r')
-        ax.add_patch(rect)
+env = Env.Env()
+env.reset()
 
-    # 绘制路径
-    path_x = [node.x for node in path]
-    path_y = [node.y for node in path]
-    ax.plot(path_x, path_y, 'b-')
+# calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=STEP_SIZE)
+path = rs.calc_all_paths(env.SP[0], env.SP[1], env.SP[2], env.TP[0], env.TP[1], env.TP[2], ParaCfg.VehPara.radius, 0.2)
 
-    # 标记起点和终点
-    ax.plot(start.x, start.y, 'go', markersize=10, label='Start')
-    ax.plot(goal.x, goal.y, 'ro', markersize=10, label='Goal')
-
-    ax.legend()
-    ax.grid(True)
-    ax.set_aspect('equal', adjustable='box')
-    plt.show()
