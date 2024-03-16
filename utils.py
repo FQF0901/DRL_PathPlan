@@ -88,16 +88,24 @@ def check_overlap(rect1, rect2):
             return False  # 如果找到分离轴，则不重叠
     return True  # 所有轴上的投影都重叠，说明矩形重叠
 
-def cal_VechPose(x, y, yaw, steering_angle, gear, dist):
-    if gear == 1:
-        dist = abs(dist)
-    elif gear == -1:
-        dist = -abs(dist)
-    else:
-        raise ValueError("Invalid gear specified")
+def cal_VechPose(x, y, yaw, steer, gear, dist):
 
-    x += dist * math.cos(yaw)
-    y += dist * math.sin(yaw)
-    yaw += (dist / ParaCfg.VehPara.wheelbase) * math.tan(math.radians(steering_angle))
+    SteerAng = math.radians(28.78) * steer    # deg
+    Dist = dist * gear
     
-    return x, y, yaw
+    if SteerAng != 0:
+        Turning_Angle = math.tan(SteerAng) * Dist / ParaCfg.VehPara.wheelbase
+        Turn_Radius = Dist / Turning_Angle
+        NextYaw = math.fmod(yaw + Turning_Angle + math.pi, 2*math.pi) - math.pi
+        NextX = x - Turn_Radius * math.sin(yaw) + Turn_Radius * math.sin(NextYaw)
+        NextY = y + Turn_Radius * math.cos(yaw) - Turn_Radius * math.cos(NextYaw)
+
+    else:
+        Turning_Angle = 0
+        Turn_Radius = dist
+        NextX = x + Dist * math.cos(yaw)
+        NextY = y + Dist * math.sin(yaw)
+        NextYaw = yaw
+
+    
+    return NextX, NextY, NextYaw

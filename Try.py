@@ -13,105 +13,33 @@ class Node:
         self.h_cost = h_cost
         self.parent = parent
 
-def heuristic(node, goal):
-    return math.sqrt((node.x - goal.x)**2 + (node.y - goal.y)**2)
+start_node = Node(1, 2, math.radians(45), 0, 0)
+open_list = [start_node]
+current_node = min(open_list, key=lambda node: node.g_cost + node.h_cost)
 
-def is_valid_node(node, obstacles):
-    host_veh = utils.get_Veh_corners(node.x, node.y, node.theta)
+expanded_nodes = []
 
-    for obstacle in obstacles:
-        if utils.check_overlap(obstacle, host_veh):
-            return False
-    return True
+# 创建图形和坐标轴
+fig, ax = plt.subplots()
 
-def hybrid_a_star(start, goal, obstacles):
-    open_list = [start]
-    closed_list = []
-    expanded_nodes = []
+# 绘制起始节点
+ax.plot(start_node.x, start_node.y, 'ro', markersize=5, label='Start Node')
 
-    fig, ax = plt.subplots()
-
-    # 绘制障碍物
-    for obstacle in obstacles:
-        rect = patches.Rectangle(obstacle[0], obstacle[2][0]-obstacle[0][0], obstacle[2][1]-obstacle[0][1], linewidth=1, edgecolor='r', facecolor='r')
-        ax.add_patch(rect)
-
-    cnt = 0
-    while open_list and cnt < 3000:
-        current_node = min(open_list, key=lambda node: node.g_cost + node.h_cost)
-        open_list.remove(current_node)
-        closed_list.append(current_node)
-
-        if abs(current_node.x - goal.x) < 0.1 and abs(current_node.y - goal.y) < 0.1:
-            path = []
-            while current_node:
-                path.append(current_node)
-                current_node = current_node.parent
-            return path[::-1]
-
-        for steering_angle in [-30, 0, 30]:
-            for gear in [-1, 1]:
-                new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, 0.2)
-                new_node = Node(new_x, new_y, new_theta, current_node.g_cost + 1, heuristic(Node(new_x, new_y, new_theta, 0, 0), goal), current_node)
-
-                if is_valid_node(new_node, obstacles) and new_node not in closed_list:
-                    if new_node not in open_list:
-                        open_list.append(new_node)
+for steer in [-1, 0, 1]:
+    for gear in [-1, 1]:
+        new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steer, gear, 4)
         
-        expanded_nodes.append((current_node.x, current_node.y))
+        # 绘制新节点
+        expanded_nodes.append((new_x, new_y))
+        
+# 绘制扩展节点
+for node in expanded_nodes:
+    ax.plot(node[0], node[1], 'bo', markersize=3, label='Expanded Node')
 
-        # 实时绘制节点
-        path_x = [node[0] for node in expanded_nodes]
-        path_y = [node[1] for node in expanded_nodes]
-        ax.plot(path_x, path_y, 'bo', markersize=3)
-        plt.pause(0.001)
-
-        cnt = cnt + 1
-
-    return None
-
-def plot_path(path, obstacles, success=True):
-    fig, ax = plt.subplots()
-
-    # 绘制障碍物
-    for obstacle in obstacles:
-        rect = patches.Rectangle(obstacle[0], obstacle[2][0]-obstacle[0][0], obstacle[2][1]-obstacle[0][1], linewidth=1, edgecolor='r', facecolor='r')
-        ax.add_patch(rect)
-
-    if success:
-        # 绘制路径
-        path_x = [node.x for node in path]
-        path_y = [node.y for node in path]
-        ax.plot(path_x, path_y, 'g-')
-
-    plt.xlim(-1, 6)
-    plt.ylim(-1, 6)
-    plt.gca().set_aspect('equal', adjustable='box')
-    plt.show()
-
-# 示例障碍物信息，每个障碍物用四个角点坐标表示
-# obstacles = [
-#     [(10, 1), (10, 2), (20, 2), (20, 1)],
-#     [(30, 3), (30, 4), (40, 4), (40, 3)]
-# ]
-obstacles = []
-
-for _ in range(1):
-    x = np.random.uniform(5, 5)
-    y = np.random.uniform(7, 8)
-    yaw = np.random.uniform(0, 360)
-    length, width = np.random.uniform(0.1, 0.5, 2)
-    
-    corners = utils.get_rectangle_corners(x, y, yaw, length, width)
-    obstacles.append(corners)
-
-start_node = Node(0, 0, 0, 0, 0)
-goal_node = Node(10, 10, math.pi/4, 0, 0)
-
-path = hybrid_a_star(start_node, goal_node, obstacles)
-if path:
-    print("找到路径！")
-    plot_path(path, obstacles, success=True)
-else:
-    print("未找到路径！")
-    plot_path([], obstacles, success=False)
+plt.xlabel('X')
+plt.ylabel('Y')
+plt.title('Expanded Nodes Visualization')
+plt.legend()
+ax.grid(True)
+ax.set_aspect('equal', adjustable='box')
+plt.show()
