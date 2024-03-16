@@ -12,12 +12,11 @@ import Env
 # env.reset()
 
 # 计算路径
-path = rs.calc_optimal_path(0, 0, 0, 5, 5, math.radians(-120), 0.2, 0.02)
-
+RSpath = rs.calc_optimal_path(0, 0, 0, 5, 5, math.radians(-120), 1 / ParaCfg.VehPara.radius, 0.02)
 
 # # 提取路径中的点坐标
-x_coords = path.x
-y_coords = path.y
+x_coords = RSpath.x
+y_coords = RSpath.y
 
 # 绘制路径
 plt.figure()
