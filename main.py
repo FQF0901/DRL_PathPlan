@@ -6,9 +6,9 @@ env = Env.Env()
 env.reset()
 env.show()
 
-# x, y = 51, 31
-# sx, sy, syaw0 = env.SP[0], env.SP[1], np.deg2rad(env.SP[2])
-# gx, gy, gyaw0 = env.TP[0], env.TP[1], np.deg2rad(env.TP[2])
+x, y = 51, 31
+sx, sy, syaw0 = env.SP[0], env.SP[1], np.deg2rad(env.SP[2])
+gx, gy, gyaw0 = env.TP[0], env.TP[1], np.deg2rad(env.TP[2])
 
 # env.obj
 # env.other_veh
