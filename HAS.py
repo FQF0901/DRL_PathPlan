@@ -102,17 +102,17 @@ def Path_show(path, obstacles, start, goal):
     ax.set_aspect('equal', adjustable='box')
     plt.show()
 
-# 示例障碍物信息，每个障碍物用四个角点坐标表示
-obstacles = []
-corners = utils.get_rectangle_corners(7.9, 1.2, 0, 0.1, 0.1)
-obstacles.append(corners)
+# # 示例障碍物信息，每个障碍物用四个角点坐标表示
+# obstacles = []
+# corners = utils.get_rectangle_corners(7.9, 1.2, 0, 0.1, 0.1)
+# obstacles.append(corners)
 
-start_node = Node(0, 0, 0, 0, 0)
-goal_node = Node(12, 5, math.pi/4, 0, 0)
+# start_node = Node(0, 0, 0, 0, 0)
+# goal_node = Node(12, 5, math.pi/4, 0, 0)
 
-path = hybrid_a_star(start_node, goal_node, obstacles)
-if path:
-    print("找到路径！")
-    Path_show(path, obstacles, start_node, goal_node)
-else:
-    print("未找到路径！")
+# path = hybrid_a_star(start_node, goal_node, obstacles)
+# if path:
+#     print("找到路径！")
+#     Path_show(path, obstacles, start_node, goal_node)
+# else:
+#     print("未找到路径！")
