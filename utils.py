@@ -1,5 +1,6 @@
 import numpy as np
 import ParaCfg
+import math
 
 def get_rectangle_corners(x, y, yaw, length, width):
     """根据中心点、旋转角度、长度和宽度计算矩形的四个角点。"""
@@ -16,6 +17,26 @@ def get_rectangle_corners(x, y, yaw, length, width):
     ])
     rotated_corners = np.dot(rectangle_corners, rotation_matrix.T) + np.array([x, y])
     return rotated_corners
+
+def get_TP(slot):
+    """通过矩形的四个角点坐标和偏移量Xm计算A点的坐标"""
+    # 计算矩形的几何中心
+    x_coordinates = [point[0] for point in slot]
+    y_coordinates = [point[1] for point in slot]
+    center_x = sum(x_coordinates) / len(x_coordinates)
+    center_y = sum(y_coordinates) / len(y_coordinates)
+
+    # 确定矩形的长度方向
+    length_vector = (slot[1][0] - slot[0][0], slot[1][1] - slot[0][1])
+    norm = math.sqrt(pow(slot[1][0] - slot[0][0], 2) + pow(slot[1][1] - slot[0][1], 2))
+
+    # 根据矩形几何中心和长度方向计算A点坐标
+    A_x = center_x + length_vector[0] * (ParaCfg.VehPara.length / 2 - ParaCfg.VehPara.rear_to_back) / norm
+    A_y = center_y + length_vector[1] * (ParaCfg.VehPara.length / 2 - ParaCfg.VehPara.rear_to_back) / norm
+
+    TP = np.array([A_x, A_y])
+
+    return TP
 
 def get_Veh_corners(x, y, yaw):
     """根据后轴中心、长度和宽度计算车辆的四个角点。"""

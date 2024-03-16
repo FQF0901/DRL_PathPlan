@@ -3,50 +3,96 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import utils
 import ParaCfg
+import random
 
 class Env:
     def __init__(self):
-        self.veh_rear_x = 0
-        self.veh_rear_y = 0
-
-        self.rectangles = []  # 存储随机数量矩形的角点
-        self.veh = None
+        self.obj = []  # 存储随机数量obj的角点
+        self.other_veh = []  # 存储随机数量other_veh的角点
+        self.host_veh = None
         self.slot = None  # 存储特定矩形（slot）的角点
+
+        self.SP = []
+        self.TP = []
     
     def reset(self):
-        self.rectangles.clear()  # 清空之前的矩形数据
-        n_rectangles = np.random.randint(0, 20)  # 随机确定矩形的数量（1~64）
+        self.obj.clear()  # 清空之前的矩形数据
+        n_obj = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
         
         # 生成特定范围内的obj矩形
-        for _ in range(n_rectangles):
-            x = np.random.uniform(-8, 8)  # 中心点坐标在-8到8之间
-            y = np.random.uniform(-4, 8)  # 中心点坐标在-8到8之间
-            yaw = np.random.uniform(0, 360)  # 旋转角度在0到360度之间
-            length, width = np.random.uniform(0.1, 0.5, 2)  # 长度和宽度在0.1到0.5之间
+        for _ in range(n_obj):
+            x = np.random.uniform(-8, 8)
+            y = np.random.uniform(-2, 6)
+            yaw = np.random.uniform(0, 360)
+            length, width = np.random.uniform(0.1, 0.5, 2)
             
             corners = utils.get_rectangle_corners(x, y, yaw, length, width)
-            self.rectangles.append(corners)
+            self.obj.append(corners)
 
-        # 生成特定范围内的host veh
-        self.veh_rear_x = np.random.uniform(-5, 5)  # 后轴坐标
-        self.veh_rear_y = np.random.uniform(-1, 3)  # 后轴坐标
-        self.veh_rear_yaw = np.random.uniform(-45, 45)  # 后轴坐标
-        self.veh = utils.get_Veh_corners(self.veh_rear_x, self.veh_rear_y, self.veh_rear_yaw)
+        # 生成特定范围内的host veh(基于后轴)
+        self.host_veh_rear_x = np.random.uniform(-5, 5)
+        self.host_veh_rear_y = np.random.uniform(-1, 3)
+        self.host_veh_rear_yaw = np.random.uniform(-45, 45)
+        self.host_veh = utils.get_Veh_corners(self.host_veh_rear_x, self.host_veh_rear_y, self.host_veh_rear_yaw)
         
         # 生成特定范围内的矩形（slot）
-        yaw = np.random.uniform(-0, 0)  # 旋转角度在0到360度之间
-        length = np.random.uniform(4.8, 5.6)  # 长度和宽度在0.1到0.5之间
-        width = np.random.uniform(2, 2.6)  # 长度和宽度在0.1到0.5之间
+        length = np.random.uniform(4.8, 5.6)
+        width = np.random.uniform(2, 2.6)
         x = 0
         y = -width / 2
-        yaw = np.random.uniform(-0, 0)  # 旋转角度在0到360度之间
+        yaw = np.random.uniform(-10, 10)
         self.slot = utils.get_rectangle_corners(x, y, yaw, length, width)
+
+        # 生成slot周围的other veh
+        length = np.random.uniform(4.4, 5.0)
+        width = np.random.uniform(1.8, 2.1)
+                       
+        x1 = np.random.uniform(5, 6)
+        y1 = np.random.uniform(-0.8, -1.2)
+        yaw1 = np.random.uniform(-10, 10)
+
+        x2 = np.random.uniform(-7, -5)
+        y2 = np.random.uniform(-0.8, -1.2)
+        yaw2 = np.random.uniform(-10, 10)
+
+        x3 = np.random.uniform(-6, -4)
+        y3 = np.random.uniform(4, 6)
+        yaw3 = np.random.uniform(-10, 10)
+
+        x4 = np.random.uniform(-1, 1)
+        y4 = np.random.uniform(4, 6)
+        yaw4 = np.random.uniform(-10, 10)
+
+        x5 = np.random.uniform(4, 6)
+        y5 = np.random.uniform(4, 6)
+        yaw5 = np.random.uniform(-10, 10)
+
+        n = random.randint(0, 5)
+        arr = np.array([[x1, y1, yaw1], [x2, y2, yaw2], [x3, y3, yaw3], [x4, y4, yaw4], [x5, y5, yaw5]])
+
+        # 从数组中进行 n 组随机抽样
+        sampled_indices = np.random.choice(arr.shape[0], size=n, replace=False)
+        sampled_coordinates = arr[sampled_indices]
+
+        for coord in sampled_coordinates:
+            corners = utils.get_rectangle_corners(coord[0], coord[1], coord[2], length, width)
+            self.other_veh.append(corners)
         
         # 检查并移除与 host veh 和 slot 存在重叠的obj矩形
-        self.rectangles = [rect for rect in self.rectangles if not utils.check_overlap(rect, self.veh)]
-        self.rectangles = [rect for rect in self.rectangles if not utils.check_overlap(rect, self.slot)]
+        self.obj = [rect for rect in self.obj if not utils.check_overlap(rect, self.host_veh)]
+        self.obj = [rect for rect in self.obj if not utils.check_overlap(rect, self.slot)]
+        self.other_veh = [rect for rect in self.other_veh if not utils.check_overlap(rect, self.host_veh)]
+
+        if self.other_veh is not None:
+            new_obj = [rect for rect in self.obj if not any(utils.check_overlap(rect, veh) for veh in self.other_veh)]
+            self.obj = new_obj
+
         
-        return self.rectangles, self.slot, self.veh
+        # 生成SP和TP
+        self.SP = np.array([self.host_veh_rear_x, self.host_veh_rear_y])
+        self.TP = utils.get_TP(self.slot)
+        
+        return self.obj, self.slot, self.host_veh, self.other_veh
     
     def step(self, action):
         new_state = None
@@ -56,13 +102,17 @@ class Env:
         return new_state, reward, done, info
     
     def show(self):
-        """绘制所有obj,slot和host veh"""
-        if not self.rectangles and self.slot is None:
-            print("No rectangles to show. Please call reset() first.")
+        """绘制所有obj,slot,host veh和other veh"""
+        if not self.obj and self.slot is None:
+            print("No obj to show. Please call reset() first.")
             return
 
         fig, ax = plt.subplots()
-        for corners in self.rectangles:
+        for corners in self.obj:
+            polygon = patches.Polygon(corners, closed=True, edgecolor='r', facecolor='none')
+            ax.add_patch(polygon)
+
+        for corners in self.other_veh:
             polygon = patches.Polygon(corners, closed=True, edgecolor='r', facecolor='none')
             ax.add_patch(polygon)
 
@@ -70,17 +120,18 @@ class Env:
             slot_polygon = patches.Polygon(self.slot, closed=True, edgecolor='b', facecolor='none')
             ax.add_patch(slot_polygon)
         
-        veh_polygon = patches.Polygon(self.veh, closed=True, edgecolor='g', facecolor='none')
-        ax.add_patch(veh_polygon)
+        host_veh_polygon = patches.Polygon(self.host_veh, closed=True, edgecolor='g', facecolor='none')
+        ax.add_patch(host_veh_polygon)
         
-        # 获取车辆后轴中心坐标
-        veh_center = np.array([self.veh_rear_x, self.veh_rear_y])
-        veh_center_circle = plt.Circle(veh_center, 0.05, color='g')  # 以绿色表示车辆后轴中心
-        ax.add_artist(veh_center_circle)
+        # 绘制SP和TP
+        SP_circle = plt.Circle(self.SP, 0.05, color='g')  # 以绿色表示SP
+        ax.add_artist(SP_circle)
+        TP_circle = plt.Circle(self.TP, 0.05, color='b')  # 以蓝色表示TP
+        ax.add_artist(TP_circle)
 
         buffer = 1
-        all_corners = np.vstack(self.rectangles + [self.slot])
-        all_corners = np.vstack([all_corners, self.veh])
+        all_corners = np.vstack(self.obj + [self.slot])
+        all_corners = np.vstack([all_corners, self.host_veh])
         
         xlim = (min(all_corners[:, 0]) - buffer, max(all_corners[:, 0]) + buffer)
         ylim = (min(all_corners[:, 1]) - buffer, max(all_corners[:, 1]) + buffer)
