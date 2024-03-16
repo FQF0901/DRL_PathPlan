@@ -30,18 +30,18 @@ class Env:
             self.obj.append(corners)
 
         # 生成特定范围内的host veh(基于后轴)
-        self.host_veh_rear_x = np.random.uniform(-5, 5)
-        self.host_veh_rear_y = np.random.uniform(-1, 3)
-        self.host_veh_rear_yaw = np.random.uniform(-45, 45)
-        self.host_veh = utils.get_Veh_corners(self.host_veh_rear_x, self.host_veh_rear_y, self.host_veh_rear_yaw)
+        host_veh_rear_x = np.random.uniform(-5, 5)
+        host_veh_rear_y = np.random.uniform(-1, 3)
+        host_veh_rear_yaw = np.random.uniform(-45, 45)
+        self.host_veh = utils.get_Veh_corners(host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw)
         
         # 生成特定范围内的矩形（slot）
         length = np.random.uniform(4.8, 5.6)
         width = np.random.uniform(2, 2.6)
-        x = 0
-        y = -width / 2
-        yaw = np.random.uniform(-10, 10)
-        self.slot = utils.get_rectangle_corners(x, y, yaw, length, width)
+        slot_x = 0
+        slot_y = -width / 2
+        slot_yaw = np.random.uniform(-10, 10)
+        self.slot = utils.get_rectangle_corners(slot_x, slot_y, slot_yaw, length, width)
 
         # 生成slot周围的other veh
         length = np.random.uniform(4.4, 5.0)
@@ -88,8 +88,8 @@ class Env:
             self.obj = new_obj
 
         # 生成SP和TP
-        self.SP = np.array([self.host_veh_rear_x, self.host_veh_rear_y])
-        self.TP = utils.get_TP(self.slot)
+        self.SP = np.array([host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw])
+        self.TP = utils.get_TP(self.slot, slot_yaw)
         
         return self.obj, self.slot, self.host_veh, self.other_veh
     

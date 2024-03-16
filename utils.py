@@ -18,7 +18,7 @@ def get_rectangle_corners(x, y, yaw, length, width):
     rotated_corners = np.dot(rectangle_corners, rotation_matrix.T) + np.array([x, y])
     return rotated_corners
 
-def get_TP(slot):
+def get_TP(slot, yaw):
     """通过矩形的四个角点坐标和偏移量Xm计算A点的坐标"""
     # 计算矩形的几何中心
     x_coordinates = [point[0] for point in slot]
@@ -34,7 +34,7 @@ def get_TP(slot):
     A_x = center_x + length_vector[0] * (ParaCfg.VehPara.length / 2 - ParaCfg.VehPara.rear_to_back) / norm
     A_y = center_y + length_vector[1] * (ParaCfg.VehPara.length / 2 - ParaCfg.VehPara.rear_to_back) / norm
 
-    TP = np.array([A_x, A_y])
+    TP = np.array([A_x, A_y, yaw])
 
     return TP
 
