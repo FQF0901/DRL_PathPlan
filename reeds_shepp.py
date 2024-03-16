@@ -23,14 +23,14 @@ class PATH:
 
 def calc_optimal_path(start_node, goal_node):
     sx = start_node.x
-    sy = start_node.x
-    syaw = start_node.x
+    sy = start_node.y
+    syaw = start_node.theta
     gx = goal_node.x
-    gy = goal_node.x
-    gyaw = goal_node.x
+    gy = goal_node.y
+    gyaw = goal_node.theta
     maxc = 1 / ParaCfg.VehPara.radius
     step_size = 0.02
-    
+
     paths = calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=step_size)
 
     minL = paths[0].L
