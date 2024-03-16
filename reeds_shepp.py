@@ -1,7 +1,7 @@
 import time
 import math
 import numpy as np
-
+import ParaCfg
 
 # parameters initiation
 STEP_SIZE = 0.2
@@ -21,7 +21,16 @@ class PATH:
         self.directions = directions        # forward: 1, backward:-1
 
 
-def calc_optimal_path(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=STEP_SIZE):
+def calc_optimal_path(start_node, goal_node):
+    sx = start_node.x
+    sy = start_node.x
+    syaw = start_node.x
+    gx = goal_node.x
+    gy = goal_node.x
+    gyaw = goal_node.x
+    maxc = 1 / ParaCfg.VehPara.radius
+    step_size = 0.02
+    
     paths = calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=step_size)
 
     minL = paths[0].L

@@ -40,6 +40,7 @@ def hybrid_a_star(start, goal, obstacles):
     closed_list = []
     expanded_nodes = []
     current_nodes = []
+    RSpath = []
     grid_cells = [[] for _ in range(grid_num ** 2)]
 
     cnt = 0
@@ -57,12 +58,22 @@ def hybrid_a_star(start, goal, obstacles):
 
         closed_list.append(current_node)
 
-        if abs(current_node.x - goal.x) < 0.1 and abs(current_node.y - goal.y) < 0.1:
-            path = []
-            while current_node:
-                path.append(current_node)
-                current_node = current_node.parent
-            return path[::-1]
+        RSpath = rs.calc_optimal_path(current_node, goal)
+
+        for i in range(0, len(RSpath.x)):
+            RSpathx = RSpath.x[i]
+            RSpathy = RSpath.y[i]
+            RSpathyaw = RSpath.yaw[i]
+
+            RSnode = Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
+            if is_overlap(RSnode, obstacles):
+                break
+            elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
+                path = []
+                while current_node:
+                    path.append(current_node)
+                    current_node = current_node.parent
+                return path[::-1], RSpath
 
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:
@@ -80,7 +91,7 @@ def hybrid_a_star(start, goal, obstacles):
 
     return None
 
-def Path_show(path, obstacles, start, goal):
+def Path_show(path, RSpath, obstacles, start, goal):
     fig, ax = plt.subplots()
 
     # 绘制障碍物
@@ -91,7 +102,12 @@ def Path_show(path, obstacles, start, goal):
     # 绘制路径
     path_x = [node.x for node in path]
     path_y = [node.y for node in path]
-    ax.plot(path_x, path_y, 'b-')
+    ax.plot(path_x, path_y, 'b-+')
+
+    # 提取路径中的点坐标
+    RSpath_x = RSpath.x
+    RSpath_Y = RSpath.y
+    ax.plot(RSpath_x, RSpath_Y, 'b-')
 
     # 标记起点和终点
     ax.plot(start.x, start.y, 'go', markersize=10, label='Start')
@@ -102,17 +118,17 @@ def Path_show(path, obstacles, start, goal):
     ax.set_aspect('equal', adjustable='box')
     plt.show()
 
-# # 示例障碍物信息，每个障碍物用四个角点坐标表示
-# obstacles = []
-# corners = utils.get_rectangle_corners(7.9, 1.2, 0, 0.1, 0.1)
-# obstacles.append(corners)
+# 示例障碍物信息，每个障碍物用四个角点坐标表示
+obstacles = []
+corners = utils.get_rectangle_corners(7.9, 1.2, 0, 0.1, 0.1)
+obstacles.append(corners)
 
-# start_node = Node(0, 0, 0, 0, 0)
-# goal_node = Node(12, 5, math.pi/4, 0, 0)
+start_node = Node(0, 0, 0, 0, 0)
+goal_node = Node(12, 5, math.pi/4, 0, 0)
 
-# path = hybrid_a_star(start_node, goal_node, obstacles)
-# if path:
-#     print("找到路径！")
-#     Path_show(path, obstacles, start_node, goal_node)
-# else:
-#     print("未找到路径！")
+path, RSpath = hybrid_a_star(start_node, goal_node, obstacles)
+if path and RSpath:
+    print("找到路径！")
+    Path_show(path, RSpath, obstacles, start_node, goal_node)
+else:
+    print("未找到路径！")
