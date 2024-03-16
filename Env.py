@@ -51,7 +51,7 @@ class Env:
         y1 = np.random.uniform(-0.8, -1.2)
         yaw1 = np.random.uniform(-10, 10)
 
-        x2 = np.random.uniform(-7, -5)
+        x2 = np.random.uniform(-7, -4)
         y2 = np.random.uniform(-0.8, -1.2)
         yaw2 = np.random.uniform(-10, 10)
 
@@ -87,7 +87,6 @@ class Env:
             new_obj = [rect for rect in self.obj if not any(utils.check_overlap(rect, veh) for veh in self.other_veh)]
             self.obj = new_obj
 
-        
         # 生成SP和TP
         self.SP = np.array([self.host_veh_rear_x, self.host_veh_rear_y])
         self.TP = utils.get_TP(self.slot)
@@ -101,7 +100,7 @@ class Env:
         info = {}
         return new_state, reward, done, info
     
-    def show(self):
+    def show(self, save_path):
         """绘制所有obj,slot,host veh和other veh"""
         if not self.obj and self.slot is None:
             print("No obj to show. Please call reset() first.")
@@ -133,16 +132,22 @@ class Env:
         all_corners = np.vstack(self.obj + [self.slot])
         all_corners = np.vstack([all_corners, self.host_veh])
         
-        xlim = (min(all_corners[:, 0]) - buffer, max(all_corners[:, 0]) + buffer)
-        ylim = (min(all_corners[:, 1]) - buffer, max(all_corners[:, 1]) + buffer)
+        # xlim = (min(all_corners[:, 0]) - buffer, max(all_corners[:, 0]) + buffer)
+        # ylim = (min(all_corners[:, 1]) - buffer, max(all_corners[:, 1]) + buffer)
+        xlim = (-9, 9)
+        ylim = (-3.5, 7)
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
 
         ax.grid(True)
-        plt.axis("equal")
+        ax.set_aspect('equal', adjustable='box')
         plt.show()
+
+        # 保存图片到指定路径
+        plt.savefig(save_path)
 
 # 示例使用
 env = Env()
 env.reset()
-env.show()
+save_path = "image.jpg"  # 保存的文件路径和名称
+env.show(save_path)
