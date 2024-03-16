@@ -100,7 +100,7 @@ class Env:
         info = {}
         return new_state, reward, done, info
     
-    def show(self, save_path):
+    def show(self):
         """绘制所有obj,slot,host veh和other veh"""
         if not self.obj and self.slot is None:
             print("No obj to show. Please call reset() first.")
@@ -134,8 +134,8 @@ class Env:
         
         # xlim = (min(all_corners[:, 0]) - buffer, max(all_corners[:, 0]) + buffer)
         # ylim = (min(all_corners[:, 1]) - buffer, max(all_corners[:, 1]) + buffer)
-        xlim = (-9, 9)
-        ylim = (-3.5, 7)
+        xlim = (ParaCfg.MapParam.xmin, ParaCfg.MapParam.xmax)
+        ylim = (ParaCfg.MapParam.ymin, ParaCfg.MapParam.ymax)
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
 
@@ -144,10 +144,10 @@ class Env:
         plt.show()
 
         # 保存图片到指定路径
+        save_path = "image.jpg"
         plt.savefig(save_path)
 
 # 示例使用
-env = Env()
-env.reset()
-save_path = "image.jpg"  # 保存的文件路径和名称
-env.show(save_path)
+# env = Env()
+# env.reset()
+# env.show()

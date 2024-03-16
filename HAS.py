@@ -20,12 +20,13 @@ import scipy.spatial.kdtree as kd
 import astar
 import draw
 import reeds_shepp as rs
+import ParaCfg
 
 
 class C:  # Parameter config
     PI = math.pi
 
-    XY_RESO = 2.0  # [m]
+    XY_RESO = 2  # [m]
     YAW_RESO = np.deg2rad(15.0)  # [rad]
     MOVE_STEP = 0.4  # [m] path interporate resolution
     N_STEER = 20.0  # steer command number
@@ -396,6 +397,11 @@ def calc_index(node, P):
 
 
 def calc_parameters(ox, oy, xyreso, yawreso, kdtree):
+    # minx = round(ParaCfg.MapParam.xmin)
+    # miny = round(ParaCfg.MapParam.ymin)
+    # maxx = round(ParaCfg.MapParam.xmax)
+    # maxy = round(ParaCfg.MapParam.ymax)
+
     minx = round(min(ox) / xyreso)
     miny = round(min(oy) / xyreso)
     maxx = round(max(ox) / xyreso)
@@ -467,24 +473,6 @@ def design_obstacles(x, y):
     for i in range(x):
         ox.append(i)
         oy.append(y - 1)
-    for i in range(y):
-        ox.append(0)
-        oy.append(i)
-    for i in range(y):
-        ox.append(x - 1)
-        oy.append(i)
-    for i in range(10, 21):
-        ox.append(i)
-        oy.append(15)
-    for i in range(15):
-        ox.append(20)
-        oy.append(i)
-    for i in range(15, 30):
-        ox.append(30)
-        oy.append(i)
-    for i in range(16):
-        ox.append(40)
-        oy.append(i)
 
     return ox, oy
 

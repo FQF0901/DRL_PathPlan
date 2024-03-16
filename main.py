@@ -1,15 +1,17 @@
+import numpy as np
 import Env
 import HAS
 
-env =Env.env
+env = Env.Env()
 env.reset()
-
-print(env.SP)
+env.show()
 
 # x, y = 51, 31
-# sx, sy, syaw0 = 10.0, 7.0, np.deg2rad(120.0)
-# gx, gy, gyaw0 = 45.0, 20.0, np.deg2rad(90.0)
+# sx, sy, syaw0 = env.SP[0], env.SP[1], np.deg2rad(env.SP[2])
+# gx, gy, gyaw0 = env.TP[0], env.TP[1], np.deg2rad(env.TP[2])
 
+# env.obj
+# env.other_veh
 # ox, oy = design_obstacles(x, y)
 
 # t0 = time.time()
