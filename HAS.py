@@ -92,7 +92,7 @@ def hybrid_a_star(start, goal, obstacles):
 
     return False, [], []
 
-def Path_show(path, RSpath, obstacles, start, goal):
+def Path_show(path, RSpath, obstacles, start, goal, slot):
     fig, ax = plt.subplots()
 
     # 绘制障碍物
@@ -113,6 +113,14 @@ def Path_show(path, RSpath, obstacles, start, goal):
     # 标记起点和终点
     ax.plot(start.x, start.y, 'go', markersize=10, label='Start')
     ax.plot(goal.x, goal.y, 'ro', markersize=10, label='Goal')
+
+    # 绘制host veh和slot
+    host_veh = utils.get_Veh_corners(goal.x, goal.y, goal.theta)
+    host_veh_polygon = patches.Polygon(host_veh, closed=True, edgecolor='g', facecolor='none')
+    ax.add_patch(host_veh_polygon)
+
+    slot_polygon = patches.Polygon(slot, closed=True, edgecolor='b', facecolor='none')
+    ax.add_patch(slot_polygon)
 
     ax.legend()
     ax.grid(True)
