@@ -4,7 +4,7 @@ import math
 
 def get_rectangle_corners(x, y, yaw, length, width):
     """根据中心点、旋转角度、长度和宽度计算矩形的四个角点。"""
-    yaw_rad = np.radians(yaw)
+    yaw_rad = yaw
     rectangle_corners = np.array([
         [length / 2, width / 2],
         [-length / 2, width / 2],
@@ -53,8 +53,8 @@ def get_Veh_corners(x, y, yaw):
 
     # 根据车辆的航向角（yaw）进行旋转
     rotation_matrix = np.array([
-        [np.cos(np.radians(yaw)), -np.sin(np.radians(yaw))],
-        [np.sin(np.radians(yaw)), np.cos(np.radians(yaw))]
+        [np.cos(yaw), -np.sin(yaw)],
+        [np.sin(yaw), np.cos(yaw)]
     ])
     rotated_corners = np.dot(local_corners, rotation_matrix.T)
 
