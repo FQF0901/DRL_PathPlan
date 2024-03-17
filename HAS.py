@@ -96,7 +96,7 @@ def Path_show(path, RSpath, obstacles, start, goal):
 
     # 绘制障碍物
     for obstacle in obstacles:
-        rect = patches.Polygon(obstacle, closed=True, linewidth=1, edgecolor='r', facecolor='r')
+        rect = patches.Polygon(obstacle, closed=True, linewidth=1, edgecolor='r', facecolor='none')
         ax.add_patch(rect)
 
     # 绘制路径

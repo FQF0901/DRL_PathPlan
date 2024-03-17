@@ -18,3 +18,4 @@ if path and RSpath:
     HAS.Path_show(path, RSpath, obstacles, start_node, goal_node)
 else:
     print("未找到路径！")
+    

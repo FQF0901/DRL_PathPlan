@@ -1,50 +1,29 @@
-import math
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import utils
 import numpy as np
-import reeds_shepp as rs
-import ParaCfg
+import matplotlib.pyplot as plt
 import Env
 import HAS
-import utils
 
+# 创建一个包含两个子图的画布
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+
+# Env
 env = Env.Env()
-# env.reset()
-obj = []
+env.reset()
+ax1.set_title('Env')
+env.show()
 
-start_node = HAS.Node(0, 0, 0, 0, 0)
-goal_node = HAS.Node(5, 6, math.radians(-120), 0, 0)
+# HAS
+start_node = HAS.Node(env.TP[0], env.TP[1], env.TP[2], 0, 0)
+goal_node = HAS.Node(env.SP[0], env.SP[1], env.SP[2], 0, 0)
+obstacles = env.obj + env.other_veh
 
-# 计算路径
-RSpath = rs.calc_optimal_path(start_node, goal_node)
+path, RSpath = HAS.hybrid_a_star(start_node, goal_node, obstacles)
+if path and RSpath:
+    print("找到路径！")
+    ax2.set_title('HAS Path')
+    HAS.Path_show(path, RSpath, obstacles, start_node, goal_node)
+else:
+    print("未找到路径！")
 
-corners = utils.get_rectangle_corners(4, 2, 0, 0.1, 0.1)
-obj.append(corners)
-
-for i in range(0, len(RSpath.x)):
-    pathx = RSpath.x[i]
-    pathy = RSpath.y[i]
-    pathyaw = RSpath.yaw[i]
-
-    RSnode = HAS.Node(pathx, pathy, pathyaw, 0, 0)
-    if HAS.is_overlap(RSnode, obj):
-        print('Collision')
-        break
-    elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
-        print('No collision')
-
-
-# # 提取路径中的点坐标
-x_coords = RSpath.x
-y_coords = RSpath.y
-
-# 绘制路径
-plt.figure()
-plt.plot(x_coords, y_coords, 'b-')
-plt.plot(0, 0, 'ro')  # 起点
-plt.plot(5, 5, 'go')  # 终点
-plt.xlabel('X')
-plt.ylabel('Y')
-plt.title('Path Visualization')
+plt.tight_layout()
 plt.show()

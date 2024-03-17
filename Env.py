@@ -4,6 +4,7 @@ import matplotlib.patches as patches
 import utils
 import ParaCfg
 import random
+import math
 
 class Env:
     def __init__(self):
@@ -23,7 +24,7 @@ class Env:
         for _ in range(n_obj):
             x = np.random.uniform(-8, 8)
             y = np.random.uniform(-2, 6)
-            yaw = np.random.uniform(0, 360)
+            yaw = np.random.uniform(0, math.pi)
             length, width = np.random.uniform(0.1, 0.5, 2)
             
             corners = utils.get_rectangle_corners(x, y, yaw, length, width)
@@ -32,7 +33,7 @@ class Env:
         # 生成特定范围内的host veh(基于后轴)
         host_veh_rear_x = np.random.uniform(-5, 5)
         host_veh_rear_y = np.random.uniform(-1, 3)
-        host_veh_rear_yaw = np.random.uniform(-45, 45)
+        host_veh_rear_yaw = np.random.uniform(math.radians(-45), math.radians(45))
         self.host_veh = utils.get_Veh_corners(host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw)
         
         # 生成特定范围内的矩形（slot）
@@ -40,7 +41,7 @@ class Env:
         width = np.random.uniform(2, 2.6)
         slot_x = 0
         slot_y = -width / 2
-        slot_yaw = np.random.uniform(-10, 10)
+        slot_yaw = np.random.uniform(math.radians(-10), math.radians(10))
         self.slot = utils.get_rectangle_corners(slot_x, slot_y, slot_yaw, length, width)
 
         # 生成slot周围的other veh
@@ -49,23 +50,23 @@ class Env:
                        
         x1 = np.random.uniform(5, 6)
         y1 = np.random.uniform(-0.8, -1.2)
-        yaw1 = np.random.uniform(-10, 10)
+        yaw1 = np.random.uniform(math.radians(-10), math.radians(10))
 
         x2 = np.random.uniform(-7, -4)
         y2 = np.random.uniform(-0.8, -1.2)
-        yaw2 = np.random.uniform(-10, 10)
+        yaw2 = np.random.uniform(math.radians(-10), math.radians(10))
 
         x3 = np.random.uniform(-6, -4)
         y3 = np.random.uniform(4, 6)
-        yaw3 = np.random.uniform(-10, 10)
+        yaw3 = np.random.uniform(math.radians(-10), math.radians(10))
 
         x4 = np.random.uniform(-1, 1)
         y4 = np.random.uniform(4, 6)
-        yaw4 = np.random.uniform(-10, 10)
+        yaw4 = np.random.uniform(math.radians(-10), math.radians(10))
 
         x5 = np.random.uniform(4, 6)
         y5 = np.random.uniform(4, 6)
-        yaw5 = np.random.uniform(-10, 10)
+        yaw5 = np.random.uniform(math.radians(-10), math.radians(10))
 
         n = random.randint(0, 5)
         arr = np.array([[x1, y1, yaw1], [x2, y2, yaw2], [x3, y3, yaw3], [x4, y4, yaw4], [x5, y5, yaw5]])
