@@ -40,6 +40,7 @@ def hybrid_a_star(start, goal, obstacles):
     closed_list = []
     expanded_nodes = []
     current_nodes = []
+    path = []
     RSpath = []
     grid_cells = [[] for _ in range(grid_num ** 2)]
 
@@ -73,7 +74,7 @@ def hybrid_a_star(start, goal, obstacles):
                 while current_node:
                     path.append(current_node)
                     current_node = current_node.parent
-                return path[::-1], RSpath
+                return True, path[::-1], RSpath
 
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:
@@ -89,7 +90,7 @@ def hybrid_a_star(start, goal, obstacles):
 
         cnt = cnt + 1
 
-    return None
+    return False, [], []
 
 def Path_show(path, RSpath, obstacles, start, goal):
     fig, ax = plt.subplots()
