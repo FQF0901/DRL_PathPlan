@@ -100,15 +100,17 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
         rect = patches.Polygon(obstacle, closed=True, linewidth=1, edgecolor='r', facecolor='none')
         ax.add_patch(rect)
 
-    # 绘制路径
-    path_x = [node.x for node in path]
-    path_y = [node.y for node in path]
-    ax.plot(path_x, path_y, 'b-+')
+    # 绘制A*路径
+    if path != []:
+        path_x = [node.x for node in path]
+        path_y = [node.y for node in path]
+        ax.plot(path_x, path_y, 'b-+')
 
-    # 提取路径中的点坐标
-    RSpath_x = RSpath.x
-    RSpath_Y = RSpath.y
-    ax.plot(RSpath_x, RSpath_Y, 'b-')
+    # 绘制RS路径
+    if path != []:
+        RSpath_x = RSpath.x
+        RSpath_Y = RSpath.y
+        ax.plot(RSpath_x, RSpath_Y, 'b-')
 
     # 标记起点和终点
     ax.plot(start.x, start.y, 'go', markersize=10, label='Start')
