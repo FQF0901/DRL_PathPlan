@@ -113,8 +113,8 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
         ax.plot(RSpath_x, RSpath_Y, 'b-')
 
     # 标记起点和终点
-    ax.plot(start.x, start.y, 'go', markersize=10, label='Start')
-    ax.plot(goal.x, goal.y, 'ro', markersize=10, label='Goal')
+    ax.plot(start.x, start.y, 'go', markersize=5, label='Start')
+    ax.plot(goal.x, goal.y, 'ro', markersize=5, label='Goal')
 
     # 绘制host veh和slot
     host_veh = utils.get_Veh_corners(goal.x, goal.y, goal.theta)
