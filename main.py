@@ -14,6 +14,7 @@ obstacles = env.obj + env.other_veh
 
 PlanFlag, path, RSpath = HAS.hybrid_a_star(start_node, goal_node, obstacles)
 
+# Visualization
 if PlanFlag:
     print("找到路径！")
     HAS.Path_show(path, RSpath, obstacles, start_node, goal_node, env.slot)

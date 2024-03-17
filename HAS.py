@@ -122,6 +122,11 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
     slot_polygon = patches.Polygon(slot, closed=True, edgecolor='b', facecolor='none')
     ax.add_patch(slot_polygon)
 
+    xlim = (ParaCfg.MapParam.xmin, ParaCfg.MapParam.xmax)
+    ylim = (ParaCfg.MapParam.ymin, ParaCfg.MapParam.ymax)
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+
     ax.legend()
     ax.grid(True)
     ax.set_aspect('equal', adjustable='box')

@@ -1,7 +1,6 @@
 import numpy as np
 import ParaCfg
 import math
-im
 
 def get_rectangle_corners(x, y, yaw, length, width):
     """根据中心点、旋转角度、长度和宽度计算矩形的四个角点。"""
@@ -37,10 +36,7 @@ def get_TP(slot, yaw):
 
     TP = np.array([A_x, A_y, yaw])
 
-    return TP
-
-def get_Envslot():
-    
+    return TP   
 
 def get_Veh_corners(x, y, yaw):
     """根据后轴中心、长度和宽度计算车辆的四个角点。"""
