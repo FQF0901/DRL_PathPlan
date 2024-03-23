@@ -151,10 +151,14 @@ def EnvNextState(action, EnvInfo):
     return EnvInfo
 
 def EnvReward(action, EnvInfo):
-    x = EnvInfo.StartPntStep[0] # new state 已经产生，因此这里是执行action后的state
-    y = EnvInfo.StartPntStep[1]
-    yaw = EnvInfo.StartPntStep[2]
-    node = ParaCfg.Node(x, y, yaw, 0, 0)
+    x = EnvInfo.State.StartPntStep[0] # new state 已经产生，因此这里是执行action后的state
+    y = EnvInfo.State.StartPntStep[1]
+    yaw = EnvInfo.State.StartPntStep[2]
+    Curt_node = ParaCfg.Node(x, y, yaw, 0, 0)
+    x = EnvInfo.State.TgtPntStep[0] # new state 已经产生，因此这里是执行action后的state
+    y = EnvInfo.State.TgtPntStep[1]
+    yaw = EnvInfo.State.TgtPntStep[2]
+    Tgt_node = ParaCfg.Node(x, y, yaw, 0, 0)
     obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
 
     # Cost
@@ -163,24 +167,30 @@ def EnvReward(action, EnvInfo):
     GearCost = 0.2 if action[1] == EnvInfo.action_z[0] else -5
     
     CloseObjCost = 0
-    if is_overlap_node(node, obstacles, 0.25, 0.15):
+    if is_overlap_node(Curt_node, obstacles, 0.25, 0.15):
         CloseObjCost = -0.5
 
     CollisionCost = 0
-    if is_overlap_node(node, obstacles, 0.1, 0.1):
+    if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
         CollisionCost = -5  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
         EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
-
-    if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd:
+    PlanFnd, _, _ = cal_validRS(Curt_node, Tgt_node, obstacles)
+    if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd and (not PlanFnd):
         PathNotFndCost = -200  
 
     TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost
 
     # Reward
-    SpcUseReward = 5
-    PathFoundReward = 1000
+    SpcUseReward = 0
+    if is_overlap_node(Curt_node, obstacles, 0.0, ParaCfg.HASParam.step_size - 0.01) and \
+        (not is_overlap_node(Curt_node, obstacles, 0.0, 0.1)):
+        SpcUseReward = 3
+
+    PathFoundReward = 0
+    if PlanFnd:
+        PathFoundReward = 10000
 
     TolReward = SpcUseReward + PathFoundReward
 

@@ -107,9 +107,9 @@ class Env:
         done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd or self.EnvInfo.ActionVehOvlp or self.EnvInfo.PathFnd
         info = {self.EnvInfo.StepCnt, self.EnvInfo.ActionVehOvlp, self.EnvInfo.PathFnd}
 
-        new_state = self.EnvInfo
+        next_state = self.EnvInfo.State
         reward = self.EnvInfo.Reward_z
-        return new_state, reward, done, info
+        return next_state, reward, done, info
     
     def show(self):
         """绘制所有obj,slot,host veh和other veh"""
