@@ -7,8 +7,8 @@ import reeds_shepp as rs
 import ParaCfg
 
 # 定义网格大小和边长
-grid_num = ParaCfg.MapParam.grid_num
-cell_size = ParaCfg.MapParam.cell_size
+grid_num = ParaCfg.HASParam.grid_num
+cell_size = ParaCfg.HASParam.cell_size
 
 class Node:
     def __init__(self, x, y, theta, g_cost, h_cost, parent=None):
@@ -78,7 +78,7 @@ def hybrid_a_star(start, goal, obstacles):
 
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:
-                new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, 0.4)
+                new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
                 new_node = Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, heuristic(Node(new_x, new_y, new_theta, 0, 0), goal), current_node)
 
                 new_idx = get_grid_index(new_node.x, new_node.y)
@@ -124,8 +124,8 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
     slot_polygon = patches.Polygon(slot, closed=True, edgecolor='b', facecolor='none')
     ax.add_patch(slot_polygon)
 
-    xlim = (ParaCfg.MapParam.xmin, ParaCfg.MapParam.xmax)
-    ylim = (ParaCfg.MapParam.ymin, ParaCfg.MapParam.ymax)
+    xlim = (ParaCfg.HASParam.xmin, ParaCfg.HASParam.xmax)
+    ylim = (ParaCfg.HASParam.ymin, ParaCfg.HASParam.ymax)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
 

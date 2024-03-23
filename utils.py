@@ -107,5 +107,21 @@ def cal_VechPose(x, y, yaw, steer, gear, dist):
         NextY = y + Dist * math.sin(yaw)
         NextYaw = yaw
 
-    
     return NextX, NextY, NextYaw
+
+def EnvNextState(action, EnvInfo):
+    steer = action[0]
+    gear = action[1]
+
+    x = EnvInfo.StartPntStep[0]
+    y = EnvInfo.StartPntStep[1]
+    yaw = EnvInfo.StartPntStep[2]
+
+    nextX, nextY, nextYaw = cal_VechPose(x, y, yaw, steer, gear, ParaCfg.HASParam.step_size)
+
+    EnvInfo.StartPntStep = np.array([nextX, nextY, nextYaw])
+
+    return EnvInfo
+
+def EnvReward(action, EnvInfo):
+    

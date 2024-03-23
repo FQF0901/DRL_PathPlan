@@ -8,16 +8,17 @@ env.reset()
 # env.show()    # Need to confirm the consistency between Env sending and HAS receiving
 
 # HAS
-start_node = HAS.Node(env.TP[0], env.TP[1], env.TP[2], 0, 0)
-goal_node = HAS.Node(env.SP[0], env.SP[1], env.SP[2], 0, 0)
-obstacles = env.obj + env.other_veh
+start_node = HAS.Node(env.EnvInfo.SlotPntInit[0], env.EnvInfo.SlotPntInit[1], env.EnvInfo.SlotPntInit[2], 0, 0)
+goal_node = HAS.Node(env.EnvInfo.VehPntInit[0], env.EnvInfo.VehPntInit[1], env.EnvInfo.VehPntInit[2], 0, 0)
+obstacles = env.EnvInfo.ObjRect + env.EnvInfo.OthVehRect
 
 PlanFlag, path, RSpath = HAS.hybrid_a_star(start_node, goal_node, obstacles)
 
 # Visualization
-HAS.Path_show(path, RSpath, obstacles, start_node, goal_node, env.slot)
+HAS.Path_show(path, RSpath, obstacles, start_node, goal_node, env.EnvInfo.SlotRectInit)
 
 if PlanFlag:
     print("找到路径！")
 else:
     print("未找到路径！")
+    

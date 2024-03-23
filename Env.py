@@ -6,35 +6,44 @@ import ParaCfg
 import random
 import math
 
+class EnvInfo:
+    def __init__(self):
+        self.ObjRect = []  # 存储随机数量obj的角点
+        self.OthVehRect = []  # 存储随机数量other_veh的角点
+
+        self.VehPntInit = []
+        self.VehRectInit = None
+        self.SlotPntInit = []
+        self.SlotRectInit = None
+
+        self.StartPntStep = []
+        self.StartRectStep = None
+        self.TgtPntStep = []
+        self.TgtRectStep = None
+
 class Env:
     def __init__(self):
-        self.obj = []  # 存储随机数量obj的角点
-        self.other_veh = []  # 存储随机数量other_veh的角点
-        self.host_veh = None
-        self.slot = None  # 存储特定矩形（slot）的角点
-
-        self.SP = []
-        self.TP = []
+        self.EnvInfo = EnvInfo()
     
     def reset(self):
-        self.obj.clear()  # 清空之前的矩形数据
-        n_obj = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
+        self.EnvInfo.ObjRect.clear()  # 清空之前的矩形数据
+        n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
         
         # 生成特定范围内的obj矩形
-        for _ in range(n_obj):
+        for _ in range(n_ObjRect):
             x = np.random.uniform(-8, 8)
             y = np.random.uniform(-2, 6)
             yaw = np.random.uniform(0, math.pi)
             length, width = np.random.uniform(0.1, 0.5, 2)
             
             corners = utils.get_rectangle_corners(x, y, yaw, length, width)
-            self.obj.append(corners)
+            self.EnvInfo.ObjRect.append(corners)
 
         # 生成特定范围内的host veh(基于后轴)
         host_veh_rear_x = np.random.uniform(-5, 5)
         host_veh_rear_y = np.random.uniform(-1, 3)
         host_veh_rear_yaw = np.random.uniform(math.radians(-45), math.radians(45))
-        self.host_veh = utils.get_Veh_corners(host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw)
+        self.EnvInfo.VehRectInit = utils.get_Veh_corners(host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw)
         
         # 生成特定范围内的矩形（slot）
         length = np.random.uniform(4.8, 5.6)
@@ -42,7 +51,7 @@ class Env:
         slot_x = 0
         slot_y = -width / 2
         slot_yaw = np.random.uniform(math.radians(-10), math.radians(10))
-        self.slot = utils.get_rectangle_corners(slot_x, slot_y, slot_yaw, length, width)
+        self.EnvInfo.SlotRectInit = utils.get_rectangle_corners(slot_x, slot_y, slot_yaw, length, width)
 
         # 生成slot周围的other veh
         length = np.random.uniform(4.4, 5.0)
@@ -77,61 +86,65 @@ class Env:
 
         for coord in sampled_coordinates:
             corners = utils.get_rectangle_corners(coord[0], coord[1], coord[2], length, width)
-            self.other_veh.append(corners)
+            self.EnvInfo.OthVehRect.append(corners)
         
         # 检查并移除与 host veh 和 slot 存在重叠的obj矩形
-        self.obj = [rect for rect in self.obj if not utils.check_overlap(rect, self.host_veh)]
-        self.obj = [rect for rect in self.obj if not utils.check_overlap(rect, self.slot)]
-        self.other_veh = [rect for rect in self.other_veh if not utils.check_overlap(rect, self.host_veh)]
+        self.EnvInfo.ObjRect = [rect for rect in self.EnvInfo.ObjRect if not utils.check_overlap(rect, self.EnvInfo.VehRectInit)]
+        self.EnvInfo.ObjRect = [rect for rect in self.EnvInfo.ObjRect if not utils.check_overlap(rect, self.EnvInfo.SlotRectInit)]
+        self.EnvInfo.OthVehRect = [rect for rect in self.EnvInfo.OthVehRect if not utils.check_overlap(rect, self.EnvInfo.VehRectInit)]
 
-        if self.other_veh is not None:
-            new_obj = [rect for rect in self.obj if not any(utils.check_overlap(rect, veh) for veh in self.other_veh)]
-            self.obj = new_obj
+        if self.EnvInfo.OthVehRect is not None:
+            new_ObjRect = [rect for rect in self.EnvInfo.ObjRect if not any(utils.check_overlap(rect, veh) for veh in self.EnvInfo.OthVehRect)]
+            self.EnvInfo.ObjRect = new_ObjRect
 
-        # 生成SP和TP
-        self.SP = np.array([host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw])
-        self.TP = utils.get_TP(self.slot, slot_yaw)
+        # 生成VehPoint和SlotPoint
+        self.EnvInfo.VehPntInit = np.array([host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw])
+        self.EnvInfo.SlotPntInit = utils.get_TP(self.EnvInfo.SlotRectInit, slot_yaw)
+
+        # 根据park mode给出拓展起点和终点，下为prkin
+        self.EnvInfo.TgtPntStep = self.EnvInfo.VehPntInit
+        self.EnvInfo.StartPntStep = self.EnvInfo.SlotPntInit
         
-        return self.obj, self.slot, self.host_veh, self.other_veh
+        return self.EnvInfo
     
     def step(self, action):
-        new_state = None
-        reward = None
+        new_state = utils.EnvNextState(action, self.EnvInfo)    # return next EnvInfo
+        reward = utils.EnvReward(action, self.EnvInfo)
         done = False
         info = {}
         return new_state, reward, done, info
     
     def show(self):
         """绘制所有obj,slot,host veh和other veh"""
-        if not self.obj and self.slot is None:
+        if not self.EnvInfo.ObjRect and self.EnvInfo.SlotRect is None:
             print("No obj to show. Please call reset() first.")
             return
 
         fig, ax = plt.subplots()
-        for corners in self.obj:
+        for corners in self.EnvInfo.ObjRect:
             polygon = patches.Polygon(corners, closed=True, edgecolor='r', facecolor='none')
             ax.add_patch(polygon)
 
-        for corners in self.other_veh:
+        for corners in self.EnvInfo.OthVehRect:
             polygon = patches.Polygon(corners, closed=True, edgecolor='r', facecolor='none')
             ax.add_patch(polygon)
 
-        if self.slot is not None:
-            slot_polygon = patches.Polygon(self.slot, closed=True, edgecolor='b', facecolor='none')
+        if self.EnvInfo.SlotRect is not None:
+            slot_polygon = patches.Polygon(self.EnvInfo.SlotRect, closed=True, edgecolor='b', facecolor='none')
             ax.add_patch(slot_polygon)
         
-        host_veh_polygon = patches.Polygon(self.host_veh, closed=True, edgecolor='g', facecolor='none')
+        host_veh_polygon = patches.Polygon(self.EnvInfo.VehRectInit, closed=True, edgecolor='g', facecolor='none')
         ax.add_patch(host_veh_polygon)
         
         # 绘制SP和TP
-        SP_circle = plt.Circle(self.SP, 0.05, color='g')  # 以绿色表示SP
+        SP_circle = plt.Circle(self.EnvInfo.VehPntInit, 0.05, color='g')  # 以绿色表示SP
         ax.add_artist(SP_circle)
-        TP_circle = plt.Circle(self.TP, 0.05, color='b')  # 以蓝色表示TP
+        TP_circle = plt.Circle(self.EnvInfo.SlotPntInit, 0.05, color='b')  # 以蓝色表示TP
         ax.add_artist(TP_circle)
 
         buffer = 1
-        all_corners = np.vstack(self.obj + [self.slot])
-        all_corners = np.vstack([all_corners, self.host_veh])
+        all_corners = np.vstack(self.EnvInfo.ObjRect + [self.EnvInfo.SlotRect])
+        all_corners = np.vstack([all_corners, self.EnvInfo.VehRectInit])
         
         # xlim = (min(all_corners[:, 0]) - buffer, max(all_corners[:, 0]) + buffer)
         # ylim = (min(all_corners[:, 1]) - buffer, max(all_corners[:, 1]) + buffer)

@@ -6,14 +6,15 @@ class VehicleParams:
         self.wheelbase = wheelbase
         self.radius = radius
 
-class MapParams:
-    def __init__(self, xmin, xmax, ymin, ymax, grid_num, cell_size):
+class HASParams:
+    def __init__(self, xmin, xmax, ymin, ymax, grid_num, cell_size, step_size):
         self.xmin = xmin
         self.xmax = xmax
         self.ymin = ymin
         self.ymax = ymax
         self.grid_num = grid_num
         self.cell_size = cell_size
+        self.step_size = step_size
 
 class TrainingParams:
     def __init__(self, learning_rate, num_iterations, batch_size):
@@ -23,4 +24,4 @@ class TrainingParams:
 
 VehPara = VehicleParams(4.48, 1.85, 1.316, 2.75, 5.0)
 TrainPara = TrainingParams(0.1, 10000, 500)
-MapParam = MapParams(-8, 8, -4, 7, 200, 0.2)
+HASParam = HASParams(-8, 8, -4, 7, 200, 0.2, 0.4)
