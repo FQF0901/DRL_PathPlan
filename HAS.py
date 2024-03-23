@@ -10,15 +10,6 @@ import ParaCfg
 grid_num = ParaCfg.HASParam.grid_num
 cell_size = ParaCfg.HASParam.cell_size
 
-class Node:
-    def __init__(self, x, y, theta, g_cost, h_cost, parent=None):
-        self.x = x
-        self.y = y
-        self.theta = theta
-        self.g_cost = g_cost
-        self.h_cost = h_cost
-        self.parent = parent
-
 def get_grid_index(x, y):
     grid_x = int((x - -20) / cell_size)
     grid_y = int((y - -20) / cell_size)
@@ -26,14 +17,6 @@ def get_grid_index(x, y):
 
 def heuristic(node, goal):
     return math.sqrt((node.x - goal.x)**2 + (node.y - goal.y)**2)
-
-def is_overlap(node, obstacles):
-    host_veh = utils.get_Veh_corners(node.x, node.y, node.theta)
-
-    for obstacle in obstacles:
-        if utils.check_overlap(obstacle, host_veh):
-            return True
-    return False
 
 def hybrid_a_star(start, goal, obstacles):
     open_list = [start]
@@ -45,7 +28,7 @@ def hybrid_a_star(start, goal, obstacles):
     grid_cells = [[] for _ in range(grid_num ** 2)]
 
     cnt = 0
-    while open_list and cnt < 750:
+    while open_list and cnt < ParaCfg.HASParam.maxEpsd + 10:    # +10 is uesed for Redundancy of EnvStep()
         current_node = min(open_list, key=lambda node: node.g_cost + node.h_cost)
         current_nodes.append(current_node)  # All selected nodes
         open_list.remove(current_node)
@@ -66,8 +49,8 @@ def hybrid_a_star(start, goal, obstacles):
             RSpathy = RSpath.y[i]
             RSpathyaw = RSpath.yaw[i]
 
-            RSnode = Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
-            if is_overlap(RSnode, obstacles):
+            RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
+            if utils.is_overlap_node(RSnode, obstacles):
                 break
             elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
                 path = []
@@ -79,10 +62,10 @@ def hybrid_a_star(start, goal, obstacles):
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:
                 new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
-                new_node = Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, heuristic(Node(new_x, new_y, new_theta, 0, 0), goal), current_node)
+                new_node = ParaCfg.Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, heuristic(ParaCfg.Node(new_x, new_y, new_theta, 0, 0), goal), current_node)
 
                 new_idx = get_grid_index(new_node.x, new_node.y)
-                if (not is_overlap(new_node, obstacles)) and new_node not in grid_cells[new_idx]:
+                if (not utils.is_overlap_node(new_node, obstacles)) and new_node not in grid_cells[new_idx]:
                     open_list.append(new_node)
                     grid_cells[new_idx].append(new_node)
 
@@ -117,7 +100,7 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
     ax.plot(goal.x, goal.y, 'ro', markersize=5, label='Goal')
 
     # 绘制host veh和slot
-    host_veh = utils.get_Veh_corners(goal.x, goal.y, goal.theta)
+    host_veh = utils.get_Veh_corners(goal.x, goal.y, goal.theta ,0 ,0)
     host_veh_polygon = patches.Polygon(host_veh, closed=True, edgecolor='g', facecolor='none')
     ax.add_patch(host_veh_polygon)
 
@@ -139,8 +122,8 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
 # corners = utils.get_rectangle_corners(7.9, 1.2, 0, 0.1, 0.1)
 # obstacles.append(corners)
 
-# start_node = Node(0, 0, 0, 0, 0)
-# goal_node = Node(12, 5, math.pi/4, 0, 0)
+# start_node = ParaCfg.Node(0, 0, 0, 0, 0)
+# goal_node = ParaCfg.Node(12, 5, math.pi/4, 0, 0)
 
 # path, RSpath = hybrid_a_star(start_node, goal_node, obstacles)
 # if path and RSpath:

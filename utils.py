@@ -38,17 +38,17 @@ def get_TP(slot, yaw):
 
     return TP   
 
-def get_Veh_corners(x, y, yaw):
+def get_Veh_corners(x, y, yaw, lat, lgt):
     """根据后轴中心、长度和宽度计算车辆的四个角点。"""
     # 计算车辆后轴中心到车头的距离
     rear_to_front = ParaCfg.VehPara.length - ParaCfg.VehPara.rear_to_back
 
     # 车辆四个角点相对于车辆后轴中心的局部坐标
     local_corners = np.array([
-        [-ParaCfg.VehPara.rear_to_back, -ParaCfg.VehPara.width / 2],
-        [-ParaCfg.VehPara.rear_to_back, ParaCfg.VehPara.width / 2],
-        [rear_to_front, ParaCfg.VehPara.width / 2],
-        [rear_to_front, -ParaCfg.VehPara.width / 2]
+        [-ParaCfg.VehPara.rear_to_back - lgt, -ParaCfg.VehPara.width / 2 - lat],
+        [-ParaCfg.VehPara.rear_to_back - lgt, ParaCfg.VehPara.width / 2 + lat],
+        [rear_to_front + lgt, ParaCfg.VehPara.width / 2 + lat],
+        [rear_to_front + lgt, -ParaCfg.VehPara.width / 2 - lat]
     ])
 
     # 根据车辆的航向角（yaw）进行旋转
@@ -72,7 +72,7 @@ def overlap(proj1, proj2):
     """检查两个投影是否重叠。"""
     return not (proj1[1] < proj2[0] or proj2[1] < proj1[0])
 
-def check_overlap(rect1, rect2):
+def is_overlap_Rect(rect1, rect2):
     """使用分离轴定理检查两个矩形是否重叠。"""
     axes = []
     for rect in [rect1, rect2]:
@@ -87,6 +87,14 @@ def check_overlap(rect1, rect2):
         if not overlap(proj1, proj2):
             return False  # 如果找到分离轴，则不重叠
     return True  # 所有轴上的投影都重叠，说明矩形重叠
+
+def is_overlap_node(node, Rects):
+    host_veh = get_Veh_corners(node.x, node.y, node.theta, 0, 0)
+
+    for rect in Rects:
+        if is_overlap_Rect(rect, host_veh):
+            return True
+    return False
 
 def cal_VechPose(x, y, yaw, steer, gear, dist):
 
@@ -124,4 +132,39 @@ def EnvNextState(action, EnvInfo):
     return EnvInfo
 
 def EnvReward(action, EnvInfo):
+    # Cost
+    ExpansionCost = -1
+    SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1
+    GearCost = 0.2 if action[1] == EnvInfo.action_z[0] else -5
     
+    CloseObjCost = 0
+    x = EnvInfo.StartPntStep[0] # new state 已经产生，因此这里是执行action后的state
+    y = EnvInfo.StartPntStep[1]
+    yaw = EnvInfo.StartPntStep[2]
+    VehRect = get_Veh_corners(x, y, yaw, 0.2, 0.0)
+    obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
+    for obstacle in obstacles:
+        if is_overlap_Rect(obstacle, VehRect):
+            CloseObjCost = CloseObjCost - 0.2
+
+    CollisionCost = 0
+    obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
+    if is_overlap_node(obstacle, VehRect):
+        CollisionCost = -5  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
+        EnvInfo.VehOvlp = True
+
+    if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd:
+        PathNotFndCost = -200  
+
+    TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost
+
+    # Reward
+    SpcUseReward = 5
+    PathFoundReward = 1000
+
+    TolReward = SpcUseReward + PathFoundReward
+
+    EnvInfo.action_z = action
+    EnvInfo.Reward_z = TolCost + TolReward
+
+    return EnvInfo.Reward_z

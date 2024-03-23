@@ -6,24 +6,9 @@ import ParaCfg
 import random
 import math
 
-class EnvInfo:
-    def __init__(self):
-        self.ObjRect = []  # 存储随机数量obj的角点
-        self.OthVehRect = []  # 存储随机数量other_veh的角点
-
-        self.VehPntInit = []
-        self.VehRectInit = None
-        self.SlotPntInit = []
-        self.SlotRectInit = None
-
-        self.StartPntStep = []
-        self.StartRectStep = None
-        self.TgtPntStep = []
-        self.TgtRectStep = None
-
 class Env:
     def __init__(self):
-        self.EnvInfo = EnvInfo()
+        self.EnvInfo = ParaCfg.EnvInfo()
     
     def reset(self):
         self.EnvInfo.ObjRect.clear()  # 清空之前的矩形数据
@@ -40,10 +25,10 @@ class Env:
             self.EnvInfo.ObjRect.append(corners)
 
         # 生成特定范围内的host veh(基于后轴)
-        host_veh_rear_x = np.random.uniform(-5, 5)
-        host_veh_rear_y = np.random.uniform(-1, 3)
-        host_veh_rear_yaw = np.random.uniform(math.radians(-45), math.radians(45))
-        self.EnvInfo.VehRectInit = utils.get_Veh_corners(host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw)
+        veh_rear_x = np.random.uniform(-5, 5)
+        veh_rear_y = np.random.uniform(-1, 3)
+        veh_rear_yaw = np.random.uniform(math.radians(-45), math.radians(45))
+        self.EnvInfo.VehRectInit = utils.get_Veh_corners(veh_rear_x, veh_rear_y, veh_rear_yaw ,0.1 ,0.1)
         
         # 生成特定范围内的矩形（slot）
         length = np.random.uniform(4.8, 5.6)
@@ -89,29 +74,38 @@ class Env:
             self.EnvInfo.OthVehRect.append(corners)
         
         # 检查并移除与 host veh 和 slot 存在重叠的obj矩形
-        self.EnvInfo.ObjRect = [rect for rect in self.EnvInfo.ObjRect if not utils.check_overlap(rect, self.EnvInfo.VehRectInit)]
-        self.EnvInfo.ObjRect = [rect for rect in self.EnvInfo.ObjRect if not utils.check_overlap(rect, self.EnvInfo.SlotRectInit)]
-        self.EnvInfo.OthVehRect = [rect for rect in self.EnvInfo.OthVehRect if not utils.check_overlap(rect, self.EnvInfo.VehRectInit)]
+        self.EnvInfo.ObjRect = [rect for rect in self.EnvInfo.ObjRect if not utils.is_overlap_Rect(rect, self.EnvInfo.VehRectInit)]
+        self.EnvInfo.ObjRect = [rect for rect in self.EnvInfo.ObjRect if not utils.is_overlap_Rect(rect, self.EnvInfo.SlotRectInit)]
+        self.EnvInfo.OthVehRect = [rect for rect in self.EnvInfo.OthVehRect if not utils.is_overlap_Rect(rect, self.EnvInfo.VehRectInit)]
 
         if self.EnvInfo.OthVehRect is not None:
-            new_ObjRect = [rect for rect in self.EnvInfo.ObjRect if not any(utils.check_overlap(rect, veh) for veh in self.EnvInfo.OthVehRect)]
+            new_ObjRect = [rect for rect in self.EnvInfo.ObjRect if not any(utils.is_overlap_Rect(rect, veh) for veh in self.EnvInfo.OthVehRect)]
             self.EnvInfo.ObjRect = new_ObjRect
 
         # 生成VehPoint和SlotPoint
-        self.EnvInfo.VehPntInit = np.array([host_veh_rear_x, host_veh_rear_y, host_veh_rear_yaw])
+        self.EnvInfo.VehPntInit = np.array([veh_rear_x, veh_rear_y, veh_rear_yaw])
         self.EnvInfo.SlotPntInit = utils.get_TP(self.EnvInfo.SlotRectInit, slot_yaw)
 
         # 根据park mode给出拓展起点和终点，下为prkin
         self.EnvInfo.TgtPntStep = self.EnvInfo.VehPntInit
         self.EnvInfo.StartPntStep = self.EnvInfo.SlotPntInit
+
+        # 初始化action和reward
+        self.EnvInfo.action_z = np.array([0, 0])    # 左正右负，前正后负
+        self.EnvInfo.Reward_z = 0
+        self.VehOvlp = False
+        self.PathFnd = False
+        self.StepCnt = 0
         
         return self.EnvInfo
     
     def step(self, action):
-        new_state = utils.EnvNextState(action, self.EnvInfo)    # return next EnvInfo
+        self.EnvInfo.StepCnt = self.EnvInfo.StepCnt + 1
+
+        new_state = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
         reward = utils.EnvReward(action, self.EnvInfo)
-        done = False
-        info = {}
+        done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd or self.EnvInfo.VehOvlp or self.EnvInfo.PathFnd
+        info = {self.EnvInfo.StepCnt, self.EnvInfo.VehOvlp, self.EnvInfo.PathFnd}
         return new_state, reward, done, info
     
     def show(self):
