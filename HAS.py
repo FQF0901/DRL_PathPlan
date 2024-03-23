@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import utils
 import numpy as np
-import reeds_shepp as rs
 import ParaCfg
 
 # 定义网格大小和边长
@@ -23,7 +22,7 @@ def hybrid_a_star(start, goal, obstacles):
     closed_list = []
     expanded_nodes = []
     current_nodes = []
-    path = []
+    AstarPath = []
     RSpath = []
     grid_cells = [[] for _ in range(grid_num ** 2)]
 
@@ -61,7 +60,7 @@ def hybrid_a_star(start, goal, obstacles):
 
     return False, [], []
 
-def Path_show(path, RSpath, obstacles, start, goal, slot):
+def Path_show(AstarPath, RSpath, obstacles, start, goal, slot):
     fig, ax = plt.subplots()
 
     # 绘制障碍物
@@ -70,13 +69,13 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
         ax.add_patch(rect)
 
     # 绘制A*路径
-    if path != []:
-        path_x = [node.x for node in path]
-        path_y = [node.y for node in path]
-        ax.plot(path_x, path_y, 'b-+')
+    if AstarPath != []:
+        AstarPath_x = [node.x for node in AstarPath]
+        AstarPath_y = [node.y for node in AstarPath]
+        ax.plot(AstarPath_x, AstarPath_y, 'b-+')
 
     # 绘制RS路径
-    if path != []:
+    if AstarPath != []:
         RSpath_x = RSpath.x
         RSpath_Y = RSpath.y
         ax.plot(RSpath_x, RSpath_Y, 'b-')
@@ -111,9 +110,9 @@ def Path_show(path, RSpath, obstacles, start, goal, slot):
 # start_node = ParaCfg.Node(0, 0, 0, 0, 0)
 # goal_node = ParaCfg.Node(12, 5, math.pi/4, 0, 0)
 
-# path, RSpath = hybrid_a_star(start_node, goal_node, obstacles)
-# if path and RSpath:
+# AstarPath, RSpath = hybrid_a_star(start_node, goal_node, obstacles)
+# if AstarPath and RSpath:
 #     print("找到路径！")
-#     Path_show(path, RSpath, obstacles, start_node, goal_node)
+#     Path_show(AstarPath, RSpath, obstacles, start_node, goal_node)
 # else:
 #     print("未找到路径！")

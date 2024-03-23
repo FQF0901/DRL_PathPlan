@@ -13,13 +13,13 @@ start_node = ParaCfg.Node(env.EnvInfo.SlotPntInit[0], env.EnvInfo.SlotPntInit[1]
 goal_node = ParaCfg.Node(env.EnvInfo.VehPntInit[0], env.EnvInfo.VehPntInit[1], env.EnvInfo.VehPntInit[2], 0, 0)
 obstacles = env.EnvInfo.State.ObjRect + env.EnvInfo.State.OthVehRect
 
-PlanFlag, path, RSpath = HAS.hybrid_a_star(start_node, goal_node, obstacles)
+PlanFlag, AstarPath, RSpath = HAS.hybrid_a_star(start_node, goal_node, obstacles)
 
 # Visualization
-HAS.Path_show(path, RSpath, obstacles, start_node, goal_node, env.EnvInfo.SlotRectInit)
-
 if PlanFlag:
     print("找到路径！")
 else:
     print("未找到路径！")
+    
+HAS.Path_show(AstarPath, RSpath, obstacles, start_node, goal_node, env.EnvInfo.SlotRectInit)
     
