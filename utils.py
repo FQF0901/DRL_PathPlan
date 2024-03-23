@@ -155,6 +155,7 @@ def EnvReward(action, EnvInfo):
     y = EnvInfo.StartPntStep[1]
     yaw = EnvInfo.StartPntStep[2]
     node = ParaCfg.Node(x, y, yaw, 0, 0)
+    obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
 
     # Cost
     ExpansionCost = -1
@@ -162,14 +163,15 @@ def EnvReward(action, EnvInfo):
     GearCost = 0.2 if action[1] == EnvInfo.action_z[0] else -5
     
     CloseObjCost = 0
-    obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
     if is_overlap_node(node, obstacles, 0.25, 0.15):
         CloseObjCost = -0.5
 
     CollisionCost = 0
     if is_overlap_node(node, obstacles, 0.1, 0.1):
         CollisionCost = -5  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
-        EnvInfo.VehOvlp = True
+        EnvInfo.ActionVehOvlp = True
+
+    PathNotFndCost = 0
 
     if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd:
         PathNotFndCost = -200  

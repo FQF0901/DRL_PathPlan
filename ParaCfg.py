@@ -6,24 +6,27 @@ class VehicleParams:
         self.wheelbase = wheelbase
         self.radius = radius
 
-class EnvInfo:
+class EnvState:
     def __init__(self):
         self.ObjRect = []  # 存储随机数量obj的角点
         self.OthVehRect = []  # 存储随机数量other_veh的角点
-
-        self.VehPntInit = []
-        self.VehRectInit = None
-        self.SlotPntInit = []
-        self.SlotRectInit = None
 
         self.StartPntStep = []
         self.StartRectStep = None
         self.TgtPntStep = []
         self.TgtRectStep = None
 
+class EnvInfo:
+    def __init__(self):
+        self.State = EnvState()
+        self.VehPntInit = []
+        self.VehRectInit = None
+        self.SlotPntInit = []
+        self.SlotRectInit = None
+
         self.action_z = []
         self.Reward_z = []
-        self.VehOvlp = False
+        self.ActionVehOvlp = False
         self.PathFnd = 0
         self.StepCnt = 0
 

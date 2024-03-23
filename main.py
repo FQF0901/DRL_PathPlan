@@ -11,7 +11,7 @@ env.reset()
 # HAS
 start_node = ParaCfg.Node(env.EnvInfo.SlotPntInit[0], env.EnvInfo.SlotPntInit[1], env.EnvInfo.SlotPntInit[2], 0, 0)
 goal_node = ParaCfg.Node(env.EnvInfo.VehPntInit[0], env.EnvInfo.VehPntInit[1], env.EnvInfo.VehPntInit[2], 0, 0)
-obstacles = env.EnvInfo.ObjRect + env.EnvInfo.OthVehRect
+obstacles = env.EnvInfo.State.ObjRect + env.EnvInfo.State.OthVehRect
 
 PlanFlag, path, RSpath = HAS.hybrid_a_star(start_node, goal_node, obstacles)
 
