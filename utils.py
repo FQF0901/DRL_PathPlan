@@ -118,7 +118,7 @@ def cal_VechPose(x, y, yaw, steer, gear, dist):
 
     return NextX, NextY, NextYaw
 
-def cal_RS(current_node, goal_node):
+def cal_validRS(current_node, goal_node, obstacles):
     RSpath = rs.calc_optimal_path(current_node, goal_node)
 
     for i in range(0, len(RSpath.x)):
@@ -128,7 +128,7 @@ def cal_RS(current_node, goal_node):
 
         RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
         if is_overlap_node(RSnode, obstacles, 0.1, 0.1):
-            break
+            return False, [], []
         elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
             path = []
             while current_node:
@@ -163,7 +163,7 @@ def EnvReward(action, EnvInfo):
     
     CloseObjCost = 0
     obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
-    if is_overlap_node(node, obstacles, 0.2, 0.2):
+    if is_overlap_node(node, obstacles, 0.25, 0.15):
         CloseObjCost = -0.5
 
     CollisionCost = 0
@@ -185,4 +185,4 @@ def EnvReward(action, EnvInfo):
     EnvInfo.action_z = action
     EnvInfo.Reward_z = TolCost + TolReward
 
-    return EnvInfo.Reward_z
+    return EnvInfo

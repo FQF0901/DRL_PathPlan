@@ -41,23 +41,26 @@ def hybrid_a_star(start, goal, obstacles):
         grid_cells[current_idx].append(current_node)
 
         closed_list.append(current_node)
+        PlanFnd, AstarPath, RSpath = utils.cal_validRS(current_node, goal, obstacles)
+        if PlanFnd:
+            return PlanFnd, AstarPath, RSpath
 
-        RSpath = rs.calc_optimal_path(current_node, goal)
+        # RSpath = rs.calc_optimal_path(current_node, goal)
 
-        for i in range(0, len(RSpath.x)):
-            RSpathx = RSpath.x[i]
-            RSpathy = RSpath.y[i]
-            RSpathyaw = RSpath.yaw[i]
+        # for i in range(0, len(RSpath.x)):
+        #     RSpathx = RSpath.x[i]
+        #     RSpathy = RSpath.y[i]
+        #     RSpathyaw = RSpath.yaw[i]
 
-            RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
-            if utils.is_overlap_node(RSnode, obstacles, 0.1, 0.1):
-                break
-            elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
-                path = []
-                while current_node:
-                    path.append(current_node)
-                    current_node = current_node.parent
-                return True, path[::-1], RSpath
+        #     RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
+        #     if utils.is_overlap_node(RSnode, obstacles, 0.1, 0.1):
+        #         break
+        #     elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
+        #         path = []
+        #         while current_node:
+        #             path.append(current_node)
+        #             current_node = current_node.parent
+        #         return True, path[::-1], RSpath
 
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:

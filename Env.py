@@ -102,8 +102,8 @@ class Env:
     def step(self, action):
         self.EnvInfo.StepCnt = self.EnvInfo.StepCnt + 1
 
-        new_state = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
-        reward = utils.EnvReward(action, self.EnvInfo)
+        self.EnvInfo = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
+        self.EnvInfo = utils.EnvReward(action, self.EnvInfo)
         done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd or self.EnvInfo.VehOvlp or self.EnvInfo.PathFnd
         info = {self.EnvInfo.StepCnt, self.EnvInfo.VehOvlp, self.EnvInfo.PathFnd}
         return new_state, reward, done, info
