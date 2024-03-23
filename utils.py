@@ -1,6 +1,7 @@
 import numpy as np
 import ParaCfg
 import math
+import reeds_shepp as rs
 
 def get_rectangle_corners(x, y, yaw, length, width):
     """根据中心点、旋转角度、长度和宽度计算矩形的四个角点。"""
@@ -88,8 +89,8 @@ def is_overlap_Rect(rect1, rect2):
             return False  # 如果找到分离轴，则不重叠
     return True  # 所有轴上的投影都重叠，说明矩形重叠
 
-def is_overlap_node(node, Rects):
-    host_veh = get_Veh_corners(node.x, node.y, node.theta, 0, 0)
+def is_overlap_node(node, Rects, lat, lgt):
+    host_veh = get_Veh_corners(node.x, node.y, node.theta, lat, lgt)
 
     for rect in Rects:
         if is_overlap_Rect(rect, host_veh):
@@ -117,6 +118,24 @@ def cal_VechPose(x, y, yaw, steer, gear, dist):
 
     return NextX, NextY, NextYaw
 
+def cal_RS(current_node, goal_node):
+    RSpath = rs.calc_optimal_path(current_node, goal_node)
+
+    for i in range(0, len(RSpath.x)):
+        RSpathx = RSpath.x[i]
+        RSpathy = RSpath.y[i]
+        RSpathyaw = RSpath.yaw[i]
+
+        RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
+        if is_overlap_node(RSnode, obstacles, 0.1, 0.1):
+            break
+        elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
+            path = []
+            while current_node:
+                path.append(current_node)
+                current_node = current_node.parent
+            return True, path[::-1], RSpath
+
 def EnvNextState(action, EnvInfo):
     steer = action[0]
     gear = action[1]
@@ -132,24 +151,23 @@ def EnvNextState(action, EnvInfo):
     return EnvInfo
 
 def EnvReward(action, EnvInfo):
-    # Cost
-    ExpansionCost = -1
-    SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1
-    GearCost = 0.2 if action[1] == EnvInfo.action_z[0] else -5
-    
-    CloseObjCost = 0
     x = EnvInfo.StartPntStep[0] # new state 已经产生，因此这里是执行action后的state
     y = EnvInfo.StartPntStep[1]
     yaw = EnvInfo.StartPntStep[2]
-    VehRect = get_Veh_corners(x, y, yaw, 0.2, 0.0)
+    node = ParaCfg.Node(x, y, yaw, 0, 0)
+
+    # Cost
+    ExpansionCost = -1
+    SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1 + 0.2
+    GearCost = 0.2 if action[1] == EnvInfo.action_z[0] else -5
+    
+    CloseObjCost = 0
     obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
-    for obstacle in obstacles:
-        if is_overlap_Rect(obstacle, VehRect):
-            CloseObjCost = CloseObjCost - 0.2
+    if is_overlap_node(node, obstacles, 0.2, 0.2):
+        CloseObjCost = -0.5
 
     CollisionCost = 0
-    obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
-    if is_overlap_node(obstacle, VehRect):
+    if is_overlap_node(node, obstacles, 0.1, 0.1):
         CollisionCost = -5  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
         EnvInfo.VehOvlp = True
 

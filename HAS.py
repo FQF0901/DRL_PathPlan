@@ -50,7 +50,7 @@ def hybrid_a_star(start, goal, obstacles):
             RSpathyaw = RSpath.yaw[i]
 
             RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
-            if utils.is_overlap_node(RSnode, obstacles):
+            if utils.is_overlap_node(RSnode, obstacles, 0.1, 0.1):
                 break
             elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
                 path = []
@@ -65,7 +65,7 @@ def hybrid_a_star(start, goal, obstacles):
                 new_node = ParaCfg.Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, heuristic(ParaCfg.Node(new_x, new_y, new_theta, 0, 0), goal), current_node)
 
                 new_idx = get_grid_index(new_node.x, new_node.y)
-                if (not utils.is_overlap_node(new_node, obstacles)) and new_node not in grid_cells[new_idx]:
+                if (not utils.is_overlap_node(new_node, obstacles, 0.1, 0.1)) and new_node not in grid_cells[new_idx]:
                     open_list.append(new_node)
                     grid_cells[new_idx].append(new_node)
 
