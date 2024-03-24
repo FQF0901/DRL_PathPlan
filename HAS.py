@@ -47,7 +47,10 @@ def hybrid_a_star(start, goal, obstacles):
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:
                 new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
-                new_node = ParaCfg.Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, heuristic(ParaCfg.Node(new_x, new_y, new_theta, 0, 0), goal), current_node)
+                # DQN DNN   
+                new_node = ParaCfg.Node(new_x, new_y, new_theta, \
+                                        current_node.g_cost + 0.02, heuristic(ParaCfg.Node(new_x, new_y, new_theta, 0, 0), goal), \
+                                            current_node)
 
                 new_idx = get_grid_index(new_node.x, new_node.y)
                 if (not utils.is_overlap_node(new_node, obstacles, 0.1, 0.1)) and new_node not in grid_cells[new_idx]:
