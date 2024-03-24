@@ -42,7 +42,7 @@ def hybrid_a_star(start, goal, obstacles):
         closed_list.append(current_node)
         PlanFnd, AstarPath, RSpath = utils.cal_validRS(current_node, goal, obstacles)
         if PlanFnd:
-            return PlanFnd, AstarPath, RSpath
+            return PlanFnd, AstarPath, RSpath, cnt
 
         for steering_angle in [-1, 0, 1]:
             for gear in [-1, 1]:
@@ -58,7 +58,7 @@ def hybrid_a_star(start, goal, obstacles):
 
         cnt = cnt + 1
 
-    return False, [], []
+    return False, [], [], cnt
 
 def Path_show(AstarPath, RSpath, obstacles, start, goal, slot):
     fig, ax = plt.subplots()
