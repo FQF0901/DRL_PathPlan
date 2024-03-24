@@ -164,10 +164,6 @@ for i in range(10):
                         'dones': b_d
                     }
                     agent.update(transition_dict)
-            
-            end_time = time.time()  # 记录结束时间
-            execution_time = end_time - start_time  # 计算函数执行时间
-            print('本次执行时间',execution_time)
 
             return_list.append(episode_return)
             if (i_episode + 1) % 10 == 0:
@@ -178,6 +174,11 @@ for i in range(10):
                     '%.3f' % np.mean(return_list[-10:])
                 })
             pbar.update(1)
+    
+    end_time = time.time()  # 记录结束时间
+    execution_time = end_time - start_time  # 计算函数执行时间
+    print('本次执行时间',execution_time)
+
 # ------------------------ DQN visualization ------------------------
 episodes_list = list(range(len(return_list)))
 plt.plot(episodes_list, return_list)
