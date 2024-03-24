@@ -67,7 +67,7 @@ class DQN:
             # 3. 广播：PyTorch 中的张量支持广播，即使张量的形状不相同，也允许张量之间进行元素级运算
             # 4. 自动微分：PyTorch中的张量支持自动微分，这是训练深度学习模型的关键组成部分
             # 5. GPU加速：当在 GPU 上执行张量运算时，数据从 CPU 传输到 GPU 内存，在那里可以由数千个线程并行处理
-            state = torch.tensor([state], dtype=torch.float).to(self.device)    # allows to specify the data type and the device (CPU or GPU) on which the tensor should reside
+            state = torch.tensor([state], dtype=torch.float).to(self.device)
             action = self.q_net(state).argmax().item()
         return action
 
@@ -155,14 +155,14 @@ episodes_list = list(range(len(return_list)))
 plt.plot(episodes_list, return_list)
 plt.xlabel('Episodes')
 plt.ylabel('Returns')
-plt.title('DQN on {}'.format(env_name))
+plt.title('DQN on HAS')
 plt.show()
 
 mv_return = rl_utils.moving_average(return_list, 9)   # Lib in 'rl_utils'
 plt.plot(episodes_list, mv_return)
 plt.xlabel('Episodes')
 plt.ylabel('Returns')
-plt.title('DQN on {}'.format(env_name))
+plt.title('DQN on HAS')
 plt.show()
 
 ## ===================================== Post-processing =====================================

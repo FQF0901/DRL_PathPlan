@@ -140,13 +140,13 @@ def EnvNextState(action, EnvInfo):
     steer = action[0]
     gear = action[1]
 
-    x = EnvInfo.StartPntStep[0]
-    y = EnvInfo.StartPntStep[1]
-    yaw = EnvInfo.StartPntStep[2]
+    x = EnvInfo.State.StartPntStep[0]
+    y = EnvInfo.State.StartPntStep[1]
+    yaw = EnvInfo.State.StartPntStep[2]
 
     nextX, nextY, nextYaw = cal_VechPose(x, y, yaw, steer, gear, ParaCfg.HASParam.step_size)
 
-    EnvInfo.StartPntStep = np.array([nextX, nextY, nextYaw])
+    EnvInfo.State.StartPntStep = np.array([nextX, nextY, nextYaw])
 
     return EnvInfo
 
@@ -159,7 +159,7 @@ def EnvReward(action, EnvInfo):
     y = EnvInfo.State.TgtPntStep[1]
     yaw = EnvInfo.State.TgtPntStep[2]
     Tgt_node = ParaCfg.Node(x, y, yaw, 0, 0)
-    obstacles = EnvInfo.ObjRect + EnvInfo.OthVehRect
+    obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
 
     # Cost
     ExpansionCost = -1
@@ -198,3 +198,43 @@ def EnvReward(action, EnvInfo):
     EnvInfo.Reward_z = TolCost + TolReward
 
     return EnvInfo
+
+def EnvDRL_StateMapping(EnvInfoState):
+    if not len(EnvInfoState.ObjRect) == 0:
+        ObjRect_array = np.concatenate(EnvInfoState.ObjRect).ravel()
+        pad_width = ((0, 10 * 4 * 2 - ObjRect_array.size))
+        ObjRect_Array = np.pad(ObjRect_array, pad_width, mode='constant', constant_values=0)
+    else:
+        ObjRect_Array = np.zeros(10 * 4 * 2)
+
+    if not len(EnvInfoState.OthVehRect) == 0:
+        OthVehRect_array = np.concatenate(EnvInfoState.OthVehRect).ravel()
+        pad_width = ((0, 5 * 4 * 2 - OthVehRect_array.size))
+        OthVehRect_Array = np.pad(OthVehRect_array, pad_width, mode='constant', constant_values=0)
+    else:
+        OthVehRect_Array = np.zeros(5 * 4 * 2)
+    
+    StartPntStep_Array = np.pad(EnvInfoState.StartPntStep, ((0, 1)), mode='constant', constant_values=0)
+    TgtPntStep_Array = np.pad(EnvInfoState.TgtPntStep, ((0, 1)), mode='constant', constant_values=0)
+    DRLstate = np.concatenate((ObjRect_Array, OthVehRect_Array, StartPntStep_Array, TgtPntStep_Array))
+    
+    return DRLstate
+
+def EnvDRL_ActionMapping(DRLaction):
+    if DRLaction == 1:
+        EnvAction = [-1, 1]
+    elif DRLaction == 2:
+        EnvAction = [0, 1]
+    elif DRLaction == 3:
+        EnvAction = [1, 1]
+    elif DRLaction == 4:
+        EnvAction = [-1, -1]
+    elif DRLaction == 5:
+        EnvAction = [0, -1]
+    elif DRLaction == 6:
+        EnvAction = [1, -1]
+    else:
+        EnvAction = [0, 1]
+
+    return EnvAction
+    

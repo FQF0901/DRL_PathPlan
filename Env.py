@@ -12,6 +12,8 @@ class Env:
     
     def reset(self):
         self.EnvInfo.State.ObjRect.clear()  # 清空之前的矩形数据
+        self.EnvInfo.State.OthVehRect.clear()  # 清空之前的矩形数据
+
         n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
         
         # 生成特定范围内的obj矩形
@@ -97,9 +99,13 @@ class Env:
         self.PathFnd = False
         self.StepCnt = 0
         
-        return self.EnvInfo.state
+        state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
+
+        return state
     
     def step(self, action):
+        action = utils.EnvDRL_ActionMapping(action)
+
         self.EnvInfo.StepCnt = self.EnvInfo.StepCnt + 1
 
         self.EnvInfo = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
@@ -107,8 +113,9 @@ class Env:
         done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd or self.EnvInfo.ActionVehOvlp or self.EnvInfo.PathFnd
         info = {self.EnvInfo.StepCnt, self.EnvInfo.ActionVehOvlp, self.EnvInfo.PathFnd}
 
-        next_state = self.EnvInfo.State
+        next_state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z
+        
         return next_state, reward, done, info
     
     def show(self):
