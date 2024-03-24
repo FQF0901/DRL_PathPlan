@@ -97,7 +97,7 @@ class Env:
         self.PathFnd = False
         self.StepCnt = 0
         
-        return self.EnvInfo
+        return self.EnvInfo.state
     
     def step(self, action):
         self.EnvInfo.StepCnt = self.EnvInfo.StepCnt + 1
