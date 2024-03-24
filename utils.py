@@ -171,6 +171,7 @@ def EnvReward(action, EnvInfo):
         CloseObjCost = -0.5
 
     CollisionCost = 0
+    EnvInfo.ActionVehOvlp = False
     if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
         CollisionCost = -5  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
         EnvInfo.ActionVehOvlp = True
@@ -190,12 +191,13 @@ def EnvReward(action, EnvInfo):
 
     PathFoundReward = 0
     if PlanFnd:
-        PathFoundReward = 10000
+        PathFoundReward = 1000
 
     TolReward = SpcUseReward + PathFoundReward
 
     EnvInfo.action_z = action
     EnvInfo.Reward_z = TolCost + TolReward
+    EnvInfo.PathFnd = PlanFnd
 
     return EnvInfo
 
@@ -221,17 +223,17 @@ def EnvDRL_StateMapping(EnvInfoState):
     return DRLstate
 
 def EnvDRL_ActionMapping(DRLaction):
-    if DRLaction == 1:
+    if DRLaction == 0:
         EnvAction = [-1, 1]
-    elif DRLaction == 2:
+    elif DRLaction == 1:
         EnvAction = [0, 1]
-    elif DRLaction == 3:
+    elif DRLaction == 2:
         EnvAction = [1, 1]
-    elif DRLaction == 4:
+    elif DRLaction == 3:
         EnvAction = [-1, -1]
-    elif DRLaction == 5:
+    elif DRLaction == 4:
         EnvAction = [0, -1]
-    elif DRLaction == 6:
+    elif DRLaction == 5:
         EnvAction = [1, -1]
     else:
         EnvAction = [0, 1]

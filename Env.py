@@ -13,6 +13,19 @@ class Env:
     def reset(self):
         self.EnvInfo.State.ObjRect.clear()  # 清空之前的矩形数据
         self.EnvInfo.State.OthVehRect.clear()  # 清空之前的矩形数据
+        self.EnvInfo.State.StartPntStep = []
+        self.EnvInfo.State.StartRectStep = None
+        self.EnvInfo.State.TgtPntStep = []
+        self.EnvInfo.State.TgtRectStep = None
+        self.VehPntInit = []
+        self.VehRectInit = None
+        self.SlotPntInit = []
+        self.SlotRectInit = None
+        self.action_z = []
+        self.Reward_z = []
+        self.ActionVehOvlp = False
+        self.PathFnd = 0
+        self.StepCnt = 0
 
         n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
         
