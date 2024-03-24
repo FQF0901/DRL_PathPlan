@@ -17,15 +17,15 @@ class Env:
         self.EnvInfo.State.StartRectStep = None
         self.EnvInfo.State.TgtPntStep = []
         self.EnvInfo.State.TgtRectStep = None
-        self.VehPntInit = []
-        self.VehRectInit = None
-        self.SlotPntInit = []
-        self.SlotRectInit = None
-        self.action_z = []
-        self.Reward_z = []
-        self.ActionVehOvlp = False
-        self.PathFnd = False
-        self.StepCnt = 0
+        self.EnvInfo.VehPntInit = []
+        self.EnvInfo.VehRectInit = None
+        self.EnvInfo.SlotPntInit = []
+        self.EnvInfo.SlotRectInit = None
+        self.EnvInfo.action_z = []
+        self.EnvInfo.Reward_z = []
+        self.EnvInfo.ActionVehOvlp = False
+        self.EnvInfo.PathFnd = False
+        self.EnvInfo.StepCnt = 0
 
         n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
         
@@ -108,9 +108,9 @@ class Env:
         # 初始化action和reward
         self.EnvInfo.action_z = np.array([0, 0])    # 左正右负，前正后负
         self.EnvInfo.Reward_z = 0
-        self.VehOvlp = False
-        self.PathFnd = False
-        self.StepCnt = 0
+        self.EnvInfo.VehOvlp = False
+        self.EnvInfo.PathFnd = False
+        self.EnvInfo.StepCnt = 0
         
         state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
 
@@ -124,7 +124,9 @@ class Env:
         self.EnvInfo = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
         self.EnvInfo = utils.EnvReward(action, self.EnvInfo)
         done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd or self.EnvInfo.ActionVehOvlp or self.EnvInfo.PathFnd
-        info = {self.EnvInfo.StepCnt, self.EnvInfo.ActionVehOvlp, self.EnvInfo.PathFnd}
+        info = (self.EnvInfo.StepCnt, \
+                'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
+                'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd')
 
         next_state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z
