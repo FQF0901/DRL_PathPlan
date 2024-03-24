@@ -27,17 +27,35 @@ class ReplayBuffer:
         return len(self.buffer)
     
 # ----------------------------- Q net ---------------------------------
+# class Qnet(torch.nn.Module):
+#     ''' 只有一层隐藏层的Q网络 '''
+#     def __init__(self, state_dim, hidden_dim, action_dim):  # state维度，128个全连接隐藏层，action维度
+#         super(Qnet, self).__init__()
+#         self.fc1 = torch.nn.Linear(state_dim, hidden_dim)   # 设置全连接层，参数为全连接层的输入/出神经元个数
+#         self.fc2 = torch.nn.Linear(hidden_dim, action_dim)  # 1个隐藏层，相当于有2个全连接
+
+#     def forward(self, x):
+#         x = F.relu(self.fc1(x))  # 隐藏层使用ReLU激活函数（该网络只有一层隐藏层，因此激活层位于隐藏层和输出层之间）
+#         return self.fc2(x)
 class Qnet(torch.nn.Module):
-    ''' 只有一层隐藏层的Q网络 '''
-    def __init__(self, state_dim, hidden_dim, action_dim):  # state维度，128个全连接隐藏层，action维度
+    ''' 带有残差连接的多层隐藏层Q网络 '''
+    def __init__(self, state_dim, hidden_dim, action_dim, num_layers):  
         super(Qnet, self).__init__()
-        self.fc1 = torch.nn.Linear(state_dim, hidden_dim)   # 设置全连接层，参数为全连接层的输入/出神经元个数
-        self.fc2 = torch.nn.Linear(hidden_dim, action_dim)  # 1个隐藏层，相当于有2个全连接
-
+        
+        self.fc1 = torch.nn.Linear(state_dim, hidden_dim)  # 输入层到第一个隐藏层的全连接层
+        self.hidden_layers = torch.nn.ModuleList([torch.nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers - 1)])  # 多层隐藏层
+        
+        self.fc2 = torch.nn.Linear(hidden_dim, action_dim)  # 最后一个隐藏层到输出层的全连接层
+        
     def forward(self, x):
-        x = F.relu(self.fc1(x))  # 隐藏层使用ReLU激活函数（该网络只有一层隐藏层，因此激活层位于隐藏层和输出层之间）
-        return self.fc2(x)
+        x = F.relu(self.fc1(x))  # 第一个隐藏层
+        
+        # 多层隐藏层
+        for layer in self.hidden_layers:
+            residual = x
+            x = F.relu(layer(x) + residual)  # 残差连接结合ReLU激活函数
 
+        return self.fc2(x)  # 输出层
 # ------------------------------ DQN ----------------------------------
 class DQN:
     ''' DQN算法 '''
@@ -45,9 +63,9 @@ class DQN:
                  epsilon, target_update, device):
         self.action_dim = action_dim
         # ---------------- Q net ----------------
-        self.q_net = Qnet(state_dim, hidden_dim, self.action_dim).to(device)  # Q网络
+        self.q_net = Qnet(state_dim, hidden_dim, self.action_dim, num_layers).to(device)  # Q网络
         # 目标网络
-        self.target_q_net = Qnet(state_dim, hidden_dim, self.action_dim).to(device)
+        self.target_q_net = Qnet(state_dim, hidden_dim, self.action_dim, num_layers).to(device)
         # ---------------- Adma optimizer ----------------
         # 使用Adam优化器
         self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=learning_rate)    # parameters代表一个模型的可学习参数
@@ -100,6 +118,7 @@ class DQN:
 lr = 2e-3
 num_episodes = 500
 hidden_dim = 128
+num_layers = 3
 gamma = 0.98
 epsilon = 0.01
 target_update = 10
@@ -127,6 +146,8 @@ for i in range(10):
             while not done:
                 action = agent.take_action(state)
                 next_state, reward, done, info = env.step(action)   # changed by fqf
+                # plt.close('all')
+                # env.show()
                 replay_buffer.add(state, action, reward, next_state, done)
                 state = next_state
                 episode_return += reward

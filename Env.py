@@ -27,7 +27,7 @@ class Env:
         self.EnvInfo.PathFnd = False
         self.EnvInfo.StepCnt = 0
 
-        n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
+        n_ObjRect = np.random.randint(1, 10)  # 随机确定矩形的数量（1~64）
         
         # 生成特定范围内的obj矩形
         for _ in range(n_ObjRect):
@@ -61,7 +61,7 @@ class Env:
         y1 = np.random.uniform(-0.8, -1.2)
         yaw1 = np.random.uniform(math.radians(-10), math.radians(10))
 
-        x2 = np.random.uniform(-7, -4)
+        x2 = np.random.uniform(-7, -5)
         y2 = np.random.uniform(-0.8, -1.2)
         yaw2 = np.random.uniform(math.radians(-10), math.radians(10))
 
@@ -77,7 +77,7 @@ class Env:
         y5 = np.random.uniform(4, 6)
         yaw5 = np.random.uniform(math.radians(-10), math.radians(10))
 
-        n = random.randint(0, 5)
+        n = random.randint(1, 5)
         arr = np.array([[x1, y1, yaw1], [x2, y2, yaw2], [x3, y3, yaw3], [x4, y4, yaw4], [x5, y5, yaw5]])
 
         # 从数组中进行 n 组随机抽样
@@ -135,7 +135,7 @@ class Env:
     
     def show(self):
         """绘制所有obj,slot,host veh和other veh"""
-        if not self.EnvInfo.State.ObjRect and self.EnvInfo.SlotRect is None:
+        if not self.EnvInfo.State.ObjRect and self.EnvInfo.SlotRectInit is None:
             print("No obj to show. Please call reset() first.")
             return
 
@@ -148,8 +148,8 @@ class Env:
             polygon = patches.Polygon(corners, closed=True, edgecolor='r', facecolor='none')
             ax.add_patch(polygon)
 
-        if self.EnvInfo.SlotRect is not None:
-            slot_polygon = patches.Polygon(self.EnvInfo.SlotRect, closed=True, edgecolor='b', facecolor='none')
+        if self.EnvInfo.SlotRectInit is not None:
+            slot_polygon = patches.Polygon(self.EnvInfo.SlotRectInit, closed=True, edgecolor='b', facecolor='none')
             ax.add_patch(slot_polygon)
         
         host_veh_polygon = patches.Polygon(self.EnvInfo.VehRectInit, closed=True, edgecolor='g', facecolor='none')
@@ -161,14 +161,17 @@ class Env:
         TP_circle = plt.Circle(self.EnvInfo.SlotPntInit, 0.05, color='b')  # 以蓝色表示TP
         ax.add_artist(TP_circle)
 
+        SP_Step_circle = plt.Circle(self.EnvInfo.State.StartPntStep, 0.03, color='r')  # 以黄色表示规划过程
+        ax.add_artist(SP_Step_circle)
+
         buffer = 1
-        all_corners = np.vstack(self.EnvInfo.State.ObjRect + [self.EnvInfo.SlotRect])
+        all_corners = np.vstack(self.EnvInfo.State.ObjRect + [self.EnvInfo.SlotRectInit])
         all_corners = np.vstack([all_corners, self.EnvInfo.VehRectInit])
         
         # xlim = (min(all_corners[:, 0]) - buffer, max(all_corners[:, 0]) + buffer)
         # ylim = (min(all_corners[:, 1]) - buffer, max(all_corners[:, 1]) + buffer)
-        xlim = (ParaCfg.MapParam.xmin, ParaCfg.MapParam.xmax)
-        ylim = (ParaCfg.MapParam.ymin, ParaCfg.MapParam.ymax)
+        xlim = (ParaCfg.HASParam.xmin, ParaCfg.HASParam.xmax)
+        ylim = (ParaCfg.HASParam.ymin, ParaCfg.HASParam.ymax)
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
 

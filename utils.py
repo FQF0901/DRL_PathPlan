@@ -155,7 +155,11 @@ def EnvReward(action, EnvInfo):
     y = EnvInfo.State.StartPntStep[1]
     yaw = EnvInfo.State.StartPntStep[2]
     Curt_node = ParaCfg.Node(x, y, yaw, 0, 0)
-    x = EnvInfo.State.TgtPntStep[0] # new state 已经产生，因此这里是执行action后的state
+    x = EnvInfo.SlotPntInit[0] # start state 已经产生
+    y = EnvInfo.SlotPntInit[1]
+    yaw = EnvInfo.SlotPntInit[2]
+    St_node = ParaCfg.Node(x, y, yaw, 0, 0)
+    x = EnvInfo.State.TgtPntStep[0] # target
     y = EnvInfo.State.TgtPntStep[1]
     yaw = EnvInfo.State.TgtPntStep[2]
     Tgt_node = ParaCfg.Node(x, y, yaw, 0, 0)
@@ -164,7 +168,7 @@ def EnvReward(action, EnvInfo):
     # Cost
     ExpansionCost = -1
     SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1 + 0.2
-    GearCost = 0.2 if action[1] == EnvInfo.action_z[0] else -5
+    GearCost = 0.2 if action[1] == EnvInfo.action_z[1] else -5
     
     CloseObjCost = 0
     if is_overlap_node(Curt_node, obstacles, 0.25, 0.15):
@@ -184,6 +188,9 @@ def EnvReward(action, EnvInfo):
     TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost
 
     # Reward
+    CloseGoalReward = math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
+                        math.sqrt((St_node.x - Tgt_node.x)**2 + (St_node.y - Tgt_node.y)**2) * 5
+
     SpcUseReward = 0
     if is_overlap_node(Curt_node, obstacles, 0.0, ParaCfg.HASParam.step_size - 0.01) and \
         (not is_overlap_node(Curt_node, obstacles, 0.0, 0.1)):
@@ -193,7 +200,7 @@ def EnvReward(action, EnvInfo):
     if PlanFnd:
         PathFoundReward = 1000
 
-    TolReward = SpcUseReward + PathFoundReward
+    TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
 
     EnvInfo.action_z = action
     EnvInfo.Reward_z = TolCost + TolReward
