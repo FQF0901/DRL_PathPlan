@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import rl_utils
 import Env
+import time
 
 # ---------------------------- ReplayBuffer ---------------------------
 class ReplayBuffer:
@@ -115,13 +116,14 @@ class DQN:
         self.count += 1
 
 # ----------------------------------- train DQN ----------------------------------
+start_time = time.time()  # 记录开始时间
 lr = 2e-3
-num_episodes = 500
+num_episodes = 5000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
 epsilon = 0.01
-target_update = 10
+target_update = 50
 buffer_size = 10000
 minimal_size = 500
 batch_size = 64
@@ -162,6 +164,11 @@ for i in range(10):
                         'dones': b_d
                     }
                     agent.update(transition_dict)
+            
+            end_time = time.time()  # 记录结束时间
+            execution_time = end_time - start_time  # 计算函数执行时间
+            print('本次执行时间',execution_time)
+
             return_list.append(episode_return)
             if (i_episode + 1) % 10 == 0:
                 pbar.set_postfix({
@@ -191,3 +198,6 @@ plt.show()
 # torch.save(net, MODEL_PATH) # 直接使用torch.save()函数即可
 
 # net = torch.load(MODEL_PATH)
+end_time = time.time()  # 记录结束时间
+execution_time = end_time - start_time  # 计算函数执行时间
+print('总执行时间',execution_time)
