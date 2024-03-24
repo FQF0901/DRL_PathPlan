@@ -24,7 +24,7 @@ class Env:
         self.action_z = []
         self.Reward_z = []
         self.ActionVehOvlp = False
-        self.PathFnd = 0
+        self.PathFnd = False
         self.StepCnt = 0
 
         n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（1~64）
