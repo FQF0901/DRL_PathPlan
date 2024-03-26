@@ -1,0 +1,318 @@
+2024-03-26 22:35:07,717 - DEBUG -  ***** 第 0个for loop ***** 
+2024-03-26 22:35:07,720 - DEBUG -  *** 第 0个for loop里, 第0个epsd *** 
+2024-03-26 22:35:08,592 - DEBUG - ExpdNode time: 0.871579647064209, action: 5, reward: 993.2, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.2
+2024-03-26 22:35:08,592 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,592 - DEBUG - 1 Epsd time: 0.871579647064209
+2024-03-26 22:35:08,592 - DEBUG -  *** 第 0个for loop里, 第1个epsd *** 
+2024-03-26 22:35:08,623 - DEBUG - ExpdNode time: 0.03096747398376465, action: 5, reward: 993.2275176772248, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.2275176772248
+2024-03-26 22:35:08,623 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,623 - DEBUG - 1 Epsd time: 0.03096747398376465
+2024-03-26 22:35:08,624 - DEBUG -  *** 第 0个for loop里, 第2个epsd *** 
+2024-03-26 22:35:08,675 - DEBUG - ExpdNode time: 0.05089974403381348, action: 2, reward: 993.4849959301334, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.4849959301334
+2024-03-26 22:35:08,675 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,675 - DEBUG - 1 Epsd time: 0.05089974403381348
+2024-03-26 22:35:08,676 - DEBUG -  *** 第 0个for loop里, 第3个epsd *** 
+2024-03-26 22:35:08,729 - DEBUG - ExpdNode time: 0.052397727966308594, action: 5, reward: 993.5454895797315, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.5454895797315
+2024-03-26 22:35:08,729 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,729 - DEBUG - 1 Epsd time: 0.052397727966308594
+2024-03-26 22:35:08,730 - DEBUG -  *** 第 0个for loop里, 第4个epsd *** 
+2024-03-26 22:35:08,772 - DEBUG - ExpdNode time: 0.04291558265686035, action: 1, reward: -5.462790626910668, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -5.462790626910668
+2024-03-26 22:35:08,772 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,809 - DEBUG - ExpdNode time: 0.0362858772277832, action: 1, reward: -0.45766757942670755, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -5.920458206337376
+2024-03-26 22:35:08,809 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,834 - DEBUG - ExpdNode time: 0.025171279907226562, action: 1, reward: -0.4673752429353111, done: False, info: StepCnt3, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.387833449272687
+2024-03-26 22:35:08,834 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,852 - DEBUG - ExpdNode time: 0.018342971801757812, action: 1, reward: -0.4850303324652583, done: False, info: StepCnt4, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.872863781737945
+2024-03-26 22:35:08,853 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,866 - DEBUG - ExpdNode time: 0.012476205825805664, action: 1, reward: -0.5122490141177114, done: False, info: StepCnt5, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.385112795855656
+2024-03-26 22:35:08,866 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,875 - DEBUG - ExpdNode time: 0.008980989456176758, action: 1, reward: -0.5490878222242241, done: False, info: StepCnt6, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.93420061807988
+2024-03-26 22:35:08,875 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,885 - DEBUG - ExpdNode time: 0.01043081283569336, action: 1, reward: -0.5929912907813761, done: False, info: StepCnt7, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -8.527191908861257
+2024-03-26 22:35:08,885 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,895 - DEBUG - ExpdNode time: 0.00997781753540039, action: 1, reward: -0.6388288868995251, done: False, info: StepCnt8, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -9.166020795760781
+2024-03-26 22:35:08,895 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,906 - DEBUG - ExpdNode time: 0.01098775863647461, action: 1, reward: -0.6806088677350584, done: False, info: StepCnt9, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -9.84662966349584
+2024-03-26 22:35:08,906 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,919 - DEBUG - ExpdNode time: 0.012473106384277344, action: 1, reward: -0.7138681288474409, done: False, info: StepCnt10, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -10.56049779234328
+2024-03-26 22:35:08,919 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,935 - DEBUG - ExpdNode time: 0.01636672019958496, action: 1, reward: -0.7369569606681954, done: False, info: StepCnt11, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -11.297454753011476
+2024-03-26 22:35:08,935 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,953 - DEBUG - ExpdNode time: 0.01846623420715332, action: 1, reward: -0.7506445268699249, done: False, info: StepCnt12, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -12.0480992798814
+2024-03-26 22:35:08,953 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,974 - DEBUG - ExpdNode time: 0.02071666717529297, action: 1, reward: -0.7569170548244033, done: False, info: StepCnt13, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -12.805016334705805
+2024-03-26 22:35:08,974 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:08,995 - DEBUG - ExpdNode time: 0.0209653377532959, action: 1, reward: -0.7579485062675877, done: False, info: StepCnt14, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -13.562964840973393
+2024-03-26 22:35:08,995 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,017 - DEBUG - ExpdNode time: 0.020964622497558594, action: 1, reward: -0.7555748209372966, done: False, info: StepCnt15, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -14.31853966191069
+2024-03-26 22:35:09,017 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,038 - DEBUG - ExpdNode time: 0.02096390724182129, action: 1, reward: -0.7511553191229616, done: False, info: StepCnt16, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -15.069694981033651
+2024-03-26 22:35:09,038 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,059 - DEBUG - ExpdNode time: 0.020963191986083984, action: 1, reward: -0.7456209553703124, done: False, info: StepCnt17, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -15.815315936403962
+2024-03-26 22:35:09,059 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,082 - DEBUG - ExpdNode time: 0.021959781646728516, action: 1, reward: -0.7395771950572967, done: False, info: StepCnt18, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -16.55489313146126
+2024-03-26 22:35:09,082 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,124 - DEBUG - ExpdNode time: 0.04193615913391113, action: 1, reward: 999.26659769118, done: True, info: StepCnt19, ActNotOvlp, PathFnd, VehinMap, episode_return: 982.7117045597187
+2024-03-26 22:35:09,124 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,124 - DEBUG - 1 Epsd time: 0.3943328857421875
+2024-03-26 22:35:09,125 - DEBUG -  *** 第 0个for loop里, 第5个epsd *** 
+2024-03-26 22:35:09,202 - DEBUG - ExpdNode time: 0.07735896110534668, action: 4, reward: 995.1657917848341, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 995.1657917848341
+2024-03-26 22:35:09,202 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,202 - DEBUG - 1 Epsd time: 0.07735896110534668
+2024-03-26 22:35:09,203 - DEBUG -  *** 第 0个for loop里, 第6个epsd *** 
+2024-03-26 22:35:09,288 - DEBUG - ExpdNode time: 0.08486175537109375, action: 4, reward: 994.1836096381336, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 994.1836096381336
+2024-03-26 22:35:09,288 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,288 - DEBUG - 1 Epsd time: 0.08486175537109375
+2024-03-26 22:35:09,290 - DEBUG -  *** 第 0个for loop里, 第7个epsd *** 
+2024-03-26 22:35:09,297 - DEBUG - ExpdNode time: 0.006484031677246094, action: 2, reward: -3.750028567205236, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -3.750028567205236
+2024-03-26 22:35:09,297 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,302 - DEBUG - ExpdNode time: 0.004993915557861328, action: 2, reward: -6.016080844514381, done: True, info: StepCnt2, ActOvlp, PathNotFnd, VehinMap, episode_return: -9.766109411719617
+2024-03-26 22:35:09,302 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,302 - DEBUG - 1 Epsd time: 0.012474536895751953
+2024-03-26 22:35:09,303 - DEBUG -  *** 第 0个for loop里, 第8个epsd *** 
+2024-03-26 22:35:09,351 - DEBUG - ExpdNode time: 0.04835057258605957, action: 5, reward: 994.7832862329759, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 994.7832862329759
+2024-03-26 22:35:09,351 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,351 - DEBUG - 1 Epsd time: 0.04835057258605957
+2024-03-26 22:35:09,353 - DEBUG -  *** 第 0个for loop里, 第9个epsd *** 
+2024-03-26 22:35:09,358 - DEBUG - ExpdNode time: 0.004487514495849609, action: 2, reward: -12.698725797101392, done: True, info: StepCnt1, ActOvlp, PathNotFnd, VehinMap, episode_return: -12.698725797101392
+2024-03-26 22:35:09,358 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,358 - DEBUG - 1 Epsd time: 0.004487514495849609
+2024-03-26 22:35:09,360 - DEBUG -  *** 第 0个for loop里, 第10个epsd *** 
+2024-03-26 22:35:09,388 - DEBUG - ExpdNode time: 0.02844691276550293, action: 5, reward: -6.442639350848376, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.442639350848376
+2024-03-26 22:35:09,388 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,408 - DEBUG - ExpdNode time: 0.019969701766967773, action: 5, reward: -0.38655929628164754, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.829198647130023
+2024-03-26 22:35:09,408 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,420 - DEBUG - ExpdNode time: 0.011968851089477539, action: 5, reward: -0.37411092028098136, done: False, info: StepCnt3, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.203309567411004
+2024-03-26 22:35:09,420 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,427 - DEBUG - ExpdNode time: 0.006483554840087891, action: 5, reward: -5.868393067649435, done: True, info: StepCnt4, ActOvlp, PathNotFnd, VehinMap, episode_return: -13.07170263506044
+2024-03-26 22:35:09,427 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,427 - DEBUG - 1 Epsd time: 0.06686902046203613
+2024-03-26 22:35:09,428 - DEBUG -  *** 第 0个for loop里, 第11个epsd *** 
+2024-03-26 22:35:09,442 - DEBUG - ExpdNode time: 0.013975143432617188, action: 2, reward: -6.397153576960902, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.397153576960902
+2024-03-26 22:35:09,442 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,455 - DEBUG - ExpdNode time: 0.012961149215698242, action: 4, reward: -6.903049535943559, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -13.30020311290446
+2024-03-26 22:35:09,455 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,468 - DEBUG - ExpdNode time: 0.013470172882080078, action: 2, reward: -6.699410991578335, done: False, info: StepCnt3, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -19.999614104482795
+2024-03-26 22:35:09,468 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,476 - DEBUG - ExpdNode time: 0.007984399795532227, action: 2, reward: 2.508955757130944, done: False, info: StepCnt4, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -17.49065834735185
+2024-03-26 22:35:09,476 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,506 - DEBUG - ExpdNode time: 0.029730558395385742, action: 2, reward: -5.981765009058578, done: True, info: StepCnt5, ActOvlp, PathNotFnd, VehinMap, episode_return: -23.472423356410427
+2024-03-26 22:35:09,506 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,506 - DEBUG - 1 Epsd time: 0.07812142372131348
+2024-03-26 22:35:09,507 - DEBUG -  *** 第 0个for loop里, 第12个epsd *** 
+2024-03-26 22:35:09,515 - DEBUG - ExpdNode time: 0.007986307144165039, action: 5, reward: -4.47808713707951, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -4.47808713707951
+2024-03-26 22:35:09,515 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,522 - DEBUG - ExpdNode time: 0.006987571716308594, action: 5, reward: -6.138064023231479, done: True, info: StepCnt2, ActOvlp, PathNotFnd, VehinMap, episode_return: -10.616151160310988
+2024-03-26 22:35:09,522 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,522 - DEBUG - 1 Epsd time: 0.014973878860473633
+2024-03-26 22:35:09,523 - DEBUG -  *** 第 0个for loop里, 第13个epsd *** 
+2024-03-26 22:35:09,653 - DEBUG - ExpdNode time: 0.13031005859375, action: 5, reward: -6.9917127813429545, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.9917127813429545
+2024-03-26 22:35:09,653 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,725 - DEBUG - ExpdNode time: 0.07187223434448242, action: 5, reward: 999.4880008774991, done: True, info: StepCnt2, ActNotOvlp, PathFnd, VehinMap, episode_return: 992.4962880961561
+2024-03-26 22:35:09,725 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,725 - DEBUG - 1 Epsd time: 0.20218229293823242
+2024-03-26 22:35:09,726 - DEBUG -  *** 第 0个for loop里, 第14个epsd *** 
+2024-03-26 22:35:09,774 - DEBUG - ExpdNode time: 0.047908782958984375, action: 5, reward: 993.3428209134828, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.3428209134828
+2024-03-26 22:35:09,774 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,774 - DEBUG - 1 Epsd time: 0.047908782958984375
+2024-03-26 22:35:09,776 - DEBUG -  *** 第 0个for loop里, 第15个epsd *** 
+2024-03-26 22:35:09,789 - DEBUG - ExpdNode time: 0.012979269027709961, action: 5, reward: -6.680902155615348, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.680902155615348
+2024-03-26 22:35:09,789 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,859 - DEBUG - ExpdNode time: 0.07007026672363281, action: 5, reward: 999.5336296340644, done: True, info: StepCnt2, ActNotOvlp, PathFnd, VehinMap, episode_return: 992.852727478449
+2024-03-26 22:35:09,859 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,859 - DEBUG - 1 Epsd time: 0.08304953575134277
+2024-03-26 22:35:09,861 - DEBUG -  *** 第 0个for loop里, 第16个epsd *** 
+2024-03-26 22:35:09,879 - DEBUG - ExpdNode time: 0.018469572067260742, action: 5, reward: -6.697583780181709, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.697583780181709
+2024-03-26 22:35:09,879 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,902 - DEBUG - ExpdNode time: 0.022959232330322266, action: 5, reward: -0.7472064643929222, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.444790244574632
+2024-03-26 22:35:09,902 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,931 - DEBUG - ExpdNode time: 0.028945446014404297, action: 5, reward: -0.7347693025166753, done: False, info: StepCnt3, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -8.179559547091307
+2024-03-26 22:35:09,931 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:09,965 - DEBUG - ExpdNode time: 0.03344845771789551, action: 5, reward: -0.7237213626553767, done: False, info: StepCnt4, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -8.903280909746684
+2024-03-26 22:35:09,965 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,003 - DEBUG - ExpdNode time: 0.03792762756347656, action: 5, reward: -0.713834505036413, done: False, info: StepCnt5, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -9.617115414783097
+2024-03-26 22:35:10,003 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,036 - DEBUG - ExpdNode time: 0.032439470291137695, action: 2, reward: -5.69229572630668, done: False, info: StepCnt6, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -15.309411141089777
+2024-03-26 22:35:10,036 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,074 - DEBUG - ExpdNode time: 0.03793644905090332, action: 5, reward: -5.913834505036412, done: False, info: StepCnt7, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -21.223245646126188
+2024-03-26 22:35:10,075 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,118 - DEBUG - ExpdNode time: 0.0429232120513916, action: 5, reward: -0.7049231032436225, done: False, info: StepCnt8, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -21.92816874936981
+2024-03-26 22:35:10,118 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,243 - DEBUG - ExpdNode time: 0.1256103515625, action: 5, reward: -0.696835859673739, done: False, info: StepCnt9, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -22.62500460904355
+2024-03-26 22:35:10,243 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,372 - DEBUG - ExpdNode time: 0.12927699089050293, action: 5, reward: -0.6894489124470966, done: False, info: StepCnt10, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -23.31445352149065
+2024-03-26 22:35:10,372 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,506 - DEBUG - ExpdNode time: 0.13376760482788086, action: 5, reward: -0.6826602685898053, done: False, info: StepCnt11, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -23.997113790080455
+2024-03-26 22:35:10,506 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,663 - DEBUG - ExpdNode time: 0.1572251319885254, action: 5, reward: -0.6763853915171114, done: False, info: StepCnt12, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -24.673499181597567
+2024-03-26 22:35:10,664 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,805 - DEBUG - ExpdNode time: 0.14036107063293457, action: 5, reward: -0.6705537291500772, done: False, info: StepCnt13, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -25.344052910747642
+2024-03-26 22:35:10,805 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:10,945 - DEBUG - ExpdNode time: 0.13990044593811035, action: 5, reward: -0.6651059857736223, done: False, info: StepCnt14, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -26.009158896521264
+2024-03-26 22:35:10,945 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,079 - DEBUG - ExpdNode time: 0.13425993919372559, action: 1, reward: -6.739508019245239, done: False, info: StepCnt15, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -32.748666915766506
+2024-03-26 22:35:11,079 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,226 - DEBUG - ExpdNode time: 0.14724040031433105, action: 5, reward: -6.859686505254981, done: False, info: StepCnt16, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -39.60835342102149
+2024-03-26 22:35:11,226 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,249 - DEBUG - ExpdNode time: 0.022954225540161133, action: 5, reward: -0.6548303191067761, done: False, info: StepCnt17, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -40.26318374012827
+2024-03-26 22:35:11,249 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,265 - DEBUG - ExpdNode time: 0.01626729965209961, action: 5, reward: -0.6502340241176783, done: False, info: StepCnt18, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -40.91341776424595
+2024-03-26 22:35:11,265 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,277 - DEBUG - ExpdNode time: 0.011478662490844727, action: 5, reward: -0.6458644817771044, done: False, info: StepCnt19, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -41.55928224602305
+2024-03-26 22:35:11,277 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,285 - DEBUG - ExpdNode time: 0.007986068725585938, action: 5, reward: -6.141692982636215, done: True, info: StepCnt20, ActOvlp, PathNotFnd, VehinMap, episode_return: -47.70097522865927
+2024-03-26 22:35:11,285 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,285 - DEBUG - 1 Epsd time: 1.423868179321289
+2024-03-26 22:35:11,285 - DEBUG -  *** 第 0个for loop里, 第17个epsd *** 
+2024-03-26 22:35:11,351 - DEBUG - ExpdNode time: 0.06586909294128418, action: 5, reward: 991.6896635372999, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 991.6896635372999
+2024-03-26 22:35:11,351 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,351 - DEBUG - 1 Epsd time: 0.0663752555847168
+2024-03-26 22:35:11,351 - DEBUG -  *** 第 0个for loop里, 第18个epsd *** 
+2024-03-26 22:35:11,387 - DEBUG - ExpdNode time: 0.03543400764465332, action: 5, reward: 993.157502873737, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.157502873737
+2024-03-26 22:35:11,387 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,387 - DEBUG - 1 Epsd time: 0.03543400764465332
+2024-03-26 22:35:11,388 - DEBUG -  *** 第 0个for loop里, 第19个epsd *** 
+2024-03-26 22:35:11,394 - DEBUG - ExpdNode time: 0.005995035171508789, action: 1, reward: -11.709700727425323, done: True, info: StepCnt1, ActOvlp, PathNotFnd, VehinMap, episode_return: -11.709700727425323
+2024-03-26 22:35:11,394 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,395 - DEBUG - 1 Epsd time: 0.006989479064941406
+2024-03-26 22:35:11,395 - DEBUG -  *** 第 0个for loop里, 第20个epsd *** 
+2024-03-26 22:35:11,417 - DEBUG - ExpdNode time: 0.02283024787902832, action: 1, reward: 994.2369247534381, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 994.2369247534381
+2024-03-26 22:35:11,417 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,417 - DEBUG - 1 Epsd time: 0.02283024787902832
+2024-03-26 22:35:11,418 - DEBUG -  *** 第 0个for loop里, 第21个epsd *** 
+2024-03-26 22:35:11,459 - DEBUG - ExpdNode time: 0.0402071475982666, action: 2, reward: 996.2402670899538, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 996.2402670899538
+2024-03-26 22:35:11,459 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,459 - DEBUG - 1 Epsd time: 0.0402071475982666
+2024-03-26 22:35:11,460 - DEBUG -  *** 第 0个for loop里, 第22个epsd *** 
+2024-03-26 22:35:11,467 - DEBUG - ExpdNode time: 0.006988525390625, action: 2, reward: -6.805716661087542, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.805716661087542
+2024-03-26 22:35:11,467 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,472 - DEBUG - ExpdNode time: 0.005486011505126953, action: 2, reward: -0.8069097143499864, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.612626375437529
+2024-03-26 22:35:11,472 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,477 - DEBUG - ExpdNode time: 0.004491329193115234, action: 2, reward: -6.28474407087316, done: True, info: StepCnt3, ActOvlp, PathNotFnd, VehinMap, episode_return: -13.897370446310688
+2024-03-26 22:35:11,477 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,477 - DEBUG - 1 Epsd time: 0.016965866088867188
+2024-03-26 22:35:11,477 - DEBUG -  *** 第 0个for loop里, 第23个epsd *** 
+2024-03-26 22:35:11,507 - DEBUG - ExpdNode time: 0.030452728271484375, action: 5, reward: 993.1880620700317, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.1880620700317
+2024-03-26 22:35:11,507 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,507 - DEBUG - 1 Epsd time: 0.030452728271484375
+2024-03-26 22:35:11,509 - DEBUG -  *** 第 0个for loop里, 第24个epsd *** 
+2024-03-26 22:35:11,576 - DEBUG - ExpdNode time: 0.06687760353088379, action: 2, reward: 993.5065932697194, done: True, info: StepCnt1, ActNotOvlp, PathFnd, VehinMap, episode_return: 993.5065932697194
+2024-03-26 22:35:11,576 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,576 - DEBUG - 1 Epsd time: 0.06687760353088379
+2024-03-26 22:35:11,577 - DEBUG -  *** 第 0个for loop里, 第25个epsd *** 
+2024-03-26 22:35:11,590 - DEBUG - ExpdNode time: 0.01247096061706543, action: 5, reward: -6.558152400430764, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.558152400430764
+2024-03-26 22:35:11,590 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,607 - DEBUG - ExpdNode time: 0.015843868255615234, action: 5, reward: -0.5166496619924406, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.074802062423204
+2024-03-26 22:35:11,607 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,625 - DEBUG - ExpdNode time: 0.018465757369995117, action: 5, reward: -0.5314568524880068, done: False, info: StepCnt3, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -7.606258914911211
+2024-03-26 22:35:11,625 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,631 - DEBUG - ExpdNode time: 0.005993843078613281, action: 5, reward: -6.050667967221784, done: True, info: StepCnt4, ActOvlp, PathNotFnd, VehinMap, episode_return: -13.656926882132996
+2024-03-26 22:35:11,631 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,631 - DEBUG - 1 Epsd time: 0.0537714958190918
+2024-03-26 22:35:11,632 - DEBUG -  *** 第 0个for loop里, 第26个epsd *** 
+2024-03-26 22:35:11,643 - DEBUG - ExpdNode time: 0.010974407196044922, action: 5, reward: -3.6321241210167123, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -3.6321241210167123
+2024-03-26 22:35:11,643 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,650 - DEBUG - ExpdNode time: 0.006990194320678711, action: 5, reward: -6.18797847335775, done: True, info: StepCnt2, ActOvlp, PathNotFnd, VehinMap, episode_return: -9.820102594374461
+2024-03-26 22:35:11,650 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,650 - DEBUG - 1 Epsd time: 0.017964601516723633
+2024-03-26 22:35:11,651 - DEBUG -  *** 第 0个for loop里, 第27个epsd *** 
+2024-03-26 22:35:11,682 - DEBUG - ExpdNode time: 0.030451536178588867, action: 2, reward: -6.4827566029565435, done: False, info: StepCnt1, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -6.4827566029565435
+2024-03-26 22:35:11,682 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,748 - DEBUG - ExpdNode time: 0.06638550758361816, action: 3, reward: -7.911975017625025, done: False, info: StepCnt2, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -14.394731620581569
+2024-03-26 22:35:11,748 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,776 - DEBUG - ExpdNode time: 0.027445554733276367, action: 2, reward: -7.682936692198876, done: False, info: StepCnt3, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -22.077668312780446
+2024-03-26 22:35:11,776 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,799 - DEBUG - ExpdNode time: 0.022954702377319336, action: 2, reward: -0.4740945752991441, done: False, info: StepCnt4, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -22.55176288807959
+2024-03-26 22:35:11,799 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,819 - DEBUG - ExpdNode time: 0.020459890365600586, action: 2, reward: -0.4645563498519194, done: False, info: StepCnt5, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -23.01631923793151
+2024-03-26 22:35:11,820 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,837 - DEBUG - ExpdNode time: 0.01747584342956543, action: 2, reward: -0.45432352664361697, done: False, info: StepCnt6, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -23.470642764575125
+2024-03-26 22:35:11,839 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,855 - DEBUG - ExpdNode time: 0.016475439071655273, action: 2, reward: -0.4434760716572079, done: False, info: StepCnt7, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -23.914118836232333
+2024-03-26 22:35:11,855 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,869 - DEBUG - ExpdNode time: 0.01397705078125, action: 2, reward: -0.4322472312612027, done: False, info: StepCnt8, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -24.346366067493538
+2024-03-26 22:35:11,869 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,882 - DEBUG - ExpdNode time: 0.012472867965698242, action: 2, reward: -0.42115987630071583, done: False, info: StepCnt9, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -24.767525943794254
+2024-03-26 22:35:11,882 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,894 - DEBUG - ExpdNode time: 0.011983871459960938, action: 0, reward: -2.431147602410628, done: False, info: StepCnt10, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -27.198673546204883
+2024-03-26 22:35:11,894 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,904 - DEBUG - ExpdNode time: 0.010250091552734375, action: 2, reward: -2.4546661294435133, done: False, info: StepCnt11, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -29.653339675648397
+2024-03-26 22:35:11,904 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,916 - DEBUG - ExpdNode time: 0.011969566345214844, action: 5, reward: -5.9567224076066925, done: False, info: StepCnt12, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -35.61006208325509
+2024-03-26 22:35:11,916 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,926 - DEBUG - ExpdNode time: 0.009975433349609375, action: 2, reward: -5.654666129443513, done: False, info: StepCnt13, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -41.2647282126986
+2024-03-26 22:35:11,926 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,938 - DEBUG - ExpdNode time: 0.011903524398803711, action: 5, reward: -5.9567224076066925, done: False, info: StepCnt14, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -47.22145062030529
+2024-03-26 22:35:11,938 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,948 - DEBUG - ExpdNode time: 0.009977579116821289, action: 2, reward: -5.654666129443513, done: False, info: StepCnt15, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -52.8761167497488
+2024-03-26 22:35:11,948 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,960 - DEBUG - ExpdNode time: 0.011524677276611328, action: 5, reward: -5.9567224076066925, done: False, info: StepCnt16, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -58.832839157355494
+2024-03-26 22:35:11,960 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,970 - DEBUG - ExpdNode time: 0.009488582611083984, action: 2, reward: -5.654666129443513, done: False, info: StepCnt17, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -64.487505286799
+2024-03-26 22:35:11,970 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,983 - DEBUG - ExpdNode time: 0.012471199035644531, action: 5, reward: -5.9567224076066925, done: False, info: StepCnt18, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -70.4442276944057
+2024-03-26 22:35:11,983 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:11,993 - DEBUG - ExpdNode time: 0.009978294372558594, action: 2, reward: -5.654666129443513, done: False, info: StepCnt19, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -76.09889382384921
+2024-03-26 22:35:11,993 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,005 - DEBUG - ExpdNode time: 0.01198267936706543, action: 5, reward: -5.9567224076066925, done: False, info: StepCnt20, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -82.0556162314559
+2024-03-26 22:35:12,005 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,014 - DEBUG - ExpdNode time: 0.00948643684387207, action: 2, reward: -5.654666129443513, done: False, info: StepCnt21, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -87.71028236089941
+2024-03-26 22:35:12,014 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,023 - DEBUG - ExpdNode time: 0.008978843688964844, action: 1, reward: -1.4822649080927586, done: False, info: StepCnt22, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -89.19254726899217
+2024-03-26 22:35:12,023 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,034 - DEBUG - ExpdNode time: 0.010483741760253906, action: 5, reward: -6.911393979285162, done: False, info: StepCnt23, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -96.10394124827734
+2024-03-26 22:35:12,034 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,043 - DEBUG - ExpdNode time: 0.008979320526123047, action: 2, reward: -5.694482999972487, done: False, info: StepCnt24, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -101.79842424824983
+2024-03-26 22:35:12,043 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,054 - DEBUG - ExpdNode time: 0.010481834411621094, action: 5, reward: -5.911393979285162, done: False, info: StepCnt25, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -107.709818227535
+2024-03-26 22:35:12,054 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,063 - DEBUG - ExpdNode time: 0.008487462997436523, action: 2, reward: -5.694482999972487, done: False, info: StepCnt26, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -113.40430122750749
+2024-03-26 22:35:12,064 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,074 - DEBUG - ExpdNode time: 0.010483980178833008, action: 5, reward: -5.911393979285162, done: False, info: StepCnt27, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -119.31569520679265
+2024-03-26 22:35:12,074 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,083 - DEBUG - ExpdNode time: 0.008979558944702148, action: 2, reward: -5.694482999972487, done: False, info: StepCnt28, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -125.01017820676515
+2024-03-26 22:35:12,083 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,094 - DEBUG - ExpdNode time: 0.011284589767456055, action: 5, reward: -5.911393979285162, done: False, info: StepCnt29, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -130.9215721860503
+2024-03-26 22:35:12,094 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,103 - DEBUG - ExpdNode time: 0.008487939834594727, action: 2, reward: -5.694482999972487, done: False, info: StepCnt30, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -136.61605518602278
+2024-03-26 22:35:12,104 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,110 - DEBUG - ExpdNode time: 0.005991458892822266, action: 2, reward: -0.5247076308964991, done: False, info: StepCnt31, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -137.14076281691928
+2024-03-26 22:35:12,110 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,119 - DEBUG - ExpdNode time: 0.008980751037597656, action: 5, reward: -5.87823772077885, done: False, info: StepCnt32, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -143.01900053769813
+2024-03-26 22:35:12,120 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,130 - DEBUG - ExpdNode time: 0.010483741760253906, action: 5, reward: -0.7113939792851616, done: False, info: StepCnt33, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -143.7303945169833
+2024-03-26 22:35:12,130 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,139 - DEBUG - ExpdNode time: 0.008978605270385742, action: 2, reward: -5.694482999972487, done: False, info: StepCnt34, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -149.42487751695577
+2024-03-26 22:35:12,139 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,150 - DEBUG - ExpdNode time: 0.011136293411254883, action: 5, reward: -5.911393979285162, done: False, info: StepCnt35, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -155.33627149624093
+2024-03-26 22:35:12,150 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,159 - DEBUG - ExpdNode time: 0.008487939834594727, action: 2, reward: -5.694482999972487, done: False, info: StepCnt36, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -161.0307544962134
+2024-03-26 22:35:12,159 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,170 - DEBUG - ExpdNode time: 0.010484457015991211, action: 5, reward: -5.911393979285162, done: False, info: StepCnt37, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -166.94214847549856
+2024-03-26 22:35:12,170 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,179 - DEBUG - ExpdNode time: 0.008978605270385742, action: 2, reward: -5.694482999972487, done: False, info: StepCnt38, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -172.63663147547103
+2024-03-26 22:35:12,179 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,190 - DEBUG - ExpdNode time: 0.011135339736938477, action: 5, reward: -5.911393979285162, done: False, info: StepCnt39, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -178.54802545475619
+2024-03-26 22:35:12,190 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,199 - DEBUG - ExpdNode time: 0.008472204208374023, action: 2, reward: -5.694482999972487, done: False, info: StepCnt40, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -184.24250845472866
+2024-03-26 22:35:12,200 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,210 - DEBUG - ExpdNode time: 0.010486125946044922, action: 5, reward: -5.911393979285162, done: False, info: StepCnt41, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -190.15390243401382
+2024-03-26 22:35:12,210 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,219 - DEBUG - ExpdNode time: 0.008978843688964844, action: 2, reward: -5.694482999972487, done: False, info: StepCnt42, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -195.8483854339863
+2024-03-26 22:35:12,219 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,231 - DEBUG - ExpdNode time: 0.011125564575195312, action: 5, reward: -5.911393979285162, done: False, info: StepCnt43, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -201.75977941327145
+2024-03-26 22:35:12,231 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,239 - DEBUG - ExpdNode time: 0.008980512619018555, action: 2, reward: -5.694482999972487, done: False, info: StepCnt44, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -207.45426241324392
+2024-03-26 22:35:12,240 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,250 - DEBUG - ExpdNode time: 0.010480880737304688, action: 5, reward: -5.911393979285162, done: False, info: StepCnt45, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -213.36565639252908
+2024-03-26 22:35:12,250 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,259 - DEBUG - ExpdNode time: 0.008979558944702148, action: 2, reward: -5.694482999972487, done: False, info: StepCnt46, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -219.06013939250155
+2024-03-26 22:35:12,259 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,271 - DEBUG - ExpdNode time: 0.011184215545654297, action: 5, reward: -5.911393979285162, done: False, info: StepCnt47, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -224.9715333717867
+2024-03-26 22:35:12,271 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,279 - DEBUG - ExpdNode time: 0.008487701416015625, action: 2, reward: -5.694482999972487, done: False, info: StepCnt48, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -230.66601637175918
+2024-03-26 22:35:12,279 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,291 - DEBUG - ExpdNode time: 0.011482000350952148, action: 5, reward: -5.911393979285162, done: False, info: StepCnt49, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -236.57741035104434
+2024-03-26 22:35:12,291 - DEBUG - UpdaDQN time: 0.0
+2024-03-26 22:35:12,302 - DEBUG - ExpdNode time: 0.01147770881652832, action: 3, reward: -2.7587192729348713, done: False, info: StepCnt50, ActNotOvlp, PathNotFnd, VehinMap, episode_return: -239.33612962397922
+2024-03-26 22:35:12,302 - DEBUG - UpdaDQN time: 0.0

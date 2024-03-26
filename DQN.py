@@ -138,7 +138,7 @@ replay_buffer = ReplayBuffer(buffer_size)
 state_dim = 128
 action_dim = 6
 agent = DQN(state_dim, hidden_dim, action_dim, lr, gamma, epsilon,
-            target_update, device)
+            target_update, num_layers, device)
 return_list = []
 
 for i in range(10):
