@@ -62,7 +62,7 @@ class Qnet(torch.nn.Module):
 class DQN:
     ''' DQN算法 '''
     def __init__(self, state_dim, hidden_dim, action_dim, learning_rate, gamma,
-                 epsilon, target_update, device):
+                 epsilon, target_update, num_layers, device):
         self.action_dim = action_dim
         # ---------------- Q net ----------------
         self.q_net = Qnet(state_dim, hidden_dim, self.action_dim, num_layers).to(device)  # Q网络
@@ -226,7 +226,7 @@ plt.title('DQN on HAS')
 plt.show()
 
 ## ===================================== Post-processing =====================================
-# MODEL_PATH = 'model.pth'  # 后缀名为 .pth
-# torch.save(net, MODEL_PATH) # 直接使用torch.save()函数即可
+# MODEL_PATH = 'D:\01_Work\DRL_PathPlan\model.pth'  # 后缀名为 .pth
+# torch.save(DQN, MODEL_PATH) # 直接使用torch.save()函数即可
 
 # net = torch.load(MODEL_PATH)
