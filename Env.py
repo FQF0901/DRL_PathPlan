@@ -27,7 +27,7 @@ class Env:
         self.EnvInfo.PathFnd = False
         self.EnvInfo.StepCnt = 0
 
-        n_ObjRect = np.random.randint(1, 10)  # 随机确定矩形的数量（1~64）
+        n_ObjRect = np.random.randint(2, 10)  # 随机确定矩形的数量（1~64）
         
         # 生成特定范围内的obj矩形
         for _ in range(n_ObjRect):
@@ -77,7 +77,7 @@ class Env:
         y5 = np.random.uniform(4, 6)
         yaw5 = np.random.uniform(math.radians(-10), math.radians(10))
 
-        n = random.randint(1, 5)
+        n = random.randint(2, 5)
         arr = np.array([[x1, y1, yaw1], [x2, y2, yaw2], [x3, y3, yaw3], [x4, y4, yaw4], [x5, y5, yaw5]])
 
         # 从数组中进行 n 组随机抽样
@@ -126,7 +126,7 @@ class Env:
         done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd \
                 or self.EnvInfo.ActionVehOvlp \
                 or self.EnvInfo.PathFnd \
-                or (abs(self.EnvInfo.State.StartPntStep[0]) > 20 or abs(self.EnvInfo.State.StartPntStep[1]) > 20)
+                or (abs(self.EnvInfo.State.StartPntStep[0]) > 15 or abs(self.EnvInfo.State.StartPntStep[1]) > 10)
         # info = (self.EnvInfo.StepCnt, \
         #         'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
         #         'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd' \
@@ -134,7 +134,7 @@ class Env:
         info = "StepCnt{}, {}, {}, {}".format(self.EnvInfo.StepCnt, \
                         'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
                             'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd', \
-                                'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 20 or abs(self.EnvInfo.State.StartPntStep[1]) > 20) else 'VehinMap')
+                                'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 15 or abs(self.EnvInfo.State.StartPntStep[1]) > 10) else 'VehinMap')
 
         next_state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z

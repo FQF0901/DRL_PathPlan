@@ -123,13 +123,13 @@ logging.basicConfig(filename='DQN.log', level=logging.DEBUG, format='%(asctime)s
 lr = 2e-3
 num_episodes = 50000
 hidden_dim = 128
-num_layers = 5
+num_layers = 3
 gamma = 0.98
 epsilon = 0.1
 target_update = 50
 buffer_size = 10000
 minimal_size = 500
-batch_size = 64
+batch_size = 128
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 env = Env.Env()
