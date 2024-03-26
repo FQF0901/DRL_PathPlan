@@ -123,10 +123,18 @@ class Env:
 
         self.EnvInfo = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
         self.EnvInfo = utils.EnvReward(action, self.EnvInfo)
-        done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd or self.EnvInfo.ActionVehOvlp or self.EnvInfo.PathFnd
-        info = (self.EnvInfo.StepCnt, \
-                'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
-                'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd')
+        done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd \
+                or self.EnvInfo.ActionVehOvlp \
+                or self.EnvInfo.PathFnd \
+                or (abs(self.EnvInfo.State.StartPntStep[0]) > 20 or abs(self.EnvInfo.State.StartPntStep[1]) > 20)
+        # info = (self.EnvInfo.StepCnt, \
+        #         'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
+        #         'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd' \
+        #         'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 20 or abs(self.EnvInfo.State.StartPntStep[1]) > 20) else 'VehinMap')
+        info = "StepCnt{}, {}, {}, {}".format(self.EnvInfo.StepCnt, \
+                        'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
+                            'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd', \
+                                'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 20 or abs(self.EnvInfo.State.StartPntStep[1]) > 20) else 'VehinMap')
 
         next_state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z

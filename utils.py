@@ -188,8 +188,12 @@ def EnvReward(action, EnvInfo):
     TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost
 
     # Reward
-    CloseGoalReward = math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
-                        math.sqrt((St_node.x - Tgt_node.x)**2 + (St_node.y - Tgt_node.y)**2) * 5
+    # 检查是否已经存在静态变量，如果不存在则初始化
+    if not hasattr(EnvReward, 'Curt_node_prev'):
+        EnvReward.Curt_node_prev = ParaCfg.Node(Curt_node.x, Curt_node.y, 0, 0, 0)
+    CloseGoalReward = 2 * (1 - (math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
+                        math.sqrt((EnvReward.Curt_node_prev.x - Tgt_node.x)**2 + (EnvReward.Curt_node_prev.y - Tgt_node.y)**2)))
+    EnvReward.Curt_node_prev = Curt_node
 
     SpcUseReward = 0
     if is_overlap_node(Curt_node, obstacles, 0.0, ParaCfg.HASParam.step_size - 0.01) and \

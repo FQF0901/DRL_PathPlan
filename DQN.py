@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import rl_utils
 import Env
 import time
+import logging
 
 # ---------------------------- ReplayBuffer ---------------------------
 class ReplayBuffer:
@@ -116,13 +117,15 @@ class DQN:
         self.count += 1
 
 # ----------------------------------- train DQN ----------------------------------
-start_time = time.time()  # 记录开始时间
+# ---------------------- #
+logging.basicConfig(filename='DQN.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# ---------------------- #
 lr = 2e-3
-num_episodes = 5000
+num_episodes = 50000
 hidden_dim = 128
-num_layers = 3
+num_layers = 5
 gamma = 0.98
-epsilon = 0.01
+epsilon = 0.1
 target_update = 50
 buffer_size = 10000
 minimal_size = 500
@@ -136,16 +139,26 @@ state_dim = 128
 action_dim = 6
 agent = DQN(state_dim, hidden_dim, action_dim, lr, gamma, epsilon,
             target_update, device)
-
 return_list = []
+
 for i in range(10):
+    # ---------------------- #
+    For_start_time = time.time()  # 记录开始时间
+    logging.debug(" ***** 第 %s个for loop ***** ", i)
+    # ---------------------- #
     with tqdm(total=int(num_episodes / 10), desc='Iteration %d' % i) as pbar:
         for i_episode in range(int(num_episodes / 10)):
             episode_return = 0
-            # state, _= env.reset()      # handcode fqf
             state = env.reset()
             done = False
+            # ---------------------- #
+            Epsd_start_time = time.time()  # 记录开始时间
+            logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
+            # ---------------------- #
             while not done:
+                # ---------------------- #
+                ExpdNode_start_time = time.time()  # 记录开始时间
+                # ---------------------- #
                 action = agent.take_action(state)
                 next_state, reward, done, info = env.step(action)   # changed by fqf
                 # plt.close('all')
@@ -153,6 +166,13 @@ for i in range(10):
                 replay_buffer.add(state, action, reward, next_state, done)
                 state = next_state
                 episode_return += reward
+                # ---------------------- #
+                ExpdNode_end_time = time.time()  # 记录结束时间
+                execution_time = ExpdNode_end_time - ExpdNode_start_time  # 计算函数执行时间
+                logging.debug("ExpdNode time: %s, action: %s, reward: %s, done: %s, info: %s, episode_return: %s", 
+                            execution_time, action, reward, done, info, episode_return)
+                UpdtNNstart_time = time.time()  # 记录结束时间
+                # ---------------------- #
                 # 当buffer数据的数量超过500后,才进行Q网络训练
                 if replay_buffer.size() > minimal_size:
                     b_s, b_a, b_r, b_ns, b_d = replay_buffer.sample(batch_size)
@@ -164,6 +184,12 @@ for i in range(10):
                         'dones': b_d
                     }
                     agent.update(transition_dict)
+                
+                # ---------------------- #
+                UpdtNNend_time = time.time()  # 记录结束时间
+                execution_time = UpdtNNend_time - UpdtNNstart_time  # 计算函数执行时间
+                logging.debug("UpdaDQN time: %s", execution_time)
+                # ---------------------- #
 
             return_list.append(episode_return)
             if (i_episode + 1) % 10 == 0:
@@ -171,14 +197,19 @@ for i in range(10):
                     'episode':
                     '%d' % (num_episodes / 10 * i + i_episode + 1),
                     'return':
-                    '%.3f' % np.mean(return_list[-10:])
+                    '%.3f' % np.mean(return_list[-1000:])
                 })
             pbar.update(1)
-    
-    end_time = time.time()  # 记录结束时间
-    execution_time = end_time - start_time  # 计算函数执行时间
-    print('本次执行时间',execution_time)
-
+            # ---------------------- #
+            Epsd_end_time = time.time()  # 记录开始时间
+            execution_time = Epsd_end_time - Epsd_start_time  # 计算函数执行时间
+            logging.debug("1 Epsd time: %s", execution_time)
+            # ---------------------- #
+    # ---------------------- #
+    For_end_time = time.time()  # 记录结束时间
+    execution_time = For_end_time - For_start_time  # 计算函数执行时间
+    print("For time: %s", execution_time)
+    # ---------------------- #
 # ------------------------ DQN visualization ------------------------
 episodes_list = list(range(len(return_list)))
 plt.plot(episodes_list, return_list)
@@ -199,6 +230,3 @@ plt.show()
 # torch.save(net, MODEL_PATH) # 直接使用torch.save()函数即可
 
 # net = torch.load(MODEL_PATH)
-end_time = time.time()  # 记录结束时间
-execution_time = end_time - start_time  # 计算函数执行时间
-print('总执行时间',execution_time)
