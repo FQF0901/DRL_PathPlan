@@ -155,10 +155,6 @@ def EnvReward(action, EnvInfo):
     y = EnvInfo.State.StartPntStep[1]
     yaw = EnvInfo.State.StartPntStep[2]
     Curt_node = ParaCfg.Node(x, y, yaw, 0, 0)
-    x = EnvInfo.SlotPntInit[0] # start state 已经产生
-    y = EnvInfo.SlotPntInit[1]
-    yaw = EnvInfo.SlotPntInit[2]
-    St_node = ParaCfg.Node(x, y, yaw, 0, 0)
     x = EnvInfo.State.TgtPntStep[0] # target
     y = EnvInfo.State.TgtPntStep[1]
     yaw = EnvInfo.State.TgtPntStep[2]
@@ -166,9 +162,10 @@ def EnvReward(action, EnvInfo):
     obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
 
     # Cost
-    ExpansionCost = -1
-    SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1 + 0.2
-    GearCost = 0.2 if action[1] == EnvInfo.action_z[1] else -5
+    ExpansionCost = - EnvInfo.StepCnt / ParaCfg.HASParam.maxEpsd
+    SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1
+    GearCost = 0 if action[1] == EnvInfo.action_z[1] else -3
+    RepeatMoveCost = -10 if (action[0] == EnvInfo.action_z[0]) and (action[1] == - EnvInfo.action_z[1]) else 0
     
     CloseObjCost = 0
     if is_overlap_node(Curt_node, obstacles, 0.25, 0.15):
@@ -177,21 +174,21 @@ def EnvReward(action, EnvInfo):
     CollisionCost = 0
     EnvInfo.ActionVehOvlp = False
     if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
-        CollisionCost = -5  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
+        CollisionCost = -200  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
         EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
     PlanFnd, _, _ = cal_validRS(Curt_node, Tgt_node, obstacles)
     if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd and (not PlanFnd):
-        PathNotFndCost = -200  
+        PathNotFndCost = -500  
 
-    TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost
+    TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost + RepeatMoveCost
 
     # Reward
     # 检查是否已经存在静态变量，如果不存在则初始化
     if not hasattr(EnvReward, 'Curt_node_prev'):
         EnvReward.Curt_node_prev = ParaCfg.Node(Curt_node.x, Curt_node.y, 0, 0, 0)
-    CloseGoalReward = 2 * (1 - (math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
+    CloseGoalReward = 50 * (1 - (math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
                         math.sqrt((EnvReward.Curt_node_prev.x - Tgt_node.x)**2 + (EnvReward.Curt_node_prev.y - Tgt_node.y)**2)))
     EnvReward.Curt_node_prev = Curt_node
 

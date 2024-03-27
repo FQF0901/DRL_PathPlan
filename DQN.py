@@ -62,7 +62,7 @@ class Qnet(torch.nn.Module):
 class DQN:
     ''' DQN算法 '''
     def __init__(self, state_dim, hidden_dim, action_dim, learning_rate, gamma,
-                 epsilon, target_update, num_layers, device):
+                 epsilon_max, target_update, num_layers, device):
         self.action_dim = action_dim
         # ---------------- Q net ----------------
         self.q_net = Qnet(state_dim, hidden_dim, self.action_dim, num_layers).to(device)  # Q网络
@@ -72,13 +72,13 @@ class DQN:
         # 使用Adam优化器
         self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=learning_rate)    # parameters代表一个模型的可学习参数
         self.gamma = gamma  # 折扣因子
-        self.epsilon = epsilon  # epsilon-贪婪策略
+        self.epsilon = epsilon_max  # epsilon-贪婪策略
         self.target_update = target_update  # 目标网络更新频率
         self.count = 0  # 计数器,记录更新次数
         self.device = device
 
-    def take_action(self, state):  # epsilon-贪婪策略采取动作
-        if np.random.random() < self.epsilon:
+    def take_action(self, state, trainproc):  # 可变的epsilon-贪婪策略采取动作
+        if np.random.random() < self.epsilon * (1 - trainproc):
             action = np.random.randint(self.action_dim)
         else:
             # torch.tensor创建张量，是可以存储和操作数值数据的多维数组，张量和普通数组的区别如下：
@@ -120,13 +120,13 @@ class DQN:
 # ---------------------- #
 logging.basicConfig(filename='DQN.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
-lr = 2e-3
+lr = 0.005
 num_episodes = 50000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
-epsilon = 0.1
-target_update = 50
+epsilon_max = 0.3
+target_update = 500
 buffer_size = 10000
 minimal_size = 500
 batch_size = 128
@@ -137,7 +137,7 @@ torch.manual_seed(0)
 replay_buffer = ReplayBuffer(buffer_size)
 state_dim = 128
 action_dim = 6
-agent = DQN(state_dim, hidden_dim, action_dim, lr, gamma, epsilon,
+agent = DQN(state_dim, hidden_dim, action_dim, lr, gamma, epsilon_max, 
             target_update, num_layers, device)
 return_list = []
 
@@ -159,7 +159,7 @@ for i in range(10):
                 # ---------------------- #
                 ExpdNode_start_time = time.time()  # 记录开始时间
                 # ---------------------- #
-                action = agent.take_action(state)
+                action = agent.take_action(state, trainproc=(i_episode + i * 10) / num_episodes)
                 next_state, reward, done, info = env.step(action)   # changed by fqf
                 # plt.close('all')
                 # env.show()
