@@ -123,7 +123,7 @@ class DQN:
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 500
+num_episodes = 25000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
