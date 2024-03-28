@@ -123,7 +123,7 @@ class DQN:
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 500
+num_episodes = 25000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
@@ -167,7 +167,7 @@ for i in range(10):
                 state = next_state
                 episode_return += reward
                 # ---------------------- #
-                logging.debug("action: %s, reward: %s, done: %s, info: %s, episode_return: %s", \
+                logging.debug(" --- action: %s, reward: %s, done: %s, info: %s, episode_return: %s", \
                               action, reward, done, info, episode_return)
                 # ---------------------- #
                 # 当buffer数据的数量超过500后,才进行Q网络训练
@@ -191,21 +191,27 @@ for i in range(10):
                     '%d' % (num_episodes / 10 * i + i_episode + 1),
                     'return':
                     '%.3f' % np.mean(return_list[-1000:]),
-                    'StepCnt':
-                    '%.3f' % (DQN_DoneCause.donePct_StepCnt_list[-1]),
-                    'ActOvlp':
-                    '%.3f' % (DQN_DoneCause.donePct_ActVehOvlp_list[-1]),
-                    'PathFnd':
-                    '%.3f' % (DQN_DoneCause.donePct_PathFnd_list[-1]),
-                    'VehOutMap':
-                    '%.3f' % (DQN_DoneCause.donePct_VehOutMap_list[-1])
+                    # 'StepCnt':
+                    # '%.3f' % (DQN_DoneCause.donePct_StepCnt_list[-1]),
+                    # 'ActOvlp':
+                    # '%.3f' % (DQN_DoneCause.donePct_ActVehOvlp_list[-1]),
+                    # 'PathFnd':
+                    # '%.3f' % (DQN_DoneCause.donePct_PathFnd_list[-1]),
+                    # 'VehOutMap':
+                    # '%.3f' % (DQN_DoneCause.donePct_VehOutMap_list[-1])
                 })
             pbar.update(1)
 
     # ---------------------- #
     For_end_time = time.time()  # 记录结束时间
     execution_time = For_end_time - For_start_time  # 计算函数执行时间
-    print("For time: %s", execution_time)
+    print("For time: %.3f, StepCnt: %.3f, ActOvlp: %.3f, PathFnd: %.3f, VehOutMap: %.3f" % (
+        execution_time,
+        DQN_DoneCause.donePct_StepCnt_list[-1], 
+        DQN_DoneCause.donePct_ActVehOvlp_list[-1], 
+        DQN_DoneCause.donePct_PathFnd_list[-1], 
+        DQN_DoneCause.donePct_VehOutMap_list[-1]
+))
     # ---------------------- #
 # ------------------------ DQN visualization ------------------------
 episodes_list = list(range(len(return_list)))
@@ -213,20 +219,22 @@ plt.plot(episodes_list, return_list)
 plt.xlabel('Episodes')
 plt.ylabel('Returns')
 plt.title('DQN on HAS')
+plt.savefig('return_plot.png')  # 保存图像为 PNG 格式
 plt.show()
 
-mv_return = rl_utils.moving_average(return_list, 9)   # Lib in 'rl_utils'
-plt.plot(episodes_list, mv_return)
-plt.xlabel('Episodes')
-plt.ylabel('Returns')
-plt.title('DQN on HAS')
-plt.show()
+# mv_return = rl_utils.moving_average(return_list, 9)   # Lib in 'rl_utils'
+# plt.plot(episodes_list, mv_return)
+# plt.xlabel('Episodes')
+# plt.ylabel('Returns')
+# plt.title('DQN on HAS')
+# plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_StepCnt_list)))
 plt.plot(episodes_list, DQN_DoneCause.donePct_StepCnt_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_StepCnt')
 plt.title('StepCnt')
+plt.savefig('StepCnt_plot.png')  # 保存图像为 PNG 格式
 plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_ActVehOvlp_list)))
@@ -234,6 +242,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_ActVehOvlp_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_ActVehOvlp')
 plt.title('ActVehOvlp')
+plt.savefig('ActVehOvlp_plot.png')  # 保存图像为 PNG 格式
 plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_PathFnd_list)))
@@ -241,6 +250,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_PathFnd_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_PathFnd')
 plt.title('PathFnd')
+plt.savefig('PathFnd_plot.png')  # 保存图像为 PNG 格式
 plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_VehOutMap_list)))
@@ -248,6 +258,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_VehOutMap_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_VehOutMap')
 plt.title('VehOutMap')
+plt.savefig('VehOutMap_plot.png')  # 保存图像为 PNG 格式
 plt.show()
 
 ## ===================================== Post-processing =====================================

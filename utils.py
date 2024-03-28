@@ -271,11 +271,11 @@ def doneCausePropt(info, DQN_DoneCause):
         DQN_DoneCause.doneCnt_StepCnt = DQN_DoneCause.doneCnt_StepCnt + 1
 
     sum = DQN_DoneCause.doneCnt_StepCnt + DQN_DoneCause.doneCnt_ActVehOvlp + \
-            DQN_DoneCause.doneCnt_PathFnd + DQN_DoneCause.doneCnt_StepCnt
+            DQN_DoneCause.doneCnt_PathFnd + DQN_DoneCause.doneCnt_VehOutMap
 
+    DQN_DoneCause.donePct_StepCnt_list.append(DQN_DoneCause.doneCnt_StepCnt / sum)
     DQN_DoneCause.donePct_ActVehOvlp_list.append(DQN_DoneCause.doneCnt_ActVehOvlp / sum)
     DQN_DoneCause.donePct_PathFnd_list.append(DQN_DoneCause.doneCnt_PathFnd / sum)
     DQN_DoneCause.donePct_VehOutMap_list.append(DQN_DoneCause.doneCnt_VehOutMap / sum)
-    DQN_DoneCause.donePct_StepCnt_list.append(DQN_DoneCause.doneCnt_StepCnt / sum)
 
     return DQN_DoneCause 
