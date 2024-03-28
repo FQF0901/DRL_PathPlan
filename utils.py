@@ -259,4 +259,19 @@ def EnvDRL_ActionMapping(DRLaction):
         EnvAction = [0, 1]
 
     return EnvAction
-    
+
+def doneCausePropt(info, DQN_DoneCause):
+    if 'ActOvlp' in info:
+        DQN_DoneCause.doneCnt_ActVehOvlp = DQN_DoneCause.doneCnt_ActVehOvlp + 1
+    elif 'PathFnd' in info:
+        DQN_DoneCause.doneCnt_PathFnd = DQN_DoneCause.doneCnt_PathFnd + 1
+    elif 'VehOutMap' in info:
+        DQN_DoneCause.doneCnt_VehOutMap = DQN_DoneCause.doneCnt_VehOutMap + 1
+    else:
+        DQN_DoneCause.doneCnt_StepCnt = DQN_DoneCause.doneCnt_StepCnt + 1
+
+    sum = DQN_DoneCause.doneCnt_StepCnt + DQN_DoneCause.doneCnt_ActVehOvlp + \
+            DQN_DoneCause.doneCnt_PathFnd + DQN_DoneCause.doneCnt_StepCnt
+
+    return DQN_DoneCause.doneCnt_StepCnt / sum, DQN_DoneCause.doneCnt_ActVehOvlp / sum, \
+            DQN_DoneCause.doneCnt_PathFnd / sum, DQN_DoneCause.doneCnt_VehOutMap / sum, 

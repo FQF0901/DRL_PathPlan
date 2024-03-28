@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import rl_utils
 import Env
+import utils
+import ParaCfg
 import time
 import logging
 
@@ -139,26 +141,24 @@ state_dim = 128
 action_dim = 6
 agent = DQN(state_dim, hidden_dim, action_dim, lr, gamma, epsilon_max, 
             target_update, num_layers, device)
+
 return_list = []
+DQN_DoneCause = ParaCfg.DQNPostProc(0, 0, 0, 0)
 
 for i in range(10):
     # ---------------------- #
-    For_start_time = time.time()  # 记录开始时间
+    For_start_time = time.time()  # 记录结束时间
     logging.debug(" ***** 第 %s个for loop ***** ", i)
     # ---------------------- #
-    with tqdm(total=int(num_episodes / 10), desc='Iteration %d' % i) as pbar:
+    with tqdm(total=int(num_episodes / 10), desc='Itr %d' % i) as pbar:
         for i_episode in range(int(num_episodes / 10)):
             episode_return = 0
             state = env.reset()
             done = False
             # ---------------------- #
-            Epsd_start_time = time.time()  # 记录开始时间
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                # ---------------------- #
-                ExpdNode_start_time = time.time()  # 记录开始时间
-                # ---------------------- #
                 action = agent.take_action(state, trainproc=(i_episode + i * 10) / num_episodes)
                 next_state, reward, done, info = env.step(action)   # changed by fqf
                 # plt.close('all')
@@ -167,11 +167,8 @@ for i in range(10):
                 state = next_state
                 episode_return += reward
                 # ---------------------- #
-                ExpdNode_end_time = time.time()  # 记录结束时间
-                execution_time = ExpdNode_end_time - ExpdNode_start_time  # 计算函数执行时间
-                logging.debug("ExpdNode time: %s, action: %s, reward: %s, done: %s, info: %s, episode_return: %s", 
-                            execution_time, action, reward, done, info, episode_return)
-                UpdtNNstart_time = time.time()  # 记录结束时间
+                logging.debug("action: %s, reward: %s, done: %s, info: %s, episode_return: %s", \
+                              action, reward, done, info, episode_return)
                 # ---------------------- #
                 # 当buffer数据的数量超过500后,才进行Q网络训练
                 if replay_buffer.size() > minimal_size:
@@ -184,27 +181,27 @@ for i in range(10):
                         'dones': b_d
                     }
                     agent.update(transition_dict)
-                
-                # ---------------------- #
-                UpdtNNend_time = time.time()  # 记录结束时间
-                execution_time = UpdtNNend_time - UpdtNNstart_time  # 计算函数执行时间
-                logging.debug("UpdaDQN time: %s", execution_time)
-                # ---------------------- #
 
             return_list.append(episode_return)
+            donePct_StepCnt, donePct_ActVehOvlp, donePct_PathFnd, donePct_VehOutMap = utils.doneCausePropt(info, DQN_DoneCause)
+
             if (i_episode + 1) % 10 == 0:
                 pbar.set_postfix({
-                    'episode':
+                    'epsd':
                     '%d' % (num_episodes / 10 * i + i_episode + 1),
                     'return':
-                    '%.3f' % np.mean(return_list[-1000:])
+                    '%.3f' % np.mean(return_list[-1000:]),
+                    'StepCnt':
+                    '%.3f' % (donePct_StepCnt),
+                    'ActOvlp':
+                    '%.3f' % (donePct_ActVehOvlp),
+                    'PathFnd':
+                    '%.3f' % (donePct_PathFnd),
+                    'VehOutMap':
+                    '%.3f' % (donePct_VehOutMap)
                 })
             pbar.update(1)
-            # ---------------------- #
-            Epsd_end_time = time.time()  # 记录开始时间
-            execution_time = Epsd_end_time - Epsd_start_time  # 计算函数执行时间
-            logging.debug("1 Epsd time: %s", execution_time)
-            # ---------------------- #
+
     # ---------------------- #
     For_end_time = time.time()  # 记录结束时间
     execution_time = For_end_time - For_start_time  # 计算函数执行时间

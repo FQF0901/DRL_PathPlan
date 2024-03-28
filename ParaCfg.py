@@ -62,3 +62,10 @@ class Node:
         self.g_cost = g_cost
         self.h_cost = h_cost
         self.parent = parent
+
+class DQNPostProc:
+    def __init__(self, StepCnt, ActVehOvlp, PathFnd, VehOutMap):
+        self.doneCnt_StepCnt = StepCnt
+        self.doneCnt_ActVehOvlp = ActVehOvlp
+        self.doneCnt_PathFnd = PathFnd
+        self.doneCnt_VehOutMap = VehOutMap
