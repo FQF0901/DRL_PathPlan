@@ -123,7 +123,7 @@ class DQN:
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 25000
+num_episodes = 500
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
@@ -143,7 +143,7 @@ agent = DQN(state_dim, hidden_dim, action_dim, lr, gamma, epsilon_max,
             target_update, num_layers, device)
 
 return_list = []
-DQN_DoneCause = ParaCfg.DQNPostProc(0, 0, 0, 0)
+DQN_DoneCause = ParaCfg.DQNPostProc()
 
 for i in range(10):
     # ---------------------- #
@@ -183,7 +183,7 @@ for i in range(10):
                     agent.update(transition_dict)
 
             return_list.append(episode_return)
-            donePct_StepCnt, donePct_ActVehOvlp, donePct_PathFnd, donePct_VehOutMap = utils.doneCausePropt(info, DQN_DoneCause)
+            DQN_DoneCause = utils.doneCausePropt(info, DQN_DoneCause)
 
             if (i_episode + 1) % 10 == 0:
                 pbar.set_postfix({
@@ -192,13 +192,13 @@ for i in range(10):
                     'return':
                     '%.3f' % np.mean(return_list[-1000:]),
                     'StepCnt':
-                    '%.3f' % (donePct_StepCnt),
+                    '%.3f' % (DQN_DoneCause.donePct_StepCnt_list[-1]),
                     'ActOvlp':
-                    '%.3f' % (donePct_ActVehOvlp),
+                    '%.3f' % (DQN_DoneCause.donePct_ActVehOvlp_list[-1]),
                     'PathFnd':
-                    '%.3f' % (donePct_PathFnd),
+                    '%.3f' % (DQN_DoneCause.donePct_PathFnd_list[-1]),
                     'VehOutMap':
-                    '%.3f' % (donePct_VehOutMap)
+                    '%.3f' % (DQN_DoneCause.donePct_VehOutMap_list[-1])
                 })
             pbar.update(1)
 
@@ -220,6 +220,34 @@ plt.plot(episodes_list, mv_return)
 plt.xlabel('Episodes')
 plt.ylabel('Returns')
 plt.title('DQN on HAS')
+plt.show()
+
+episodes_list = list(range(len(DQN_DoneCause.donePct_StepCnt_list)))
+plt.plot(episodes_list, DQN_DoneCause.donePct_StepCnt_list)
+plt.xlabel('Episodes')
+plt.ylabel('donePct_StepCnt')
+plt.title('StepCnt')
+plt.show()
+
+episodes_list = list(range(len(DQN_DoneCause.donePct_ActVehOvlp_list)))
+plt.plot(episodes_list, DQN_DoneCause.donePct_ActVehOvlp_list)
+plt.xlabel('Episodes')
+plt.ylabel('donePct_ActVehOvlp')
+plt.title('ActVehOvlp')
+plt.show()
+
+episodes_list = list(range(len(DQN_DoneCause.donePct_PathFnd_list)))
+plt.plot(episodes_list, DQN_DoneCause.donePct_PathFnd_list)
+plt.xlabel('Episodes')
+plt.ylabel('donePct_PathFnd')
+plt.title('PathFnd')
+plt.show()
+
+episodes_list = list(range(len(DQN_DoneCause.donePct_VehOutMap_list)))
+plt.plot(episodes_list, DQN_DoneCause.donePct_VehOutMap_list)
+plt.xlabel('Episodes')
+plt.ylabel('donePct_VehOutMap')
+plt.title('VehOutMap')
 plt.show()
 
 ## ===================================== Post-processing =====================================

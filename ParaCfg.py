@@ -23,6 +23,18 @@ class TrainingParams:
         self.learning_rate = 0.1
         self.num_iterations = 2000
         self.batch_size = 500
+    
+class DQNPostProc:
+    def __init__(self):
+        self.doneCnt_StepCnt = 0
+        self.doneCnt_ActVehOvlp = 0
+        self.doneCnt_PathFnd = 0
+        self.doneCnt_VehOutMap = 0
+
+        self.donePct_StepCnt_list = []
+        self.donePct_ActVehOvlp_list = []
+        self.donePct_PathFnd_list = []
+        self.donePct_VehOutMap_list = []
 
 VehPara = VehicleParams()
 HASParam = HASParams()
@@ -62,10 +74,3 @@ class Node:
         self.g_cost = g_cost
         self.h_cost = h_cost
         self.parent = parent
-
-class DQNPostProc:
-    def __init__(self, StepCnt, ActVehOvlp, PathFnd, VehOutMap):
-        self.doneCnt_StepCnt = StepCnt
-        self.doneCnt_ActVehOvlp = ActVehOvlp
-        self.doneCnt_PathFnd = PathFnd
-        self.doneCnt_VehOutMap = VehOutMap
