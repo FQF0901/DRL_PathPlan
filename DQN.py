@@ -123,7 +123,7 @@ class DQN:
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 25000
+num_episodes = 500
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
@@ -183,7 +183,7 @@ for i in range(10):
                     agent.update(transition_dict)
 
             return_list.append(episode_return)
-            DQN_DoneCause = utils.doneCausePropt(info, DQN_DoneCause)
+            DQN_DoneCause = utils.doneCausePropt(info, DQN_DoneCause, num_episodes / 100)
 
             if (i_episode + 1) % 10 == 0:
                 pbar.set_postfix({

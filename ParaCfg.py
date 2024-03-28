@@ -26,10 +26,10 @@ class TrainingParams:
     
 class DQNPostProc:
     def __init__(self):
-        self.doneCnt_StepCnt = 0
-        self.doneCnt_ActVehOvlp = 0
-        self.doneCnt_PathFnd = 0
-        self.doneCnt_VehOutMap = 0
+        self.doneCnt_StepCnt_list = []
+        self.doneCnt_ActVehOvlp_list = []
+        self.doneCnt_PathFnd_list = []
+        self.doneCnt_VehOutMap_list = []
 
         self.donePct_StepCnt_list = []
         self.donePct_ActVehOvlp_list = []

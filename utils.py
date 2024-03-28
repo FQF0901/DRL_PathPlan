@@ -206,7 +206,7 @@ def EnvReward(action, EnvInfo):
 
     PathFoundReward = 0
     if PlanFnd:
-        PathFoundReward = 1000
+        PathFoundReward = 2000
 
     TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
 
@@ -260,22 +260,25 @@ def EnvDRL_ActionMapping(DRLaction):
 
     return EnvAction
 
-def doneCausePropt(info, DQN_DoneCause):
+def doneCausePropt(info, DQN_DoneCause, latest_epsd):
+    DQN_DoneCause.doneCnt_StepCnt_list.append(0)
+    DQN_DoneCause.doneCnt_ActVehOvlp_list.append(0)
+    DQN_DoneCause.doneCnt_PathFnd_list.append(0)
+    DQN_DoneCause.doneCnt_VehOutMap_list.append(0)
+
     if 'ActOvlp' in info:
-        DQN_DoneCause.doneCnt_ActVehOvlp = DQN_DoneCause.doneCnt_ActVehOvlp + 1
+        DQN_DoneCause.doneCnt_ActVehOvlp_list[-1] = 1
     elif 'PathFnd' in info:
-        DQN_DoneCause.doneCnt_PathFnd = DQN_DoneCause.doneCnt_PathFnd + 1
+        DQN_DoneCause.doneCnt_PathFnd_list[-1] = 1
     elif 'VehOutMap' in info:
-        DQN_DoneCause.doneCnt_VehOutMap = DQN_DoneCause.doneCnt_VehOutMap + 1
+        DQN_DoneCause.doneCnt_VehOutMap_list[-1] = 1
     else:
-        DQN_DoneCause.doneCnt_StepCnt = DQN_DoneCause.doneCnt_StepCnt + 1
+        DQN_DoneCause.doneCnt_StepCnt_list[-1] = 1
 
-    sum = DQN_DoneCause.doneCnt_StepCnt + DQN_DoneCause.doneCnt_ActVehOvlp + \
-            DQN_DoneCause.doneCnt_PathFnd + DQN_DoneCause.doneCnt_VehOutMap
-
-    DQN_DoneCause.donePct_StepCnt_list.append(DQN_DoneCause.doneCnt_StepCnt / sum)
-    DQN_DoneCause.donePct_ActVehOvlp_list.append(DQN_DoneCause.doneCnt_ActVehOvlp / sum)
-    DQN_DoneCause.donePct_PathFnd_list.append(DQN_DoneCause.doneCnt_PathFnd / sum)
-    DQN_DoneCause.donePct_VehOutMap_list.append(DQN_DoneCause.doneCnt_VehOutMap / sum)
+    latest_epsd = int(max(100, latest_epsd))    # 最少100个，不然不稳定
+    DQN_DoneCause.donePct_StepCnt_list.append(np.mean(DQN_DoneCause.doneCnt_StepCnt_list[-latest_epsd:]))
+    DQN_DoneCause.donePct_ActVehOvlp_list.append(np.mean(DQN_DoneCause.doneCnt_ActVehOvlp_list[-latest_epsd:]))
+    DQN_DoneCause.donePct_PathFnd_list.append(np.mean(DQN_DoneCause.doneCnt_PathFnd_list[-latest_epsd:]))
+    DQN_DoneCause.donePct_VehOutMap_list.append(np.mean(DQN_DoneCause.doneCnt_VehOutMap_list[-latest_epsd:]))
 
     return DQN_DoneCause 
