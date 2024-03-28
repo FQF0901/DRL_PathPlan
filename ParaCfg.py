@@ -16,7 +16,7 @@ class HASParams:
         self.grid_num = 200
         self.cell_size = 0.2
         self.step_size = 0.4
-        self.maxEpsd = 750
+        self.maxEpsd = 300
 
 class TrainingParams:
     def __init__(self):

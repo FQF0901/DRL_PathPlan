@@ -27,7 +27,7 @@ class Env:
         self.EnvInfo.PathFnd = False
         self.EnvInfo.StepCnt = 0
 
-        n_ObjRect = np.random.randint(0, 3)  # 随机确定矩形的数量（0~10）
+        n_ObjRect = np.random.randint(0, 10)  # 随机确定矩形的数量（0~10）
         
         # 生成特定范围内的obj矩形
         for _ in range(n_ObjRect):
@@ -77,7 +77,7 @@ class Env:
         y5 = np.random.uniform(4, 6)
         yaw5 = np.random.uniform(math.radians(-10), math.radians(10))
 
-        n = random.randint(5, 5)    # 随机抽样0 ~ 5个
+        n = random.randint(2, 5)    # 随机抽样0 ~ 5个
         arr = np.array([[x1, y1, yaw1], [x2, y2, yaw2], [x3, y3, yaw3], [x4, y4, yaw4], [x5, y5, yaw5]])
 
         # 从数组中进行 n 组随机抽样

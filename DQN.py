@@ -118,14 +118,14 @@ class DQN:
 
 # ----------------------------------- train DQN ----------------------------------
 # ---------------------- #
-logging.basicConfig(filename='DQN.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 50000
+num_episodes = 25000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
-epsilon_max = 0.3
+epsilon_max = 0.2
 target_update = 500
 buffer_size = 10000
 minimal_size = 500

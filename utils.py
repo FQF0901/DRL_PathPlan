@@ -2,6 +2,7 @@ import numpy as np
 import ParaCfg
 import math
 import reeds_shepp as rs
+import logging
 
 def get_rectangle_corners(x, y, yaw, length, width):
     """根据中心点、旋转角度、长度和宽度计算矩形的四个角点。"""
@@ -174,7 +175,7 @@ def EnvReward(action, EnvInfo):
     CollisionCost = 0
     EnvInfo.ActionVehOvlp = False
     if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
-        CollisionCost = -200  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
+        CollisionCost = -5000  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
         EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
@@ -183,6 +184,12 @@ def EnvReward(action, EnvInfo):
         PathNotFndCost = -500  
 
     TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost + RepeatMoveCost
+
+    # ---------------------- #
+    logging.debug("ExpansionCost: %s, SteerCost: %s, GearCost: %s, CloseObjCost: %s, CollisionCost: %s, PathNotFndCost: %s, RepeatMoveCost: %s", 
+                ExpansionCost, SteerCost, GearCost, CloseObjCost, \
+                    CollisionCost, PathNotFndCost, RepeatMoveCost)
+    # ---------------------- #
 
     # Reward
     # 检查是否已经存在静态变量，如果不存在则初始化
@@ -202,6 +209,11 @@ def EnvReward(action, EnvInfo):
         PathFoundReward = 1000
 
     TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
+
+    # ---------------------- #
+    logging.debug("SpcUseReward: %s, PathFoundReward: %s, CloseGoalReward: %s", \
+                SpcUseReward, PathFoundReward, CloseGoalReward)
+    # ---------------------- #
 
     EnvInfo.action_z = action
     EnvInfo.Reward_z = TolCost + TolReward
