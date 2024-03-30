@@ -80,43 +80,46 @@ class DQN:
         self.device = device
 
     def take_action(self, state, EnvState, trainproc, CutActSpc):  # 可变的epsilon-贪婪策略采取动作
-        tkact_slt = 0
+        # Collision value
+        expdNode_list = []
+        current_node = ParaCfg.Node(EnvState.StartPntStep[0], \
+                                    EnvState.StartPntStep[1], \
+                                    EnvState.StartPntStep[2], 0, 0, None)
+        expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
+        Cc_values_array = ([])
+        obstacles = EnvState.ObjRect + EnvState.OthVehRect
+        for nodes in expdNode_list:
+            if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)):
+                Cc_values_array = np.append(Cc_values_array, 0)
+            else:
+                Cc_values_array = np.append(Cc_values_array, -1)  # 碰撞惩罚，用于变相裁剪，-1表示不可选
 
-        if np.random.random() < self.epsilon:   # np.random.random() < (self.epsilon * (1 - trainproc))
-            action = np.random.randint(self.action_dim)
+        # action selection
+        if np.random.random() < (self.epsilon * (1 - trainproc)):   # np.random.random() < (self.epsilon * (1 - trainproc))
+            NotOvlpidx_array = []
+            NotOvlpidx_array = np.where(Cc_values_array != -1)[0]   # 找到所有非 -1 的元素的索引
+
+            if NotOvlpidx_array.size > 0:  
+                action = np.random.choice(NotOvlpidx_array)    # 从非 -1 的元素idx中随机选择一个idx
+            else:   # 如果所有action都碰撞
+                action = np.random.randint(self.action_dim)
+
         else:
             # torch.tensor创建张量，是可以存储和操作数值数据的多维数组
             state = torch.tensor([state], dtype=torch.float).to(self.device)
             
             if CutActSpc:
-                tkact_slt = 1
                 # DQN net value
                 q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
                 q_values_array = q_values.detach().cpu().numpy()
                 q_values_array = q_values_array[0,:]
 
-                # Collision value
-                expdNode_list = []
-                current_node = ParaCfg.Node(EnvState.StartPntStep[0], \
-                                            EnvState.StartPntStep[1], \
-                                            EnvState.StartPntStep[2], 0, 0, None)
-                expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
-
-                Cc_values_array = ([])
-                obstacles = EnvState.ObjRect + EnvState.OthVehRect
-                for nodes in expdNode_list:
-                    if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)):
-                        Cc_values_array = np.append(Cc_values_array, 0)
-                    else:
-                        Cc_values_array = np.append(Cc_values_array, -1)  # 碰撞惩罚，用于变相裁剪，-1表示不可选
-
                 action = utils.combineDqnMcts(q_values_array, Cc_values_array)
 
             else:
-                tkact_slt = 2
                 action = self.q_net(state).argmax().item()    # select optimal action by dqn
 
-        return action, tkact_slt
+        return action
 
     def update(self, transition_dict):
         states = torch.tensor(transition_dict['states'], dtype=torch.float).to(self.device)
@@ -183,7 +186,7 @@ for i in range(10):
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                action, tkact_slt = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
+                action, tkactmod, Cc_values_array, NotOvlpidx_array, sampled_indices = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
                 next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
                 # plt.close('all')  # 用于每一步的观测
                 # env.show()
@@ -191,8 +194,8 @@ for i in range(10):
                 state = next_state
                 episode_return += reward
                 # ---------------------- #
-                logging.debug(" --- action: %s, reward: %s, done: %s, info: %s, episode_return: %s, tkact_slt: %s", \
-                              action, reward, done, info, episode_return, tkact_slt)
+                logging.debug(" --- action: %s, reward: %s, done: %s, info: %s, episode_return: %s", \
+                              action, reward, done, info, episode_return)
                 # ---------------------- #
                 # 当buffer数据的数量超过500后,才进行Q网络训练
                 if replay_buffer.size() > minimal_size:
