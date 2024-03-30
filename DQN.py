@@ -93,6 +93,7 @@ class DQN:
                 # DQN net value
                 q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
                 q_values_array = q_values.detach().cpu().numpy()
+                q_values_array = q_values_array[0,:]
 
                 # Collision value
                 expdNode_list = []
@@ -107,11 +108,9 @@ class DQN:
                     if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)):
                         Cc_values_array = np.append(Cc_values_array, 0)
                     else:
-                        Cc_values_array = np.append(Cc_values_array, -200)  # 碰撞惩罚，用于变相裁剪
+                        Cc_values_array = np.append(Cc_values_array, -1)  # 碰撞惩罚，用于变相裁剪，-1表示不可选
 
-                nodes_value = ([])
-                nodes_value = q_values_array + Cc_values_array
-                action = np.argmax(nodes_value)
+                action = utils.combineDqnMcts(q_values_array, Cc_values_array)
 
             else:
                 tkact_slt = 2

@@ -304,3 +304,10 @@ def expandNode(current_node):
             expdNode_list.append(new_node)
 
     return expdNode_list
+
+def combineDqnMcts(q_values_array, cc_values_array):
+    # Index of max value in q_values_array (excluding -1 elements)
+    idx1 = np.where(cc_values_array == -1)[0]
+    q_values_array[idx1] = np.min(q_values_array) - 1   # 碰撞action赋值为 min - 1
+    idx_max = np.argmax(q_values_array)
+    return idx_max
