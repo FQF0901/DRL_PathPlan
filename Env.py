@@ -114,7 +114,7 @@ class Env:
         
         DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
 
-        return DRLstate
+        return DRLstate, self.EnvInfo.State
     
     def step(self, action):
         action = utils.EnvDRL_ActionMapping(action)
@@ -139,7 +139,7 @@ class Env:
         next_DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z
         
-        return next_DRLstate, reward, done, info
+        return next_DRLstate, reward, done, info, self.EnvInfo.State
     
     def show(self):
         """绘制所有obj,slot,host veh和other veh"""

@@ -286,8 +286,8 @@ def doneCausePropt(info, DQN_DoneCause, latest_epsd):
 def expandNode(current_node):
     expdNode_list = []
     
-    for steering_angle in [-1, 0, 1]:
-        for gear in [-1, 1]:
+    for gear in [1, -1]:
+        for steering_angle in [-1, 0, 1]:
             new_x, new_y, new_theta = cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
             # DQN DNN   
             new_node = ParaCfg.Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, 0, current_node)

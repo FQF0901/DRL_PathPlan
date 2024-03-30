@@ -79,21 +79,38 @@ class DQN:
         self.count = 0  # 计数器,记录更新次数
         self.device = device
 
-    def take_action(self, state, trainproc, Ena_MCTS):  # 可变的epsilon-贪婪策略采取动作
+    def take_action(self, state, EnvState, trainproc, CutActSpc):  # 可变的epsilon-贪婪策略采取动作
         if np.random.random() < self.epsilon * (1 - trainproc):
             action = np.random.randint(self.action_dim)
         else:
-            # torch.tensor创建张量，是可以存储和操作数值数据的多维数组，张量和普通数组的区别如下：
-            # 1. 同质数据：张量存储同质数据，这使得 GPU 计算更加高效，因为硬件可以并行处理多个数据点
-            # 2. 内存分配：PyTorch 中的张量被分配在连续的内存块中，使它们更容易存储在 GPU 内存中并允许更快的计算
-            # 3. 广播：PyTorch 中的张量支持广播，即使张量的形状不相同，也允许张量之间进行元素级运算
-            # 4. 自动微分：PyTorch中的张量支持自动微分，这是训练深度学习模型的关键组成部分
-            # 5. GPU加速：当在 GPU 上执行张量运算时，数据从 CPU 传输到 GPU 内存，在那里可以由数千个线程并行处理
+            # torch.tensor创建张量，是可以存储和操作数值数据的多维数组
             state = torch.tensor([state], dtype=torch.float).to(self.device)
             
-            if Ena_MCTS:
+            if CutActSpc:
+                # DQN net value
                 q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
                 q_values_array = q_values.detach().cpu().numpy()
+
+                # Collision value
+                expdNode_list = []
+                current_node = ParaCfg.Node(EnvState.StartPntStep[0], \
+                                            EnvState.StartPntStep[1], \
+                                            EnvState.StartPntStep[2], 0, 0, None)
+                expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
+
+                Cc_values_array = ([])
+                obstacles = EnvState.ObjRect + EnvState.OthVehRect
+                for nodes in expdNode_list:
+                    if (not utils.is_overlap_node(nodes, obstacles, 0.1, 0.1)):
+                        Cc_values_array = np.append(Cc_values_array, 0)
+                    else:
+                        Cc_values_array = np.append(Cc_values_array, -200)  # 碰撞惩罚，用于变相裁剪
+
+                nodes_value = ([])
+                nodes_value = q_values_array + Cc_values_array
+                action = np.argmax(nodes_value)
+                return action
+
             else:
                 action = self.q_net(state).argmax().item()    # select optimal action by dqn
                 
@@ -158,14 +175,14 @@ for i in range(10):
     with tqdm(total=int(num_episodes / 10), desc='Itr %d' % i) as pbar:
         for i_episode in range(int(num_episodes / 10)):
             episode_return = 0
-            state = env.reset()
+            state, EnvState = env.reset()
             done = False
             # ---------------------- #
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                action = agent.take_action(state, trainproc=(i_episode + i * 10) / num_episodes, Ena_MCTS = 1)
-                next_state, reward, done, info = env.step(action)   # changed by fqf
+                action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
+                next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
                 # plt.close('all')
                 # env.show()
                 replay_buffer.add(state, action, reward, next_state, done)
