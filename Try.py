@@ -1,75 +1,9 @@
-# 导入所需的库
-import numpy as np
-import random
-import tensorflow as tf
+done = 0
 
-# 定义MCTS类
-class Node:
-    def __init__(self, parent=None):
-        self.parent = parent
-        self.visit_count = 0
-        self.total_reward = 0
-        self.children = []
+a = 0
+b = 1
+c = 1
 
-class MCTS:
-    def __init__(self):
-        # 初始化MCTS参数
-        self.search_tree = {}  # 搜索树，存储节点信息
-        self.exploration_factor = 1.0
-        self.simulation_count = 100
+done |= (a << 0) | (b << 1)| (c << 2)
 
-    def select_node(self, node):
-        # 通过UCB公式选择子节点中最有价值的节点
-        return selected_node
-
-    def expand_node(self, node):
-        # 扩展选定的节点，生成新的子节点
-        return new_node
-
-    def simulate(self, node):
-        # 模拟随机决策路径，并评估路径的价值
-        return reward
-
-    def backpropagate(self, node, reward):
-        # 反向传播，更新节点的信息（访问次数、累计奖励等）
-        while node is not None:
-            node.visit_count += 1
-            node.total_reward += reward
-            reward = -reward  # 切换正负奖励以模拟对手行为
-            node = node.parent
-
-    def get_best_action(self):
-        # 从搜索树中获取最佳行动
-        return best_action
-
-# 初始化环境和参数
-output_shape = 4  # 输出动作数量
-mcts = MCTS()
-initial_node = Node()
-
-num_iterations = 10
-
-# 主循环执行路径规划过程
-for _ in range(num_iterations):
-    # 使用MCTS进行搜索
-    current_node = initial_node
-    for _ in range(mcts.simulation_count):
-        selected_node = mcts.select_node(current_node)
-        if selected_node is not fully expanded:
-            new_node = mcts.expand_node(selected_node)
-            reward = mcts.simulate(new_node)
-            mcts.backpropagate(new_node, reward)
-        else:
-            reward = mcts.simulate(selected_node)
-            mcts.backpropagate(selected_node, reward)
-
-    # 结合MCTS和DQN结果
-    mcts_action = mcts.get_best_action()  # 从MCTS中获取最佳行动
-
-    # 更新搜索树和路径规划信息
-
-# 路径执行和优化
-# 执行最终路径规划结果
-# 根据执行结果对MCTS和DQN进行优化
-
-# 结束
+print(bin(done))  # 输出 done 的二进制表示

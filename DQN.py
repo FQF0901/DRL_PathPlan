@@ -101,7 +101,7 @@ class DQN:
                 Cc_values_array = ([])
                 obstacles = EnvState.ObjRect + EnvState.OthVehRect
                 for nodes in expdNode_list:
-                    if (not utils.is_overlap_node(nodes, obstacles, 0.1, 0.1)):
+                    if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)):
                         Cc_values_array = np.append(Cc_values_array, 0)
                     else:
                         Cc_values_array = np.append(Cc_values_array, -200)  # 碰撞惩罚，用于变相裁剪
@@ -146,7 +146,7 @@ class DQN:
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 500
+num_episodes = 30000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
@@ -205,14 +205,18 @@ for i in range(10):
                     agent.update(transition_dict)
 
             return_list.append(episode_return)
-            DQN_DoneCause = utils.doneCausePropt(info, DQN_DoneCause, num_episodes / 100)
+            DQN_DoneCause = utils.doneCausePropt(done, DQN_DoneCause, num_episodes / 100)
+
+            if not (done >> 2) & 1: # PathNotFnd but done, need log and debug
+                env.show('%s _ %s' % (i, i_episode))
+            plt.close('all')
 
             if (i_episode + 1) % 10 == 0:
                 pbar.set_postfix({
                     'epsd':
                     '%d' % (num_episodes / 10 * i + i_episode + 1),
                     'return':
-                    '%.3f' % np.mean(return_list[-1000:]),
+                    '%.3f' % np.mean(return_list[int(- num_episodes / 100):]),
                     # 'StepCnt':
                     # '%.3f' % (DQN_DoneCause.donePct_StepCnt_list[-1]),
                     # 'ActOvlp':

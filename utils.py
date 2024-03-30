@@ -128,7 +128,7 @@ def cal_validRS(current_node, goal_node, obstacles):
         RSpathyaw = RSpath.yaw[i]
 
         RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
-        if is_overlap_node(RSnode, obstacles, 0.1, 0.1):
+        if is_overlap_node(RSnode, obstacles, 0.0, 0.0):
             return False, [], []
         elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
             path = []
@@ -166,16 +166,17 @@ def EnvReward(action, EnvInfo):
     ExpansionCost = - EnvInfo.StepCnt / ParaCfg.HASParam.maxEpsd
     SteerCost = abs(action[0] - EnvInfo.action_z[0]) * -1
     GearCost = 0 if action[1] == EnvInfo.action_z[1] else -3
-    RepeatMoveCost = -10 if (action[0] == EnvInfo.action_z[0]) and (action[1] == - EnvInfo.action_z[1]) else 0
+    # RepeatMoveCost也不应该放在这里，因为DRL的Markov基础假设是不具备记忆性，应该放在MCTS\LSTM里
+    RepeatMoveCost = -5 if (action[0] == EnvInfo.action_z[0]) and (action[1] == - EnvInfo.action_z[1]) else 0
     
     CloseObjCost = 0
-    if is_overlap_node(Curt_node, obstacles, 0.25, 0.15):
-        CloseObjCost = -0.5
+    if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
+        CloseObjCost = -3
 
-    CollisionCost = 0
+    CollisionCost = 0   # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数，应该放在action space cut或MCTS里
     # EnvInfo.ActionVehOvlp = False
     # if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
-    #     CollisionCost = -3000  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
+    #     CollisionCost = -3000
     #     EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
@@ -192,21 +193,23 @@ def EnvReward(action, EnvInfo):
     # ---------------------- #
 
     # Reward
+
     # 检查是否已经存在静态变量，如果不存在则初始化
-    if not hasattr(EnvReward, 'Curt_node_prev'):
-        EnvReward.Curt_node_prev = ParaCfg.Node(Curt_node.x, Curt_node.y, 0, 0, 0)
-    CloseGoalReward = 50 * (1 - (math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
-                        math.sqrt((EnvReward.Curt_node_prev.x - Tgt_node.x)**2 + (EnvReward.Curt_node_prev.y - Tgt_node.y)**2)))
-    EnvReward.Curt_node_prev = Curt_node
+    CloseGoalReward = 0 # 向目标点探索不见得是个好的启发
+    # if not hasattr(EnvReward, 'Curt_node_prev'):
+    #     EnvReward.Curt_node_prev = ParaCfg.Node(Curt_node.x, Curt_node.y, 0, 0, 0)
+    # CloseGoalReward = 50 * (1 - (math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
+    #                     math.sqrt((EnvReward.Curt_node_prev.x - Tgt_node.x)**2 + (EnvReward.Curt_node_prev.y - Tgt_node.y)**2)))
+    # EnvReward.Curt_node_prev = Curt_node
 
     SpcUseReward = 0
     if is_overlap_node(Curt_node, obstacles, 0.0, ParaCfg.HASParam.step_size - 0.01) and \
         (not is_overlap_node(Curt_node, obstacles, 0.0, 0.1)):
-        SpcUseReward = 3
+        SpcUseReward = 2
 
     PathFoundReward = 0
     if PlanFnd:
-        PathFoundReward = 1000
+        PathFoundReward = 1000  # 应该增加在pathfound后对path的评判，如把数，dist2obj等，而不是恒定1000
 
     TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
 
@@ -260,20 +263,22 @@ def EnvDRL_ActionMapping(DRLaction):
 
     return EnvAction
 
-def doneCausePropt(info, DQN_DoneCause, latest_epsd):
+def doneCausePropt(done, DQN_DoneCause, latest_epsd):
     DQN_DoneCause.doneCnt_StepCnt_list.append(0)
     DQN_DoneCause.doneCnt_ActVehOvlp_list.append(0)
     DQN_DoneCause.doneCnt_PathFnd_list.append(0)
     DQN_DoneCause.doneCnt_VehOutMap_list.append(0)
 
-    if 'ActOvlp' in info:
+    if (done >> 0) & 1:
+        DQN_DoneCause.doneCnt_StepCnt_list[-1] = 1
+    elif (done >> 1) & 1:
         DQN_DoneCause.doneCnt_ActVehOvlp_list[-1] = 1
-    elif 'PathFnd' in info:
+    elif (done >> 2) & 1:
         DQN_DoneCause.doneCnt_PathFnd_list[-1] = 1
-    elif 'VehOutMap' in info:
+    elif (done >> 3) & 1:
         DQN_DoneCause.doneCnt_VehOutMap_list[-1] = 1
     else:
-        DQN_DoneCause.doneCnt_StepCnt_list[-1] = 1
+        print('doneCausePropt err !')
 
     latest_epsd = int(max(100, latest_epsd))    # 最少100个，不然不稳定
     DQN_DoneCause.donePct_StepCnt_list.append(np.mean(DQN_DoneCause.doneCnt_StepCnt_list[-latest_epsd:]))

@@ -50,7 +50,7 @@ def hybrid_a_star(start, goal, obstacles):
             nodes.h_cost = heuristic(ParaCfg.Node(nodes.x, nodes.y, nodes.theta, 0, 0), goal)
 
             new_idx = get_grid_index(nodes.x, nodes.y)
-            if (not utils.is_overlap_node(nodes, obstacles, 0.1, 0.1)) and nodes not in grid_cells[new_idx]:
+            if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)) and nodes not in grid_cells[new_idx]:
                 open_list.append(nodes)
                 grid_cells[new_idx].append(nodes)
 

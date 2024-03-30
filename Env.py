@@ -108,7 +108,7 @@ class Env:
         # 初始化action和reward
         self.EnvInfo.action_z = np.array([0, 0])    # 左正右负，前正后负
         self.EnvInfo.Reward_z = 0
-        self.EnvInfo.VehOvlp = False
+        self.EnvInfo.ActionVehOvlp = False
         self.EnvInfo.PathFnd = False
         self.EnvInfo.StepCnt = 0
         
@@ -123,25 +123,23 @@ class Env:
 
         self.EnvInfo = utils.EnvNextState(action, self.EnvInfo)    # return next ParaCfg.EnvInfo
         self.EnvInfo = utils.EnvReward(action, self.EnvInfo)
-        done = self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd \
-                or self.EnvInfo.ActionVehOvlp \
-                or self.EnvInfo.PathFnd \
-                or (abs(self.EnvInfo.State.StartPntStep[0]) > 15 or abs(self.EnvInfo.State.StartPntStep[1]) > 10)
-        # info = (self.EnvInfo.StepCnt, \
-        #         'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
-        #         'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd' \
-        #         'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 20 or abs(self.EnvInfo.State.StartPntStep[1]) > 20) else 'VehinMap')
+        done = 0
+        done |= (self.EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd << 0) \
+                | (self.EnvInfo.ActionVehOvlp << 1) \
+                | (self.EnvInfo.PathFnd << 2) \
+                | ((abs(self.EnvInfo.State.StartPntStep[0]) > 15 or abs(self.EnvInfo.State.StartPntStep[1]) > 10) << 3)
+        
         info = "StepCnt{}, {}, {}, {}".format(self.EnvInfo.StepCnt, \
-                        'ActOvlp' if self.EnvInfo.ActionVehOvlp else 'ActNotOvlp', \
-                            'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd', \
-                                'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 15 or abs(self.EnvInfo.State.StartPntStep[1]) > 10) else 'VehinMap')
+                        'ActOvlp' if (done >> 1) & 1 else 'ActNotOvlp', \
+                            'PathFnd' if (done >> 2) & 1 else 'PathNotFnd', \
+                                'VehOutMap' if (done >> 3) & 1 else 'VehinMap')
 
         next_DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z
         
         return next_DRLstate, reward, done, info, self.EnvInfo.State
     
-    def show(self):
+    def show(self, img_name = 'img'):
         """绘制所有obj,slot,host veh和other veh"""
         if not self.EnvInfo.State.ObjRect and self.EnvInfo.SlotRectInit is None:
             print("No obj to show. Please call reset() first.")
@@ -185,10 +183,11 @@ class Env:
 
         ax.grid(True)
         ax.set_aspect('equal', adjustable='box')
-        plt.show()
+        plt.title('{}'.format(img_name))
+        # plt.show()
 
         # 保存图片到指定路径
-        save_path = "image.jpg"
+        save_path = "{}.png".format(img_name)
         plt.savefig(save_path)
 
 # 示例使用
