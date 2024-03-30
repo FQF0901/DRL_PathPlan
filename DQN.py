@@ -80,13 +80,16 @@ class DQN:
         self.device = device
 
     def take_action(self, state, EnvState, trainproc, CutActSpc):  # 可变的epsilon-贪婪策略采取动作
-        if np.random.random() < self.epsilon * (1 - trainproc):
+        tkact_slt = 0
+
+        if np.random.random() < (self.epsilon * (1 - trainproc)):
             action = np.random.randint(self.action_dim)
         else:
             # torch.tensor创建张量，是可以存储和操作数值数据的多维数组
             state = torch.tensor([state], dtype=torch.float).to(self.device)
             
             if CutActSpc:
+                tkact_slt = 1
                 # DQN net value
                 q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
                 q_values_array = q_values.detach().cpu().numpy()
@@ -109,12 +112,12 @@ class DQN:
                 nodes_value = ([])
                 nodes_value = q_values_array + Cc_values_array
                 action = np.argmax(nodes_value)
-                return action
 
             else:
+                tkact_slt = 2
                 action = self.q_net(state).argmax().item()    # select optimal action by dqn
-                
-        return action
+
+        return action, tkact_slt
 
     def update(self, transition_dict):
         states = torch.tensor(transition_dict['states'], dtype=torch.float).to(self.device)
@@ -151,7 +154,7 @@ hidden_dim = 128
 num_layers = 3
 gamma = 0.98
 epsilon_max = 0.2
-target_update = 100
+target_update = min(100, num_episodes / 100)
 buffer_size = 10000
 minimal_size = 500
 batch_size = 128
@@ -181,16 +184,16 @@ for i in range(10):
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
+                action, tkact_slt = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
                 next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
-                # plt.close('all')
+                # plt.close('all')  # 用于每一步的观测
                 # env.show()
                 replay_buffer.add(state, action, reward, next_state, done)
                 state = next_state
                 episode_return += reward
                 # ---------------------- #
-                logging.debug(" --- action: %s, reward: %s, done: %s, info: %s, episode_return: %s", \
-                              action, reward, done, info, episode_return)
+                logging.debug(" --- action: %s, reward: %s, done: %s, info: %s, episode_return: %s, tkact_slt: %s", \
+                              action, reward, done, info, episode_return, tkact_slt)
                 # ---------------------- #
                 # 当buffer数据的数量超过500后,才进行Q网络训练
                 if replay_buffer.size() > minimal_size:

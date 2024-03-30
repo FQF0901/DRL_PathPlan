@@ -174,25 +174,25 @@ def EnvReward(action, EnvInfo):
         CloseObjCost = -3
 
     CollisionCost = 0   # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数，应该放在action space cut或MCTS里
-    # EnvInfo.ActionVehOvlp = False
-    # if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
-    #     CollisionCost = -3000
-    #     EnvInfo.ActionVehOvlp = True
+    EnvInfo.ActionVehOvlp = False
+    if is_overlap_node(Curt_node, obstacles, 0.0, 0.0): # safety margin的bug后需要改掉
+        CollisionCost = -200    # 但DQN.take_action()里有随机性，因此还是可能出现ovlp，此处仍要给出惩罚以告知DNN不可碰撞但不宜过大
+        EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
     PlanFnd, _, _ = cal_validRS(Curt_node, Tgt_node, obstacles)
     if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd and (not PlanFnd):
-        PathNotFndCost = -500 
+        PathNotFndCost = -1000 
 
     VehOutMapCost = 0 
     VehOutMapCost = -10 if (abs(EnvInfo.State.StartPntStep[0]) > 10 or abs(EnvInfo.State.StartPntStep[1]) > 5) else 0
+    VehOutMapCost = -2000 if (abs(EnvInfo.State.StartPntStep[0]) > 14 or abs(EnvInfo.State.StartPntStep[1]) > 9) else 0
 
     TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + \
         CollisionCost + PathNotFndCost + RepeatMoveCost + VehOutMapCost
 
     # ---------------------- #
-    logging.debug("ExpansionCost: %s, SteerCost: %s, GearCost: %s, CloseObjCost: %s, \
-                    CollisionCost: %s, PathNotFndCost: %s, RepeatMoveCost: %s, VehOutMapCost: %s", \
+    logging.debug("ExpansionCost: %s, SteerCost: %s, GearCost: %s, CloseObjCost: %s, CollisionCost: %s, PathNotFndCost: %s, RepeatMoveCost: %s, VehOutMapCost: %s", \
                     ExpansionCost, SteerCost, GearCost, CloseObjCost, \
                     CollisionCost, PathNotFndCost, RepeatMoveCost, VehOutMapCost)
     # ---------------------- #

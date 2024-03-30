@@ -137,7 +137,7 @@ class Env:
         next_DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z
         
-        return next_DRLstate, reward, done, info, self.EnvInfo.State
+        return next_DRLstate, reward, int(done), info, self.EnvInfo.State
     
     def show(self, img_name = 'img'):
         """绘制所有obj,slot,host veh和other veh"""
