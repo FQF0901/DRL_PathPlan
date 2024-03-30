@@ -82,7 +82,7 @@ class DQN:
     def take_action(self, state, EnvState, trainproc, CutActSpc):  # 可变的epsilon-贪婪策略采取动作
         tkact_slt = 0
 
-        if np.random.random() < (self.epsilon * (1 - trainproc)):
+        if np.random.random() < self.epsilon:   # np.random.random() < (self.epsilon * (1 - trainproc))
             action = np.random.randint(self.action_dim)
         else:
             # torch.tensor创建张量，是可以存储和操作数值数据的多维数组
@@ -153,7 +153,7 @@ num_episodes = 30000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
-epsilon_max = 0.2
+epsilon_max = 0.1
 target_update = min(100, num_episodes / 100)
 buffer_size = 10000
 minimal_size = 500

@@ -176,7 +176,7 @@ def EnvReward(action, EnvInfo):
     CollisionCost = 0   # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数，应该放在action space cut或MCTS里
     EnvInfo.ActionVehOvlp = False
     if is_overlap_node(Curt_node, obstacles, 0.0, 0.0): # safety margin的bug后需要改掉
-        CollisionCost = -200    # 但DQN.take_action()里有随机性，因此还是可能出现ovlp，此处仍要给出惩罚以告知DNN不可碰撞但不宜过大
+        CollisionCost = -5    # 但DQN.take_action()里有随机性，因此还是可能出现ovlp，此处仍要给出惩罚以告知DNN不可碰撞但不宜过大
         EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
