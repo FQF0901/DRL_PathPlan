@@ -211,20 +211,20 @@ for i in range(10):
                 env.show('%s _ %s' % (i, i_episode))
             plt.close('all')
 
-            if (i_episode + 1) % 10 == 0:
+            if (i_episode + 1) % 30 == 0:
                 pbar.set_postfix({
                     'epsd':
                     '%d' % (num_episodes / 10 * i + i_episode + 1),
                     'return':
                     '%.3f' % np.mean(return_list[int(- num_episodes / 100):]),
-                    # 'StepCnt':
-                    # '%.3f' % (DQN_DoneCause.donePct_StepCnt_list[-1]),
-                    # 'ActOvlp':
-                    # '%.3f' % (DQN_DoneCause.donePct_ActVehOvlp_list[-1]),
-                    # 'PathFnd':
-                    # '%.3f' % (DQN_DoneCause.donePct_PathFnd_list[-1]),
-                    # 'VehOutMap':
-                    # '%.3f' % (DQN_DoneCause.donePct_VehOutMap_list[-1])
+                    'StepCnt':
+                    '%.3f' % (DQN_DoneCause.donePct_StepCnt_list[-1]),
+                    'ActOvlp':
+                    '%.3f' % (DQN_DoneCause.donePct_ActVehOvlp_list[-1]),
+                    'PathFnd':
+                    '%.3f' % (DQN_DoneCause.donePct_PathFnd_list[-1]),
+                    'VehOutMap':
+                    '%.3f' % (DQN_DoneCause.donePct_VehOutMap_list[-1])
                 })
             pbar.update(1)
 

@@ -182,14 +182,19 @@ def EnvReward(action, EnvInfo):
     PathNotFndCost = 0
     PlanFnd, _, _ = cal_validRS(Curt_node, Tgt_node, obstacles)
     if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd and (not PlanFnd):
-        PathNotFndCost = -500  
+        PathNotFndCost = -500 
 
-    TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + CollisionCost + PathNotFndCost + RepeatMoveCost
+    VehOutMapCost = 0 
+    VehOutMapCost = -10 if (abs(EnvInfo.State.StartPntStep[0]) > 10 or abs(EnvInfo.State.StartPntStep[1]) > 5) else 0
+
+    TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + \
+        CollisionCost + PathNotFndCost + RepeatMoveCost + VehOutMapCost
 
     # ---------------------- #
-    logging.debug("ExpansionCost: %s, SteerCost: %s, GearCost: %s, CloseObjCost: %s, CollisionCost: %s, PathNotFndCost: %s, RepeatMoveCost: %s", 
-                ExpansionCost, SteerCost, GearCost, CloseObjCost, \
-                    CollisionCost, PathNotFndCost, RepeatMoveCost)
+    logging.debug("ExpansionCost: %s, SteerCost: %s, GearCost: %s, CloseObjCost: %s, \
+                    CollisionCost: %s, PathNotFndCost: %s, RepeatMoveCost: %s, VehOutMapCost: %s", \
+                    ExpansionCost, SteerCost, GearCost, CloseObjCost, \
+                    CollisionCost, PathNotFndCost, RepeatMoveCost, VehOutMapCost)
     # ---------------------- #
 
     # Reward
