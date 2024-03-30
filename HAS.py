@@ -20,7 +20,6 @@ def heuristic(node, goal):
 def hybrid_a_star(start, goal, obstacles):
     open_list = [start]
     closed_list = []
-    expanded_nodes = []
     current_nodes = []
     AstarPath = []
     RSpath = []
@@ -44,20 +43,16 @@ def hybrid_a_star(start, goal, obstacles):
         if PlanFnd:
             return PlanFnd, AstarPath, RSpath, cnt
 
-        for steering_angle in [-1, 0, 1]:
-            for gear in [-1, 1]:
-                new_x, new_y, new_theta = utils.cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
-                # DQN DNN   
-                new_node = ParaCfg.Node(new_x, new_y, new_theta, \
-                                        current_node.g_cost + 0.02, heuristic(ParaCfg.Node(new_x, new_y, new_theta, 0, 0), goal), \
-                                            current_node)
+        expdNode_list = []
+        expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
 
-                new_idx = get_grid_index(new_node.x, new_node.y)
-                if (not utils.is_overlap_node(new_node, obstacles, 0.1, 0.1)) and new_node not in grid_cells[new_idx]:
-                    open_list.append(new_node)
-                    grid_cells[new_idx].append(new_node)
+        for nodes in expdNode_list:
+            nodes.h_cost = heuristic(ParaCfg.Node(nodes.x, nodes.y, nodes.theta, 0, 0), goal)
 
-                    expanded_nodes.append((new_node.x, new_node.y)) # All expand nodes
+            new_idx = get_grid_index(nodes.x, nodes.y)
+            if (not utils.is_overlap_node(nodes, obstacles, 0.1, 0.1)) and nodes not in grid_cells[new_idx]:
+                open_list.append(nodes)
+                grid_cells[new_idx].append(nodes)
 
         cnt = cnt + 1
 
