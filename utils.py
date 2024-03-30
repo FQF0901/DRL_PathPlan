@@ -173,10 +173,10 @@ def EnvReward(action, EnvInfo):
         CloseObjCost = -0.5
 
     CollisionCost = 0
-    EnvInfo.ActionVehOvlp = False
-    if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
-        CollisionCost = -5000  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
-        EnvInfo.ActionVehOvlp = True
+    # EnvInfo.ActionVehOvlp = False
+    # if is_overlap_node(Curt_node, obstacles, 0.1, 0.1):
+    #     CollisionCost = -3000  # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数
+    #     EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
     PlanFnd, _, _ = cal_validRS(Curt_node, Tgt_node, obstacles)
@@ -206,7 +206,7 @@ def EnvReward(action, EnvInfo):
 
     PathFoundReward = 0
     if PlanFnd:
-        PathFoundReward = 2000
+        PathFoundReward = 1000
 
     TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
 

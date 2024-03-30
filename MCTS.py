@@ -1,9 +1,15 @@
 # 导入所需的库
 import numpy as np
 import random
-import tensorflow as tf
 
 # 定义MCTS类
+class Node:
+    def __init__(self, parent=None):
+        self.parent = parent
+        self.visit_count = 0
+        self.total_reward = 0
+        self.children = []
+
 class MCTS:
     def __init__(self):
         # 初始化MCTS参数
@@ -13,6 +19,15 @@ class MCTS:
 
     def select_node(self, node):
         # 通过UCB公式选择子节点中最有价值的节点
+        best_value = float("-inf")
+        selected_node = None
+        for child_node in node.children:
+            exploitation_term = child_node.total_reward / child_node.visit_count
+            exploration_term = math.sqrt(2 * math.log(node.visit_count) / child_node.visit_count)
+            ucb_value = exploitation_term + self.exploration_factor * exploration_term
+            if ucb_value > best_value:
+                best_value = ucb_value
+                selected_node = child_node
         return selected_node
 
     def expand_node(self, node):
@@ -31,36 +46,16 @@ class MCTS:
             reward = -reward  # 切换正负奖励以模拟对手行为
             node = node.parent
 
-# 定义Hybrid A*类
-class HybridAStar:
-    def __init__(self):
-        # 初始化Hybrid A*参数
-        pass
-
-    # 其他Hybrid A*方法，包括启发函数、车辆动力学模型等
-
-# 定义DQN类
-class DQN:
-    def __init__(self):
-        # 初始化DQN网络结构和参数
-        self.model = tf.keras.Sequential([
-            tf.keras.layers.Dense(64, activation='relu', input_shape=(input_shape,)),
-            tf.keras.layers.Dense(64, activation='relu'),
-            tf.keras.layers.Dense(output_shape)
-        ])
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-
-    # 其他DQN方法，包括网络训练、预测等
+    def get_best_action(self):
+        # 从搜索树中获取最佳行动
+        return best_action
 
 # 初始化环境和参数
-map = np.zeros((10, 10))  # 简化的地图
-start = (0, 0)
-goal = (9, 9)
-input_shape = 10  # 输入特征大小
-output_shape = 4  # 输出动作数量
+output_shape = 6  # 输出动作数量
 mcts = MCTS()
-hybrid_a_star = HybridAStar()
-dqn = DQN()
+initial_node = Node()
+
+num_iterations = 10
 
 # 主循环执行路径规划过程
 for _ in range(num_iterations):
@@ -76,17 +71,8 @@ for _ in range(num_iterations):
             reward = mcts.simulate(selected_node)
             mcts.backpropagate(selected_node, reward)
 
-    # 使用DQN进行策略优化
-    state = get_state_representation(current_node)  # 获取状态表示
-    action = dqn.predict(state)  # 使用DQN预测最优动作
-    execute_action(action)  # 执行预测的动作
-
     # 结合MCTS和DQN结果
     mcts_action = mcts.get_best_action()  # 从MCTS中获取最佳行动
-    dqn_action = dqn.get_best_action()  # 从DQN中获取最佳行动
-
-    # 选择最终行动
-    final_action = combine_actions(mcts_action, dqn_action)  # 结合MCTS和DQN结果得到最终行动
 
     # 更新搜索树和路径规划信息
 

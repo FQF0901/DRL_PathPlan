@@ -79,7 +79,7 @@ class DQN:
         self.count = 0  # 计数器,记录更新次数
         self.device = device
 
-    def take_action(self, state, trainproc):  # 可变的epsilon-贪婪策略采取动作
+    def take_action(self, state, trainproc, Ena_MCTS):  # 可变的epsilon-贪婪策略采取动作
         if np.random.random() < self.epsilon * (1 - trainproc):
             action = np.random.randint(self.action_dim)
         else:
@@ -90,7 +90,13 @@ class DQN:
             # 4. 自动微分：PyTorch中的张量支持自动微分，这是训练深度学习模型的关键组成部分
             # 5. GPU加速：当在 GPU 上执行张量运算时，数据从 CPU 传输到 GPU 内存，在那里可以由数千个线程并行处理
             state = torch.tensor([state], dtype=torch.float).to(self.device)
-            action = self.q_net(state).argmax().item()
+            
+            if Ena_MCTS:
+                q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
+                q_values_array = q_values.detach().cpu().numpy()
+            else:
+                action = self.q_net(state).argmax().item()    # select optimal action by dqn
+                
         return action
 
     def update(self, transition_dict):
@@ -123,12 +129,12 @@ class DQN:
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
 lr = 0.005
-num_episodes = 25000
+num_episodes = 500
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
 epsilon_max = 0.2
-target_update = 500
+target_update = 100
 buffer_size = 10000
 minimal_size = 500
 batch_size = 128
@@ -147,7 +153,6 @@ DQN_DoneCause = ParaCfg.DQNPostProc()
 
 for i in range(10):
     # ---------------------- #
-    For_start_time = time.time()  # 记录结束时间
     logging.debug(" ***** 第 %s个for loop ***** ", i)
     # ---------------------- #
     with tqdm(total=int(num_episodes / 10), desc='Itr %d' % i) as pbar:
@@ -159,7 +164,7 @@ for i in range(10):
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                action = agent.take_action(state, trainproc=(i_episode + i * 10) / num_episodes)
+                action = agent.take_action(state, trainproc=(i_episode + i * 10) / num_episodes, Ena_MCTS = 1)
                 next_state, reward, done, info = env.step(action)   # changed by fqf
                 # plt.close('all')
                 # env.show()
@@ -203,15 +208,12 @@ for i in range(10):
             pbar.update(1)
 
     # ---------------------- #
-    For_end_time = time.time()  # 记录结束时间
-    execution_time = For_end_time - For_start_time  # 计算函数执行时间
-    print("For time: %.3f, StepCnt: %.3f, ActOvlp: %.3f, PathFnd: %.3f, VehOutMap: %.3f" % (
-        execution_time,
+    print("StepCnt: %.3f, ActOvlp: %.3f, PathFnd: %.3f, VehOutMap: %.3f" % (
         DQN_DoneCause.donePct_StepCnt_list[-1], 
         DQN_DoneCause.donePct_ActVehOvlp_list[-1], 
         DQN_DoneCause.donePct_PathFnd_list[-1], 
-        DQN_DoneCause.donePct_VehOutMap_list[-1]
-))
+        DQN_DoneCause.donePct_VehOutMap_list[-1])
+        )
     # ---------------------- #
 # ------------------------ DQN visualization ------------------------
 episodes_list = list(range(len(return_list)))
@@ -219,7 +221,7 @@ plt.plot(episodes_list, return_list)
 plt.xlabel('Episodes')
 plt.ylabel('Returns')
 plt.title('DQN on HAS')
-plt.savefig('return_plot.png')  # 保存图像为 PNG 格式
+plt.savefig('return_plot.svg', format='svg')  # 保存图像为 PNG 格式
 plt.show()
 
 # mv_return = rl_utils.moving_average(return_list, 9)   # Lib in 'rl_utils'
@@ -234,7 +236,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_StepCnt_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_StepCnt')
 plt.title('StepCnt')
-plt.savefig('StepCnt_plot.png')  # 保存图像为 PNG 格式
+plt.savefig('StepCnt_plot.svg', format='svg')  # 保存图像为 PNG 格式
 plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_ActVehOvlp_list)))
@@ -242,7 +244,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_ActVehOvlp_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_ActVehOvlp')
 plt.title('ActVehOvlp')
-plt.savefig('ActVehOvlp_plot.png')  # 保存图像为 PNG 格式
+plt.savefig('ActVehOvlp_plot.svg', format='svg')  # 保存图像为 PNG 格式
 plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_PathFnd_list)))
@@ -250,7 +252,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_PathFnd_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_PathFnd')
 plt.title('PathFnd')
-plt.savefig('PathFnd_plot.png')  # 保存图像为 PNG 格式
+plt.savefig('PathFnd_plot.svg', format='svg')  # 保存图像为 PNG 格式
 plt.show()
 
 episodes_list = list(range(len(DQN_DoneCause.donePct_VehOutMap_list)))
@@ -258,7 +260,7 @@ plt.plot(episodes_list, DQN_DoneCause.donePct_VehOutMap_list)
 plt.xlabel('Episodes')
 plt.ylabel('donePct_VehOutMap')
 plt.title('VehOutMap')
-plt.savefig('VehOutMap_plot.png')  # 保存图像为 PNG 格式
+plt.savefig('VehOutMap_plot.svg', format='svg')  # 保存图像为 PNG 格式
 plt.show()
 
 ## ===================================== Post-processing =====================================

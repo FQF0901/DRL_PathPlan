@@ -112,9 +112,9 @@ class Env:
         self.EnvInfo.PathFnd = False
         self.EnvInfo.StepCnt = 0
         
-        state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
+        DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
 
-        return state
+        return DRLstate
     
     def step(self, action):
         action = utils.EnvDRL_ActionMapping(action)
@@ -136,10 +136,10 @@ class Env:
                             'PathFnd' if self.EnvInfo.PathFnd else 'PathNotFnd', \
                                 'VehOutMap' if (abs(self.EnvInfo.State.StartPntStep[0]) > 15 or abs(self.EnvInfo.State.StartPntStep[1]) > 10) else 'VehinMap')
 
-        next_state = utils.EnvDRL_StateMapping(self.EnvInfo.State)
+        next_DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
         reward = self.EnvInfo.Reward_z
         
-        return next_state, reward, done, info
+        return next_DRLstate, reward, done, info
     
     def show(self):
         """绘制所有obj,slot,host veh和other veh"""
