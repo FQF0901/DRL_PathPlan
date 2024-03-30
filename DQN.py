@@ -186,7 +186,7 @@ for i in range(10):
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                action, tkactmod, Cc_values_array, NotOvlpidx_array, sampled_indices = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
+                action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
                 next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
                 # plt.close('all')  # 用于每一步的观测
                 # env.show()
