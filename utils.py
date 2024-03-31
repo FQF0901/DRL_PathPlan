@@ -214,7 +214,8 @@ def EnvReward(action, EnvInfo):
 
     PathFoundReward = 0
     if PlanFnd:
-        PathFoundReward = 1000  # 应该增加在pathfound后对path的评判，如把数，dist2obj等，而不是恒定1000
+        # 应该增加在pathfound后对path的评判，如把数，dist2obj等，而不是恒定1000
+        PathFoundReward = 1000 + EnvInfo.StepCnt * 2    # 复杂场景下的pathfound更应奖励
 
     TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
 

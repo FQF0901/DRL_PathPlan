@@ -31,7 +31,12 @@ class Env:
         
         # 生成特定范围内的obj矩形
         for _ in range(n_ObjRect):
-            x = np.random.uniform(-8, 8)
+            random_choice = random.uniform(0, 1)
+            if random_choice < 0.5:
+                x = random.uniform(-8, -3)
+            else:
+                x = random.uniform(5, 8)
+            # x = np.random.uniform(-8, 8)
             y = np.random.uniform(-2, 6)
             yaw = np.random.uniform(0, math.pi)
             length, width = np.random.uniform(0.1, 0.5, 2)
@@ -77,7 +82,7 @@ class Env:
         y5 = np.random.uniform(4, 6)
         yaw5 = np.random.uniform(math.radians(-10), math.radians(10))
 
-        n = random.randint(2, 5)    # 随机抽样0 ~ 5个
+        n = random.randint(3, 5)    # 随机抽样0 ~ 5个
         arr = np.array([[x1, y1, yaw1], [x2, y2, yaw2], [x3, y3, yaw3], [x4, y4, yaw4], [x5, y5, yaw5]])
 
         # 从数组中进行 n 组随机抽样

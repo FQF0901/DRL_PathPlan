@@ -12,6 +12,7 @@ import utils
 import ParaCfg
 import time
 import logging
+from torch.optim.lr_scheduler import StepLR
 
 # ---------------------------- ReplayBuffer ---------------------------
 class ReplayBuffer:
@@ -72,7 +73,8 @@ class DQN:
         self.target_q_net = Qnet(state_dim, hidden_dim, self.action_dim, num_layers).to(device)
         # ---------------- Adma optimizer ----------------
         # 使用Adam优化器
-        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=learning_rate)    # parameters代表一个模型的可学习参数
+        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=learning_rate)
+        self.scheduler = StepLR(self.optimizer, step_size=5000, gamma=0.8)  # 定义学习率调度器
         self.gamma = gamma  # 折扣因子
         self.epsilon = epsilon_max  # epsilon-贪婪策略
         self.target_update = target_update  # 目标网络更新频率
@@ -150,8 +152,8 @@ class DQN:
 # ---------------------- #
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ---------------------- #
-lr = 0.005
-num_episodes = 30000
+lr = 0.01   # 0.005
+num_episodes = 10000
 hidden_dim = 128
 num_layers = 3
 gamma = 0.98
@@ -186,6 +188,7 @@ for i in range(10):
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
+                agent.scheduler.step()    # 动态调整学习率
                 action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
                 next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
                 # plt.close('all')  # 用于每一步的观测
