@@ -66,7 +66,7 @@ class EnvInfo:
         self.PathFnd = 0
         self.StepCnt = 0
 
-class Node:
+class HasNode:
     def __init__(self, x, y, theta, g_cost, h_cost, parent=None):
         self.x = x
         self.y = y
@@ -74,3 +74,10 @@ class Node:
         self.g_cost = g_cost
         self.h_cost = h_cost
         self.parent = parent
+
+class MctsNode:
+    def __init__(self):
+        self.HasNode = HasNode()
+        self.visit_count = 0
+        self.total_reward = 0
+        self.children = []

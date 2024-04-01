@@ -10,8 +10,8 @@ env.reset()
 # env.show()    # Need to confirm the consistency between Env sending and HAS receiving
 
 # HAS
-start_node = ParaCfg.Node(env.EnvInfo.SlotPntInit[0], env.EnvInfo.SlotPntInit[1], env.EnvInfo.SlotPntInit[2], 0, 0)
-goal_node = ParaCfg.Node(env.EnvInfo.VehPntInit[0], env.EnvInfo.VehPntInit[1], env.EnvInfo.VehPntInit[2], 0, 0)
+start_node = ParaCfg.HasNode(env.EnvInfo.SlotPntInit[0], env.EnvInfo.SlotPntInit[1], env.EnvInfo.SlotPntInit[2], 0, 0)
+goal_node = ParaCfg.HasNode(env.EnvInfo.VehPntInit[0], env.EnvInfo.VehPntInit[1], env.EnvInfo.VehPntInit[2], 0, 0)
 obstacles = env.EnvInfo.State.ObjRect + env.EnvInfo.State.OthVehRect
 
 start_time = time.time()

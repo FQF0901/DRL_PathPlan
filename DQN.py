@@ -13,6 +13,7 @@ import ParaCfg
 import time
 import logging
 from torch.optim.lr_scheduler import StepLR
+import MCTS
 
 # ---------------------------- ReplayBuffer ---------------------------
 class ReplayBuffer:
@@ -81,45 +82,50 @@ class DQN:
         self.count = 0  # 计数器,记录更新次数
         self.device = device
 
-    def take_action(self, state, EnvState, trainproc, CutActSpc):  # 可变的epsilon-贪婪策略采取动作
-        # Collision value
-        expdNode_list = []
-        current_node = ParaCfg.Node(EnvState.StartPntStep[0], \
-                                    EnvState.StartPntStep[1], \
-                                    EnvState.StartPntStep[2], 0, 0, None)
-        expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
-        Cc_values_array = ([])
-        obstacles = EnvState.ObjRect + EnvState.OthVehRect
-        for nodes in expdNode_list:
-            if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)):
-                Cc_values_array = np.append(Cc_values_array, 0)
+    def take_action(self, state, EnvState, trainproc, TkActMod):  # 可变的epsilon-贪婪策略采取动作
+
+        if TkActMod == 0 or TkActMod == 1:  # 非MCTS
+            # Collision value
+            expdNode_list = []
+            current_node = ParaCfg.HasNode(EnvState.StartPntStep[0], \
+                                        EnvState.StartPntStep[1], \
+                                        EnvState.StartPntStep[2], 0, 0, None)
+            expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
+            Cc_values_array = ([])
+            obstacles = EnvState.ObjRect + EnvState.OthVehRect
+            for nodes in expdNode_list:
+                if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)):
+                    Cc_values_array = np.append(Cc_values_array, 0)
+                else:
+                    Cc_values_array = np.append(Cc_values_array, -1)  # 碰撞惩罚，用于变相裁剪，-1表示不可选
+
+            # action selection
+            if np.random.random() < (self.epsilon * (1 - trainproc)):   # np.random.random() < (self.epsilon * (1 - trainproc))
+                NotOvlpidx_array = []
+                NotOvlpidx_array = np.where(Cc_values_array != -1)[0]   # 找到所有非 -1 的元素的索引
+
+                if NotOvlpidx_array.size > 0 and TkActMod == 1:  # cut ovlp act
+                    action = np.random.choice(NotOvlpidx_array)    # 从非 -1 的元素idx中随机选择一个idx
+                else:   # TkActMod == 1但所有action都碰撞 or TkActMod == 0
+                    action = np.random.randint(self.action_dim)
+
             else:
-                Cc_values_array = np.append(Cc_values_array, -1)  # 碰撞惩罚，用于变相裁剪，-1表示不可选
+                # torch.tensor创建张量，是可以存储和操作数值数据的多维数组
+                state = torch.tensor([state], dtype=torch.float).to(self.device)
+                
+                if TkActMod == 1:  # cut ovlp act
+                    # DQN net value
+                    q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
+                    q_values_array = q_values.detach().cpu().numpy()
+                    q_values_array = q_values_array[0,:]
 
-        # action selection
-        if np.random.random() < (self.epsilon * (1 - trainproc)):   # np.random.random() < (self.epsilon * (1 - trainproc))
-            NotOvlpidx_array = []
-            NotOvlpidx_array = np.where(Cc_values_array != -1)[0]   # 找到所有非 -1 的元素的索引
+                    action = utils.CutOvlpAct(q_values_array, Cc_values_array)
 
-            if NotOvlpidx_array.size > 0:  
-                action = np.random.choice(NotOvlpidx_array)    # 从非 -1 的元素idx中随机选择一个idx
-            else:   # 如果所有action都碰撞
-                action = np.random.randint(self.action_dim)
-
-        else:
-            # torch.tensor创建张量，是可以存储和操作数值数据的多维数组
-            state = torch.tensor([state], dtype=torch.float).to(self.device)
+                else:   # TkActMod == 0 非cut ovlp act
+                    action = self.q_net(state).argmax().item()    # select optimal action by dqn
             
-            if CutActSpc:
-                # DQN net value
-                q_values = self.q_net(state)  # 获取单个状态的所有动作的 Q 值
-                q_values_array = q_values.detach().cpu().numpy()
-                q_values_array = q_values_array[0,:]
-
-                action = utils.combineDqnMcts(q_values_array, Cc_values_array)
-
-            else:
-                action = self.q_net(state).argmax().item()    # select optimal action by dqn
+        elif TkActMod == 2: # MCTS
+            action = MCTS
 
         return action
 
@@ -189,7 +195,7 @@ for i in range(10):
             # ---------------------- #
             while not done:
                 agent.scheduler.step()    # 动态调整学习率
-                action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, CutActSpc = 1)
+                action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, TkActMod = 2)
                 next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
                 # plt.close('all')  # 用于每一步的观测
                 # env.show()

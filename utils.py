@@ -127,7 +127,7 @@ def cal_validRS(current_node, goal_node, obstacles):
         RSpathy = RSpath.y[i]
         RSpathyaw = RSpath.yaw[i]
 
-        RSnode = ParaCfg.Node(RSpathx, RSpathy, RSpathyaw, 0, 0)
+        RSnode = ParaCfg.HasNode(RSpathx, RSpathy, RSpathyaw, 0, 0)
         if is_overlap_node(RSnode, obstacles, 0.0, 0.0):
             return False, [], []
         elif i == len(RSpath.x) - 1:    # 全部RS校验完成都没有碰撞
@@ -155,11 +155,11 @@ def EnvReward(action, EnvInfo):
     x = EnvInfo.State.StartPntStep[0] # new state 已经产生，因此这里是执行action后的state
     y = EnvInfo.State.StartPntStep[1]
     yaw = EnvInfo.State.StartPntStep[2]
-    Curt_node = ParaCfg.Node(x, y, yaw, 0, 0)
+    Curt_node = ParaCfg.HasNode(x, y, yaw, 0, 0)
     x = EnvInfo.State.TgtPntStep[0] # target
     y = EnvInfo.State.TgtPntStep[1]
     yaw = EnvInfo.State.TgtPntStep[2]
-    Tgt_node = ParaCfg.Node(x, y, yaw, 0, 0)
+    Tgt_node = ParaCfg.HasNode(x, y, yaw, 0, 0)
     obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
 
     # Cost
@@ -202,7 +202,7 @@ def EnvReward(action, EnvInfo):
     # 检查是否已经存在静态变量，如果不存在则初始化
     CloseGoalReward = 0 # 向目标点探索不见得是个好的启发
     # if not hasattr(EnvReward, 'Curt_node_prev'):
-    #     EnvReward.Curt_node_prev = ParaCfg.Node(Curt_node.x, Curt_node.y, 0, 0, 0)
+    #     EnvReward.Curt_node_prev = ParaCfg.HasNode(Curt_node.x, Curt_node.y, 0, 0, 0)
     # CloseGoalReward = 50 * (1 - (math.sqrt((Curt_node.x - Tgt_node.x)**2 + (Curt_node.y - Tgt_node.y)**2) / \
     #                     math.sqrt((EnvReward.Curt_node_prev.x - Tgt_node.x)**2 + (EnvReward.Curt_node_prev.y - Tgt_node.y)**2)))
     # EnvReward.Curt_node_prev = Curt_node
@@ -301,12 +301,12 @@ def expandNode(current_node):
         for steering_angle in [-1, 0, 1]:
             new_x, new_y, new_theta = cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
             # DQN DNN   
-            new_node = ParaCfg.Node(new_x, new_y, new_theta, current_node.g_cost + 0.02, 0, current_node)
+            new_node = ParaCfg.HasNode(new_x, new_y, new_theta, current_node.g_cost + 0.02, 0, current_node)
             expdNode_list.append(new_node)
 
     return expdNode_list
 
-def combineDqnMcts(q_values_array, cc_values_array):
+def CutOvlpAct(q_values_array, cc_values_array):
     # Index of max value in q_values_array (excluding -1 elements)
     idx1 = np.where(cc_values_array == -1)[0]
     q_values_array[idx1] = np.min(q_values_array) - 1   # 碰撞action赋值为 min - 1

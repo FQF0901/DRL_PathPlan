@@ -47,7 +47,7 @@ def hybrid_a_star(start, goal, obstacles):
         expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
 
         for nodes in expdNode_list:
-            nodes.h_cost = heuristic(ParaCfg.Node(nodes.x, nodes.y, nodes.theta, 0, 0), goal)
+            nodes.h_cost = heuristic(ParaCfg.HasNode(nodes.x, nodes.y, nodes.theta, 0, 0), goal)
 
             new_idx = get_grid_index(nodes.x, nodes.y)
             if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)) and nodes not in grid_cells[new_idx]:
@@ -105,8 +105,8 @@ def Path_show(AstarPath, RSpath, obstacles, start, goal, slot):
 # corners = utils.get_rectangle_corners(7.9, 1.2, 0, 0.1, 0.1)
 # obstacles.append(corners)
 
-# start_node = ParaCfg.Node(0, 0, 0, 0, 0)
-# goal_node = ParaCfg.Node(12, 5, math.pi/4, 0, 0)
+# start_node = ParaCfg.HasNode(0, 0, 0, 0, 0)
+# goal_node = ParaCfg.HasNode(12, 5, math.pi/4, 0, 0)
 
 # AstarPath, RSpath = hybrid_a_star(start_node, goal_node, obstacles)
 # if AstarPath and RSpath:

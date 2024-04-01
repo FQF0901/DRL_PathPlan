@@ -1,14 +1,9 @@
 # 导入所需的库
 import numpy as np
 import random
-
-# 定义MCTS类
-class Node:
-    def __init__(self, parent=None):
-        self.parent = parent
-        self.visit_count = 0
-        self.total_reward = 0
-        self.children = []
+import math
+import utils
+import ParaCfg
 
 class MCTS:
     def __init__(self):
@@ -30,8 +25,10 @@ class MCTS:
                 selected_node = child_node
         return selected_node
 
-    def expand_node(self, node):
-        # 扩展选定的节点，生成新的子节点
+    def expand_node(self, curt_node):
+        new_node = ParaCfg.MctsNode
+        new_node.HasNode = utils.expandNode(curt_node)
+        curt_node.children.append(new_node)
         return new_node
 
     def simulate(self, node):
@@ -50,31 +47,34 @@ class MCTS:
         # 从搜索树中获取最佳行动
         return best_action
 
-# 初始化环境和参数
-output_shape = 6  # 输出动作数量
-mcts = MCTS()
-initial_node = Node()
+    def is_fully_expanded(self):
+        # 检查节点是否完全扩展
+        return len(self.children) == len(self.state.get_legal_actions())
+    
+    def search(self):
+        # 主循环执行路径规划过程
+        for _ in range(num_iterations):
+            # 使用MCTS进行搜索
+            current_node = initial_node
+            for _ in range(self.simulation_count):
+                selected_node = self.select_node(current_node)
+                if selected_node is not self.is_fully_expanded:
+                    new_node = self.expand_node(selected_node)
+                    reward = self.simulate(new_node)
+                    self.backpropagate(new_node, reward)
+                else:
+                    reward = self.simulate(selected_node)
+                    self.backpropagate(selected_node, reward)
+
+            # 结合MCTS和DQN结果
+            action = self.get_best_action()  # 从MCTS中获取最佳行动
+
 
 num_iterations = 10
+initial_node = ParaCfg.MctsNode()
 
-# 主循环执行路径规划过程
-for _ in range(num_iterations):
-    # 使用MCTS进行搜索
-    current_node = initial_node
-    for _ in range(mcts.simulation_count):
-        selected_node = mcts.select_node(current_node)
-        if selected_node is not fully expanded:
-            new_node = mcts.expand_node(selected_node)
-            reward = mcts.simulate(new_node)
-            mcts.backpropagate(new_node, reward)
-        else:
-            reward = mcts.simulate(selected_node)
-            mcts.backpropagate(selected_node, reward)
 
-    # 结合MCTS和DQN结果
-    mcts_action = mcts.get_best_action()  # 从MCTS中获取最佳行动
-
-    # 更新搜索树和路径规划信息
+# 更新搜索树和路径规划信息
 
 # 路径执行和优化
 # 执行最终路径规划结果
