@@ -7,9 +7,9 @@ import ParaCfg
 
 class MCTS:
     def __init__(self):
-        # 初始化MCTS参数
-        self.simulation_count = 100
         self.c_puct = 5
+        self.num_iter = 10
+        self.root_node = ParaCfg.MctsNode()
 
     def select_node(self, curt_node):
         # 通过UCT公式选择子节点中最有价值的节点
@@ -52,12 +52,8 @@ class MCTS:
     def is_leaf(self, node):
         """检查是否是叶节点，即没有被扩展的节点"""
         return node.children == None    # 这里还要增加判断children的P是否不为0
-
-    def is_fully_expanded(self):
-        # 检查节点是否完全扩展
-        return len(self.children) == len(self.state.get_legal_actions())
     
-    def simulate(self, root_node):
+    def simulate(self, root_node):  # 这是一个完整的plan流程
         cnt = 0
 
         while cnt < ParaCfg.HASParam.maxEpsd and PathNotFnd and Openlist != [] :
@@ -76,26 +72,7 @@ class MCTS:
         node.Q = TrueValue  # 如果终止了，就应该给出真值用于更新DNN的Q
         self.backpropagate(node)
     
-    def search(self):
+    def search(self, root_node):
         # 主循环执行路径规划过程
-        for _ in range(num_iterations):
-            # 使用MCTS进行搜索
-            current_node = initial_node
-            for _ in range(self.simulation_count):
-                selected_node = self.select_node(current_node)
-                if selected_node is not self.is_fully_expanded:
-                    new_node = self.expand_node(selected_node)
-                    reward = self.simulate(new_node)
-                    self.backpropagate(new_node, reward)
-                else:
-                    reward = self.simulate(selected_node)
-                    self.backpropagate(selected_node, reward)
-
-            # 结合MCTS和DQN结果
-            action = self.get_best_action()  # 从MCTS中获取最佳行动
-
-
-num_iterations = 10
-initial_node = ParaCfg.MctsNode()
-
-
+        for _ in range(self.num_iter):  # 每个局面plan 10次
+            self.simulate(root_node)
