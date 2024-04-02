@@ -76,8 +76,9 @@ class HasNode:
         self.parent = parent
 
 class MctsNode:
-    def __init__(self):
+    def __init__(self, children=None, DnnQ = 0, DnnP = 0):
         self.HasNode = HasNode()
-        self.visit_count = 0
-        self.total_reward = 0
-        self.children = []
+        self.children = children
+        self.visit_count = 0   # 当前当前节点的访问次数
+        self.Q = DnnQ       # 当前节点对应动作的平均动作价值
+        self.P = DnnP       # DNN给出的P概率
