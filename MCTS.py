@@ -8,7 +8,6 @@ import ParaCfg
 class MCTS:
     def __init__(self):
         # 初始化MCTS参数
-        self.search_tree = {}  # 搜索树，存储节点信息
         self.simulation_count = 100
         self.c_puct = 5
 
@@ -37,17 +36,11 @@ class MCTS:
             new_node.Q = DnnQ
             new_node.P = DnnP
 
-            if utils.ChildNotVaild(new_node):   # ovlp和RepeatMove
+            if utils.ChildNotVaild(new_node):   # ovlp和RepeatMove，P为0或不往children里写入
                 new_node.P = 0  
+            curt_node.children.append(new_node) # 不vaild就不想里面写入？
 
-            curt_node.children.append(new_node)
-
-        return curt_node.children
-
-    def simulate(self, Curt_node):
-        # 模拟随机决策路径，并评估路径的价值。AlphaZore应该没有simulate
-        reward = Curt_node.Q
-        return reward
+        # return curt_node.children
 
     def backpropagate(self, node, DnnQ):
         # 反向传播，更新节点的信息（访问次数、累计奖励等）
@@ -56,13 +49,32 @@ class MCTS:
             node.visit_count += 1
             node = node.parent
 
-    def is_leaf(self):
+    def is_leaf(self, node):
         """检查是否是叶节点，即没有被扩展的节点"""
-        return self.children == None
+        return node.children == None    # 这里还要增加判断children的P是否不为0
 
     def is_fully_expanded(self):
         # 检查节点是否完全扩展
         return len(self.children) == len(self.state.get_legal_actions())
+    
+    def simulate(self, root_node):
+        cnt = 0
+
+        while cnt < ParaCfg.HASParam.maxEpsd and PathNotFnd and Openlist != [] :
+            node = root_node
+
+            while True:
+                if self.is_leaf(node):
+                    curt_node = node
+                    break
+                node = self.select_node(node)
+                
+            self.expand_node(curt_node)   # 这里要判断是否pathfound和openlist
+            self.backpropagate(curt_node)
+            cnt = cnt + 1
+
+        node.Q = TrueValue  # 如果终止了，就应该给出真值用于更新DNN的Q
+        self.backpropagate(node)
     
     def search(self):
         # 主循环执行路径规划过程
@@ -87,10 +99,3 @@ num_iterations = 10
 initial_node = ParaCfg.MctsNode()
 
 
-# 更新搜索树和路径规划信息
-
-# 路径执行和优化
-# 执行最终路径规划结果
-# 根据执行结果对MCTS和DQN进行优化
-
-# 结束
