@@ -312,3 +312,16 @@ def CutOvlpAct(q_values_array, cc_values_array):
     q_values_array[idx1] = np.min(q_values_array) - 1   # 碰撞action赋值为 min - 1
     idx_max = np.argmax(q_values_array)
     return idx_max
+
+def ChildNotVaild(MctsNode, EnvInfoState):    # EnvInfoState
+    OvlpFlag = False
+    RptStFlag = False
+
+    # overlap
+    obstacles = EnvInfoState.ObjRect + EnvInfoState.OthVehRects
+    OvlpFlag = is_overlap_node(MctsNode.HasNode, obstacles, 0.0, 0.0)
+
+    # RepeatMove
+    
+
+    return OvlpFlag or RptStFlag

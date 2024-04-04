@@ -4,6 +4,7 @@ import random
 import math
 import utils
 import ParaCfg
+import Env
 
 class MCTS:
     def __init__(self):
@@ -12,12 +13,12 @@ class MCTS:
         self.root_node = ParaCfg.MctsNode()
 
     def select_node(self, curt_node):
-        # 通过UCT公式选择子节点中最有价值的节点
+        # 通过PUCT公式选择子节点中最有价值的节点
         best_value = float("-inf")
         selected_node = None
         for child_node in curt_node.children:
             exploitation_term = child_node.Q
-            exploration_term = np.sqrt(child_node.HasNode.parent.n_visits) / (1 + child_node.n_visits)
+            exploration_term = np.sqrt(child_node.HasNode.parent.visit_count) / (1 + child_node.visit_count)
             puct_value = exploitation_term + self.c_puct * child_node.P * exploration_term  # PUCT公式
 
             if puct_value > best_value:
@@ -26,21 +27,20 @@ class MCTS:
 
         return selected_node
 
-    def expand_node(self, curt_node):   # 这里要把不合法的动作概率全部设置为0，并补充P和Q
-        new_node = ParaCfg.MctsNode
+    def expand_node(self, curt_node, EnvInfoState):   # 这里要把不合法的动作概率全部设置为0，并补充P和Q
+        new_node = ParaCfg.MctsNode()
         new_HasNode_list = utils.expandNode(curt_node)
 
         for HasNode in new_HasNode_list:
             new_node.HasNode = HasNode
-            DnnQ, DnnP = utils.DNN(new_node.HasNode)
+            DnnQ, DnnP = utils.DNN(new_node.HasNode)    # 需要补充DNN
             new_node.Q = DnnQ
             new_node.P = DnnP
 
-            if utils.ChildNotVaild(new_node):   # ovlp和RepeatMove，P为0或不往children里写入
+            if utils.ChildNotVaild(new_node, EnvInfoState):   # ovlp和RepeatMove，P为0或不往children里写入
                 new_node.P = 0  
+                new_node.Q = float("-inf")  # To ensure this node will not be selected
             curt_node.children.append(new_node) # 不vaild就不想里面写入？
-
-        # return curt_node.children
 
     def backpropagate(self, node, DnnQ):
         # 反向传播，更新节点的信息（访问次数、累计奖励等）
@@ -51,7 +51,12 @@ class MCTS:
 
     def is_leaf(self, node):
         """检查是否是叶节点，即没有被扩展的节点"""
-        return node.children == None    # 这里还要增加判断children的P是否不为0
+        NoChildFlag = node.children == None # 没子节点
+         
+        if not NoChildFlag: # 有子节点但均不vaild
+            ChildNotVaildFlag = sum(child.P for child in node.children) == 0
+
+        return NoChildFlag or ChildNotVaildFlag    # 这里还要增加判断children的P是否不为0
     
     def simulate(self, root_node):  # 这是一个完整的plan流程
         cnt = 0
@@ -74,5 +79,8 @@ class MCTS:
     
     def search(self, root_node):
         # 主循环执行路径规划过程
-        for _ in range(self.num_iter):  # 每个局面plan 10次
+        for _ in range(self.num_iter):  # 每个局面plan 10次？
             self.simulate(root_node)
+
+env = Env.Env()
+DRLstate, EnvInfoState = Env.Env.reset()

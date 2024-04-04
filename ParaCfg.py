@@ -82,3 +82,8 @@ class MctsNode:
         self.visit_count = 0   # 当前当前节点的访问次数
         self.Q = DnnQ       # 当前节点对应动作的平均动作价值
         self.P = DnnP       # DNN给出的P概率
+
+class MctsState:
+    def __init__(self, MctsNode, EnvState):
+        self.MctsNode = MctsNode
+        self.EnvState = EnvState
