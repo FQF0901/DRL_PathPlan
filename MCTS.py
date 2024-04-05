@@ -11,6 +11,7 @@ class MCTS:
         self.c_puct = 5
         self.num_iter = 10
         self.root_node = ParaCfg.MctsNode()
+        self.grid_cells = [[] for _ in range(ParaCfg.HASParam.grid_num ** 2)]   # used for check repeat state
 
     def select_node(self, curt_node):
         # 通过PUCT公式选择子节点中最有价值的节点
@@ -21,9 +22,15 @@ class MCTS:
             exploration_term = np.sqrt(child_node.HasNode.parent.visit_count) / (1 + child_node.visit_count)
             puct_value = exploitation_term + self.c_puct * child_node.P * exploration_term  # PUCT公式
 
-            if puct_value > best_value:
+            if puct_value > best_value and puct_value > float("-inf") + 0.001:
                 best_value = puct_value
                 selected_node = child_node
+        
+        if selected_node == None:
+            print('select child node err, no vaild child !')  # 应该先判断是否为leaf node再进行select node
+        else:
+            curt_idx = utils.get_grid_index(curt_node.x, curt_node.y)   # used for check repeat state
+            self.grid_cells[curt_idx].append(curt_node)
 
         return selected_node
 
@@ -37,10 +44,11 @@ class MCTS:
             new_node.Q = DnnQ
             new_node.P = DnnP
 
-            if utils.ChildNotVaild(new_node, EnvInfoState):   # ovlp和RepeatMove，P为0或不往children里写入
+            if utils.ChildNotVaild(new_node, EnvInfoState, self.grid_cells):   # ovlp和RepeatMove，P为0
                 new_node.P = 0  
                 new_node.Q = float("-inf")  # To ensure this node will not be selected
-            curt_node.children.append(new_node) # 不vaild就不想里面写入？
+
+            curt_node.children.append(new_node) # 都填进去，只是不选择
 
     def backpropagate(self, node, DnnQ):
         # 反向传播，更新节点的信息（访问次数、累计奖励等）

@@ -313,7 +313,12 @@ def CutOvlpAct(q_values_array, cc_values_array):
     idx_max = np.argmax(q_values_array)
     return idx_max
 
-def ChildNotVaild(MctsNode, EnvInfoState):    # EnvInfoState
+def get_grid_index(x, y):   # 这里后续要改成3维
+    grid_x = int((x - -20) / ParaCfg.HASParam.cell_size)
+    grid_y = int((y - -20) / ParaCfg.HASParam.cell_size)
+    return grid_x + grid_y * ParaCfg.HASParam.grid_num
+
+def ChildNotVaild(MctsNode, EnvInfoState, grid_cells):    # EnvInfoState
     OvlpFlag = False
     RptStFlag = False
 
@@ -322,6 +327,8 @@ def ChildNotVaild(MctsNode, EnvInfoState):    # EnvInfoState
     OvlpFlag = is_overlap_node(MctsNode.HasNode, obstacles, 0.0, 0.0)
 
     # RepeatMove
-    
+    new_idx = get_grid_index(MctsNode.HasNode.x, MctsNode.HasNode.y)
+    if MctsNode.HasNode in grid_cells[new_idx]:
+        RptStFlag = True
 
     return OvlpFlag or RptStFlag

@@ -5,14 +5,6 @@ import utils
 import numpy as np
 import ParaCfg
 
-# 定义网格大小和边长
-grid_num = ParaCfg.HASParam.grid_num
-cell_size = ParaCfg.HASParam.cell_size
-
-def get_grid_index(x, y):
-    grid_x = int((x - -20) / cell_size)
-    grid_y = int((y - -20) / cell_size)
-    return grid_x + grid_y * grid_num
 
 def heuristic(node, goal):
     return math.sqrt((node.x - goal.x)**2 + (node.y - goal.y)**2)
@@ -23,7 +15,7 @@ def hybrid_a_star(start, goal, obstacles):
     current_nodes = []
     AstarPath = []
     RSpath = []
-    grid_cells = [[] for _ in range(grid_num ** 2)]
+    grid_cells = [[] for _ in range(ParaCfg.HASParam.grid_num ** 2)]
 
     cnt = 0
     while open_list and cnt < ParaCfg.HASParam.maxEpsd + 10:    # +10 is uesed for Redundancy of EnvStep()
@@ -31,7 +23,7 @@ def hybrid_a_star(start, goal, obstacles):
         current_nodes.append(current_node)  # All selected nodes
         open_list.remove(current_node)
 
-        current_idx = get_grid_index(current_node.x, current_node.y)
+        current_idx = utils.get_grid_index(current_node.x, current_node.y)
         if current_node in open_list:
             open_list.remove(current_node)
         elif current_node in closed_list:
@@ -49,7 +41,7 @@ def hybrid_a_star(start, goal, obstacles):
         for nodes in expdNode_list:
             nodes.h_cost = heuristic(ParaCfg.HasNode(nodes.x, nodes.y, nodes.theta, 0, 0), goal)
 
-            new_idx = get_grid_index(nodes.x, nodes.y)
+            new_idx = utils.get_grid_index(nodes.x, nodes.y)
             if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)) and nodes not in grid_cells[new_idx]:
                 open_list.append(nodes)
                 grid_cells[new_idx].append(nodes)
