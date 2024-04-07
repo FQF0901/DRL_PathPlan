@@ -1,16 +1,32 @@
 # 导入所需的库
 import numpy as np
 import random
-import math
+import torch
 import utils
 import ParaCfg
 import Env
 import logging
 import tqdm
+import collections
 
-'''
-MCTS Tree
-'''
+# ---------------------------- ReplayBuffer ---------------------------
+class ReplayBuffer:
+    ''' 经验回放池 '''
+    def __init__(self, capacity):
+        self.buffer = collections.deque(maxlen=capacity)  # 双端队列,先进先出，类似list但更小更快
+
+    def add(self, state, action, reward, next_state, done):  # 将数据加入buffer
+        self.buffer.append((state, action, reward, next_state, done))   # ()是创建元组tuple
+
+    def sample(self, batch_size):  # 从buffer中采样数据,数量为batch_size
+        transitions = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = zip(*transitions) # 相当于分列打包
+        return np.array(state), action, reward, np.array(next_state), done  # 经测试有没有np.array强制转换似乎不影响
+
+    def size(self):  # 目前buffer中数据的数量
+        return len(self.buffer)
+
+# ---------------------------- MCTS Tree ---------------------------
 class MCTS:
     def __init__(self):
         self.c_puct = 5
@@ -96,14 +112,34 @@ class MCTS:
 
         node.Q = node.HasNode.g_cost  # 如果终止了，就应该给出真值用于更新DNN的Q。需要细致的评判轨迹的优劣
         self.backpropagate(node)
+
+        # 这里应该增加replay_buffer的存储：state, action, reward, next_state, done。其中reward应该就是node.Q？
     
 
-'''
-Training Process
-'''
-env = Env.Env()
-DRLstate, EnvInfoState = Env.Env.reset()
+# ----------------------------------- Training Process ----------------------------------
+# ---------------------- #
+logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# ---------------------- #
+lr = 0.01   # 0.005
 num_episodes = 10000
+hidden_dim = 128
+num_layers = 3
+gamma = 0.98
+epsilon_max = 0.1
+target_update = min(100, num_episodes / 100)
+buffer_size = 10000
+minimal_size = 500
+batch_size = 128
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+env = Env.Env()
+torch.manual_seed(0)
+replay_buffer = ReplayBuffer(buffer_size)
+state_dim = 128
+action_dim = 6
+
+return_list = []
+DQN_DoneCause = ParaCfg.DQNPostProc()
 
 for i in range(10):
     # ---------------------- #
@@ -118,19 +154,15 @@ for i in range(10):
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)
             # ---------------------- #
             while not done:
-                agent.scheduler.step()    # 动态调整学习率
-                action = agent.take_action(state, EnvState, trainproc=(i_episode + i * 10) / num_episodes, TkActMod = 2)
-                next_state, reward, done, info, EnvState = env.step(action)   # changed by fqf
-                # plt.close('all')  # 用于每一步的观测
-                # env.show()
+
+                MCTS.simulate(done, EnvInfo)    # 需要确认这里EnvInfo好还是EnvState好。另这是个off policy的方案
                 replay_buffer.add(state, action, reward, next_state, done)
-                state = next_state
                 episode_return += reward
                 # ---------------------- #
                 logging.debug(" --- action: %s, reward: %s, done: %s, info: %s, episode_return: %s", \
                               action, reward, done, info, episode_return)
                 # ---------------------- #
-                # 当buffer数据的数量超过500后,才进行Q网络训练
+                # 当buffer数据的数量超过500后,才进行网络训练
                 if replay_buffer.size() > minimal_size:
                     b_s, b_a, b_r, b_ns, b_d = replay_buffer.sample(batch_size)
                     transition_dict = {
