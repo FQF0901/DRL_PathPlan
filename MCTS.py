@@ -5,11 +5,15 @@ import math
 import utils
 import ParaCfg
 import Env
+import logging
+import tqdm
 
+'''
+MCTS Tree
+'''
 class MCTS:
     def __init__(self):
         self.c_puct = 5
-        self.num_iter = 10
         self.root_node = ParaCfg.MctsNode()
         self.grid_cells = [[] for _ in range(ParaCfg.HASParam.grid_num ** 2)]   # used for check repeat state
 
@@ -35,9 +39,10 @@ class MCTS:
 
         return selected_node
 
-    def expand_node(self, curt_node, EnvInfoState):   # 这里要把不合法的动作概率全部设置为0，并补充P和Q
+    def expand_node(self, curt_node, EnvInfo):   # 这里要把不合法的动作概率全部设置为0，并补充P和Q
         new_node = ParaCfg.MctsNode()
         new_HasNode_list = utils.expandNode(curt_node)
+        cnt = 0
 
         for HasNode in new_HasNode_list:
             new_node.HasNode = HasNode
@@ -45,6 +50,11 @@ class MCTS:
             new_node.Q = DnnQ
             new_node.P = DnnP
 
+            EnvAction = utils.EnvDRL_ActionMapping(cnt)
+            new_node.HasNode.g_cost = new_node.HasNode.g_cost + utils.EnvReward(EnvAction, EnvInfo)  # 用于最后的真值Q（基于Path的评估）
+            cnt = cnt + 1
+
+            EnvInfoState = EnvInfo.state
             if utils.ChildNotVaild(new_node, EnvInfoState, self.grid_cells):   # ovlp和RepeatMove，P为0
                 new_node.P = 0  
                 # new_node.Q = 0 # 不能给float("-inf")，太小在回溯时会过于影响父节点。干脆不给人工值
@@ -67,8 +77,12 @@ class MCTS:
 
         return NoChildFlag or ChildNotVaildFlag    # 这里还要增加判断children的P是否不为0
     
-    def simulate(self, root_node, done):  # 这是一个完整的plan流程
-        node = root_node
+    def simulate(self, done, EnvInfo):  # 这是一个完整的plan流程
+        Has_node = ParaCfg.HasNode(EnvInfo.SlotPntInit[0], \
+                                        EnvInfo.SlotPntInit[1], \
+                                        EnvInfo.SlotPntInit[2], 0, 0, None)
+        node = ParaCfg.MctsNode()
+        node.HasNode = Has_node
 
         while not done: # DQN不需要考虑openlist=[]，但MCTS和HAS需要考虑
             while True: # 探索选择，直到找到叶节点
@@ -77,19 +91,19 @@ class MCTS:
                     break
                 node = self.select_node(node)
                 
-            self.expand_node(LeafNode)   # 这里要判断是否pathfound和openlist
+            self.expand_node(LeafNode, EnvInfo)   # 这里要判断是否pathfound和openlist
             self.backpropagate(LeafNode)
 
-        node.Q = TrueValue  # 如果终止了，就应该给出真值用于更新DNN的Q
+        node.Q = node.HasNode.g_cost  # 如果终止了，就应该给出真值用于更新DNN的Q。需要细致的评判轨迹的优劣
         self.backpropagate(node)
     
-    def search(self, root_node):
-        # 主循环执行路径规划过程
-        for _ in range(self.num_iter):  # 每个局面plan 10次？
-            self.simulate(root_node)
 
+'''
+Training Process
+'''
 env = Env.Env()
 DRLstate, EnvInfoState = Env.Env.reset()
+num_episodes = 10000
 
 for i in range(10):
     # ---------------------- #

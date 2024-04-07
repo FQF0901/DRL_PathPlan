@@ -174,19 +174,19 @@ def EnvReward(action, EnvInfo):
         CloseObjCost = -3
 
     CollisionCost = 0   # 碰撞不应由DNN保证，因此不应因碰撞大幅惩罚DNN参数，应该放在action space cut或MCTS里
-    EnvInfo.ActionVehOvlp = False
-    if is_overlap_node(Curt_node, obstacles, 0.0, 0.0): # safety margin的bug后需要改掉
-        CollisionCost = -10    # 但DQN.take_action()里有随机性，因此还是可能出现ovlp，此处仍要给出惩罚以告知DNN不可碰撞但不宜过大
-        EnvInfo.ActionVehOvlp = True
+    # EnvInfo.ActionVehOvlp = False
+    # if is_overlap_node(Curt_node, obstacles, 0.0, 0.0): # safety margin的bug后需要改掉
+    #     CollisionCost = -10    # 但DQN.take_action()里有随机性，因此还是可能出现ovlp，此处仍要给出惩罚以告知DNN不可碰撞但不宜过大
+    #     EnvInfo.ActionVehOvlp = True
 
     PathNotFndCost = 0
     PlanFnd, _, _ = cal_validRS(Curt_node, Tgt_node, obstacles)
     if EnvInfo.StepCnt >= ParaCfg.HASParam.maxEpsd and (not PlanFnd):
-        PathNotFndCost = -1000 
+        PathNotFndCost = -100
 
     VehOutMapCost = 0 
     VehOutMapCost = -10 if (abs(EnvInfo.State.StartPntStep[0]) > 10 or abs(EnvInfo.State.StartPntStep[1]) > 5) else 0
-    VehOutMapCost = -2000 if (abs(EnvInfo.State.StartPntStep[0]) > 14 or abs(EnvInfo.State.StartPntStep[1]) > 9) else 0
+    VehOutMapCost = -100 if (abs(EnvInfo.State.StartPntStep[0]) > 14 or abs(EnvInfo.State.StartPntStep[1]) > 9) else 0
 
     TolCost = ExpansionCost + SteerCost + GearCost + CloseObjCost + \
         CollisionCost + PathNotFndCost + RepeatMoveCost + VehOutMapCost
@@ -215,7 +215,7 @@ def EnvReward(action, EnvInfo):
     PathFoundReward = 0
     if PlanFnd:
         # 应该增加在pathfound后对path的评判，如把数，dist2obj等，而不是恒定1000
-        PathFoundReward = 1000 + EnvInfo.StepCnt * 2    # 复杂场景下的pathfound更应奖励
+        PathFoundReward = 100 + EnvInfo.StepCnt * 2    # 复杂场景下的pathfound更应奖励
 
     TolReward = SpcUseReward + PathFoundReward + CloseGoalReward
 
@@ -265,7 +265,7 @@ def EnvDRL_ActionMapping(DRLaction):
     elif DRLaction == 5:
         EnvAction = [1, -1]
     else:
-        EnvAction = [0, 1]
+        EnvAction = [0, 0]
 
     return EnvAction
 
@@ -301,7 +301,7 @@ def expandNode(current_node):
         for steering_angle in [-1, 0, 1]:
             new_x, new_y, new_theta = cal_VechPose(current_node.x, current_node.y, current_node.theta, steering_angle, gear, ParaCfg.HASParam.step_size)
             # DQN DNN   
-            new_node = ParaCfg.HasNode(new_x, new_y, new_theta, current_node.g_cost + 0.02, 0, current_node)
+            new_node = ParaCfg.HasNode(new_x, new_y, new_theta, current_node.g_cost + 0, 0, current_node)   # 此处仅为几何拓展，使用时各自对g_cost赋值
             expdNode_list.append(new_node)
 
     return expdNode_list

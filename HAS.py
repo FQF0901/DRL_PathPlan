@@ -39,7 +39,7 @@ def hybrid_a_star(start, goal, obstacles):
         expdNode_list = utils.expandNode(current_node)  # expand child nodes from curnt node
 
         for nodes in expdNode_list:
-            nodes.h_cost = heuristic(ParaCfg.HasNode(nodes.x, nodes.y, nodes.theta, 0, 0), goal)
+            nodes.h_cost = heuristic(ParaCfg.HasNode(nodes.x, nodes.y, nodes.theta, 0, 0), goal)    # 没有g_cost
 
             new_idx = utils.get_grid_index(nodes.x, nodes.y)
             if (not utils.is_overlap_node(nodes, obstacles, 0.0, 0.0)) and nodes not in grid_cells[new_idx]:
