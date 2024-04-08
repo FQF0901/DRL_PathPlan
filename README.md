@@ -29,8 +29,8 @@
 ### 方案3：MCTS + DNN
 
 1. 针对方案2撞障碍物，修改action space后不奏效的问题，应该是DRL没有学到足够有用的东西：**当前的方案有点稀疏奖励，只在轨迹生成的时刻进行奖励**，即方案设计上只对最后的select action进行奖励，而在path found之前的action/state给的reward都是负值（因为没找到轨迹且有episode耗时等惩罚）。
-个人认为上述方案是有问题的，**会让DRL只知道最后一步的action和state是好的，但不知道如何到达最后一个state。应该借用alphago的方案，当path found后回溯，该episode下所有action和state都应奖励**。
-
+个人认为上述方案是有问题的，**会让DRL只知道最后一步的action和state是好的，但不知道如何到达最后一个state。应该借用alphago的方案，当path found后回溯，该episode下所有action和state都应奖励**。但回溯的方案不知MCTS一种，另一种详见：https://github.com/FQF0901/aleph_star/tree/master 【后续再补充】
+![alt text](image-1.png)
 2. 针对方案2原地打转要引入hybrid A star的grid的问题，虽然也是是对action space的裁剪，但这个裁剪要求DRL知道之前state是什么（即本次episode是否探索过该位置），这个MDP本质相悖。因此在想是否要引入MCTS以simulation的方式更好的剔除重复动作，给出action的价值
 
 3. AlphaZero不是任何典型的DRL方法，其重点在MCTS，DNN仅用于2处：一是对MCTS进行宽度和深度上的裁剪，二是用于逼近和存储MCTS信息。
