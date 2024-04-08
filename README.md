@@ -2,6 +2,8 @@
 
 原本想要解决的问题：是DRL对hybrid A star的搜索进行加速，即DRL直接根据当前state给出optimal action（而非人工定义的启发函数），得到next state，然后再给optimal action，。。。直到得到轨迹
 
+![alt text](image.png)
+
 =====================================
 
 ### 方案1：DQN
