@@ -1,6 +1,6 @@
 # Notebook
 
-原本想要解决的问题：是DRL对hybrid A star的搜索进行加速，即DRL直接根据当前state给出optimal action（而非人工定义的启发函数），得到next state，然后再给optimal action，。。。直到得到轨迹
+想要解决的问题：是DRL对hybrid A star的搜索进行加速，即DRL直接根据当前state给出optimal action（而非人工定义的启发函数），得到next state，然后再给optimal action，。。。直到得到轨迹【Q*】
 
 ![alt text](image.png)
 
@@ -43,6 +43,7 @@
    1. 用policy net指导: 该方案是选择当前state下的optimal action的，属于先验因此算的快，很适用于实时规划；但不同state之间的action不具备比较意义，因此开弓没有回头箭，这要求policy net训练的非常好并且可以较好应对奇异值才行
    2. 用value net指导：需要从当前state执行action并得到next_state后，才能通过value net得到value，然后**在整个tree中的leaf nodes中通过max value对应的action【propagate是对整个tree回溯，使value不受state限制，因此不同state下的value可以相互比较】**。如AlphaZero作者解释，这样计算量也较大。但**优势是发现当前state下的optical action不够好时可以“反悔”到其他state**，这一点可用在HAS的heuristic func上
    3. 在线滚动计算MCTS，用在线的n_visits指导：AlphaZero的方案，原因是可以避免DNN的奇异值，但在线滚动1600次MCTS计算量巨大
+   4. Q*可用policy net进行动作空间裁剪，再加value net给出Q做heuristic func
 
 7. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
 
