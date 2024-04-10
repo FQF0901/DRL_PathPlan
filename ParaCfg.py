@@ -67,7 +67,7 @@ class EnvInfo:
         self.StepCnt = 0
 
 class HasNode:
-    def __init__(self, x, y, theta, g_cost, h_cost, parent=None):
+    def __init__(self, x = 0, y = 0, theta = 0, g_cost = 0, h_cost = 0, parent=None):
         self.x = x
         self.y = y
         self.theta = theta
@@ -76,14 +76,17 @@ class HasNode:
         self.parent = parent
 
 class MctsNode:
-    def __init__(self, children=None, DnnQ = 0, DnnP = 0):
+    def __init__(self, children=None, visit_count = 0, DnnQ = 0, DnnP = 0):
         self.HasNode = HasNode()
         self.children = children
-        self.visit_count = 0   # 当前当前节点的访问次数
+        self.visit_count = visit_count   # 当前当前节点的访问次数
         self.Q = DnnQ       # 当前节点对应动作的平均动作价值
         self.P = DnnP       # DNN给出的P概率
 
 class MctsState:
-    def __init__(self, MctsNode, EnvState):
-        self.MctsNode = MctsNode
+    def __init__(self, EnvState = None):
         self.EnvState = EnvState
+        self.MctsNode = MctsNode()
+        self.MctsNode.HasNode = HasNode(self.EnvState.StartPntStep[0], \
+                                        self.EnvState.StartPntStep[1], \
+                                        self.EnvState.StartPntStep[2], 0, 0, None)
