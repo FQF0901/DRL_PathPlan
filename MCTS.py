@@ -13,6 +13,8 @@ import collections
 class MCTS:
     def __init__(self, EnvState):
         self.c_puct = 5
+        self.PlayOutOkCnt = 20  # 这个数最小也要大于动作空间
+        self.PlayOutTolCnt = 30
         self.grid_cells = [[] for _ in range(ParaCfg.HASParam.grid_num ** 2)]   # used for check repeat state
         self.root_state = ParaCfg.MctsState(EnvState = EnvState)
 
@@ -38,7 +40,7 @@ class MCTS:
 
         return selected_node
 
-    def expand_node(self, curt_node, EnvState):   # 这里要把不合法的动作概率全部设置为0，并补充P和Q
+    def expand_node(self, curt_node, EnvState):   # 这里要把不合法的动作概率全部设置为0，并补充P和Q。或者不应砍掉
         new_node = ParaCfg.MctsNode()
         new_HasNode_list = utils.expandNode(curt_node)
         cnt = 0
@@ -53,7 +55,7 @@ class MCTS:
             # new_node.HasNode.g_cost = new_node.HasNode.g_cost + utils.EnvReward(EnvAction, EnvInfo)  # 用于最后的真值Q（基于Path的评估）
             cnt = cnt + 1
 
-            if utils.ChildNotVaild(new_node, EnvState, self.grid_cells):   # ovlp和RepeatMove，P为0
+            if utils.ChildNotVaild(new_node, EnvState, self.grid_cells):   # ovlp和RepeatMove，P为0。或者不应砍掉
                 new_node.P = 0  
                 # new_node.Q = 0 # 不能给float("-inf")，太小在回溯时会过于影响父节点。干脆不给人工值
 
@@ -88,6 +90,10 @@ class MCTS:
         self.backpropagate(LeafNode)
 
         return state, action, action_probs
+    
+    def TkAct(self, EnvState):
+
+
 
 # ---------------------------- Collection ---------------------------
 num_episodes = 10000
@@ -101,11 +107,11 @@ for _ in range(num_episodes):
     
     done = False
     while not done:
-        state, action, action_probs = MctsTree.simulate()  # 用于policy net训练
+        state, action, action_probs = MctsTree.TkAct(EnvState)  # TkAct内基于该state推演了至多PlayOutOkCnt次成功规划
         next_state, reward, done, info, EnvState = env.step(action)
 
         state_list.append(state)
-        act_probs_list.append(action_probs)
+        act_probs_list.append(action_probs) # 经过PlayOutOkCnt次成功规划后action_probs应该是有可信度的
         
     MctsTree.root_state.MctsNode.Q = MctsTree.root_state.MctsNodHasNode.g_cost  # 结束后给出真值用于更新DNN的Q，需要细致的评判轨迹的优劣
     MctsTree.backpropagate(MctsTree.root_state.MctsNode)
