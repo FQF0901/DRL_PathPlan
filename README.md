@@ -60,12 +60,14 @@
 
 4. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
    
-5. 在tree拓展完成并对所有leaf node进行propagate后，所有experience都被存储到buffer里用于DNN训练
+5. 在tree拓展完成并对所有leaf node进行propagate后，所有experience(state, state/action_value)都被存储到buffer里用于DNN训练
+
+6. 需要训练2个网络：policy net和value net，因为动作空间大不想每次通过state value做select action，因此需要policy net先做裁剪在用value net给出state value。policy net用action value训练
 
 https://github.com/FQF0901/aleph_star/tree/master
 ![alt text](image-1.png)
 
-2.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
+1.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
    
 =====================================
 
