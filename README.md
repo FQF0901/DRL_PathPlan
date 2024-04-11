@@ -1,6 +1,6 @@
 # Notebook
 
-想要解决的问题：是DRL对hybrid A star的搜索进行加速，即DRL直接根据当前state给出optimal action（而非人工定义的启发函数），得到next state，然后再给optimal action，。。。直到得到轨迹【记作Q star】
+想要解决的问题：是DRL对hybrid A star的搜索进行加速，即DRL直接根据当前state给出optimal action（而非人工定义的启发函数），得到next state，然后再给optimal action，。。。直到得到轨迹【记作DHAS】
 
 ![alt text](image.png)
 
@@ -26,7 +26,7 @@
 
 =====================================
 
-### 方案3：AlphaZero
+### 方案3：AlphaZero（MCTS + DNN）
 
 1. 针对方案2撞障碍物，修改action space后不奏效的问题，应该是DRL没有学到足够有用的东西：**当前的方案有点稀疏奖励，只在轨迹生成的时刻进行奖励**，即方案设计上只对最后的select action进行奖励，而在path found之前的action/state给的reward都是负值（因为没找到轨迹且有episode耗时等惩罚）。
 个人认为上述方案是有问题的，**会让DRL只知道最后一步的action和state是好的，但不知道如何到达最后一个state。应该借用alphago的方案，当path found后回溯，该episode下所有action和state都应奖励**。
@@ -40,24 +40,32 @@
    
 5. 实际对弈过程中有3种指导拓展node的方式：
    1. 用policy net指导: 该方案是选择当前state下的optimal action的，属于先验因此算的快，很适用于实时规划；但不同state之间的action不具备比较意义，因此开弓没有回头箭，这要求policy net训练的非常好并且可以较好应对奇异值才行
-   2. 用value net指导：需要从当前state执行action并得到next_state后，才能通过value net得到value，然后**在整个tree中的leaf nodes中通过max value对应的action【propagate是对整个tree回溯，使value不受state限制，因此不同state下的value可以相互比较】**。如AlphaZero作者解释，这样计算量也较大。但**优势是发现当前state下的optical action不够好时可以“反悔”到其他state**，这一点可用在HAS的heuristic func上
+   2. 用value net指导：需要从当前state执行action并得到next_state后，才能通过value net得到state value，然后**在整个tree中的leaf nodes中通过max value对应的action【propagate是对整个tree回溯，使value不受state限制，因此不同state下的value可以相互比较】**。如AlphaZero作者解释，这样计算量也较大。但**优势是发现当前state下的optical action不够好时可以“反悔”到其他state**，这一点可用在DHAS的heuristic func上
    3. 在线滚动计算MCTS，用在线的n_visits指导：AlphaZero的方案，原因是可以避免DNN的奇异值，但在线滚动1600次MCTS计算量巨大
-   4. Q star可用policy net进行动作空间裁剪，再加value net给出Q做heuristic func。平衡计算速度和兜底
+   4. DHAS可用policy net进行动作空间裁剪，再加value net给出state value做heuristic func。平衡计算速度和兜底
 
 6. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
    
-7. 但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录Q。个人感觉该方案用于Q star 浪费严重，因为AlphaZero重点更像是在MCTS，而Q star重点在Q value。照搬AlphaZero方案对Q star来讲不够有针对性。因此基于《Reinforcement Learning with A* and a Deep Heuristic》给出方案4
+7. 但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
    
 =====================================
 
-### 方案4：
+### 方案4：DQN + MCTS
 
-1. 
+1. 首先要再强调的是DQN是在某个state下通过action value给出optimal action，它并不能在不同state下比较action的优劣。但发现《Reinforcement Learning with A* and a Deep Heuristic》中假设了在不同state下比较action value不失一般性，感觉不太有理论支撑
+   
+2. 所有visited state和possible actions都会被存储到tree里
+   
+3. state/action value会被propagate以满足TD equation。但回溯时间在整个tree拓展结束后，并针对所有leaf node回溯（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯）
+
+4. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
+   
+5. 在tree拓展完成并对所有leaf node进行propagate后，所有experience都被存储到buffer里用于DNN训练
 
 https://github.com/FQF0901/aleph_star/tree/master
 ![alt text](image-1.png)
 
-1.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
+2.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
    
 =====================================
 
