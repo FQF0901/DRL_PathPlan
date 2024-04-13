@@ -318,7 +318,7 @@ def get_grid_index(x, y):   # 这里后续要改成3维
     grid_y = int((y - -20) / ParaCfg.HASParam.cell_size)
     return grid_x + grid_y * ParaCfg.HASParam.grid_num
 
-def ChildNotVaild(MctsNode, EnvInfoState, grid_cells):    # EnvInfoState
+def ChildNotVaild(MctsNode, EnvInfoState):    # EnvInfoState
     OvlpFlag = False
     RptStFlag = False
 
