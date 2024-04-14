@@ -107,7 +107,7 @@ class MCTS:
     def simulate(self, EnvInfo):  # 这是针对某个init state的一个完整充分的探索流程
         node = self.root_state.MctsNode
 
-        for _ in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次 或 OpenList = []
+        for cnt in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次 或 OpenList = []
 
             while True: # 探索选择，直到找到叶节点
                 if self.is_leaf(node):
@@ -117,7 +117,7 @@ class MCTS:
                 OpListFlg, node = self.select_node(node)   # 选择该node的children，更新n_visit，并判断root_node是否openlist = []
                 if OpListFlg == 0:
                     print('Episode end due to OpenList = [] !')
-                    return
+                    return 2, cnt
             
             # 还要判断LeafNode是否可以PathFnd
             obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
@@ -133,9 +133,17 @@ class MCTS:
 
         self.backpropagateV(node)    # 1000次充分探索后要回溯state value
         
-        return state, act_probs, V_value
+        return 1, self.expd_maxcnt
     
+    def StoreTreeInfo(self, node, state_list, act_probs_list, V_value_list):
 
+        if node.visit_count == 1:  # 这里是store时的递归尽头, =1是selected once node
+            return
+
+        # 遍历所有子节点
+        for child in node.children:
+            self.backpropagateV(child)
+    
 # ---------------------------- Collection ---------------------------
 num_episodes = 10000
 
@@ -145,11 +153,9 @@ for _ in range(num_episodes):
     DRLstate, EnvState = env.reset()
     MctsTree = MCTS(EnvState)
     state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
+        
+    DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo)
+
+    MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
     
-    state, act_probs, V_value = MctsTree.simulate(EnvInfo)  # TkAct内基于该state推演了至多PlayOutOkCnt次成功规划
-
-    state_list.append(state)
-    act_probs_list.append(act_probs)
-    V_value_list.append(V_value)
-
-# pickle
+    # pickle
