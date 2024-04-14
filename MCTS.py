@@ -13,7 +13,7 @@ import collections
 class MCTS:
     def __init__(self, EnvState):
         self.root_state = ParaCfg.MctsState(EnvState = EnvState)
-        self.exploration_weight = 10    # 这个权重待讨论
+        self.exploration_weight = 100    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
         self.expd_maxcnt = 1000 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
 
@@ -61,14 +61,14 @@ class MCTS:
             DnnV, DnnP = utils.DNN(new_node.HasNode)    # 需要补充DNN
             new_node.V = DnnV   # 用于指导select
             new_node.P = DnnP   # 用于指导select
+            new_node.idx = cnt
 
-            if utils.ChildNotVaild(new_node, EnvInfo.State):   # ovlp和RepeatMove，type = dead node
+            if utils.ChildNotVaild(curt_node.idx, new_node, EnvInfo.State):   # ovlp和RepeatMove，type = dead node
                 new_node.type = 2   # type = dead node
-                new_node.HasNode.g_cost = new_node.HasNode.g_cost + -40 # 该node确认是条死路,-40保证不及格
+                # new_node.HasNode.g_cost = new_node.HasNode.g_cost # ovlp和repear move不建议惩罚
             else:
                 new_node.type = 1   # type = norm node
-                EnvAction = utils.EnvDRL_ActionMapping(cnt)
-                new_node.HasNode.g_cost = new_node.HasNode.g_cost + utils.EnvReward(EnvAction, EnvInfo)  # utils.EnvReward无需判断PathFnd
+                new_node.HasNode.g_cost = new_node.HasNode.g_cost + utils.MctsExpdrRwd(new_node, EnvInfo)  # utils.EnvReward无需判断PathFnd
 
             cnt = cnt + 1
 
@@ -78,16 +78,16 @@ class MCTS:
     
     def is_leaf(self, node):
         """检查是否是叶节点，即没有被扩展的节点"""
-        NoChildFlag = node.children == None # 没子节点 或 子节点的P全为0？
-         
-        if not NoChildFlag: # 有子节点但均不vaild
-            ChildNotVaildFlag = sum(child.P for child in node.children) == 0
-
-        return NoChildFlag or ChildNotVaildFlag    # 这里还要增加判断children的P是否不为0
+        return node.children == None
     
     def backpropagateV(self, node):
-        if self.is_leaf(node):
+        if node.visit_count == 1:  # 这里是递归的尽头, =1是selected once node
             node.V = node.HasNode.g_cost + 100 if node.type == 3 else 0
+            node.Vdone = True
+            return
+        elif node.visit_count == 0: # =0是leaf node
+            node.V = node.HasNode.g_cost
+            node.Vdone = True
             return
 
         # 遍历所有子节点
@@ -101,17 +101,13 @@ class MCTS:
 
         if all_children_done:
             # 计算父节点的DnnV
-            total_child_v = sum(child.DnnV * child.visit_count for child in node.children)
-            total_visits = sum(child.visit_count for child in node.children)
-            if total_visits != 0:
-                node.V = total_child_v / total_visits
-            node.Vdone = True
-            
+            node.V = sum(child.V * child.visit_count / (node.visit_count - 1) for child in node.children)
+   
     
     def simulate(self, EnvInfo):  # 这是针对某个init state的一个完整充分的探索流程
         node = self.root_state.MctsNode
 
-        for _ in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次
+        for _ in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次 或 OpenList = []
 
             while True: # 探索选择，直到找到叶节点
                 if self.is_leaf(node):
@@ -120,23 +116,24 @@ class MCTS:
 
                 OpListFlg, node = self.select_node(node)   # 选择该node的children，更新n_visit，并判断root_node是否openlist = []
                 if OpListFlg == 0:
-                    print('OpenList = [] !')
+                    print('Episode end due to OpenList = [] !')
                     return
             
             # 还要判断LeafNode是否可以PathFnd
-            PlanFnd, _, _ = utils.cal_validRS(LeafNode, Tgt_node, obstacles)
+            obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
+            PlanFnd, _, _ = utils.cal_validRS(LeafNode, EnvInfo.VehPntInit, obstacles)
             if PlanFnd:
                 LeafNode.type = 3
+                # LeafNode.V = LeafNode.HasNode.g_cost + 100
                 _ = self.backpropagate_Type(LeafNode)
-
                 
             new_Node_list = self.expand_node(LeafNode, EnvInfo)   # 仅判断是否ovlp和repeat move
-            for HasNode in new_Node_list:    # 把type回溯父节点，以免select的时候选到dead node或PathFnd
-                _ = self.backpropagate_Type(HasNode)
+            for newNode in new_Node_list:    # 把type回溯父节点，以免select的时候选到dead node或PathFnd
+                _ = self.backpropagate_Type(newNode)
 
         self.backpropagateV(node)    # 1000次充分探索后要回溯state value
         
-        return state, action, action_probs
+        return state, act_probs, V_value
     
 
 # ---------------------------- Collection ---------------------------
@@ -147,19 +144,12 @@ env = Env.Env()
 for _ in range(num_episodes):
     DRLstate, EnvState = env.reset()
     MctsTree = MCTS(EnvState)
-    state_list, act_probs_list, Q_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
+    state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
     
-    done = False
-    while not done:
-        state, action, action_probs = MctsTree.TkAct(EnvState)  # TkAct内基于该state推演了至多PlayOutOkCnt次成功规划
-        next_state, reward, done, info, EnvState = env.step(action)
+    state, act_probs, V_value = MctsTree.simulate(EnvInfo)  # TkAct内基于该state推演了至多PlayOutOkCnt次成功规划
 
-        state_list.append(state)
-        act_probs_list.append(action_probs) # 经过PlayOutOkCnt次成功规划后action_probs应该是有可信度的
-        
-    MctsTree.root_state.MctsNode.V = MctsTree.root_state.MctsNodHasNode.g_cost  # 结束后给出真值用于更新DNN的Q，需要细致的评判轨迹的优劣
-    MctsTree.backpropagate(MctsTree.root_state.MctsNode)
-
-    # Q_value_list.append()
+    state_list.append(state)
+    act_probs_list.append(act_probs)
+    V_value_list.append(V_value)
 
 # pickle

@@ -318,17 +318,32 @@ def get_grid_index(x, y):   # 这里后续要改成3维
     grid_y = int((y - -20) / ParaCfg.HASParam.cell_size)
     return grid_x + grid_y * ParaCfg.HASParam.grid_num
 
-def ChildNotVaild(MctsNode, EnvInfoState):    # EnvInfoState
+def ChildNotVaild(CrntIdx, NewNode, EnvInfoState):    # EnvInfoState
     OvlpFlag = False
     RptStFlag = False
 
     # overlap
     obstacles = EnvInfoState.ObjRect + EnvInfoState.OthVehRects
-    OvlpFlag = is_overlap_node(MctsNode.HasNode, obstacles, 0.0, 0.0)
+    OvlpFlag = is_overlap_node(NewNode.HasNode, obstacles, 0.0, 0.0)
 
     # RepeatMove
-    new_idx = get_grid_index(MctsNode.HasNode.x, MctsNode.HasNode.y)
-    if MctsNode.HasNode in grid_cells[new_idx]:
+    if abs(CrntIdx - NewNode.idx) == 3:
         RptStFlag = True
 
     return OvlpFlag or RptStFlag
+
+def MctsExpdrRwd(new_node, EnvInfo):
+    act_prev = EnvDRL_ActionMapping(new_node.HasNode.parent.idx)
+    acr_crnt = EnvDRL_ActionMapping(new_node.idx)
+    
+    # Cost
+    ExpansionCost = - 1
+    SteerCost = abs(acr_crnt[0] - act_prev[0]) * -1
+    GearCost = 0 if acr_crnt[1] == act_prev[1] else -3
+
+    VehOutMapCost = 0 
+    VehOutMapCost = -10 if (abs(EnvInfo.State.StartPntStep[0]) > 10 or abs(EnvInfo.State.StartPntStep[1]) > 5) else 0
+    VehOutMapCost = -20 if (abs(EnvInfo.State.StartPntStep[0]) > 14 or abs(EnvInfo.State.StartPntStep[1]) > 9) else 0
+
+    TolCost = ExpansionCost + SteerCost + GearCost + VehOutMapCost
+    return TolCost

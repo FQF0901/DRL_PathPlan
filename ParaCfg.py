@@ -84,6 +84,8 @@ class MctsNode:
         self.P = DnnP       # DNN给出的P概率
         self.Vdone = Vdone  # node的V是否回溯完成
         self.type = Type    # 0:default, 1:Norm, 2:Dead, 3:PathFnd。用于记录是否充分探索
+        self.idx = -1   # 和action绑定
+        # self.rank = 0   # n叉数的第几层
 
 class MctsState:
     def __init__(self, EnvState = None):
