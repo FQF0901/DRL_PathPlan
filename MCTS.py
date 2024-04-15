@@ -11,8 +11,13 @@ import collections
 
 # ---------------------------- MCTS Tree ---------------------------
 class MCTS:
-    def __init__(self, EnvState):
-        self.root_state = ParaCfg.MctsState(EnvState = EnvState)
+    def __init__(self, EnvInfo):
+        self.root_node = ParaCfg.MctsNode()
+        self.root_node.HasNode.x = EnvInfo.SlotPntInit[0]
+        self.root_node.HasNode.y = EnvInfo.SlotPntInit[1]
+        self.root_node.HasNode.theta = EnvInfo.SlotPntInit[2]
+
+        self.root_state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = self.root_node)
         self.exploration_weight = 100    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
         self.expd_maxcnt = 1000 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
@@ -135,14 +140,19 @@ class MCTS:
         
         return 1, self.expd_maxcnt
     
-    def StoreTreeInfo(self, node, state_list, act_probs_list, V_value_list):
+    def StoreTreeInfo(self, MctsNode, state_list, act_probs_list, V_value_list):
 
-        if node.visit_count == 1:  # 这里是store时的递归尽头, =1是selected once node
-            return
+        # 计算需要存储的信息
+        state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
+
+        # 存储当前节点信息
+        state_list.append(MctsNode.state)
+        act_probs_list.append(MctsNode.action_probs)
+        V_value_list.append(MctsNode.V) # state value
 
         # 遍历所有子节点
-        for child in node.children:
-            self.backpropagateV(child)
+        for child in MctsNode.children:
+            self.StoreTreeInfo(child, state_list, act_probs_list, V_value_list)
     
 # ---------------------------- Collection ---------------------------
 num_episodes = 10000
@@ -150,8 +160,8 @@ num_episodes = 10000
 env = Env.Env()
 
 for _ in range(num_episodes):
-    DRLstate, EnvState = env.reset()
-    MctsTree = MCTS(EnvState)
+    DRLstate, EnvInfo = env.reset()
+    MctsTree = MCTS(EnvInfo)
     state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
         
     DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo)

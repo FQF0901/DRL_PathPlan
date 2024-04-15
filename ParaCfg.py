@@ -76,7 +76,7 @@ class HasNode:
         self.parent = parent
 
 class MctsNode:
-    def __init__(self, children=None, visit_count = 0, DnnV = 0, DnnP = 0, Vdone = False, Type = 0):
+    def __init__(self,children=None, visit_count = 0, DnnV = 0, DnnP = 0, Vdone = False, Type = 0):
         self.HasNode = HasNode()
         self.children = children
         self.visit_count = visit_count   # 当前当前节点的访问次数
@@ -88,9 +88,6 @@ class MctsNode:
         # self.rank = 0   # n叉数的第几层
 
 class MctsState:
-    def __init__(self, EnvState = None):
+    def __init__(self, EnvState = None, MctsNode = None):
         self.EnvState = EnvState
-        self.MctsNode = MctsNode()
-        self.MctsNode.HasNode = HasNode(self.EnvState.StartPntStep[0], \
-                                        self.EnvState.StartPntStep[1], \
-                                        self.EnvState.StartPntStep[2], 0, 0, None)
+        self.MctsNode = MctsNode

@@ -188,7 +188,8 @@ for i in range(10):
     with tqdm(total=int(num_episodes / 10), desc='Itr %d' % i) as pbar:
         for i_episode in range(int(num_episodes / 10)):
             episode_return = 0
-            state, EnvState = env.reset()
+            state, EnvInfo = env.reset()
+            EnvState = EnvInfo.State
             done = False
             # ---------------------- #
             logging.debug(" *** 第 %s个for loop里, 第%s个epsd *** ", i, i_episode)

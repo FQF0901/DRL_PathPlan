@@ -119,7 +119,7 @@ class Env:
         
         DRLstate = utils.EnvDRL_StateMapping(self.EnvInfo.State)
 
-        return DRLstate, self.EnvInfo.State
+        return DRLstate, self.EnvInfo
     
     def step(self, action):
         action = utils.EnvDRL_ActionMapping(action)
