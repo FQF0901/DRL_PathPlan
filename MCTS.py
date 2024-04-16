@@ -43,7 +43,7 @@ class MCTS:
 
     def backpropagate_Type(self, node):  # 除了expand_node要回溯type = 2，主程序也要用来回溯 type = 3
         # 反向传播，更新节点的 Type：充分探索分2种情况：dead 和 PathFnd
-        if node.node.HasNode.parent == None:
+        if node.HasNode.parent == None:
             print('Epsd end at root_node, so donnot need backpropagate !')
             return
         
@@ -67,7 +67,8 @@ class MCTS:
 
         for HasNode in new_HasNode_list:
             new_node.HasNode = HasNode
-            DnnV, DnnP = utils.DNN(new_node.HasNode)    # 需要补充DNN
+            new_node.HasNode.parent = curt_node # utils.expandNode中的parent给的是HASnode的类型
+            DnnV, DnnP =[60, 0.166]    # 需要补充DNN: utils.DNN(new_node.HasNode)
             new_node.V = DnnV   # 用于指导select
             new_node.P = DnnP   # 用于指导select
             new_node.idx = cnt
@@ -80,14 +81,14 @@ class MCTS:
                 new_node.HasNode.g_cost = new_node.HasNode.g_cost + utils.MctsExpdrRwd(new_node, EnvInfo)  # utils.EnvReward无需判断PathFnd
 
             cnt = cnt + 1
-
+        
             curt_node.children.append(new_node) # 都填进去，只是不选择 type = 2 的node
 
         return new_HasNode_list
     
     def is_leaf(self, node):
         """检查是否是叶节点，即没有被扩展的节点"""
-        return node.children == None
+        return node.children == []
     
     def backpropagateV(self, node):
         if node.visit_count == 1:  # 这里是递归的尽头, =1是selected once node

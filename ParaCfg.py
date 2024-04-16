@@ -76,7 +76,7 @@ class HasNode:
         self.parent = parent
 
 class MctsNode:
-    def __init__(self,children=None, visit_count = 0, DnnV = 0, DnnP = 0, Vdone = False, Type = 0):
+    def __init__(self,children=[], visit_count = 0, DnnV = 0, DnnP = 0, Vdone = False, Type = 0):
         self.HasNode = HasNode()
         self.children = children
         self.visit_count = visit_count   # 当前当前节点的访问次数

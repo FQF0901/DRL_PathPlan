@@ -323,7 +323,7 @@ def ChildNotVaild(CrntIdx, NewNode, EnvInfoState):    # EnvInfoState
     RptStFlag = False
 
     # overlap
-    obstacles = EnvInfoState.ObjRect + EnvInfoState.OthVehRects
+    obstacles = EnvInfoState.ObjRect + EnvInfoState.OthVehRect
     OvlpFlag = is_overlap_node(NewNode.HasNode, obstacles, 0.0, 0.0)
 
     # RepeatMove
