@@ -67,7 +67,7 @@
 https://github.com/FQF0901/aleph_star/tree/master
 ![alt text](image-1.png)
 
-1.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
+7.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
    
 =====================================
 

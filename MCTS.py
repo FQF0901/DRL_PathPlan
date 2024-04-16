@@ -43,6 +43,10 @@ class MCTS:
 
     def backpropagate_Type(self, node):  # 除了expand_node要回溯type = 2，主程序也要用来回溯 type = 3
         # 反向传播，更新节点的 Type：充分探索分2种情况：dead 和 PathFnd
+        if node.node.HasNode.parent == None:
+            print('Epsd end at root_node, so donnot need backpropagate !')
+            return
+        
         while node is not None and (node.type == 2 or node.type == 3):   # 本节点是个dead node 或 PathFnd
             nodeBro_list = node.HasNode.parent.children # 找本node的所有兄弟节点
             nodeBro_PathFnd = False
@@ -58,7 +62,7 @@ class MCTS:
 
     def expand_node(self, curt_node, EnvInfo):   # 这里要把不合法的动作type置2，这个type需要回溯父节点
         new_node = ParaCfg.MctsNode()
-        new_HasNode_list = utils.expandNode(curt_node)
+        new_HasNode_list = utils.expandNode(curt_node.HasNode)
         cnt = 0
 
         for HasNode in new_HasNode_list:
@@ -126,7 +130,9 @@ class MCTS:
             
             # 还要判断LeafNode是否可以PathFnd
             obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
-            PlanFnd, _, _ = utils.cal_validRS(LeafNode, EnvInfo.VehPntInit, obstacles)
+            current_node = LeafNode.HasNode
+            goal_node = ParaCfg.HasNode(x = EnvInfo.VehPntInit[0], y = EnvInfo.VehPntInit[1], theta = EnvInfo.VehPntInit[2])
+            PlanFnd, _, _ = utils.cal_validRS(current_node, goal_node, obstacles)
             if PlanFnd:
                 LeafNode.type = 3
                 # LeafNode.V = LeafNode.HasNode.g_cost + 100
@@ -145,10 +151,17 @@ class MCTS:
         # 计算需要存储的信息
         state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
 
+        if MctsNode.HasNode.parent != None:
+            action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count)
+        else:
+            action_probs = 1
+
+        State_Value = MctsNode.V
+
         # 存储当前节点信息
-        state_list.append(MctsNode.state)
-        act_probs_list.append(MctsNode.action_probs)
-        V_value_list.append(MctsNode.V) # state value
+        state_list.append(state)
+        act_probs_list.append(action_probs)
+        V_value_list.append(State_Value) # state value
 
         # 遍历所有子节点
         for child in MctsNode.children:
