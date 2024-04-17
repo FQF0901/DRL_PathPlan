@@ -20,7 +20,7 @@ class MCTS:
         self.root_state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = self.root_node)
         self.exploration_weight = 100    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
-        self.expd_maxcnt = 1000 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
+        self.expd_maxcnt = 10 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
 
     def select_node(self, curt_node):   # 通过PUCT公式选择子节点中最有价值的节点。不能用min heap，因为没有随机性
         if curt_node.type == 2 or curt_node.type == 3: # 确保当前不是dead node
@@ -37,7 +37,7 @@ class MCTS:
                 best_value = puct_value
                 selected_node = child_node
 
-            selected_node.visit_count = selected_node.visit_count + 1
+        selected_node.visit_count = selected_node.visit_count + 1
 
         return True, selected_node
 
@@ -155,7 +155,7 @@ class MCTS:
         state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
 
         if MctsNode.HasNode.parent != None:
-            action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count)
+            action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count - 1)
         else:
             action_probs = 1
 
