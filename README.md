@@ -54,15 +54,18 @@
 
 1. 首先要再强调的是DQN是在某个state下通过action value给出optimal action，它并不能在不同state下比较action的优劣。但发现《Reinforcement Learning with A* and a Deep Heuristic》中假设了在不同state下比较action value不失一般性，感觉不太有理论支撑
    
-2. 所有visited state和possible actions都会被存储到tree里
+2. 回溯的时候要注意bellman equation
+![alt text](image-2.png)
    
-3. state/action value会被propagate以满足TD equation。但回溯时间在整个tree拓展结束后，并针对所有leaf node回溯（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯）
-
-4. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
+3. 所有visited state和possible actions都会被存储到tree里
    
-5. 在tree拓展完成并对所有leaf node进行propagate后，所有experience(state, state/action_value)都被存储到buffer里用于DNN训练
+4. state/action value会被propagate以满足TD equation。但回溯时间在整个tree拓展结束后，并针对所有leaf node回溯（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯）
 
-6. 需要训练2个网络：policy net和value net，因为动作空间大不想每次通过state value做select action，因此需要policy net先做裁剪在用value net给出state value。policy net用action value训练
+5. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
+   
+6. 在tree拓展完成并对所有leaf node进行propagate后，所有experience(state, state/action_value)都被存储到buffer里用于DNN训练
+
+7. 需要训练2个网络：policy net和value net，因为动作空间大不想每次通过state value做select action，因此需要policy net先做裁剪在用value net给出state value。policy net用action value训练
 
 https://github.com/FQF0901/aleph_star/tree/master
 ![alt text](image-1.png)
