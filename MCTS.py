@@ -8,6 +8,7 @@ import Env
 import logging
 import tqdm
 import collections
+import matplotlib.pyplot as plt
 
 # ---------------------------- MCTS Tree ---------------------------
 class MCTS:
@@ -185,3 +186,24 @@ for _ in range(num_episodes):
     MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
     
     # pickle
+
+# ---------------------------- Visualization ---------------------------
+def visualize_tree(root):
+    fig, ax = plt.subplots()
+    plot_tree(ax, root)
+    ax.set_aspect('equal')
+    ax.axis('off')
+    plt.show()
+
+def plot_tree(ax, node, x=0, y=0, dx=1, dy=1):
+    ax.plot(x, y, 'bo', markersize=10)  # 绘制节点
+    ax.text(x, y, f"({node.has_node.x}, {node.has_node.y})", fontsize=8, ha='center', va='center')  # 节点坐标文本
+
+    num_children = len(node.children)
+    if num_children > 0:
+        next_dx = dx / num_children
+        next_x = x - dx / 2
+        for child in node.children:
+            plot_tree(ax, child, x=next_x, y=y-dy, dx=next_dx, dy=dy*2)
+            ax.plot([x, next_x], [y, y-dy], 'k-')  # 绘制父节点和子节点的连接线
+            next_x += next_dx
