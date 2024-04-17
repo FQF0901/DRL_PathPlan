@@ -61,11 +61,13 @@ class MCTS:
             node = node.HasNode.parent
 
     def expand_node(self, curt_node, EnvInfo):   # 这里要把不合法的动作type置2，这个type需要回溯父节点
-        new_node = ParaCfg.MctsNode()
         new_HasNode_list = utils.expandNode(curt_node.HasNode)
+        new_MctsNode_list = []
         cnt = 0
 
         for HasNode in new_HasNode_list:
+            new_node = ParaCfg.MctsNode()
+
             new_node.HasNode = HasNode
             new_node.HasNode.parent = curt_node # utils.expandNode中的parent给的是HASnode的类型
             DnnV, DnnP =[60, 0.166]    # 需要补充DNN: utils.DNN(new_node.HasNode)
@@ -81,10 +83,10 @@ class MCTS:
                 new_node.HasNode.g_cost = new_node.HasNode.g_cost + utils.MctsExpdrRwd(new_node, EnvInfo)  # utils.EnvReward无需判断PathFnd
 
             cnt = cnt + 1
-        
             curt_node.children.append(new_node) # 都填进去，只是不选择 type = 2 的node
+            new_MctsNode_list.append(new_node)
 
-        return new_HasNode_list
+        return new_MctsNode_list
     
     def is_leaf(self, node):
         """检查是否是叶节点，即没有被扩展的节点"""
