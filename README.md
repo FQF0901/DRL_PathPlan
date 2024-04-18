@@ -54,7 +54,7 @@
 
 1. 首先要再强调的是DQN是在某个state下通过action value给出optimal action，它并不能在不同state下比较action的优劣。但发现《Reinforcement Learning with A* and a Deep Heuristic》中假设了在不同state下比较action value不失一般性，感觉不太有理论支撑
    
-2. 回溯的时候要注意bellman equation
+2. 回溯的时候要注意bellman equation：**return_parent = Sum_pi(return_child * gamma + reward)**
 ![alt text](image-2.png)
    
 3. 所有visited state和possible actions都会被存储到tree里
