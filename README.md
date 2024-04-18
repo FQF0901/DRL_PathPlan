@@ -58,7 +58,7 @@
 2. 回溯的时候要注意bellman equation：**return_parent = Sum_pi(return_child * gamma + reward)**
 ![alt text](image-2.png)
 
-3. 从leaf node向root回溯时，不能回溯g_cost(评价整条轨迹的方向盘和换挡)，因为有MDP假设。但可以放在reward里，state里加上当前steer和gear，根据action给出对steer和gear的reward。
+3. 从leaf node向root回溯时，不能回溯g_cost(无论leaf node的V还是回溯过程中的parent V，都不能评价整条轨迹的方向盘和换挡)，因为违反MDP假设。但可以放在reward里，state里加上当前steer和gear，根据action给出对steer和gear的reward。
    
 4. 所有visited state和possible actions都会被存储到tree里
    
