@@ -23,7 +23,7 @@ class MCTS:
         self.root_state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = self.root_node)
         self.exploration_weight = 100    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
-        self.expd_maxcnt = 10 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
+        self.expd_maxcnt = 100 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
 
     # ---------------------------- Visualization ---------------------------
     def visualize_tree(self, root):
@@ -31,8 +31,9 @@ class MCTS:
         filename = f"MctsTree_{timestamp}"
     
         dot = graphviz.Digraph()
+        dot.attr(rankdir='LR')  # 设置横向排列
         self.add_nodes(root, dot)
-        dot.render(filename, format='png', cleanup=True)    
+        dot.render(filename, format='svg', cleanup=True)    
 
     def add_nodes(self, node, dot):
         formatted_x = "{:.3f}".format(node.HasNode.x)
