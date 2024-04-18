@@ -27,6 +27,7 @@ class MCTS:
 
     # ---------------------------- Visualization ---------------------------
     def visualize_tree(self, root):
+        time.sleep(1)   # 等待1秒,防止重名
         timestamp = time.strftime("%d%H%M%S", time.localtime())
         filename = f"MctsTree_{timestamp}"
     
@@ -47,8 +48,14 @@ class MCTS:
     # -----------------------------------------------------------------------
 
     def select_node(self, curt_node):   # 通过PUCT公式选择子节点中最有价值的节点。不能用min heap，因为没有随机性
-        if curt_node.type == 2 or curt_node.type == 3: # 确保当前不是 2:Dead, 3:PathFnd
-            return False, curt_node
+        OpListFlg = 1
+
+        if curt_node.type == 2: # 实际作用是判定root_node的状态 2:Dead
+            OpListFlg = 2
+            return OpListFlg, curt_node
+        elif curt_node.type == 3:   # 判定root_node的状态 3:PathFnd
+            OpListFlg = 3
+            return OpListFlg, curt_node
 
         best_value = float("-inf")
         selected_node = None
@@ -64,12 +71,12 @@ class MCTS:
 
         selected_node.visit_count = selected_node.visit_count + 1
 
-        return True, selected_node
+        return OpListFlg, selected_node
 
     def backpropagate_Type(self, node):  # 除了expand_node要回溯type = 2，主程序也要用来回溯 type = 3
         # 反向传播，更新节点的 Type：充分探索分2种情况：dead 和 PathFnd
         if node.HasNode.parent == None:
-            print('Epsd end at root_node, so donnot need backpropagate !')
+            # print('Epsd end at root_node, so donnot need backpropagate !')
             return
         
         while node is not None and (node.type == 2 or node.type == 3):   # 本节点是个dead node 或 PathFnd
@@ -152,10 +159,13 @@ class MCTS:
                     LeafNode = node
                     break
 
-                OpListFlg, node = self.select_node(node)   # 选择该node的children，更新n_visit，并判断root_node是否openlist = []
-                if OpListFlg == 0:
+                OpListFlg, node = self.select_node(node)   # OpListFlg: 2:openlist = [], 3:RootNode PathFnd
+                if OpListFlg == 2:
                     print('Episode end due to OpenList = [] !')
-                    return 2, cnt
+                    return OpListFlg, cnt
+                elif OpListFlg == 3:
+                    print('Episode end due to Root_Node PathFnd !')
+                    return OpListFlg, cnt
             
             # 还要判断LeafNode是否可以PathFnd
             obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
@@ -168,12 +178,12 @@ class MCTS:
                 _ = self.backpropagate_Type(LeafNode)
                 
             new_Node_list = self.expand_node(LeafNode, EnvInfo)   # 仅判断是否ovlp和repeat move
-            # self.visualize_tree(MctsTree.root_state.MctsNode)
             for newNode in new_Node_list:    # 把type回溯父节点，以免select的时候选到dead node或PathFnd
                 _ = self.backpropagate_Type(newNode)
 
-        self.backpropagateV(node)    # 1000次充分探索后要回溯state value
-        
+        MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
+        self.backpropagateV(self.root_state.MctsNode)    # 充分探索后要回溯state value
+        print('Episode end due to reach expd_maxcnt !')
         return 1, self.expd_maxcnt
     
     def StoreTreeInfo(self, MctsNode, state_list, act_probs_list, V_value_list):
@@ -183,14 +193,10 @@ class MCTS:
             # 计算需要存储的信息
             state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
 
-            try:
-                if MctsNode.HasNode.parent != None:
-                    action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count - 1)
-                else:
-                    action_probs = 1
-            except ZeroDivisionError:
-                print("除零错误发生！当前节点信息： x:{}, y:{}, theta:{}".format(MctsNode.HasNode.x, MctsNode.HasNode.y, MctsNode.HasNode.theta))
-                sys.exit("程序终止：除零错误发生，无法继续运行！")
+            if MctsNode.HasNode.parent != None:
+                action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count - 1)
+            else:
+                action_probs = 1
 
             State_Value = MctsNode.V
 
@@ -215,8 +221,8 @@ for _ in range(num_episodes):
     MctsTree = MCTS(EnvInfo)
     state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
         
-    DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo) # DoneFlag = 1:Cnt>expd_maxcnt, DoneFlag = 2:openlist = []
-    MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
+    DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo) # 1:Cnt>expd_maxcnt, 2:openlist = [], 3:PathFnd
+    # MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
     MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
     
     # pickle
