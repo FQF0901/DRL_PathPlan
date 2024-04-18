@@ -35,18 +35,20 @@
 2. AlphaZero不是任何典型的DRL方法，其重点在MCTS，DNN仅用于2处：一是对MCTS进行宽度和深度上的裁剪，二是用于逼近和存储MCTS信息。
    
 3. AlphaZero为何同时拥有policy net和value net？实际可以用value net做policy net的活儿（即给出先验概率进行MCTS的宽度裁剪），但一是在巨大action space的情况下效率低下；二是他俩本质是在干两个不同的事情，用不同的网络头会更适合，并在一起实践效果不好。详见AlphaZero作者本人的解释：https://www.reddit.com/r/reinforcementlearning/comments/1b1te73/help_me_understand_why_use_a_policy_net_instead/
-
-4. AlphaZero存储**每次对弈下的softmax(n_visit)** 和 **每局结束并backpropagate后的winflag**用于policy net和value net的训练
    
-5. 实际对弈过程中有3种指导拓展node的方式：
+4. 补充一点：A2C里也存在policy net和value net，其value net一般指的是action value（不是state value，也不是reward）
+
+5. AlphaZero存储**每次对弈下的softmax(n_visit)** 和 **每局结束并backpropagate后的winflag**用于policy net和value net的训练
+   
+6. 实际对弈过程中有3种指导拓展node的方式：
    1. 用policy net指导: 该方案是选择当前state下的optimal action的，属于先验因此算的快，很适用于实时规划；但不同state之间的action不具备比较意义，因此开弓没有回头箭，这要求policy net训练的非常好并且可以较好应对奇异值才行
    2. 用value net指导：需要从当前state执行action并得到next_state后，才能通过value net得到state value，然后**在整个tree中的leaf nodes中通过max value对应的action【propagate是对整个tree回溯，使value不受state限制，因此不同state下的value可以相互比较】**。如AlphaZero作者解释，这样计算量也较大。但**优势是发现当前state下的optical action不够好时可以“反悔”到其他state**，这一点可用在DHAS的heuristic func上
    3. 在线滚动计算MCTS，用在线的n_visits指导：AlphaZero的方案，原因是可以避免DNN的奇异值，但在线滚动1600次MCTS计算量巨大
    4. DHAS可用policy net进行动作空间裁剪，再加value net给出state value做heuristic func。平衡计算速度和兜底
 
-6. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
+7. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
    
-7. 但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
+8. 但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
    
 =====================================
 
