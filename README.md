@@ -38,6 +38,7 @@
 4. AlphaZero为何同时拥有policy net和value net？实际可以用value net做policy net的活儿（即给出先验概率进行MCTS的宽度裁剪），但一是在巨大action space的情况下效率低下；二是他俩本质是在干两个不同的事情，用不同的网络头会更适合，并在一起实践效果不好。详见AlphaZero作者本人的解释：https://www.reddit.com/r/reinforcementlearning/comments/1b1te73/help_me_understand_why_use_a_policy_net_instead/
    
 5. 补充一点：A2C里也存在policy net和value net，其value net一般指的是action value（不是state value，也不是reward）。那么A2C和AlphaZero如此相像，为什么AlphaZero在围棋表现优秀而A2C却做不到？原因是：AlphaZero 将基于模型的规划（MCTS）和高效探索相结合，可以提前计划、探索潜在的走法。A2C是无模型的，仅依赖于试错探索，在围棋这种复杂环境中可能效率较低，但A2C对于更简单的任务和连续的行动空间仍然很有价值
+
 ![alt text](image-4.png)
 
 6. AlphaZero存储**每次对弈下的softmax(n_visit)** 和 **每局结束并backpropagate后的winflag**用于policy net和value net的训练
