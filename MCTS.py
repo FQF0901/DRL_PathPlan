@@ -21,9 +21,9 @@ class MCTS:
         self.root_node.HasNode.theta = EnvInfo.SlotPntInit[2]
 
         self.root_state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = self.root_node)
-        self.exploration_weight = 100    # 这个权重待讨论
+        self.exploration_weight = 10    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
-        self.expd_maxcnt = 100 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
+        self.expd_maxcnt = 20 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
 
     # ---------------------------- Visualization ---------------------------
     def visualize_tree(self, root):
@@ -125,6 +125,7 @@ class MCTS:
         return node.children == []
     
     def backpropagateV(self, node):
+        MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
         if node.visit_count == 1:  # 这里是递归的尽头, =1是selected once node
             node.V = node.HasNode.g_cost + 100 if node.type == 3 else 0
             node.Vdone = True
@@ -181,7 +182,6 @@ class MCTS:
             for newNode in new_Node_list:    # 把type回溯父节点，以免select的时候选到dead node或PathFnd
                 _ = self.backpropagate_Type(newNode)
 
-        MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
         self.backpropagateV(self.root_state.MctsNode)    # 充分探索后要回溯state value
         print('Episode end due to reach expd_maxcnt !')
         return 1, self.expd_maxcnt
