@@ -33,11 +33,11 @@
 
 2. 针对方案2原地打转要引入hybrid A star的grid的问题，虽然也是是对action space的裁剪，但这个裁剪要求DRL知道之前state是什么（即本次episode是否探索过该位置），这个MDP本质相悖。因此在想是否要引入MCTS以simulation的方式更好的剔除重复动作，给出action的价值
 
-3. AlphaZero不是任何典型的DRL方法，其重点在MCTS，DNN仅用于2处：一是对MCTS进行宽度和深度上的裁剪，二是用于逼近和存储MCTS信息。
+3. AlphaZero是model-based的DRL方法，其重点在MCTS，DNN仅用于2处：一是对MCTS进行宽度和深度上的裁剪，二是用于逼近和存储MCTS信息。
    
 4. AlphaZero为何同时拥有policy net和value net？实际可以用value net做policy net的活儿（即给出先验概率进行MCTS的宽度裁剪），但一是在巨大action space的情况下效率低下；二是他俩本质是在干两个不同的事情，用不同的网络头会更适合，并在一起实践效果不好。详见AlphaZero作者本人的解释：https://www.reddit.com/r/reinforcementlearning/comments/1b1te73/help_me_understand_why_use_a_policy_net_instead/
    
-5. 补充一点：A2C里也存在policy net和value net，其value net一般指的是action value（不是state value，也不是reward）。那么A2C和AlphaZero如此相像，为什么AlphaZero在围棋表现优秀而A2C却做不到？原因是：AlphaZero 将基于模型的规划（MCTS）和高效探索相结合，可以提前计划、探索潜在的走法。A2C是无模型的，仅依赖于试错探索，在围棋这种复杂环境中可能效率较低，但A2C对于更简单的任务和连续的行动空间仍然很有价值
+5. 补充一点：A2C里也存在policy net和value net，其value net一般指的是action value（不是state value，也不是reward）。那么A2C和AlphaZero如此相像，为什么AlphaZero在围棋表现优秀而A2C却做不到？原因是：AlphaZero 将基于模型的规划（MCTS）和高效探索相结合，可以提前计划、探索潜在的走法。A2C是无模型的，仅依赖于试错探索，在围棋这种复杂环境中可能效率较低，但A2C对于更简单的任务和连续的行动空间仍然很有价值。另外A2C的两个net是同时训练的，而AlphaZero实现训练policy net在训练value net
 
 ![alt text](image-4.png)
 
@@ -62,6 +62,8 @@
    
 2. 回溯的时候要注意bellman equation：**return_parent = Sum_pi(return_child * gamma + reward)**
 ![alt text](image-2.png)
+AlphaZero回溯的本质：
+![alt text](image-5.png)
 
 3. 从leaf node向root回溯时，不能回溯g_cost(无论leaf node的V还是回溯过程中的parent V，都不能评价整条轨迹的方向盘和换挡)，因为违反MDP假设。但可以放在reward里，state里加上当前steer和gear，根据action给出对steer和gear的reward。
    
