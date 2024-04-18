@@ -57,21 +57,23 @@
    
 2. 回溯的时候要注意bellman equation：**return_parent = Sum_pi(return_child * gamma + reward)**
 ![alt text](image-2.png)
-   
-1. 所有visited state和possible actions都会被存储到tree里
-   
-2. state/action value会被propagate以满足TD equation。但回溯时间在整个tree拓展结束后，并针对所有leaf node回溯（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯）
 
-3. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
+3. 从leaf node向root回溯时，不能回溯g_cost(评价整条轨迹的方向盘和换挡)，因为有MDP假设。但可以放在reward里，state里加上当前steer和gear，根据action给出对steer和gear的reward。
    
-4. 在tree拓展完成并对所有leaf node进行propagate后，所有experience(state, state/action_value)都被存储到buffer里用于DNN训练
+4. 所有visited state和possible actions都会被存储到tree里
+   
+5. state/action value会被propagate以满足TD equation。但回溯时间在整个tree拓展结束后，并针对所有leaf node回溯（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯）
 
-5. 需要训练2个网络：policy net和value net，因为动作空间大不想每次通过state value做select action，因此需要policy net先做裁剪在用value net给出state value。policy net用action value训练
+6. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
+   
+7. 在tree拓展完成并对所有leaf node进行propagate后，所有experience(state, state/action_value)都被存储到buffer里用于DNN训练
+
+8. 需要训练2个网络：policy net和value net，因为动作空间大不想每次通过state value做select action，因此需要policy net先做裁剪在用value net给出state value。policy net用action value训练
 
 https://github.com/FQF0901/aleph_star/tree/master
 ![alt text](image-1.png)
 
-7.  DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
+9. DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
    
 =====================================
 
