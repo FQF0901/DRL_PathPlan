@@ -26,52 +26,49 @@
 
 =====================================
 
-### 方案3：AlphaZero（MCTS + DNN）
+### 方案3：AlphaGo（MCTS + DNN）
 
-1. 针对方案2撞障碍物，修改action space后不奏效的问题，应该是DRL没有学到足够有用的东西：**当前的方案有点稀疏奖励，只在轨迹生成的时刻进行奖励**，即方案设计上只对最后的select action进行奖励，而在path found之前的action/state给的reward都是负值（因为没找到轨迹且有episode耗时等惩罚）。
-个人认为上述方案是有问题的，**会让DRL只知道最后一步的action和state是好的，但不知道如何到达最后一个state。应该借用alphago的方案，当path found后回溯，该episode下所有action和state都应奖励**。
+1. 针对方案2撞障碍物，修改action space后不奏效的问题，应该是因为初始参数下完全通过试错学习，效率极其低下：该场景类似围棋，episode结束前的reward指导意义较小（reward很重要，TD中代表具有实际意义的TD target，用于指导DNN的反向传播），只有最后时刻且PathFnd下的reward对action value net的反向传播有好的指导作用。DRL会先把episode_tn-1时刻的Q训练好，然后再逐渐训练好episode_tn-2时刻的Q，以此类推直至episode_t1，，而训练初期（此时Q不好，无法倾向探索好的node）基本完全在试错，因此在拓展层数较深或者action space较大的场景中效率极慢。针对这个问题应该借鉴AlphaGo而非AlphaZero的方案：在前期使用IM学习人类棋谱以得到一个较好的policy net，然后再用RL提升这个policy net。用在本case下就是充分拓展MCTS，并通过leaf node的reward回溯搜索树中每个node的state value和action value，用于action value net的监督学习
 
-2. 针对方案2原地打转要引入hybrid A star的grid的问题，虽然也是是对action space的裁剪，但这个裁剪要求DRL知道之前state是什么（即本次episode是否探索过该位置），这个MDP本质相悖。因此在想是否要引入MCTS以simulation的方式更好的剔除重复动作，给出action的价值
+2. 针对方案2原地打转想来想去不建议引入HAS的occupied grid，而是用MCTS：在MCTS拓展过程中不允许向parent拓展，以便更充分的探索而不受grid cell size的制约
 
 3. AlphaZero是model-based的DRL方法，其重点在MCTS，DNN仅用于2处：一是对MCTS进行宽度和深度上的裁剪，二是用于逼近和存储MCTS信息。
    
 4. AlphaZero为何同时拥有policy net和value net？实际可以用value net做policy net的活儿（即给出先验概率进行MCTS的宽度裁剪），但一是在巨大action space的情况下效率低下；二是他俩本质是在干两个不同的事情，用不同的网络头会更适合，并在一起实践效果不好。详见AlphaZero作者本人的解释：https://www.reddit.com/r/reinforcementlearning/comments/1b1te73/help_me_understand_why_use_a_policy_net_instead/
-   
-5. 补充一点：A2C里也存在policy net和value net，其value net一般指的是action value（不是state value，也不是reward）。那么A2C和AlphaZero如此相像，为什么AlphaZero在围棋表现优秀而A2C却做不到？原因是：AlphaZero 将基于模型的规划（MCTS）和高效探索相结合，可以提前计划、探索潜在的走法。A2C是无模型的，仅依赖于试错探索，在围棋这种复杂环境中可能效率较低，但A2C对于更简单的任务和连续的行动空间仍然很有价值。另外A2C的两个net是同时训练的，而AlphaZero实现训练policy net在训练value net
 
-![alt text](image-4.png)
-
-6. AlphaZero存储**每次对弈下的softmax(n_visit)** 和 **每局结束并backpropagate后的winflag**用于policy net和value net的训练
+5. AlphaZero存储**每次对弈下的softmax(n_visit)** 和 **每局结束并backpropagate后的winflag**用于policy net和value net的训练
    
-7. 实际对弈过程中有3种指导拓展node的方式：
+6. 实际对弈过程中有3种指导拓展node的方式：
    1. 用policy net指导: 该方案是选择当前state下的optimal action的，属于先验因此算的快，很适用于实时规划；但不同state之间的action不具备比较意义，因此开弓没有回头箭，这要求policy net训练的非常好并且可以较好应对奇异值才行
    2. 用value net指导：需要从当前state执行action并得到next_state后，才能通过value net得到state value，然后**在整个tree中的leaf nodes中通过max value对应的action【propagate是对整个tree回溯，使value不受state限制，因此不同state下的value可以相互比较】**。如AlphaZero作者解释，这样计算量也较大。但**优势是发现当前state下的optical action不够好时可以“反悔”到其他state**，这一点可用在DHAS的heuristic func上
    3. 在线滚动计算MCTS，用在线的n_visits指导：AlphaZero的方案，原因是可以避免DNN的奇异值，但在线滚动1600次MCTS计算量巨大
    4. DHAS可用policy net进行动作空间裁剪，再加value net给出state value做heuristic func。平衡计算速度和兜底
 
-8. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
+7. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
    
-9.  但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
+8.  但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
    
 =====================================
 
-### 方案4：DQN + MCTS
+### 方案4：A2C + MCTS
 
-1. 首先要再强调的是DQN是在某个state下通过action value给出optimal action，它并不能在不同state下比较action的优劣。但发现《Reinforcement Learning with A* and a Deep Heuristic》中假设了在不同state下比较action value不失一般性，感觉不太有理论支撑，原因见下图，对于policy（策略学习）和action value（价值学习）而言，都是基于某个状态S。但HAS在推演过程中实在全局选optimal node
+1. 用MCTS充分探索(episode end)，并通过leaf node的reward回溯搜索树中每个node的V和Q（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯），用于action value net的训练。有了好的Q，则可以通过A2C训练出好的policy net。最终上HAS实际要使用state value(原因详见第3条)，因此也需要借助action value net训练出state value net。policy net用于DHAS的action space裁剪，state value net用于DHAS的node评估
+
+2. 另外此处要引入解释下：A2C里也存在policy net和value net，其value net一般指的是action value（不是state value，也不是reward）。那么A2C和AlphaZero如此相像，为什么AlphaZero在围棋表现优秀而A2C却做不到？原因是：AlphaZero 将基于模型的规划（MCTS）和高效探索相结合，可以提前计划、探索潜在的走法。A2C是无模型的，仅依赖于试错探索，在围棋这种复杂环境中可能效率较低，但A2C对于更简单的任务和连续的行动空间仍然很有价值。另外A2C的两个net是同时训练的，而AlphaZero实现训练policy net在训练value net
+
+![alt text](image-4.png)
+
+3. 首先要再强调的是DQN是在某个state下通过action value给出optimal action，它并不能在不同state下比较action的优劣。但发现《Reinforcement Learning with A* and a Deep Heuristic》中假设了在不同state下比较action value不失一般性，感觉不太有理论支撑，原因见下图，对于policy（策略学习）和action value（价值学习）而言，都是基于某个状态S。但HAS在推演过程中实在全局选optimal node
 ![alt text](image-3.png)
    
-2. 回溯的时候要注意bellman equation：**return_parent = Sum_pi(return_child * gamma + reward)**
+4. 回溯的时候要注意bellman equation：**return_parent = Sum_pi(return_child * gamma + reward)**
 ![alt text](image-2.png)
 AlphaZero回溯的本质：
 ![alt text](image-5.png)
 
-3. 从leaf node向root回溯时，不能回溯g_cost(无论leaf node的V还是回溯过程中的parent V，都不能评价整条轨迹的方向盘和换挡)，因为违反MDP假设。但可以放在reward里，state里加上当前steer和gear，根据action给出对steer和gear的reward。
-   
-4. 所有visited state和possible actions都会被存储到tree里
-   
-5. state/action value会被propagate以满足TD equation。但回溯时间在整个tree拓展结束后，并针对所有leaf node回溯（AlphaZero中每次expand node都会用DNN给出的state value回溯，一局结束后用Game给出的state value回溯）
+5. 从leaf node向root回溯时，为了遵循MDP假设，可以将当前steer和gear可以放在state里，根据action给出对steer和gear的reward。
 
-6. 在expand node时不需要像AlphaZero那样rollout很多次，而是根据C+Q得来的
+6. 在expand node时不需要像AlphaZero那样rollout达1600次，DHAS不需要像下围棋那样推演，没这么高的要求，可以根据PUCT得来的
    
 7. 在tree拓展完成并对所有leaf node进行propagate后，所有experience(state, state/action_value)都被存储到buffer里用于DNN训练
 
@@ -80,7 +77,7 @@ AlphaZero回溯的本质：
 https://github.com/FQF0901/aleph_star/tree/master
 ![alt text](image-1.png)
 
-9. DNN是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？给出方案5
+9. value net是对MCTS的逼近和存储（并用于MCTS的裁剪和引导），那么DNN对启发函数的优化上限是MCTS找到轨迹的性能线附近（如果MCTS在某些case下找不到轨迹，那DNN就没有该case下可逼近的有价值的Q），而MCTS的性能应该是高于HAS的（因为MCTS有好的DNN指导并具有随机性并且有A2C迭代，有机会探索到更好的拓展方案）。**那么为何某些场景下人可以找到泊车轨迹而MCTS/HAS找不到**？但仍旧该问题给出方案5
    
 =====================================
 
