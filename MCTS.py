@@ -47,6 +47,7 @@ class MCTS:
 
         best_value = float("-inf")
         selected_node = None
+
         for child_node in curt_node.children:
             exploitation_term = child_node.V
             exploration_term = np.sqrt(child_node.HasNode.parent.visit_count) / (1 + child_node.visit_count)
@@ -136,9 +137,10 @@ class MCTS:
    
     
     def simulate(self, EnvInfo):  # 这是针对某个init state的一个完整充分的探索流程
-        node = self.root_state.MctsNode
 
         for cnt in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次 或 OpenList = []
+            node = self.root_state.MctsNode
+            node.visit_count = node.visit_count + 1
 
             while True: # 探索选择，直到找到叶节点
                 if self.is_leaf(node):
