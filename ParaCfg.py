@@ -67,7 +67,7 @@ class EnvInfo:
         self.StepCnt = 0
 
 class HasNode:
-    def __init__(self, x = 0, y = 0, theta = 0, g_cost = 0, h_cost = 0, parent=None):
+    def __init__(self, x = 0, y = 0, theta = 0, g_cost = 0, h_cost = 0, parent = None):
         self.x = x
         self.y = y
         self.theta = theta

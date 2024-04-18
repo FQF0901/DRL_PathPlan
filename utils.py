@@ -119,8 +119,12 @@ def cal_VechPose(x, y, yaw, steer, gear, dist):
 
     return NextX, NextY, NextYaw
 
-def cal_validRS(current_node, goal_node, obstacles):
-    RSpath = rs.calc_optimal_path(current_node, goal_node)
+def cal_validRS(current_node, goal_node, obstacles, Mod = 1):
+    if Mod == 1:
+        crnt_node = current_node.HasNode  # MCTS mode
+    else:
+        pass # HAS mode
+    RSpath = rs.calc_optimal_path(crnt_node, goal_node)
 
     for i in range(0, len(RSpath.x)):
         RSpathx = RSpath.x[i]
@@ -134,7 +138,11 @@ def cal_validRS(current_node, goal_node, obstacles):
             path = []
             while current_node:
                 path.append(current_node)
-                current_node = current_node.parent
+                if Mod == 1:
+                    current_node = current_node.HasNode.parent  # MCTS mode
+                else:
+                    current_node = current_node.parent  # HAS mode
+
             return True, path[::-1], RSpath
 
 def EnvNextState(action, EnvInfo):

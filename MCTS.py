@@ -9,7 +9,8 @@ import logging
 import tqdm
 import collections
 import graphviz
-
+import sys
+import time
 
 # ---------------------------- MCTS Tree ---------------------------
 class MCTS:
@@ -26,9 +27,12 @@ class MCTS:
 
     # ---------------------------- Visualization ---------------------------
     def visualize_tree(self, root):
+        timestamp = time.strftime("%d%H%M%S", time.localtime())
+        filename = f"MctsTree_{timestamp}"
+    
         dot = graphviz.Digraph()
         self.add_nodes(root, dot)
-        dot.render('MctsTree', format='png', cleanup=True)
+        dot.render(filename, format='png', cleanup=True)    
 
     def add_nodes(self, node, dot):
         formatted_x = "{:.3f}".format(node.HasNode.x)
@@ -42,7 +46,7 @@ class MCTS:
     # -----------------------------------------------------------------------
 
     def select_node(self, curt_node):   # 通过PUCT公式选择子节点中最有价值的节点。不能用min heap，因为没有随机性
-        if curt_node.type == 2 or curt_node.type == 3: # 确保当前不是dead node
+        if curt_node.type == 2 or curt_node.type == 3: # 确保当前不是 2:Dead, 3:PathFnd
             return False, curt_node
 
         best_value = float("-inf")
@@ -154,16 +158,16 @@ class MCTS:
             
             # 还要判断LeafNode是否可以PathFnd
             obstacles = EnvInfo.State.ObjRect + EnvInfo.State.OthVehRect
-            current_node = LeafNode.HasNode
             goal_node = ParaCfg.HasNode(x = EnvInfo.VehPntInit[0], y = EnvInfo.VehPntInit[1], theta = EnvInfo.VehPntInit[2])
-            PlanFnd, _, _ = utils.cal_validRS(current_node, goal_node, obstacles)
+            PlanFnd, _, _= utils.cal_validRS(LeafNode, goal_node, obstacles, Mod = 1)   # Mod = 0:HAS, Mod = 1:MCTS
+
             if PlanFnd:
                 LeafNode.type = 3
                 # LeafNode.V = LeafNode.HasNode.g_cost + 100
                 _ = self.backpropagate_Type(LeafNode)
                 
             new_Node_list = self.expand_node(LeafNode, EnvInfo)   # 仅判断是否ovlp和repeat move
-            self.visualize_tree(MctsTree.root_state.MctsNode)
+            # self.visualize_tree(MctsTree.root_state.MctsNode)
             for newNode in new_Node_list:    # 把type回溯父节点，以免select的时候选到dead node或PathFnd
                 _ = self.backpropagate_Type(newNode)
 
@@ -173,27 +177,35 @@ class MCTS:
     
     def StoreTreeInfo(self, MctsNode, state_list, act_probs_list, V_value_list):
 
-        # 计算需要存储的信息
-        state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
+        if MctsNode.visit_count == 1:   # 递归的终点
 
-        if MctsNode.HasNode.parent != None:
-            action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count - 1)
-        else:
-            action_probs = 1
+            # 计算需要存储的信息
+            state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
 
-        State_Value = MctsNode.V
+            try:
+                if MctsNode.HasNode.parent != None:
+                    action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count - 1)
+                else:
+                    action_probs = 1
+            except ZeroDivisionError:
+                print("除零错误发生！当前节点信息： x:{}, y:{}, theta:{}".format(MctsNode.HasNode.x, MctsNode.HasNode.y, MctsNode.HasNode.theta))
+                sys.exit("程序终止：除零错误发生，无法继续运行！")
 
-        # 存储当前节点信息
-        state_list.append(state)
-        act_probs_list.append(action_probs)
-        V_value_list.append(State_Value) # state value
+            State_Value = MctsNode.V
+
+            # 存储当前节点信息
+            state_list.append(state)
+            act_probs_list.append(action_probs)
+            V_value_list.append(State_Value) # state value
+
+            return
 
         # 遍历所有子节点
         for child in MctsNode.children:
             self.StoreTreeInfo(child, state_list, act_probs_list, V_value_list)
     
 # ---------------------------- Collection ---------------------------
-num_episodes = 10000
+num_episodes = 10
 
 env = Env.Env()
 
@@ -202,8 +214,8 @@ for _ in range(num_episodes):
     MctsTree = MCTS(EnvInfo)
     state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
         
-    DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo)
-
+    DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo) # DoneFlag = 1:Cnt>expd_maxcnt, DoneFlag = 2:openlist = []
+    MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
     MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
     
     # pickle
