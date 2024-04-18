@@ -8,7 +8,8 @@ import Env
 import logging
 import tqdm
 import collections
-import matplotlib.pyplot as plt
+import graphviz
+
 
 # ---------------------------- MCTS Tree ---------------------------
 class MCTS:
@@ -22,6 +23,23 @@ class MCTS:
         self.exploration_weight = 100    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
         self.expd_maxcnt = 10 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
+
+    # ---------------------------- Visualization ---------------------------
+    def visualize_tree(self, root):
+        dot = graphviz.Digraph()
+        self.add_nodes(root, dot)
+        dot.render('MctsTree', format='png', cleanup=True)
+
+    def add_nodes(self, node, dot):
+        formatted_x = "{:.3f}".format(node.HasNode.x)
+        formatted_y = "{:.3f}".format(node.HasNode.y)
+        formatted_theta = "{:.3f}".format(node.HasNode.theta)
+        label = f"({formatted_x}, {formatted_y}, {formatted_theta})\nn_visits: {node.visit_count}, V: {node.V}, P: {node.P}, type: {node.type}"
+        dot.node(str(id(node)), label, shape="box", style="filled", fillcolor="lightblue")
+        for child in node.children:
+            dot.edge(str(id(node)), str(id(child)))
+            self.add_nodes(child, dot)
+    # -----------------------------------------------------------------------
 
     def select_node(self, curt_node):   # 通过PUCT公式选择子节点中最有价值的节点。不能用min heap，因为没有随机性
         if curt_node.type == 2 or curt_node.type == 3: # 确保当前不是dead node
@@ -143,6 +161,7 @@ class MCTS:
                 _ = self.backpropagate_Type(LeafNode)
                 
             new_Node_list = self.expand_node(LeafNode, EnvInfo)   # 仅判断是否ovlp和repeat move
+            self.visualize_tree(MctsTree.root_state.MctsNode)
             for newNode in new_Node_list:    # 把type回溯父节点，以免select的时候选到dead node或PathFnd
                 _ = self.backpropagate_Type(newNode)
 
@@ -186,24 +205,3 @@ for _ in range(num_episodes):
     MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
     
     # pickle
-
-# ---------------------------- Visualization ---------------------------
-def visualize_tree(root):
-    fig, ax = plt.subplots()
-    plot_tree(ax, root)
-    ax.set_aspect('equal')
-    ax.axis('off')
-    plt.show()
-
-def plot_tree(ax, node, x=0, y=0, dx=1, dy=1):
-    ax.plot(x, y, 'bo', markersize=10)  # 绘制节点
-    ax.text(x, y, f"({node.has_node.x}, {node.has_node.y})", fontsize=8, ha='center', va='center')  # 节点坐标文本
-
-    num_children = len(node.children)
-    if num_children > 0:
-        next_dx = dx / num_children
-        next_x = x - dx / 2
-        for child in node.children:
-            plot_tree(ax, child, x=next_x, y=y-dy, dx=next_dx, dy=dy*2)
-            ax.plot([x, next_x], [y, y-dy], 'k-')  # 绘制父节点和子节点的连接线
-            next_x += next_dx
