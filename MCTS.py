@@ -148,6 +148,9 @@ class MCTS:
             for child in node.children:
                 reward_P2C = 0   # child.HasNode.g_cost复用为reward，不严谨，后需要改在parent里
                 probs = child.visit_count / (node.visit_count - 1)
+                # 较大的 temp 会使得概率分布更加均匀，而较小的 temp 则会增加对访问次数较高的动作的偏好性。
+                # 通过取对数，可以将大的访问次数转换为相对较小的值，同时保留了它们之间的相对大小关系。这有助于减小数据的范围，使得计算更加稳定
+                # probs = softmax(1.0 / temp * np.log(np.array(child.visit_count) + 1e-10))  
                 V_parent = V_parent + (reward_P2C + 1 * child.V) * probs   # self.gamma
             node.V = V_parent
             node.Vdone = True
