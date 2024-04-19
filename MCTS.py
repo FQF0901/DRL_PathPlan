@@ -23,7 +23,7 @@ class MCTS:
         self.root_state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = self.root_node)
         self.exploration_weight = 10    # 这个权重待讨论
         self.gamma = 0.97   # state value回溯时的衰减   0.95^10=0.598, 0.97^10=0.737
-        self.expd_maxcnt = 20 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
+        self.expd_maxcnt = 50 # 每个root state的MCTS tree都要充分拓展expd_maxcnt = 5000次
 
     # ---------------------------- Visualization ---------------------------
     def visualize_tree(self, root):
@@ -40,7 +40,7 @@ class MCTS:
         formatted_x = "{:.3f}".format(node.HasNode.x)
         formatted_y = "{:.3f}".format(node.HasNode.y)
         formatted_theta = "{:.3f}".format(node.HasNode.theta)
-        label = f"({formatted_x}, {formatted_y}, {formatted_theta})\nn_visits: {node.visit_count}, V: {node.V}, P: {node.P}, type: {node.type}"
+        label = f"({formatted_x}, {formatted_y}, {formatted_theta})\nn_visits: {node.visit_count}, V: {node.V}, P: {node.P}, type: {node.type}, Vdone: {node.Vdone}"
         dot.node(str(id(node)), label, shape="box", style="filled", fillcolor="lightblue")
         for child in node.children:
             dot.edge(str(id(node)), str(id(child)))
@@ -125,7 +125,6 @@ class MCTS:
         return node.children == []
     
     def backpropagateV(self, node):
-        # MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
         if node.visit_count == 1:  # 这里是递归的尽头, =1是selected once node
             node.V = node.HasNode.g_cost + (100 if node.type == 3 else 0)   # g_cost复用为reward，不严谨，后需要改在parent里
             node.Vdone = True
@@ -147,11 +146,12 @@ class MCTS:
         if all_children_done:
             V_parent = 0
             for child in node.children:
-                reward_P2C = child.HasNode.g_cost   # g_cost复用为reward，不严谨，后需要改在parent里
+                reward_P2C = 0   # child.HasNode.g_cost复用为reward，不严谨，后需要改在parent里
                 probs = child.visit_count / (node.visit_count - 1)
-                V_parent = V_parent + (reward_P2C + self.gamma * child.V) * probs
-
+                V_parent = V_parent + (reward_P2C + 1 * child.V) * probs   # self.gamma
             node.V = V_parent
+            node.Vdone = True
+
     def simulate(self, EnvInfo):  # 这是针对某个init state的一个完整充分的探索流程
 
         for cnt in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次 或 OpenList = []
