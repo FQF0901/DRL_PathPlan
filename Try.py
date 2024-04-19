@@ -1,13 +1,13 @@
-class HasNode:
-    def __init__(self, x = 0, y = 0, theta = 0, g_cost = 0, h_cost = 0, parent = None):
-        self.x = x
-        self.y = y
-        self.theta = theta
-        self.g_cost = g_cost
-        self.h_cost = h_cost
-        self.parent = parent
-
-node = HasNode()
-
-node.y
-node.parent
+try:
+    with open(CONFIG['train_data_buffer_path'], 'rb') as data_dict:
+        data_file = pickle.load(data_dict)
+        self.data_buffer = deque(maxlen=self.buffer_size)
+        self.data_buffer.extend(data_file['data_buffer'])
+        self.iters = data_file['iters']
+        del data_file
+        self.iters += 1
+        self.data_buffer.extend(play_data)
+    print('成功载入数据')
+    break
+except:
+    time.sleep(30)

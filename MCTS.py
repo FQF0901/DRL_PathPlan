@@ -215,17 +215,15 @@ class MCTS:
             self.StoreTreeInfo(child, state_list, act_probs_list, V_value_list)
     
 # ---------------------------- Collection ---------------------------
-num_episodes = 10
+# num_episodes = 10
 
-env = Env.Env()
+# env = Env.Env()
 
-for _ in range(num_episodes):
-    DRLstate, EnvInfo = env.reset()
-    MctsTree = MCTS(EnvInfo)
-    state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
+# for _ in range(num_episodes):
+#     DRLstate, EnvInfo = env.reset()
+#     MctsTree = MCTS(EnvInfo)
+#     state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
         
-    DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo) # 1:Cnt>expd_maxcnt, 2:openlist = [], 3:PathFnd
-    MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
-    MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
-    
-    # pickle
+#     DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo) # 1:Cnt>expd_maxcnt, 2:openlist = [], 3:PathFnd
+#     MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
+#     MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
