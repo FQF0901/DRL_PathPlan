@@ -125,9 +125,9 @@ class MCTS:
         return node.children == []
     
     def backpropagateV(self, node):
-        MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
+        # MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
         if node.visit_count == 1:  # 这里是递归的尽头, =1是selected once node
-            node.V = node.HasNode.g_cost + 100 if node.type == 3 else 0
+            node.V = node.HasNode.g_cost + (100 if node.type == 3 else 0)   # g_cost复用为reward，不严谨，后需要改在parent里
             node.Vdone = True
             return
         elif node.visit_count == 0: # =0是leaf node
@@ -145,10 +145,13 @@ class MCTS:
         all_children_done = all(child.Vdone for child in node.children)
 
         if all_children_done:
-            # 计算父节点的DnnV
-            node.V = sum(child.V * child.visit_count / (node.visit_count - 1) for child in node.children)
-   
-    
+            V_parent = 0
+            for child in node.children:
+                reward_P2C = child.HasNode.g_cost   # g_cost复用为reward，不严谨，后需要改在parent里
+                probs = child.visit_count / (node.visit_count - 1)
+                V_parent = V_parent + (reward_P2C + self.gamma * child.V) * probs
+
+            node.V = V_parent
     def simulate(self, EnvInfo):  # 这是针对某个init state的一个完整充分的探索流程
 
         for cnt in range(self.expd_maxcnt):   # 充分拓展self.expd_maxcnt次 或 OpenList = []
@@ -222,7 +225,7 @@ for _ in range(num_episodes):
     state_list, act_probs_list, V_value_list = [], [], [] # state_list每个element应包含obst，SP/TP 和 【occupied grid】
         
     DoneFlag, expd_cnt = MctsTree.simulate(EnvInfo) # 1:Cnt>expd_maxcnt, 2:openlist = [], 3:PathFnd
-    # MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
+    MctsTree.visualize_tree(MctsTree.root_state.MctsNode)
     MctsTree.StoreTreeInfo(MctsTree.root_state.MctsNode, state_list, act_probs_list, V_value_list)
     
     # pickle
