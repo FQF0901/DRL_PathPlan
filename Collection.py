@@ -1,6 +1,4 @@
 # 导入所需的库
-import numpy as np
-import random
 import Env
 import collections
 import pickle
