@@ -26,16 +26,16 @@ for _ in range(num_episodes):
     play_data = zip(state_list, act_probs_list, V_value_list)
 
     if os.path.exists('Mcts_Train_Data_buffer.pkl'):
-        # try:
-        with open('Mcts_Train_Data_buffer.pkl', 'rb') as data_dict:
-            data_file = pickle.load(data_dict)
-            DataBuffer = collections.deque(maxlen = 100000)   # 每次要清掉，重新压入新数据
-            DataBuffer.extend(data_file['DataBuffer'])
-            del data_file
-            DataBuffer.extend(play_data)
-        print('Import data from buffer_pkl success !')
-        # except:
-        #     print('Import data from buffer_pkl fail !')
+        try:
+            with open('Mcts_Train_Data_buffer.pkl', 'rb') as data_dict:
+                data_file = pickle.load(data_dict)
+                DataBuffer = collections.deque(maxlen = 100000)   # 每次要清掉，重新压入新数据
+                DataBuffer.extend(data_file['DataBuffer'])
+                del data_file
+                DataBuffer.extend(play_data)
+            print('Import data from buffer_pkl success !')
+        except:
+            print('Import data from buffer_pkl fail !')
     else:
         DataBuffer.extend(play_data)
     
