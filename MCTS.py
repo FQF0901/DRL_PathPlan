@@ -1,15 +1,8 @@
 # 导入所需的库
 import numpy as np
-import random
-import torch
 import utils
 import ParaCfg
-import Env
-import logging
-import tqdm
-import collections
 import graphviz
-import sys
 import time
 
 # ---------------------------- MCTS Tree ---------------------------
@@ -192,12 +185,12 @@ class MCTS:
         print('Episode end due to reach expd_maxcnt !')
         return 1, self.expd_maxcnt
     
-    def StoreTreeInfo(self, MctsNode, state_list, act_probs_list, V_value_list):
+    def StoreTreeInfo(self, MctsNode, EnvState, state_list, act_probs_list, V_value_list):
 
         if MctsNode.visit_count == 1:   # 递归的终点
 
             # 计算需要存储的信息
-            state = ParaCfg.MctsState(EnvState = EnvInfo.State, MctsNode = MctsNode)
+            state = ParaCfg.MctsState(EnvState = EnvState, MctsNode = MctsNode)
 
             if MctsNode.HasNode.parent != None:
                 action_probs = MctsNode.visit_count / (MctsNode.HasNode.parent.visit_count - 1)
@@ -215,7 +208,7 @@ class MCTS:
 
         # 遍历所有子节点
         for child in MctsNode.children:
-            self.StoreTreeInfo(child, state_list, act_probs_list, V_value_list)
+            self.StoreTreeInfo(child, EnvState, state_list, act_probs_list, V_value_list)
     
 # ---------------------------- Collection ---------------------------
 # num_episodes = 10
