@@ -33,7 +33,9 @@ class MCTS:
         formatted_x = "{:.3f}".format(node.HasNode.x)
         formatted_y = "{:.3f}".format(node.HasNode.y)
         formatted_theta = "{:.3f}".format(node.HasNode.theta)
-        label = f"({formatted_x}, {formatted_y}, {formatted_theta})\nn_visits: {node.visit_count}, V: {node.V}, P: {node.P}, type: {node.type}, Vdone: {node.Vdone}"
+        formatted_V = "{:.3f}".format(node.V)
+        
+        label = f"({formatted_x}, {formatted_y}, {formatted_theta})\nn_visits: {node.visit_count}, V: {formatted_V}, P: {node.P}, type: {node.type}, Vdone: {node.Vdone}"
         dot.node(str(id(node)), label, shape="box", style="filled", fillcolor="lightblue")
         for child in node.children:
             dot.edge(str(id(node)), str(id(child)))
