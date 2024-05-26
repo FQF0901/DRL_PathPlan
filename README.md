@@ -45,8 +45,10 @@
    4. DHAS可用policy net进行动作空间裁剪，再加value net给出state value做heuristic func。平衡计算速度和兜底
 
 7. 从DRL的角度思考AlphaZero，MCTS是解决了DRL中最难解决的reward问题，即稀疏/延时奖励下如何准确及时的给出reward。除了MCTS也可以使用IM解决reward的问题
+
+8. 存储MCTS生成轨迹成功场景链路的每一步（失败分支没有学习意义），用于模仿训练，让DNN的参数尽可能逼近MCTS给出的状态价值和动作概率
    
-8.  但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
+9.  但是AlphaZero的方案在每次take action时，都要基于当前state用MCTS滚动1600次，以得到n_visits用于policy net的训练，且滚动1600次均没有记录state value。个人感觉该方案用于DHAS浪费严重，因为AlphaZero重点更像是在MCTS，而DHAS重点在state value，照搬AlphaZero方案对DHAS来讲不够有针对性。因此给出方案4
    
 =====================================
 
