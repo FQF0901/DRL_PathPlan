@@ -123,7 +123,7 @@ def cal_validRS(current_node, goal_node, obstacles, Mod = 1):
     if Mod == 1:
         crnt_node = current_node.HasNode  # MCTS mode
     else:
-        pass # HAS mode
+        crnt_node = current_node
     RSpath = rs.calc_optimal_path(crnt_node, goal_node)
 
     for i in range(0, len(RSpath.x)):

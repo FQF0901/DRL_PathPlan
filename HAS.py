@@ -31,7 +31,7 @@ def hybrid_a_star(start, goal, obstacles):
         grid_cells[current_idx].append(current_node)
 
         closed_list.append(current_node)
-        PlanFnd, AstarPath, RSpath = utils.cal_validRS(current_node, goal, obstacles)
+        PlanFnd, AstarPath, RSpath = utils.cal_validRS(current_node, goal, obstacles, 0)
         if PlanFnd:
             return PlanFnd, AstarPath, RSpath, cnt
 
