@@ -1,0 +1,171 @@
+"""
+@author: Fqf
+@time: 20240618
+@file: Train.py
+@description: Training DNN
+"""
+
+import random
+import collections
+import numpy as np
+import pandas as pd
+from PIL import Image
+import ast
+from Dnn import PolicyValueNet
+import pickle
+import time
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import transforms
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
+from Util import utils
+
+# ==========================================================
+# ======================== DataSet =========================
+# ==========================================================
+
+class CustomDataset(Dataset):   # 它继承自torch.utils.data.Dataset，并实现其中的两个方法：__len__和__getitem__
+    def __init__(self, csv_file, img_folder, transform=None):
+        self.labels_df = pd.read_csv(csv_file)  # self.labels_df是一个DataFrame对象，其中包含图片名和对应的目标标签
+        self.img_folder = img_folder
+        self.transform = transform  # 这是一个可选参数，用于在数据加载时对图像进行预处理（如缩放、裁剪、标准化等）
+
+    def __len__(self):  # 返回数据集中样本的数量
+        return len(self.labels_df)
+
+    def __getitem__(self, idx): # 它接受一个索引idx，并返回对应的图像和标签
+        img_name = os.path.join(self.img_folder, self.labels_df.iloc[idx, 0])   # 获取DataFrame中第idx行、第0列的图片名
+        image = Image.open(img_name).convert('RGB') # 使用Pillow库的Image.open打开图片，并将其转换为RGB模式
+        
+        label_str = self.labels_df.iloc[idx, 1]
+        label_list = ast.literal_eval(label_str)
+        label = np.array(label_list, dtype='float')
+
+        if self.transform:  # self.transform通常是一个torchvision.transforms.Compose对象，包含多个图像预处理步骤
+            image = self.transform(image)
+
+        return image, torch.tensor(label, dtype=torch.float)
+
+
+# ==========================================================
+# ========================= Train ==========================
+# ==========================================================
+
+class TrainPipeline:
+    
+    def __init__(self, init_model=None) -> None:
+        # 1. init paras
+        self.batch_size = 64
+        self.data_buffer = collections.deque(maxlen = self.batch_size)
+        self.epochs = 5
+        self.epoch_num = 1000
+        self.mse_targ = 10
+        self.savenet_freq = min(10, self.epoch_num / 2)
+
+        # 2. Load model
+        if init_model:
+            try:
+                self.policy_value_net = PolicyValueNet(model_file=init_model)
+                print(utils.HighLightGreenMsg('已加载上次最终模型'))
+            except:
+                print(utils.HighLightRedMsg('模型路径不存在，从零开始训练'))
+                self.policy_value_net = PolicyValueNet()
+        else:
+            print(utils.HighLightRedMsg('从零开始训练'))
+            self.policy_value_net = PolicyValueNet()
+
+# --------------------- Policy Evaluate --------------------
+    """Evaluate the capabilities of the policy value network"""
+    def net_evaluate(self):
+        pass
+
+# ---------------------- Policy Update ---------------------
+    """Train the network and update the parameters"""
+    def net_update(self, epoch, writer):
+        # 1. Preparing training data
+        for batch_idx, (state_batch, value_batch) in enumerate(self.data_buffer):
+
+            value_batch = np.array(value_batch).astype('float32')
+
+            # 2. Performance under the initial network(for comparison of training progress)
+            old_value_batch = self.policy_value_net.policy_value_eval_batch(state_batch)
+
+            # 3. Training network
+            for i in range(self.epochs):
+                try:
+                    loss = self.policy_value_net.train_step(state_batch, value_batch)
+                except Exception as e:
+                    print(utils.HighLightRedMsg(f"Error during training step: {e}"))
+                    continue
+
+                new_value_batch = self.policy_value_net.policy_value_eval_batch(state_batch)
+
+                par_update_loss = F.mse_loss(input=new_value_batch, target=old_value_batch)
+                if par_update_loss > self.mse_targ * 4:
+                    print(utils.HighLightRedMsg('KL divergence is too bad, For loop is terminated !'))
+                    break
+            
+            writer.add_scalar('Loss/train', loss.item(), epoch * len(self.data_buffer) + batch_idx)
+            current_lr = self.policy_value_net.optimizer.param_groups[0]['lr']  # 获取当前学习率
+            writer.add_scalar('Learning Rate', current_lr, epoch * len(self.data_buffer) + batch_idx)
+
+        # 5. Print parameters to monitor training progress
+        print(("par_update_loss:{:.3f}," "current_lr:{:.3f}," "loss:{}").format(par_update_loss, current_lr, loss))
+
+        return loss
+
+# --------------------- Train Pipeline ---------------------
+    """A complete training process"""
+    def run(self, csv_file, img_folder):
+        try:
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(self.policy_value_net.optimizer, gamma=0.999)
+            writer = SummaryWriter(log_dir='logs/train')
+
+            # 1. Create a dataset
+            transform = transforms.Compose([transforms.Resize((224, 384)),
+                                            transforms.ToTensor(),
+                                            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+            dataset = CustomDataset(csv_file=csv_file, img_folder=img_folder, transform=transform)
+
+            for epoch in range(self.epoch_num):
+                running_loss = 0.0
+
+                # 2. Loading data
+                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
+
+                # 3. Training net
+                loss = self.net_update(epoch, writer)
+                scheduler.step()
+
+                # 4. Post process
+                running_loss += loss.item()
+                writer.add_scalar('Loss/train/average', running_loss / self.epoch_num, epoch)
+                print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
+
+                # 5. Save net
+                if (epoch + 1) % self.savenet_freq == 0:
+                    print("Save Net, : epoch_num {}".format(epoch))
+                    self.policy_value_net.save_model(r'E:\DataSet\PECU_DRL\MctsRlTrain\TreeData\crnt_policy_value_net_{}.pkl'.format(epoch))
+
+            writer.close()
+
+        except KeyboardInterrupt:
+            print(utils.HighLightRedMsg('\n\rQuit'))
+
+
+# -------------------------- Test --------------------------
+if __name__ == '__main__':
+
+    net_model = r'crnt_policy_value_net_29.pkl'
+    csv_path = r'E:\DataSet\TrainDataSet\label.csv'
+    img_path = r'E:\DataSet\TrainDataSet\images'
+
+    training_pipeline = TrainPipeline(init_model=net_model)
+    training_pipeline.run(csv_file=csv_path, img_folder=img_path)
+
+    # tensorboard --logdir=logs/train

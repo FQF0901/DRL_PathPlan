@@ -1,7 +1,17 @@
+"""
+@author: Fqf
+@time: 20240620
+@file: RS.py
+@description: reeds_shepp libary: calc_optimal_path(start_node, goal_node)
+"""
+
 import time
 import math
 import numpy as np
-import ParaCfg
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
+from Util import Config
 
 # parameters initiation
 STEP_SIZE = 0.2
@@ -24,12 +34,12 @@ class PATH:
 def calc_optimal_path(start_node, goal_node):
     sx = start_node.x
     sy = start_node.y
-    syaw = start_node.theta
+    syaw = start_node.yaw_rad
     gx = goal_node.x
     gy = goal_node.y
-    gyaw = goal_node.theta
-    maxc = 1 / ParaCfg.VehPara.radius
-    step_size = 0.02
+    gyaw = goal_node.yaw_rad
+    maxc = 1 / Config.VehPara.MinTurnRadius
+    step_size = 0.02    # The spacing of discrete points
 
     paths = calc_all_paths(sx, sy, syaw, gx, gy, gyaw, maxc, step_size=step_size)
 
