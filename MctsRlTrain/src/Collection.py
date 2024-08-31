@@ -29,7 +29,7 @@ from Util import Config
 max_step_each_epsd = 10000
 DataBuffer = collections.deque(maxlen = 100000)
 
-# 1. Load net
+'''1. Load net'''
 policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.net_path, 'policy_value_net.pkl'))
 
 # --------------------- Tree Truth Gen ----------------------
@@ -37,7 +37,7 @@ scene_file_list = []
 scene_file_list = DrlUtil.get_file_list_from_dir(scene_file_list)
 
 for scene_pkl_file in scene_file_list:
-    # 2.1 Random scene extraction
+    '''2.1 Random scene extraction'''
     with open(scene_pkl_file, 'rb') as scene_pkl_data:   #  Select scene time slice randomly
         scene_data = pickle.load(scene_pkl_data)
         row_num = scene_data.shape[0]
@@ -52,39 +52,23 @@ for scene_pkl_file in scene_file_list:
                 # print(scene)  # [used for debug]
                 # utils.plot_scene_pkl(scene_pkl_file, scene_data, row_idx, store_path=Config.StorePath.tree_info_path)   # [used for debug]
 
-                # 2.2 Generating truth tree
-                if DrlCfg.TreePara.TreeType == 1:   # 1: Mcts, 2: Mcts efficient, 3: Mcts Bi-direction
-                    # 2.2.1 init env
-                    # start_time = time.time()
-                    DrlUtil.init_PcptGeo_info(scene)    # (collision free with SP and TP)
-                    # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx) # [used for debug]
+                '''2.2 Generating truth tree'''
+                # 2.2.1 init env
+                DrlUtil.init_PcptGeo_info(scene)    # (collision free with SP and TP)
+                # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx) # [used for debug]
 
-                    # 2.2.2 init mcts
-                    MT = Mcts.MctsTree()
-                    DrlUtil.init_mcts_info(MT)
-                    sim_info = MT.Simulate(max_step_each_epsd, policy_value_net)
+                # 2.2.2 init mcts
+                MT = Mcts.MctsTree()
+                DrlUtil.init_mcts_info(MT)
+                sim_info = MT.Simulate(max_step_each_epsd, policy_value_net)
 
-                    # 2.2.3 store tree data
-                    state_list, V_value_list = MT.StoreTreeInfo(sim_info)
-                    MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
-                    DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)    # [used for debug]
-                    play_data_list = zip(state_list, V_value_list)  # Each element of the play_data_list list is a tuple containing a state, act_probs and value
+                # 2.2.3 store tree data
+                state_list, V_value_list = MT.StoreTreeInfo(sim_info)
+                MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
+                DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)    # [used for debug]
+                play_data_list = zip(state_list, V_value_list)  # Each element of the play_data_list list is a tuple containing a state, act_probs and value
 
-                elif DrlCfg.TreePara.TreeType == 2:
-                    MT = MctsEfct.MctsEfctTree()
-                    DrlUtil.init_mctsefct_info(MT)
-
-                    DrlUtil.init_PcptGeo_info(scene)
-                    # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx) # [used for debug]
-
-                    MT.Simulate(max_step_each_epsd)
-                    MT.VisTree(scene_pkl_file, row_idx)
-
-                    state_list, V_value_list = MT.StoreTreeInfo()
-
-                    play_data_list = zip(state_list, V_value_list)
-
-                # 2.3 Store mcts tree information
+                '''2.3 Store mcts tree information'''
                 Mcts_Data_filename = f"{Config.StorePath.tree_info_path}/Mcts_Train_Data_buffer.pkl"
                 if os.path.exists(Mcts_Data_filename):
                     try:
@@ -104,9 +88,7 @@ for scene_pkl_file in scene_file_list:
                 with open(Mcts_Data_filename, 'wb') as data_file:
                     pickle.dump(data_dict, data_file)
 
-                # end_time = time.time()
-
-                # 3. Progress Bar
+                '''3. Progress Bar'''
                 cycle_interval = 1
                 if cnt % cycle_interval == 0:
                         pbar.set_postfix({
@@ -114,10 +96,6 @@ for scene_pkl_file in scene_file_list:
                             })
                         
                         pbar.update(cycle_interval)
-
-                # print(f"Single scene time consumption: {end_time - start_time:.4f} s")
-                # max_step_each_epsd = 50
-                # init_PcptGeo_info: 0.0025 s, init_mcts_info: 0.0000 s, mcts_simulate: 68.8811 s, plot_EnvMcts_info: 0.0945 s, store_time: 0.0015 s
 
 print('===== Mcts info generated done ! =====')
 
