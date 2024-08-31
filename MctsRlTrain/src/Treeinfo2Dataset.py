@@ -39,5 +39,5 @@ def Convert2DataSet():
 
 
 # -------------------------- Test ---------------------------
-
-Convert2DataSet()
+if __name__ == '__main__':
+    Convert2DataSet()

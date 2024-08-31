@@ -152,5 +152,6 @@ class PolicyValueNet:
 # ===================== Visualization ======================
 # ==========================================================
 
-# model = Net()
-# summary(model, (3, 224, 384))  # The input dimensions are (batch_size, channels, height, width). Can add historical expansion node through batch_size
+if __name__ == "__main__":
+    model = Net()
+    summary(model, (3, 224, 384))  # The input dimensions are (batch_size, channels, height, width). Can add historical expansion node through batch_size
