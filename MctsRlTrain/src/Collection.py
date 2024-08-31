@@ -41,7 +41,7 @@ for scene_pkl_file in scene_file_list:
     with open(scene_pkl_file, 'rb') as scene_pkl_data:   #  Select scene time slice randomly
         scene_data = pickle.load(scene_pkl_data)
         row_num = scene_data.shape[0]
-        sampled_scene_idx_list = random.sample(range(row_num), min(200, row_num))
+        sampled_scene_idx_list = random.sample(range(row_num), min(100, row_num))
 
         # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
 
@@ -98,12 +98,3 @@ for scene_pkl_file in scene_file_list:
                         pbar.update(cycle_interval)
 
 print('===== Mcts info generated done ! =====')
-
-# time.sleep(60)
-# try:
-#     os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
-#     # os.system("shutdown /s /t 0")
-# except Exception as e:
-#     print(f"An error occurred: {e}")
-
-# assert path.L >= 0.01
