@@ -47,9 +47,7 @@ def run_functions():
         csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
         img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
-        training_pipeline = TrainPipeline(init_model=net_model)
-        training_pipeline.run(csv_file=csv_path, img_folder=img_path)
-        
+        training_pipeline = TrainPipeline(init_model=net_model)       
         future_train = executor.submit(training_pipeline.run, csv_file=csv_path, img_folder=img_path)
         
         # 2. Collection
@@ -92,7 +90,7 @@ if __name__ == "__main__":
         Treeinfo2Dataset.Convert2DataSet()
         update_input_files()
 
-        time.sleep(30)
+        time.sleep(10)
 
     # try:
     #     os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')

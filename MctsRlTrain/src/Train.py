@@ -154,7 +154,7 @@ class TrainPipeline:
                 # 5. Save net
                 if (epoch + 1) % self.savenet_freq == 0:
                     print("Save Net, : epoch_num {}".format(epoch))
-                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl_{}'.format(epoch))
+                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch))
                     self.policy_value_net.save_model(mdl_name)
                     mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
                     self.policy_value_net.save_model(mdl_name)
