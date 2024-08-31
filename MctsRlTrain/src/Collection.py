@@ -26,7 +26,7 @@ from Util import Config
 # ==========================================================
 
 # ------------------------- Config -------------------------
-max_step_each_epsd = 5000
+max_step_each_epsd = 10000
 DataBuffer = collections.deque(maxlen = 100000)
 
 # 1. Load net
@@ -43,7 +43,7 @@ for scene_pkl_file in scene_file_list:
         row_num = scene_data.shape[0]
         sampled_scene_idx_list = random.sample(range(row_num), min(200, row_num))
 
-        sampled_scene_idx_list = [3161, 1745, 3368, 4186]
+        # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3677]
 
         with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Progress Bar') as pbar:
 
@@ -62,10 +62,10 @@ for scene_pkl_file in scene_file_list:
                     # 2.2.2 init mcts
                     MT = Mcts.MctsTree()
                     DrlUtil.init_mcts_info(MT)
-                    MT.Simulate(max_step_each_epsd, policy_value_net)
+                    sim_info = MT.Simulate(max_step_each_epsd, policy_value_net)
 
                     # 2.2.3 store tree data
-                    state_list, V_value_list = MT.StoreTreeInfo()
+                    state_list, V_value_list = MT.StoreTreeInfo(sim_info)
                     MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
                     DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)    # [used for debug]
                     play_data_list = zip(state_list, V_value_list)  # Each element of the play_data_list list is a tuple containing a state, act_probs and value

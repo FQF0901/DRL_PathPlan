@@ -9,6 +9,7 @@ import os
 import numpy as np
 import graphviz
 import time
+import math
 import GlbVar
 import CollisionCheck
 import DrlUtil
@@ -174,6 +175,8 @@ class MctsTree:
     """This is a complete exploration process for root node"""
     def Simulate(self, expd_maxcnt, policy_value_net):
 
+        PathFndCnt = 0
+
         for cnt in range(expd_maxcnt):
             self.expd_maxcnt = expd_maxcnt
             node = self.RootMctsNode
@@ -205,6 +208,11 @@ class MctsTree:
             PathFnd, _ = DrlUtil.CalValidRS(SelectedLeafNode.node, self.TargetPose)
             if PathFnd:
                 SelectedLeafNode.type = 4
+                PathFndCnt = PathFndCnt + 1
+
+                # Minimum run 3000 times, maximum run 10000 times (but path found over 100 can also be terminated early)
+                if cnt > 3000 and PathFndCnt > 100:
+                    return SelectNodeInfo, cnt
 
             _ = self.BackpropagateType(SelectedLeafNode)
 
@@ -221,15 +229,15 @@ class MctsTree:
 # ---------------------- StoreTreeInfo ---------------------
     """Store the tree information after backpropagate value"""
     # External packaging interface
-    def StoreTreeInfo(self):
+    def StoreTreeInfo(self, sim_info):
         state_list, value_list = [], []
         GlbVar.vis_node_list.clear()
-        self.TravslTreeInfo(self.RootMctsNode, state_list, value_list)
+        self.TravslTreeInfo(self.RootMctsNode, state_list, value_list, sim_info)
 
         return state_list, value_list
 
     # Recursively traverse the entire tree
-    def TravslTreeInfo(self, MctsNode, state_list, value_list):
+    def TravslTreeInfo(self, MctsNode, state_list, value_list, sim_info):
         stack = [MctsNode]
     
         while stack:
@@ -237,7 +245,9 @@ class MctsTree:
             
             for child_node in node.children:
                 # Only node with full exploration or high value(0.4) should be recorded and learned
-                if (((child_node.n_visit >= max(6, self.expd_maxcnt / 125)) or (child_node.n_visit >= 1 and child_node.Value > 0.2)) 
+                if (((child_node.n_visit >= max(6, sim_info[1] / math.pow(6, 3)))
+                     or (child_node.n_visit >= 1 and child_node.Value > 0.4)
+                     or (child_node.type == 4)) 
                     and (not child_node.Store)):
                     
                     state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
