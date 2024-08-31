@@ -246,8 +246,9 @@ class MctsTree:
             for child_node in node.children:
                 # Only node with full exploration or high value(0.4) should be recorded and learned
                 if (((child_node.n_visit >= max(6, sim_info[1] / math.pow(6, 3)))
-                     or (child_node.n_visit >= 1 and child_node.Value > 0.4)
-                     or (child_node.type == 4)) 
+                    #  or (child_node.n_visit >= 1 and child_node.Value > 0.2)
+                    #  or (child_node.type == 4)
+                     ) 
                     and (not child_node.Store)):
                     
                     state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
