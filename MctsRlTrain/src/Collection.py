@@ -25,7 +25,7 @@ from Util import Config
 # ======================= Collection =======================
 # ==========================================================
 
-def collection(scene_num = 100, max_step = 10000, deque_len = 100000):
+def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
     # ------------------------- Config -------------------------
     '''1. Load net'''
