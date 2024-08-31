@@ -8,23 +8,32 @@
 import os
 import numpy as np
 import graphviz
+import time
 import GlbVar
+import CollisionCheck
 import DrlUtil
-import random
+import KDTree
 import DrlCfg
 import matplotlib.cm as cm
 import matplotlib.colors as colors
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
+from Util import Config
 
 # ==========================================================
 # ======================= Mcts Tree ========================
 # ==========================================================
 class MctsTree:
     def __init__(self) -> None:
-        self.exploration_weight = 50    # Keep the chance average at first (larger), then gradually move closer to the value (smaller)
+        self.exploration_weight = 0.5    # Keep the chance average at first (larger), then gradually move closer to the value (smaller)
         self.gamma = 0.99
+        self.expd_maxcnt = 750
 
         self.RootMctsNode = GlbVar.MctsNode()
         self.TargetPose = GlbVar.Node()
+
+        # self.GridMap = GlbVar.NodeGridMap()
+        self.GridMap = KDTree.KdTreeGridMap()
 
 # ----------------------- Select Node ----------------------
     """Select node(type should equal to 1) among the child by PUCT"""
@@ -52,11 +61,13 @@ class MctsTree:
 
 # ----------------------- Expand Node ----------------------
     """Expand the node and init the related info"""
-    def ExpandNode(self, crnt_node):
+    def ExpandNode(self, crnt_node, policy_value_net):
+
         # 1. Expand Node by bicyc-model
         Expd_MctsNode_list = []
         new_node_list, ExpdAct_list = DrlUtil.Expd_Node(crnt_node.node)
-        Child_Value = DrlUtil.NodeNetValue()    # Need update [important]
+
+        Child_Value = DrlUtil.NodeNetValue(crnt_node.node, policy_value_net)
 
         # 2. Add element info into expanded node
         for index, node in enumerate(new_node_list, start=1):
@@ -66,7 +77,7 @@ class MctsTree:
             NewMctsNode.node = node
             NewMctsNode.parent = crnt_node
             NewMctsNode.TreeLvl = NewMctsNode.parent.TreeLvl + 1
-            NewMctsNode.Value = Child_Value[index-1]
+            NewMctsNode.Value = Child_Value[0][index-1]
             NewMctsNode.Probs = 0
 
             # 2.2 New Mcts Node ActInfo
@@ -81,17 +92,20 @@ class MctsTree:
                                 - DrlCfg.TreePara.ExpdNodeCost
 
             # 2.4 New Mcts Node Type
-            if DrlUtil.IsOvlpAllObst(node):
+            if CollisionCheck.CollisionCheck_opt(node): # DrlUtil.IsOvlpAllObst(node)   # used for debug [important]
                 NewMctsNode.type = 2    # 2:Ovlp
             elif DrlUtil.ChkRepeatAct(NewMctsNode):
                 NewMctsNode.type = 3    # 3:RepeatMove (Impossible that collision and repeat both satisfied)
+            elif self.GridMap.is_occupied(node.x, node.y, node.yaw_rad):
+                NewMctsNode.type = 5    # 5:Occupied grid
             else:
+                self.GridMap.add_or_update_grid(node.x, node.y, node.yaw_rad, True)
                 NewMctsNode.type = 1    # 1:Unexplored
 
             # 3. return expand node list
             crnt_node.children.append(NewMctsNode)
-            Expd_MctsNode_list.append(NewMctsNode)
-        
+            Expd_MctsNode_list.append(NewMctsNode)    
+
         return Expd_MctsNode_list
 
 # ---------------------- Backpropagate ---------------------
@@ -118,35 +132,50 @@ class MctsTree:
     """Back propagation, update the node value after episode end (its input is root node)"""
     def BackpropagateValue(self, node):
         # 1. The end of the recursion
-        if node.n_visit == 0 or node.n_visit == 1:   # True value leaf node
+        if node.n_visit == 0:   # True value leaf node
+            node.Vprev = node.Value
             node.Value = DrlUtil.LeafNodeValueJudge(node)
             node.Vdone = True
             return
-        
-        # 2. backtpropagation: if the Vdone of the child node is False, update the Value of the child node first
-        for child_node in node.children:
-            if not child_node.Vdone:
-                self.BackpropagateValue(child_node)
+        elif node.n_visit == 1:   # True value leaf node
+            node.Vprev = node.Value
+            node.Value = DrlUtil.LeafNodeValueJudge(node)
+            node.Vdone = True
+
+        # 2. backpropagation: if the Vdone of the child node is False, update the Value of the child node first
+        elif node.n_visit > 1:
+            for child_node in node.children:
+                if not child_node.Vdone:
+                    self.BackpropagateValue(child_node)
 
         # 3. If the Vdone of all child nodes is True, calculate the value of this node
-        all_child_Vdone = all(child_node.Vdone for child_node in node.children)
+        if not(node.n_visit == 1 and node.type == 4):
+            all_child_Vdone = all(child_node.Vdone for child_node in node.children)
 
-        if all_child_Vdone:
-            node_value = 0
-            for child_node in node.children:
-                itmdt_reward = 0
-                child_node.Probs = 1 / (DrlCfg.TreePara.DistActDim * DrlCfg.TreePara.GearActDim * DrlCfg.TreePara.StrActDim) # child_node.n_visit / (node.n_visit - 1)
-                node_value = node_value + (itmdt_reward + self.gamma * child_node.Value) * child_node.Probs
+            if all_child_Vdone:
+                # 3.1 Cal num of valid child
+                node_valid_child_num = 0
+                for child_node in node.children:
+                    if not child_node.type == 3:
+                        node_valid_child_num = node_valid_child_num + 1
 
+                # 3.2 Cal node.value
+                node_value = 0
+                for child_node in node.children:
+                    itmdt_reward = 0
+                    child_node.Probs = child_node.n_visit / (node.n_visit - 1) # 1 / node_valid_child_num # (DrlCfg.TreePara.DistActDim * DrlCfg.TreePara.GearActDim * DrlCfg.TreePara.StrActDim) # child_node.n_visit / (node.n_visit - 1)
+                    node_value = node_value + (itmdt_reward + self.gamma * child_node.Value) * child_node.Probs
 
-            node.Value = node_value
-            node.Vdone = True
+                node.Vprev = node.Value
+                node.Value = node_value
+                node.Vdone = True
     
 # ----------------------- Simulation -----------------------
     """This is a complete exploration process for root node"""
-    def Simulate(self, expd_maxcnt=3000):
+    def Simulate(self, expd_maxcnt, policy_value_net):
 
         for cnt in range(expd_maxcnt):
+            self.expd_maxcnt = expd_maxcnt
             node = self.RootMctsNode
             node.n_visit = node.n_visit + 1
 
@@ -161,12 +190,14 @@ class MctsTree:
 
                 # 1.2 Execute different strategies according to different node types, used to avoid select dead nodes in the next round of simulation: 2:Ovlp, 3:RepeatMove, 4:PathFnd
                 if SelectNodeInfo == 2: # Case for root node
+                    self.RootMctsNode.n_visit = self.RootMctsNode.n_visit - 1
                     _ = self.BackpropagateValue(self.RootMctsNode)
-                    print('-- Episode end! All children of the root node overlap, so openlist = [] and cannot expand further')
+                    # print('-- Episode end! All children of the root node overlap, so openlist = [] and cannot expand further')
                     return SelectNodeInfo, cnt
                 elif SelectNodeInfo == 4:   # Case for root node
+                    self.RootMctsNode.n_visit = self.RootMctsNode.n_visit - 1
                     _ = self.BackpropagateValue(self.RootMctsNode)
-                    print('-- Episode end! All children of the root node have been explored, and some whose type are PathFnd')
+                    # print('-- Episode end! All children of the root node have been explored, and some whose type are PathFnd')
                     return SelectNodeInfo, cnt
 
                 node = selected_node
@@ -177,41 +208,50 @@ class MctsTree:
 
             _ = self.BackpropagateType(SelectedLeafNode)
 
-            # 2. Expand Node based on leaf node
-            Expd_MctsNode_list = self.ExpandNode(SelectedLeafNode)
+            # 2. Expand Node based on leaf node.
+            Expd_MctsNode_list = self.ExpandNode(SelectedLeafNode, policy_value_net)
 
             # 3. Backprogagete node info such as type and value
             _ = self.BackpropagateType(Expd_MctsNode_list[0])
 
         _ = self.BackpropagateValue(self.RootMctsNode)
-        print('-- Episode end due to reach self.expd_maxcnt !')
+        # print('-- Episode end due to reach self.expd_maxcnt !')
         return SelectNodeInfo, cnt
 
 # ---------------------- StoreTreeInfo ---------------------
     """Store the tree information after backpropagate value"""
     # External packaging interface
     def StoreTreeInfo(self):
-        state_list, V_value_list = [], []
-        self.TravslTreeInfo(self.RootMctsNode, state_list, V_value_list)
+        state_list, value_list = [], []
+        GlbVar.vis_node_list.clear()
+        self.TravslTreeInfo(self.RootMctsNode, state_list, value_list)
 
-        return state_list, V_value_list
+        return state_list, value_list
 
     # Recursively traverse the entire tree
-    def TravslTreeInfo(self, MctsNode, state_list, V_value_list):
+    def TravslTreeInfo(self, MctsNode, state_list, value_list):
+        stack = [MctsNode]
+    
+        while stack:
+            node = stack.pop()
+            
+            for child_node in node.children:
+                # Only node with full exploration or high value(0.4) should be recorded and learned
+                if (((child_node.n_visit >= max(6, self.expd_maxcnt / 125)) or (child_node.n_visit >= 1 and child_node.Value > 0.2)) 
+                    and (not child_node.Store)):
+                    
+                    state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
+                    value_list.append([GrandChild.Value for GrandChild in child_node.children])
 
-        for child_node in MctsNode.children:
-            if child_node.n_visit > 1 and child_node.StoreDone == False:
-                
-                state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
-                V_value_list.append([GrandChild.Value for GrandChild in child_node.children])
+                    GlbVar.vis_node_list.add_node(child_node.node, child_node.Value)
 
-                child_node.StoreDone = True
-
-                self.TravslTreeInfo(child_node, state_list, V_value_list)
+                    child_node.Store = True
+                    stack.append(child_node)
 
 # ---------------------- Visualization ---------------------
-    def VisTree(self, scene_pkl_file='', time_slice_idx='', store_path=os.getcwd()):
+    def VisTree(self, scene_pkl_file='', time_slice_idx=''):
         root = self.RootMctsNode
+        store_path = Config.StorePath.tree_info_path
 
         if not scene_pkl_file=='' and not time_slice_idx=='':
             filename = f"{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{time_slice_idx}"
@@ -229,18 +269,23 @@ class MctsTree:
         formatted_y = "{:.3f}".format(node.node.y)
         formatted_yaw_rad = "{:.3f}".format(node.node.yaw_rad)
         formatted_V = "{:.2f}".format(node.Value)
+        formatted_Vprev = "{:.2f}".format(node.Vprev)
         formatted_Probs = "{:.2f}".format(node.Probs)
         formatted_ActInfo = ", ".join("{:.2f}".format(val) for val in node.ActInfo)
         formatted_ActCost = "{:.2f}".format(node.ActCost)
         
         label = f"({formatted_x}, {formatted_y}, {formatted_yaw_rad})\
-            \nValue: {formatted_V}, Probs: {formatted_Probs}, n_visit: {node.n_visit}, Type: {node.type}, Vdone: {node.Vdone}\
-            \nTreeLvl: {node.TreeLvl}, ActInfo: {formatted_ActInfo}, ActCost: {formatted_ActCost}"
+            \nValue: {formatted_V}, Probs: {formatted_Probs}, n_visit: {node.n_visit}, Type: {node.type}, Vdone: {node.Vdone}, Store: {node.Store}\
+            \nVprev: {formatted_Vprev}, TreeLvl: {node.TreeLvl}, ActInfo: {formatted_ActInfo}, ActCost: {formatted_ActCost}"
         
         if node.type == 2:  # ovlp node
             fillcolor = "Magenta"
+        elif node.type == 3:    # RepeatMove
+            fillcolor = "yellow"
         elif node.type == 4:    # PathFnd node
             fillcolor = "lightgreen"
+        elif node.type == 5:    # Occupied grid
+            fillcolor = "gray"
         elif node.n_visit == 0: # un-visit node
             fillcolor = "white"
         else:

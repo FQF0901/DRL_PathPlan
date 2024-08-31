@@ -51,11 +51,10 @@ def ets(file, sample_mode, sample_nums):
     # 1.2 end index                   
     if 22 in mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'].values:
         End_Time_Index = mdf_resample.loc[mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'] == 22].index[0]
+    elif 30 in mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'].values :
+        End_Time_Index = mdf_resample.loc[mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'] == 30].index[0]
     else:
-        if 30 in mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'].values and (mdf_resample.loc[mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'] == 30].index[0] + 20) < len(mdf_resample.index):
-            End_Time_Index = mdf_resample.loc[mdf_resample['PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State'] == 30].index[0] + 20
-        else:
-            End_Time_Index = len(mdf_resample.index) - 1
+        End_Time_Index = len(mdf_resample.index) - 1
 
     if ((End_Time_Index - Start_Time_Index) < 30):
         Mf4_duration_OK = 0
@@ -65,8 +64,28 @@ def ets(file, sample_mode, sample_nums):
     # 1.3 Sample time slice
     if sample_mode == 1:    # Uniform Sampling
         time_slice_list = np.linspace(Start_Time_Index, End_Time_Index, sample_nums, endpoint=True, dtype=int)
+
     elif sample_mode == 2:  # Random Sampling
         time_slice_list = np.random.randint(Start_Time_Index, End_Time_Index + 1, size=sample_nums)
+
+    elif sample_mode == 3:  # Advanced Sampling Solutions
+
+        time_slice_list = []
+        first_plan_idx_exsit_flag = False
+
+        for idx in range(0, sample_nums * 2):
+            time_slice_idx = np.random.randint(Start_Time_Index, End_Time_Index + 1, size=1)
+            SsmState = mdf_resample.loc[time_slice_idx, 'PFSM_SYSM_HMIOutOutputs_o_obv.PAS_State']
+
+            if not (SsmState.tolist()[0] >= 15 and SsmState.tolist()[0] <= 21) or (first_plan_idx_exsit_flag and SsmState.tolist()[0] == 16):
+                continue
+            if SsmState.tolist()[0] == 16:
+                first_plan_idx_exsit_flag = True
+
+            time_slice_list.append(time_slice_idx[0])
+
+            if len(time_slice_list) >= sample_nums:
+                break
     else:
         time_slice_list = []
 

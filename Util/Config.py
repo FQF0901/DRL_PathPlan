@@ -36,4 +36,14 @@ class VehParams:
         # self.LatMargin = 0.1
         # self.LgtMargin = 0.1
 
+class StoreFolderPath:
+    def __init__(self) -> None:
+        self.mf4_raw_file_path =        r'E:\DataSet\Mf4RawFile'
+        self.scene_slice_data_path =    r'E:\DataSet\SceneSliceData'
+        self.tree_info_path =           r'E:\DataSet\TreeinfoData'
+        self.train_dataset_path =       r'E:\DataSet\TrainDataSet'
+        self.net_path =                 r'E:\PECU_DRL\MctsRlTrain\output'
+
+
 VehPara = VehParams()
+StorePath = StoreFolderPath()

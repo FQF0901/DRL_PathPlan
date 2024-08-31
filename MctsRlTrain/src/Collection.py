@@ -9,6 +9,9 @@ import collections
 import os
 import sys
 import pickle
+import random
+import time
+from tqdm import tqdm
 import Mcts
 import MctsEfct
 import DrlUtil
@@ -16,85 +19,113 @@ import DrlCfg
 from Dnn import PolicyValueNet
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
+from Util import Config
 
 # ==========================================================
 # ======================= Collection =======================
 # ==========================================================
 
 # ------------------------- Config -------------------------
-max_step_each_epsd = 10000
+max_step_each_epsd = 5000
 DataBuffer = collections.deque(maxlen = 100000)
 
-# 1.1 scene pkl file location
-scene_pkl_path = r'D:\DataSet\TimeSliceData'    # [ Config ]: The folder address where scene data is located
-
-# 1.2 tree pkl file location
-tree_pkl_path = r'D:\DataSet\TreeinfoData'
-
-# 1.3 Load net
-mcts_value_net = PolicyValueNet(model_file=r'C:\01_Project\10_Git\PECU_DRL\MctsRlTrain\TrainDataSet\crnt_policy_value_net.pkl')   # used in DrlUtil.py
+# 1. Load net
+policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.net_path, 'policy_value_net.pkl'))
 
 # --------------------- Tree Truth Gen ----------------------
 scene_file_list = []
-scene_file_list = DrlUtil.get_file_list_from_dir(scene_pkl_path, scene_file_list)
+scene_file_list = DrlUtil.get_file_list_from_dir(scene_file_list)
 
 for scene_pkl_file in scene_file_list:
     # 2.1 Random scene extraction
     with open(scene_pkl_file, 'rb') as scene_pkl_data:   #  Select scene time slice randomly
         scene_data = pickle.load(scene_pkl_data)
         row_num = scene_data.shape[0]
-        
-        for row_idx in range(0, row_num):
-            scene = scene_data.iloc[row_idx]
-            # print(scene)  # [used for debug]
-            # utils.plot_scene_pkl(scene_pkl_file, scene_data, row_idx, store_path=tree_pkl_path)   # [used for debug]
+        sampled_scene_idx_list = random.sample(range(row_num), min(200, row_num))
 
-            # 2.2 Generating truth tree
-            if DrlCfg.TreePara.TreeType == 1:   # 1: Mcts, 2: Mcts efficient, 3: Mcts Bi-direction
-                # 2.2.1 init env
-                DrlUtil.init_PcptGeo_info(scene)
-                # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx, tree_pkl_path) # [used for debug]
+        sampled_scene_idx_list = [3161, 1745, 3368, 4186]
 
-                # 2.2.2 init mcts
-                MT = Mcts.MctsTree()
-                DrlUtil.init_mcts_info(MT, scene)
-                MT.Simulate(max_step_each_epsd)
-                MT.VisTree(scene_pkl_file, row_idx, store_path=tree_pkl_path)
+        with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Progress Bar') as pbar:
 
-                # 2.2.3 store tree data
-                state_list, V_value_list = MT.StoreTreeInfo()
-                play_data_list = zip(state_list, V_value_list)  # Each element of the play_data_list list is a tuple containing a state, act_probs and value
+            for cnt, row_idx in enumerate(sampled_scene_idx_list, start=1):
+                scene = scene_data.iloc[row_idx]
+                # print(scene)  # [used for debug]
+                # utils.plot_scene_pkl(scene_pkl_file, scene_data, row_idx, store_path=Config.StorePath.tree_info_path)   # [used for debug]
 
-            elif DrlCfg.TreePara.TreeType == 2:
-                MT = MctsEfct.MctsEfctTree()
-                DrlUtil.init_mctsefct_info(MT, scene)
+                # 2.2 Generating truth tree
+                if DrlCfg.TreePara.TreeType == 1:   # 1: Mcts, 2: Mcts efficient, 3: Mcts Bi-direction
+                    # 2.2.1 init env
+                    # start_time = time.time()
+                    DrlUtil.init_PcptGeo_info(scene)    # (collision free with SP and TP)
+                    # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx) # [used for debug]
 
-                DrlUtil.init_PcptGeo_info(scene)
-                # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx, tree_pkl_path) # [used for debug]
+                    # 2.2.2 init mcts
+                    MT = Mcts.MctsTree()
+                    DrlUtil.init_mcts_info(MT)
+                    MT.Simulate(max_step_each_epsd, policy_value_net)
 
-                MT.Simulate(max_step_each_epsd)
-                MT.VisTree(scene_pkl_file, row_idx, store_path=tree_pkl_path)
+                    # 2.2.3 store tree data
+                    state_list, V_value_list = MT.StoreTreeInfo()
+                    MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
+                    DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)    # [used for debug]
+                    play_data_list = zip(state_list, V_value_list)  # Each element of the play_data_list list is a tuple containing a state, act_probs and value
 
-                state_list, V_value_list = MT.StoreTreeInfo()
+                elif DrlCfg.TreePara.TreeType == 2:
+                    MT = MctsEfct.MctsEfctTree()
+                    DrlUtil.init_mctsefct_info(MT)
 
-                play_data_list = zip(state_list, V_value_list)
+                    DrlUtil.init_PcptGeo_info(scene)
+                    # DrlUtil.plot_PcptGeo(scene_pkl_file, row_idx) # [used for debug]
 
-            # 2.3 Store mcts tree information
-            Mcts_Data_filename = f"{tree_pkl_path}/Mcts_Train_Data_buffer.pkl"
-            if os.path.exists(Mcts_Data_filename):
-                try:
-                    with open(Mcts_Data_filename, 'rb') as data_dict:
-                        data_file = pickle.load(data_dict)  # This is a dictionary
-                        DataBuffer = collections.deque(maxlen = 100000) # Keep the most recently added elements, and remove the oldest elements
-                        DataBuffer.extend(data_file['DataBuffer'])
-                        del data_file
-                        DataBuffer.extend(play_data_list)
-                    # print('-- Import data from buffer_pkl success !')
-                except:
-                    print(utils.HighLightRedMsg('Import data from buffer_pkl fail !'))
-            else:
-                DataBuffer.extend(play_data_list)
-            
-            data_dict = {'DataBuffer': DataBuffer}
-            with open(Mcts_Data_filename, 'wb') as data_file:
-                pickle.dump(data_dict, data_file)
+                    MT.Simulate(max_step_each_epsd)
+                    MT.VisTree(scene_pkl_file, row_idx)
+
+                    state_list, V_value_list = MT.StoreTreeInfo()
+
+                    play_data_list = zip(state_list, V_value_list)
+
+                # 2.3 Store mcts tree information
+                Mcts_Data_filename = f"{Config.StorePath.tree_info_path}/Mcts_Train_Data_buffer.pkl"
+                if os.path.exists(Mcts_Data_filename):
+                    try:
+                        with open(Mcts_Data_filename, 'rb') as data_dict:
+                            data_file = pickle.load(data_dict)  # This is a dictionary
+                            DataBuffer = collections.deque(maxlen = 100000) # Keep the most recently added elements, and remove the oldest elements
+                            DataBuffer.extend(data_file['DataBuffer'])
+                            del data_file
+                            DataBuffer.extend(play_data_list)
+                        # print('-- Import data from buffer_pkl success !')
+                    except:
+                        print(utils.HighLightRedMsg('Import data from buffer_pkl fail !'))
+                else:
+                    DataBuffer.extend(play_data_list)
+                
+                data_dict = {'DataBuffer': DataBuffer}
+                with open(Mcts_Data_filename, 'wb') as data_file:
+                    pickle.dump(data_dict, data_file)
+
+                # end_time = time.time()
+
+                # 3. Progress Bar
+                cycle_interval = 1
+                if cnt % cycle_interval == 0:
+                        pbar.set_postfix({
+                            'episode': '%d' % (cnt)
+                            })
+                        
+                        pbar.update(cycle_interval)
+
+                # print(f"Single scene time consumption: {end_time - start_time:.4f} s")
+                # max_step_each_epsd = 50
+                # init_PcptGeo_info: 0.0025 s, init_mcts_info: 0.0000 s, mcts_simulate: 68.8811 s, plot_EnvMcts_info: 0.0945 s, store_time: 0.0015 s
+
+print('===== Mcts info generated done ! =====')
+
+# time.sleep(60)
+# try:
+#     os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+#     # os.system("shutdown /s /t 0")
+# except Exception as e:
+#     print(f"An error occurred: {e}")
+
+# assert path.L >= 0.01

@@ -1,87 +1,129 @@
-'''
-DataSet
-'''
+"""
+@author: Fqf
+@time: 20240618
+@file: Collection.py
+@description: Used to generate training/testing datasets
+"""
 
-import pandas as pd
+import collections
 import os
-from PIL import Image
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from torchvision import models
+import sys
+import pickle
+import random
+import threading
+from tqdm import tqdm
+import concurrent.futures
+import Mcts
+import MctsEfct
+import DrlUtil
+import DrlCfg
+from Dnn import PolicyValueNet
+sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
+from Util import utils
+from Util import Config
 
-# 自定义数据集类
-class CustomDataset(Dataset):   # 它继承自torch.utils.data.Dataset，并实现其中的两个方法：__len__和__getitem__
-    def __init__(self, csv_file, img_folder, transform=None):
-        self.labels_df = pd.read_csv(csv_file)  # self.labels_df是一个DataFrame对象，其中包含图片名和对应的目标标签
-        self.img_folder = img_folder
-        self.transform = transform  # 这是一个可选参数，用于在数据加载时对图像进行预处理（如缩放、裁剪、标准化等）
+# ==========================================================
+# ======================== Function ========================
+# ==========================================================
 
-    def __len__(self):  # 返回数据集中样本的数量
-        return len(self.labels_df)
+def process_row(row_idx):
+    scene = scene_data.iloc[row_idx]
+    
+    play_data_list = []
+    if DrlCfg.TreePara.TreeType == 1:
+        DrlUtil.init_PcptGeo_info(scene)
+        MT = Mcts.MctsTree()
+        DrlUtil.init_mcts_info(MT)
+        MT.Simulate(max_step_each_epsd, policy_value_net)
+        state_list, V_value_list = MT.StoreTreeInfo()
+        MT.VisTree(scene_pkl_file, row_idx)
+        DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)
+        play_data_list = zip(state_list, V_value_list)
+    
+    elif DrlCfg.TreePara.TreeType == 2:
+        MT = MctsEfct.MctsEfctTree()
+        DrlUtil.init_mctsefct_info(MT)
+        DrlUtil.init_PcptGeo_info(scene)
+        MT.Simulate(max_step_each_epsd)
+        MT.VisTree(scene_pkl_file, row_idx)
+        state_list, V_value_list = MT.StoreTreeInfo()
+        play_data_list = zip(state_list, V_value_list)
 
-    def __getitem__(self, idx): # 它接受一个索引idx，并返回对应的图像和标签
-        img_name = os.path.join(self.img_folder, self.labels_df.iloc[idx, 0])   # 获取DataFrame中第idx行、第0列的图片名
-        image = Image.open(img_name).convert('RGB') # 使用Pillow库的Image.open打开图片，并将其转换为RGB模式
-        label = self.labels_df.iloc[idx, 1:].values.astype('float') # 获取目标标签。self.labels_df.iloc[idx, 1:]获取第idx行，第1列及之后的所有列（这些列包含目标标签）
+    return play_data_list
 
-        if self.transform:  # self.transform通常是一个torchvision.transforms.Compose对象，包含多个图像预处理步骤
-            image = self.transform(image)
+def process_chunk(chunk):
+    chunk_results = []
+    for row_idx in chunk:
+        chunk_results.extend(process_row(row_idx))
+    return chunk_results
 
-        return image, torch.tensor(label, dtype=torch.float)
+def update_data_buffer(play_data_list):
+    Mcts_Data_filename = f"{Config.StorePath.tree_info_path}/Mcts_Train_Data_buffer.pkl"
+    
+    if os.path.exists(Mcts_Data_filename):
+        try:
+            with open(Mcts_Data_filename, 'rb') as data_dict:
+                data_file = pickle.load(data_dict)
+                DataBuffer = collections.deque(maxlen=100000)
+                DataBuffer.extend(data_file['DataBuffer'])
+                del data_file
+                DataBuffer.extend(play_data_list)
+        except:
+            print('Import data from buffer_pkl fail !')
+    else:
+        DataBuffer = collections.deque(play_data_list, maxlen=100000)
+    
+    data_dict = {'DataBuffer': DataBuffer}
+    with open(Mcts_Data_filename, 'wb') as data_file:
+        pickle.dump(data_dict, data_file)
 
-# 数据转换
-transform = transforms.Compose([
-    transforms.Resize((224, 384)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+# ==========================================================
+# ======================= Collection =======================
+# ==========================================================
 
-# 实例化数据集和数据加载器
-dataset = CustomDataset(csv_file=r'D:\DataSet\TrainDataSet\label.csv', img_folder=r'D:\DataSet\TrainDataSet\images', transform=transform)
-# batch_size=32指定每个批次包含32个样本
-# shuffle=True表示每个epoch开始时将数据集打乱，以增加训练的随机性。
-# drop_last=True表示如果最后一个批次样本数不足以形成完整批次，则丢弃该批次。
-# num_workers=4指定使用4个子进程来加载数据，以提高数据加载速度。
-train_loader = DataLoader(dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4)  # 批量加载数据集中的数据
+if __name__ == "__main__":
 
-# 验证数据加载器是否工作
-for images, labels in train_loader:
-    print(images.shape, labels.shape)
-    break
+# ------------------------- Config -------------------------
+    max_step_each_epsd = 12
+    DataBuffer = collections.deque(maxlen = 100000)
 
-# 定义ResNet模型
-class ResNetActionModel(nn.Module):
-    def __init__(self):
-        super(ResNetActionModel, self).__init__()
-        self.resnet = models.resnet34(pretrained=True)  # 使用预训练的ResNet34
-        num_features = self.resnet.fc.in_features
-        self.resnet.fc = nn.Linear(num_features, 6)  # 修改最后的全连接层
+    # 1. Load net
+    policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.net_path, 'policy_value_net.pkl'))
 
-    def forward(self, x):
-        return self.resnet(x)
+# --------------------- Tree Truth Gen ----------------------
+    scene_file_list = []
+    scene_file_list = DrlUtil.get_file_list_from_dir(scene_file_list)
 
-# 初始化模型、损失函数和优化器
-model = ResNetActionModel()
-criterion = nn.MSELoss()  # 均方误差损失函数,通常用于回归任务，衡量模型预测值与真实值之间的差异
-optimizer = optim.Adam(model.parameters(), lr=0.001)    # model.parameters()返回模型中的所有可训练参数
+    for scene_pkl_file in scene_file_list:
+        # 2.1 Random scene extraction
+        with open(scene_pkl_file, 'rb') as scene_pkl_data:   #  Select scene time slice randomly
+            scene_data = pickle.load(scene_pkl_data)
+            row_num = scene_data.shape[0]
+            sampled_scene_idx_list = random.sample(range(row_num), min(200, row_num))
+            sampled_scene_idx_list = [174, 734, 1024, 1167, 2872, 3375, 4234, 5084]
+# --------------------- Tree Truth Gen ----------------------
+            lock = threading.Lock()
 
-# 训练函数
-def train(model, train_loader, criterion, optimizer, num_epochs=10):
-    model.train()   # 将模型设置为训练模式, 会启用诸如Dropout和BatchNorm等训练时特有的功能
-    for epoch in range(num_epochs):
-        running_loss = 0.0
-        for inputs, targets in train_loader:    # train_loader是一个数据加载器，返回batch_size=32个数据
-            optimizer.zero_grad()   # 在每次迭代前清除之前的梯度
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward() # 反向传播损失
-            optimizer.step()    # 更新模型参数
-            running_loss += loss.item() * inputs.size(0)
-        epoch_loss = running_loss / len(train_loader.dataset)
-        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}')
+            # Determine the chunk size for splitting the workload
+            num_chunks = 4
+            chunk_size = len(sampled_scene_idx_list) // num_chunks
+            
+            # Split the workload into chunks
+            chunks = [sampled_scene_idx_list[i:i + chunk_size] for i in range(0, len(sampled_scene_idx_list), chunk_size)]
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
+                # process_chunk 是处理每个数据块的函数，而 chunk 是要处理的数据块
+                # 返回一个Future 对象表示异步执行的结果
+                future_to_chunk = {executor.submit(process_chunk, chunk): chunk for chunk in chunks}
+                
+                # 遍历这些完成的任务，并依次处理它们的结果
+                for future in concurrent.futures.as_completed(future_to_chunk):
+                    try:
+                        chunk_results = future.result()
+                        # Lock to ensure thread-safe access to file
+                        with lock:
+                            update_data_buffer(chunk_results)
+                    except Exception as e:
+                        print(f"Error processing chunk: {e}")
 
-# 调用训练函数
-train(model, train_loader, criterion, optimizer)
+    print('===== Mcts info generated done ! =====')

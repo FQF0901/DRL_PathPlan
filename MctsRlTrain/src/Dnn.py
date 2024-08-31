@@ -87,27 +87,30 @@ class Net(nn.Module):
 # =================== Policy & Value Net ===================
 # ==========================================================
 class PolicyValueNet:
-
-    def __init__(self, model_file=None, use_gpu=True):
-        self.use_gpu = use_gpu
+    def __init__(self, model_file=None):
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         self.policy_value_net = Net().to(self.device)
         self.l2_const = 2e-3    # L2 Regularization
         self.optimizer = torch.optim.Adam(params=self.policy_value_net.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=self.l2_const)
 
-        if model_file: 
-            self.policy_value_net.load_state_dict(torch.load(model_file))   # Load model parameters
+        if model_file:
+            state_dict = torch.load(model_file, map_location=torch.device(self.device))
+            self.policy_value_net.load_state_dict(state_dict)  # Load model parameters
 
 # ------------------- Policy & Value net -------------------
     """ Using neural networks to evaluate policy and value in batch states """
     def policy_value_eval_batch(self, state_batch):
         self.policy_value_net.eval()    # Set the neural network to evaluation mode, which usually turns off specific layers used in training (such as Dropout or BatchNorm)
-        state_batch = torch.tensor(state_batch).float().to(self.device)
+        # state_batch = torch.tensor(state_batch).float().to(self.device)
+        state_batch = state_batch.clone().detach().float().to(self.device)
 
         # .detach(): Generate a new tensor that shares data storage with the original tensor 
         # but no longer has the history of gradient calculations (i.e. it becomes a leaf tensor). 
         # This is usually done to prevent the propagation of gradients.
-        with autocast():    # Use mixed precision (FP16) calculations to reduce computational cost and memory usage.
+        if self.device == 'cuda':   # When there is no GPU, a pop-up window will be displayed. This is used to clear the pop-up window.
+            with autocast():    # Use mixed precision (FP16) calculations to reduce computational cost and memory usage.
+                value_batch = self.policy_value_net(state_batch)
+        else:
             value_batch = self.policy_value_net(state_batch)
         
         # value_batch = value_batch.cpu().detach().numpy()
@@ -125,7 +128,8 @@ class PolicyValueNet:
         # 1. Data preparation
         self.policy_value_net.train()   # Set the neural network model to training mode(such as Dropout or BatchNorm)
 
-        state_batch = torch.tensor(state_batch).float().to(self.device)
+        # state_batch = torch.tensor(state_batch).float().to(self.device)
+        state_batch = state_batch.clone().detach().float().to(self.device)
         value_batch = torch.tensor(value_batch).float().to(self.device)
 
         # 2. Training parameter settings
