@@ -422,7 +422,7 @@ def GenImgLabel(scene, Img_Label_path):
     # Save fig
     # filename = f"{store_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo.png"
     file_name = str(uuid.uuid4()) + '.png'
-    file_path = os.path.join(Img_Label_path, file_name)
+    file_path = os.path.join(Img_Label_path, 'images', file_name)
 
     plt.savefig(file_path)
     plt.close()

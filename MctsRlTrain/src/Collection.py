@@ -15,6 +15,7 @@ from tqdm import tqdm
 import Mcts
 import DrlUtil
 import DrlCfg
+import Treeinfo2Dataset
 from Dnn import PolicyValueNet
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
@@ -98,6 +99,10 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 100000):
                             pbar.update(cycle_interval)
 
     print('===== Mcts info generated done ! =====')
+
+    # ------------------------- DataSet ------------------------
+    Treeinfo2Dataset.Convert2DataSet()
+    print('===== Gen Train Dataset Done ! =====')
 
 
 # -------------------------- Test ---------------------------
