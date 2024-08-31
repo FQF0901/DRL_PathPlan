@@ -43,7 +43,7 @@ for scene_pkl_file in scene_file_list:
         row_num = scene_data.shape[0]
         sampled_scene_idx_list = random.sample(range(row_num), min(200, row_num))
 
-        # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3677]
+        # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
 
         with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Progress Bar') as pbar:
 
