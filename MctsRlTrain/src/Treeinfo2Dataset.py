@@ -16,17 +16,18 @@ from Util import Config
 
 def Convert2DataSet():
     # 1. Clean old dataset
-    for filename in os.listdir(Config.StorePath.train_dataset_path):
-        file_path = os.path.join(Config.StorePath.train_dataset_path, filename)
-        if os.path.isfile(file_path) or os.path.islink(file_path):
-            os.remove(file_path)
-        elif os.path.isdir(file_path):
-            shutil.rmtree(file_path)
+    csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
+    img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
-    images_folder_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
-    os.makedirs(images_folder_path, exist_ok=True)
+    if os.path.isfile(csv_path):
+        os.remove(csv_path)
 
-    time.sleep(5)
+    if os.path.isdir(img_path):
+        shutil.rmtree(img_path)
+
+    os.makedirs(img_path, exist_ok=True)
+
+    time.sleep(3)
 
     # 2. Gen dataset
     TreeInfoPkl = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')

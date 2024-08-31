@@ -24,6 +24,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
+from Util import Config
 
 # ==========================================================
 # ======================== DataSet =========================
@@ -60,24 +61,26 @@ class TrainPipeline:
     
     def __init__(self, init_model=None) -> None:
         # 1. init paras
-        self.batch_size = 64
+        self.batch_size = 32
         self.data_buffer = collections.deque(maxlen = self.batch_size)
         self.epochs = 5
         self.epoch_num = 1000
         self.mse_targ = 10
         self.savenet_freq = min(10, self.epoch_num / 2)
 
-        # 2. Load model
-        if init_model:
-            try:
-                self.policy_value_net = PolicyValueNet(model_file=init_model)
-                print(utils.HighLightGreenMsg('已加载上次最终模型'))
-            except:
-                print(utils.HighLightRedMsg('模型路径不存在，从零开始训练'))
-                self.policy_value_net = PolicyValueNet()
-        else:
-            print(utils.HighLightRedMsg('从零开始训练'))
-            self.policy_value_net = PolicyValueNet()
+        self.policy_value_net = PolicyValueNet(model_file=init_model)
+
+        # # 2. Load model
+        # if init_model:
+        #     try:
+        #         self.policy_value_net = PolicyValueNet(model_file=init_model)
+        #         print(utils.HighLightGreenMsg('已加载上次最终模型'))
+        #     except:
+        #         print(utils.HighLightRedMsg('模型路径不存在，从零开始训练'))
+        #         self.policy_value_net = PolicyValueNet()
+        # else:
+        #     print(utils.HighLightRedMsg('从零开始训练'))
+        #     self.policy_value_net = PolicyValueNet()
 
 # --------------------- Policy Evaluate --------------------
     """Evaluate the capabilities of the policy value network"""
@@ -122,6 +125,7 @@ class TrainPipeline:
 # --------------------- Train Pipeline ---------------------
     """A complete training process"""
     def run(self, csv_file, img_folder):
+        print(utils.HighLightGreenMsg('运行 train.run()'))
         try:
             scheduler = torch.optim.lr_scheduler.ExponentialLR(self.policy_value_net.optimizer, gamma=0.999)
             writer = SummaryWriter(log_dir='logs/train')
@@ -150,7 +154,10 @@ class TrainPipeline:
                 # 5. Save net
                 if (epoch + 1) % self.savenet_freq == 0:
                     print("Save Net, : epoch_num {}".format(epoch))
-                    self.policy_value_net.save_model(r'E:\DataSet\PECU_DRL\MctsRlTrain\TreeData\crnt_policy_value_net_{}.pkl'.format(epoch))
+                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl_{}'.format(epoch))
+                    self.policy_value_net.save_model(mdl_name)
+                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
+                    self.policy_value_net.save_model(mdl_name)
 
             writer.close()
 
@@ -161,9 +168,9 @@ class TrainPipeline:
 # -------------------------- Test --------------------------
 if __name__ == '__main__':
 
-    net_model = r'crnt_policy_value_net_29.pkl'
-    csv_path = r'E:\DataSet\TrainDataSet\label.csv'
-    img_path = r'E:\DataSet\TrainDataSet\images'
+    net_model = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
+    csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
+    img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
     training_pipeline = TrainPipeline(init_model=net_model)
     training_pipeline.run(csv_file=csv_path, img_folder=img_path)

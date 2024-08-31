@@ -15,7 +15,6 @@ from tqdm import tqdm
 import Mcts
 import DrlUtil
 import DrlCfg
-import Treeinfo2Dataset
 from Dnn import PolicyValueNet
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
@@ -26,12 +25,13 @@ from Util import Config
 # ==========================================================
 
 def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
+    print(utils.HighLightGreenMsg('运行 collection()'))
 
     # ------------------------- Config -------------------------
     '''1. Load net'''
     max_step_each_epsd = max_step
     DataBuffer = collections.deque(maxlen = deque_len)
-    policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.net_path, 'policy_value_net.pkl'))
+    policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.tree_info_path, 'policy_value_net.pkl'))
 
     # --------------------- Tree Truth Gen ----------------------
     scene_file_list = []
@@ -65,7 +65,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
                     # 2.2.3 store tree data
                     state_list, V_value_list = MT.StoreTreeInfo(sim_info)
-                    MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
+                    # MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
                     DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)    # [used for debug]
                     play_data_list = zip(state_list, V_value_list)  # Each element of the play_data_list list is a tuple containing a state, act_probs and value
 
@@ -99,11 +99,6 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
                             pbar.update(cycle_interval)
 
     print('===== Mcts info generated done ! =====')
-
-    # ------------------------- DataSet ------------------------
-    Treeinfo2Dataset.Convert2DataSet()
-    print('===== Gen Train Dataset Done ! =====')
-
 
 # -------------------------- Test ---------------------------
 
