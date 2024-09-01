@@ -212,6 +212,7 @@ class MctsTree:
 
                 # Minimum run 3000 times, maximum run 10000 times (but path found over 100 can also be terminated early)
                 if cnt > 3000 and PathFndCnt > 100:
+                    _ = self.BackpropagateValue(self.RootMctsNode)
                     return SelectNodeInfo, cnt
 
             _ = self.BackpropagateType(SelectedLeafNode)
