@@ -1,23 +1,20 @@
 """
 @author: Fqf
-@time: 20240618
-@file: Collection.py
-@description: Used to generate training/testing datasets
+@time: 20240807
+@file: main.py
+@description: main func of RL
 """
 
-import collections
 import os
 import sys
-import pickle
-import random
-import threading
-from tqdm import tqdm
+import glob
+import shutil
 import concurrent.futures
-import Mcts
-import MctsEfct
-import DrlUtil
-import DrlCfg
+import time
+import Treeinfo2Dataset
+from Collection import collection
 from Dnn import PolicyValueNet
+from Train import TrainPipeline
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
 from Util import Config
@@ -26,104 +23,110 @@ from Util import Config
 # ======================== Function ========================
 # ==========================================================
 
-def process_row(row_idx):
-    scene = scene_data.iloc[row_idx]
-    
-    play_data_list = []
-    if DrlCfg.TreePara.TreeType == 1:
-        DrlUtil.init_PcptGeo_info(scene)
-        MT = Mcts.MctsTree()
-        DrlUtil.init_mcts_info(MT)
-        MT.Simulate(max_step_each_epsd, policy_value_net)
-        state_list, V_value_list = MT.StoreTreeInfo()
-        MT.VisTree(scene_pkl_file, row_idx)
-        DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)
-        play_data_list = zip(state_list, V_value_list)
-    
-    elif DrlCfg.TreePara.TreeType == 2:
-        MT = MctsEfct.MctsEfctTree()
-        DrlUtil.init_mctsefct_info(MT)
-        DrlUtil.init_PcptGeo_info(scene)
-        MT.Simulate(max_step_each_epsd)
-        MT.VisTree(scene_pkl_file, row_idx)
-        state_list, V_value_list = MT.StoreTreeInfo()
-        play_data_list = zip(state_list, V_value_list)
+def clear_path(path):
+    if os.path.exists(path):
+        for filename in os.listdir(path):
+            file_path = os.path.join(path, filename)
+            try:
+                if os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                else:
+                    os.remove(file_path)
+            except Exception as e:
+                print(f"Error while deleting {file_path}: {e}")
 
-    return play_data_list
-
-def process_chunk(chunk):
-    chunk_results = []
-    for row_idx in chunk:
-        chunk_results.extend(process_row(row_idx))
-    return chunk_results
-
-def update_data_buffer(play_data_list):
-    Mcts_Data_filename = f"{Config.StorePath.tree_info_path}/Mcts_Train_Data_buffer.pkl"
+def delete_files_for_loop(tree_info_path, train_dataset_path):
+    # 1. Delete. png and. svg files, as well as Mcts_Train_data-buffer. pkl
+    for extension in ['*.png', '*.svg']:
+        for filepath in glob.glob(os.path.join(tree_info_path, extension)):
+            os.remove(filepath)
     
-    if os.path.exists(Mcts_Data_filename):
-        try:
-            with open(Mcts_Data_filename, 'rb') as data_dict:
-                data_file = pickle.load(data_dict)
-                DataBuffer = collections.deque(maxlen=100000)
-                DataBuffer.extend(data_file['DataBuffer'])
-                del data_file
-                DataBuffer.extend(play_data_list)
-        except:
-            print('Import data from buffer_pkl fail !')
+    pkl_file = os.path.join(tree_info_path, 'Mcts_Train_Data_buffer.pkl')
+    if os.path.exists(pkl_file):
+        os.remove(pkl_file)
+    
+    # 2. Delete files containing 'policy-value_net_' with a suffix of. pkl
+    for filepath in glob.glob(os.path.join(train_dataset_path, 'policy_value_net_*.pkl')):
+        os.remove(filepath)
+
+def update_input_files():
+    # 1. train_dataset_path
+    net_in_train_folder = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
+    if os.path.isfile(net_in_train_folder):
+        shutil.copy(net_in_train_folder, os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl'))
+        shutil.copy(net_in_train_folder, Config.StorePath.tree_info_path)
     else:
-        DataBuffer = collections.deque(play_data_list, maxlen=100000)
+        print(f"文件 {net_in_train_folder} 不存在")
+
+    # 2. tree_info_path
+    scene_in_tree_folder = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
+    if os.path.isfile(scene_in_tree_folder):
+        shutil.copy(scene_in_tree_folder, os.path.join(os.getcwd(), 'MctsRlTrain', 'output'))
+        shutil.copy(scene_in_tree_folder, Config.StorePath.train_dataset_path)
+    else:
+        print(f"文件 {scene_in_tree_folder} 不存在")
     
-    data_dict = {'DataBuffer': DataBuffer}
-    with open(Mcts_Data_filename, 'wb') as data_file:
-        pickle.dump(data_dict, data_file)
+def multi_threaded_func():
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+
+        # 1. Train net
+        net_model = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
+        csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
+        img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
+
+        training_pipeline = TrainPipeline(init_model=net_model)       
+        training_pipeline.epoch_num = 1000
+        training_pipeline.epochs = 1
+        future_train = executor.submit(training_pipeline.run, csv_file=csv_path, img_folder=img_path)
+        
+        # 2. Collection
+        future_collection = executor.submit(collection, scene_num=100, max_step=15000, deque_len=300000)
+
+        concurrent.futures.wait([future_collection, future_train])
+
 
 # ==========================================================
-# ======================= Collection =======================
+# ======================== main fun ========================
 # ==========================================================
 
 if __name__ == "__main__":
 
-# ------------------------- Config -------------------------
-    max_step_each_epsd = 12
-    DataBuffer = collections.deque(maxlen = 100000)
+    # 1. Clean folder
+    clear_path(Config.StorePath.train_dataset_path)
+    clear_path(Config.StorePath.tree_info_path)
 
-    # 1. Load net
-    policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.net_path, 'policy_value_net.pkl'))
+    # 2. Init env
+    policy_value_net_pkl = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl')
 
-# --------------------- Tree Truth Gen ----------------------
-    scene_file_list = []
-    scene_file_list = DrlUtil.get_file_list_from_dir(scene_file_list)
+    if not os.path.isfile(policy_value_net_pkl):
+        policy_value_net = PolicyValueNet()
+        policy_value_net.save_model(model_file = policy_value_net_pkl)
+        print(utils.HighLightRedMsg(f'{policy_value_net_pkl}不存在, 从零开始训练'))
 
-    for scene_pkl_file in scene_file_list:
-        # 2.1 Random scene extraction
-        with open(scene_pkl_file, 'rb') as scene_pkl_data:   #  Select scene time slice randomly
-            scene_data = pickle.load(scene_pkl_data)
-            row_num = scene_data.shape[0]
-            sampled_scene_idx_list = random.sample(range(row_num), min(200, row_num))
-            sampled_scene_idx_list = [174, 734, 1024, 1167, 2872, 3375, 4234, 5084]
-# --------------------- Tree Truth Gen ----------------------
-            lock = threading.Lock()
+    else:
+        print(utils.HighLightGreenMsg('加载上次最终{policy_value_net_pkl}'))
 
-            # Determine the chunk size for splitting the workload
-            num_chunks = 4
-            chunk_size = len(sampled_scene_idx_list) // num_chunks
-            
-            # Split the workload into chunks
-            chunks = [sampled_scene_idx_list[i:i + chunk_size] for i in range(0, len(sampled_scene_idx_list), chunk_size)]
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
-                # process_chunk 是处理每个数据块的函数，而 chunk 是要处理的数据块
-                # 返回一个Future 对象表示异步执行的结果
-                future_to_chunk = {executor.submit(process_chunk, chunk): chunk for chunk in chunks}
-                
-                # 遍历这些完成的任务，并依次处理它们的结果
-                for future in concurrent.futures.as_completed(future_to_chunk):
-                    try:
-                        chunk_results = future.result()
-                        # Lock to ensure thread-safe access to file
-                        with lock:
-                            update_data_buffer(chunk_results)
-                    except Exception as e:
-                        print(f"Error processing chunk: {e}")
+    shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
+    shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
 
-    print('===== Mcts info generated done ! =====')
+    # 3. Generate new scenes for initial training
+    collection(scene_num = 50, max_step = 15000, deque_len = 300000)
+    Treeinfo2Dataset.Convert2DataSet()
+    update_input_files()
+
+    # 4. Start the formal loop (based on the initialized or old net parameter)
+    for _ in range(5):
+        delete_files_for_loop(Config.StorePath.tree_info_path, Config.StorePath.train_dataset_path)    # Clear PNG, SVG and Mcts_Train_Data_buffer.pkl, policy_value_net_n.pkl
+
+        multi_threaded_func()   # Multi threaded parallel computing main function
+
+        Treeinfo2Dataset.Convert2DataSet()
+        update_input_files()
+
+    # 5. Sleep computer
+    try:
+        time.sleep(30)
+        os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+        # os.system("shutdown /s /t 0")
+    except Exception as e:
+        print(f"An error occurred: {e}")

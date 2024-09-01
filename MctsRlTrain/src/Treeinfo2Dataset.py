@@ -36,6 +36,8 @@ def Convert2DataSet():
         for scene in data_file['DataBuffer']:
             DrlUtil.GenImgLabel(scene, Config.StorePath.train_dataset_path)
 
+    print('===== Convert2DataSet done ! =====')
+
 
 # -------------------------- Test ---------------------------
 if __name__ == '__main__':

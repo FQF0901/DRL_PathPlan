@@ -95,7 +95,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
                             
                             pbar.update(cycle_interval)
 
-    print('===== Mcts info generated done ! =====')
+    print('===== Collection done ! =====')
 
 # -------------------------- Test ---------------------------
 

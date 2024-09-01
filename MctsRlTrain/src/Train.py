@@ -57,12 +57,12 @@ class CustomDataset(Dataset):   # 它继承自torch.utils.data.Dataset，并实�
 
 class TrainPipeline:
     
-    def __init__(self, init_model=None) -> None:
+    def __init__(self, init_model=None, batch_size=32, epochs=5, epoch_num=1000) -> None:
         # 1. init paras
-        self.batch_size = 32
+        self.batch_size = batch_size
         self.data_buffer = collections.deque(maxlen = self.batch_size)
-        self.epochs = 5
-        self.epoch_num = 1000
+        self.epochs = epochs
+        self.epoch_num = epoch_num
         self.mse_targ = 10
         self.savenet_freq = min(10, self.epoch_num / 2)
 
@@ -155,8 +155,6 @@ class TrainPipeline:
                         # print("Save Net, : epoch_num {}".format(epoch))
                         mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch))
                         self.policy_value_net.save_model(mdl_name)
-                        mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
-                        self.policy_value_net.save_model(mdl_name)
 
                     '''3. Progress Bar'''
                     cycle_interval = 10
@@ -168,6 +166,7 @@ class TrainPipeline:
                             pbar.update(cycle_interval)
 
             writer.close()
+            print('===== Train done ! =====')
 
         except KeyboardInterrupt:
             print(utils.HighLightRedMsg('\n\rQuit'))
@@ -180,7 +179,11 @@ if __name__ == '__main__':
     csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
     img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
-    training_pipeline = TrainPipeline(init_model=net_model)
-    training_pipeline.run(csv_file=csv_path, img_folder=img_path)
+    training_pipeline = TrainPipeline(init_model=net_model, 
+                                          batch_size=32,
+                                          epochs=5, 
+                                          epoch_num=1000)       
+    training_pipeline.run(csv_file=csv_path, 
+                          img_folder=img_path)
 
     # tensorboard --logdir=logs/train
