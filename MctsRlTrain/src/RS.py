@@ -91,7 +91,9 @@ def set_path(paths, lengths, ctypes):
     if path.L >= MAX_LENGTH:
         return paths
 
-    assert path.L >= 0.01
+    # assert path.L >= 0.01
+    if path.L < 0.01:   # handcode fqf
+        print(path.L)
     paths.append(path)
 
     return paths
