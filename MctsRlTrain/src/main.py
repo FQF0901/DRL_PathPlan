@@ -7,6 +7,7 @@
 
 import os
 import sys
+import glob
 import shutil
 import concurrent.futures
 import time
@@ -21,6 +22,31 @@ from Util import Config
 # ==========================================================
 # ======================== Function ========================
 # ==========================================================
+
+def clear_path(path):
+    if os.path.exists(path):
+        for filename in os.listdir(path):
+            file_path = os.path.join(path, filename)
+            try:
+                if os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                else:
+                    os.remove(file_path)
+            except Exception as e:
+                print(f"Error while deleting {file_path}: {e}")
+
+def clear_non_pkl_files(path):
+
+    if os.path.exists(path):
+        for file_path in glob.glob(os.path.join(path, '*')):
+            if not file_path.endswith('.pkl'):
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    print(f"Error while deleting {file_path}: {e}")
 
 def update_input_files():
     # 1. train_dataset_path
@@ -39,7 +65,7 @@ def update_input_files():
     else:
         print(f"文件 {scene_in_tree_folder} 不存在")
     
-def run_functions():
+def multi_threaded_func():
     with concurrent.futures.ThreadPoolExecutor() as executor:
 
         # 1. Train net
@@ -48,6 +74,8 @@ def run_functions():
         img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
         training_pipeline = TrainPipeline(init_model=net_model)       
+        training_pipeline.epoch_num = 1000
+        training_pipeline.epochs = 1
         future_train = executor.submit(training_pipeline.run, csv_file=csv_path, img_folder=img_path)
         
         # 2. Collection
@@ -62,36 +90,43 @@ def run_functions():
 
 if __name__ == "__main__":
 
-    # 1. Init net
-    policy_value_net_path = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl')
+    # 1. Clean folder
+    clear_path(Config.StorePath.train_dataset_path)
+    clear_path(Config.StorePath.tree_info_path)
 
-    if not os.path.isfile(policy_value_net_path):
+    # 2. Init env
+    policy_value_net_pkl = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl')
+
+    if not os.path.isfile(policy_value_net_pkl):
         policy_value_net = PolicyValueNet()
-        policy_value_net.save_model(model_file = policy_value_net_path)
-        print(utils.HighLightRedMsg('模型路径不存在，从零开始训练'))
+        policy_value_net.save_model(model_file = policy_value_net_pkl)
+        print(utils.HighLightRedMsg(f'{policy_value_net_pkl}不存在, 从零开始训练'))
 
     else:
-        print(utils.HighLightGreenMsg('已加载上次最终模型'))
+        print(utils.HighLightGreenMsg('加载上次最终{policy_value_net_pkl}'))
 
-    shutil.copy(policy_value_net_path, Config.StorePath.train_dataset_path)
-    shutil.copy(policy_value_net_path, Config.StorePath.tree_info_path)
+    shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
+    shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
 
-    # 2. Generate new scenes for initial training
+    # 3. Generate new scenes for initial training
     collection(scene_num = 50, max_step = 30000, deque_len = 300000)
     Treeinfo2Dataset.Convert2DataSet()
     update_input_files()
 
-    time.sleep(3)
+    time.sleep(5)
 
-    # 3. Start the formal loop (based on the initialized or old net parameter)
-    for _ in range(1):
-        run_functions()
+    # 4. Start the formal loop (based on the initialized or old net parameter)
+    for _ in range(5):
+        clear_non_pkl_files(Config.StorePath.tree_info_path)
+
+        multi_threaded_func()   # Multi threaded parallel computing main function
 
         Treeinfo2Dataset.Convert2DataSet()
         update_input_files()
 
-        time.sleep(10)
+        time.sleep(5)
 
+    # 5. Sleep computer
     try:
         time.sleep(10)
         os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')

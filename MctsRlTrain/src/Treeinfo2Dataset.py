@@ -21,13 +21,11 @@ def Convert2DataSet():
 
     if os.path.isfile(csv_path):
         os.remove(csv_path)
-
     if os.path.isdir(img_path):
         shutil.rmtree(img_path)
 
+    time.sleep(5)
     os.makedirs(img_path, exist_ok=True)
-
-    time.sleep(3)
 
     # 2. Gen dataset
     TreeInfoPkl = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
