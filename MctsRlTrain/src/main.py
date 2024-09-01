@@ -35,18 +35,19 @@ def clear_path(path):
             except Exception as e:
                 print(f"Error while deleting {file_path}: {e}")
 
-def clear_non_pkl_files(path):
-
-    if os.path.exists(path):
-        for file_path in glob.glob(os.path.join(path, '*')):
-            if not file_path.endswith('.pkl'):
-                try:
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                except Exception as e:
-                    print(f"Error while deleting {file_path}: {e}")
+def clear_non_pkl_files(tree_info_path, train_dataset_path):
+    # 1. Delete. png and. svg files, as well as Mcts_Train_data-buffer. pkl
+    for extension in ['*.png', '*.svg']:
+        for filepath in glob.glob(os.path.join(tree_info_path, extension)):
+            os.remove(filepath)
+    
+    pkl_file = os.path.join(tree_info_path, 'Mcts_Train_Data_buffer.pkl')
+    if os.path.exists(pkl_file):
+        os.remove(pkl_file)
+    
+    # 2. Delete files containing 'policy-value_net_' with a suffix of. pkl
+    for filepath in glob.glob(os.path.join(train_dataset_path, 'policy_value_net_*.pkl')):
+        os.remove(filepath)
 
 def update_input_files():
     # 1. train_dataset_path
@@ -115,7 +116,7 @@ if __name__ == "__main__":
 
     # 4. Start the formal loop (based on the initialized or old net parameter)
     for _ in range(5):
-        clear_non_pkl_files(Config.StorePath.tree_info_path)    # Clear PNG and SVG
+        clear_non_pkl_files(Config.StorePath.tree_info_path, Config.StorePath.train_dataset_path)    # Clear PNG, SVG and Mcts_Train_Data_buffer.pkl, policy_value_net_n.pkl
 
         multi_threaded_func()   # Multi threaded parallel computing main function
 
