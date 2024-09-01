@@ -51,7 +51,7 @@ def run_functions():
         future_train = executor.submit(training_pipeline.run, csv_file=csv_path, img_folder=img_path)
         
         # 2. Collection
-        future_collection = executor.submit(collection, scene_num=100, max_step=10000, deque_len=300000)
+        future_collection = executor.submit(collection, scene_num=100, max_step=30000, deque_len=300000)
 
         concurrent.futures.wait([future_collection, future_train])
 
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     shutil.copy(policy_value_net_path, Config.StorePath.tree_info_path)
 
     # 2. Generate new scenes for initial training
-    collection(scene_num = 10, max_step = 10000, deque_len = 300000)
+    collection(scene_num = 50, max_step = 30000, deque_len = 300000)
     Treeinfo2Dataset.Convert2DataSet()
     update_input_files()
 
@@ -92,8 +92,9 @@ if __name__ == "__main__":
 
         time.sleep(10)
 
-    # try:
-    #     os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
-    #     # os.system("shutdown /s /t 0")
-    # except Exception as e:
-    #     print(f"An error occurred: {e}")
+    try:
+        time.sleep(10)
+        os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+        # os.system("shutdown /s /t 0")
+    except Exception as e:
+        print(f"An error occurred: {e}")

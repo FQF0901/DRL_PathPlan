@@ -5,15 +5,13 @@
 @description: Training DNN
 """
 
-import random
 import collections
 import numpy as np
 import pandas as pd
 from PIL import Image
 import ast
 from Dnn import PolicyValueNet
-import pickle
-import time
+from tqdm import tqdm
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -118,7 +116,7 @@ class TrainPipeline:
             writer.add_scalar('Learning Rate', current_lr, epoch * len(self.data_buffer) + batch_idx)
 
         # 5. Print parameters to monitor training progress
-        print(("par_update_loss:{:.3f}," "current_lr:{:.3f}," "loss:{}").format(par_update_loss, current_lr, loss))
+        # print(("par_update_loss:{:.3f}," "current_lr:{:.3f}," "loss:{}").format(par_update_loss, current_lr, loss))
 
         return loss
 
@@ -136,28 +134,38 @@ class TrainPipeline:
                                             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
             dataset = CustomDataset(csv_file=csv_file, img_folder=img_folder, transform=transform)
 
-            for epoch in range(self.epoch_num):
-                running_loss = 0.0
+            with tqdm(total=int(self.epoch_num), dynamic_ncols=True, desc='Train Progress Bar') as pbar:
+                for epoch in range(self.epoch_num):
+                    running_loss = 0.0
 
-                # 2. Loading data
-                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
+                    # 2. Loading data
+                    self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
 
-                # 3. Training net
-                loss = self.net_update(epoch, writer)
-                scheduler.step()
+                    # 3. Training net
+                    loss = self.net_update(epoch, writer)
+                    scheduler.step()
 
-                # 4. Post process
-                running_loss += loss.item()
-                writer.add_scalar('Loss/train/average', running_loss / self.epoch_num, epoch)
-                print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
+                    # 4. Post process
+                    running_loss += loss.item()
+                    writer.add_scalar('Loss/train/average', running_loss / self.epoch_num, epoch)
+                    # print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
 
-                # 5. Save net
-                if (epoch + 1) % self.savenet_freq == 0:
-                    print("Save Net, : epoch_num {}".format(epoch))
-                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch))
-                    self.policy_value_net.save_model(mdl_name)
-                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
-                    self.policy_value_net.save_model(mdl_name)
+                    # 5. Save net
+                    if (epoch + 1) % self.savenet_freq == 0:
+                        # print("Save Net, : epoch_num {}".format(epoch))
+                        mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch))
+                        self.policy_value_net.save_model(mdl_name)
+                        mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
+                        self.policy_value_net.save_model(mdl_name)
+
+                    '''3. Progress Bar'''
+                    cycle_interval = 10
+                    if epoch % cycle_interval == 0:
+                            pbar.set_postfix({
+                                'episode': '%d' % (epoch)
+                                })
+                            
+                            pbar.update(cycle_interval)
 
             writer.close()
 
