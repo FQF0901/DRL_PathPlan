@@ -188,7 +188,7 @@ def LeafNodeValueJudge(node):
     Close2ObstcCost = 0  # [important]
     DefaultValue = node.Value * 0.8 if (node.type == 1 or node.type == 5) else 0  # 1:Unexplored, 5:Occupied grid
     RepeatValue = node.parent.parent.Value if node.type == 3 else 0    # 3:RepeatMove
-    OvlpCost = 0.1 if node.type == 2 else 0 # Not encouraging but maintaining exploratory ability
+    OvlpCost = 0 if node.type == 2 else 0 # Not encouraging but maintaining exploratory ability
     PathFndReward = 1 if node.type == 4 else 0   # [important]
 
     TotalValue = DefaultValue + RepeatValue + OvlpCost + PathFndReward    # [important]

@@ -157,15 +157,17 @@ class MctsTree:
                 # 3.1 Cal num of valid child
                 node_valid_child_num = 0
                 for child_node in node.children:
-                    if not child_node.type == 3:
+                    if child_node.type == 1 or child_node.type == 3 or child_node.type == 4:
                         node_valid_child_num = node_valid_child_num + 1
 
                 # 3.2 Cal node.value
                 node_value = 0
                 for child_node in node.children:
-                    itmdt_reward = 0
-                    child_node.Probs = child_node.n_visit / (node.n_visit - 1) # 1 / node_valid_child_num # (DrlCfg.TreePara.DistActDim * DrlCfg.TreePara.GearActDim * DrlCfg.TreePara.StrActDim) # child_node.n_visit / (node.n_visit - 1)
-                    node_value = node_value + (itmdt_reward + self.gamma * child_node.Value) * child_node.Probs
+                    if child_node.type == 1 or child_node.type == 3 or child_node.type == 4:
+                        itmdt_reward = 0
+                        # 1 / node_valid_child_num # (DrlCfg.TreePara.DistActDim * DrlCfg.TreePara.GearActDim * DrlCfg.TreePara.StrActDim) # child_node.n_visit / (node.n_visit - 1)
+                        child_node.Probs = 1 / node_valid_child_num
+                        node_value = node_value + (itmdt_reward + self.gamma * child_node.Value) * child_node.Probs
 
                 node.Vprev = node.Value
                 node.Value = node_value
@@ -247,7 +249,7 @@ class MctsTree:
             for child_node in node.children:
                 # Only node with full exploration or high value(0.4) should be recorded and learned
                 if (((child_node.n_visit >= max(6, sim_info[1] / math.pow(6, 3)))
-                    #  or (child_node.n_visit >= 1 and child_node.Value > 0.2)
+                     or (child_node.n_visit >= 1 and child_node.Value >= 0.2)
                     #  or (child_node.type == 4)
                      ) 
                     and (not child_node.Store)):

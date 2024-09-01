@@ -10,11 +10,9 @@ import os
 import sys
 import pickle
 import random
-import time
 from tqdm import tqdm
 import Mcts
 import DrlUtil
-import DrlCfg
 from Dnn import PolicyValueNet
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
@@ -29,7 +27,6 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
     # ------------------------- Config -------------------------
     '''1. Load net'''
-    max_step_each_epsd = max_step
     DataBuffer = collections.deque(maxlen = deque_len)
     policy_value_net = PolicyValueNet(model_file=os.path.join(Config.StorePath.tree_info_path, 'policy_value_net.pkl'))
 
@@ -46,7 +43,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
             # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
 
-            with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Progress Bar') as pbar:
+            with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Collection Progress Bar') as pbar:
 
                 for cnt, row_idx in enumerate(sampled_scene_idx_list, start=1):
                     scene = scene_data.iloc[row_idx]
@@ -61,7 +58,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
                     # 2.2.2 init mcts
                     MT = Mcts.MctsTree()
                     DrlUtil.init_mcts_info(MT)
-                    sim_info = MT.Simulate(max_step_each_epsd, policy_value_net)
+                    sim_info = MT.Simulate(max_step, policy_value_net)
 
                     # 2.2.3 store tree data
                     state_list, V_value_list = MT.StoreTreeInfo(sim_info)

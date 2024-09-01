@@ -49,7 +49,7 @@ class MctsNode:
 # -------------------- MctsEfctNode Type -------------------
 class MctsEfctNode:
     def __init__(self, x = 0, y = 0, yaw_rad = 0, parent = None, children = None, DnnV = 0, Type = 1, \
-                 n_visit = 0, Vdone = False, StoreDone = False, TreeLvl = 0, ActInfo = None, ActCost = 0) -> None:
+                 n_visit = 0, Vdone = False, Store = False, TreeLvl = 0, ActInfo = None, ActCost = 0) -> None:
         self.node = Node(x, y, yaw_rad)
         self.parent = parent
         self.children = children if children is not None else []
@@ -57,7 +57,7 @@ class MctsEfctNode:
         self.type = Type    # 0:default, 1:Unexplored, 2:Ovlp, 3:RepeatMove, 4:PathFnd, 5:Occupied grid
         self.n_visit = n_visit
         self.Vdone = Vdone
-        self.StoreDone = StoreDone
+        self.Store = Store
         self.TreeLvl = TreeLvl
         self.ActInfo = ActInfo if ActInfo is not None else [0, 0, 0]    # Steer Gear Distance: Represents the action from the parent node to this node
         self.ActCost = ActCost
