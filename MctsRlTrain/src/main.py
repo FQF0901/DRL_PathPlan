@@ -6,6 +6,7 @@
 """
 
 import os
+import re
 import sys
 import glob
 import shutil
@@ -35,67 +36,53 @@ def clear_path(path):
             except Exception as e:
                 print(f"Error while deleting {file_path}: {e}")
 
-def delete_files_for_loop(tree_info_path, train_dataset_path):
-    # 1. Delete. png and. svg files, as well as Mcts_Train_data-buffer. pkl
-    for extension in ['*.png', '*.svg']:
-        for filepath in glob.glob(os.path.join(tree_info_path, extension)):
-            os.remove(filepath)
-    
-    pkl_file = os.path.join(tree_info_path, 'Mcts_Train_Data_buffer.pkl')
-    if os.path.exists(pkl_file):
-        os.remove(pkl_file)
-    
-    # 2. Delete files containing 'policy-value_net_' with a suffix of. pkl
-    for filepath in glob.glob(os.path.join(train_dataset_path, 'policy_value_net_*.pkl')):
-        os.remove(filepath)
-
-def update_input_files():
+def store_2_pkl_files():
     # 1. train_dataset_path
-    net_in_train_folder = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
-    if os.path.isfile(net_in_train_folder):
-        shutil.copy(net_in_train_folder, os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl'))
-        shutil.copy(net_in_train_folder, Config.StorePath.tree_info_path)
+    output_path = os.path.join(os.getcwd(), 'MctsRlTrain', 'output')
+    
+    files = [f for f in os.listdir(Config.StorePath.train_dataset_path) if f.startswith('policy_value_net_') and f.endswith('.pkl')]
+    
+    max_x = -1
+    max_file = None
+    pattern = re.compile(r'policy_value_net_(\d+)\.pkl')
+    
+    for file in files:
+        match = pattern.match(file)
+        if match:
+            x = int(match.group(1))
+            if x > max_x:
+                max_x = x
+                max_file = file
+    
+    if max_file:
+        src_path = os.path.join(Config.StorePath.train_dataset_path, max_file)
+        dst_path = os.path.join(output_path, 'policy_value_net.pkl')
+        shutil.copy(src_path, dst_path)
+        print(f"文件 {src_path} 已复制到 {dst_path}")
     else:
-        print(f"文件 {net_in_train_folder} 不存在")
+        print(f"没有找到符合条件的文件")
 
     # 2. tree_info_path
     scene_in_tree_folder = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
     if os.path.isfile(scene_in_tree_folder):
         shutil.copy(scene_in_tree_folder, os.path.join(os.getcwd(), 'MctsRlTrain', 'output'))
-        shutil.copy(scene_in_tree_folder, Config.StorePath.train_dataset_path)
     else:
         print(f"文件 {scene_in_tree_folder} 不存在")
     
-def multi_threaded_func():
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-
-        # 1. Train net
-        net_model = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
-        csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
-        img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
-
-        training_pipeline = TrainPipeline(init_model=net_model)       
-        training_pipeline.epoch_num = 1000
-        training_pipeline.epochs = 1
-        future_train = executor.submit(training_pipeline.run, csv_file=csv_path, img_folder=img_path)
-        
-        # 2. Collection
-        future_collection = executor.submit(collection, scene_num=100, max_step=15000, deque_len=300000)
-
-        concurrent.futures.wait([future_collection, future_train])
-
 
 # ==========================================================
 # ======================== main fun ========================
 # ==========================================================
 
 if __name__ == "__main__":
+    # 0. Config
+    start_from_train_or_collection = 1  # 1: start from train, 2: start from collection
 
     # 1. Clean folder
     clear_path(Config.StorePath.train_dataset_path)
     clear_path(Config.StorePath.tree_info_path)
 
-    # 2. Init env
+    # 2. Init net.pkl
     policy_value_net_pkl = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl')
 
     if not os.path.isfile(policy_value_net_pkl):
@@ -106,24 +93,49 @@ if __name__ == "__main__":
     else:
         print(utils.HighLightGreenMsg('加载上次最终{policy_value_net_pkl}'))
 
-    shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
-    shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
+    # 2. Init tree_info.pkl
+    tree_info_pkl = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'Mcts_Train_Data_buffer.pkl')
 
-    # 3. Generate new scenes for initial training
-    collection(scene_num = 50, max_step = 15000, deque_len = 300000)
-    Treeinfo2Dataset.Convert2DataSet()
-    update_input_files()
+    # if start_from_train_or_collection == 1:
+    #     # 2.1 Gen Dataset
+    #     Treeinfo2Dataset.Convert2DataSet()
 
-    # 4. Start the formal loop (based on the initialized or old net parameter)
+    #     # 2.2 Train
+    #     net_model = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl')
+    #     csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
+    #     img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
+
+    #     training_pipeline = TrainPipeline(init_model=net_model)       
+    #     training_pipeline.epoch_num = 1000
+    #     training_pipeline.epochs = 1
+    #     training_pipeline.run(csv_file=csv_path, img_folder=img_path)
+
+    # 3. Start the formal loop (based on the initialized or old net parameter)
     for _ in range(5):
-        delete_files_for_loop(Config.StorePath.tree_info_path, Config.StorePath.train_dataset_path)    # Clear PNG, SVG and Mcts_Train_Data_buffer.pkl, policy_value_net_n.pkl
+        # 3.0 Prepare pkl file
+        shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
+        shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
 
-        multi_threaded_func()   # Multi threaded parallel computing main function
+        # 3.1 Gen raw dataset
+        collection(scene_num = 100, max_step = 15000, deque_len = 300000)
 
+        # 3.2 Gen dataset
         Treeinfo2Dataset.Convert2DataSet()
-        update_input_files()
+        
+        # 3.3 Train
+        training_pipeline = TrainPipeline(init_model=os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl'), 
+                                          batch_size=32,
+                                          epochs=1, 
+                                          epoch_num=1000)       
+        training_pipeline.run(csv_file=os.path.join(Config.StorePath.train_dataset_path, 'label.csv'), 
+                              img_folder=os.path.join(Config.StorePath.train_dataset_path, 'images'))
+        
+        # 3.4 Store files and reset folders
+        store_2_pkl_files()
+        clear_path(Config.StorePath.train_dataset_path)
+        clear_path(Config.StorePath.tree_info_path)
 
-    # 5. Sleep computer
+    # 4. Sleep computer
     try:
         time.sleep(30)
         os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
