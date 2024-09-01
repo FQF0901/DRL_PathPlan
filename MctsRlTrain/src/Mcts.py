@@ -97,8 +97,9 @@ class MctsTree:
                 NewMctsNode.type = 2    # 2:Ovlp
             elif DrlUtil.ChkRepeatAct(NewMctsNode):
                 NewMctsNode.type = 3    # 3:RepeatMove (Impossible that collision and repeat both satisfied)
-            elif self.GridMap.is_occupied(node.x, node.y, node.yaw_rad):
+            elif (occupied_value := self.GridMap.is_occupied(node.x, node.y, node.yaw_rad)) > 1e-5: # 0: Non-occupied, (0, 1]: occupied_value
                 NewMctsNode.type = 5    # 5:Occupied grid
+                NewMctsNode.Value = occupied_value
             else:
                 self.GridMap.add_or_update_grid(node.x, node.y, node.yaw_rad, True)
                 NewMctsNode.type = 1    # 1:Unexplored
@@ -157,13 +158,13 @@ class MctsTree:
                 # 3.1 Cal num of valid child
                 node_valid_child_num = 0
                 for child_node in node.children:
-                    if child_node.type == 1 or child_node.type == 3 or child_node.type == 4:
+                    if not child_node.type == 2:
                         node_valid_child_num = node_valid_child_num + 1
 
                 # 3.2 Cal node.value
                 node_value = 0
                 for child_node in node.children:
-                    if child_node.type == 1 or child_node.type == 3 or child_node.type == 4:
+                    if not child_node.type == 2:
                         itmdt_reward = 0
                         # 1 / node_valid_child_num # (DrlCfg.TreePara.DistActDim * DrlCfg.TreePara.GearActDim * DrlCfg.TreePara.StrActDim) # child_node.n_visit / (node.n_visit - 1)
                         child_node.Probs = 1 / node_valid_child_num

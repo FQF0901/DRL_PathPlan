@@ -28,7 +28,7 @@ class KdTreeGridMap:
         self.grid_size_yaw = params.grid_size_yaw_rad
         
         self.occupied_grids = np.empty((0, 3))  # Initialize as an empty array with 3 columns
-        self.grid_state = {}
+        self.grid_state = {}  # Dictionary to store grid states with their occupied value
         self.kd_tree = KDTree(self.occupied_grids)  # Initialize KDTree with empty data
 
     '''将实际坐标 (x, y, yaw) 转换为网格索引'''
@@ -45,29 +45,28 @@ class KdTreeGridMap:
         yaw = self.yaw_min + yaw_idx * self.grid_size_yaw
         return x, y, yaw
 
-    '''如果 occupied 为 True，则将网格添加到 KDTree 中；如果 False，则从 KDTree 中删除该网格'''
+    '''更新网格状态，occupied 为 0 到 1 的数值'''
     def add_or_update_grid(self, x, y, yaw_rad, occupied):
         x_idx, y_idx, yaw_idx = self._to_grid_indices(x, y, yaw_rad)
-
         grid_key = (x_idx, y_idx, yaw_idx)
-        if occupied:
-            if grid_key not in self.grid_state or not self.grid_state[grid_key]:
-                self.grid_state[grid_key] = True
-                grid_pos = self._from_grid_indices(x_idx, y_idx, yaw_idx)
+
+        grid_pos = self._from_grid_indices(x_idx, y_idx, yaw_idx)
+
+        if occupied > 0:  # If occupied is greater than 0, update or add the grid
+            self.grid_state[grid_key] = occupied
+            if not any(np.all(grid_pos == p) for p in self.occupied_grids):
                 self.occupied_grids = np.vstack([self.occupied_grids, grid_pos])  # Add new grid
                 self.kd_tree = KDTree(self.occupied_grids)  # Rebuild KDTree with updated occupied grids
-        else:
-            if grid_key in self.grid_state and self.grid_state[grid_key]:
-                self.grid_state[grid_key] = False
-                grid_pos = self._from_grid_indices(x_idx, y_idx, yaw_idx)
+        else:  # If occupied is 0, remove the grid if it exists
+            if grid_key in self.grid_state:
+                del self.grid_state[grid_key]
                 self.occupied_grids = np.array([p for p in self.occupied_grids if not np.array_equal(p, grid_pos)])  # Remove grid
                 self.kd_tree = KDTree(self.occupied_grids)  # Rebuild KDTree with updated occupied grids
 
-    '''检查指定网格索引 (x_idx, y_idx, yaw_idx) 对应的网格是否被占用'''
+    '''检查指定网格索引 (x_idx, y_idx, yaw_idx) 对应的网格的占用程度'''
     def is_occupied(self, x, y, yaw_rad):
         x_idx, y_idx, yaw_idx = self._to_grid_indices(x, y, yaw_rad)
-
-        return self.grid_state.get((x_idx, y_idx, yaw_idx), False)
+        return self.grid_state.get((x_idx, y_idx, yaw_idx), 0.0)  # Default to 0.0 if not found
 
     '''根据给定的位置 (x, y, yaw) 查找附近的网格'''
     def locate_grid(self, x, y, yaw):
@@ -82,9 +81,9 @@ if __name__ == "__main__":
 
     x, y, yaw_rad = 1.0, 2.0, 0.5
 
-    kd_tree_map.add_or_update_grid(x, y, yaw_rad, occupied=True)
+    kd_tree_map.add_or_update_grid(x, y, yaw_rad, occupied=0.1)
 
     x, y, yaw_rad = 1.04, 2.04, 0.5
-    is_occupied = kd_tree_map.is_occupied(x, y, yaw_rad)
+    is_occupied = kd_tree_map.is_occupied(x, y, yaw_rad)    # 0: Non-occupied, (0, 1]: occupied_value
 
     print("网格是否被占用:", is_occupied)
