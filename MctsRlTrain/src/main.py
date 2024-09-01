@@ -35,7 +35,7 @@ def clear_path(path):
             except Exception as e:
                 print(f"Error while deleting {file_path}: {e}")
 
-def clear_non_pkl_files(tree_info_path, train_dataset_path):
+def delete_files_for_loop(tree_info_path, train_dataset_path):
     # 1. Delete. png and. svg files, as well as Mcts_Train_data-buffer. pkl
     for extension in ['*.png', '*.svg']:
         for filepath in glob.glob(os.path.join(tree_info_path, extension)):
@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
     # 4. Start the formal loop (based on the initialized or old net parameter)
     for _ in range(5):
-        clear_non_pkl_files(Config.StorePath.tree_info_path, Config.StorePath.train_dataset_path)    # Clear PNG, SVG and Mcts_Train_Data_buffer.pkl, policy_value_net_n.pkl
+        delete_files_for_loop(Config.StorePath.tree_info_path, Config.StorePath.train_dataset_path)    # Clear PNG, SVG and Mcts_Train_Data_buffer.pkl, policy_value_net_n.pkl
 
         multi_threaded_func()   # Multi threaded parallel computing main function
 
