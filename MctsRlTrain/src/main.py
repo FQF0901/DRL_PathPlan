@@ -113,22 +113,18 @@ if __name__ == "__main__":
     Treeinfo2Dataset.Convert2DataSet()
     update_input_files()
 
-    time.sleep(5)
-
     # 4. Start the formal loop (based on the initialized or old net parameter)
     for _ in range(5):
-        clear_non_pkl_files(Config.StorePath.tree_info_path)
+        clear_non_pkl_files(Config.StorePath.tree_info_path)    # Clear PNG and SVG
 
         multi_threaded_func()   # Multi threaded parallel computing main function
 
         Treeinfo2Dataset.Convert2DataSet()
         update_input_files()
 
-        time.sleep(5)
-
     # 5. Sleep computer
     try:
-        time.sleep(10)
+        time.sleep(30)
         os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
         # os.system("shutdown /s /t 0")
     except Exception as e:
