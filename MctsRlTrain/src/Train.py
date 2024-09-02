@@ -11,10 +11,10 @@ import pandas as pd
 from PIL import Image
 import ast
 from Dnn import PolicyValueNet
+import DrlUtil
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
@@ -57,14 +57,13 @@ class CustomDataset(Dataset):   # 它继承自torch.utils.data.Dataset，并实�
 
 class TrainPipeline:
     
-    def __init__(self, init_model=None, batch_size=32, epochs=5, epoch_num=1000) -> None:
+    def __init__(self, init_model=None, batch_size=32, epoch_num=10) -> None:
         # 1. init paras
         self.batch_size = batch_size
-        self.data_buffer = collections.deque(maxlen = self.batch_size)
-        self.epochs = epochs
+        self.data_buffer = collections.deque(maxlen = 10000)
         self.epoch_num = epoch_num
         self.mse_targ = 10
-        self.savenet_freq = min(10, self.epoch_num / 2)
+        self.savenet_freq = 10
 
         self.policy_value_net = PolicyValueNet(model_file=init_model)
 
@@ -89,15 +88,18 @@ class TrainPipeline:
     """Train the network and update the parameters"""
     def net_update(self, epoch, writer):
         # 1. Preparing training data
-        for batch_idx, (state_batch, value_batch) in enumerate(self.data_buffer):
+        with tqdm(total=len(self.data_buffer), dynamic_ncols=True, desc='Train Progress Bar') as pbar:
 
-            value_batch = np.array(value_batch).astype('float32')
+            running_loss = 0.0
 
-            # 2. Performance under the initial network(for comparison of training progress)
-            old_value_batch = self.policy_value_net.policy_value_eval_batch(state_batch)
+            for batch_idx, (state_batch, value_batch) in enumerate(self.data_buffer):
 
-            # 3. Training network
-            for i in range(self.epochs):
+                value_batch = np.array(value_batch).astype('float32')
+
+                # 2. Performance under the initial network(for comparison of training progress)
+                old_value_batch = self.policy_value_net.policy_value_eval_batch(state_batch)
+
+                # 3. Training network
                 try:
                     loss = self.policy_value_net.train_step(state_batch, value_batch)
                 except Exception as e:
@@ -110,15 +112,33 @@ class TrainPipeline:
                 if par_update_loss > self.mse_targ * 4:
                     print(utils.HighLightRedMsg('KL divergence is too bad, For loop is terminated !'))
                     break
-            
-            writer.add_scalar('Loss/train', loss.item(), epoch * len(self.data_buffer) + batch_idx)
-            current_lr = self.policy_value_net.optimizer.param_groups[0]['lr']  # 获取当前学习率
-            writer.add_scalar('Learning Rate', current_lr, epoch * len(self.data_buffer) + batch_idx)
+                
+                running_loss += loss.item()
 
-        # 5. Print parameters to monitor training progress
-        # print(("par_update_loss:{:.3f}," "current_lr:{:.3f}," "loss:{}").format(par_update_loss, current_lr, loss))
+                # 4. Save net
+                if (epoch * len(self.data_buffer) + batch_idx + 1) % self.savenet_freq == 0:
+                    # print("Save Net, : epoch_num {}".format(epoch))
+                    mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch * len(self.data_buffer) + batch_idx))
+                    self.policy_value_net.save_model(mdl_name)
+                
+                # 5. Tensorboard
+                writer.add_scalar('Loss/train', loss.item(), epoch * len(self.data_buffer) + batch_idx)
+                current_lr = self.policy_value_net.optimizer.param_groups[0]['lr']  # 获取当前学习率
+                writer.add_scalar('Learning Rate', current_lr, epoch * len(self.data_buffer) + batch_idx)
 
-        return loss
+                # 6. Progress Bar
+                cycle_interval = 10
+                if batch_idx % cycle_interval == 0:
+                        pbar.set_postfix({
+                            'episode': '%d' % (epoch)
+                            })
+                        
+                        pbar.update(cycle_interval)
+
+            # 7. Print parameters to monitor training progress
+            # print(("par_update_loss:{:.3f}," "current_lr:{:.3f}," "loss:{}").format(par_update_loss, current_lr, loss))
+
+        return running_loss
 
 # --------------------- Train Pipeline ---------------------
     """A complete training process"""
@@ -126,7 +146,8 @@ class TrainPipeline:
         print(utils.HighLightGreenMsg('运行 train.run()'))
         try:
             scheduler = torch.optim.lr_scheduler.ExponentialLR(self.policy_value_net.optimizer, gamma=0.999)
-            writer = SummaryWriter(log_dir='logs/train')
+            writer = SummaryWriter(log_dir=DrlUtil.generate_new_train_dir(os.path.join(os.getcwd(), 'logs'), 
+                                                                          DrlUtil.find_existing_train_dirs(os.path.join(os.getcwd(), 'logs'))))
 
             # 1. Create a dataset
             transform = transforms.Compose([transforms.Resize((224, 384)),
@@ -134,36 +155,17 @@ class TrainPipeline:
                                             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
             dataset = CustomDataset(csv_file=csv_file, img_folder=img_folder, transform=transform)
 
-            with tqdm(total=int(self.epoch_num), dynamic_ncols=True, desc='Train Progress Bar') as pbar:
-                for epoch in range(self.epoch_num):
-                    running_loss = 0.0
+            for epoch in range(self.epoch_num):
+                # 2. Loading data
+                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
 
-                    # 2. Loading data
-                    self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
+                # 3. Training net
+                loss_sum = self.net_update(epoch, writer)
+                scheduler.step()
 
-                    # 3. Training net
-                    loss = self.net_update(epoch, writer)
-                    scheduler.step()
-
-                    # 4. Post process
-                    running_loss += loss.item()
-                    writer.add_scalar('Loss/train/average', running_loss / self.epoch_num, epoch)
-                    # print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
-
-                    # 5. Save net
-                    if (epoch + 1) % self.savenet_freq == 0:
-                        # print("Save Net, : epoch_num {}".format(epoch))
-                        mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch))
-                        self.policy_value_net.save_model(mdl_name)
-
-                    '''3. Progress Bar'''
-                    cycle_interval = 10
-                    if epoch % cycle_interval == 0:
-                            pbar.set_postfix({
-                                'episode': '%d' % (epoch)
-                                })
-                            
-                            pbar.update(cycle_interval)
+                # 4. Post process
+                writer.add_scalar('Loss_sum/train/average', loss_sum / len(self.data_buffer), epoch)
+                # print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
 
             writer.close()
             print('===== Train done ! =====')
@@ -181,8 +183,7 @@ if __name__ == '__main__':
 
     training_pipeline = TrainPipeline(init_model=net_model, 
                                           batch_size=32,
-                                          epochs=5, 
-                                          epoch_num=1000)       
+                                          epoch_num=10)       
     training_pipeline.run(csv_file=csv_path, 
                           img_folder=img_path)
 

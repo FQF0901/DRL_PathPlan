@@ -5,11 +5,11 @@
 @description: Shared Libraries for DRL
 """
 
+import re
 import uuid
 import csv
 import math
 import io
-import time
 import DrlCfg
 import GlbVar
 import RS
@@ -439,3 +439,36 @@ def GenImgLabel(scene, Img_Label_path):
         with open(csv_file, mode='w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow([file_name, value])
+
+
+# ==========================================================
+# ========================= Train ==========================
+# ==========================================================
+'''Find all folders containing 'train' in the directory'''
+def find_existing_train_dirs(base_dir):
+    existing_dirs = []
+    for folder_name in os.listdir(base_dir):
+        folder_path = os.path.join(base_dir, folder_name)
+        if os.path.isdir(folder_path) and 'train' in folder_name:
+            existing_dirs.append(folder_name)
+    return existing_dirs
+
+'''Generate a new train_x folder name'''
+def generate_new_train_dir(base_dir, existing_dirs):
+
+    pattern = re.compile(r'train_(\d+)')
+    existing_numbers = set()
+    
+    for dir_name in existing_dirs:
+        match = pattern.match(dir_name)
+        if match:
+            existing_numbers.add(int(match.group(1)))
+    
+    x = 1
+    while f'train_{x}' in existing_dirs or f'train_{x}' in existing_numbers:
+        x += 1
+    
+    new_train_dir = os.path.join(base_dir, f'train_{x}')
+    os.makedirs(new_train_dir)
+    
+    return new_train_dir

@@ -1,8 +1,8 @@
 """
 @author: Fqf
-@time: 20240807
-@file: main.py
-@description: main func of RL
+@time: 20240902
+@file: main_multithread.py
+@description: main func of RL with Multi-threading
 """
 
 import os
@@ -123,7 +123,7 @@ if __name__ == "__main__":
         shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
 
         # 3.1 Gen raw dataset
-        collection(scene_num = 20, max_step = 750, deque_len = 300000)
+        collection(scene_num = 200, max_step = 15000, deque_len = 300000)
 
         # 3.2 Gen dataset
         Treeinfo2Dataset.Convert2DataSet(sample_size=100000)
