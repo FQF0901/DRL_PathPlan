@@ -216,9 +216,6 @@ def get_file_list_from_dir(file_list):
 # ======================= Collection =======================
 # ==========================================================
 def init_mcts_info(MT):
-    GlbVar.datalist.append(3)
-    print("子进程",os.getpid(),GlbVar.datalist)
-
     ''' Initialize the MCTS tree '''
     MT.RootMctsNode.node = GlbVar.PcptInfo.StartPoint
     MT.GoalNode = GlbVar.PcptInfo.TargetPoint
@@ -228,8 +225,7 @@ def init_mctsefct_info(MT):
     MT.TargetPose = GlbVar.PcptInfo.TargetPoint
 
 def init_PcptGeo_info(scene):
-    GlbVar.datalist.append(2)
-    print("子进程",os.getpid(),GlbVar.datalist)
+    GlbVar.PcptInfo.clear()
 
     # SP & TP
     if scene['PrkMod'] == 1:
@@ -302,6 +298,10 @@ def NodeNetValue(child_node, policy_value_net):
 def plot_env(child_node = []):
     ''' Plot env '''
     plt.ioff()
+    plt.clf()
+    plt.cla()
+    plt.close('all')
+
     figsize = (384 / 100, 224 / 100)    # figsize is in inches, 384x224 pixel image at 100 dpi
     fig, ax = plt.subplots(figsize=figsize, dpi=100)
 
@@ -353,6 +353,7 @@ def plot_PcptGeo(scene_pkl_file, row_idx):
     plt.close(fig)
 
 def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
+        
     # 1. Plot env
     child_node = []
     fig = plot_env(child_node)
@@ -370,14 +371,13 @@ def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
     # 3. Save pic
     filename = f"{Config.StorePath.tree_info_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
     fig.savefig(filename)
-    plt.close(fig)
+
 
 def GenChildNodeImg(child_node):
     fig = plot_env(child_node)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png')
-    plt.close(fig)
     buf.seek(0)  # 重置字节流位置
 
     ''' used for debug

@@ -159,6 +159,12 @@ class PcptGeo:
         self.Slot = Slot
         self.Obstcle_list = Obst_list
 
+    def clear(self):
+        self.StartPoint = []
+        self.TargetPoint = []
+        self.Slot = []
+        self.Obstcle_list = []
+
 # ------------------------ GridMap -------------------------
 class GridMap:
     def __init__(self, StPt = [], TgtPt = [], Map = []) -> None:
