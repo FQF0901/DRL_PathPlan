@@ -4,15 +4,17 @@
 @file: Env.py 
 @description: Sim env, more suitable for simulating real-time plan(PPO), not suitable for simulating MCTS
 """
+
+import GlbVar
+import DrlUtil
+from GlbVar import thread_local
+
 # ==========================================================
 # ======================== Env Info ========================
 # ==========================================================
-import GlbVar
-import DrlUtil
-
 class Env:
     def __init__(self) -> None:
-        self.PcptInfo = GlbVar.PcptInfo
+        self.PcptInfo = thread_local.PcptInfo
         self.Reward = 0
         self.CycleCnt = 0 
     

@@ -6,11 +6,12 @@
 """
 from numba import jit, njit
 import numpy as np
-import GlbVar
+from GlbVar import thread_local
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import Config
+
 
 # ==========================================================
 # ===================== CollisionCheck =====================
@@ -110,7 +111,7 @@ def CollisionCheck_opt(crnt_node, LatMargin = Config.VehPara.LatMargin, LgtMargi
     crnt_node_y = crnt_node.y
     crnt_node_yaw_rad = crnt_node.yaw_rad
 
-    ObstRect_array = np.array(GlbVar.PcptInfo.Obstcle_list, dtype=np.float32)
+    ObstRect_array = np.array(thread_local.PcptInfo.Obstcle_list, dtype=np.float32)
 
     return IsOvlpAllObst_opt(crnt_node_x, crnt_node_y, crnt_node_yaw_rad, LatMargin, LgtMargin, ObstRect_array, 
                               Config.VehPara.VehicleLength, Config.VehPara.Center2RearAxle, Config.VehPara.VehicleWidth)

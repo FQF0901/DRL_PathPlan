@@ -7,6 +7,7 @@
 
 import scipy.sparse as sp
 import DrlCfg
+import threading
 
 # ==========================================================
 # ====================== Global Types ======================
@@ -170,5 +171,14 @@ class GridMap:
 # ==========================================================
 # ==================== Global Variables ====================
 # ==========================================================
-PcptInfo = PcptGeo()    # GridMap() [important]
-vis_node_list = VisNodeList()
+# PcptInfo = PcptGeo()    # GridMap() [important]
+# vis_node_list = VisNodeList()
+
+def init_thread_variables():
+    thread_local.PcptInfo = PcptGeo([], [], [], [])
+    
+    thread_local.vis_node_list = VisNodeList()
+    thread_local.vis_node_list.clear()
+
+thread_local = threading.local() 
+init_thread_variables()

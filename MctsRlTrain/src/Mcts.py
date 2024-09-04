@@ -11,6 +11,7 @@ import graphviz
 import time
 import math
 import GlbVar
+from GlbVar import thread_local
 import CollisionCheck
 import DrlUtil
 import KDTree
@@ -19,7 +20,9 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
+from Util import utils
 from Util import Config
+
 
 # ==========================================================
 # ======================= Mcts Tree ========================
@@ -35,7 +38,8 @@ class MctsTree:
 
         # self.GridMap = GlbVar.NodeGridMap()
         self.GridMap = KDTree.KdTreeGridMap()
-
+        self.GridMap.add_or_update_grid(self.RootMctsNode.node.x, self.RootMctsNode.node.y, self.RootMctsNode.node.yaw_rad, True)
+        self.GridMap.add_or_update_grid(self.TargetPose.x, self.TargetPose.y, self.TargetPose.yaw_rad, True)
 # ----------------------- Select Node ----------------------
     """Select node(type should equal to 1) among the child by PUCT"""
     def SelectNode(self, crnt_node):
@@ -199,16 +203,23 @@ class MctsTree:
                     self.RootMctsNode.n_visit = self.RootMctsNode.n_visit - 1
                     _ = self.BackpropagateValue(self.RootMctsNode)
                     # print('-- Episode end! All children of the root node overlap, so openlist = [] and cannot expand further')
-                    return SelectNodeInfo, cnt
+                    return SelectNodeInfo, cnt, PathFndCnt
                 elif SelectNodeInfo == 4:   # Case for root node
                     self.RootMctsNode.n_visit = self.RootMctsNode.n_visit - 1
                     _ = self.BackpropagateValue(self.RootMctsNode)
                     # print('-- Episode end! All children of the root node have been explored, and some whose type are PathFnd')
-                    return SelectNodeInfo, cnt
+                    return SelectNodeInfo, cnt, PathFndCnt
 
                 node = selected_node
+                
+            try:
+                PathFnd, _ = DrlUtil.CalValidRS(SelectedLeafNode.node, self.TargetPose)
+            except:
+                PathFnd = False
+                print(utils.HighLightRedMsg("DrlUtil.CalValidRS err, skip !"))
+                print(SelectedLeafNode.node.x, SelectedLeafNode.node.y, SelectedLeafNode.node.yaw_rad, 
+                      self.TargetPose.x, self.TargetPose.y, self.TargetPose.yaw_rad)
 
-            PathFnd, _ = DrlUtil.CalValidRS(SelectedLeafNode.node, self.TargetPose)
             if PathFnd:
                 SelectedLeafNode.type = 4
                 PathFndCnt = PathFndCnt + 1
@@ -216,7 +227,7 @@ class MctsTree:
                 # Minimum run 3000 times, maximum run 10000 times (but path found over 100 can also be terminated early)
                 if cnt > 3000 and PathFndCnt > 100:
                     _ = self.BackpropagateValue(self.RootMctsNode)
-                    return SelectNodeInfo, cnt
+                    return SelectNodeInfo, cnt, PathFndCnt
 
             _ = self.BackpropagateType(SelectedLeafNode)
 
@@ -228,20 +239,20 @@ class MctsTree:
 
         _ = self.BackpropagateValue(self.RootMctsNode)
         # print('-- Episode end due to reach self.expd_maxcnt !')
-        return SelectNodeInfo, cnt
+        return SelectNodeInfo, cnt, PathFndCnt
 
 # ---------------------- StoreTreeInfo ---------------------
     """Store the tree information after backpropagate value"""
     # External packaging interface
-    def StoreTreeInfo(self, sim_info):
+    def StoreTreeInfo(self, cnt):
         state_list, value_list = [], []
-        GlbVar.vis_node_list.clear()
-        self.TravslTreeInfo(self.RootMctsNode, state_list, value_list, sim_info)
+        thread_local.vis_node_list.clear()
+        self.TravslTreeInfo(self.RootMctsNode, state_list, value_list, cnt)
 
         return state_list, value_list
 
     # Recursively traverse the entire tree
-    def TravslTreeInfo(self, MctsNode, state_list, value_list, sim_info):
+    def TravslTreeInfo(self, MctsNode, state_list, value_list, cnt):
         stack = [MctsNode]
     
         while stack:
@@ -249,16 +260,16 @@ class MctsTree:
             
             for child_node in node.children:
                 # Only node with full exploration or high value(0.4) should be recorded and learned
-                if (((child_node.n_visit >= max(6, sim_info[1] / math.pow(6, 3)))
+                if (((child_node.n_visit >= max(6, cnt / math.pow(6, 3)))
                      or (child_node.n_visit > 1 and child_node.Value >= 0.2)
                     #  or (child_node.type == 4)
                      ) 
                     and (not child_node.Store)):
                     
-                    state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
+                    state_list.append([child_node.node, self.TargetPose, thread_local.PcptInfo])
                     value_list.append([GrandChild.Value for GrandChild in child_node.children])
 
-                    GlbVar.vis_node_list.add_node(child_node.node, child_node.Value)
+                    thread_local.vis_node_list.add_node(child_node.node, child_node.Value)
 
                     child_node.Store = True
                     stack.append(child_node)

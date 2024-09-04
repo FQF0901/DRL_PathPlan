@@ -12,11 +12,40 @@ import shutil
 import DrlUtil
 import os
 import sys
+from tqdm import tqdm
+import concurrent.futures
+import threading
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import Config
 from Util import utils
 
-def Convert2DataSet(sample_size = 100000):
+Convert2DataSet_pbar_lock = threading.Lock()
+
+# ==========================================================
+# ======================= GenDataSet =======================
+# ==========================================================
+
+def process_chunk(chunk, thread_idx):
+    thread_id = threading.get_ident()
+
+    with tqdm(total=len(chunk), dynamic_ncols=True, desc="Convert2DataSet Progress Bar") as pbar:
+        for cnt, scene in enumerate(chunk):
+            DrlUtil.GenImgLabel(scene, Config.StorePath.train_dataset_path)
+
+            if cnt == len(chunk) - 1:
+                DrlUtil.flush_cache()
+
+            cycle_interval = 10
+            if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
+                with Convert2DataSet_pbar_lock:
+                    pbar.set_postfix({'thread_idx': f'{thread_idx}'})
+                    pbar.update(cycle_interval)
+
+    pbar.close()
+
+def Convert2DataSet(sample_size=100000):
+    print(utils.HighLightGreenMsg('运行 Convert2DataSet()'))
+
     # 1. Clean old dataset
     csv_path = os.path.join(Config.StorePath.train_dataset_path, 'label.csv')
     img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
@@ -38,12 +67,19 @@ def Convert2DataSet(sample_size = 100000):
 
         sampled_indices = random.sample(scene_data, min(len(scene_data), sample_size))
 
-        for scene in sampled_indices:
-            try:
-                DrlUtil.GenImgLabel(scene, Config.StorePath.train_dataset_path)
-            except Exception as e:
-                print(utils.HighLightRedMsg(f"Convert2DataSet err: {e}"))
-
+        num_chunks = Config.MultiTread.Convert2DataSet_multi_thread_num
+        chunks = [sampled_indices[i::num_chunks] for i in range(num_chunks)]
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
+            # Submit tasks to the executor
+            futures = [executor.submit(process_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
+            
+            # Wait for all futures to complete
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()  # Raise exception if the task failed
+                except Exception as e:
+                    print(utils.HighLightRedMsg(f"Convert2DataSet err: {e}"))
 
     print('===== Convert2DataSet done ! =====')
 

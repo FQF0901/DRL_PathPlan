@@ -9,7 +9,6 @@
 # ==================== Global Config Parameters ====================
 # ==================================================================
 
-# -------------------- Veh para --------------------
 class VehParams:
     def __init__(self) -> None:
         # BX platform
@@ -36,6 +35,11 @@ class VehParams:
         # self.LatMargin = 0.1
         # self.LgtMargin = 0.1
 
+class MultiTreadNum:
+    def __init__(self) -> None:
+        self.collection_multi_thread_num = 4
+        self.Convert2DataSet_multi_thread_num = 4
+
 class StoreFolderPath:
     def __init__(self) -> None:
         self.mf4_raw_file_path =        r'E:\DataSet\Mf4RawFile'
@@ -47,3 +51,4 @@ class StoreFolderPath:
 
 VehPara = VehParams()
 StorePath = StoreFolderPath()
+MultiTread = MultiTreadNum()
