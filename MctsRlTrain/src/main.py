@@ -12,7 +12,7 @@ import shutil
 import time
 import Treeinfo2Dataset
 # from Collection import collection
-from CollectionMultithread import collection
+from CollectionMultprocess import collection
 from Dnn import PolicyValueNet
 from Train import TrainPipeline
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
@@ -143,14 +143,14 @@ def main(main_for_loop_num, start_from_train_or_collection,
 if __name__ == "__main__":
     try:
         # 1. Config
-        Config.MultiTread.collection_multi_thread_num = 4
-        Config.MultiTread.Convert2DataSet_multi_thread_num = 4
+        Config.MultiProcess.collection_multi_core_num = 12
+        Config.MultiProcess.Convert2DataSet_multi_core_num = 12
         
         main_for_loop_num = 5
         start_from_train_or_collection = 0  # 1: start from train, others: start from collection
 
-        collection_scene_num = 20
-        collection_max_step = 100
+        collection_scene_num = 180
+        collection_max_step = 10000
 
         train_batch_size = 32
         train_epoch_num = 10

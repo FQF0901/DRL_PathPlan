@@ -11,7 +11,6 @@ import graphviz
 import time
 import math
 import GlbVar
-from GlbVar import thread_local
 import CollisionCheck
 import DrlUtil
 import KDTree
@@ -22,7 +21,6 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
 from Util import Config
-
 
 # ==========================================================
 # ======================= Mcts Tree ========================
@@ -246,7 +244,7 @@ class MctsTree:
     # External packaging interface
     def StoreTreeInfo(self, cnt):
         state_list, value_list = [], []
-        thread_local.vis_node_list.clear()
+        GlbVar.vis_node_list.clear()
         self.TravslTreeInfo(self.RootMctsNode, state_list, value_list, cnt)
 
         return state_list, value_list
@@ -266,10 +264,10 @@ class MctsTree:
                      ) 
                     and (not child_node.Store)):
                     
-                    state_list.append([child_node.node, self.TargetPose, thread_local.PcptInfo])
+                    state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
                     value_list.append([GrandChild.Value for GrandChild in child_node.children])
 
-                    thread_local.vis_node_list.add_node(child_node.node, child_node.Value)
+                    GlbVar.vis_node_list.add_node(child_node.node, child_node.Value)
 
                     child_node.Store = True
                     stack.append(child_node)
