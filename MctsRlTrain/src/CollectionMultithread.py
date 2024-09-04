@@ -12,6 +12,7 @@ import pickle
 import datetime
 import random
 from tqdm import tqdm
+import concurrent.futures
 import Mcts
 import DrlUtil
 import GlbVar
@@ -19,22 +20,19 @@ from Dnn import PolicyValueNet
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
 from Util import Config
-import concurrent.futures
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
+import threading
 
-
-tree_info_pkl_lock = multiprocessing.Lock()
-log_file_lock = multiprocessing.Lock()
-collection_pbar_lock = multiprocessing.Lock()
+tree_info_pkl_lock = threading.Lock()
+log_file_lock = threading.Lock()
+collection_pbar_lock = threading.Lock()
 
 # ==========================================================
 # ======================== Function ========================
 # ==========================================================
 
 def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file):
-    # Initialize process shared variables
-    # GlbVar.init_process_variables()
+    # Initialize thread shared variables
+    GlbVar.init_thread_variables()
     
     scene = scene_data.iloc[row_idx]
     play_data_list = []
@@ -63,9 +61,9 @@ def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file)
                 myfile.write(f"{current_time} {scene.FileName} - {scene.TimeStamp} -- no path found\n") # write fail info into log
     return play_data_list
 
-def process_chunk(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, process_idx):
+def process_chunk(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, thread_idx):
     chunk_results = []
-    process_id = os.getpid()
+    thread_id = threading.get_ident()
 
     with tqdm(total=len(chunk), dynamic_ncols=True, desc="Collection Progress Bar") as pbar:
         for cnt, row_idx in enumerate(chunk):
@@ -74,7 +72,7 @@ def process_chunk(chunk, scene_data, policy_value_net, max_step, scene_pkl_file,
             cycle_interval = 1
             if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
                 with collection_pbar_lock:
-                    pbar.set_postfix({'process_id': f'{process_id}'})
+                    pbar.set_postfix({'thread_idx': f'{thread_idx}'})
                     pbar.update(cycle_interval)
         
     pbar.close()
@@ -104,7 +102,7 @@ def update_data_buffer(play_data_list):
 # ==========================================================
 
 def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
-    print(utils.HighLightGreenMsg('运行 CollectionMultiprocess()'))
+    print(utils.HighLightGreenMsg('运行 CollectionMultithread()'))
 
     # ------------------------- Config -------------------------
     '''1. Load net'''
@@ -122,11 +120,11 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
             # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
 
     # --------------------- Tree Truth Gen ----------------------
-            num_chunks = Config.MultiProcess.collection_multi_core_num
+            num_chunks = Config.MultiTread.collection_multi_thread_num
             chunk_size = len(sampled_scene_idx_list) // num_chunks
             chunks = [sampled_scene_idx_list[i:i + chunk_size] for i in range(0, len(sampled_scene_idx_list), chunk_size)]
             
-            with ProcessPoolExecutor(max_workers=num_chunks) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
                 future_to_chunk = {executor.submit(process_chunk, chunk, scene_data, policy_value_net, max_step, scene_pkl_file, idx): chunk for idx, chunk in enumerate(chunks)}
                 
                 for future in concurrent.futures.as_completed(future_to_chunk):
@@ -143,4 +141,4 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
 if __name__ == "__main__":
 
-    collection(scene_num = 40, max_step = 3000, deque_len = 100000)
+    collection(scene_num = 8, max_step = 100, deque_len = 100000)

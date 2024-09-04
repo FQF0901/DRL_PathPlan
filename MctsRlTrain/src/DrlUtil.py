@@ -12,9 +12,10 @@ import math
 import io
 import DrlCfg
 import GlbVar
+from GlbVar import thread_local
+from threading import Lock
 import RS
 import CollisionCheck
-import multiprocessing
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -28,7 +29,7 @@ sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import Config
 from Util import utils
 
-csv_lock = multiprocessing.Lock()
+csv_lock = Lock()
 label_cache = []
 matplotlib.use('Agg')
 
@@ -113,10 +114,9 @@ def IsOvlpSprtAxis(rect1, rect2):
 
 """Check Collision between Veh node and all obstacles (OD / FSD)"""
 def IsOvlpAllObst(crnt_node, LatMargin = Config.VehPara.LatMargin, LgtMargin = Config.VehPara.LgtMargin):
-
     VehRect = GetVehRect(crnt_node, LatMargin, LgtMargin)
 
-    for ObstRect in GlbVar.PcptInfo.Obstcle_list:
+    for ObstRect in thread_local.PcptInfo.Obstcle_list:
         if IsOvlpSprtAxis(ObstRect, VehRect):
             return True # Overlap
     return False    # No Overlap
@@ -218,24 +218,25 @@ def get_file_list_from_dir(file_list):
 # ==========================================================
 def init_mcts_info(MT):
     ''' Initialize the MCTS tree '''
-    MT.RootMctsNode.node = GlbVar.PcptInfo.StartPoint
-    MT.GoalNode = GlbVar.PcptInfo.TargetPoint
+    MT.RootMctsNode.node = thread_local.PcptInfo.StartPoint
+    MT.GoalNode = thread_local.PcptInfo.TargetPoint
 
 def init_mctsefct_info(MT):
-    MT.RootMctsEfctNode.node = GlbVar.PcptInfo.StartPoint
-    MT.TargetPose = GlbVar.PcptInfo.TargetPoint
+    MT.RootMctsEfctNode.node = thread_local.PcptInfo.StartPoint
+    MT.TargetPose = thread_local.PcptInfo.TargetPoint
 
 def init_PcptGeo_info(scene):
+
     # SP & TP
     if scene['PrkMod'] == 1:
-        GlbVar.PcptInfo.StartPoint = GlbVar.Node(scene['TargetPose'][0], scene['TargetPose'][1], scene['TargetPose'][2])
-        GlbVar.PcptInfo.TargetPoint = GlbVar.Node(scene['StartPose'][0], scene['StartPose'][1], scene['StartPose'][2])
+        thread_local.PcptInfo.StartPoint = GlbVar.Node(scene['TargetPose'][0], scene['TargetPose'][1], scene['TargetPose'][2])
+        thread_local.PcptInfo.TargetPoint = GlbVar.Node(scene['StartPose'][0], scene['StartPose'][1], scene['StartPose'][2])
     else:
-        GlbVar.PcptInfo.StartPoint = GlbVar.Node(scene['StartPose'][0], scene['StartPose'][1], scene['StartPose'][2])
-        GlbVar.PcptInfo.TargetPoint = GlbVar.Node(scene['TargetPose'][0], scene['TargetPose'][1], scene['TargetPose'][2])
+        thread_local.PcptInfo.StartPoint = GlbVar.Node(scene['StartPose'][0], scene['StartPose'][1], scene['StartPose'][2])
+        thread_local.PcptInfo.TargetPoint = GlbVar.Node(scene['TargetPose'][0], scene['TargetPose'][1], scene['TargetPose'][2])
 
     # slot
-    GlbVar.PcptInfo.Slot.append(np.array([
+    thread_local.PcptInfo.Slot.append(np.array([
                                 [scene['ParkingSlot_x'][0], scene['ParkingSlot_y'][0]],
                                 [scene['ParkingSlot_x'][1], scene['ParkingSlot_y'][1]],
                                 [scene['ParkingSlot_x'][2], scene['ParkingSlot_y'][2]],
@@ -245,8 +246,8 @@ def init_PcptGeo_info(scene):
     # OD and FSB (collision free with SP and TP)
     for i in range(0, scene['OD_Number'][0]):
 
-        VehRect_Sp = GetVehRect(GlbVar.PcptInfo.StartPoint)
-        VehRect_Tp = GetVehRect(GlbVar.PcptInfo.TargetPoint)
+        VehRect_Sp = GetVehRect(thread_local.PcptInfo.StartPoint)
+        VehRect_Tp = GetVehRect(thread_local.PcptInfo.TargetPoint)
         ObstRect = np.array([[scene['OD_x'][i][0], scene['OD_y'][i][0]],
                             [scene['OD_x'][i][1], scene['OD_y'][i][1]],
                             [scene['OD_x'][i][2], scene['OD_y'][i][2]],
@@ -255,12 +256,12 @@ def init_PcptGeo_info(scene):
 
         if IsOvlpSprtAxis(ObstRect, VehRect_Sp) or IsOvlpSprtAxis(ObstRect, VehRect_Tp):
             continue
-        GlbVar.PcptInfo.Obstcle_list.append(ObstRect)
+        thread_local.PcptInfo.Obstcle_list.append(ObstRect)
 
     for i in range(0, scene['FSB_Number'][0]):
 
-        VehRect_Sp = GetVehRect(GlbVar.PcptInfo.StartPoint)
-        VehRect_Tp = GetVehRect(GlbVar.PcptInfo.TargetPoint)
+        VehRect_Sp = GetVehRect(thread_local.PcptInfo.StartPoint)
+        VehRect_Tp = GetVehRect(thread_local.PcptInfo.TargetPoint)
         ObstRect = np.array([[scene['FSB_x'][i][0], scene['FSB_y'][i][0]],
                             [scene['FSB_x'][i][1], scene['FSB_y'][i][1]],
                             [scene['FSB_x'][i][2], scene['FSB_y'][i][2]],
@@ -269,7 +270,7 @@ def init_PcptGeo_info(scene):
 
         if IsOvlpSprtAxis(ObstRect, VehRect_Sp) or IsOvlpSprtAxis(ObstRect, VehRect_Tp):
             continue
-        GlbVar.PcptInfo.Obstcle_list.append(ObstRect)
+        thread_local.PcptInfo.Obstcle_list.append(ObstRect)
 
 def visualize_image(img_data):
     image = Image.open(io.BytesIO(img_data)).convert('RGB')
@@ -302,25 +303,25 @@ def plot_env(child_node = []):
 
     # Start Pose and Target Pose
     if child_node == []:
-        plt.plot(GlbVar.PcptInfo.StartPoint.x, GlbVar.PcptInfo.StartPoint.y, color='cyan', marker='o', markersize=0.5)
-        sp_veh_rect = utils.get_Veh_corners(GlbVar.PcptInfo.StartPoint.x, GlbVar.PcptInfo.StartPoint.y, GlbVar.PcptInfo.StartPoint.yaw_rad, 0, 0)
+        plt.plot(thread_local.PcptInfo.StartPoint.x, thread_local.PcptInfo.StartPoint.y, color='cyan', marker='o', markersize=0.5)
+        sp_veh_rect = utils.get_Veh_corners(thread_local.PcptInfo.StartPoint.x, thread_local.PcptInfo.StartPoint.y, thread_local.PcptInfo.StartPoint.yaw_rad, 0, 0)
         plt.plot(sp_veh_rect[0], sp_veh_rect[1], color='cyan', linestyle='-', linewidth=0.5)
     else:
-        plt.plot(GlbVar.PcptInfo.StartPoint.x, GlbVar.PcptInfo.StartPoint.y, color='cyan', marker='o', markersize=0.5)
+        plt.plot(thread_local.PcptInfo.StartPoint.x, thread_local.PcptInfo.StartPoint.y, color='cyan', marker='o', markersize=0.5)
         sp_veh_rect = utils.get_Veh_corners(child_node.x, child_node.y, child_node.yaw_rad, 0, 0)
         plt.plot(sp_veh_rect[0], sp_veh_rect[1], color='cyan', linestyle='-', linewidth=0.5)
 
-    plt.plot(GlbVar.PcptInfo.TargetPoint.x, GlbVar.PcptInfo.TargetPoint.y, color='green', marker='o', markersize=0.5)
-    tp_veh_rect = utils.get_Veh_corners(GlbVar.PcptInfo.TargetPoint.x, GlbVar.PcptInfo.TargetPoint.y, GlbVar.PcptInfo.TargetPoint.yaw_rad, 0, 0)
+    plt.plot(thread_local.PcptInfo.TargetPoint.x, thread_local.PcptInfo.TargetPoint.y, color='green', marker='o', markersize=0.5)
+    tp_veh_rect = utils.get_Veh_corners(thread_local.PcptInfo.TargetPoint.x, thread_local.PcptInfo.TargetPoint.y, thread_local.PcptInfo.TargetPoint.yaw_rad, 0, 0)
     plt.plot(tp_veh_rect[0], tp_veh_rect[1], color='green', linestyle='-', linewidth=0.5)
 
     # Slot
-    if GlbVar.PcptInfo.Slot is not None:
-        slot_polygon = patches.Polygon(GlbVar.PcptInfo.Slot[0], closed=True, edgecolor='b', facecolor='none', linestyle='--', linewidth=0.5)
+    if thread_local.PcptInfo.Slot is not None:
+        slot_polygon = patches.Polygon(thread_local.PcptInfo.Slot[0], closed=True, edgecolor='b', facecolor='none', linestyle='--', linewidth=0.5)
         ax.add_patch(slot_polygon)
 
     # OD and FSB
-    for rect in GlbVar.PcptInfo.Obstcle_list:
+    for rect in thread_local.PcptInfo.Obstcle_list:
         obst_polygon = patches.Polygon(rect, closed=True, edgecolor='r', facecolor='none', linestyle='-', linewidth=0.5)
         ax.add_patch(obst_polygon)
 
@@ -354,7 +355,7 @@ def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
 
     # 2. Plot node
     ax = fig.gca()
-    x, y, values = GlbVar.vis_node_list.get_data()
+    x, y, values = thread_local.vis_node_list.get_data()
 
     cmap = plt.get_cmap('RdYlGn')  # Reversed colormap for red to green
     norm = mcolors.Normalize(vmin=0, vmax=1)

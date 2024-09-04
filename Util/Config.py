@@ -35,10 +35,10 @@ class VehParams:
         # self.LatMargin = 0.1
         # self.LgtMargin = 0.1
 
-class MultiProcessNum:
+class MultiTreadNum:
     def __init__(self) -> None:
-        self.collection_multi_core_num = 4
-        self.Convert2DataSet_multi_core_num = 4
+        self.collection_multi_thread_num = 4
+        self.Convert2DataSet_multi_thread_num = 4
 
 class StoreFolderPath:
     def __init__(self) -> None:
@@ -51,4 +51,4 @@ class StoreFolderPath:
 
 VehPara = VehParams()
 StorePath = StoreFolderPath()
-MultiProcess = MultiProcessNum()
+MultiTread = MultiTreadNum()

@@ -7,6 +7,7 @@
 
 import GlbVar
 import DrlUtil
+from GlbVar import thread_local
 
 # ==========================================================
 # ======================== Env Info ========================

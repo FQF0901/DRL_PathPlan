@@ -14,20 +14,19 @@ import os
 import sys
 from tqdm import tqdm
 import concurrent.futures
+import threading
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import Config
 from Util import utils
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
 
-Convert2DataSet_pbar_lock = multiprocessing.Lock()
+Convert2DataSet_pbar_lock = threading.Lock()
 
 # ==========================================================
 # ======================= GenDataSet =======================
 # ==========================================================
 
-def process_chunk(chunk, process_idx):
-    process_id = os.getpid()
+def process_chunk(chunk, thread_idx):
+    thread_id = threading.get_ident()
 
     with tqdm(total=len(chunk), dynamic_ncols=True, desc="Convert2DataSet Progress Bar") as pbar:
         for cnt, scene in enumerate(chunk):
@@ -39,7 +38,7 @@ def process_chunk(chunk, process_idx):
             cycle_interval = 10
             if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
                 with Convert2DataSet_pbar_lock:
-                    pbar.set_postfix({'process_id': f'{process_id}'})
+                    pbar.set_postfix({'thread_idx': f'{thread_idx}'})
                     pbar.update(cycle_interval)
 
     pbar.close()
@@ -68,10 +67,10 @@ def Convert2DataSet(sample_size=100000):
 
         sampled_indices = random.sample(scene_data, min(len(scene_data), sample_size))
 
-        num_chunks = Config.MultiProcess.Convert2DataSet_multi_core_num
+        num_chunks = Config.MultiTread.Convert2DataSet_multi_thread_num
         chunks = [sampled_indices[i::num_chunks] for i in range(num_chunks)]
         
-        with ProcessPoolExecutor(max_workers=num_chunks) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
             # Submit tasks to the executor
             futures = [executor.submit(process_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
             
