@@ -174,11 +174,11 @@ class GridMap:
 # PcptInfo = PcptGeo()    # GridMap() [important]
 # vis_node_list = VisNodeList()
 
-def init_thread_variables():
+def init_process_variables():
     thread_local.PcptInfo = PcptGeo([], [], [], [])
     
     thread_local.vis_node_list = VisNodeList()
     thread_local.vis_node_list.clear()
 
 thread_local = threading.local() 
-init_thread_variables()
+init_process_variables()

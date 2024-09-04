@@ -25,7 +25,7 @@ Convert2DataSet_pbar_lock = threading.Lock()
 # ======================= GenDataSet =======================
 # ==========================================================
 
-def process_chunk(chunk, thread_idx):
+def process_chunk(chunk, process_idx):
     thread_id = threading.get_ident()
 
     with tqdm(total=len(chunk), dynamic_ncols=True, desc="Convert2DataSet Progress Bar") as pbar:
@@ -38,7 +38,7 @@ def process_chunk(chunk, thread_idx):
             cycle_interval = 10
             if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
                 with Convert2DataSet_pbar_lock:
-                    pbar.set_postfix({'thread_idx': f'{thread_idx}'})
+                    pbar.set_postfix({'process_idx': f'{process_idx}'})
                     pbar.update(cycle_interval)
 
     pbar.close()
