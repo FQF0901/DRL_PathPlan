@@ -9,7 +9,6 @@ import os
 from collections import deque
 import graphviz
 import GlbVar
-from GlbVar import thread_local
 import DrlUtil
 import random
 import DrlCfg
@@ -177,7 +176,7 @@ class MctsEfctTree:
         for child_node in MctsNode.children:
             if child_node.n_visit > 1 and child_node.StoreDone == False:
                 
-                state_list.append([child_node.node, self.TargetPose, thread_local.PcptInfo])
+                state_list.append([child_node.node, self.TargetPose, GlbVar.PcptInfo])
                 V_value_list.append([GrandChild.Value for GrandChild in child_node.children])
 
                 child_node.StoreDone = True

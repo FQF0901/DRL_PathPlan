@@ -14,34 +14,24 @@ import os
 import sys
 from tqdm import tqdm
 import concurrent.futures
-import threading
+import multiprocessing
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import Config
 from Util import utils
 
-Convert2DataSet_pbar_lock = threading.Lock()
+Convert2DataSet_pbar_lock = multiprocessing.Lock()
 
 # ==========================================================
 # ======================= GenDataSet =======================
 # ==========================================================
 
 def process_chunk(chunk, process_idx):
-    thread_id = threading.get_ident()
+    for cnt, scene in enumerate(chunk):
+        DrlUtil.GenImgLabel(scene, Config.StorePath.train_dataset_path)
 
-    with tqdm(total=len(chunk), dynamic_ncols=True, desc="Convert2DataSet Progress Bar") as pbar:
-        for cnt, scene in enumerate(chunk):
-            DrlUtil.GenImgLabel(scene, Config.StorePath.train_dataset_path)
+        if cnt == len(chunk) - 1:
+            DrlUtil.flush_cache()
 
-            if cnt == len(chunk) - 1:
-                DrlUtil.flush_cache()
-
-            cycle_interval = 10
-            if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
-                with Convert2DataSet_pbar_lock:
-                    pbar.set_postfix({'process_idx': f'{process_idx}'})
-                    pbar.update(cycle_interval)
-
-    pbar.close()
 
 def Convert2DataSet(sample_size=100000):
     print(utils.HighLightGreenMsg('运行 Convert2DataSet()'))
@@ -70,7 +60,7 @@ def Convert2DataSet(sample_size=100000):
         num_chunks = Config.MultiProcess.Convert2DataSet_multi_precess_num
         chunks = [sampled_indices[i::num_chunks] for i in range(num_chunks)]
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_chunks) as executor:
             # Submit tasks to the executor
             futures = [executor.submit(process_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
             

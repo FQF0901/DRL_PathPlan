@@ -7,14 +7,13 @@
 
 import GlbVar
 import DrlUtil
-from GlbVar import thread_local
 
 # ==========================================================
 # ======================== Env Info ========================
 # ==========================================================
 class Env:
     def __init__(self) -> None:
-        self.PcptInfo = thread_local.PcptInfo
+        self.PcptInfo = GlbVar.PcptInfo
         self.Reward = 0
         self.CycleCnt = 0 
     
