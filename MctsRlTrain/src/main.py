@@ -143,8 +143,8 @@ def main(main_for_loop_num, start_from_train_or_collection,
 if __name__ == "__main__":
     try:
         # 1. Config
-        Config.MultiProcess.collection_multi_process_num = 4
-        Config.MultiProcess.Convert2DataSet_multi_precess_num = 4
+        Config.MultiProcess.collection_multi_process_num = 6
+        Config.MultiProcess.Convert2DataSet_multi_precess_num = 6
         
         main_for_loop_num = 5
         start_from_train_or_collection = 0  # 1: start from train, others: start from collection
