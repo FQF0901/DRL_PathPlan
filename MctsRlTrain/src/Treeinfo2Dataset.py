@@ -67,7 +67,7 @@ def Convert2DataSet(sample_size=100000):
 
         sampled_indices = random.sample(scene_data, min(len(scene_data), sample_size))
 
-        num_chunks = Config.MultiTread.Convert2DataSet_multi_thread_num
+        num_chunks = Config.MultiProcess.Convert2DataSet_multi_precess_num
         chunks = [sampled_indices[i::num_chunks] for i in range(num_chunks)]
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:

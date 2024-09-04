@@ -120,7 +120,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
             # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
 
     # --------------------- Tree Truth Gen ----------------------
-            num_chunks = Config.MultiTread.collection_multi_thread_num
+            num_chunks = Config.MultiProcess.collection_multi_process_num
             chunk_size = len(sampled_scene_idx_list) // num_chunks
             chunks = [sampled_scene_idx_list[i:i + chunk_size] for i in range(0, len(sampled_scene_idx_list), chunk_size)]
             

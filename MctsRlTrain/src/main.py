@@ -143,14 +143,14 @@ def main(main_for_loop_num, start_from_train_or_collection,
 if __name__ == "__main__":
     try:
         # 1. Config
-        Config.MultiTread.collection_multi_thread_num = 4
-        Config.MultiTread.Convert2DataSet_multi_thread_num = 4
+        Config.MultiProcess.collection_multi_process_num = 4
+        Config.MultiProcess.Convert2DataSet_multi_precess_num = 4
         
         main_for_loop_num = 5
         start_from_train_or_collection = 0  # 1: start from train, others: start from collection
 
-        collection_scene_num = 20
-        collection_max_step = 100
+        collection_scene_num = 40
+        collection_max_step = 750
 
         train_batch_size = 32
         train_epoch_num = 10
