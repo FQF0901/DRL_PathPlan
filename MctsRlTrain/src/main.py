@@ -12,7 +12,7 @@ import shutil
 import time
 import Treeinfo2Dataset
 # from Collection import collection
-from CollectionMultithread import collection
+from MctsRlTrain.src.CollectionMultiprocess import collection
 from Dnn import PolicyValueNet
 from Train import TrainPipeline
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))

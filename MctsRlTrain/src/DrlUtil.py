@@ -226,6 +226,8 @@ def init_mctsefct_info(MT):
     MT.TargetPose = thread_local.PcptInfo.TargetPoint
 
 def init_PcptGeo_info(scene):
+    GlbVar.datalist.append(2)
+    print("子进程",os.getpid(),GlbVar.datalist)
 
     # SP & TP
     if scene['PrkMod'] == 1:

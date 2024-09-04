@@ -31,9 +31,10 @@ collection_pbar_lock = multiprocessing.Lock()
 # ==========================================================
 
 def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file):
-    # Initialize thread shared variables
-    GlbVar.init_process_variables()
-    
+
+    GlbVar.datalist.append(1)
+    print("子进程",os.getpid(),GlbVar.datalist)
+
     scene = scene_data.iloc[row_idx]
     play_data_list = []
     # print(scene)  # [used for debug]
