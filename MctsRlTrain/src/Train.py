@@ -5,6 +5,7 @@
 @description: Training DNN
 """
 
+import gc
 import collections
 import numpy as np
 import pandas as pd
@@ -167,7 +168,14 @@ class TrainPipeline:
                 writer.add_scalar('Loss_sum/train/average', loss_sum / len(self.data_buffer), epoch)
                 # print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
 
+            # 5. Release computing resources
+            gc.collect()
+            del self.policy_value_net.optimizer
+            del self.policy_value_net
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
             writer.close()
+            
             print('===== Train done ! =====')
 
         except KeyboardInterrupt:

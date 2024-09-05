@@ -8,6 +8,8 @@
 import collections
 import os
 import sys
+import gc
+import torch
 import pickle
 import datetime
 import random
@@ -23,7 +25,7 @@ import multiprocessing
 
 tree_info_pkl_lock = multiprocessing.Lock()
 log_file_lock = multiprocessing.Lock()
-cycle_interval = 2
+cycle_interval = 1
 
 # ==========================================================
 # ======================== Function ========================
@@ -160,6 +162,10 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
                     for result in async_results:
                         result.wait()
+
+    # Release computing resources
+    gc.collect()
+    torch.cuda.empty_cache()
 
     print('===== Mcts info generated done ! =====')
 
