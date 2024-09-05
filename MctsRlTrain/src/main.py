@@ -71,8 +71,8 @@ def store_2_pkl_files(only_tree_info_pkl=False):
         print(f"文件 {scene_in_tree_folder} 不存在")
 
 def main(main_for_loop_num, start_from_train_or_collection,
-         collection_scene_num, collection_max_step,
-         train_batch_size, train_epoch_num):
+             collection_scene_num, collection_max_step, collection_use_multiprocessing_Pool, 
+             train_batch_size, train_epoch_num):
     
     # 1. Clean folder
     clear_path(Config.StorePath.train_dataset_path)
@@ -119,15 +119,17 @@ def main(main_for_loop_num, start_from_train_or_collection,
         shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
 
         # 3.1 Gen raw dataset
-        collection(scene_num=collection_scene_num, max_step=collection_max_step, deque_len=300000)
+        collection(scene_num=collection_scene_num, 
+                   max_step=collection_max_step, deque_len=300000, 
+                   use_multiprocessing_Pool = collection_use_multiprocessing_Pool)
 
         # 3.2 Gen dataset
         Treeinfo2Dataset.Convert2DataSet(sample_size=100000)
         
         # 3.3 Train
         training_pipeline = TrainPipeline(init_model=os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl'), 
-                                        batch_size=train_batch_size,
-                                        epoch_num=train_epoch_num)       
+                                          batch_size=train_batch_size,
+                                          epoch_num=train_epoch_num)       
         training_pipeline.run(csv_file=os.path.join(Config.StorePath.train_dataset_path, 'label.csv'), 
                             img_folder=os.path.join(Config.StorePath.train_dataset_path, 'images'))
         
@@ -143,21 +145,22 @@ def main(main_for_loop_num, start_from_train_or_collection,
 if __name__ == "__main__":
     try:
         # 1. Config
-        Config.MultiProcess.collection_multi_process_num = 6
-        Config.MultiProcess.Convert2DataSet_multi_precess_num = 6
+        Config.MultiProcess.collection_multi_process_num = 2
+        Config.MultiProcess.Convert2DataSet_multi_precess_num = 2
         
         main_for_loop_num = 5
         start_from_train_or_collection = 0  # 1: start from train, others: start from collection
 
-        collection_scene_num = 40
-        collection_max_step = 750
+        collection_scene_num = 20
+        collection_max_step = 100
+        collection_use_multiprocessing_Pool = True
 
         train_batch_size = 32
         train_epoch_num = 10
 
         # 2. main func
         main(main_for_loop_num, start_from_train_or_collection,
-             collection_scene_num, collection_max_step,
+             collection_scene_num, collection_max_step, collection_use_multiprocessing_Pool, 
              train_batch_size, train_epoch_num)
 
         print(utils.HighLightGreenMsg('The entire process is completed !'))

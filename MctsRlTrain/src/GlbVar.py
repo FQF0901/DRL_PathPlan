@@ -178,5 +178,3 @@ class GridMap:
 # ==========================================================
 PcptInfo = PcptGeo()    # GridMap() [important]
 vis_node_list = VisNodeList()
-
-datalist=['+++']

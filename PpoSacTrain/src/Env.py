@@ -4,13 +4,12 @@
 @file: Env.py 
 @description: Sim env, more suitable for simulating real-time plan(PPO), not suitable for simulating MCTS
 """
-
-import GlbVar
-import DrlUtil
-
 # ==========================================================
 # ======================== Env Info ========================
 # ==========================================================
+import GlbVar
+import DrlUtil
+
 class Env:
     def __init__(self) -> None:
         self.PcptInfo = GlbVar.PcptInfo

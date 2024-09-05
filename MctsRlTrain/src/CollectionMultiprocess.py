@@ -15,7 +15,6 @@ from tqdm import tqdm
 import concurrent.futures
 import Mcts
 import DrlUtil
-import GlbVar
 from Dnn import PolicyValueNet
 sys.path.append(os.path.abspath(os.path.join(os.getcwd())))
 from Util import utils
@@ -59,15 +58,22 @@ def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file)
                 myfile.write(f"{current_time} {scene.FileName} - {scene.TimeStamp} -- no path found\n") # write fail info into log
     return play_data_list
 
-def process_chunk(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, process_idx):
-    chunk_results = []
+def batch_exec(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w):
+    chunk_results = collections.deque(maxlen=100000)
+    batch_size = 2
 
-    for cnt, row_idx in enumerate(chunk):
+    for idx, row_idx in enumerate(chunk):
         chunk_results.extend(process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file))
-        
-    return chunk_results
 
-def update_data_buffer(play_data_list):
+        if (idx + 1) % batch_size == 0 or (idx + 1) == len(chunk):
+            update_data_buffer(chunk_results)
+            chunk_results.clear()
+
+        w.send(1)
+
+    return True
+
+def update_data_buffer(chunk_results):
     Mcts_Data_filename = f"{Config.StorePath.tree_info_path}/Mcts_Train_Data_buffer.pkl"
 
     with tree_info_pkl_lock:
@@ -80,17 +86,24 @@ def update_data_buffer(play_data_list):
             except Exception as e:
                 print(f"加载缓冲区时出错: {e}")
         
-        DataBuffer.extend(play_data_list)
+        DataBuffer.extend(chunk_results)
         
         data_dict = {'DataBuffer': DataBuffer}
         with open(Mcts_Data_filename, 'wb') as data_file:
             pickle.dump(data_dict, data_file)
 
+def on_success(result):
+    pass
+    # print(f"Result: {result}")
+
+def on_error(exception):
+    print(f"Multi-Task failed with exception: {exception}")
+
 # ==========================================================
 # ======================= Collection =======================
 # ==========================================================
 
-def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
+def collection(scene_num = 100, max_step = 10000, deque_len = 300000, use_multiprocessing_Pool = True):
     print(utils.HighLightGreenMsg('运行 CollectionMultiprocess()'))
 
     # ------------------------- Config -------------------------
@@ -106,21 +119,76 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
             scene_data = pickle.load(scene_pkl_data)
             row_num = scene_data.shape[0]
             sampled_scene_idx_list = random.sample(range(row_num), min(scene_num, row_num))
+            # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
 
-    # --------------------- Tree Truth Gen ----------------------
+    # ---------------------- Multi execute ----------------------
             num_chunks = Config.MultiProcess.collection_multi_process_num
             chunk_size = len(sampled_scene_idx_list) // num_chunks
             chunks = [sampled_scene_idx_list[i:i + chunk_size] for i in range(0, len(sampled_scene_idx_list), chunk_size)]
-            
-            with concurrent.futures.ProcessPoolExecutor(max_workers=num_chunks) as executor:
-                future_to_chunk = {executor.submit(process_chunk, chunk, scene_data, policy_value_net, max_step, scene_pkl_file, idx): chunk for idx, chunk in enumerate(chunks)}
-                
-                for future in concurrent.futures.as_completed(future_to_chunk):
-                    try:
-                        chunk_results = future.result()
-                        update_data_buffer(chunk_results)
-                    except Exception as e:
-                        print(f"Error processing chunk: {e}")
+            pool_size = num_chunks
+
+            if use_multiprocessing_Pool:
+                ''' multiprocessing.Pool '''
+                with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Collection Progress Bar') as pbar:
+                    with multiprocessing.Pool(processes=pool_size) as pool:
+                        
+                        async_results = []
+                        r,w = multiprocessing.Pipe(duplex=False)
+
+                        for chunk in chunks:
+                            async_result  = pool.apply_async(batch_exec, 
+                                                            args=(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w),
+                                                            callback=on_success, error_callback=on_error)
+                            async_results.append(async_result)
+
+                        cnt=0
+                        while cnt<int(len(sampled_scene_idx_list)):
+                            try:
+                                msg=r.recv()
+                                cnt+=1
+
+                                cycle_interval = 1
+                                if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
+                                    with collection_pbar_lock:
+                                        # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
+                                        pbar.update(cycle_interval)
+
+                            except EOFError:
+                                break
+
+                        for result in async_results:
+                            result.wait()
+            else:
+                ''' concurrent.futures.ProcessPoolExecutor '''
+                # with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Collection Progress Bar') as pbar:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=num_chunks) as executor:
+
+                        # async_results = []
+                        # r,w = multiprocessing.Pipe(duplex=False)
+
+                    future_to_chunk = {executor.submit(batch_exec, chunk, scene_data, policy_value_net, max_step, scene_pkl_file): chunk 
+                                    for chunk in enumerate(chunks)}
+
+                        # cnt=0
+                        # while cnt<int(len(sampled_scene_idx_list)):
+                        #     try:
+                        #         msg=r.recv()
+                        #         cnt+=1
+
+                        #         cycle_interval = 1
+                        #         if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
+                        #             with collection_pbar_lock:
+                        #                 # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
+                        #                 pbar.update(cycle_interval)
+
+                        #     except EOFError:
+                        #         break
+
+                    for future in concurrent.futures.as_completed(future_to_chunk):
+                        try:
+                            chunk_results = future.result()
+                        except Exception as e:
+                            print(f"Error processing chunk: {e}")
 
     print('===== Mcts info generated done ! =====')
 
@@ -129,4 +197,5 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
 if __name__ == "__main__":
 
-    collection(scene_num = 8, max_step = 100, deque_len = 100000)
+    Config.MultiProcess.collection_multi_process_num = 2
+    collection(scene_num = 8, max_step = 100, deque_len = 100000, use_multiprocessing_Pool = False)

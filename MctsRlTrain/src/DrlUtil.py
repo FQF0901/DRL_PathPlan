@@ -224,7 +224,8 @@ def init_mctsefct_info(MT):
     MT.RootMctsEfctNode.node = GlbVar.PcptInfo.StartPoint
     MT.TargetPose = GlbVar.PcptInfo.TargetPoint
 
-def init_PcptGeo_info(scene):
+def init_PcptGeo_info(scene): 
+    ''' Initialize environment information '''
     GlbVar.PcptInfo.clear()
 
     # SP & TP
@@ -297,6 +298,7 @@ def NodeNetValue(child_node, policy_value_net):
 # ==========================================================
 def plot_env(child_node = []):
     ''' Plot env '''
+    matplotlib.use('Agg')
     plt.ioff()
     plt.clf()
     plt.cla()
@@ -353,7 +355,6 @@ def plot_PcptGeo(scene_pkl_file, row_idx):
     plt.close(fig)
 
 def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
-        
     # 1. Plot env
     child_node = []
     fig = plot_env(child_node)
@@ -371,13 +372,14 @@ def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
     # 3. Save pic
     filename = f"{Config.StorePath.tree_info_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
     fig.savefig(filename)
-
+    plt.close(fig)
 
 def GenChildNodeImg(child_node):
     fig = plot_env(child_node)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png')
+    plt.close(fig)
     buf.seek(0)  # 重置字节流位置
 
     ''' used for debug
@@ -418,12 +420,13 @@ def flush_cache():
 
 def GenImgLabel(scene, Img_Label_path):
     Img = scene[0]
-    Label = scene[1]
+    Label = scene[1]  
 
     ''' Img '''
     figsize = (384 / 100, 224 / 100)    # figsize is in inches, 384x224 pixel image at 100 dpi
     fig, ax = plt.subplots(figsize=figsize, dpi=100)
 
+    # Start Pose and Target Pose
     plt.plot(Img[0].x, Img[0].y, color='cyan', marker='o', markersize=0.5)
     sp_veh_rect = utils.get_Veh_corners(Img[0].x, Img[0].y, Img[0].yaw_rad, 0, 0)
     plt.plot(sp_veh_rect[0], sp_veh_rect[1], color='cyan', linestyle='-', linewidth=0.5)
@@ -432,17 +435,20 @@ def GenImgLabel(scene, Img_Label_path):
     tp_veh_rect = utils.get_Veh_corners(Img[1].x, Img[1].y, Img[1].yaw_rad, 0, 0)
     plt.plot(tp_veh_rect[0], tp_veh_rect[1], color='green', linestyle='-', linewidth=0.5)
 
+    # Slot
     if Img[2].Slot is not None:
         slot_polygon = patches.Polygon(Img[2].Slot[0], closed=True, edgecolor='b', facecolor='none', linestyle='--', linewidth=0.5)
         ax.add_patch(slot_polygon)
 
+    # OD and FSB
     for rect in Img[2].Obstcle_list:
         obst_polygon = patches.Polygon(rect, closed=True, edgecolor='r', facecolor='none', linestyle='-', linewidth=0.5)
         ax.add_patch(obst_polygon)
 
+    # Post process
     physics_size = 14
     xlim = (-physics_size, physics_size)
-    ylim = (-physics_size / 384 * 224, physics_size / 384 * 224)
+    ylim = (-physics_size/384*224, physics_size/384*224)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
 
@@ -450,6 +456,8 @@ def GenImgLabel(scene, Img_Label_path):
     ax.axis('off')
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)   # Make the content fill the entire picture
 
+    # Save fig
+    # filename = f"{store_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo.png"
     file_name = str(uuid.uuid4()) + '.png'
     file_path = os.path.join(Img_Label_path, 'images', file_name)
 
