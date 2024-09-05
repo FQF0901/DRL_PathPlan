@@ -23,7 +23,6 @@ import multiprocessing
 
 tree_info_pkl_lock = multiprocessing.Lock()
 log_file_lock = multiprocessing.Lock()
-collection_pbar_lock = multiprocessing.Lock()
 
 # ==========================================================
 # ======================== Function ========================
@@ -103,7 +102,7 @@ def on_error(exception):
 # ======================= Collection =======================
 # ==========================================================
 
-def collection(scene_num = 100, max_step = 10000, deque_len = 300000, use_multiprocessing_Pool = True):
+def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
     print(utils.HighLightGreenMsg('运行 CollectionMultiprocess()'))
 
     # ------------------------- Config -------------------------
@@ -127,68 +126,35 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000, use_multip
             chunks = [sampled_scene_idx_list[i:i + chunk_size] for i in range(0, len(sampled_scene_idx_list), chunk_size)]
             pool_size = num_chunks
 
-            if use_multiprocessing_Pool:
-                ''' multiprocessing.Pool '''
-                with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Collection Progress Bar') as pbar:
-                    with multiprocessing.Pool(processes=pool_size) as pool:
-                        
-                        async_results = []
-                        r,w = multiprocessing.Pipe(duplex=False)
+            ''' multiprocessing.Pool '''
+            with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Collection Progress Bar') as pbar:
+                with multiprocessing.Pool(processes=pool_size) as pool:
+                    
+                    async_results = []
+                    r,w = multiprocessing.Pipe(duplex=False)
 
-                        for chunk in chunks:
-                            async_result  = pool.apply_async(batch_exec, 
-                                                            args=(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w),
-                                                            callback=on_success, error_callback=on_error)
-                            async_results.append(async_result)
+                    for chunk in chunks:
+                        async_result  = pool.apply_async(batch_exec, 
+                                                        args=(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w),
+                                                        callback=on_success, error_callback=on_error)
+                        async_results.append(async_result)
 
-                        cnt=0
-                        while cnt<int(len(sampled_scene_idx_list)):
-                            try:
-                                msg=r.recv()
-                                cnt+=1
-
-                                cycle_interval = 1
-                                if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
-                                    with collection_pbar_lock:
-                                        # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
-                                        pbar.update(cycle_interval)
-
-                            except EOFError:
-                                break
-
-                        for result in async_results:
-                            result.wait()
-            else:
-                ''' concurrent.futures.ProcessPoolExecutor '''
-                # with tqdm(total=int(len(sampled_scene_idx_list)), dynamic_ncols=True, desc='Collection Progress Bar') as pbar:
-                with concurrent.futures.ProcessPoolExecutor(max_workers=num_chunks) as executor:
-
-                        # async_results = []
-                        # r,w = multiprocessing.Pipe(duplex=False)
-
-                    future_to_chunk = {executor.submit(batch_exec, chunk, scene_data, policy_value_net, max_step, scene_pkl_file): chunk 
-                                    for chunk in enumerate(chunks)}
-
-                        # cnt=0
-                        # while cnt<int(len(sampled_scene_idx_list)):
-                        #     try:
-                        #         msg=r.recv()
-                        #         cnt+=1
-
-                        #         cycle_interval = 1
-                        #         if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
-                        #             with collection_pbar_lock:
-                        #                 # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
-                        #                 pbar.update(cycle_interval)
-
-                        #     except EOFError:
-                        #         break
-
-                    for future in concurrent.futures.as_completed(future_to_chunk):
+                    cnt=0
+                    while cnt<int(len(sampled_scene_idx_list)):
                         try:
-                            chunk_results = future.result()
-                        except Exception as e:
-                            print(f"Error processing chunk: {e}")
+                            msg=r.recv()
+                            cnt+=1
+
+                            cycle_interval = 1
+                            if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
+                                # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
+                                pbar.update(cycle_interval)
+
+                        except EOFError:
+                            break
+
+                    for result in async_results:
+                        result.wait()
 
     print('===== Mcts info generated done ! =====')
 
@@ -197,5 +163,5 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000, use_multip
 
 if __name__ == "__main__":
 
-    Config.MultiProcess.collection_multi_process_num = 2
-    collection(scene_num = 8, max_step = 100, deque_len = 100000, use_multiprocessing_Pool = False)
+    Config.MultiProcess.collection_multi_process_num = 6
+    collection(scene_num = 20, max_step = 8000, deque_len = 100000)
