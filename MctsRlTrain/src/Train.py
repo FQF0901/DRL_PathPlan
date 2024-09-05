@@ -63,7 +63,7 @@ class TrainPipeline:
         self.data_buffer = collections.deque(maxlen = 10000)
         self.epoch_num = epoch_num
         self.mse_targ = 10
-        self.savenet_freq = 10
+        self.savenet_freq = 50
 
         self.policy_value_net = PolicyValueNet(model_file=init_model)
 

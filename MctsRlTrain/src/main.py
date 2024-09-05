@@ -150,7 +150,7 @@ if __name__ == "__main__":
         main_for_loop_num = 5
         start_from_train_or_collection = 0  # 1: start from train, others: start from collection
 
-        collection_scene_num = 200
+        collection_scene_num = 240
         collection_max_step = 8000
 
         train_batch_size = 32
