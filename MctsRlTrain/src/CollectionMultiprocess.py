@@ -146,7 +146,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
                             cnt+=1
 
                             cycle_interval = 1
-                            if cnt % cycle_interval == 0 or cnt == len(chunk) - 1:
+                            if cnt % cycle_interval == 0 or cnt == len(sampled_scene_idx_list) - 1:
                                 # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
                                 pbar.update(cycle_interval)
 
