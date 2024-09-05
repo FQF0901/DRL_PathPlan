@@ -90,6 +90,8 @@ def update_data_buffer(chunk_results):
                 print(utils.HighLightRedMsg("Pickle 文件为空或损坏"))
             except pickle.UnpicklingError:
                 print(utils.HighLightRedMsg("Pickle 文件解码错误"))
+            except PermissionError:
+                print(utils.HighLightRedMsg("文件权限错误"))
             except Exception as e:
                 print(utils.HighLightRedMsg(f"加载缓冲区时出错: {e}"))
         

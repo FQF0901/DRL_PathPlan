@@ -63,7 +63,7 @@ class TrainPipeline:
         self.data_buffer = collections.deque(maxlen = 10000)
         self.epoch_num = epoch_num
         self.mse_targ = 10
-        self.savenet_freq = 50
+        self.savenet_freq = 1000
 
         self.policy_value_net = PolicyValueNet(model_file=init_model)
 
@@ -157,7 +157,7 @@ class TrainPipeline:
 
             for epoch in range(self.epoch_num):
                 # 2. Loading data
-                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
+                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=2)
 
                 # 3. Training net
                 loss_sum = self.net_update(epoch, writer)
@@ -182,7 +182,7 @@ if __name__ == '__main__':
     img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
     training_pipeline = TrainPipeline(init_model=net_model, 
-                                          batch_size=32,
+                                          batch_size=16,
                                           epoch_num=10)       
     training_pipeline.run(csv_file=csv_path, 
                           img_folder=img_path)
