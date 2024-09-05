@@ -34,6 +34,8 @@ def process_chunk(chunk, w):
 
     w.send(1)
 
+    return True
+
 def Convert2DataSet(sample_size=100000):
     print(utils.HighLightGreenMsg('运行 Convert2DataSet()'))
 
@@ -65,7 +67,7 @@ def Convert2DataSet(sample_size=100000):
                 
                 r,w = multiprocessing.Pipe(duplex=False)
                 
-                futures = [executor.submit(process_chunk, chunk, w) for chunk in enumerate(chunks)]
+                futures = [executor.submit(process_chunk, chunk, w) for chunk in chunks]
                 
                 cnt=0
                 while cnt<int(len(sampled_indices)):
