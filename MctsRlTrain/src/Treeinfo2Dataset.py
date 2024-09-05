@@ -20,6 +20,7 @@ from Util import Config
 from Util import utils
 
 Convert2DataSet_pbar_lock = multiprocessing.Lock()
+cycle_interval = 500
 
 # ==========================================================
 # ======================= GenDataSet =======================
@@ -32,7 +33,10 @@ def process_chunk(chunk, w):
         if cnt == len(chunk) - 1:
             DrlUtil.flush_cache()
 
-    w.send(1)
+        if (cnt + 1) % cycle_interval == 0:
+            w.send(cycle_interval)
+    if len(chunk) % cycle_interval != 0:
+        w.send(len(chunk) % cycle_interval)
 
     return True
 
@@ -73,13 +77,8 @@ def Convert2DataSet(sample_size=100000):
                 while cnt<int(len(sampled_indices)):
                     try:
                         msg=r.recv()
-                        cnt+=1
-
-                        cycle_interval = 1
-                        if cnt % cycle_interval == 0 or cnt == len(sampled_indices) - 1:
-                            # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
-                            pbar.update(cycle_interval)
-
+                        cnt+=msg
+                        pbar.update(msg)
                     except EOFError:
                         break
 

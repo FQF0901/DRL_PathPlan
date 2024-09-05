@@ -23,6 +23,7 @@ import multiprocessing
 
 tree_info_pkl_lock = multiprocessing.Lock()
 log_file_lock = multiprocessing.Lock()
+cycle_interval = 2
 
 # ==========================================================
 # ======================== Function ========================
@@ -68,7 +69,10 @@ def batch_exec(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w)
             update_data_buffer(chunk_results)
             chunk_results.clear()
 
-        w.send(1)
+        if (idx + 1) % cycle_interval == 0:
+            w.send(cycle_interval)
+    if len(chunk) % cycle_interval != 0:
+        w.send(len(chunk) % cycle_interval)
 
     return True
 
@@ -82,8 +86,12 @@ def update_data_buffer(chunk_results):
                 with open(Mcts_Data_filename, 'rb') as data_dict:
                     data_file = pickle.load(data_dict)
                     DataBuffer.extend(data_file.get('DataBuffer', []))
+            except EOFError:
+                print(utils.HighLightRedMsg("Pickle 文件为空或损坏"))
+            except pickle.UnpicklingError:
+                print(utils.HighLightRedMsg("Pickle 文件解码错误"))
             except Exception as e:
-                print(f"加载缓冲区时出错: {e}")
+                print(utils.HighLightRedMsg(f"加载缓冲区时出错: {e}"))
         
         DataBuffer.extend(chunk_results)
         
@@ -143,13 +151,8 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
                     while cnt<int(len(sampled_scene_idx_list)):
                         try:
                             msg=r.recv()
-                            cnt+=1
-
-                            cycle_interval = 1
-                            if cnt % cycle_interval == 0 or cnt == len(sampled_scene_idx_list) - 1:
-                                # pbar.set_postfix({'thread_idx': f'{thread_idx}'})
-                                pbar.update(cycle_interval)
-
+                            cnt+=msg
+                            pbar.update(msg)
                         except EOFError:
                             break
 
