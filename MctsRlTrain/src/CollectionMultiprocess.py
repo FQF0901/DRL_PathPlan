@@ -14,7 +14,7 @@ import pickle
 import datetime
 import random
 from tqdm import tqdm
-import concurrent.futures
+import time
 import Mcts
 import DrlUtil
 from Dnn import PolicyValueNet
@@ -83,22 +83,23 @@ def update_data_buffer(chunk_results):
 
     with tree_info_pkl_lock:
         DataBuffer = collections.deque(maxlen=100000)
+
         if os.path.exists(Mcts_Data_filename):
-            try:
-                with open(Mcts_Data_filename, 'rb') as data_dict:
-                    data_file = pickle.load(data_dict)
-                    DataBuffer.extend(data_file.get('DataBuffer', []))
-            except EOFError:
-                print(utils.HighLightRedMsg("Pickle 文件为空或损坏"))
-            except pickle.UnpicklingError:
-                print(utils.HighLightRedMsg("Pickle 文件解码错误"))
-            except PermissionError:
-                print(utils.HighLightRedMsg("文件权限错误"))
-            except Exception as e:
-                print(utils.HighLightRedMsg(f"加载缓冲区时出错: {e}"))
+            write_cnt = 0
+            while write_cnt < 3:
+                try:
+                    write_cnt = write_cnt + 1
+                    with open(Mcts_Data_filename, 'rb') as data_dict:
+                        data_file = pickle.load(data_dict)
+                        DataBuffer.extend(data_file.get('DataBuffer', []))
+                        break
+                except Exception as e:
+                    if write_cnt == 3:
+                        print(utils.HighLightRedMsg(f"尝试3次加载缓冲区均出错: {e}"))
+                        break
+                    time.sleep(30)
         
         DataBuffer.extend(chunk_results)
-        
         data_dict = {'DataBuffer': DataBuffer}
         with open(Mcts_Data_filename, 'wb') as data_file:
             pickle.dump(data_dict, data_file)
