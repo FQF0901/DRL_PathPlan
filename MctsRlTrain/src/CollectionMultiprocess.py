@@ -45,15 +45,16 @@ def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file)
     # 2.2.2 init mcts
     MT = Mcts.MctsTree()
     DrlUtil.init_mcts_info(MT)
-    SelectNodeInfo, cnt, PathFndCnt = MT.Simulate(max_step, policy_value_net)
+    _, cnt, PathFndCnt = MT.Simulate(max_step, policy_value_net)
 
     # 2.2.3 store tree data
-    if not PathFndCnt == 0:
+    if not (PathFndCnt == 0):
         state_list, V_value_list = MT.StoreTreeInfo(cnt)
         # MT.VisTree(scene_pkl_file, row_idx) # [used for debug]
-        DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, MT)    # [used for debug]
+        DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, True)    # [used for debug]
         play_data_list = zip(state_list, V_value_list)
     else:
+        DrlUtil.plot_EnvMcts_info(scene_pkl_file, row_idx, False)    # [used for debug]
         with log_file_lock:
             with open(os.path.join(os.getcwd(), 'MctsRlTrain', 'output', 'log_mcts_simulation.txt'), "a") as myfile:
                 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

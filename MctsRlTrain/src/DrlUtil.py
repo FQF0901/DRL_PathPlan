@@ -354,7 +354,7 @@ def plot_PcptGeo(scene_pkl_file, row_idx):
     fig.savefig(filename)
     plt.close(fig)
 
-def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
+def plot_EnvMcts_info(scene_pkl_file, row_idx, PathFnd):
     # 1. Plot env
     child_node = []
     fig = plot_env(child_node)
@@ -370,7 +370,10 @@ def plot_EnvMcts_info(scene_pkl_file, row_idx, MT):
     scatter = ax.scatter(x, y, c=values, cmap=cmap, norm=norm, s=0.5)
 
     # 3. Save pic
-    filename = f"{Config.StorePath.tree_info_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
+    if PathFnd:
+        filename = f"{Config.StorePath.tree_info_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
+    else:
+        filename = f"{os.path.join(os.getcwd(), 'MctsRlTrain', 'output')}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
     fig.savefig(filename)
     plt.close(fig)
 
