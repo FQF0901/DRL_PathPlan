@@ -58,7 +58,7 @@ def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file)
         with log_file_lock:
             with open(os.path.join(os.getcwd(), 'MctsRlTrain', 'output', 'log_mcts_simulation.txt'), "a") as myfile:
                 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                myfile.write(f"{current_time} {scene.FileName} - {scene.TimeStamp} -- no path found\n") # write fail info into log
+                myfile.write(f"{current_time} {scene.FileName} -- {scene.TimeStamp} -- no path found\n") # write fail info into log
     return play_data_list
 
 def batch_exec(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w):

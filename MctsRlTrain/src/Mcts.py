@@ -39,6 +39,8 @@ class MctsTree:
         self.GridMap = KDTree.KdTreeGridMap()
         self.GridMap.add_or_update_grid(self.RootMctsNode.node.x, self.RootMctsNode.node.y, self.RootMctsNode.node.yaw_rad, True)
         self.GridMap.add_or_update_grid(self.TargetPose.x, self.TargetPose.y, self.TargetPose.yaw_rad, True)
+        GlbVar.vis_node_list.clear()
+        
 # ----------------------- Select Node ----------------------
     """Select node(type should equal to 1) among the child by PUCT"""
     def SelectNode(self, crnt_node):
@@ -245,7 +247,6 @@ class MctsTree:
     # External packaging interface
     def StoreTreeInfo(self, cnt):
         state_list, value_list = [], []
-        GlbVar.vis_node_list.clear()
         self.TravslTreeInfo(self.RootMctsNode, state_list, value_list, cnt)
 
         return state_list, value_list
