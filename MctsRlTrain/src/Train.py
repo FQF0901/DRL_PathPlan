@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import ast
+import time
 from Dnn import PolicyValueNet
 import DrlUtil
 from tqdm import tqdm
@@ -158,7 +159,7 @@ class TrainPipeline:
 
             for epoch in range(self.epoch_num):
                 # 2. Loading data
-                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=2)
+                self.data_buffer = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=4)
 
                 # 3. Training net
                 loss_sum = self.net_update(epoch, writer)
@@ -168,12 +169,13 @@ class TrainPipeline:
                 writer.add_scalar('Loss_sum/train/average', loss_sum / len(self.data_buffer), epoch)
                 # print(f'Epoch {epoch+1}/{self.epoch_num}, Loss: {loss:.4f}, lr: {self.policy_value_net.optimizer.param_groups[0]['lr']}')
 
-            # 5. Release computing resources
-            gc.collect()
+                # 5. Release computing resources
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+                gc.collect()
+                time.sleep(10)
             del self.policy_value_net.optimizer
             del self.policy_value_net
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
             writer.close()
             
             print('===== Train done ! =====')
@@ -190,7 +192,7 @@ if __name__ == '__main__':
     img_path = os.path.join(Config.StorePath.train_dataset_path, 'images')
 
     training_pipeline = TrainPipeline(init_model=net_model, 
-                                          batch_size=16,
+                                          batch_size=64,
                                           epoch_num=10)       
     training_pipeline.run(csv_file=csv_path, 
                           img_folder=img_path)

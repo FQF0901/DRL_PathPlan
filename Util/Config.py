@@ -42,11 +42,11 @@ class MultiProcessNum:
 
 class StoreFolderPath:
     def __init__(self) -> None:
-        self.mf4_raw_file_path =        r'E:\DataSet\Mf4RawFile'
-        self.scene_slice_data_path =    r'E:\DataSet\SceneSliceData'
-        self.tree_info_path =           r'E:\DataSet\TreeinfoData'
-        self.train_dataset_path =       r'E:\DataSet\TrainDataSet'
-        self.net_path =                 r'E:\DataSet\TrainDataSet'
+        self.mf4_raw_file_path =        r'D:\DataSet\Mf4RawFile'
+        self.scene_slice_data_path =    r'D:\DataSet\SceneSliceData'
+        self.tree_info_path =           r'D:\DataSet\TreeinfoData'
+        self.train_dataset_path =       r'D:\DataSet\TrainDataSet'
+        self.net_path =                 r'D:\DataSet\TrainDataSet'
 
 
 VehPara = VehParams()

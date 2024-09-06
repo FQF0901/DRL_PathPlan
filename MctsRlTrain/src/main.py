@@ -153,8 +153,8 @@ if __name__ == "__main__":
         collection_scene_num = 240
         collection_max_step = 8000
 
-        train_batch_size = 16
-        train_epoch_num = 10
+        train_batch_size = 64
+        train_epoch_num = 20
 
         # 2. main func
         main(main_for_loop_num, start_from_train_or_collection,
