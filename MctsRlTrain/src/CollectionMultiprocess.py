@@ -129,7 +129,6 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
             scene_data = pickle.load(scene_pkl_data)
             row_num = scene_data.shape[0]
             sampled_scene_idx_list = random.sample(range(row_num), min(scene_num, row_num))
-            sampled_scene_idx_list = [966, 950, 2039, 3211]
 
     # ---------------------- Multi execute ----------------------
             num_chunks = Config.MultiProcess.collection_multi_process_num
