@@ -173,12 +173,13 @@ class TrainPipeline:
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 gc.collect()
-                time.sleep(10)
+                time.sleep(5)
             del self.policy_value_net.optimizer
             del self.policy_value_net
             writer.close()
             
             print('===== Train done ! =====')
+            time.sleep(15)
 
         except KeyboardInterrupt:
             print(utils.HighLightRedMsg('\n\rQuit'))

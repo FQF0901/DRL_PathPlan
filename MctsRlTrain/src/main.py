@@ -10,6 +10,7 @@ import re
 import sys
 import shutil
 import time
+from datetime import datetime
 import Treeinfo2Dataset
 # from Collection import collection
 from MctsRlTrain.src.CollectionMultiprocess import collection
@@ -57,7 +58,7 @@ def store_2_pkl_files(only_tree_info_pkl=False):
         if max_file:
             src_path = os.path.join(Config.StorePath.train_dataset_path, max_file)
             dst_path = os.path.join(output_path, 'policy_value_net.pkl')
-            shutil.copy(src_path, dst_path)
+            shutil.copy2(src_path, dst_path)
             print(f"文件 {src_path} 已复制并重命名为 {dst_path}")
         else:
             print(f"没有找到符合条件的文件")
@@ -66,7 +67,7 @@ def store_2_pkl_files(only_tree_info_pkl=False):
     scene_in_tree_folder = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
     
     if os.path.isfile(scene_in_tree_folder):
-        shutil.copy(scene_in_tree_folder, os.path.join(os.getcwd(), 'MctsRlTrain', 'output'))
+        shutil.copy2(scene_in_tree_folder, os.path.join(os.getcwd(), 'MctsRlTrain', 'output'))
     else:
         print(f"文件 {scene_in_tree_folder} 不存在")
 
@@ -114,6 +115,9 @@ def main(main_for_loop_num, start_from_train_or_collection,
 
     # 3. Start the formal loop (based on the initialized or old net parameter)
     for _ in range(main_for_loop_num):
+        start_time = time.time()
+        print(f"第{main_for_loop_num}轮开始，当前时间: {datetime.now()}")
+
         # 3.0 Prepare pkl file
         shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
         shutil.copy(policy_value_net_pkl, Config.StorePath.tree_info_path)
@@ -137,6 +141,10 @@ def main(main_for_loop_num, start_from_train_or_collection,
         clear_path(Config.StorePath.train_dataset_path)
         clear_path(Config.StorePath.tree_info_path)
 
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"第{main_for_loop_num}轮结束，当前时间: {datetime.now()}，本轮耗时：{elapsed_time//3600}时{(elapsed_time % 3600) // 60}分{elapsed_time % 60}秒")
+
 # ==========================================================
 # ======================== main fun ========================
 # ==========================================================
@@ -144,7 +152,7 @@ def main(main_for_loop_num, start_from_train_or_collection,
 if __name__ == "__main__":
     try:
         # 1. Config
-        Config.MultiProcess.collection_multi_process_num = 6
+        Config.MultiProcess.collection_multi_process_num = 8
         Config.MultiProcess.Convert2DataSet_multi_precess_num = 6
         
         main_for_loop_num = 5
@@ -154,7 +162,7 @@ if __name__ == "__main__":
         collection_max_step = 8000
 
         train_batch_size = 64
-        train_epoch_num = 20
+        train_epoch_num = 100
 
         # 2. main func
         main(main_for_loop_num, start_from_train_or_collection,
@@ -168,9 +176,10 @@ if __name__ == "__main__":
 
 
     # 4. Sleep computer
-    # try:
-    #     time.sleep(30)
-    #     os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
-    #     # os.system("shutdown /s /t 0")
-    # except Exception as e:
-    #     print(utils.HighLightRedMsg(f"An error occurred: {e}"))
+    try:
+        print(utils.HighLightRedMsg('训练结束，准备休眠/关机 !'))
+        time.sleep(60)
+        os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+        # os.system("shutdown /s /t 0")
+    except Exception as e:
+        print(utils.HighLightRedMsg(f"An error occurred: {e}"))

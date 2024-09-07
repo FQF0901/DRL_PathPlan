@@ -90,7 +90,7 @@ def Convert2DataSet(sample_size=100000):
                         print(utils.HighLightRedMsg(f"Convert2DataSet err: {e}"))
 
     print('===== Convert2DataSet done ! =====')
-
+    time.sleep(15)
 
 # -------------------------- Test ---------------------------
 if __name__ == '__main__':

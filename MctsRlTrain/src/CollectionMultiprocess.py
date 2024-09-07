@@ -98,7 +98,7 @@ def update_data_buffer(chunk_results):
                     if write_cnt == 3:
                         print(utils.HighLightRedMsg(f"尝试3次加载缓冲区均出错: {e}"))
                         break
-                    time.sleep(30)
+                    time.sleep(15)
         
         DataBuffer.extend(chunk_results)
         data_dict = {'DataBuffer': DataBuffer}
@@ -170,6 +170,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
     torch.cuda.empty_cache()
 
     print('===== Mcts info generated done ! =====')
+    time.sleep(15)
 
 
 # -------------------------- Test ---------------------------
