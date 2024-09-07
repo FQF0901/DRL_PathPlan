@@ -118,14 +118,15 @@ class TrainPipeline:
                 running_loss += loss.item()
 
                 # 4. Save net
-                if (epoch * len(self.data_buffer) + batch_idx + 1) % self.savenet_freq == 0:
+                if ((epoch * len(self.data_buffer) + batch_idx + 1) % self.savenet_freq == 0) \
+                    or ((epoch * len(self.data_buffer) + batch_idx + 1) == self.epoch_num * len(self.data_buffer)):
                     # print("Save Net, : epoch_num {}".format(epoch))
                     mdl_name = os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net_{}.pkl'.format(epoch * len(self.data_buffer) + batch_idx))
                     self.policy_value_net.save_model(mdl_name)
                 
                 # 5. Tensorboard
                 writer.add_scalar('Loss/train', loss.item(), epoch * len(self.data_buffer) + batch_idx)
-                current_lr = self.policy_value_net.optimizer.param_groups[0]['lr']  # 获取当前学习率
+                current_lr = self.policy_value_net.optimizer.param_groups[0]['lr']
                 writer.add_scalar('Learning Rate', current_lr, epoch * len(self.data_buffer) + batch_idx)
 
                 # 6. Progress Bar
@@ -148,8 +149,8 @@ class TrainPipeline:
         print(utils.HighLightGreenMsg('运行 train.run()'))
         try:
             scheduler = torch.optim.lr_scheduler.ExponentialLR(self.policy_value_net.optimizer, gamma=0.999)
-            writer = SummaryWriter(log_dir=DrlUtil.generate_new_train_dir(os.path.join(os.getcwd(), 'logs'), 
-                                                                          DrlUtil.find_existing_train_dirs(os.path.join(os.getcwd(), 'logs'))))
+            writer = SummaryWriter(log_dir=DrlUtil.generate_new_train_dir(os.path.join(Config.StorePath.log_path, 'train_logs'), 
+                                                                          DrlUtil.find_existing_train_dirs(os.path.join(Config.StorePath.log_path, 'train_logs'))))
 
             # 1. Create a dataset
             transform = transforms.Compose([transforms.Resize((224, 384)),
@@ -198,4 +199,4 @@ if __name__ == '__main__':
     training_pipeline.run(csv_file=csv_path, 
                           img_folder=img_path)
 
-    # tensorboard --logdir=logs/train
+    # tensorboard --logdir=train_logs/train

@@ -8,6 +8,7 @@
 import os
 import re
 import sys
+import glob
 import shutil
 import time
 from datetime import datetime
@@ -37,10 +38,15 @@ def clear_path(path):
                 print(utils.HighLightRedMsg(f"Error while deleting {file_path}: {e}"))
 
 def store_2_pkl_files(only_tree_info_pkl=False):
-    # 1. train_dataset_path
+    output_path = os.path.join(os.getcwd(), 'MctsRlTrain', 'output')
+
+    # 1. delete old pkl
+    for pkl_file in glob.glob(os.path.join(output_path, '*.pkl')):
+        os.remove(pkl_file)
+
+    # 2. train_dataset_path
     if not only_tree_info_pkl:
         output_path = os.path.join(os.getcwd(), 'MctsRlTrain', 'output')
-        
         files = [f for f in os.listdir(Config.StorePath.train_dataset_path) if f.startswith('policy_value_net_') and f.endswith('.pkl')]
         
         max_x = -1
@@ -63,7 +69,7 @@ def store_2_pkl_files(only_tree_info_pkl=False):
         else:
             print(f"没有找到符合条件的文件")
 
-    # 2. tree_info_path
+    # 3. tree_info_path
     scene_in_tree_folder = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
     
     if os.path.isfile(scene_in_tree_folder):
@@ -78,7 +84,8 @@ def main(main_for_loop_num, start_from_train_or_collection,
     # 1. Clean folder
     clear_path(Config.StorePath.train_dataset_path)
     clear_path(Config.StorePath.tree_info_path)
-    clear_path(os.path.join(os.getcwd(), 'logs'))
+    clear_path(os.path.join(Config.StorePath.log_path, 'train_logs'))
+    # clear_path(os.path.join(Config.StorePath.tree_info_path, 'tree_logs'))
 
     # 2. Init net.pkl
     policy_value_net_pkl = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'policy_value_net.pkl')
@@ -114,9 +121,9 @@ def main(main_for_loop_num, start_from_train_or_collection,
         clear_path(Config.StorePath.tree_info_path)
 
     # 3. Start the formal loop (based on the initialized or old net parameter)
-    for _ in range(main_for_loop_num):
+    for loop_cnt in range(main_for_loop_num):
         start_time = time.time()
-        print(f"第{main_for_loop_num}轮开始，当前时间: {datetime.now()}")
+        print(f"第{loop_cnt}轮开始，当前时间: {datetime.now()}")
 
         # 3.0 Prepare pkl file
         shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
@@ -143,7 +150,7 @@ def main(main_for_loop_num, start_from_train_or_collection,
 
         end_time = time.time()
         elapsed_time = end_time - start_time
-        print(f"第{main_for_loop_num}轮结束，当前时间: {datetime.now()}，本轮耗时：{elapsed_time//3600}时{(elapsed_time % 3600) // 60}分{elapsed_time % 60}秒")
+        print(f"第{loop_cnt}轮结束，当前时间: {datetime.now()}，本轮耗时：{elapsed_time//3600}时{(elapsed_time % 3600) // 60}分{elapsed_time % 60}秒")
 
 # ==========================================================
 # ======================== main fun ========================

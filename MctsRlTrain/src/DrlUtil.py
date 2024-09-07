@@ -373,7 +373,7 @@ def plot_EnvMcts_info(scene_pkl_file, row_idx, PathFnd):
     if PathFnd:
         filename = f"{Config.StorePath.tree_info_path}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
     else:
-        filename = f"{os.path.join(os.getcwd(), 'MctsRlTrain', 'output')}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
+        filename = f"{os.path.join(Config.StorePath.log_path, 'tree_logs')}/{os.path.basename(scene_pkl_file).rsplit('.', 1)[0]}_rowidx{row_idx}_PcptGeo_Node.png"
     fig.savefig(filename)
     plt.close(fig)
 

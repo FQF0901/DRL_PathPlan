@@ -46,7 +46,7 @@ class StoreFolderPath:
         self.scene_slice_data_path =    r'D:\DataSet\SceneSliceData'
         self.tree_info_path =           r'D:\DataSet\TreeinfoData'
         self.train_dataset_path =       r'D:\DataSet\TrainDataSet'
-        self.net_path =                 r'D:\DataSet\TrainDataSet'
+        self.log_path =                 r'D:\DataSet\log'
 
 
 VehPara = VehParams()
