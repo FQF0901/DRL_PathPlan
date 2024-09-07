@@ -94,4 +94,5 @@ def Convert2DataSet(sample_size=100000):
 
 # -------------------------- Test ---------------------------
 if __name__ == '__main__':
+    Config.MultiProcess.Convert2DataSet_multi_precess_num = 1
     Convert2DataSet(sample_size=100000)

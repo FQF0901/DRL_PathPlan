@@ -422,6 +422,12 @@ def flush_cache():
     label_cache = []
 
 def GenImgLabel(scene, Img_Label_path):
+    matplotlib.use('Agg')
+    plt.ioff()
+    plt.clf()
+    plt.cla()
+    plt.close('all')
+
     Img = scene[0]
     Label = scene[1]  
 

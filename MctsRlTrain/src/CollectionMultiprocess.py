@@ -63,14 +63,11 @@ def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file)
 
 def batch_exec(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w):
     chunk_results = collections.deque(maxlen=100000)
-    batch_size = 2
 
     for idx, row_idx in enumerate(chunk):
         chunk_results.extend(process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file))
-
-        if (idx + 1) % batch_size == 0 or (idx + 1) == len(chunk):
-            update_data_buffer(chunk_results)
-            chunk_results.clear()
+        update_data_buffer(chunk_results)
+        chunk_results.clear()
 
         if (idx + 1) % cycle_interval == 0:
             w.send(cycle_interval)
@@ -132,7 +129,7 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
             scene_data = pickle.load(scene_pkl_data)
             row_num = scene_data.shape[0]
             sampled_scene_idx_list = random.sample(range(row_num), min(scene_num, row_num))
-            # sampled_scene_idx_list = [3161, 3368, 4186, 1879, 2126, 3672]
+            sampled_scene_idx_list = [966, 950, 2039, 3211]
 
     # ---------------------- Multi execute ----------------------
             num_chunks = Config.MultiProcess.collection_multi_process_num
