@@ -56,43 +56,48 @@ def Convert2DataSet(sample_size=100000):
     os.makedirs(img_path, exist_ok=True)
 
     # 2. Gen dataset
-    TreeInfoPkl = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
+    tree_info_path = Config.StorePath.tree_info_path
+    for file in os.listdir(tree_info_path):
+        if 'Mcts_Train_Data_buffer' in file and file.endswith('.pkl'):
+            TreeInfoPkl = os.path.join(tree_info_path, file)
 
-    with open(TreeInfoPkl, 'rb') as data_dict:
-        data_file = pickle.load(data_dict)  # This is a dictionary
-        scene_data = data_file['DataBuffer']
+            print(f"Processing file: {TreeInfoPkl}")
 
-        sampled_indices = random.sample(scene_data, min(len(scene_data), sample_size))
-        num_chunks = Config.MultiProcess.Convert2DataSet_multi_precess_num
-        chunks = [sampled_indices[i::num_chunks] for i in range(num_chunks)]
-        
-        with tqdm(total=int(len(sampled_indices)), dynamic_ncols=True, desc='Convert2DataSet Progress Bar') as pbar:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=num_chunks) as executor:
-                
-                r,w = multiprocessing.Pipe(duplex=False)
-                
-                futures = [executor.submit(process_chunk, chunk, w) for chunk in chunks]
-                
-                cnt=0
-                while cnt<int(len(sampled_indices)):
-                    try:
-                        msg=r.recv()
-                        cnt+=msg
-                        pbar.update(msg)
-                    except EOFError:
-                        break
+            with open(TreeInfoPkl, 'rb') as data_dict:
+                data_file = pickle.load(data_dict)  # This is a dictionary
+                scene_data = data_file['DataBuffer']
 
-                # Wait for all futures to complete
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        future.result()  # Raise exception if the task failed
-                    except Exception as e:
-                        print(utils.HighLightRedMsg(f"Convert2DataSet err: {e}"))
+                sampled_indices = random.sample(scene_data, min(len(scene_data), sample_size))
+                num_chunks = Config.MultiProcess.Convert2DataSet_multi_precess_num
+                chunks = [sampled_indices[i::num_chunks] for i in range(num_chunks)]
+
+                with tqdm(total=int(len(sampled_indices)), dynamic_ncols=True, desc='Convert2DataSet Progress Bar') as pbar:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=num_chunks) as executor:
+                        
+                        r, w = multiprocessing.Pipe(duplex=False)
+                        
+                        futures = [executor.submit(process_chunk, chunk, w) for chunk in chunks]
+                        
+                        cnt = 0
+                        while cnt < int(len(sampled_indices)):
+                            try:
+                                msg = r.recv()
+                                cnt += msg
+                                pbar.update(msg)
+                            except EOFError:
+                                break
+
+                    # Wait for all futures to complete
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            future.result()  # Raise exception if the task failed
+                        except Exception as e:
+                            print(utils.HighLightRedMsg(f"Convert2DataSet err: {e}"))
 
     print('===== Convert2DataSet done ! =====')
     time.sleep(15)
 
 # -------------------------- Test ---------------------------
 if __name__ == '__main__':
-    Config.MultiProcess.Convert2DataSet_multi_precess_num = 1
-    Convert2DataSet(sample_size=100000)
+    Config.MultiProcess.Convert2DataSet_multi_precess_num = 6
+    Convert2DataSet(sample_size=150000)
