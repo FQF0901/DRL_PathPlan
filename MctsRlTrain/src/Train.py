@@ -62,10 +62,10 @@ class TrainPipeline:
     def __init__(self, init_model=None, batch_size=32, epoch_num=10) -> None:
         # 1. init paras
         self.batch_size = batch_size
-        self.data_buffer = collections.deque(maxlen = 10000)
+        self.data_buffer = collections.deque(maxlen = 50000)
         self.epoch_num = epoch_num
         self.mse_targ = 10
-        self.savenet_freq = 1000
+        self.savenet_freq = 4000
 
         self.policy_value_net = PolicyValueNet(model_file=init_model)
 
@@ -130,7 +130,7 @@ class TrainPipeline:
                 writer.add_scalar('Learning Rate', current_lr, epoch * len(self.data_buffer) + batch_idx)
 
                 # 6. Progress Bar
-                cycle_interval = 10
+                cycle_interval = 500
                 if batch_idx % cycle_interval == 0:
                         pbar.set_postfix({
                             'episode': '%d' % (epoch)
@@ -195,7 +195,7 @@ if __name__ == '__main__':
 
     training_pipeline = TrainPipeline(init_model=net_model, 
                                           batch_size=64,
-                                          epoch_num=10)       
+                                          epoch_num=100)       
     training_pipeline.run(csv_file=csv_path, 
                           img_folder=img_path)
 
