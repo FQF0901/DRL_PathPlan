@@ -77,7 +77,7 @@ def store_2_pkl_files(only_tree_info_pkl=False):
             dst_path = os.path.join(output_path, file)
             shutil.copy2(src_path, dst_path)
 
-def main(main_for_loop_num, start_from_train_or_collection,
+def main(main_for_loop_num, 
              collection_scene_num, collection_max_step, 
              train_batch_size, train_epoch_num):
     
@@ -98,28 +98,6 @@ def main(main_for_loop_num, start_from_train_or_collection,
     else:
         print(utils.HighLightGreenMsg('加载上次最终policy_value_net.pkl'))
 
-    # 2. Init tree_info.pkl
-    if start_from_train_or_collection == 1:
-        # 2.1 Prepare pkl file
-        tree_info_pkl = os.path.join(os.path.join(os.getcwd(), 'MctsRlTrain', 'output'), 'Mcts_Train_Data_buffer.pkl')
-        shutil.copy(tree_info_pkl, Config.StorePath.tree_info_path)
-
-        # 2.2 Gen dataset
-        Treeinfo2Dataset.Convert2DataSet(sample_size=100000)
-        
-        # 2.3 Train
-        shutil.copy(policy_value_net_pkl, Config.StorePath.train_dataset_path)
-        training_pipeline = TrainPipeline(init_model=os.path.join(Config.StorePath.train_dataset_path, 'policy_value_net.pkl'), 
-                                        batch_size=train_batch_size,
-                                        epoch_num=train_epoch_num)       
-        training_pipeline.run(csv_file=os.path.join(Config.StorePath.train_dataset_path, 'label.csv'), 
-                            img_folder=os.path.join(Config.StorePath.train_dataset_path, 'images'))
-        
-        # 2.4 Store files and reset folders
-        store_2_pkl_files(only_tree_info_pkl=True)
-        clear_path(Config.StorePath.train_dataset_path)
-        clear_path(Config.StorePath.tree_info_path)
-
     # 3. Start the formal loop (based on the initialized or old net parameter)
     for loop_cnt in range(main_for_loop_num):
         start_time = time.time()
@@ -131,7 +109,7 @@ def main(main_for_loop_num, start_from_train_or_collection,
 
         # 3.1 Gen raw dataset
         collection(scene_num=collection_scene_num, 
-                   max_step=collection_max_step, deque_len=300000)
+                   max_step=collection_max_step, deque_len=150000)
 
         # 3.2 Gen dataset
         Treeinfo2Dataset.Convert2DataSet(sample_size=100000)
@@ -163,7 +141,6 @@ if __name__ == "__main__":
         Config.MultiProcess.Convert2DataSet_multi_precess_num = 6
         
         main_for_loop_num = 5
-        start_from_train_or_collection = 0  # 1: start from train, others: start from collection
 
         collection_scene_num = 240
         collection_max_step = 8000
@@ -172,7 +149,7 @@ if __name__ == "__main__":
         train_epoch_num = 100
 
         # 2. main func
-        main(main_for_loop_num, start_from_train_or_collection,
+        main(main_for_loop_num, 
              collection_scene_num, collection_max_step, 
              train_batch_size, train_epoch_num)
 
