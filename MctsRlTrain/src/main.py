@@ -70,12 +70,12 @@ def store_2_pkl_files(only_tree_info_pkl=False):
             print(f"没有找到符合条件的文件")
 
     # 3. tree_info_path
-    scene_in_tree_folder = os.path.join(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl')
-    
-    if os.path.isfile(scene_in_tree_folder):
-        shutil.copy2(scene_in_tree_folder, os.path.join(os.getcwd(), 'MctsRlTrain', 'output'))
-    else:
-        print(f"文件 {scene_in_tree_folder} 不存在")
+    tree_info_path = Config.StorePath.tree_info_path
+    for file in os.listdir(tree_info_path):
+        if 'Mcts_Train_Data_buffer' in file and file.endswith('.pkl'):
+            src_path = os.path.join(tree_info_path, file)
+            dst_path = os.path.join(output_path, file)
+            shutil.copy2(src_path, dst_path)
 
 def main(main_for_loop_num, start_from_train_or_collection,
              collection_scene_num, collection_max_step, 

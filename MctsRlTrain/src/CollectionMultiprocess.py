@@ -12,6 +12,7 @@ import gc
 import torch
 import pickle
 import datetime
+import shutil
 import random
 from tqdm import tqdm
 import time
@@ -62,11 +63,11 @@ def process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file)
     return play_data_list
 
 def batch_exec(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w):
-    chunk_results = collections.deque(maxlen=100000)
+    chunk_results = collections.deque(maxlen=10000)
 
     for idx, row_idx in enumerate(chunk):
         chunk_results.extend(process_row(row_idx, scene_data, policy_value_net, max_step, scene_pkl_file))
-        update_data_buffer(chunk_results)
+        update_data_buffer(Config.StorePath.tree_info_path, 'Mcts_Train_Data_buffer.pkl', chunk_results, max_size_mb=20)
         chunk_results.clear()
 
         if (idx + 1) % cycle_interval == 0:
@@ -76,24 +77,39 @@ def batch_exec(chunk, scene_data, policy_value_net, max_step, scene_pkl_file, w)
 
     return True
 
-def update_data_buffer(chunk_results):
-    Mcts_Data_filename = f"{Config.StorePath.tree_info_path}/Mcts_Train_Data_buffer.pkl"
+def update_data_buffer(store_path, file_basename, chunk_results, max_size_mb=20):
+    Mcts_Data_filename = os.path.join(store_path, file_basename)
+    max_size_bytes = max(max_size_mb, 10) * 1024 * 1024 # To avoid too small size
+
+    def get_next_filename(path, basename):
+        index = 1
+        while True:
+            new_name = f"{basename}_{index}.pkl"
+            if not os.path.exists(os.path.join(path, new_name)):
+                return new_name
+            index += 1
 
     with tree_info_pkl_lock:
-        DataBuffer = collections.deque(maxlen=100000)
+        DataBuffer = collections.deque(maxlen=300000)
 
         if os.path.exists(Mcts_Data_filename):
+            file_size = os.path.getsize(Mcts_Data_filename)
+            if file_size > max_size_bytes:
+                new_filename = get_next_filename(store_path, file_basename.split('.pkl')[0])
+                shutil.copy(Mcts_Data_filename, os.path.join(store_path, new_filename))
+                os.remove(Mcts_Data_filename)
+
             write_cnt = 0
-            while write_cnt < 3:
+            while write_cnt < 5:
                 try:
-                    write_cnt = write_cnt + 1
+                    write_cnt += 1
                     with open(Mcts_Data_filename, 'rb') as data_dict:
                         data_file = pickle.load(data_dict)
                         DataBuffer.extend(data_file.get('DataBuffer', []))
                         break
                 except Exception as e:
-                    if write_cnt == 3:
-                        print(utils.HighLightRedMsg(f"尝试3次加载缓冲区均出错: {e}"))
+                    if write_cnt >= 5:
+                        print(utils.HighLightRedMsg(f"尝试5次加载缓冲区均出错: {e}"))
                         break
                     time.sleep(15)
         
@@ -173,5 +189,13 @@ def collection(scene_num = 100, max_step = 10000, deque_len = 300000):
 
 if __name__ == "__main__":
 
-    Config.MultiProcess.collection_multi_process_num = 6
-    collection(scene_num = 20, max_step = 8000, deque_len = 100000)
+    Config.MultiProcess.collection_multi_process_num = 8
+    collection(scene_num = 1000, max_step = 8000, deque_len = 100000)
+
+    try:
+        print(utils.HighLightRedMsg('collection结束, 准备休眠/关机 !'))
+        time.sleep(60)
+        os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+        # os.system("shutdown /s /t 0")
+    except Exception as e:
+        print(utils.HighLightRedMsg(f"An error occurred: {e}"))
