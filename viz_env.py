@@ -104,7 +104,32 @@ def plot_fsd_group(ax, polys, types, confs, label_prefix):
                 linestyle=ls, label=lbl)
 
 
-def plot_frame(tpd: TimePointData, veh, title_str=""):
+def draw_path(ax, path_result):
+    """Draw planned trajectory on the axis as a single highlighted path.
+    Direction arrows indicate travel direction (from difference between consecutive poses).
+    Start (blue circle) and end (purple square) are marked.
+    """
+    if not path_result or not path_result.valid or len(path_result.poses) < 2:
+        return
+    poses = path_result.poses
+
+    ax.plot(poses[:, 0], poses[:, 1], '-', color='#FF6F00', lw=3.0,
+            alpha=0.9, label='Planned path')
+
+    # Arrows along travel direction (from pose differences, not heading)
+    step = max(1, len(poses) // 10)
+    for i in range(0, len(poses) - 1, step):
+        p0, p1 = poses[i], poses[min(i+1, len(poses)-1)]
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        ax.arrow(p0[0], p0[1], dx, dy, head_width=0.12, head_length=0.15,
+                 fc='#FF6F00', ec='#FF6F00', alpha=0.8)
+
+    ax.plot(poses[0, 0], poses[0, 1], 'o', color='blue', ms=6, label='Path start')
+    ax.plot(poses[-1, 0], poses[-1, 1], 's', color='purple', ms=6, label='Path end')
+
+
+def plot_frame(tpd: TimePointData, veh, title_str="", path_result=None):
     """绘制某一时刻的完整俯视图."""
     fig, ax = plt.subplots(figsize=(8, 8))
 
@@ -146,6 +171,7 @@ def plot_frame(tpd: TimePointData, veh, title_str=""):
     ax.set_ylabel('Y / m')
     ax.set_aspect('equal')
     ax.grid(True)
+    draw_path(ax, path_result)
     ax.legend(loc='upper right', fontsize=7)
     ax.set_title(title_str)
     plt.tight_layout()

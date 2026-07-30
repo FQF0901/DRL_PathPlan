@@ -19,8 +19,16 @@ import logging
 import numpy as np
 from asammdf import MDF
 
-# Suppress asammdf verbose duplicate-channel errors
-logging.getLogger('asammdf').setLevel(logging.WARNING)
+# Suppress asammdf verbose duplicate-channel errors and missing-attachment warnings
+asammdf_log = logging.getLogger('asammdf')
+asammdf_log.setLevel(logging.WARNING)
+class AsammdfFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        if 'not found' in msg or 'Attachment' in msg or 'Exception during attachment' in msg:
+            return False
+        return True
+asammdf_log.addFilter(AsammdfFilter())
 
 # ============================================================
 # GLOBALS
@@ -192,16 +200,36 @@ def nearest_interp_2d(ts, data_2d, t_grid):
 
 
 def build_time_grid(mdf, step=TIME_STEP):
-    """根据 MF4 中所有通道的时间范围构建等步长时间网格."""
+    """根据 MF4 中关键信号的时间范围构建等步长时间网格."""
+    # Probe known high-frequency signals for time range
+    known = [
+        'EPE_Global_Estimated_X_m_o_obv',
+        'EPE_Global_Estimated_Y_m_o_obv',
+        'HAS_Event_Request_Trajectory_Trigger',
+        'SIFOR1_Valid_Fusion_Object_Set',
+    ]
     tmn, tmx = [], []
-    for ch in list(mdf.channels_db.keys())[:200]:
+    for pat in known:
+        ch, grp, cidx = find_channel(mdf, pat)
+        if ch is None:
+            continue
         try:
-            sig = mdf.get(ch)
+            sig = mdf.get(ch, group=grp, index=cidx)
             if sig is not None and len(sig.timestamps) > 1:
                 tmn.append(float(sig.timestamps[0]))
                 tmx.append(float(sig.timestamps[-1]))
         except Exception:
             pass
+    # Fallback: scan all channels if known signals not found
+    if not tmn:
+        for ch in list(mdf.channels_db.keys()):
+            try:
+                sig = mdf.get(ch)
+                if sig is not None and len(sig.timestamps) > 1:
+                    tmn.append(float(sig.timestamps[0]))
+                    tmx.append(float(sig.timestamps[-1]))
+            except Exception:
+                pass
     if not tmn:
         return np.array([])
     return np.arange(min(tmn), max(tmx) + step, step)
@@ -407,6 +435,58 @@ class MdfData:
 # 5. TIME POINT EXTRACTOR
 # ============================================================
 
+# ============================================================
+# 6. SLOT TYPE LOOKUP
+# ============================================================
+
+def get_selected_slot_type(mdf, t_query):
+    """
+    读取目标库位的类型.
+
+    方法: 先尝试 PFSM*Driver_Selected_Parking_Space_ID → PS_SlotType array lookup,
+          回退到 SA_Ego_PS_SlotType_NU.
+    
+    返回: (slot_type_int, source_string) 或 (None, 'no_signal').
+    """
+    import numpy as np
+
+    # Method 1: PFSM ID → slot type array lookup
+    try:
+        id_ch, id_g, id_c = find_channel(mdf, 'Driver_Selected_Parking_Space_ID')
+        if id_ch is not None and id_g is not None and id_c is not None:
+            id_ts, id_v = read_simple(mdf, id_ch, id_g, id_c)
+            if id_ts is not None and len(id_ts) > 0:
+                id_idx = int(np.argmin(np.abs(id_ts - t_query)))
+                sel_id = int(id_v[id_idx])
+                if sel_id > 0:  # valid ID
+                    # Look up TP_100ms PS_SlotType._sel_id_
+                    st_ch_name = f'TP_100ms_ZF_Fusion_Parking_Slot_Set_i_obv.PS_SlotType._{sel_id}_'
+                    for ch_n in mdf.channels_db:
+                        if st_ch_name == ch_n:
+                            st_ch, st_g, st_c = ch_n, mdf.channels_db[ch_n][0][0], mdf.channels_db[ch_n][0][1]
+                            st_ts, st_v = read_simple(mdf, st_ch, st_g, st_c)
+                            if st_ts is not None and len(st_ts) > 0:
+                                st_idx = int(np.argmin(np.abs(st_ts - t_query)))
+                                st_val = int(st_v[st_idx])
+                                if st_val > 0:  # only return valid type
+                                    return (st_val, 'pfsm_lookup')
+    except Exception:
+        pass
+
+    # Method 2: Fallback to SA_Ego_PS_SlotType_NU
+    try:
+        st_ch, st_g, st_c = find_channel(mdf, 'SA_Ego_PS_SlotType_NU')
+        if st_ch is not None and st_g is not None and st_c is not None:
+            st_ts, st_v = read_simple(mdf, st_ch, st_g, st_c)
+            if st_ts is not None and len(st_ts) > 0:
+                st_idx = int(np.argmin(np.abs(st_ts - t_query)))
+                return (int(st_v[st_idx]), 'ego_slottype')
+    except Exception:
+        pass
+
+    return (None, 'no_signal')
+
+
 class TimePointData:
     """从 MdfData 中提取某一时刻的快照数据."""
 
@@ -461,9 +541,32 @@ class TimePointData:
         self.fsd_confs = [int(md.fsd_conf_data[idx, fi]) if md.fsd_conf_data is not None else 0
                          for fi in range(len(self.sifor_fsd_polys))]
 
-        # -- TargetPose --
+        # -- TargetPose (transform from global to ego-vehicle frame) --
         def _tpv(name):
             a = getattr(md, name, None)
             return float(a[idx]) if a is not None and idx < len(a) else np.nan
-        self.tp = (_tpv('tp_x'), _tpv('tp_y'), _tpv('tp_yaw'))
-        self.sp = (_tpv('sp_x'), _tpv('sp_y'), _tpv('sp_yaw'))
+        tp_gx, tp_gy, tp_gyaw = _tpv('tp_x'), _tpv('tp_y'), _tpv('tp_yaw')
+        if not any(np.isnan(v) for v in (tp_gx, tp_gy, tp_gyaw, self.ego_x, self.ego_y, self.ego_yaw)):
+            dx = tp_gx - self.ego_x
+            dy = tp_gy - self.ego_y
+            eyaw = self.ego_yaw
+            self.tp = (
+                dx * np.cos(eyaw) + dy * np.sin(eyaw),
+                -dx * np.sin(eyaw) + dy * np.cos(eyaw),
+                float(np.arctan2(np.sin(tp_gyaw - eyaw), np.cos(tp_gyaw - eyaw)))
+            )
+        else:
+            # Any NaN → return all NaNs so planner's early-return catches it
+            self.tp = (np.nan, np.nan, np.nan)
+        sp_gx, sp_gy, sp_gyaw = _tpv('sp_x'), _tpv('sp_y'), _tpv('sp_yaw')
+        if not any(np.isnan(v) for v in (sp_gx, sp_gy, sp_gyaw, self.ego_x, self.ego_y, self.ego_yaw)):
+            dx = sp_gx - self.ego_x
+            dy = sp_gy - self.ego_y
+            eyaw = self.ego_yaw
+            self.sp = (
+                dx * np.cos(eyaw) + dy * np.sin(eyaw),
+                -dx * np.sin(eyaw) + dy * np.cos(eyaw),
+                float(np.arctan2(np.sin(sp_gyaw - eyaw), np.cos(sp_gyaw - eyaw)))
+            )
+        else:
+            self.sp = (np.nan, np.nan, np.nan)
