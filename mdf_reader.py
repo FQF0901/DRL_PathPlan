@@ -236,28 +236,6 @@ def build_time_grid(mdf, step=TIME_STEP):
 
 
 # ============================================================
-# 3. COORDINATE TRANSFORM
-# ============================================================
-
-def h_transform(pts, ego_x, ego_y, ego_yaw):
-    """全局 -> 自车 坐标变换 (右手系, X前Y左)."""
-    c, s = np.cos(-ego_yaw), np.sin(-ego_yaw)
-    x, y = pts[..., 0], pts[..., 1]
-    tx = c * x - s * y + (-ego_x * c + ego_y * s)
-    ty = s * x + c * y + (-ego_x * s - ego_y * c)
-    r = np.zeros_like(pts)
-    r[..., 0] = tx
-    r[..., 1] = ty
-    return r
-
-
-def h_transform_single(px, py, ego_x, ego_y, ego_yaw):
-    """单点变换."""
-    t = h_transform(np.array([[px, py]]), ego_x, ego_y, ego_yaw)
-    return float(t[0, 0]), float(t[0, 1])
-
-
-# ============================================================
 # 4. MF4 DATA READER
 # ============================================================
 
@@ -541,32 +519,26 @@ class TimePointData:
         self.fsd_confs = [int(md.fsd_conf_data[idx, fi]) if md.fsd_conf_data is not None else 0
                          for fi in range(len(self.sifor_fsd_polys))]
 
-        # -- TargetPose (transform from global to ego-vehicle frame) --
+        # -- TargetPose / StartPose (raw signals are ALREADY ego-vehicle frame) --
+        # Confirmed (2026-07-31): HAS_Selected_Target_Position_* / HAS_Selected_Start_*
+        # are published in the ego-relative frame; NO global->vehicle transform needed.
         def _tpv(name):
             a = getattr(md, name, None)
             return float(a[idx]) if a is not None and idx < len(a) else np.nan
-        tp_gx, tp_gy, tp_gyaw = _tpv('tp_x'), _tpv('tp_y'), _tpv('tp_yaw')
-        if not any(np.isnan(v) for v in (tp_gx, tp_gy, tp_gyaw, self.ego_x, self.ego_y, self.ego_yaw)):
-            dx = tp_gx - self.ego_x
-            dy = tp_gy - self.ego_y
-            eyaw = self.ego_yaw
-            self.tp = (
-                dx * np.cos(eyaw) + dy * np.sin(eyaw),
-                -dx * np.sin(eyaw) + dy * np.cos(eyaw),
-                float(np.arctan2(np.sin(tp_gyaw - eyaw), np.cos(tp_gyaw - eyaw)))
-            )
-        else:
-            # Any NaN → return all NaNs so planner's early-return catches it
-            self.tp = (np.nan, np.nan, np.nan)
-        sp_gx, sp_gy, sp_gyaw = _tpv('sp_x'), _tpv('sp_y'), _tpv('sp_yaw')
-        if not any(np.isnan(v) for v in (sp_gx, sp_gy, sp_gyaw, self.ego_x, self.ego_y, self.ego_yaw)):
-            dx = sp_gx - self.ego_x
-            dy = sp_gy - self.ego_y
-            eyaw = self.ego_yaw
-            self.sp = (
-                dx * np.cos(eyaw) + dy * np.sin(eyaw),
-                -dx * np.sin(eyaw) + dy * np.cos(eyaw),
-                float(np.arctan2(np.sin(sp_gyaw - eyaw), np.cos(sp_gyaw - eyaw)))
-            )
-        else:
-            self.sp = (np.nan, np.nan, np.nan)
+
+        def _tp_tuple(gx, gy, gyaw):
+            """Raw ego-relative pose -> (x, y, yaw).
+
+            NaN in any component -> all-NaN tuple (planner early-return).
+            |x|<1e-6 AND |y|<1e-6 (position cleared) -> all-NaN tuple, per MATLAB
+            convention (x==0 && y==0 => no target). Non-zero position with yaw==0
+            is a legitimate target and is kept.
+            """
+            if any(np.isnan(v) for v in (gx, gy, gyaw)):
+                return (np.nan, np.nan, np.nan)
+            if abs(gx) < 1e-6 and abs(gy) < 1e-6:
+                return (np.nan, np.nan, np.nan)
+            return (gx, gy, gyaw)
+
+        self.tp = _tp_tuple(_tpv('tp_x'), _tpv('tp_y'), _tpv('tp_yaw'))
+        self.sp = _tp_tuple(_tpv('sp_x'), _tpv('sp_y'), _tpv('sp_yaw'))

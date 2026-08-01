@@ -2,3 +2,4 @@ __pycache__
 .slim/deepwork/
 *.png
 *.pdf
+.cache/

@@ -1,0 +1,1619 @@
+{
+  "n_files": 37,
+  "n_files_with_scenarios": 37,
+  "n_files_extraction_ok": 37,
+  "n_scenarios_total": 41,
+  "n_scenarios_valid": 40,
+  "n_excluded": 1,
+  "n_plan_ok": 39,
+  "n_plan_fail": 2,
+  "success_rate_pct": 95.1,
+  "success_rate_valid_pct": 97.5,
+  "n_quality_gate_rejected": 2,
+  "detour_ratio_max": 2.2,
+  "detour_ratio_mean": 1.29,
+  "strategy_distribution": {
+    "straight": 20,
+    "three_seg": 6,
+    "two_seg": 11,
+    "no_path": 2,
+    "already_at_target": 1,
+    "single_arc": 1
+  },
+  "files": [
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_055544#CANape_log_139.mf4",
+      "log_num": "139",
+      "extraction_ok": true,
+      "n_scenarios": 3,
+      "plan_ok": 3,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_055728#CANape_log_140.mf4",
+      "log_num": "140",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_060132#CANape_log_141.mf4",
+      "log_num": "141",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_060849#CANape_log_142.mf4",
+      "log_num": "142",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 0,
+      "plan_fail": 1,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_061105#CANape_log_143.mf4",
+      "log_num": "143",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_061309#CANape_log_144.mf4",
+      "log_num": "144",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_061525#CANape_log_145.mf4",
+      "log_num": "145",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_073159#CANape_log_021.mf4",
+      "log_num": "021",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_073946#CANape_log_021.mf4",
+      "log_num": "021",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_074306#CANape_log_022.mf4",
+      "log_num": "022",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_074548#CANape_log_023.mf4",
+      "log_num": "023",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_074847#CANape_log_024.mf4",
+      "log_num": "024",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_075603#CANape_log_025.mf4",
+      "log_num": "025",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_075827#CANape_log_026.mf4",
+      "log_num": "026",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080003#CANape_log_027.mf4",
+      "log_num": "027",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080229#CANape_log_028.mf4",
+      "log_num": "028",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080420#CANape_log_029.mf4",
+      "log_num": "029",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080524#CANape_log_030.mf4",
+      "log_num": "030",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_085620#CANape_log_051.mf4",
+      "log_num": "051",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_024946#CANape_log_036.mf4",
+      "log_num": "036",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025223#CANape_log_037.mf4",
+      "log_num": "037",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 0,
+      "plan_fail": 1,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025434#CANape_log_038.mf4",
+      "log_num": "038",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025647#CANape_log_039.mf4",
+      "log_num": "039",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025906#CANape_log_040.mf4",
+      "log_num": "040",
+      "extraction_ok": true,
+      "n_scenarios": 2,
+      "plan_ok": 2,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_030145#CANape_log_041.mf4",
+      "log_num": "041",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_030323#CANape_log_042.mf4",
+      "log_num": "042",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_030705#CANape_log_043.mf4",
+      "log_num": "043",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031024#CANape_log_044.mf4",
+      "log_num": "044",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031205#CANape_log_045.mf4",
+      "log_num": "045",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031439#CANape_log_046.mf4",
+      "log_num": "046",
+      "extraction_ok": true,
+      "n_scenarios": 2,
+      "plan_ok": 2,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031732#CANape_log_047.mf4",
+      "log_num": "047",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_035839#CANape_log_059.mf4",
+      "log_num": "059",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_075900#CANape_log_060.mf4",
+      "log_num": "060",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080117#CANape_log_061.mf4",
+      "log_num": "061",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080256#CANape_log_062.mf4",
+      "log_num": "062",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080416#CANape_log_063.mf4",
+      "log_num": "063",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080619#CANape_log_064.mf4",
+      "log_num": "064",
+      "extraction_ok": true,
+      "n_scenarios": 1,
+      "plan_ok": 1,
+      "plan_fail": 0,
+      "errors": []
+    }
+  ],
+  "triggers": [
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_055544#CANape_log_139.mf4",
+      "log_num": "139",
+      "time": 45.35632029999999,
+      "idx": 903,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 9,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.657922967518838,
+      "errors": [],
+      "ego": [
+        -1.1504603624343872,
+        -1.9585109949111938,
+        0.23046493530273438
+      ],
+      "target": [
+        -0.657810389995575,
+        -0.012170538306236267,
+        -0.3417280614376068
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_055544#CANape_log_139.mf4",
+      "log_num": "139",
+      "time": 51.00632029999999,
+      "idx": 1016,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 9,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.35563082951384656,
+      "errors": [],
+      "ego": [
+        -2.0921754837036133,
+        -2.0969955921173096,
+        0.058331966400146484
+      ],
+      "target": [
+        0.31954553723335266,
+        0.15608951449394226,
+        -0.16056008636951447
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_055544#CANape_log_139.mf4",
+      "log_num": "139",
+      "time": 63.356320299999986,
+      "idx": 1263,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 9,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.6604337396129609,
+      "errors": [],
+      "ego": [
+        -1.202506184577942,
+        -2.038748264312744,
+        -0.05752277374267578
+      ],
+      "target": [
+        -0.6576169729232788,
+        0.06093144789338112,
+        -0.022002654150128365
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_055728#CANape_log_140.mf4",
+      "log_num": "140",
+      "time": 23.052940700000008,
+      "idx": 457,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "three_seg",
+      "n_segments": 3,
+      "total_length": 5.845449878086407,
+      "errors": [],
+      "ego": [
+        4.779885768890381,
+        -0.2871703505516052,
+        0.518280029296875
+      ],
+      "target": [
+        -4.48895788192749,
+        0.04844091087579727,
+        -0.5195534825325012
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0738438164688322,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_060132#CANape_log_141.mf4",
+      "log_num": "141",
+      "time": 20.904088899999994,
+      "idx": 414,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 11.057449448039877,
+      "errors": [],
+      "ego": [
+        3.8005542755126953,
+        -0.027055533602833748,
+        0.5201301574707031
+      ],
+      "target": [
+        -5.023261547088623,
+        0.041756387799978256,
+        -0.5026178956031799
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.19905482203119007,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_060849#CANape_log_142.mf4",
+      "log_num": "142",
+      "time": 47.44585179999999,
+      "idx": 945,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": true,
+      "valid": false,
+      "strategy_label": "no_path",
+      "n_segments": 0,
+      "total_length": 0.0,
+      "errors": [],
+      "ego": [
+        0.33893969655036926,
+        -2.603137493133545,
+        0.3093538284301758
+      ],
+      "target": [
+        0.27137473225593567,
+        -0.15566514432430267,
+        -0.3628292977809906
+      ]
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_061105#CANape_log_143.mf4",
+      "log_num": "143",
+      "time": 50.49353929999999,
+      "idx": 1006,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "three_seg",
+      "n_segments": 3,
+      "total_length": 7.576529300729373,
+      "errors": [],
+      "ego": [
+        3.384990930557251,
+        -0.22306112945079803,
+        0.4705619812011719
+      ],
+      "target": [
+        -3.77479887008667,
+        -0.611687958240509,
+        -0.45845314860343933
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.13581752506754619,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_061309#CANape_log_144.mf4",
+      "log_num": "144",
+      "time": 35.552251299999995,
+      "idx": 707,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.6679696646215707,
+      "errors": [],
+      "ego": [
+        0.9996737241744995,
+        -2.4499893188476562,
+        0.15397214889526367
+      ],
+      "target": [
+        -0.6267971396446228,
+        0.2308870255947113,
+        -0.19509609043598175
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_149_R11A03APASpotCheck_2026_06_05_061525#CANape_log_145.mf4",
+      "log_num": "145",
+      "time": 28.059819600000008,
+      "idx": 557,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "three_seg",
+      "n_segments": 3,
+      "total_length": 6.601487963985381,
+      "errors": [],
+      "ego": [
+        4.348334312438965,
+        -0.2799038589000702,
+        0.5268006324768066
+      ],
+      "target": [
+        -4.619650363922119,
+        -0.16863127052783966,
+        -0.474042147397995
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.17399217506956788,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_073159#CANape_log_021.mf4",
+      "log_num": "021",
+      "time": 40.75866749999999,
+      "idx": 811,
+      "source": "trigger",
+      "slot_type": 2,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "already_at_target",
+      "n_segments": 0,
+      "total_length": 0.0,
+      "errors": [],
+      "ego": [
+        1.3803939819335938,
+        -2.8558225631713867,
+        0.09759044647216797
+      ],
+      "target": [
+        0.031100952997803688,
+        0.0030290016438812017,
+        -0.07626719772815704
+      ]
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_073946#CANape_log_021.mf4",
+      "log_num": "021",
+      "time": 26.311427899999995,
+      "idx": 522,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 7.653507426517276,
+      "errors": [],
+      "ego": [
+        4.998586177825928,
+        -0.6551439166069031,
+        0.5961484909057617
+      ],
+      "target": [
+        -5.274951457977295,
+        0.7091984748840332,
+        -0.5813755393028259
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.017376210078653642,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_074306#CANape_log_022.mf4",
+      "log_num": "022",
+      "time": 31.402215799999993,
+      "idx": 624,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 9.342544189350797,
+      "errors": [],
+      "ego": [
+        4.210362911224365,
+        -0.25732243061065674,
+        0.5286774635314941
+      ],
+      "target": [
+        -5.080074787139893,
+        0.155619814991951,
+        -0.5216271281242371
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.17750165758249814,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_074548#CANape_log_023.mf4",
+      "log_num": "023",
+      "time": 23.289948199999994,
+      "idx": 462,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 8.9993092597046,
+      "errors": [],
+      "ego": [
+        2.968137741088867,
+        -0.3883029520511627,
+        0.5287775993347168
+      ],
+      "target": [
+        -5.0325517654418945,
+        0.1920722872018814,
+        -0.5171484351158142
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.1773572779323498,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_074847#CANape_log_024.mf4",
+      "log_num": "024",
+      "time": 25.287803699999994,
+      "idx": 502,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 7.325828659850267,
+      "errors": [],
+      "ego": [
+        3.7035508155822754,
+        -0.10240992158651352,
+        0.5585455894470215
+      ],
+      "target": [
+        -5.127682685852051,
+        0.49520164728164673,
+        -0.5341848731040955
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.11999947929983623,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_075603#CANape_log_025.mf4",
+      "log_num": "025",
+      "time": 88.28852620000002,
+      "idx": 1762,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 8.297646099845196,
+      "errors": [],
+      "ego": [
+        4.961246013641357,
+        -0.35698023438453674,
+        0.5387425422668457
+      ],
+      "target": [
+        -5.318934440612793,
+        0.39561304450035095,
+        -0.5375269055366516
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.14263657775285488,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_075827#CANape_log_026.mf4",
+      "log_num": "026",
+      "time": 18.842504399999996,
+      "idx": 373,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 8.06883134661118,
+      "errors": [],
+      "ego": [
+        0.5271523594856262,
+        -0.2935790717601776,
+        0.5728936195373535
+      ],
+      "target": [
+        -4.903696537017822,
+        0.40685972571372986,
+        -0.5674989819526672
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.13384763670392896,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080003#CANape_log_027.mf4",
+      "log_num": "027",
+      "time": 23.044735299999996,
+      "idx": 457,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "three_seg",
+      "n_segments": 3,
+      "total_length": 7.275269551077729,
+      "errors": [],
+      "ego": [
+        1.9743496179580688,
+        -0.3068240284919739,
+        0.4082207679748535
+      ],
+      "target": [
+        -4.2610182762146,
+        -0.47769978642463684,
+        -0.4746539294719696
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 5.551115123125783e-17,
+      "max_residual_m": 0.1394391797812462,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080229#CANape_log_028.mf4",
+      "log_num": "028",
+      "time": 26.592208899999996,
+      "idx": 528,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "three_seg",
+      "n_segments": 3,
+      "total_length": 6.608596424732602,
+      "errors": [],
+      "ego": [
+        5.112868309020996,
+        -0.5187235474586487,
+        0.5764980316162109
+      ],
+      "target": [
+        -5.348001480102539,
+        0.4731022119522095,
+        -0.5523625016212463
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.08566662926111412,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080420#CANape_log_029.mf4",
+      "log_num": "029",
+      "time": 25.098092299999994,
+      "idx": 498,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 1.0362207658371303,
+      "errors": [],
+      "ego": [
+        -2.0282771587371826,
+        -2.8524351119995117,
+        0.2276449203491211
+      ],
+      "target": [
+        -1.030874490737915,
+        0.10512497276067734,
+        -0.24592025578022003
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_080524#CANape_log_030.mf4",
+      "log_num": "030",
+      "time": 54.539868699999985,
+      "idx": 1087,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 9,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.6153835077089888,
+      "errors": [],
+      "ego": [
+        0.6924718618392944,
+        -2.714338779449463,
+        0.05971479415893555
+      ],
+      "target": [
+        -0.6124979853630066,
+        -0.059523772448301315,
+        -0.037534311413764954
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1706_R12A02IntensiveTest-PEB_2026_07_26_085620#CANape_log_051.mf4",
+      "log_num": "051",
+      "time": 38.80257709999999,
+      "idx": 772,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.20254704989604938,
+      "errors": [],
+      "ego": [
+        0.3989957273006439,
+        -3.7062909603118896,
+        0.32563185691833496
+      ],
+      "target": [
+        -0.1795067936182022,
+        -0.09382227063179016,
+        -0.3230080306529999
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_024946#CANape_log_036.mf4",
+      "log_num": "036",
+      "time": 23.994162799999998,
+      "idx": 475,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 7.22822732107681,
+      "errors": [],
+      "ego": [
+        2.589714527130127,
+        -1.0998508930206299,
+        0.6484405994415283
+      ],
+      "target": [
+        -4.624459266662598,
+        0.8358027935028076,
+        -0.6743144392967224
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.09425387903774674,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025223#CANape_log_037.mf4",
+      "log_num": "037",
+      "time": 26.214227899999994,
+      "idx": 520,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": true,
+      "valid": false,
+      "strategy_label": "no_path",
+      "n_segments": 0,
+      "total_length": 0.0,
+      "errors": [],
+      "ego": [
+        2.805521011352539,
+        -0.5563079118728638,
+        0.38622498512268066
+      ],
+      "target": [
+        -4.373101234436035,
+        -0.37797796726226807,
+        -0.46513816714286804
+      ]
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025434#CANape_log_038.mf4",
+      "log_num": "038",
+      "time": 37.225526699999996,
+      "idx": 740,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.5886692159077457,
+      "errors": [],
+      "ego": [
+        1.7884098291397095,
+        -2.1388418674468994,
+        0.18764972686767578
+      ],
+      "target": [
+        -0.5845156908035278,
+        0.0698058232665062,
+        -0.2223425656557083
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025647#CANape_log_039.mf4",
+      "log_num": "039",
+      "time": 41.27500109999999,
+      "idx": 821,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 7.272012877239172,
+      "errors": [],
+      "ego": [
+        6.075814247131348,
+        -0.4055253267288208,
+        0.615394115447998
+      ],
+      "target": [
+        -5.285288333892822,
+        0.7387399673461914,
+        -0.6124718189239502
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.17621193749314656,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025906#CANape_log_040.mf4",
+      "log_num": "040",
+      "time": 35.60721979999999,
+      "idx": 708,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.9734248093788914,
+      "errors": [],
+      "ego": [
+        -0.14186841249465942,
+        -2.822166919708252,
+        0.18613243103027344
+      ],
+      "target": [
+        -0.9357876181602478,
+        0.2680622935295105,
+        -0.23023588955402374
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_025906#CANape_log_040.mf4",
+      "log_num": "040",
+      "time": 44.75721979999999,
+      "idx": 891,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 9,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 1.7004698017904476,
+      "errors": [],
+      "ego": [
+        0.6327897906303406,
+        -2.825139045715332,
+        -0.042447566986083984
+      ],
+      "target": [
+        -1.6999467611312866,
+        0.042172931134700775,
+        0.003407045267522335
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_030145#CANape_log_041.mf4",
+      "log_num": "041",
+      "time": 21.917331199999996,
+      "idx": 434,
+      "source": "tp_fallback",
+      "slot_type": 1,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 7.230175960905387,
+      "errors": [],
+      "ego": [
+        -2.020615339279175,
+        -0.9610902667045593,
+        0.6219024658203125
+      ],
+      "target": [
+        -4.452774524688721,
+        0.5233796834945679,
+        -0.6644924283027649
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.028815792622450154,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_030323#CANape_log_042.mf4",
+      "log_num": "042",
+      "time": 33.6647426,
+      "idx": 669,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.6666518350930494,
+      "errors": [],
+      "ego": [
+        -1.0716158151626587,
+        -2.9838967323303223,
+        0.19342899322509766
+      ],
+      "target": [
+        -0.6623682975769043,
+        0.07545135915279388,
+        -0.18641038239002228
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_030705#CANape_log_043.mf4",
+      "log_num": "043",
+      "time": 36.86846950000001,
+      "idx": 733,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.1320671419272524,
+      "errors": [],
+      "ego": [
+        -1.1448357105255127,
+        -2.8235526084899902,
+        0.19359493255615234
+      ],
+      "target": [
+        0.12879858911037445,
+        0.029200229793787003,
+        -0.21002478897571564
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031024#CANape_log_044.mf4",
+      "log_num": "044",
+      "time": 43.22118170000002,
+      "idx": 860,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.22378143152999597,
+      "errors": [],
+      "ego": [
+        -0.6032348871231079,
+        -2.780925750732422,
+        0.2274022102355957
+      ],
+      "target": [
+        -0.22354333102703094,
+        -0.010320283472537994,
+        -0.2593410909175873
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031205#CANape_log_045.mf4",
+      "log_num": "045",
+      "time": 28.772263799999994,
+      "idx": 571,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.38398445457343766,
+      "errors": [],
+      "ego": [
+        -0.7635027766227722,
+        -2.62229585647583,
+        0.28299713134765625
+      ],
+      "target": [
+        -0.38305532932281494,
+        0.026695992797613144,
+        -0.27486535906791687
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031439#CANape_log_046.mf4",
+      "log_num": "046",
+      "time": 32.9135541,
+      "idx": 654,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.24972203858476466,
+      "errors": [],
+      "ego": [
+        0.05671575292944908,
+        -2.67651104927063,
+        0.2730255126953125
+      ],
+      "target": [
+        -0.24798259139060974,
+        0.02942330576479435,
+        -0.29315921664237976
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031439#CANape_log_046.mf4",
+      "log_num": "046",
+      "time": 48.363554099999995,
+      "idx": 963,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 9,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "single_arc",
+      "n_segments": 1,
+      "total_length": 0.6728002635096595,
+      "errors": [],
+      "ego": [
+        -0.788621187210083,
+        -2.71380352973938,
+        -0.01620197296142578
+      ],
+      "target": [
+        0.6727494597434998,
+        -0.0150081692263484,
+        0.02128557674586773
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.02216836969922653,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_031732#CANape_log_047.mf4",
+      "log_num": "047",
+      "time": 33.72628859999999,
+      "idx": 670,
+      "source": "trigger",
+      "slot_type": 1,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.27748427841054607,
+      "errors": [],
+      "ego": [
+        0.36274802684783936,
+        -2.3943140506744385,
+        0.2198495864868164
+      ],
+      "target": [
+        -0.2774769961833954,
+        -0.002010311931371689,
+        -0.2907324731349945
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_28_035839#CANape_log_059.mf4",
+      "log_num": "059",
+      "time": 46.171988700000014,
+      "idx": 919,
+      "source": "trigger",
+      "slot_type": 3,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.36776931015188385,
+      "errors": [],
+      "ego": [
+        0.7522658109664917,
+        -3.1063125133514404,
+        0.25960874557495117
+      ],
+      "target": [
+        -0.3672901391983032,
+        0.018767502158880234,
+        -0.2982921302318573
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_075900#CANape_log_060.mf4",
+      "log_num": "060",
+      "time": 34.07798579999999,
+      "idx": 677,
+      "source": "trigger",
+      "slot_type": 2,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "two_seg",
+      "n_segments": 2,
+      "total_length": 5.921913933126072,
+      "errors": [],
+      "ego": [
+        2.2187488079071045,
+        -0.8957092761993408,
+        0.7159924507141113
+      ],
+      "target": [
+        -3.3032422065734863,
+        0.2941124737262726,
+        -0.6988828778266907
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.07947646712219214,
+      "exact_tangent": false
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080117#CANape_log_061.mf4",
+      "log_num": "061",
+      "time": 0.2234731,
+      "idx": 0,
+      "source": "tp_forced",
+      "slot_type": 1,
+      "pz": 2,
+      "tp_valid": true,
+      "excluded": true,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 2.9773026104089406,
+      "errors": [],
+      "ego": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target": [
+        0.4402543902397156,
+        2.9445724487304688,
+        -0.055339738726615906
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080256#CANape_log_062.mf4",
+      "log_num": "062",
+      "time": 33.02286690000001,
+      "idx": 656,
+      "source": "trigger",
+      "slot_type": 2,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.622450908835544,
+      "errors": [],
+      "ego": [
+        -0.8826632499694824,
+        3.0833146572113037,
+        -0.27379512786865234
+      ],
+      "target": [
+        -0.6065793633460999,
+        -0.13966606557369232,
+        0.20445258915424347
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080416#CANape_log_063.mf4",
+      "log_num": "063",
+      "time": 56.26540089999999,
+      "idx": 1121,
+      "source": "trigger",
+      "slot_type": 2,
+      "pz": 10,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "straight",
+      "n_segments": 1,
+      "total_length": 0.5807279289484788,
+      "errors": [],
+      "ego": [
+        -1.1256431341171265,
+        3.095989942550659,
+        -0.14049482345581055
+      ],
+      "target": [
+        0.5805375576019287,
+        -0.01486847922205925,
+        0.14957912266254425
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.0,
+      "exact_tangent": true
+    },
+    {
+      "file": "Zeekr_PR61253_P417_1718_R12A00IntensiveTest-APADeltaTest_2026_07_29_080619#CANape_log_064.mf4",
+      "log_num": "064",
+      "time": 28.21387959999999,
+      "idx": 560,
+      "source": "tp_fallback",
+      "slot_type": 2,
+      "pz": 8,
+      "tp_valid": true,
+      "excluded": false,
+      "quality_gate_rejected": false,
+      "valid": true,
+      "strategy_label": "three_seg",
+      "n_segments": 3,
+      "total_length": 8.609999258996952,
+      "errors": [],
+      "ego": [
+        2.1646769046783447,
+        -0.6260643005371094,
+        0.4571394920349121
+      ],
+      "target": [
+        -3.8984227180480957,
+        -0.8102401494979858,
+        -0.45833882689476013
+      ],
+      "endpoint_err": 0.0,
+      "endpoint_herr": 0.0,
+      "max_residual_m": 0.1853135468881968,
+      "exact_tangent": false
+    }
+  ]
+}
