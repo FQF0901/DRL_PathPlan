@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Project venv python wrapper.
+# Adds the venv-local glvnd runtime libs (see tools/setup_gl_libs.sh) to the loader path,
+# then execs .venv/bin/python. Use this instead of calling .venv/bin/python directly
+# whenever MetaDrive/Panda3D is involved.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GLDIR="$ROOT/.venv/gl/usr/lib/x86_64-linux-gnu"
+if [ -d "$GLDIR" ]; then
+  export LD_LIBRARY_PATH="$GLDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec "$ROOT/.venv/bin/python" "$@"

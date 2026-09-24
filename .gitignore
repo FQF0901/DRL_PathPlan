@@ -1,0 +1,12 @@
+__pycache__
+.slim/deepwork/
+*.png
+*.pdf
+.cache/
+.venv/
+data/
+runs/
+*.pkl
+env/specs/*.json
+.pytest_cache/
+*.egg-info/

@@ -1,0 +1,11 @@
+# 主配置：聚合各子配置；合并顺序 env → model → train → eval
+project:
+  name: DRL_PathPlan              # 项目名
+  phase: P0                       # 当前阶段（P0 = 骨架）
+  python: "3.10"                  # 目标 Python 版本
+
+includes:                         # 子配置路径（相对仓库根目录）
+  - config/env.yaml               # 环境 / 步长 / 观测 / 场景
+  - config/model.yaml             # 网络结构
+  - config/train.yaml             # 分阶段训练
+  - config/eval.yaml              # 评估与 KPI

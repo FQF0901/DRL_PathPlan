@@ -1,0 +1,36 @@
+# 评估配置：独立进程、确定性、周期性执行
+eval:
+  spec: env/specs/scenarios_val.json  # 验证场景 spec
+  every_epochs: 5                     # 每 5 个 epoch 评估一次
+  deterministic: true                 # 确定性评估（固定种子）
+  process: separate                   # 独立进程运行
+  worker_restart_resets: 5000         # P0 实测泄漏 +11MB/1000 resets → 5000 次重启足够安全
+
+kpis:                                 # 评估 KPI 列表
+  - collision                         # 碰撞
+  - offroad                           # 出界
+  - min_ttc                           # 最小碰撞时间
+  - a_lon                             # 纵向加速度
+  - a_lat                             # 横向加速度
+  - jerk                              # 加加速度
+  - speed_ratio                       # 速度 / 限速比
+  - solid_line_crossing               # 压实线
+  - speed_limit_violation             # 超速
+  - route_completion                  # 路线完成度
+  - per_category_success              # 按场景类别的成功率
+
+thresholds:                           # P0 冻结（Gate 2 修订）：相对规则基线口径
+  protocol: relative_to_rule_baseline
+  baseline: pure_pursuit_idm          # 规则基线（pure-pursuit + IDM）；仅用 train 集调参后冻结，与 policy 同 harness/同种子
+  collision_rate: "<= max(baseline, 0.01)"   # 零基线保护 ε
+  offroad_rate: "<= max(baseline, 0.01)"
+  route_completion: ">= baseline - 0.05"
+  speed_ratio: ">= baseline * 0.90"          # 效率守卫：防爬行刷 rc/安全分
+  a_lat_mean: "<= baseline * 1.10"
+  a_lat_p95: "<= baseline * 1.20"            # 尾部指标（mean 会掩盖急打方向）
+  per_category_success: ">= baseline - 0.10 (n>=30 判定；n<30 仅报告 + Wilson CI)"
+dataset_gate:                         # 数据侧 gate，与 policy KPI 分离
+  consistency_violations: 0           # 与物理时间相悖的违例数
+  bc_expert_success_rate: ">= 0.90 (easy 类 >= 0.95)"
+  min_samples_per_scenario: 10        # policy-step (2Hz)
+  min_samples_per_category: 50

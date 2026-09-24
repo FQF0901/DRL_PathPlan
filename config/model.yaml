@@ -1,0 +1,42 @@
+# 网络结构：时序编码 → 空间消息传递 → MoE → 世界模型 → 策略头
+hidden_dim: 96                    # 主干隐藏维 H=96
+param_budget_estimate: 585000     # H=96 且含 8×(96→192→96) 专家，约 585K 参数
+
+temporal:
+  type: gru                       # 时序编码器：GRU
+  input: obs_history              # 输入 6 帧历史观测
+  hidden_dim: 96                  # 隐藏维
+  layers: 1                       # 层数
+
+spatial:
+  type: message_passing           # 空间编码：消息传递
+  layers: 2                       # 2 层
+  hidden_dim: 96                  # 隐藏维
+
+moe:
+  primary:
+    enabled: true                 # 主专家常开
+    router_gated: false           # 不参与路由门控
+  experts:
+    count: 8                      # 8 个专用专家
+    hidden_dim: 192               # 结构 96 → 192 → 96
+    init: zero_residual           # 零初始化，输出作为残差
+  router:
+    type: sigmoid                 # sigmoid 路由器（多标签）
+    supervision: bce              # 多标签 BCE 监督
+    labels: per_step_observable   # 标签为逐步可观测标签
+
+world_model:
+  enabled: true                   # 启用世界模型
+  conditioned_on: ego             # ego 条件化的 OD/LD 动力学
+  rollout_steps: 6                # 展开 6 步
+  loss: direct_multi_step         # 直接多步损失
+
+policy:
+  type: autoregressive_rollout    # 策略 rollout：自回归（方案 B1）
+  rollout_steps: 6                # ×6 步
+  action:
+    space: [ds, dtheta]           # 动作 = 弧长 + 航向变化
+    dt: 0.5                       # 作用于下一个 0.5 s
+    bounded: true                 # 动作有界
+    smooth: true                  # 动作平滑约束

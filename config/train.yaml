@@ -1,0 +1,39 @@
+# 分阶段训练：A = BC 预热 + PPO；B = 离线世界模型；C = 联合微调
+runtime:
+  python: "3.10"                  # 运行 Python 版本
+  seed: null                      # 全局种子（P1 固定）
+
+data:
+  spec: env/specs/scenarios_train.json  # 训练场景 spec
+  steps_per_epoch: 100000         # 每 epoch 环境步数（评估每 5 epoch，见 eval.yaml）
+  buffer:
+    type: replay                  # 回放缓冲区
+    capacity: null                # 容量 P1 标定
+
+stages:
+  A:
+    name: bc_warmup_ppo           # 阶段名
+    bc:
+      enabled: true               # 启用 BC 预热
+      expert: idmpolicy           # 专家 = MetaDrive 内置 IDMPolicy，沿路线行驶
+      epochs: null                # BC 轮数 P1 标定
+    ppo:
+      enabled: true               # BC 后接 PPO
+      tracking: exact             # 精确跟踪执行动作
+      lr: null                    # 学习率 P1 标定
+  B:
+    name: offline_world_model     # 阶段名
+    replay_from: A                # 复用阶段 A 回放数据
+    env_interaction: false        # 不与环境交互
+  C:
+    name: joint_finetune          # 阶段名
+    tracker: mpc_lqr              # 环境内 MPC/LQR 跟踪器
+    router_supervision: weak      # 弱路由监督
+    kl_anchor: true               # KL 锚点，限制策略漂移
+    primary_lr_scale: 0.1         # 主专家学习率 ×0.1
+
+monitoring:
+  tensorboard: true               # 输出 tensorboard
+  csv: true                       # 同步输出 CSV
+  scene_labels: true              # 逐步场景标签统计（场景分布 + MoE 分析）
+  moe_routing: true               # MoE 路由统计（有效专家数 / 权重 / 输出范数 / token 数）
