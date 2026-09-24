@@ -1,36 +1,49 @@
 # 评估配置：独立进程、确定性、周期性执行
 eval:
-  spec: env/specs/scenarios_val.json  # 验证场景 spec
-  every_epochs: 5                     # 每 5 个 epoch 评估一次
+  spec: env/specs/scenarios_val.json  # 验证场景 spec（1000 条，冻结）
+  every_epochs: 5                     # 每 5 个 epoch 评估一次（epoch = train.steps_per_epoch）
   deterministic: true                 # 确定性评估（固定种子）
   process: separate                   # 独立进程运行
-  worker_restart_resets: 5000         # P0 实测泄漏 +11MB/1000 resets → 5000 次重启足够安全
+  recycle_every_specs: 150            # Gate 3：按 spec 实例数回收 worker（build_env-per-spec 泄漏
+                                      # ~3.5MB/spec；reset 计数对这条路径无效）
+  mem_available_floor_mb: 3000        # Gate 3：评测前查 MemAvailable，低于此值先暂停/缩减训练池
+  train_pool_policy: pause            # Gate 3：评测期间训练池必须暂停（或 worker<=2），避免 OOM 场景复现
 
-kpis:                                 # 评估 KPI 列表
-  - collision                         # 碰撞
-  - offroad                           # 出界
-  - min_ttc                           # 最小碰撞时间
-  - a_lon                             # 纵向加速度
-  - a_lat                             # 横向加速度
-  - jerk                              # 加加速度
-  - speed_ratio                       # 速度 / 限速比
-  - solid_line_crossing               # 压实线
-  - speed_limit_violation             # 超速
-  - route_completion                  # 路线完成度
-  - per_category_success              # 按场景类别的成功率
+kpis:                                 # 评估 KPI（按 primary 标签分组；复合模板单列 compound）
+  - collision
+  - offroad
+  - min_ttc
+  - a_lon
+  - a_lat
+  - jerk
+  - speed_ratio
+  - solid_line_crossing
+  - speed_limit_violation
+  - route_completion
+  - per_category_success              # 分组口径 = spec.labels.geometry（primary）
+  - overall_success                   # Gate 3 新增：总体成功率条款（原协议只有分项）
 
-thresholds:                           # P0 冻结（Gate 2 修订）：相对规则基线口径
+thresholds:                           # P0 冻结（Gate 2 + Gate 3 修订）：相对规则基线口径
   protocol: relative_to_rule_baseline
-  baseline: pure_pursuit_idm          # 规则基线（pure-pursuit + IDM）；仅用 train 集调参后冻结，与 policy 同 harness/同种子
-  collision_rate: "<= max(baseline, 0.01)"   # 零基线保护 ε
+  baseline: pure_pursuit_idm
+  baseline_frozen_at: "2026-09-25"    # runs/baseline_eval/val_reference.json；主标签分组见
+                                      # runs/baseline_eval/val_reference_by_primary.json
+  grouping: primary_label             # 按 spec.labels.geometry 分组；其余标签进 compound 单列
+  overall_success: ">= max(baseline - 0.05, 0.70)"     # 总体条款（新）
+  collision_rate: "<= max(baseline, 0.01)"             # 零基线保护 ε
   offroad_rate: "<= max(baseline, 0.01)"
   route_completion: ">= baseline - 0.05"
-  speed_ratio: ">= baseline * 0.90"          # 效率守卫：防爬行刷 rc/安全分
+  speed_ratio: ">= baseline * 0.90"                    # 效率守卫：防爬行刷 rc/安全分
   a_lat_mean: "<= baseline * 1.10"
-  a_lat_p95: "<= baseline * 1.20"            # 尾部指标（mean 会掩盖急打方向）
-  per_category_success: ">= baseline - 0.10 (n>=30 判定；n<30 仅报告 + Wilson CI)"
-dataset_gate:                         # 数据侧 gate，与 policy KPI 分离
-  consistency_violations: 0           # 与物理时间相悖的违例数
-  bc_expert_success_rate: ">= 0.90 (easy 类 >= 0.95)"
+  a_lat_p95: "<= baseline * 1.20"                      # 尾部指标（mean 会掩盖急打方向）
+  per_category_success: "weak(baseline<0.7) -> target=max(baseline+0.15, 0.75)；否则 >= baseline - 0.10"
+  per_category_n_min: 30                               # n<30 仅报告 + Wilson CI，不判定
+
+dataset_gate:                         # 数据侧 gate，与 policy KPI 分离（Gate 3 改口径）
+  consistency_violations: 0           # 与物理时间相悖的违例数（数据集抽验）
+  bc_retained_step_yield: ">= 0.60"   # 过滤后保留步数产出率（替代原 bc_expert_success_rate>=0.90，
+                                      # 该口径与已接受的 IDMPolicy 冷启动质量矛盾）
   min_samples_per_scenario: 10        # policy-step (2Hz)
-  min_samples_per_category: 50
+  min_samples_per_category: 50        # 每受监督标签的正样本下限
+  # BC 过滤规则唯一出处：.slim/deepwork/p2-contract.md §8.2（终末截断 / 3s 窗口干净 / on_lane /
+  # round-trip 可复现 / 事件 fired∧actor_alive / 难度几何配平）

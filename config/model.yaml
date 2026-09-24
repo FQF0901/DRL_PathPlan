@@ -25,6 +25,18 @@ moe:
     type: sigmoid                 # sigmoid 路由器（多标签）
     supervision: bce              # 多标签 BCE 监督
     labels: per_step_observable   # 标签为逐步可观测标签
+    # Gate 3 定案：受监督标签 8 个（固定顺序）→ 8 个 expert 一一对应；
+    # 名义标签 lane_change / zipper_merge / maneuver(turns) 退出监督与 KPI（无脚本、运行期不可核验）；
+    # in_intersection 与 near_intersection 语义重叠 → 只保留 near_intersection。
+    supervised_labels:
+      - cutin_active
+      - cutout_active
+      - crowded
+      - car_following
+      - on_curve
+      - merging
+      - roundabout_near
+      - near_intersection
 
 world_model:
   enabled: true                   # 启用世界模型

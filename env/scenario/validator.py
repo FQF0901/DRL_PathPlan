@@ -486,11 +486,22 @@ def _validate_one(spec: Any, rollout_steps: int) -> dict:
 # --------------------------------------------------------------------------------------
 
 
-def validate_specs(specs: Iterable[Any], workers: int = 8, rollout_steps: int = 50) -> dict:
+def validate_specs(
+    specs: Iterable[Any],
+    workers: int = 8,
+    rollout_steps: int = 50,
+    specs_per_worker_per_pool: int = 100,
+) -> dict:
     """逐条实例化校验；返回报告 dict（结构见模块 docstring）。
 
     ``rollout_steps`` 是 rollout 的**下界**：含脚本事件时自动延长到覆盖事件窗口
     （``_event_rollout_length``，上限 ``MAX_ROLLOUT_STEPS``）。
+
+    **worker 回收（内存关键）**：实测 MetaDrive 每次 ``build_env`` + ``close`` 会在进程内留下
+    ~3.5MB 残留（P0 的 reset 循环是干净的，泄漏只发生在"每条 spec 新建 env"的路径上），
+    长跑会让 worker RSS 从 1.2GB 涨到 4GB+ 并显著拖慢吞吐。因此按"每个 worker 处理
+    ``specs_per_worker_per_pool`` 条 spec"为一批，**每批重建进程池**把 RSS 拉回基线；
+    每批结束打印进度（便于外部监控）。
     """
     spec_list = list(specs)
     total_start = time.perf_counter()
@@ -499,37 +510,53 @@ def validate_specs(specs: Iterable[Any], workers: int = 8, rollout_steps: int = 
     if n_specs:
         max_workers = min(max_workers, n_specs)
     results: list = [None] * n_specs
-    pool_error: Optional[str] = None
+    pool_errors: list[str] = []
 
     if n_specs == 1 or max_workers <= 1:
         for index, spec in enumerate(spec_list):
             results[index] = _validate_one(spec, rollout_steps)
     else:
-        pending = set(range(n_specs))
-        try:
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {}
-                for index in range(n_specs):
-                    futures[executor.submit(_validate_one, spec_list[index], rollout_steps)] = index
-                for future in as_completed(futures):
-                    index = futures[future]
-                    pending.discard(index)
-                    try:
-                        results[index] = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        results[index] = _crash_result(spec_list[index], repr(exc))
-        except Exception as exc:  # noqa: BLE001 - 进程池崩溃（如 panda 段错误）后退化为内联
-            pool_error = repr(exc)
-            for index in sorted(pending):
-                results[index] = _validate_one(spec_list[index], rollout_steps)
+        chunk = max(1, int(specs_per_worker_per_pool) * max_workers)
+        n_chunks = (n_specs + chunk - 1) // chunk
+        for chunk_index, start in enumerate(range(0, n_specs, chunk), start=1):
+            stop = min(start + chunk, n_specs)
+            indices = list(range(start, stop))
+            pending = set(indices)
+            try:
+                with ProcessPoolExecutor(max_workers=min(max_workers, len(indices))) as executor:
+                    futures = {
+                        executor.submit(_validate_one, spec_list[index], rollout_steps): index
+                        for index in indices
+                    }
+                    for future in as_completed(futures):
+                        index = futures[future]
+                        pending.discard(index)
+                        try:
+                            results[index] = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            results[index] = _crash_result(spec_list[index], repr(exc))
+            except Exception as exc:  # noqa: BLE001 - 进程池崩溃（如 panda 段错误）后退化为内联
+                pool_errors.append(repr(exc))
+                for index in sorted(pending):
+                    results[index] = _validate_one(spec_list[index], rollout_steps)
+            print(
+                f"[validator] chunk {chunk_index}/{n_chunks}: {stop}/{n_specs} specs, "
+                f"elapsed {time.perf_counter() - total_start:.0f}s",
+                flush=True,
+            )
         for index in range(n_specs):
             if results[index] is None:
-                results[index] = _crash_result(spec_list[index], pool_error or "missing result")
+                results[index] = _crash_result(
+                    spec_list[index], "; ".join(pool_errors) or "missing result"
+                )
 
     elapsed = time.perf_counter() - total_start
     report = _build_report(results, max_workers, rollout_steps, elapsed)
-    if pool_error:
-        report["meta"]["pool_error"] = pool_error
+    report["meta"]["pool_chunk_specs"] = (
+        max(1, int(specs_per_worker_per_pool) * max_workers) if max_workers > 1 else n_specs
+    )
+    if pool_errors:
+        report["meta"]["pool_error"] = "; ".join(pool_errors)
     return report
 
 

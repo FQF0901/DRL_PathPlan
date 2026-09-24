@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"额外生成 P1a 切片：训练 N 条 + 验证 max(1, N//{SLICE_VAL_RATIO}) 条（不带值时 N={DEFAULT_SLICE}）",
     )
-    parser.add_argument("--workers", type=int, default=8, help="实例化校验并行进程数（默认 8）")
+    parser.add_argument("--workers", type=int, default=16, help="实例化校验并行进程数（默认 16；内存紧张时用 8）")
     parser.add_argument("--out-dir", type=Path, default=Path("env/specs"), help="spec 输出目录（默认 env/specs）")
     parser.add_argument(
         "--seed-range",
