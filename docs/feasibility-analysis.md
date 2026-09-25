@@ -378,4 +378,40 @@ tools/          # gene_env.sh, train.py, test.py
 
 ---
 
-*附：调研来源与实测数据索引见 `.slim/deepwork/planner-rl-feasibility.md`（工作状态文件，gitignored）。*
+## 14. 训练流程修订 v1.1（2026-09-25 用户确认并实施）
+
+**修订动机（因果一致性）**：原实现里 Stage A 的 BC 直接监督 `traj_xy`，但 `traj_xy` 是内部 rollout 的产物，
+而 rollout 依赖**尚未训练**的 world model → 监督"假观测下产出的轨迹"不合理（且梯度还会顺带污染 WM）。
+用户提出并确认按"先模型、后策略、再 RL"重排：
+
+| 阶段 | 内容 | 可训练 | 监督 GT | 验收证据 |
+|---|---|---|---|---|
+| **A：WM teacher forcing** | ego 条件=专家 GT 动作序列；目标=未来 OD/LD 帧（(episode, step+5k) 查表、t0 对齐、mask+valid）；直接多步损失（Huber+角度）；ego 计划噪声增强 | 编码器/时序/空间/**MoE（共享）**/WM | 未来 OD/LD 真值 | **ADE 1.647 / FDE 2.739 vs 匀速 3.269 / 4.483 ✓**（`runs/train/stage_a_matched`）|
+| **B：Planner BC** | 先 primary(+主干) 后 specific（冻结 primary）；动作 BC（`action_mu` vs 专家首动作）+ **rollout 轨迹小权重辅助**（WM 冻结+detach）+ router BCE | 主干/MoE/策略头/specific | 专家动作 + 专家 traj6 + 逐步标签 | ds **3.319m**（专家 3.260）；aux=0 消融 off-road 1.0 → 0.5（辅助必需）；10 条评测 succ 0.4 / off-road 0.5 / speed 0.75 |
+| **C：PPO RL** | rollout + 闭环（LQR 跟踪 6 点预瞄）；KL 锚到 **Stage B 快照**、系数 0.05→0 衰减；primary lr×0.1；WM 先冻后放 | specific/策略头/价值头（WM 后放） | 规则奖励（PPO/GAE） | 50 updates 跑通（44–49 steps/s，无坍塌）；`explained_var≈0` → 下一版加 critic 预热 |
+
+**关键实现修正（本轮）**：轨迹监督目标对齐（`traj6`）；动作损失接线；策略头改 sigmoid 非饱和；WM 冻结+detach；
+**跟踪器参考改为 6 点预瞄**（原单动作弧是"偏出车道+速度衰减"的元凶）；评测注入 `prev_action`（原 OOV）；
+GL 运行时守卫（spawn worker）；观测 scope 改盒式（前100/后50/左25/右25）。
+
+**当前差距（诚实记录）**：策略 vs 冻结基线（50 条 val）：exact 执行 0.40/0.50 vs 0.82/0.06；LQR 闭环 0.20–0.24/0.68–0.70。
+主要缺口是**横向/车道保持**与**终点到达行为**（策略会冲过路线终点继续开，rc>1）；下一步：更大 BC 数据（2000 场景采集中）、
+critic 预热、跟踪器调参（需干净指标）。
+
+**已知风险**：MetaDrive 对少数脚本事件场景存在**运行间非确定性**（同种子下 cut-in 样本 11 vs 12）→ 事件类 KPI 有噪声，
+Gate 4 需记录；候选修复：事件脚本改为纯步数驱动。
+
+## 15. 现状与证据索引（2026-09-25）
+
+- **管线状态**：全链路端到端跑通（场景生成 → 专家数据 → Stage A WM → Stage B BC → Stage C PPO → 评测/KPI/监控），
+  88 项测试通过；所有 MetaDrive 运行经 `tools/venv-python`（glvnd 本地解包 + spawn 守卫）。
+- **性能现状**：开环模仿已接近专家（动作 `mu_ds` 3.499 m vs 专家 3.500 m；轨迹 MAE 0.633 m；WM ADE 1.647 vs
+  匀速 3.269），但闭环 KPI 落后规则基线（success 0.26–0.40 vs 0.82；off-road 0.60–0.72 vs 0.06）。
+- **主要缺口**：横向车道保持（BC 复合误差，失败终止以 `out_of_road` 为主，发生在途中）；闭环执行链（LQR 跟踪）
+  与 critic 解释力（`explained_var ≈ 0`）为次要缺口。
+- **Stage C 观察（v2，300 updates）**：RL 修好了低速吸引子（探针 0–1 m/s 档 ds 0.19 → 5.7 m、告警解除；
+  评测速度比 0.364 → 0.631），但**未带来 KPI 增益**：success 0.26 → 0.18、碰撞 0.00 → 0.14（exact 口径更极端：
+  0.4 → 0.1 / 0.2 → 0.5 / 速度比 → 1.093）。训练期出现"加速+驶出道路"的奖励 hack 期（off-road/步 → −1.28、
+  总奖励转负），根因：横向弱点 × 速度项主导的稠密奖励 × critic 解释力不足（`explained_var` ≈ 0.004）。
+  修复方向：速度项按在道状态门控、提高 off-road/crash 权重、KL 系数下限、critic 强化、先修横向弱点。
+- **详细数字与命令**：`README.md` §2–§3、`docs/experiments.md`（运行清单/数据集/各阶段/消融/口径）。

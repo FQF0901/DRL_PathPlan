@@ -11,6 +11,28 @@
 沿导航路线行驶）；``--expert pure_pursuit`` 可切换到仓库内的
 ``env/expert/pure_pursuit_idm.py::PurePursuitIDMPolicy``（确定性规则基线）。
 
+并行采集（``--workers``，默认 1 = 原单进程路径）
+------------------------------------------------
+``--workers N`` 用 **spawn** 子进程并行跑 spec 列表（MetaDrive 每进程只能有一个 engine，
+见 ``pipeline/vector_env.py``；每个 worker 同一时刻只建一个 env，跑完即 ``close``）：
+
+- spec 按全局下标轮转分配（``index % N``，确定性、互斥、覆盖全部）；父进程按**原始
+  spec 顺序**合并，``episode_id`` 直接用全局下标，因此 ``expert_bc.npz`` / meta /
+  report 统计与 ``--workers 1`` 一致（worker 数不影响产出）；
+- 每个 worker 在建 env 前调用 ``pipeline.gl_runtime.ensure_gl_library_path()``，父进程
+  spawn 前也先把 venv 本地 glvnd 写进 ``LD_LIBRARY_PATH``（spawn 子进程启动时继承），
+  避免子进程的 "Known Pipes" 崩溃；
+- **内存**：单 worker 基线 ≈0.7 GB（``pipeline/vector_env.ENV_RSS_PER_WORKER_MB``=650 MB），
+  另加 MetaDrive ``build_env``+``close`` 每 spec ≈3.5–4 MB 残留（本机实测线性上涨）；worker
+  每 ``--recycle-every`` 条（默认 150，与 ``pipeline/vector_env`` 同口径）跑完即退出重启，
+  峰值 ≈0.7 + 150×4 MB ≈ 1.3 GB/worker；本机 15 GB 建议 ``--workers<=8``（6 更稳）；
+- worker 异常退出时只丢失当前块，其余块继续；末尾打印 ``missing`` 统计。
+
+例（2000 条 spec、6 worker；父进程另缓存全量样本 ≈0.4 MB/spec）::
+
+    tools/venv-python tools/collect_expert.py \
+        --specs env/specs/scenarios_train.json --limit 2000 --out runs/bc_expert_2k --workers 6
+
 产出（``--out`` 目录）
 ----------------------
 - ``expert_bc.npz``：按帧存（**不存 6 帧堆叠**）的 BC 样本；历史窗口由训练侧在线拼；
@@ -48,7 +70,9 @@ import os
 import sys
 import time
 from collections import Counter, defaultdict
+from multiprocessing import get_context
 from pathlib import Path
+from queue import Empty
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -63,6 +87,7 @@ from env.obs.builder import ObservationBuilder  # noqa: E402
 from env.scenario.behaviors import event_state  # noqa: E402
 from env.scenario.labels import LABEL_ORDER, compute_step_labels  # noqa: E402
 from env.scenario.spec import load_specs  # noqa: E402
+from pipeline.gl_runtime import ensure_gl_library_path  # noqa: E402
 
 __all__ = ["main", "arc_interpolate", "SUPERVISED_LABELS"]
 
@@ -91,6 +116,14 @@ _MODEL_CONFIG_DEFAULT = "config/model.yaml"
 #: dataset_gate 口径（config/eval.yaml）
 DEFAULT_MIN_YIELD = 0.60
 DEFAULT_MIN_SAMPLES_PER_CATEGORY = 50
+#: 并行采集默认/上限：单 worker env RSS ≈0.65 GB（pipeline/vector_env.ENV_RSS_PER_WORKER_MB），
+#: 本机 15 GB → 建议 <=8 个 worker（超出只告警，不阻塞）。
+DEFAULT_WORKERS = 1
+MAX_RECOMMENDED_WORKERS = 8
+#: worker 进程级回收间隔（spec 数）：MetaDrive ``build_env``+``close`` 实测残留
+#: ≈3.5 MB/spec（与 pipeline/vector_env.DEFAULT_RECYCLE_EVERY_SPECS 同口径），
+#: 长跑线性上涨；每块跑完重启进程把 RSS 拉回基线。0 = 不回收。
+RECYCLE_EVERY_SPECS = 150
 
 _CRASH_KEYS = ("crash", "crash_vehicle", "crash_object", "crash_building", "crash_sidewalk", "crash_human")
 
@@ -475,6 +508,307 @@ def extract_samples(
 
 
 # --------------------------------------------------------------------------- #
+# 单 spec 采集（单进程主循环与 spawn worker 的唯一共用实现）
+# --------------------------------------------------------------------------- #
+
+def _collect_one_spec(
+    spec: Any,
+    *,
+    spec_index: int,
+    builder: ObservationBuilder,
+    label_order: Sequence[str],
+    interpolate_fn: Any,
+    expert_kind: str = "idm",
+    max_steps: int = 600,
+    on_lane_frac: float = 0.5,
+    on_lane_margin: float = 0.3,
+    roundtrip_key_mean: float = 0.25,
+    roundtrip_key_max: float = 0.5,
+    require_dense: bool = False,
+    roundtrip_dense_mean: float = 0.5,
+    traffic_density: Optional[float] = None,
+) -> Dict[str, Any]:
+    """采集 + 过滤单个 spec，返回可跨进程传递的逐 spec 记录。
+
+    ``spec_index`` = 该 spec 在过滤后列表里的全局下标，直接作为 ``episode_id``：
+    并行合并后 ``episode_id`` 仍连续、且与单进程逐条执行一致。异常不向上抛
+    （与旧主循环同口径：单条失败不中断整批），错误记录 ``report.termination=="error"``。
+    """
+    env = None
+    filter_counter: Counter = Counter()
+    started = time.perf_counter()
+    try:
+        env = build_env(spec, traffic_density=traffic_density, use_render=False)
+        episode = collect_episode(
+            env,
+            spec,
+            builder=builder,
+            expert_kind=str(expert_kind),
+            max_steps=int(max_steps),
+        )
+        kept = extract_samples(
+            episode,
+            spec,
+            episode_id=int(spec_index),
+            label_order=label_order,
+            interpolate_fn=interpolate_fn,
+            on_lane_frac=float(on_lane_frac),
+            on_lane_margin=float(on_lane_margin),
+            roundtrip_key_mean=float(roundtrip_key_mean),
+            roundtrip_key_max=float(roundtrip_key_max),
+            filter_counter=filter_counter,
+            require_dense=bool(require_dense),
+            roundtrip_dense_mean=float(roundtrip_dense_mean),
+        )
+        return {
+            "spec_index": int(spec_index),
+            "kept": kept,
+            "filter_counts": filter_counter,
+            "candidates": len(episode["frames"]),
+            "steps": int(episode["steps"]),
+            "elapsed_s": time.perf_counter() - started,
+            "report": {
+                "id": int(getattr(spec, "id", -1)),
+                "seed": int(getattr(spec, "seed", -1)),
+                "difficulty": str(getattr(spec, "difficulty", "unknown")),
+                "geometry": str(getattr(spec, "labels", {}).get("geometry", "unknown")),
+                "termination": episode["termination"],
+                "env_steps": int(episode["steps"]),
+                "candidate_policy_steps": len(episode["frames"]),
+                "retained_steps": len(kept),
+                "step_yield": (len(kept) / len(episode["frames"])) if episode["frames"] else 0.0,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001 - 单条失败不中断整批（与 validator 同口径）
+        return {
+            "spec_index": int(spec_index),
+            "kept": [],
+            "filter_counts": filter_counter,
+            "candidates": 0,
+            "steps": 0,
+            "elapsed_s": time.perf_counter() - started,
+            "error": f"{type(exc).__name__}: {exc}",
+            "report": {
+                "id": int(getattr(spec, "id", -1)),
+                "termination": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        }
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# --------------------------------------------------------------------------- #
+# 并行采集（--workers N；spawn，每 worker 单 engine）
+# --------------------------------------------------------------------------- #
+
+def _worker_spec_indices(total: int, worker_index: int, num_workers: int) -> List[int]:
+    """worker 的确定性 spec 下标（轮转 ``index % N``）：互斥且覆盖 ``range(total)``。"""
+    return list(range(int(worker_index), int(total), int(num_workers)))
+
+
+def _chunk_tasks(tasks: List[Tuple[int, Any]], chunk_size: int) -> List[List[Tuple[int, Any]]]:
+    """把分区任务切成 ≤``chunk_size`` 的块（每块一个 worker 进程生命周期）。
+
+    ``chunk_size<=0`` = 不分块（整段单进程）。进程级回收用于释放 MetaDrive
+    ``build_env``+``close`` 每 spec ≈3.5 MB 的残留（见模块 docstring 内存说明）。
+    """
+    size = int(chunk_size or 0)
+    if size <= 0:
+        return [list(tasks)]
+    return [list(tasks[start : start + size]) for start in range(0, len(tasks), size)]
+
+
+def _expert_worker(
+    worker_index: int,
+    chunk_id: int,
+    tasks: List[Tuple[int, Any]],
+    config: Dict[str, Any],
+    out_queue: Any,
+) -> None:
+    """spawn 子进程入口：顺序采集本块 spec，逐条把记录放入 ``out_queue``。
+
+    每个 worker 同一时刻只持有一个 env（MetaDrive 每进程单 engine）。``ensure_gl_library_path``
+    必须在建 env 前调用：父进程 spawn 前已写入 ``LD_LIBRARY_PATH``（子进程启动即继承），
+    这里再兜底一次，确保不触发 "Known Pipes" 崩溃。
+
+    消息 ``(worker_index, chunk_id, record | None)``：``None`` = 本块完成（父进程据此
+    重启进程回收内存）；``chunk_id`` 让父进程忽略崩溃块的迟到消息（不误续块）。
+    """
+    ensure_gl_library_path()
+    builder = ObservationBuilder({})
+    interpolate_fn, _ = resolve_interpolate()
+    for spec_index, spec in tasks:
+        record = _collect_one_spec(
+            spec,
+            spec_index=int(spec_index),
+            builder=builder,
+            interpolate_fn=interpolate_fn,
+            **config,
+        )
+        out_queue.put((int(worker_index), int(chunk_id), record))
+    out_queue.put((int(worker_index), int(chunk_id), None))
+
+
+def _run_workers(
+    specs: Sequence[Any],
+    num_workers: int,
+    config: Dict[str, Any],
+    recycle_every: int = RECYCLE_EVERY_SPECS,
+) -> List[Dict[str, Any]]:
+    """父进程侧并行编排：静态分区 + 分块 spawn，返回逐 spec 记录（乱序）。
+
+    每个分区（``index % N``）的 spec 按 ``recycle_every`` 切块，依次由一个 spawn
+    子进程处理；一块跑完进程即退出、父进程重启下一块 → RSS 回落到基线。结果仅按
+    ``spec_index`` 归并（:func:`_merge_records`），与 worker 数、分块方式无关。
+    """
+    total = len(specs)
+    ctx = get_context("spawn")
+    # spawn 子进程继承父进程 environ：先把 venv 本地 glvnd 写进 LD_LIBRARY_PATH，
+    # 子进程启动时 ld.so 即可解析（worker 内部再调一次作兜底）。
+    ensure_gl_library_path()
+    out_queue = ctx.Queue()
+    chunks: List[List[Tuple[int, Any]]] = []
+    for worker_index in range(int(num_workers)):
+        tasks = [(index, specs[index]) for index in _worker_spec_indices(total, worker_index, num_workers)]
+        chunks.append(_chunk_tasks(tasks, recycle_every))
+    procs: Dict[int, Any] = {}  # worker_index -> 当前块进程
+    running_chunk: Dict[int, int] = {}  # worker_index -> 当前块号
+    next_chunk: Dict[int, int] = {index: 0 for index in range(int(num_workers))}
+    done: set = set()
+
+    def _spawn(worker_index: int) -> None:
+        running_chunk[worker_index] = next_chunk[worker_index]
+        proc = ctx.Process(
+            target=_expert_worker,
+            args=(
+                worker_index,
+                running_chunk[worker_index],
+                chunks[worker_index][running_chunk[worker_index]],
+                config,
+                out_queue,
+            ),
+            name=f"collect-expert-{worker_index}",
+            daemon=True,
+        )
+        proc.start()
+        procs[worker_index] = proc
+
+    def _advance(worker_index: int) -> None:
+        """当前块结束/崩溃：进入下一块（重启进程）或标记分区完成。"""
+        next_chunk[worker_index] += 1
+        if next_chunk[worker_index] < len(chunks[worker_index]):
+            print(
+                f"[collect_expert] [w{worker_index}] 进程回收重启（块 "
+                f"{next_chunk[worker_index] + 1}/{len(chunks[worker_index])}）",
+                flush=True,
+            )
+            _spawn(worker_index)
+        else:
+            done.add(worker_index)
+
+    for worker_index in range(int(num_workers)):
+        if chunks[worker_index] and chunks[worker_index][0]:
+            _spawn(worker_index)
+        else:
+            done.add(worker_index)
+
+    records: List[Dict[str, Any]] = []
+    dead: set = set()
+    try:
+        while len(done) < int(num_workers):
+            try:
+                worker_index, chunk_id, record = out_queue.get(timeout=1.0)
+            except Empty:
+                for worker_index, proc in list(procs.items()):
+                    if proc.is_alive():
+                        continue
+                    proc.join(timeout=0.5)
+                    del procs[worker_index]
+                    dead.add(worker_index)
+                    print(
+                        f"[collect_expert] worker {worker_index} 异常退出（exitcode={proc.exitcode}）；"
+                        "崩溃块的 spec 不会产出（其余块继续，见末尾 missing 统计）",
+                        flush=True,
+                    )
+                    _advance(worker_index)
+                continue
+            if record is None:
+                proc = procs.pop(worker_index, None)
+                if proc is None or running_chunk.get(worker_index) != int(chunk_id):
+                    continue  # 崩溃块的迟到哨兵：忽略，避免误续
+                proc.join(timeout=30.0)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=5.0)
+                    print(f"[collect_expert] worker {worker_index} 退出超时，已强制回收", flush=True)
+                _advance(worker_index)
+                continue
+            records.append(record)
+            if "error" in record:
+                print(
+                    f"[collect_expert] {len(records)}/{total} [w{worker_index}] "
+                    f"id={record['report'].get('id', -1)} 失败：{record['error']}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[collect_expert] {len(records)}/{total} [w{worker_index}] "
+                    f"id={record['report'].get('id', -1)} term={record['report'].get('termination')} "
+                    f"steps={record['steps']} cand={record['candidates']} kept={len(record['kept'])} "
+                    f"({record['elapsed_s']:.1f}s)",
+                    flush=True,
+                )
+        # worker 正常退出会 flush 队列；这里兜底回收崩溃 worker 已入队但未读的记录
+        while True:
+            try:
+                _, _, record = out_queue.get(timeout=1.0)
+            except Empty:
+                break
+            if record is not None:
+                records.append(record)
+    finally:
+        out_queue.close()
+        for proc in procs.values():
+            if proc.is_alive():
+                proc.terminate()
+            proc.join(timeout=10.0)
+    if dead:
+        print(f"[collect_expert] 异常退出的 worker：{sorted(dead)}", flush=True)
+    return records
+
+
+def _merge_records(
+    records: Sequence[Dict[str, Any]],
+    total_specs: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Counter, int, List[int]]:
+    """按全局 spec 下标合并 worker 记录（与单进程顺序累加逐项一致）。
+
+    Returns:
+        ``(samples, spec_reports, filter_counter, total_candidates, missing_indices)``；
+        ``samples`` 按原始 spec 顺序展开，``missing_indices`` = 无记录的 spec 下标
+        （单进程恒为空；并行下 worker 崩溃才会出现）。
+    """
+    by_index = sorted(records, key=lambda record: int(record["spec_index"]))
+    samples: List[Dict[str, Any]] = []
+    spec_reports: List[Dict[str, Any]] = []
+    filter_counter: Counter = Counter()
+    total_candidates = 0
+    for record in by_index:
+        samples.extend(record["kept"])
+        spec_reports.append(record["report"])
+        filter_counter.update(record["filter_counts"])
+        total_candidates += int(record["candidates"])
+    seen = {int(record["spec_index"]) for record in by_index}
+    missing = [index for index in range(int(total_specs)) if index not in seen]
+    return samples, spec_reports, filter_counter, total_candidates, missing
+
+
+# --------------------------------------------------------------------------- #
 # 配平
 # --------------------------------------------------------------------------- #
 
@@ -679,6 +1013,18 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--balance", choices=("weights", "cap", "none"), default="weights", help="配平模式（规则 5）")
     parser.add_argument("--balance-ratio", type=float, default=3.0, help="cap 模式下最大组/最小组样本比")
     parser.add_argument("--seed", type=int, default=0, help="工具随机种子（仅用于诊断）")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help="并行采集的 spawn worker 数（默认 1=单进程）；每 worker 峰值 ≈1.3GB 内存，本机建议 <=8",
+    )
+    parser.add_argument(
+        "--recycle-every",
+        type=int,
+        default=RECYCLE_EVERY_SPECS,
+        help="worker 跑满 N 条 spec 后重启进程回收内存（默认 150；0=不回收）。仅 --workers>1 生效",
+    )
     parser.add_argument("--traffic-density", type=float, default=None, help="覆盖 build_env 的 traffic_density")
     parser.add_argument(
         "--model-config", default=_MODEL_CONFIG_DEFAULT, help="读取 router.supervised_labels 的配置文件"
@@ -701,81 +1047,72 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     label_order = load_supervised_labels(args.model_config)
     interpolate_fn, kinematics_source = resolve_interpolate()
     builder = ObservationBuilder({})
-    filter_counter: Counter = Counter()
-    samples: List[Dict[str, Any]] = []
-    spec_reports: List[Dict[str, Any]] = []
-    total_candidates = 0
-    episode_id = 0
+    # 每个 spec 的采集参数（单进程直调 / worker 经 **config 传入，保证两条路径同一实现）
+    spec_config: Dict[str, Any] = {
+        "label_order": tuple(label_order),
+        "expert_kind": str(args.expert),
+        "max_steps": int(args.max_steps),
+        "on_lane_frac": float(args.on_lane_frac),
+        "on_lane_margin": float(args.on_lane_margin),
+        "roundtrip_key_mean": float(args.roundtrip_key_mean),
+        "roundtrip_key_max": float(args.roundtrip_key_max),
+        "require_dense": bool(args.require_dense),
+        "roundtrip_dense_mean": float(args.roundtrip_dense_mean),
+        "traffic_density": args.traffic_density,
+    }
+    num_workers = max(1, int(args.workers))
+    if num_workers > len(specs):
+        print(f"[collect_expert] --workers {num_workers} > specs {len(specs)}，按 specs 数收敛", flush=True)
+        num_workers = len(specs)
+    if num_workers > MAX_RECOMMENDED_WORKERS:
+        print(
+            f"[collect_expert] 警告：--workers {num_workers} > 建议上限 {MAX_RECOMMENDED_WORKERS}"
+            "（峰值 ≈1.3GB/worker，本机 15GB）",
+            flush=True,
+        )
     print(
         f"[collect_expert] specs={len(specs)} expert={args.expert} kinematics={kinematics_source} "
-        f"labels={list(label_order)}",
+        f"labels={list(label_order)}"
+        + (f" workers={num_workers} recycle_every={int(args.recycle_every)}" if num_workers > 1 else ""),
         flush=True,
     )
 
-    for index, spec in enumerate(specs, start=1):
-        env = None
-        spec_start = time.perf_counter()
-        try:
-            env = build_env(spec, traffic_density=args.traffic_density, use_render=False)
-            episode = collect_episode(
-                env,
+    records: List[Dict[str, Any]] = []
+    if num_workers > 1:
+        records = _run_workers(
+            specs, num_workers, spec_config, recycle_every=int(args.recycle_every)
+        )
+    else:
+        for index, spec in enumerate(specs, start=1):
+            record = _collect_one_spec(
                 spec,
+                spec_index=index - 1,
                 builder=builder,
-                expert_kind=args.expert,
-                max_steps=int(args.max_steps),
-            )
-            kept = extract_samples(
-                episode,
-                spec,
-                episode_id=episode_id,
-                label_order=label_order,
                 interpolate_fn=interpolate_fn,
-                on_lane_frac=float(args.on_lane_frac),
-                on_lane_margin=float(args.on_lane_margin),
-                roundtrip_key_mean=float(args.roundtrip_key_mean),
-                roundtrip_key_max=float(args.roundtrip_key_max),
-                filter_counter=filter_counter,
-                require_dense=bool(args.require_dense),
-                roundtrip_dense_mean=float(args.roundtrip_dense_mean),
+                **spec_config,
             )
-            total_candidates += len(episode["frames"])
-            samples.extend(kept)
-            spec_reports.append(
-                {
-                    "id": int(getattr(spec, "id", -1)),
-                    "seed": int(getattr(spec, "seed", -1)),
-                    "difficulty": str(getattr(spec, "difficulty", "unknown")),
-                    "geometry": str(getattr(spec, "labels", {}).get("geometry", "unknown")),
-                    "termination": episode["termination"],
-                    "env_steps": int(episode["steps"]),
-                    "candidate_policy_steps": len(episode["frames"]),
-                    "retained_steps": len(kept),
-                    "step_yield": (len(kept) / len(episode["frames"])) if episode["frames"] else 0.0,
-                }
-            )
-            print(
-                f"[collect_expert] {index}/{len(specs)} id={getattr(spec, 'id', -1)} "
-                f"term={episode['termination']} steps={episode['steps']} "
-                f"cand={len(episode['frames'])} kept={len(kept)} "
-                f"({time.perf_counter() - spec_start:.1f}s)",
-                flush=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - 单条失败不中断整批（与 validator 同口径）
-            print(f"[collect_expert] id={getattr(spec, 'id', -1)} 失败：{type(exc).__name__}: {exc}", flush=True)
-            spec_reports.append(
-                {
-                    "id": int(getattr(spec, "id", -1)),
-                    "termination": "error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        finally:
-            if env is not None:
-                try:
-                    env.close()
-                except Exception:  # noqa: BLE001
-                    pass
-        episode_id += 1
+            records.append(record)
+            if "error" in record:
+                print(f"[collect_expert] id={getattr(spec, 'id', -1)} 失败：{record['error']}", flush=True)
+            else:
+                print(
+                    f"[collect_expert] {index}/{len(specs)} id={getattr(spec, 'id', -1)} "
+                    f"term={record['report']['termination']} steps={record['steps']} "
+                    f"cand={record['candidates']} kept={len(record['kept'])} "
+                    f"({record['elapsed_s']:.1f}s)",
+                    flush=True,
+                )
+
+    samples, spec_reports, filter_counter, total_candidates, missing = _merge_records(
+        records, len(specs)
+    )
+    if missing:
+        shown = missing[:8]
+        print(
+            f"[collect_expert] 警告：{len(missing)} 条 spec 无产出（worker 崩溃）"
+            f"：{shown}{' ...' if len(missing) > len(shown) else ''}",
+            flush=True,
+        )
 
     if not samples:
         print("[collect_expert] 未保留任何样本；检查过滤阈值或专家质量", flush=True)
@@ -843,6 +1180,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         **({"cap": balance["stats"]["cap"], "min_group_count": balance["stats"]["min_group_count"]}
            if "cap" in balance["stats"] else {}),
     }
+    if missing:  # 仅并行 worker 崩溃时出现；单进程恒为空（报告可与单进程逐键对比）
+        report["missing_spec_indices"] = [int(index) for index in missing]
     paths = save_dataset(
         Path(args.out),
         samples,

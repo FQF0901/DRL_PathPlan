@@ -37,10 +37,26 @@ rollout 只存单帧当前通道；更新时用 ``buffer.build_history`` 在 SE(
 派生量 a_lon/a_lat/jerk/speed_ratio/speed_limit_mps``（见 :class:`RewardAdapter`）；
 ``reward_model`` 不可用时回退到文档化 stub（打印告警）。
 
+PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
+--------------------------------------------------
+每个 ``update()`` 的指标除 PPO 损失/KL/clip/entropy/grad_norm 外还包含：
+
+- ``reward/<term>`` + ``reward/dense|terminating|carl_multiplier|carl_penalty|terminal|total``：
+  rollout 内逐步奖励分解（:class:`RewardStatistics`）；
+- ``advantage/{mean,std,min,max}``（归一化前）、``returns/mean``、
+  ``value/{mean,std,explained_var}``（``1 − Var(ret−V)/Var(ret)``）；
+- ``probe/*``：**固定探针批**（``train.probe_batch``，默认 :data:`DEFAULT_PROBE_BATCH`，
+  加载一次）上的 ``action_mu[:,0]``/``logstd`` 均值-方差与分速度档 ds 均值；
+  任一 speed<2 m/s 档 ds<1.5 m → ``probe/low_speed_alert=1`` + 打印告警（低速吸引子）。
+
+``pipeline.monitoring`` 递归展平嵌套指标 → CSV + tensorboard（``train/...``）。
+
 预算与纪律
 ----------
 - γ=0.99、λ=0.95、clip=0.2、多 epoch × minibatch、value/entropy、梯度裁剪；
 - 阶段 C：``kl_anchor_coef``（冻结参考模型）+ ``bc_anchor_coef``（专家动作）+ primary lr ×0.1；
+  critic warmup（``train.critic_warmup_updates`` / CLI ``--critic-warmup-updates``）：前 N 个
+  update 只拟合 value 头（策略/主干冻结，指标 ``critic_warmup=true``），之后恢复常规 PPO；
 - router 辅助损失 = 8 标签 BCE（固定顺序 = ``config/model.yaml``），另输出负载均衡/熵监控。
 """
 
@@ -54,6 +70,7 @@ import math
 import os
 import sys
 import time
+from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -81,6 +98,8 @@ __all__ = [
     "BCDataset",
     "RouterMonitor",
     "RewardAdapter",
+    "RewardStatistics",
+    "DEFAULT_PROBE_BATCH",
     "LocalEnvPool",
     "VectorPoolAdapter",
     "build_pool",
@@ -121,6 +140,26 @@ _POLICY_DT = 0.5
 _PHYSICS_HZ = 10
 NON_OBS_KEYS = ("pose",)
 _HIST_SUFFIX = "_hist"
+
+# --------------------------------------------------------------------------- #
+# PPO 诊断（无行为改变；每 update 输出指标 → pipeline.monitoring）
+# --------------------------------------------------------------------------- #
+
+#: 固定探针批默认路径（BC 数据集目录/npz）：动作 ds/logstd 漂移 + 低速吸引子检测。
+#: 配置覆盖：``config/train.yaml::train.probe_batch``（null = 关闭探针）。
+DEFAULT_PROBE_BATCH = "runs/bc_expert_full"
+#: 探针批大小（帧；固定不随 update 变化，保证序列可比）。
+DEFAULT_PROBE_SIZE = 256
+#: 探针分速度档（m/s）：0–1 / 1–2 / 2–4 / 4–8 / >8。
+_PROBE_SPEED_BINS: Tuple[Tuple[float, float], ...] = (
+    (0.0, 1.0),
+    (1.0, 2.0),
+    (2.0, 4.0),
+    (4.0, 8.0),
+    (8.0, float("inf")),
+)
+#: 低速吸引子阈值：speed < 2 m/s 档的 ds 均值低于该值 → 告警（打印 + 指标字段）。
+_PROBE_LOW_SPEED_DS_THRESHOLD = 1.5
 
 
 def load_supervised_labels(path: str = _MODEL_CONFIG_DEFAULT) -> Tuple[str, ...]:
@@ -390,6 +429,20 @@ def build_optimizer(model: "nn.Module", lr: float, primary_lr_scale: float = 1.0
     return torch.optim.Adam(groups, lr=float(lr))
 
 
+def _value_parameter_names(model: "nn.Module") -> Tuple[str, ...]:
+    """critic warmup 的可训练参数名：价值头（真实模型 ``value.*``；smoke stub ``head_value.*``）。
+
+    warmup 只解冻这些参数，其余（policy 头 + 共享主干/encoders/MoE/WM）全部冻结——
+    因此 value 梯度不会流回共享主干，warmup 期间策略输出逐位不变（见
+    :meth:`PPOTrainer.update`）。
+    """
+    named = list(model.named_parameters())
+    names = tuple(name for name, _ in named if name.lower().startswith("value."))
+    if not names:
+        names = tuple(name for name, _ in named if "value" in name.lower())
+    return names
+
+
 # --------------------------------------------------------------------------- #
 # 配置
 # --------------------------------------------------------------------------- #
@@ -416,6 +469,8 @@ class PPOConfig:
     bc_anchor_coef: float = 0.0
     primary_lr_scale: float = 1.0
     target_kl: Optional[float] = None
+    #: 前 N 个 update 只拟合 critic（value 头），策略/共享主干冻结（0 = 关闭，行为同旧版）。
+    critic_warmup_updates: int = 0
     seed: int = 0
     device: str = "auto"  # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
 
@@ -598,6 +653,12 @@ class RewardAdapter:
             "terminal_key": result.terminal_key,
             "components": dict(result.components),
             "terminal_value": float(result.terminal_value),
+            # 诊断用派生量（RewardStatistics 消费；不影响奖励数值/训练行为）
+            "dense_sum": float(result.dense_sum),
+            "terminating_sum": float(result.terminating_sum),
+            "carl_multiplier": float(result.carl_multiplier),
+            "carl_penalty": float(result.carl_penalty),
+            "shaping_decay": float(result.shaping_decay),
         }
         if bool(result.done) and not done:
             self.early_terminations += 1
@@ -638,6 +699,93 @@ def build_reward_adapter(
         logger(f"[reward] reward_model 不可用（{type(exc).__name__}: {exc}）→ 使用文档化 stub 奖励")
     fallback = None if factory is not None else make_stub_reward()
     return RewardAdapter(factory=factory, fallback=fallback, dt=dt), source
+
+
+class RewardStatistics:
+    """一次 rollout 内逐步奖励分解的窗口均值（PPO 诊断指标，不影响训练）。
+
+    ``RewardAdapter.step`` 的 meta（``components`` + dense/terminating/carl/terminal）+ 实际
+    逐步奖励 → ``{"reward": {term: 均值, ..., "dense": 均值, "terminal": 均值, ..., "steps": N}}``。
+    """
+
+    _PARTS = (
+        ("dense", "dense_sum"),
+        ("terminating", "terminating_sum"),
+        ("carl_multiplier", "carl_multiplier"),
+        ("carl_penalty", "carl_penalty"),
+        ("terminal", "terminal_value"),
+    )
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._steps = 0
+        self._terms: Dict[str, float] = {}
+        self._parts: Dict[str, float] = {}
+
+    def update(self, meta: Mapping[str, Any], reward: float) -> None:
+        """累计一步：逐项加权贡献 + 派生部分（stub 路径 meta 为空时只记 total）。"""
+        self._steps += 1
+        components = meta.get("components") if isinstance(meta, _MappingABC) else None
+        if isinstance(components, _MappingABC):
+            for name, value in components.items():
+                try:
+                    self._terms[str(name)] = self._terms.get(str(name), 0.0) + float(value)
+                except (TypeError, ValueError):
+                    continue
+        for out_key, meta_key in self._PARTS:
+            if not isinstance(meta, _MappingABC) or meta_key not in meta:
+                continue  # stub 路径 meta 为空 → 只记 total，不虚构 0 值部分
+            try:
+                self._parts[out_key] = self._parts.get(out_key, 0.0) + float(meta[meta_key])
+            except (TypeError, ValueError):
+                continue
+        self._parts["total"] = self._parts.get("total", 0.0) + float(reward)
+
+    def summary(self) -> Dict[str, Dict[str, float]]:
+        if self._steps <= 0:
+            return {}
+        steps = float(self._steps)
+        payload = {name: value / steps for name, value in self._terms.items()}
+        payload.update({name: value / steps for name, value in self._parts.items()})
+        payload["steps"] = steps
+        return {"reward": payload}
+
+
+def _probe_speed_bin_key(low: float, high: float) -> str:
+    """速度档标签：``0-1`` / ``1-2`` / ``2-4`` / ``4-8`` / ``8-inf``（标签用 ``_`` 分隔）。"""
+    left = f"{low:g}"
+    right = "inf" if math.isinf(high) else f"{high:g}"
+    return f"{left}_{right}"
+
+
+def _advantage_stats(
+    advantages: np.ndarray, returns: np.ndarray, values: np.ndarray
+) -> Dict[str, Any]:
+    """原始（未归一化）优势/回报/价值统计 + 价值解释方差 ``1 - Var(ret-V)/Var(ret)``。"""
+    if advantages.size <= 0:
+        return {}
+    returns_variance = float(np.var(returns))
+    explained = (
+        1.0 - float(np.var(returns - values)) / returns_variance
+        if returns_variance > 1e-12
+        else 0.0
+    )
+    return {
+        "advantage": {
+            "mean": float(advantages.mean()),
+            "std": float(advantages.std()),
+            "min": float(advantages.min()),
+            "max": float(advantages.max()),
+        },
+        "returns": {"mean": float(returns.mean()), "std": float(returns.std())},
+        "value": {
+            "mean": float(values.mean()),
+            "std": float(values.std()),
+            "explained_var": float(explained),
+        },
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1544,6 +1692,8 @@ class PPOTrainer:
         reward_adapter: Optional[RewardAdapter] = None,
         ref_model: Optional["nn.Module"] = None,
         bc_dataset: Optional[BCDataset] = None,
+        probe_batch: Optional[str] = None,
+        probe_size: int = DEFAULT_PROBE_SIZE,
         logger: Callable[[str], None] = print,
         dt: float = _POLICY_DT,
     ):
@@ -1581,9 +1731,16 @@ class PPOTrainer:
         self._router_labels: Optional[np.ndarray] = None
         self._has_router_labels: Optional[np.ndarray] = None
         self._total_steps = 0
+        self._updates_done = 0
+        self._value_param_names = _value_parameter_names(model)
         self._last_metrics: Dict[str, Any] = {}
         self._last_collect_timing: Dict[str, Any] = {}
         self._pose_warned = False
+        # 诊断：逐步奖励分解窗口 + 固定探针批（动作漂移 / 低速吸引子）
+        self._reward_stats = RewardStatistics()
+        self._probe_obs: Optional[Dict[str, "torch.Tensor"]] = None
+        self._probe_speed: Optional[np.ndarray] = None
+        self._setup_probe(probe_batch, probe_size)
 
     # ---------------------------------------------------------------- 工具
     def adopt_obs(self, obs_list: Sequence[Dict[str, np.ndarray]]) -> None:
@@ -1594,6 +1751,88 @@ class PPOTrainer:
         self._step_in_episode = [0] * self._num_envs
         self._pose_est = [None] * self._num_envs
         self.reward_adapter.reset_all()
+
+    # ---------------------------------------------------------------- 探针批
+    def _setup_probe(self, probe_batch: Optional[str], probe_size: int) -> None:
+        """加载**固定**探针批（一次），供每个 update 检测动作分布漂移/低速吸引子。
+
+        失败/路径缺失时静默关闭（只打日志），绝不影响训练；观测/ego 速度在加载时固化，
+        保证跨 update 可比（唯一变量 = 模型权重）。
+        """
+        if not probe_batch:
+            return
+        target = Path(str(probe_batch))
+        if not target.exists():
+            self.logger(f"[probe] 探针批不存在：{target} → 动作漂移/低速吸引子探针关闭")
+            return
+        try:
+            dataset = BCDataset.load(str(target))
+            size = max(1, min(int(probe_size), int(dataset.count)))
+            if size >= int(dataset.count):
+                indices = np.arange(int(dataset.count), dtype=np.int64)
+            else:
+                # 均匀跨全数据集抽样（固定）：覆盖各速度档/场景，避免前缀批在低速档为空
+                indices = np.linspace(0, int(dataset.count) - 1, num=size, dtype=np.int64)
+            obs = dataset.build_obs_batch(indices)
+            ego = np.asarray(dataset.arrays["ego"], dtype=np.float64)
+            speed = ego[indices, 0, 0] if ego.ndim == 3 else ego[indices, 0]
+            self._probe_obs = _to_device_obs(obs, self.device)
+            self._probe_speed = np.asarray(speed, dtype=np.float64).reshape(-1)
+            self.logger(f"[probe] 固定探针批已加载：{target}（{size} 帧，device={self.device}）")
+        except Exception as exc:  # noqa: BLE001 - 探针是诊断，绝不阻塞训练
+            self._probe_obs = None
+            self._probe_speed = None
+            self.logger(f"[probe] 探针批加载失败（{type(exc).__name__}: {exc}）→ 探针关闭")
+
+    @torch.no_grad() if torch is not None else (lambda fn: fn)
+    def _probe_metrics(self) -> Dict[str, Any]:
+        """固定批 cheap-path 前向：``action_mu[:,0]``/``logstd`` 均值-方差 + 分速度档 ds。
+
+        ``probe/low_speed_alert=1`` ⇔ 任一 speed<2 m/s 档的 ds 均值 < 1.5 m（低速吸引子），
+        同时打印一行告警。返回 ``{"probe": {...}}``（无探针时 ``available=0``）。
+        """
+        if self._probe_obs is None or self._probe_speed is None:
+            return {"probe": {"available": 0.0}}
+        was_training = bool(self.model.training)
+        self.model.eval()
+        try:
+            out = self.model(self._probe_obs, rollout=False, world_model=False)
+            mu = out["action_mu"].detach().double().cpu().numpy()
+            logstd = out["action_logstd"].detach().double().cpu().numpy()
+        finally:
+            self.model.train(was_training)
+        ds = np.asarray(mu[:, 0], dtype=np.float64)
+        speed = self._probe_speed
+        stats: Dict[str, float] = {
+            "available": 1.0,
+            "n": float(ds.shape[0]),
+            "action_mu_ds_mean": float(ds.mean()),
+            "action_mu_ds_std": float(ds.std()),
+            "action_logstd_mean": float(logstd.mean()),
+            "action_logstd_std": float(logstd.std()),
+        }
+        alert = 0.0
+        low_speed_reports: List[str] = []
+        for low, high in _PROBE_SPEED_BINS:
+            key = _probe_speed_bin_key(low, high)
+            mask = (speed >= low) & (speed < high)
+            count = int(mask.sum())
+            stats[f"n_speed_{key}"] = float(count)
+            if count <= 0:
+                continue
+            mean_ds = float(ds[mask].mean())
+            stats[f"ds_mean_speed_{key}"] = mean_ds
+            if high <= 2.0:
+                low_speed_reports.append(f"{key}m/s→ds={mean_ds:.2f}m")
+                if mean_ds < _PROBE_LOW_SPEED_DS_THRESHOLD:
+                    alert = 1.0
+        stats["low_speed_alert"] = alert
+        if alert:
+            self.logger(
+                f"[probe] 低速吸引子告警：ds 均值 < {_PROBE_LOW_SPEED_DS_THRESHOLD:.1f} m"
+                f"（speed<2 m/s：{', '.join(low_speed_reports)}）"
+            )
+        return {"probe": stats}
 
     def _to_tensor_obs(self, obs_list: Sequence[Mapping[str, np.ndarray]]) -> Dict["torch.Tensor"]:
         keys = [key for key in obs_list[0] if key not in NON_OBS_KEYS]
@@ -1648,6 +1887,7 @@ class PPOTrainer:
         assert self._obs_list is not None
         self._num_envs = int(len(self._obs_list))
         horizon = int(horizon)
+        self._reward_stats.reset()
         # 每个 env 的逐帧记录（env-major 写入 buffer，见模块 docstring）
         pending: List[List[Dict[str, Any]]] = [[{} for _ in range(horizon)] for _ in range(self._num_envs)]
         self.model.eval()
@@ -1686,7 +1926,10 @@ class PPOTrainer:
                 truncated = bool(record.get("truncated", False))
                 cut = bool(record.get("cut", False))
                 done = terminated or truncated or cut
-                reward, _ = self._reward(env_index, info, obs_current, done, float(record.get("reward", 0.0) or 0.0))
+                reward, reward_meta = self._reward(
+                    env_index, info, obs_current, done, float(record.get("reward", 0.0) or 0.0)
+                )
+                self._reward_stats.update(reward_meta, reward)
                 pose = self._frame_pose(env_index, obs_current)
                 # router_labels：优先 record 级（VectorEnvPool 新契约），回退 info（LocalEnvPool/旧接口）
                 labels = record.get("router_labels") if isinstance(record, dict) else None
@@ -1808,13 +2051,25 @@ class PPOTrainer:
         return squeeze_single_slot(batch)
 
     def update(self) -> Dict[str, Any]:
-        """PPO 更新（clip/value/entropy/router/KL/BC 锚）；返回聚合指标。"""
+        """PPO 更新（clip/value/entropy/router/KL/BC 锚）；返回聚合指标。
+
+        ``critic_warmup_updates``（默认 0）：前 N 个 update 只做 value-only 优化——
+        仅 value 头可训练（其余参数 ``requires_grad`` 临时冻结并在 update 结束时恢复），
+        损失 = ``value_loss``（MSE）+ 梯度裁剪，无 policy/entropy/router/KL/BC 项，
+        指标不含 ``policy_loss``；指标 ``critic_warmup=true/false`` 标记当前 update 口径。
+        """
         if self.buffer is None or self._valid_mask is None:
             raise RuntimeError("update() 之前必须先 collect_rollout()")
         buffer = self.buffer
         valid_indices = np.where(self._valid_mask)[0]
         advantages_all, returns_all = buffer.compute_gae(
             last_value=0.0, gamma=self.config.gamma, lam=self.config.lam
+        )
+        # 诊断统计：原始（归一化前）优势 + 回报/价值解释方差（进入 metrics → monitor）
+        advantage_stats = _advantage_stats(
+            np.asarray(advantages_all[valid_indices], dtype=np.float64),
+            np.asarray(returns_all[valid_indices], dtype=np.float64),
+            np.asarray(buffer.value[valid_indices], dtype=np.float64),
         )
         advantages = advantages_all[valid_indices].astype(np.float64)
         returns = returns_all[valid_indices].astype(np.float32)
@@ -1827,96 +2082,126 @@ class PPOTrainer:
         assert self._router_labels is not None and self._has_router_labels is not None
         labels_t = torch.as_tensor(self._router_labels[valid_indices], dtype=torch.float32, device=self.device)
         has_labels_t = torch.as_tensor(self._has_router_labels[valid_indices], dtype=torch.bool, device=self.device)
+        # critic warmup：前 N 个 update 只拟合 value 头（策略/主干冻结，value 梯度不回流共享主干）
+        warmup = self._updates_done < max(0, int(self.config.critic_warmup_updates))
+        saved_requires: Optional[List[Tuple["torch.Tensor", bool]]] = None
+        if warmup:
+            value_names = set(self._value_param_names)
+            if not value_names:
+                raise RuntimeError("critic warmup 需要可识别的 value 头参数（参数名需含 'value'）")
+            saved_requires = [(parameter, bool(parameter.requires_grad)) for parameter in self.model.parameters()]
+            for name, parameter in self.model.named_parameters():
+                parameter.requires_grad_(name in value_names)
+            self.logger(
+                f"[trainer] critic warmup {self._updates_done + 1}/{int(self.config.critic_warmup_updates)}："
+                f"仅 value 头可训练（{len(value_names)} 个参数），策略/主干冻结"
+            )
         self.model.train()
         self.monitor.reset()
         aggregates: Dict[str, List[float]] = {}
         batches = 0
         total = int(valid_indices.shape[0])
         t_data = t_forward = t_backward = 0.0
-        for epoch in range(max(1, int(self.config.epochs))):
-            rng = np.random.default_rng(self.config.seed + 1000 * epoch)
-            order = rng.permutation(total)
-            for start in range(0, total, max(1, int(self.config.minibatch_size))):
-                selection = order[start : start + max(1, int(self.config.minibatch_size))]
-                t0 = time.perf_counter()
-                obs_batch = _to_device_obs(self._assemble_obs_batch(valid_indices[selection]), self.device)
-                t_data += time.perf_counter() - t0
-                t1 = time.perf_counter()
-                # PPO 只需要 heads/router/logstd/value：走 cheap path（不跑 B1 rollout 与 WM 多步）
-                out = self.model(obs_batch, rollout=False, world_model=False)
-                mu = out["action_mu"]
-                logstd = out["action_logstd"]
-                value = out["value"].reshape(-1)
-                new_logprob = logprob_from_action(
-                    mu, logstd, actions_t[selection], self.low, self.high, mode=self.config.action_mode
-                )
-                old_logprob = old_logprobs_t[selection]
-                ratio = torch.exp(new_logprob - old_logprob)
-                adv = advantages_t[selection]
-                policy_loss = -torch.min(
-                    ratio * adv, torch.clamp(ratio, 1.0 - self.config.clip, 1.0 + self.config.clip) * adv
-                ).mean()
-                value_loss = F.mse_loss(value, returns_t[selection])
-                entropy = gaussian_entropy(logstd).mean()
-                loss = policy_loss + self.config.vf_coef * value_loss - self.config.ent_coef * entropy
-                router_loss = torch.zeros((), device=self.device)
-                if self.config.router_coef > 0.0 and out.get("router_logits") is not None and bool(has_labels_t[selection].any()):
-                    mask = has_labels_t[selection]
-                    router_loss = self.config.router_coef * F.binary_cross_entropy_with_logits(
-                        out["router_logits"][mask], labels_t[selection][mask]
-                    )
-                    loss = loss + router_loss
-                kl_anchor = torch.zeros((), device=self.device)
-                if self.ref_model is not None and self.config.kl_anchor_coef > 0.0:
-                    with torch.no_grad():
-                        ref_out = self.ref_model(obs_batch, rollout=False, world_model=False)
-                    with torch.no_grad():
-                        ref_raw_mu = raw_mu_from_action(
-                            ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
+        try:
+            for epoch in range(max(1, int(self.config.epochs))):
+                rng = np.random.default_rng(self.config.seed + 1000 * epoch)
+                order = rng.permutation(total)
+                for start in range(0, total, max(1, int(self.config.minibatch_size))):
+                    selection = order[start : start + max(1, int(self.config.minibatch_size))]
+                    t0 = time.perf_counter()
+                    obs_batch = _to_device_obs(self._assemble_obs_batch(valid_indices[selection]), self.device)
+                    t_data += time.perf_counter() - t0
+                    t1 = time.perf_counter()
+                    # PPO 只需要 heads/router/logstd/value：走 cheap path（不跑 B1 rollout 与 WM 多步）
+                    out = self.model(obs_batch, rollout=False, world_model=False)
+                    value = out["value"].reshape(-1)
+                    if warmup:
+                        # value-only：损失 = critic MSE（无 policy/entropy/router/KL/BC 项）
+                        value_loss = F.mse_loss(value, returns_t[selection])
+                        loss = value_loss
+                    else:
+                        mu = out["action_mu"]
+                        logstd = out["action_logstd"]
+                        new_logprob = logprob_from_action(
+                            mu, logstd, actions_t[selection], self.low, self.high, mode=self.config.action_mode
                         )
-                        raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
-                    kl_anchor = self.config.kl_anchor_coef * gaussian_kl(
-                        raw_mu, logstd, ref_raw_mu, ref_out["action_logstd"]
-                    ).mean()
-                    loss = loss + kl_anchor
-                bc_anchor = torch.zeros((), device=self.device)
-                if self.bc_dataset is not None and self.config.bc_anchor_coef > 0.0:
-                    expert_idx = self.rng.integers(0, self.bc_dataset.count, size=min(len(selection), 64))
-                    expert_action = torch.as_tensor(
-                        self.bc_dataset.arrays["action"][expert_idx, 0], dtype=torch.float32, device=self.device
-                    )
-                    bc_anchor = self.config.bc_anchor_coef * F.l1_loss(mu, expert_action)
-                    loss = loss + bc_anchor
-                t_forward += time.perf_counter() - t1
-                t2 = time.perf_counter()
-                self.optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm))
-                self.optimizer.step()
-                t_backward += time.perf_counter() - t2
-                with torch.no_grad():
-                    approx_kl = float(((ratio - 1.0) - (new_logprob - old_logprob)).mean())
-                    clipfrac = float(((ratio - 1.0).abs() > self.config.clip).float().mean())
-                self.monitor.update(out)
-                for key, val in {
-                    "policy_loss": policy_loss,
-                    "value_loss": value_loss,
-                    "entropy": entropy,
-                    "total_loss": loss,
-                    "router_loss": router_loss,
-                    "kl_anchor": kl_anchor,
-                    "bc_anchor": bc_anchor,
-                }.items():
-                    aggregates.setdefault(key, []).append(float(val.detach()))
-                aggregates.setdefault("approx_kl", []).append(approx_kl)
-                aggregates.setdefault("clipfrac", []).append(clipfrac)
-                aggregates.setdefault("grad_norm", []).append(grad_norm)
-                batches += 1
-            if self.config.target_kl is not None and aggregates.get("approx_kl"):
-                recent = aggregates["approx_kl"][-max(1, batches // max(1, self.config.epochs)) :]
-                if float(np.mean(recent)) > 1.5 * float(self.config.target_kl):
-                    break
+                        old_logprob = old_logprobs_t[selection]
+                        ratio = torch.exp(new_logprob - old_logprob)
+                        adv = advantages_t[selection]
+                        policy_loss = -torch.min(
+                            ratio * adv, torch.clamp(ratio, 1.0 - self.config.clip, 1.0 + self.config.clip) * adv
+                        ).mean()
+                        value_loss = F.mse_loss(value, returns_t[selection])
+                        entropy = gaussian_entropy(logstd).mean()
+                        loss = policy_loss + self.config.vf_coef * value_loss - self.config.ent_coef * entropy
+                        router_loss = torch.zeros((), device=self.device)
+                        if self.config.router_coef > 0.0 and out.get("router_logits") is not None and bool(has_labels_t[selection].any()):
+                            mask = has_labels_t[selection]
+                            router_loss = self.config.router_coef * F.binary_cross_entropy_with_logits(
+                                out["router_logits"][mask], labels_t[selection][mask]
+                            )
+                            loss = loss + router_loss
+                        kl_anchor = torch.zeros((), device=self.device)
+                        if self.ref_model is not None and self.config.kl_anchor_coef > 0.0:
+                            with torch.no_grad():
+                                ref_out = self.ref_model(obs_batch, rollout=False, world_model=False)
+                            with torch.no_grad():
+                                ref_raw_mu = raw_mu_from_action(
+                                    ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
+                                )
+                                raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
+                            kl_anchor = self.config.kl_anchor_coef * gaussian_kl(
+                                raw_mu, logstd, ref_raw_mu, ref_out["action_logstd"]
+                            ).mean()
+                            loss = loss + kl_anchor
+                        bc_anchor = torch.zeros((), device=self.device)
+                        if self.bc_dataset is not None and self.config.bc_anchor_coef > 0.0:
+                            expert_idx = self.rng.integers(0, self.bc_dataset.count, size=min(len(selection), 64))
+                            expert_action = torch.as_tensor(
+                                self.bc_dataset.arrays["action"][expert_idx, 0], dtype=torch.float32, device=self.device
+                            )
+                            bc_anchor = self.config.bc_anchor_coef * F.l1_loss(mu, expert_action)
+                            loss = loss + bc_anchor
+                    t_forward += time.perf_counter() - t1
+                    t2 = time.perf_counter()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm))
+                    self.optimizer.step()
+                    t_backward += time.perf_counter() - t2
+                    self.monitor.update(out)
+                    if warmup:
+                        aggregates.setdefault("value_loss", []).append(float(value_loss.detach()))
+                        aggregates.setdefault("total_loss", []).append(float(loss.detach()))
+                        aggregates.setdefault("grad_norm", []).append(grad_norm)
+                    else:
+                        with torch.no_grad():
+                            approx_kl = float(((ratio - 1.0) - (new_logprob - old_logprob)).mean())
+                            clipfrac = float(((ratio - 1.0).abs() > self.config.clip).float().mean())
+                        for key, val in {
+                            "policy_loss": policy_loss,
+                            "value_loss": value_loss,
+                            "entropy": entropy,
+                            "total_loss": loss,
+                            "router_loss": router_loss,
+                            "kl_anchor": kl_anchor,
+                            "bc_anchor": bc_anchor,
+                        }.items():
+                            aggregates.setdefault(key, []).append(float(val.detach()))
+                        aggregates.setdefault("approx_kl", []).append(approx_kl)
+                        aggregates.setdefault("clipfrac", []).append(clipfrac)
+                        aggregates.setdefault("grad_norm", []).append(grad_norm)
+                    batches += 1
+                if not warmup and self.config.target_kl is not None and aggregates.get("approx_kl"):
+                    recent = aggregates["approx_kl"][-max(1, batches // max(1, self.config.epochs)) :]
+                    if float(np.mean(recent)) > 1.5 * float(self.config.target_kl):
+                        break
+        finally:
+            if saved_requires is not None:
+                for parameter, flag in saved_requires:
+                    parameter.requires_grad_(flag)
         metrics = {key: float(np.mean(values)) for key, values in aggregates.items()}
+        metrics["critic_warmup"] = bool(warmup)
         metrics["batches"] = batches
         metrics["total_steps"] = self._total_steps
         metrics["update_timing_s"] = {
@@ -1925,8 +2210,12 @@ class PPOTrainer:
             "backward_s": float(t_backward),
         }
         metrics["reward_early_terminations"] = int(self.reward_adapter.early_terminations)
+        metrics.update(self._reward_stats.summary())
+        metrics.update(advantage_stats)
+        metrics.update(self._probe_metrics())
         metrics.update(self.monitor.summary())
         self._last_metrics = metrics
+        self._updates_done += 1
         return metrics
 
     def train(self, updates: int, horizon: int) -> List[Dict[str, Any]]:
@@ -2251,7 +2540,9 @@ def smoke_main(argv: Optional[Sequence[str]] = None) -> int:
             seed=int(args.seed),
             device=str(device),
         )
-        trainer = PPOTrainer(model, pool, config, reward_adapter=reward_adapter)
+        probe_cfg = train_cfg.get("probe_batch", DEFAULT_PROBE_BATCH)
+        probe_batch = None if probe_cfg is None else str(probe_cfg)
+        trainer = PPOTrainer(model, pool, config, reward_adapter=reward_adapter, probe_batch=probe_batch)
         trainer.adopt_obs([record["obs"] for record in initial])
         use_cuda = str(device).startswith("cuda") and torch is not None and torch.cuda.is_available()
         if use_cuda:

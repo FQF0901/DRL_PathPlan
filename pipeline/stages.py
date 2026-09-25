@@ -13,7 +13,8 @@
   （``traj_xy`` vs 专家 ``traj6``，**WM 冻结且 rollout 内输出 detach**，因果链有效）+ router BCE。
 - **C = PPO RL**：KL 锚 = **阶段 B 策略快照**（``--ckpt``，冻结参考模型），系数**线性衰减**
   （默认 0.05 → 0）；primary lr ×0.1；world model 初始冻结、``--wm-freeze-updates`` 后解冻
-  （PPO 损失本身不消费 WM 输出，解冻 = 参数重新进入优化器，供后续 WM 辅助损失使用）。
+  （PPO 损失本身不消费 WM 输出，解冻 = 参数重新进入优化器，供后续 WM 辅助损失使用）；
+  critic warmup ``--critic-warmup-updates N`` 前 N 个 update 只拟合 value 头（策略不动）。
 
 环境约束（§8.1）
 ----------------
@@ -51,6 +52,7 @@ if _PROJECT_ROOT not in sys.path:
 from pipeline.trainer import (  # noqa: E402
     BCConfig,
     BCDataset,
+    DEFAULT_PROBE_BATCH,
     PPOConfig,
     PPOTrainer,
     apply_freeze_prefixes,
@@ -740,7 +742,11 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 # --------------------------------------------------------------------------- #
 
 def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ primary lr ×0.1 + WM 冻结/解冻。"""
+    """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ primary lr ×0.1 + WM 冻结/解冻。
+
+    ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
+    update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
+    """
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     specs = _resolve_specs(args, config)
@@ -748,6 +754,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         raise SystemExit("[stages] 阶段 C 没有可用 spec")
     apply_thread_limits(workers=1, config=config)
     train_cfg = dict(config.get("train", {}) or {})
+    # 固定探针批（诊断）：train.probe_batch；缺失 → 默认 runs/bc_expert_full，显式 null → 关闭
+    probe_cfg = train_cfg.get("probe_batch", DEFAULT_PROBE_BATCH)
+    probe_batch = None if probe_cfg is None else str(probe_cfg)
     device = resolve_device(args.device, config)
     model = build_model(_load_yaml(args.model_config))
     ckpt = args.ckpt or "runs/train/stage_b/final.pt"
@@ -767,6 +776,12 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     kl_initial = float(args.kl_anchor_coef)
     kl_final = float(args.kl_anchor_final_coef)
     kl_decay = bool(args.kl_anchor_decay)
+    # critic warmup：前 N 个 update 只拟合 value 头（CLI 优先，否则 config train.critic_warmup_updates）
+    critic_warmup_cfg = train_cfg.get("critic_warmup_updates", 0)
+    critic_warmup_updates = int(
+        args.critic_warmup_updates if args.critic_warmup_updates is not None else (critic_warmup_cfg or 0)
+    )
+    critic_warmup_updates = max(0, critic_warmup_updates)
     # WM 初始冻结：--wm-freeze-updates（None = updates//4）；解冻 = 参数重新进入优化器
     wm_freeze_updates = args.wm_freeze_updates
     if wm_freeze_updates is None:
@@ -795,7 +810,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "primary_lr_scale": primary_lr_scale,
         "kl_anchor": {"initial": kl_initial, "final": kl_final, "decay": kl_decay, "source": str(ckpt)},
         "wm_freeze_updates": wm_freeze_updates,
+        "critic_warmup_updates": critic_warmup_updates,
         "device": device,
+        "probe_batch": probe_batch,
     }
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
     try:
@@ -808,6 +825,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             router_coef=router_coef,
             bc_anchor_coef=float(args.bc_anchor_coef) if bc_dataset is not None else 0.0,
             primary_lr_scale=primary_lr_scale,
+            critic_warmup_updates=critic_warmup_updates,
             seed=int(args.seed),
             device=device,
         )
@@ -818,10 +836,17 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             reward_adapter=reward_adapter,
             ref_model=ref_model,
             bc_dataset=bc_dataset,
+            probe_batch=probe_batch,
             logger=print,
         )
         initial = pool.reset()
         trainer.adopt_obs([record["obs"] for record in initial])
+        if critic_warmup_updates > 0:
+            print(
+                f"[stageC] critic warmup：前 {critic_warmup_updates} 个 update 只拟合 value 头"
+                "（策略/主干冻结，无 policy 更新）",
+                flush=True,
+            )
         history: List[Dict[str, Any]] = []
         kl_schedule: List[float] = []
         for update in range(updates):
@@ -854,6 +879,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 f"[stageC] update {update + 1}/{updates} loss={update_metrics['total_loss']:+.3f} "
                 f"kl_anchor={update_metrics.get('kl_anchor', 0.0):.4f} coef={update_metrics['kl_anchor_coef']:.4f} "
                 f"router={update_metrics.get('router_loss', 0.0):.4f} "
+                f"critic_warmup={int(bool(update_metrics.get('critic_warmup', False)))} "
                 f"steps/s={int(args.rollout_steps) * int(getattr(pool, 'num_envs', 1)) / max(time.perf_counter() - update_started, 1e-9):.1f}",
                 flush=True,
             )
@@ -925,6 +951,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C KL 锚系数线性衰减到末值（默认开）")
     parser.add_argument("--wm-freeze-updates", type=int, default=None,
                         help="阶段 C 前 N 个 update 冻结 WM（默认 updates//4；0=不冻结）")
+    parser.add_argument("--critic-warmup-updates", type=int, default=None,
+                        help="阶段 C 前 N 个 update 只拟合 critic（value 头；策略/主干冻结）。"
+                             "默认取 config/train.yaml train.critic_warmup_updates=0（0=关闭）")
     parser.add_argument("--bc-anchor", action="store_true", help="阶段 C 启用 BC 动作锚（默认关）")
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
     # ---- 通用 ----

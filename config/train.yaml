@@ -12,6 +12,8 @@ train:                            # 运行设备 / 线程 / batch（2026-09-25 G
     minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU）
   bc:
     batch_size: 256               # BC 轨迹损失 batch（rollout path，显存受控）
+  probe_batch: runs/bc_expert_full  # 固定探针批（动作 ds/logstd 漂移 + 低速吸引子；null=关闭，缺失=默认此路径）
+  critic_warmup_updates: 0        # 阶段 C 前 N 个 update 只拟合 critic（value 头；策略/主干冻结；CLI --critic-warmup-updates）
 
 data:
   spec: env/specs/scenarios_train.json  # 训练场景 spec

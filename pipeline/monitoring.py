@@ -11,7 +11,10 @@
    ``primary_output``，统计 **有效专家数 N=Σw**、每 expert 平均权重、输出 L2 范数、
    token 数（w > 阈值）、**primary 漂移**（``‖Σ w_e·expert_e‖ / (‖primary‖+ε)``，
    即 MoE 相对纯 primary 输出的残差占比）；
-4. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
+4. **PPO 诊断序列**（训练侧已写成嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
+   ``log_scalars`` 递归展平嵌套 Mapping → 标签 ``a/b/c``，因此奖励分解 / 优势-价值统计 /
+   固定探针动作漂移全部自动进 CSV + tensorboard；
+5. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
 
 设计
 ----
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import csv
 import math
+from collections.abc import Mapping as _MappingABC
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -79,6 +83,22 @@ def _finite(value: Any) -> Optional[float]:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, Any]:
+    """递归展平嵌套 Mapping：``{"a": {"b": 1}}`` → ``{"a/b": 1}``。
+
+    非 Mapping 值（标量/列表/数组）原样返回，由 :func:`_finite` 过滤；这样训练侧可以
+    用嵌套 dict 组织指标（奖励分解 / 优势统计 / 探针），无需手写扁平标签。
+    """
+    flat: Dict[str, Any] = {}
+    for tag, value in values.items():
+        name = f"{prefix}{tag}"
+        if isinstance(value, _MappingABC):
+            flat.update(_flatten_scalars(value, prefix=f"{name}/"))
+        else:
+            flat[name] = value
+    return flat
 
 
 class SceneLabelStatistics:
@@ -276,7 +296,8 @@ class TrainingMonitor:
             self._writer.add_scalar(str(tag), number, global_step=0 if step is None else int(step))
 
     def log_scalars(self, values: Mapping[str, Any], step: Optional[int] = None) -> None:
-        for tag, value in values.items():
+        """批量写标量（嵌套 Mapping 递归展平为 ``a/b/c`` 标签）。"""
+        for tag, value in _flatten_scalars(values).items():
             self.log_scalar(str(tag), value, step=step)
 
     def flush(self, step: Optional[int] = None) -> None:
