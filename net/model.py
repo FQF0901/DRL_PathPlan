@@ -335,12 +335,17 @@ class DrivingModel(nn.Module):
         latent0: Tensor,
         od_state0: Tensor,
         ld_state0: Tensor,
+        *,
+        wm_detach: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """B1 自回归 rollout：策略 ×6 + 世界模型 OD/LD 推演。
 
         返回 ``(traj_xy (B,6,2), traj_theta (B,6), plan (B,6,2))``：
         轨迹为 **t0 自车系**下 t=0.5..3.0 s 的 6 个动作端点；
         ``plan`` 是 rollout 实际执行的 6 个策略动作（供直接多步世界模型使用）。
+
+        ``wm_detach=True`` 时每步 WM 预测在进入重编码前 ``detach``：轨迹损失/策略梯度
+        不会回传到世界模型（阶段 B 的"WM 冻结 + 输出 detach"因果链要求）。
         """
         od_mask, ld_mask = frame0.od_mask, frame0.ld_mask
         pose = torch.zeros((latent0.shape[0], 3), dtype=latent0.dtype, device=latent0.device)
@@ -363,6 +368,9 @@ class DrivingModel(nn.Module):
             od_pred, ld_pred, _ = self.world_model.step(
                 latent, action, od_state0, ld_state0, k + 1
             )
+            if wm_detach:
+                od_pred = od_pred.detach()
+                ld_pred = ld_pred.detach()
             od_body = od_pred_to_features(od_pred, pose, frame0.od_feat, od_mask)
             ld_body = ld_pred_to_features(ld_pred, pose, frame0.ld_feat, ld_mask)
             ego_body = ego_next_features(
@@ -382,6 +390,7 @@ class DrivingModel(nn.Module):
         *,
         rollout: bool = True,
         world_model: bool = True,
+        wm_detach: bool = False,
     ) -> dict[str, Tensor]:
         """完整前向：策略/价值/直接多步世界模型预测/B1 rollout。
 
@@ -389,6 +398,9 @@ class DrivingModel(nn.Module):
         **不跑** B1 自回归 rollout 与 WM 直接多步；返回的 ``action_mu/action_logstd/
         value/router_logits/expert_weights/latent`` 与完整前向逐位一致，但省略
         ``traj_xy/traj_theta/od_pred/ld_pred``。收集（PPO rollout）不需要多步预测输出。
+
+        ``wm_detach=True``：B1 rollout 内每步 WM 预测 detach（阶段 B 轨迹辅助损失的
+        因果链要求；WM 参数冻结 + 输出不回传）。
         """
         encoded = self.encode(obs)
         frame = encoded["frame"]
@@ -419,9 +431,12 @@ class DrivingModel(nn.Module):
             latent,
             od_state,
             ld_state,
+            wm_detach=wm_detach,
         )
         out["traj_xy"] = traj_xy
         out["traj_theta"] = traj_theta
+        # 6 步规划预览（供跟踪器构建 30 点参考：单动作参考会退化为"瞄准终点"的短前视）
+        out["plan"] = plan
         if world_model:
             # 世界模型直接多步预测：以 rollout 的策略计划为 ego 条件（detach 后不回流到策略）
             od_pred, ld_pred, _ = self.world_model(latent, plan.detach(), od_state, ld_state)

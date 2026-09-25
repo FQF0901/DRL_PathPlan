@@ -1,7 +1,17 @@
-# 分阶段训练：A = BC 预热 + PPO；B = 离线世界模型；C = 联合微调
+# 分阶段训练（v1.1）：A = world model 教师强制；B = planner BC（primary→specific）；C = PPO RL
 runtime:
   python: "3.10"                  # 运行 Python 版本
   seed: null                      # 全局种子（P1 固定）
+
+train:                            # 运行设备 / 线程 / batch（2026-09-25 GPU 化；CLI 显式参数优先）
+  device: auto                    # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
+  threads:
+    max_per_process: 4            # 每进程 torch 线程上限：min(cap, cpu_count // workers)
+    omp_num_threads: 1            # OMP_NUM_THREADS / MKL_NUM_THREADS 默认值（setdefault）
+  ppo:
+    minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU）
+  bc:
+    batch_size: 256               # BC 轨迹损失 batch（rollout path，显存受控）
 
 data:
   spec: env/specs/scenarios_train.json  # 训练场景 spec
@@ -12,25 +22,34 @@ data:
 
 stages:
   A:
-    name: bc_warmup_ppo           # 阶段名
-    bc:
-      enabled: true               # 启用 BC 预热
-      expert: idmpolicy           # 专家 = MetaDrive 内置 IDMPolicy，沿路线行驶
-      epochs: null                # BC 轮数 P1 标定
-    ppo:
-      enabled: true               # BC 后接 PPO
-      tracking: exact             # 精确跟踪执行动作
-      lr: null                    # 学习率 P1 标定
+    name: world_model_teacher_forcing  # 阶段名
+    world_model:
+      epochs: 10                # WM 轮数（CLI --wm-epochs 优先）
+      ego_condition: expert_gt_actions  # ego 条件 = 专家 GT (ds,dθ) 序列（6×2）
+      targets: future_od_ld_lookup      # 目标 = (episode, step+5k) 查表 + 对齐 t0 + mask/valid
+      slot_matching: nearest_neighbor_t0 # OD 槽位按 t0 帧最近邻匹配（gate 8m；--no-match-future-slots 关闭）
+      loss: direct_multi_step           # Huber + 角度 1-cos
+      noise: ego_plan                   # ego plan 噪声增强（CLI --plan-noise*）
+      trainable: [encoders, temporal, spatial, moe, world_model]  # policy/value 头不参与
   B:
-    name: offline_world_model     # 阶段名
-    replay_from: A                # 复用阶段 A 回放数据
-    env_interaction: false        # 不与环境交互
+    name: planner_bc            # 阶段名
+    bc:
+      epochs: 10                # 总轮数（CLI --bc-epochs 优先）
+      primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）
+      action_weight: 1.0        # 主损失：action_mu vs 专家即时动作
+      traj_aux_weight: 0.1      # 辅助：rollout traj_xy vs 专家 traj6（WM 冻结 + detach）
+      router_coef: 0.1          # router BCE
+      loss_type: l2
+      wm_detach: true           # rollout 内 WM 输出 detach（因果链有效）
   C:
-    name: joint_finetune          # 阶段名
-    tracker: mpc_lqr              # 环境内 MPC/LQR 跟踪器
-    router_supervision: weak      # 弱路由监督
-    kl_anchor: true               # KL 锚点，限制策略漂移
-    primary_lr_scale: 0.1         # 主专家学习率 ×0.1
+    name: ppo_rl                # 阶段名
+    tracker: mpc_lqr            # 环境内 MPC/LQR 跟踪器
+    router_supervision: weak    # 弱路由监督
+    kl_anchor: true             # KL 锚 = 阶段 B 策略快照（--ckpt）
+    kl_anchor_coef: 0.05        # 初始系数（CLI --kl-anchor-coef）
+    kl_anchor_final_coef: 0.0   # 末值（线性衰减，CLI --kl-anchor-final-coef）
+    wm_freeze_updates: null     # 前 N 个 update 冻结 WM；null = updates//4
+    primary_lr_scale: 0.1       # 主专家学习率 ×0.1
 
 monitoring:
   tensorboard: true               # 输出 tensorboard

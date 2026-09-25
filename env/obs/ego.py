@@ -11,7 +11,10 @@
   与上游 StateObservation 的做法一致（``obs/state_obs.py:124-130``）；
 - ``a_lat`` = v * yaw_rate（向心加速度）；
 - ``steer``：``agent.steering``（归一化到 [-1,1]，``base_vehicle.py:462-466``）；
-- ``curvature``：当前车道的 dθ/ds（``env.obs.ld.lane_curvature``，直道 0、圆弧 ±1/R）。
+- ``curvature``：当前车道的 dθ/ds（``env.obs.ld.lane_curvature``，直道 0、圆弧 ±1/R）；
+- ``reserved0/1``：**上一策略步的动作** ``(ds, dtheta)``（物理单位：m / rad）。调用方（trainer /
+  collect_expert）在每次策略决策后设置 ``env.prev_policy_action = (ds, dtheta)``；未设置时保持 0。
+  （Gate 3 §8.4：这两维是"上一动作"的唯一载体，形状不变、成本≈0。）
 
 dt 取 ``physics_world_step_size * decision_repeat``（默认 0.02×5=0.1 s）；上游 StateObservation
 硬编码 0.1，这里从 env.config 读，避免 config 改动后失真。
@@ -86,6 +89,13 @@ class EgoChannel(ObservationChannel):
         feats[0, 3] = yaw_rate
         feats[0, 4] = steer
         feats[0, 5] = curvature
-        # feats[0, 6:8] 保留位保持 0
+        # reserved0/1 = 上一策略步动作 (ds, dtheta)；由调用方通过 env.prev_policy_action 注入
+        prev_action = getattr(env, "prev_policy_action", None)
+        if prev_action is not None:
+            try:
+                feats[0, 6] = float(prev_action[0])
+                feats[0, 7] = float(prev_action[1])
+            except (TypeError, ValueError, IndexError):
+                pass
         mask[0] = 1.0
         return feats, mask

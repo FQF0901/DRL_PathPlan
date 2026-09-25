@@ -4,11 +4,18 @@
 -------------------------
 ``(ds, dθ)`` = 下一个 0.5 s 的弧长（m）与航向变化（rad）。
 动作有界：``ds ∈ [0, 10] m``、``dθ ∈ [-0.6, 0.6] rad``（0.5 s 内 ≈ ±1.2 rad/s，
-覆盖路口转向），由 ``tanh`` 压缩保证；默认界可在构造时覆盖。
+覆盖路口转向），由 ``sigmoid`` 压缩保证；默认界可在构造时覆盖。
+
+为什么不是 tanh（实测缺陷，2026-09-25）：tanh 在 ``raw < -2`` 区域的导数
+``1-tanh²(raw)`` 指数消失（raw=-2.6 时 ≈0.011），BC/PPO 梯度不足以拉回；
+薄切片训练中策略 raw(ds) 从 -0.9 漂到 -2.6 → ds≈0.07 m 的蠕动策略。
+``sigmoid`` 在专家数据所在的中间区间（ds≈3 m ⇔ raw≈-0.85）导数 ≈0.16，
+且末层 ``mu`` 零初始化 → 初始 raw=0 → 初始动作 = 界中点 ``(5.0 m, 0 rad)``，
+新策略从中速巡航起步、初始梯度健康。
 
 - ``forward`` 返回**已压缩且落在动作界内**的均值与**有界** logstd
   （``clamp(log_std_min, log_std_max)``，默认 ``[-5, 0]``）；
-- :meth:`log_prob` 使用 tanh 变换的雅可比修正，PPO 可直接用；
+- :meth:`log_prob` 使用 sigmoid 变换的雅可比修正，PPO 可直接用；
 - ``log_std`` 是可学习参数（每维一个），初始化 ``-1.0``（std≈0.37，动作尺度友好）。
 """
 
@@ -30,7 +37,7 @@ _EPS = 1e-6
 
 
 class PolicyHead(nn.Module):
-    """2 维均值 + 有界 logstd 的策略头。"""
+    """2 维均值 + 有界 logstd 的策略头（sigmoid 压缩，见模块 docstring）。"""
 
     def __init__(
         self,
@@ -46,6 +53,9 @@ class PolicyHead(nn.Module):
             raise ValueError("action_low/action_high 必须各为 2 维")
         self.trunk = nn.Sequential(nn.Linear(hidden, hidden), nn.GELU())
         self.mu = nn.Linear(hidden, 2)
+        # 末层零初始化：初始 raw=0 → 动作 = 界中点 (5 m, 0 rad)，远离饱和区
+        nn.init.zeros_(self.mu.weight)
+        nn.init.zeros_(self.mu.bias)
         self.log_std = nn.Parameter(torch.full((2,), float(log_std_init)))
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
@@ -60,8 +70,8 @@ class PolicyHead(nn.Module):
         return raw_mu, log_std
 
     def squash(self, raw_mu: Tensor) -> Tensor:
-        """tanh 压缩到 ``[low, high]``。"""
-        unit = 0.5 * (torch.tanh(raw_mu) + 1.0)
+        """sigmoid 压缩到 ``[low, high]``（``low + span·σ(raw)``）。"""
+        unit = torch.sigmoid(raw_mu)
         return self.action_low + (self.action_high - self.action_low) * unit
 
     def forward(self, latent: Tensor) -> tuple[Tensor, Tensor]:
@@ -77,15 +87,15 @@ class PolicyHead(nn.Module):
         return self.squash(raw_mu + noise * log_std.exp())
 
     def log_prob(self, latent: Tensor, action: Tensor) -> Tensor:
-        """tanh 压缩后的对数概率 ``(B,)``（含雅可比修正）。"""
+        """sigmoid 压缩后的对数概率 ``(B,)``（含雅可比修正）。"""
         raw_mu, log_std = self.raw(latent)
         span = (self.action_high - self.action_low).clamp(min=_EPS)
-        unit = (2.0 * (action - self.action_low) / span - 1.0).clamp(-1.0 + _EPS, 1.0 - _EPS)
-        raw_action = torch.atanh(unit)
+        unit = ((action - self.action_low) / span).clamp(_EPS, 1.0 - _EPS)
+        raw_action = torch.log(unit) - torch.log1p(-unit)  # logit(unit)
         base = -0.5 * (
             ((raw_action - raw_mu) / log_std.exp()) ** 2 + 2.0 * log_std + math.log(2.0 * math.pi)
         )
-        log_det = torch.log(span * 0.5 * (1.0 - unit**2) + _EPS)
+        log_det = torch.log(span * unit * (1.0 - unit) + _EPS)
         return (base - log_det).sum(dim=-1)
 
 

@@ -14,6 +14,9 @@
 选取优先级："距离 + TTC"：**对每个候选取 ``min(TTC, ttc_cap_s)`` 作为键**（不接近/后方目标记 +∞ →
 被压到 cap，与"TTC ≥ cap"的目标同组），组内再按欧氏距离升序。掩码 mask=1 表示槽位有效。
 
+**scope = 盒式**：只在自车系 前 ``front_m``(默认 100m) / 后 ``rear_m``(50m) / 左 ``left_m``(25m) /
+右 ``right_m``(25m) 的矩形内取候选（x 前 / y 左），盒内 top-16，不足补零 + mask=0；不做全图 top-k。
+
 为什么 vx/vy 用相对速度而不是绝对速度：策略关心的是"是否会撞/何时撞"，
 相对速度 + dx 即可直接构造 TTC，且与 MetaDrive 上游观测语义一致。
 """
@@ -62,9 +65,21 @@ class ODChannel(ObservationChannel):
     # 位置对 (dx,dy)、速度对 (vx,vy)、朝向单位向量对 (cosθ,sinθ)
     alignment = FrameAlignment(point_pairs=((0, 1), ), vector_pairs=((2, 3), (4, 5)))
 
-    def __init__(self, *, num_slots: int = 16, range_m: float = 100.0, ttc_cap_s: float = 5.0):
+    def __init__(
+        self,
+        *,
+        num_slots: int = 16,
+        front_m: float = 100.0,
+        rear_m: float = 50.0,
+        left_m: float = 25.0,
+        right_m: float = 25.0,
+        ttc_cap_s: float = 5.0,
+    ):
         self.num_slots = int(num_slots)
-        self.range_m = float(range_m)
+        self.front_m = float(front_m)
+        self.rear_m = float(rear_m)
+        self.left_m = float(left_m)
+        self.right_m = float(right_m)
         self.ttc_cap_s = float(ttc_cap_s)
 
     def build(self, env, spec=None) -> tuple[np.ndarray, np.ndarray]:
@@ -81,8 +96,14 @@ class ODChannel(ObservationChannel):
                 continue
             # 位置/速度都经 MetaDrive 自己的坐标变换，保证与当前帧其它通道同系
             rel_pos = np.asarray(ego.convert_to_local_coordinates(obj.position, ego.position), dtype=np.float32)
+            # 盒式 scope：前 front / 后 rear / 左 left / 右 right（自车系 x 前 / y 左）
+            if not (
+                -self.rear_m <= float(rel_pos[0]) <= self.front_m
+                and -self.right_m <= float(rel_pos[1]) <= self.left_m
+            ):
+                continue
             dist = float(math.hypot(float(rel_pos[0]), float(rel_pos[1])))
-            if not np.isfinite(dist) or dist > self.range_m:
+            if not np.isfinite(dist):
                 continue
             rel_vel = np.asarray(ego.convert_to_local_coordinates(obj.velocity, ego.velocity), dtype=np.float32)
             heading_rel = float(wrap_to_pi(obj.heading_theta - ego_theta))

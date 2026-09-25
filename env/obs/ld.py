@@ -166,9 +166,22 @@ class LDChannel(ObservationChannel):
     # (dx,dy) 是点；heading_rel 是角度标量；curvature/speed_limit/线型不随坐标系变化
     alignment = FrameAlignment(point_pairs=((0, 1), ), angle_dims=(2, ))
 
-    def __init__(self, *, num_slots: int = 16, offsets: Sequence[float] = (5.0, 10.0, 15.0, 20.0, 30.0)):
+    def __init__(
+        self,
+        *,
+        num_slots: int = 16,
+        offsets: Sequence[float] = (5.0, 10.0, 15.0, 20.0, 30.0),
+        front_m: float = 100.0,
+        rear_m: float = 50.0,
+        left_m: float = 25.0,
+        right_m: float = 25.0,
+    ):
         self.num_slots = int(num_slots)
         self.offsets = tuple(float(o) for o in offsets)
+        self.front_m = float(front_m)
+        self.rear_m = float(rear_m)
+        self.left_m = float(left_m)
+        self.right_m = float(right_m)
 
     def build(self, env, spec=None) -> tuple[np.ndarray, np.ndarray]:
         feats, mask = make_empty(self.num_slots, self.feature_dim)
@@ -205,6 +218,12 @@ class LDChannel(ObservationChannel):
                 except Exception:  # noqa: BLE001
                     continue
                 rel = np.asarray(ego.convert_to_local_coordinates(point, ego.position), dtype=np.float32)
+                # 盒式 scope（与 OD 同口径）：前 front / 后 rear / 左 left / 右 right
+                if not (
+                    -self.rear_m <= float(rel[0]) <= self.front_m
+                    and -self.right_m <= float(rel[1]) <= self.left_m
+                ):
+                    continue
                 row = np.array(
                     [
                         rel[0],

@@ -1,25 +1,26 @@
 # 网络结构：时序编码 → 空间消息传递 → MoE → 世界模型 → 策略头
-hidden_dim: 96                    # 主干隐藏维 H=96
-param_budget_estimate: 585000     # H=96 且含 8×(96→192→96) 专家，约 585K 参数
+hidden_dim: 128                   # 主干隐藏维 H=128（2026-09-25 放大：GPU 化后余量充足）
+param_budget_estimate: 585000     # H=96 时期的历史估算；H=128 预算以 net/param_probe.py 与
+                                  # root config 构建的实测参数量为准（≤1.5M）
 
 temporal:
   type: gru                       # 时序编码器：GRU
   input: obs_history              # 输入 6 帧历史观测
-  hidden_dim: 96                  # 隐藏维
+  hidden_dim: 128                 # 隐藏维（与 hidden_dim 一致）
   layers: 1                       # 层数
 
 spatial:
   type: message_passing           # 空间编码：消息传递
   layers: 2                       # 2 层
-  hidden_dim: 96                  # 隐藏维
+  hidden_dim: 128                 # 隐藏维（与 hidden_dim 一致）
 
 moe:
   primary:
     enabled: true                 # 主专家常开
     router_gated: false           # 不参与路由门控
   experts:
-    count: 8                      # 8 个专用专家
-    hidden_dim: 192               # 结构 96 → 192 → 96
+    count: 8                      # 8 个专用专家（保持 8）
+    hidden_dim: 256               # 结构 128 → 256 → 128
     init: zero_residual           # 零初始化，输出作为残差
   router:
     type: sigmoid                 # sigmoid 路由器（多标签）
