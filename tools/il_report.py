@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import re
 from collections import defaultdict
@@ -130,12 +131,88 @@ def stage_b_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
         lines += table([[k, num(v)] for k, v in sorted(labels.items())], ["label", "action err"])
     summary["labels"] = labels
 
-    horizon = {int(re.search(r"_traj_err_h(\d+)$", t).group(1)): latest(v)
-               for t, v in find(series, r"train/primary_bc_traj_err_h\d+$").items()}
-    if horizon:
-        lines += table([[f"h{k}", num(v)] for k, v in sorted(horizon.items())],
-                       ["traj horizon", "error (m)"])
-    summary["traj_per_horizon"] = horizon
+    # 轨迹误差（2026-09-26 单位修正）：新键 traj_mae_h{k}_m（加权 MAE，m）与
+    # traj_mse_h{k}（加权 MSE，m²）。旧 run 只有 traj_err_h{k}（loss_type=l2 下实为加权
+    # MSE，m²）→ 回退：MSE 原样展示，MAE 用 sqrt(MSE) 近似（Jensen 上界，≥ 真 MAE）。
+    def per_horizon(pattern: str) -> Dict[int, Optional[float]]:
+        # 锚定 primary 相位（specific 同 tag 后缀，混入会按 CSV 顺序覆盖）
+        return {int(re.search(pattern, t).group(1)): latest(v)
+                for t, v in find(series, pattern).items()}
+
+    mae_h = per_horizon(r"train/primary_bc_traj_mae_h(\d+)_m$")
+    mse_h = per_horizon(r"train/primary_bc_traj_mse_h(\d+)$")
+    legacy_err = per_horizon(r"train/primary_bc_traj_err_h(\d+)$")
+    mae_estimated = False
+    if not mse_h and legacy_err:
+        mse_h = dict(legacy_err)
+    for k, mse in sorted(mse_h.items()):
+        if k not in mae_h and mse is not None and mse >= 0.0:
+            mae_h[k] = math.sqrt(mse)
+            mae_estimated = True
+    horizon_rows: List[List[Any]] = []
+    ratios: List[float] = []
+    for k in sorted(set(mae_h) | set(mse_h)):
+        mae, mse = mae_h.get(k), mse_h.get(k)
+        horizon_rows.append([f"h{k}", num(mae), num(mse),
+                             "" if mse is None else num(math.sqrt(mse))])
+        # 换算校验只在 MAE/MSE 都是真实序列时有意义；估算的 MAE 与 sqrt(MSE) 恒等，不算校验。
+        if not mae_estimated and mae and mae > 0 and mse is not None and mse >= 0:
+            ratios.append(math.sqrt(mse) / mae)
+    if horizon_rows:
+        lines.append("**轨迹误差（逐 horizon，加权口径）**")
+        if mae_estimated:
+            lines.append("")
+            lines.append("> 旧 run 无 MAE 序列：MAE 列由 sqrt(MSE) 近似（Jensen 上界，≥ 真 MAE）。")
+        lines += table(horizon_rows, ["horizon", "MAE (m)", "MSE (m²)", "sqrt(MSE) (m)"])
+        if ratios:
+            lines.append("")
+            lines.append(f"- 同 ckpt 换算校验：sqrt(MSE)/MAE ∈ [{min(ratios):.3f}, {max(ratios):.3f}]"
+                         "（Jensen：≥1；=1 仅当误差幅度齐一，故不能用 sqrt(MSE) 当 MAE 读）")
+    # 全局轨迹标量：旧 run 的 bc_traj_mae_m 实为**未加权 MSE（m²）**（2026-09-26 修正前语义），
+    # 检测到旧口径时迁移到 bc_traj_mse_unweighted 展示，避免把 m² 读成 m。
+    traj_global = {key: scalar(key) for key in
+                   ("traj_mse", "traj_mae_m", "traj_mae_all_m", "traj_mse_unweighted")}
+    legacy_global_mae = scalar("traj_mae_m")
+    legacy_global_semantics = (
+        traj_global["traj_mse"] is None
+        and traj_global["traj_mae_all_m"] is None
+        and legacy_global_mae is not None
+    )
+    if legacy_global_semantics:
+        traj_global["traj_mse_unweighted"] = legacy_global_mae
+        traj_global["traj_mae_m"] = None
+    global_rows: List[List[Any]] = []
+    if traj_global["traj_mse"] is not None:
+        global_rows.append(["bc_traj_mse", f"{num(traj_global['traj_mse'])} m²（加权）"])
+    if traj_global["traj_mae_m"] is not None:
+        global_rows.append(["bc_traj_mae_m", f"{num(traj_global['traj_mae_m'])} m（加权）"])
+    elif legacy_global_semantics:
+        global_rows.append([
+            "bc_traj_mae_m",
+            "缺失（旧 run 该键实为未加权 MSE，口径见下行）",
+        ])
+    if traj_global["traj_mae_all_m"] is not None:
+        global_rows.append([
+            "bc_traj_mae_all_m",
+            f"{num(traj_global['traj_mae_all_m'])} m（未加权，含被过滤帧，诊断）",
+        ])
+    if traj_global["traj_mse_unweighted"] is not None:
+        global_rows.append([
+            "bc_traj_mse_unweighted",
+            f"{num(traj_global['traj_mse_unweighted'])} m²（未加权，旧 bc_traj_mae_m 口径 alias）",
+        ])
+    if global_rows:
+        lines.append("")
+        lines.append("**轨迹误差（全局）**")
+        lines += table(global_rows, ["metric", "value"])
+    horizon_summary = {k: {"mae_m": mae_h.get(k), "mse_m2": mse_h.get(k),
+                           "sqrt_mse_m": (None if mse_h.get(k) is None else math.sqrt(mse_h[k]))}
+                       for k in sorted(set(mae_h) | set(mse_h))}
+    summary["traj_per_horizon"] = horizon_summary
+    summary["traj_per_horizon_legacy"] = legacy_err  # 旧键原值（l2→MSE m² / l1→MAE m）
+    summary["traj_global"] = traj_global
+    summary["traj_global_legacy_bc_traj_mae_m"] = legacy_global_mae if legacy_global_semantics else None
+    summary["traj_mae_estimated_from_mse"] = mae_estimated
 
     router_soft = {k: scalar(f"router_soft_{k}") for k in ("ce", "kl", "placeholder")}
     router = {k: scalar(f"router_{k}") for k in ("top1_cluster_acc", "nmi", "entropy")}

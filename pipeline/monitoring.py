@@ -18,7 +18,9 @@
    ``on_moe_step``（monitor 会累计，但语义不同，推荐默认传 softmax 分布）；
 4. **分组指标（v2）**：``on_grouped_step`` 接收 per-horizon / per-label / 分切片三组
    窗口统计（``GroupedMetricStatistics``），flush 时输出 ``horizon/<h>/<m>``、
-   ``label/<name>/<m>``、``slice/<name>/<m>`` 的 ``mean``/``count``/``weighted_mean``；
+   ``label/<name>/<m>``、``slice/<name>/<m>`` 的 ``mean``/``count``/``weighted_mean``。
+   轨迹分组标签**自带单位**（``horizon/h1/traj_mse_m2``、``horizon/h1/traj_mae_m``），
+   不再用无单位的 ``traj_err``（2026-09-26：旧标签在 l2 下实为 m²，易误读为 m）；
 5. **PPO 诊断序列**（训练侧已写成嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
    ``log_scalars`` 递归展平嵌套 Mapping → 标签 ``a/b/c``，因此奖励分解 / 优势-价值统计 /
    固定探针动作漂移全部自动进 CSV + tensorboard；
@@ -262,7 +264,7 @@ class MoERoutingStatistics:
 class GroupedMetricStatistics:
     """**分组指标窗口**（per-horizon / per-label / 分切片序列）。
 
-    训练侧按 ``update({"h1": {"loss": 0.3, "ade": 1.2}}`` 的形式喂入窗口统计，
+    训练侧按 ``update({"h1": {"traj_mae_m": 2.3, "traj_mse_m2": 5.5}}`` 的形式喂入窗口统计，
     ``flush()`` 输出（CSV + tensorboard 同一套 tag）：
 
     - ``<prefix>/<group>/<metric>/mean``：窗口内计数口径均值（与旧日志可比）；

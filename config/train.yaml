@@ -4,15 +4,20 @@ runtime:
   python: "3.10"                  # 运行 Python 版本
   seed: null                      # 全局种子（P1 固定）
 
-train:                            # 运行设备 / 线程 / batch（2026-09-25 GPU 化；CLI 显式参数优先）
+train:                            # 运行设备 / 线程 / batch（2026-09-26 GPU 化；CLI 显式参数优先）
   device: auto                    # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
   threads:
-    max_per_process: 4            # 每进程 torch 线程上限：min(cap, cpu_count // workers)
-    omp_num_threads: 1            # OMP_NUM_THREADS / MKL_NUM_THREADS 默认值（setdefault）
+    max_per_process: 8            # 每进程 torch 线程上限：min(cap, cpu_count // workers)（≤8）
+    omp_num_threads: 1            # OMP/MKL 默认值（setdefault）；数据集型训练由 tools/train.sh 默认 8，
+                                  # 此处的 1 保护 eval 多 worker spawn（避免每 worker 8 OMP 线程风暴）
   ppo:
-    minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU）
+    minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU；与 --batch-size 独立）
+  wm:
+    batch_size: 1024              # Stage A 宏 batch（物化快路径 + 梯度累积；CLI --batch-size 覆盖）
+    micro_batch_size: 256         # ST-GNN 6 步展开实测 ~32MB/样本：12GB 卡 micro 上限 256（384 OOM）
   bc:
-    batch_size: 256               # BC 轨迹损失 batch（rollout path，显存受控）
+    batch_size: 1024              # 宏 batch（物化快路径 + 梯度累积；CLI --batch-size 覆盖）
+    micro_batch_size: 512         # rollout micro 512 实测峰值 6.6GB（768 = 9.9GB，1024 OOM）
   probe_batch: runs/bc_expert_full  # 固定探针批（动作 ds/logstd 漂移 + 低速吸引子；null=关闭，缺失=默认此路径）
   critic_warmup_updates: 0        # 阶段 C 前 N 个 update 只拟合 critic（value 头；策略/主干冻结；CLI --critic-warmup-updates）
 

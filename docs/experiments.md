@@ -153,6 +153,77 @@ tools/venv-python -m pipeline.stages --stage C --ckpt runs/train/stage_b_2k_aux3
 
 ---
 
+## 8. v1.2 IL 正式运行（2026-09-26，新架构 + schema v2）
+
+数据：`runs/bc_expert_2k_v2`（144,763 行入库 / 103,932 可训练；`obs_fingerprint` v2；scope 前 150）。
+命令：
+```bash
+BC_DIR=runs/bc_expert_2k_v2 OUT=runs/train/il_v2_10x10 WM_EPOCHS=10 BC_EPOCHS=10 \
+  EXTRA_B="--traj-aux-weight 0.3" bash tools/train.sh
+```
+（快路径：物化数据 + 宏 batch 1024 / 微 256(A)·512(B) 精确梯度累积；Stage A **GPU 95%**、Stage B **97%**。）
+
+### 8.1 Stage A（WM，10 epochs）
+
+| 指标 | 值 |
+| --- | --- |
+| loss / val | 2.351 → 0.883 / 0.884 → 0.614 |
+| **ADE（WM / 匀速）** | **1.447 / 6.987**（6 个 horizon 全部胜）|
+| FDE（WM / 匀速） | 2.729 / 12.254 |
+| presence AUC / 正例率 | **0.970** / 0.391（id 轴）|
+| entry AUC / 正例率 | 0.702 / 0.0119 |
+| 吞吐 | 82.3 s/epoch（data 0.5s + fwd 37.3s + bwd 39.0s）|
+
+### 8.2 Stage B（5 primary + 5 specific）
+
+逐 horizon **加权 MAE (m)** / MSE (m²)：
+
+| horizon | 0.5 s | 1.0 s | 1.5 s | 2.0 s | 2.5 s | 3.0 s |
+| --- | --- | --- | --- | --- | --- | --- |
+| primary MAE | 0.125 | 0.294 | 0.500 | 0.729 | 0.969 | 1.240 |
+| specific MAE | 0.079 | 0.211 | 0.374 | 0.546 | 0.727 | 0.942 |
+| primary MSE | 0.088 | 0.420 | 1.097 | 2.170 | 3.627 | 5.496 |
+
+动作（首步 ds/dθ，显式 L1）：weighted **0.1201** / median 0.0652 / p95 0.4010；切片 brake 0.2299、turn 0.2750、
+curve 0.1558。router：CE 0.0038 / KL 0.0022（**软目标非占位 ✓**）；top-1 簇准确率 0.265、NMI 0.081、
+gate 熵 0.0038；专家混合集中在 expert2 0.297 / expert6 0.232。`mu_ds` 3.522（weighted 3.564；专家 3.218）。
+
+> 度量口径（2026-09-26 修正）：`bc_traj_mae_h{k}_m` = 加权 L1（米）；`bc_traj_mse_h{k}` = 加权 MSE（m²）。
+> 旧 `mae=` 实为**未加权 MSE**（含被过滤帧），`sqrt(MSE)` 只是 Jensen 上界（高估 1.89–2.37×），**不可当 MAE**。
+
+### 8.3 闭环（50 条 val slice，LQR 闭环，配对同场景）
+
+| 策略 | success | collision | off-road | rc | speed_ratio |
+| --- | --- | --- | --- | --- | --- |
+| 规则基线（冻结） | **0.82** | 0.10 | **0.06** | 0.925 | 0.734 |
+| v1 2k-BC（aux0.3） | 0.26 | 0.00 | 0.72 | 0.539 | 0.364 |
+| v1 Stage-C v2（300 updates） | 0.18 | 0.14 | 0.68 | 0.453 | 0.631 |
+| **v1.2 IL（本次）** | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
+
+95% CI [0.259, 0.518]；n=50、errors=0、mean_speed 3.84 m/s、min-TTC 7.37 s、a_lat95 2.15。
+分主标签：ramp_out 0.80、merge 0.60、split 0.60、straight 0.60、intersection 0.50、t_intersection 0.50、
+ramp_in 0.40、**curve 0.00 / roundabout 0.00 / uturn 0.00 / tollgate 0.00**；难度 easy 0.72 / medium 0.28 / hard 0.07。
+（修正版 ckpt 复评与修前**逐位一致** → 度量修正未改动模型。）
+
+### 8.4 本轮修掉 / 记录的问题
+
+| 问题 | 状态 |
+| --- | --- |
+| 轨迹度量单位混淆（`mae=` 实为未加权 MSE；`bc_traj_err_h*` 实为 m²）| **已修**（新键带单位；旧键保留 alias 并标注）|
+| 数据管线瓶颈（GPU 18%、0.44 s/batch）| **已修**（物化 + 宏 batch + 线程放开 → GPU 95%/97%）|
+| 物理 batch 1024 OOM（6 步 ST-GNN ≈32 MB/样本）| 用**精确梯度累积**（已验证 ≤1e-4 等价）|
+| router 负载集中（8 专家中 2 个占 53%，其余 <0.12）| **记录**：软目标过平滑（top-2 gap p50 = 0.017）→ 待定夺（降 τ / 减边界平滑）|
+| 弯道 / 环岛 / 掉头 / 收费站成功率 0% | **记录**：下一步主攻方向 |
+| speed_ratio 0.407（基线 0.734，偏慢）| **记录** |
+
+### 8.5 与 v1 的可比性说明
+
+- 数据：v1 用 200 场景/1.08 万行（旧观测 scope、过滤后只留干净帧）；v1.2 用 2,000 场景/14.5 万行
+  （scope 前 150、全帧 + 权重）；**开环数字不可直接跨版本比较**，闭环走同一冻结协议（50 条 val slice）。
+- 模型：v1 为 GRU 时序 + 共享 MoE；v1.2 为 mem-bank + 分模态注意力 + plan-head MoE + ST-GNN；
+  参数量 1,149,663（H=128）。
+- 评测：两版都用 LQR 闭环 + 同一 50 条切片 + 同一位姿/随机种子协议 ✓。
+
 ## 7. 口径与注意事项
 
 1. **tracker 语义**：`exact` = Stage B 语义（运动学精确执行预瞄，不引入动力学）；`lqr` = Stage C 闭环

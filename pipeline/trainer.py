@@ -98,6 +98,10 @@ __all__ = [
     "BCConfig",
     "PPOTrainer",
     "BCDataset",
+    "MaterializedBCDataset",
+    "to_device_tensor",
+    "to_device_tensors",
+    "DEFAULT_STAGE_BATCH_SIZE",
     "RouterMonitor",
     "RewardAdapter",
     "RewardStatistics",
@@ -207,6 +211,8 @@ def _require_torch() -> None:
 DEFAULT_TORCH_THREAD_CAP = 4
 #: OMP/MKL 线程数默认值（``config/train.yaml::train.threads.omp_num_threads``）
 DEFAULT_OMP_NUM_THREADS = 1
+#: 阶段 A/B 默认 batch（2026-09-26 GPU 利用率改造：256 → 1024；CLI ``--batch-size`` 覆盖）
+DEFAULT_STAGE_BATCH_SIZE = 1024
 
 
 def _thread_config(config: Optional[Mapping[str, Any]] = None) -> Tuple[int, int]:
@@ -508,6 +514,9 @@ class BCConfig:
 
     epochs: int = 10
     batch_size: int = 256
+    #: micro-batch（梯度累积）：>0 且 < batch_size 时按 micro 前向/反向、宏 batch 一次更新
+    #: （损失按宏口径精确缩放，Σ_m s_m·L_m = L_macro；None = 不分片）。
+    micro_batch_size: Optional[int] = None
     lr: float = 3e-4
     loss_type: str = "l2"  # l1 | l2
     traj_weight: float = 1.0
@@ -1129,6 +1138,7 @@ def presence_entry_loss(
     entry_target: "torch.Tensor",
     *,
     frame_weight: Optional["torch.Tensor"] = None,
+    collect: Optional[Dict[str, List[np.ndarray]]] = None,
 ) -> Dict[str, Any]:
     """presence/entry BCE + AUC（每槽位二分类；支持逐帧或逐 (帧,horizon) 权重）。
 
@@ -1137,6 +1147,9 @@ def presence_entry_loss(
         presence_target/entry_target: 同形 0/1 目标。
         frame_weight: ``(B,)`` 或 ``(B,K)``（v2：``train_weight × wm_valid``）；0 的样本
             既不计损失也不计分母与 AUC。
+        collect: 梯度累积用；传入 dict 时把逐 micro 的 scores/labels 追加进池
+            （键 ``presence_scores/presence_labels/entry_scores/entry_labels``），
+            本函数返回的 AUC 为 nan，由调用方在宏 batch 上一次性计算。
     """
     import torch
     import torch.nn.functional as F
@@ -1169,8 +1182,17 @@ def presence_entry_loss(
     presence_labels = target_p.detach().float().cpu().numpy()[mask]
     entry_scores = logits_e.detach().float().cpu().numpy()[mask]
     entry_labels = target_e.detach().float().cpu().numpy()[mask]
-    presence_auc = binary_auc(presence_scores, presence_labels)
-    entry_auc = binary_auc(entry_scores, entry_labels)
+    if collect is not None:
+        # 梯度累积：逐 micro 汇入 scores/labels，宏 batch 上一次性算 AUC（pos_rate 用池化值）
+        collect.setdefault("presence_scores", []).append(presence_scores)
+        collect.setdefault("presence_labels", []).append(presence_labels)
+        collect.setdefault("entry_scores", []).append(entry_scores)
+        collect.setdefault("entry_labels", []).append(entry_labels)
+        presence_auc = float("nan")
+        entry_auc = float("nan")
+    else:
+        presence_auc = binary_auc(presence_scores, presence_labels)
+        entry_auc = binary_auc(entry_scores, entry_labels)
     return {
         "presence": presence_loss,
         "entry": entry_loss,
@@ -1506,8 +1528,126 @@ class BCDataset:
         return np.arange(self.count, dtype=np.int64)
 
 
-def _to_device_obs(batch: Mapping[str, np.ndarray], device: "torch.device") -> Dict[str, "torch.Tensor"]:
-    return {key: torch.as_tensor(value, dtype=torch.float32, device=device) for key, value in batch.items()}
+class MaterializedBCDataset:
+    """``BCDataset`` 的一次性物化（obs 历史 + 可选目标 → 连续数组）。
+
+    背景（实测 2026-09-26，H=128 / batch=256）：逐样本 ``build_obs_batch``（6 帧历史精确
+    查表 + SE(2) 对齐 + numpy 拼接）占单 batch 墙钟 >95%（Stage A ~0.44 s vs GPU
+    前反向 5–15 ms）。本类把逐样本重建**移出训练循环**，循环内只做 ``arr[idx]`` 切片
+    + ``torch.as_tensor(...)``（H2D 走 pin_memory + non_blocking，见
+    :func:`to_device_tensors`）。
+
+    数学等价：obs 由 ``BCDataset.build_obs_batch`` 分块生成后逐字段原样存储（bitwise
+    相同，dtype 不变）；目标由 ``BCDataset.targets`` 的同一公式一次性预计算
+    （``train_weight = row_action_weights``；``traj30`` 训练不用，不物化以省内存）。
+
+    内存量级（144k 行 v2）：obs ≈ 1.35 GB；Stage B 目标 < 30 MB。Stage A 的未来目标由
+    ``pipeline.stages`` 单独物化（同一 ``_future_targets`` 路径）。
+    """
+
+    #: 目标键（与 ``BCDataset.targets`` 对齐；缺失的源键跳过）
+    TARGET_SOURCE_KEYS: Tuple[str, ...] = ("action", "traj6", "labels", "sample_weight")
+
+    def __init__(
+        self,
+        dataset: BCDataset,
+        *,
+        chunk_size: int = 2048,
+        include_targets: bool = True,
+        logger: Callable[[str], None] = print,
+    ):
+        started = time.perf_counter()
+        self.dataset = dataset
+        self.count = int(dataset.count)
+        chunk = max(1, int(chunk_size))
+        self.arrays: Dict[str, np.ndarray] = {}
+        for start in range(0, self.count, chunk):
+            stop = min(start + chunk, self.count)
+            batch = dataset.build_obs_batch(np.arange(start, stop, dtype=np.int64))
+            if not self.arrays:
+                self.arrays = {
+                    key: np.empty(
+                        (self.count, ) + tuple(np.asarray(value).shape[1:]), dtype=np.asarray(value).dtype
+                    )
+                    for key, value in batch.items()
+                }
+            for key, value in batch.items():
+                self.arrays[key][start:stop] = value
+        self.targets: Dict[str, np.ndarray] = {}
+        if include_targets:
+            source = dataset.arrays
+            for key in self.TARGET_SOURCE_KEYS:
+                if key in source:
+                    self.targets[key] = np.asarray(source[key], dtype=np.float32)
+            if V2_ROUTER_SOFT in source:
+                self.targets["router_soft"] = np.asarray(source[V2_ROUTER_SOFT], dtype=np.float32)
+            if V2_WM_VALID in source:
+                self.targets["wm_valid"] = np.asarray(source[V2_WM_VALID], dtype=np.float32)
+            self.targets["train_weight"] = row_action_weights(
+                dataset, np.arange(self.count, dtype=np.int64)
+            ).astype(np.float32)
+        self.nbytes = int(
+            sum(value.nbytes for value in self.arrays.values())
+            + sum(value.nbytes for value in self.targets.values())
+        )
+        logger(
+            f"[materialize] obs+targets {self.count} 行 → {self.nbytes / 1e6:.1f} MB "
+            f"（{time.perf_counter() - started:.1f}s，chunk={chunk}）"
+        )
+
+    def obs_batch(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
+        """训练 batch 的 obs（与 ``BCDataset.build_obs_batch`` 逐值相同；只做切片）。"""
+        idx = np.asarray(indices, dtype=np.int64)
+        return {key: value[idx] for key, value in self.arrays.items()}
+
+    def targets_batch(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
+        """训练 batch 的目标（与 ``BCDataset.targets`` 相同键值；只做切片）。"""
+        idx = np.asarray(indices, dtype=np.int64)
+        return {key: value[idx] for key, value in self.targets.items()}
+
+
+def to_device_tensor(
+    value: np.ndarray,
+    device: Any,
+    *,
+    dtype: Optional["torch.dtype"] = None,
+    pin: bool = False,
+    non_blocking: bool = True,
+) -> "torch.Tensor":
+    """numpy → device 张量（可选 pin_memory + non_blocking H2D）。
+
+    ``dtype=None`` 保持原 dtype（future 目标的 ``od_id_fut`` 是 int64，不能被强转 fp32）；
+    ``pin`` 只对 CPU 张量生效，失败（不支持的内存）时退化为普通拷贝。
+    """
+    _require_torch()
+    tensor = torch.as_tensor(value, dtype=dtype)
+    if pin and tensor.device.type == "cpu":
+        try:
+            tensor = tensor.pin_memory()
+        except Exception:  # noqa: BLE001 - pin 失败退化为普通 H2D
+            pass
+    return tensor.to(device, non_blocking=bool(non_blocking))
+
+
+def to_device_tensors(
+    batch: Mapping[str, np.ndarray],
+    device: Any,
+    *,
+    dtype: Optional["torch.dtype"] = None,
+    pin: bool = False,
+    non_blocking: bool = True,
+) -> Dict[str, "torch.Tensor"]:
+    """:func:`to_device_tensor` 的映射批量版（键集/顺序保持）。"""
+    return {
+        key: to_device_tensor(value, device, dtype=dtype, pin=pin, non_blocking=non_blocking)
+        for key, value in batch.items()
+    }
+
+
+def _to_device_obs(
+    batch: Mapping[str, np.ndarray], device: "torch.device", *, pin: bool = False
+) -> Dict[str, "torch.Tensor"]:
+    return to_device_tensors(batch, device, dtype=torch.float32, pin=pin)
 
 
 #: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``）
@@ -1567,11 +1707,26 @@ def bc_trajectory_loss(
     *,
     loss_type: str = "l2",
     weights: Optional["torch.Tensor"] = None,
-) -> Tuple["torch.Tensor", "torch.Tensor"]:
+) -> Tuple["torch.Tensor", Dict[str, float]]:
     """轨迹 L1/L2：模型 ``(B,K,2)`` vs 密集插值目标 ``(B,D,2)``（K≠D 时按时间对齐取点）。
 
     优先直接传数据集 ``traj6``（与模型 6 个端点时间对齐、无重采样误差）；
     传 ``traj30`` 时用 :func:`trajectory_target_indices` 取 t=k+1 的采样点。
+
+    返回 ``(loss, metrics)``：
+
+    - ``loss``：``loss_type`` 口径的**加权**训练损失（l2→加权 MSE，l1→加权 MAE；
+      ``Σ w·err_i/Σ w``，权重全 0 时按 1e-8 兜底防除零）；
+    - ``metrics``（纯诊断标量，与梯度无关，2026-09-26 新增）：
+      ``traj_mse_weighted`` = 加权 MSE（m²，与 ``loss_type`` 无关）、
+      ``traj_mae_weighted_m`` = 加权 MAE（m，与 ``loss_type`` 无关）、
+      ``traj_mae_all_m`` = **未加权** MAE（m，**含 w=0 的被过滤帧**，仅诊断）。
+
+    .. warning::
+        旧接口返回的第二个元素是**未加权 MSE（m²）**却被命名为 ``mae``：因为
+        ``train_weight=0`` 的近崩溃/离道帧被排除在加权值之外、而这些帧未来误差极大，
+        两者相差近一个量级。新接口用显式字典区分口径，数值与本函数 ``loss`` 的
+        加权口径一致。
     """
     if pred.shape[1] != target_dense.shape[1]:
         target_idx = torch.as_tensor(
@@ -1581,14 +1736,26 @@ def bc_trajectory_loss(
     else:
         target = target_dense
     diff = pred - target
-    per_sample = (diff ** 2).mean(dim=(-1, -2)) if loss_type == "l2" else diff.abs().mean(dim=(-1, -2))
+    mse_sample = (diff ** 2).mean(dim=(-1, -2))
+    mae_sample = diff.abs().mean(dim=(-1, -2))
+    per_sample = mse_sample if loss_type == "l2" else mae_sample
     if weights is not None:
         # 显式加权：Σ w·err / Σ w（等价于旧式 w/mean(w) 的 .mean()，但避免权重全 0 时除零放大）
         weight = weights.reshape(-1)
-        loss = (per_sample * weight).sum() / weight.sum().clamp(min=1e-8)
+        denom = weight.sum().clamp(min=1e-8)
+        loss = (per_sample * weight).sum() / denom
+        mse_weighted = (mse_sample * weight).sum() / denom
+        mae_weighted = (mae_sample * weight).sum() / denom
     else:
         loss = per_sample.mean()
-    return loss, per_sample.mean().detach()
+        mse_weighted = mse_sample.mean()
+        mae_weighted = mae_sample.mean()
+    metrics = {
+        "traj_mse_weighted": float(mse_weighted.detach()),  # m²，加权（与 loss_type 无关）
+        "traj_mae_weighted_m": float(mae_weighted.detach()),  # m，加权（与 loss_type 无关）
+        "traj_mae_all_m": float(mae_sample.mean().detach()),  # m，未加权，含被过滤帧（诊断）
+    }
+    return loss, metrics
 
 
 @_with_safe_od_pose
@@ -1599,6 +1766,7 @@ def pretrain_bc(
     *,
     logger: Callable[[str], None] = print,
     router_soft_targets_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+    batch_source: Optional[MaterializedBCDataset] = None,
 ) -> Dict[str, Any]:
     """BC 预热循环：轨迹 L1/L2 + **首步**动作回归 + router 软目标 CE/KL（权重感知）。
 
@@ -1618,12 +1786,28 @@ def pretrain_bc(
     阶段 B（v1.1）：``config.wm_detach`` 时 rollout 内 WM 输出 detach；
     ``config.freeze_prefixes`` 在优化器构建前生效（primary→specific 分段训练）。
 
-    返回指标（既有键不退化，新增按 horizon/label/slice 分组；全部带 count/weighted 双口径）：
-    ``bc_loss``、``bc_traj_loss``、``bc_action_loss``、``bc_router_loss``、``bc_traj_mae_m``、
-    ``bc_action_mu_ds_mean``，以及 ``bc_action_err_{mean,weighted_mean,median,p95}``、
-    ``bc_action_err_slice_{brake,turn,curve}_*``、``bc_action_err_label_<name>``、
-    ``bc_traj_err_h{k}``、``bc_router_{top1_cluster_acc,nmi,entropy,soft_ce,soft_kl,
-    expert_util_*, expert_weight_*, cluster_version,k,soft_placeholder}``。
+    ``batch_source``（2026-09-26 GPU 路径）：传入 :class:`MaterializedBCDataset` 时训练
+    循环只做切片 + pin/non-blocking H2D（逐样本历史重建移到训练前一次性完成）；
+    语义/数值与 ``None``（旧路径）逐位一致（等价性测试见 ``tests/test_fast_data_path.py``）。
+
+    ``config.micro_batch_size``（梯度累积）：< ``batch_size`` 时按 micro 前向/反向、
+    宏 batch 一次更新；各损失项按宏口径精确缩放（``Σ_m s_m·L_m = L_macro``），
+    12GB 卡上宏 batch 1024 靠它把显存峰值压到 micro 级别（net ST-GNN 6 步展开 ~32MB/样本）。
+
+    返回指标（既有键不退化，新增按 horizon/label/slice 分组；全部带 count/weighted 双口径；
+    2026-09-26 轨迹度量单位修正）：
+
+    - 轨迹全局：``bc_traj_loss``（加权损失项，含 ``traj_weight``）、``bc_traj_mse``（加权 MSE，m²）、
+      ``bc_traj_mae_m``（**加权 MAE，m**；旧语义 = 未加权 MSE(m²)，已修正）、
+      ``bc_traj_mae_all_m``（未加权 MAE，m，含 ``train_weight=0`` 的被过滤帧，仅诊断）、
+      ``bc_traj_mse_unweighted``（旧 ``bc_traj_mae_m`` 口径 alias：未加权 MSE，m²）；
+    - 轨迹逐 horizon：``bc_traj_mse_h{k}``（加权 MSE，m²）、``bc_traj_mae_h{k}_m``（加权 MAE，m）、
+      ``bc_traj_err_h{k}``（legacy alias：loss_type 口径的加权误差——l2→MSE(m²) / l1→MAE(m)）；
+    - 动作侧统计是显式 L1（米/弧度），不受 ``loss_type`` 影响：``bc_action_err_{mean,weighted_mean,
+      median,p95}``、``bc_action_err_slice_{brake,turn,curve}_*``、``bc_action_err_label_<name>``；
+    - 另有 ``bc_loss``、``bc_action_loss``、``bc_router_loss``、``bc_action_mu_ds_mean``、
+      ``bc_router_{top1_cluster_acc,nmi,entropy,soft_ce,soft_kl,expert_util_*,expert_weight_*,
+      cluster_version,k,soft_placeholder}``。
     """
     _require_torch()
     order_config = load_supervised_labels()
@@ -1656,7 +1840,8 @@ def pretrain_bc(
         "turn": {"err": [], "weight": []},
         "curve": {"err": [], "weight": []},
     }
-    traj_err_values: List[np.ndarray] = []
+    traj_mse_values: List[np.ndarray] = []
+    traj_mae_values: List[np.ndarray] = []
     weight_values: List[np.ndarray] = []
     mu_ds_sum, mu_ds_weight = 0.0, 0.0
     router_prob_sum: Optional[np.ndarray] = None
@@ -1669,146 +1854,229 @@ def pretrain_bc(
     router_soft_used = False
     router_soft_warned = False
 
+    macro_size = max(1, int(config.batch_size))
+    micro_size = (
+        macro_size
+        if config.micro_batch_size is None
+        else max(1, min(macro_size, int(config.micro_batch_size)))
+    )
+    if micro_size < macro_size:
+        logger(
+            f"[bc] 梯度累积：宏 batch={macro_size} · micro batch={micro_size}"
+            f"（phase={config.phase}；损失按宏口径精确缩放）"
+        )
     for epoch in range(int(config.epochs)):
         order = indices.copy()
         if config.shuffle:
             rng.shuffle(order)
-        totals = {"loss": 0.0, "traj": 0.0, "action": 0.0, "router": 0.0, "mae": 0.0, "mu_ds": 0.0}
+        totals = {
+            "loss": 0.0,
+            "traj": 0.0,
+            "action": 0.0,
+            "router": 0.0,
+            "mu_ds": 0.0,
+            # 轨迹度量（2026-09-26 单位修正）：加权 MSE(m²)/MAE(m) + 未加权诊断
+            "traj_mse": 0.0,
+            "traj_mae": 0.0,
+            "traj_mae_all": 0.0,
+            "traj_mse_all": 0.0,
+        }
         batches = 0
-        for start in range(0, len(order), max(1, int(config.batch_size))):
+        data_seconds = forward_seconds = backward_seconds = 0.0
+        for start in range(0, len(order), macro_size):
             if config.max_batches is not None and batches >= int(config.max_batches):
                 break
-            batch_indices = order[start : start + max(1, int(config.batch_size))]
-            obs_np = dataset.build_obs_batch(batch_indices)
-            obs = _to_device_obs(obs_np, device)
-            targets = {
-                key: torch.as_tensor(value, device=device) for key, value in dataset.targets(batch_indices).items()
+            batch_indices = order[start : start + macro_size]
+            n_macro = int(batch_indices.shape[0])
+            data_started = time.perf_counter()
+            if batch_source is not None:
+                obs_macro = batch_source.obs_batch(batch_indices)
+                targets_macro = batch_source.targets_batch(batch_indices)
+            else:
+                obs_macro = dataset.build_obs_batch(batch_indices)
+                targets_macro = dataset.targets(batch_indices)
+            weight_macro_np = np.asarray(targets_macro["train_weight"], dtype=np.float64).reshape(-1)
+            weight_macro_total = max(float(weight_macro_np.sum()), 1e-12)
+            data_seconds += time.perf_counter() - data_started
+            # 梯度累积（micro-batch，可选）：每 micro 前向/反向，按宏 batch 口径精确缩放
+            # （Σ_m s_m·L_m = L_macro），optimizer 每宏 batch 一次；micro == macro 时退化旧行为。
+            optimizer.zero_grad(set_to_none=True)
+            totals_micro = {
+                "loss": 0.0,
+                "traj": 0.0,
+                "action": 0.0,
+                "router": 0.0,
+                "traj_mse": 0.0,
+                "traj_mae": 0.0,
+                "traj_mae_all": 0.0,
+                "traj_mse_all": 0.0,
             }
-            frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
-            weight_sum = frame_weight.sum().clamp(min=1e-8)
-            weight_values.append(frame_weight.detach().double().cpu().numpy())
-            # 阶段 B 只需要 traj_xy（B1 rollout）；WM 直接多步预测不参与损失（world_model=False），
-            # 且 ``wm_detach`` 时 rollout 内 WM 预测不回传梯度（因果链：WM 冻结 + 输出 detach）。
-            out = model(obs, rollout=True, world_model=False, wm_detach=config.wm_detach)
-            traj_pred = out.get("traj_xy")
-            if traj_pred is None:
-                raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
-            traj_loss, traj_mae = bc_trajectory_loss(
-                traj_pred, targets["traj6"], loss_type=config.loss_type, weights=frame_weight
-            )
-            loss = config.traj_weight * traj_loss
-            traj_diff = traj_pred - targets["traj6"]
-            traj_per_point = (
-                (traj_diff ** 2).mean(dim=-1) if config.loss_type == "l2" else traj_diff.abs().mean(dim=-1)
-            )
-            traj_err_values.append(traj_per_point.detach().double().cpu().numpy())
-            action_loss = torch.zeros((), device=device)
-            action_pred = out.get("action_mu")
-            target_action = targets["action"][:, 0, :]
-            if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
-                diff = action_pred - target_action
-                per_sample = (diff ** 2).mean(dim=-1) if config.loss_type == "l2" else diff.abs().mean(dim=-1)
-                action_loss = (per_sample * frame_weight).sum() / weight_sum * config.action_weight
-                loss = loss + action_loss
-                totals["mu_ds"] += float((action_pred[:, 0] * frame_weight).sum() / weight_sum)
-                # 统计口径：逐样本 L1（不受 loss_type 影响，便于跨实验比较）+ 分切片/分标签误差
-                sample_error = diff.abs().mean(dim=-1).detach().double().cpu().numpy()
-                sample_weight = frame_weight.detach().double().cpu().numpy()
-                action_err_values.append(sample_error)
-                labels_np = targets["labels"].detach().double().cpu().numpy()
-                label_values.append(labels_np)
-                expert_action = target_action.detach().double().cpu().numpy()
-                slice_masks = {
-                    "brake": expert_action[:, 0] < float(config.slice_brake_ds),
-                    "turn": np.abs(expert_action[:, 1]) >= float(config.slice_turn_dtheta),
-                }
-                if on_curve_index is not None:
-                    slice_masks["curve"] = labels_np[:, on_curve_index] > 0.5
-                for name, mask in slice_masks.items():
-                    if bool(np.any(mask)):
-                        slice_err_values[name]["err"].append(sample_error[mask])
-                        slice_err_values[name]["weight"].append(sample_weight[mask])
-                mu_ds_sum += float((action_pred[:, 0] * frame_weight).sum())
-                mu_ds_weight += float(weight_sum)
-            router_loss = torch.zeros((), device=device)
-            if config.router_coef > 0.0 and out.get("router_logits") is not None:
-                logits = out["router_logits"]
-                soft_targets_np = None
-                if router_soft_targets_fn is not None:
-                    try:
-                        soft_targets_np = router_soft_targets_fn(obs_np)
-                    except Exception as exc:  # noqa: BLE001 - 聚类 artifact/特征口径不匹配 → 跳过
-                        if not router_soft_warned:
-                            logger(
-                                f"[bc] router 软目标不可用（{type(exc).__name__}: {exc}）→ "
-                                "本轮跳过 router 损失（不再回退 8 维硬标签 BCE）"
-                            )
-                            router_soft_warned = True
-                        soft_targets_np = None
-                if soft_targets_np is None:
-                    soft_targets_np = targets.get("router_soft")
-                if soft_targets_np is None:
-                    if not router_soft_warned:
-                        logger(
-                            "[bc] 无 router 软目标（cluster fn / 数据集 router_soft_targets 均缺失）→ "
-                            "跳过 router 损失（bc_router_soft_placeholder=1）"
-                        )
-                        router_soft_warned = True
+            mu_num = mu_den = 0.0
+            for m_start in range(0, n_macro, micro_size):
+                micro_indices = batch_indices[m_start : m_start + micro_size]
+                m_lo, m_hi = m_start, m_start + int(micro_indices.shape[0])
+                data_started = time.perf_counter()
+                if micro_size >= n_macro:
+                    obs_np, targets_np = obs_macro, targets_macro
                 else:
-                    if hasattr(soft_targets_np, "detach"):
-                        soft_targets_np = soft_targets_np.detach().cpu().numpy()
-                    soft_targets_np = np.asarray(soft_targets_np, dtype=np.float32)
-                    soft_targets = torch.as_tensor(soft_targets_np, dtype=torch.float32, device=device)
-                    if tuple(soft_targets.shape) != tuple(logits.shape):
+                    obs_np = {key: value[m_lo:m_hi] for key, value in obs_macro.items()}
+                    targets_np = {key: value[m_lo:m_hi] for key, value in targets_macro.items()}
+                obs = _to_device_obs(obs_np, device, pin=batch_source is not None)
+                targets = to_device_tensors(targets_np, device, pin=batch_source is not None)
+                frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
+                weight_sum = frame_weight.sum().clamp(min=1e-8)
+                # 精确缩放因子：加权项（traj/action/加权轨迹度量）= W_m/W_macro；逐行均值项（router）与
+                # 未加权诊断口径（traj_*_all）= n_m/n_macro
+                scale_weight = float(weight_macro_np[m_lo:m_hi].sum()) / weight_macro_total
+                scale_rows = float(m_hi - m_lo) / float(max(1, n_macro))
+                weight_values.append(frame_weight.detach().double().cpu().numpy())
+                data_seconds += time.perf_counter() - data_started
+                forward_started = time.perf_counter()
+                # 阶段 B 只需要 traj_xy（B1 rollout）；WM 直接多步预测不参与损失（world_model=False），
+                # 且 ``wm_detach`` 时 rollout 内 WM 预测不回传梯度（因果链：WM 冻结 + 输出 detach）。
+                out = model(obs, rollout=True, world_model=False, wm_detach=config.wm_detach)
+                traj_pred = out.get("traj_xy")
+                if traj_pred is None:
+                    raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
+                traj_loss, traj_metrics = bc_trajectory_loss(
+                    traj_pred, targets["traj6"], loss_type=config.loss_type, weights=frame_weight
+                )
+                traj_term = config.traj_weight * traj_loss
+                action_term = torch.zeros((), device=device)
+                router_term = torch.zeros((), device=device)
+                traj_diff = traj_pred - targets["traj6"]
+                # 逐 horizon 矩阵：MSE 与 L1 分开累计（口径与 loss_type 解耦）
+                traj_mse_point = (traj_diff ** 2).mean(dim=-1)
+                traj_mae_point = traj_diff.abs().mean(dim=-1)
+                traj_mse_values.append(traj_mse_point.detach().double().cpu().numpy())
+                traj_mae_values.append(traj_mae_point.detach().double().cpu().numpy())
+                action_loss = torch.zeros((), device=device)
+                action_pred = out.get("action_mu")
+                target_action = targets["action"][:, 0, :]
+                if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
+                    diff = action_pred - target_action
+                    per_sample = (diff ** 2).mean(dim=-1) if config.loss_type == "l2" else diff.abs().mean(dim=-1)
+                    action_loss = (per_sample * frame_weight).sum() / weight_sum * config.action_weight
+                    action_term = action_loss
+                    mu_num += float((action_pred[:, 0] * frame_weight).sum())
+                    mu_den += float(weight_sum)
+                    # 统计口径：逐样本 L1（不受 loss_type 影响，便于跨实验比较）+ 分切片/分标签误差
+                    sample_error = diff.abs().mean(dim=-1).detach().double().cpu().numpy()
+                    sample_weight = frame_weight.detach().double().cpu().numpy()
+                    action_err_values.append(sample_error)
+                    labels_np = targets["labels"].detach().double().cpu().numpy()
+                    label_values.append(labels_np)
+                    expert_action = target_action.detach().double().cpu().numpy()
+                    slice_masks = {
+                        "brake": expert_action[:, 0] < float(config.slice_brake_ds),
+                        "turn": np.abs(expert_action[:, 1]) >= float(config.slice_turn_dtheta),
+                    }
+                    if on_curve_index is not None:
+                        slice_masks["curve"] = labels_np[:, on_curve_index] > 0.5
+                    for name, mask in slice_masks.items():
+                        if bool(np.any(mask)):
+                            slice_err_values[name]["err"].append(sample_error[mask])
+                            slice_err_values[name]["weight"].append(sample_weight[mask])
+                    mu_ds_sum += float((action_pred[:, 0] * frame_weight).sum())
+                    mu_ds_weight += float(weight_sum)
+                router_loss = torch.zeros((), device=device)
+                if config.router_coef > 0.0 and out.get("router_logits") is not None:
+                    logits = out["router_logits"]
+                    soft_targets_np = None
+                    if router_soft_targets_fn is not None:
+                        try:
+                            soft_targets_np = router_soft_targets_fn(obs_np)
+                        except Exception as exc:  # noqa: BLE001 - 聚类 artifact/特征口径不匹配 → 跳过
+                            if not router_soft_warned:
+                                logger(
+                                    f"[bc] router 软目标不可用（{type(exc).__name__}: {exc}）→ "
+                                    "本轮跳过 router 损失（不再回退 8 维硬标签 BCE）"
+                                )
+                                router_soft_warned = True
+                            soft_targets_np = None
+                    if soft_targets_np is None:
+                        soft_targets_np = targets.get("router_soft")
+                    if soft_targets_np is None:
                         if not router_soft_warned:
                             logger(
-                                f"[bc] router 软目标形状 {tuple(soft_targets.shape)} != logits "
-                                f"{tuple(logits.shape)} → 跳过 router 损失"
+                                "[bc] 无 router 软目标（cluster fn / 数据集 router_soft_targets 均缺失）→ "
+                                "跳过 router 损失（bc_router_soft_placeholder=1）"
                             )
                             router_soft_warned = True
                     else:
-                        router_soft_used = True
-                        router_loss = config.router_coef * router_soft_target_loss(
-                            logits, soft_targets, temperature=float(config.router_temperature)
-                        )
-                        loss = loss + router_loss
-                if router_soft_used:
-                    with torch.no_grad():
-                        probs = torch.softmax(logits, dim=-1).detach().double().cpu().numpy()
-                        if router_prob_sum is None:
-                            num_experts = int(probs.shape[1])
-                            router_prob_sum = np.zeros(num_experts, dtype=np.float64)
-                            router_mix_weight_sum = np.zeros(num_experts, dtype=np.float64)
-                            router_mix_selected = np.zeros(num_experts, dtype=np.float64)
-                        router_prob_sum += probs.sum(axis=0)
-                        router_top1.append(np.argmax(probs, axis=1))
-                        clip = np.clip(probs, 1e-9, 1.0)
-                        router_entropy_sum += float((-(clip * np.log(clip)).sum(axis=1)).mean())
-                        router_count += int(probs.shape[0])
-                        router_cluster.append(
-                            torch.argmax(soft_targets, dim=-1).detach().cpu().numpy().astype(np.int64)
-                        )
-                        soft_stats = router_soft_target_stats(
-                            logits, soft_targets, temperature=float(config.router_temperature)
-                        )
-                        router_soft_ce_sum += soft_stats["ce"]
-                        router_soft_kl_sum += soft_stats["kl"]
-                        weights = out.get("expert_weights")
-                        if weights is not None and tuple(weights.shape) == tuple(logits.shape):
-                            mix = weights.detach().double().cpu().numpy()
-                            router_mix_weight_sum += mix.sum(axis=0)
-                            router_mix_selected += (mix > 1e-6).sum(axis=0)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+                        if hasattr(soft_targets_np, "detach"):
+                            soft_targets_np = soft_targets_np.detach().cpu().numpy()
+                        soft_targets_np = np.asarray(soft_targets_np, dtype=np.float32)
+                        soft_targets = torch.as_tensor(soft_targets_np, dtype=torch.float32, device=device)
+                        if tuple(soft_targets.shape) != tuple(logits.shape):
+                            if not router_soft_warned:
+                                logger(
+                                    f"[bc] router 软目标形状 {tuple(soft_targets.shape)} != logits "
+                                    f"{tuple(logits.shape)} → 跳过 router 损失"
+                                )
+                                router_soft_warned = True
+                        else:
+                            router_soft_used = True
+                            router_loss = config.router_coef * router_soft_target_loss(
+                                logits, soft_targets, temperature=float(config.router_temperature)
+                            )
+                            router_term = router_loss
+                    if router_soft_used:
+                        with torch.no_grad():
+                            probs = torch.softmax(logits, dim=-1).detach().double().cpu().numpy()
+                            if router_prob_sum is None:
+                                num_experts = int(probs.shape[1])
+                                router_prob_sum = np.zeros(num_experts, dtype=np.float64)
+                                router_mix_weight_sum = np.zeros(num_experts, dtype=np.float64)
+                                router_mix_selected = np.zeros(num_experts, dtype=np.float64)
+                            router_prob_sum += probs.sum(axis=0)
+                            router_top1.append(np.argmax(probs, axis=1))
+                            clip = np.clip(probs, 1e-9, 1.0)
+                            router_entropy_sum += float((-(clip * np.log(clip)).sum(axis=1)).mean())
+                            router_count += int(probs.shape[0])
+                            router_cluster.append(
+                                torch.argmax(soft_targets, dim=-1).detach().cpu().numpy().astype(np.int64)
+                            )
+                            soft_stats = router_soft_target_stats(
+                                logits, soft_targets, temperature=float(config.router_temperature)
+                            )
+                            router_soft_ce_sum += soft_stats["ce"]
+                            router_soft_kl_sum += soft_stats["kl"]
+                            weights = out.get("expert_weights")
+                            if weights is not None and tuple(weights.shape) == tuple(logits.shape):
+                                mix = weights.detach().double().cpu().numpy()
+                                router_mix_weight_sum += mix.sum(axis=0)
+                                router_mix_selected += (mix > 1e-6).sum(axis=0)
+                forward_seconds += time.perf_counter() - forward_started
+                # 组合缩放后的宏 batch 损失：Σ_m s_m·L_m = L_macro（micro == macro 时 s=1）
+                loss = (
+                    traj_term * scale_weight
+                    + action_term * scale_weight
+                    + router_term * scale_rows
+                )
+                backward_started = time.perf_counter()
+                loss.backward()
+                backward_seconds += time.perf_counter() - backward_started
+                totals_micro["loss"] += float(loss.detach())
+                totals_micro["traj"] += float(traj_term.detach()) * scale_weight
+                totals_micro["action"] += float(action_term.detach()) * scale_weight
+                totals_micro["router"] += float(router_term.detach()) * scale_rows
+                # 轨迹度量：加权口径按 W_m/W_macro、未加权诊断口径按 n_m/n_macro 缩放
+                totals_micro["traj_mse"] += traj_metrics["traj_mse_weighted"] * scale_weight
+                totals_micro["traj_mae"] += traj_metrics["traj_mae_weighted_m"] * scale_weight
+                totals_micro["traj_mae_all"] += traj_metrics["traj_mae_all_m"] * scale_rows
+                totals_micro["traj_mse_all"] += float(traj_mse_point.mean()) * scale_rows
+            for key, value in totals_micro.items():
+                totals[key] += value
+            if mu_den > 0.0:
+                totals["mu_ds"] += mu_num / mu_den
+            # micro 累积结束 → 一次梯度裁剪 + optimizer 步进（等价于宏 batch 一次更新）
+            backward_started = time.perf_counter()
             torch.nn.utils.clip_grad_norm_(
                 [parameter for parameter in model.parameters() if parameter.requires_grad], float(config.grad_clip)
             )
             optimizer.step()
-            totals["loss"] += float(loss.detach())
-            totals["traj"] += float(traj_loss.detach())
-            totals["action"] += float(action_loss.detach())
-            totals["router"] += float(router_loss.detach())
-            totals["mae"] += float(traj_mae)
+            backward_seconds += time.perf_counter() - backward_started
             batches += 1
         metrics["batches"] += batches
         divisor = max(1, batches)
@@ -1818,7 +2086,13 @@ def pretrain_bc(
                 "bc_traj_loss": totals["traj"] / divisor,
                 "bc_action_loss": totals["action"] / divisor,
                 "bc_router_loss": totals["router"] / divisor,
-                "bc_traj_mae_m": totals["mae"] / divisor,
+                # 轨迹度量（单位见 docstring）：bc_traj_loss 是加权损失项（含 traj_weight）；
+                # bc_traj_mse 加权 MSE(m²)；bc_traj_mae_m 加权 MAE(m)；
+                # bc_traj_mae_all_m 未加权 MAE(m，含被过滤帧)；bc_traj_mse_unweighted 旧口径 alias(m²)。
+                "bc_traj_mse": totals["traj_mse"] / divisor,
+                "bc_traj_mae_m": totals["traj_mae"] / divisor,
+                "bc_traj_mae_all_m": totals["traj_mae_all"] / divisor,
+                "bc_traj_mse_unweighted": totals["traj_mse_all"] / divisor,
                 "bc_action_mu_ds_mean": totals["mu_ds"] / divisor,
                 "bc_batches_count": int(batches),
                 "last_epoch": epoch + 1,
@@ -1826,9 +2100,12 @@ def pretrain_bc(
         )
         logger(
             f"[bc] phase={config.phase} epoch {epoch + 1}/{config.epochs} loss={metrics['bc_loss']:.4f} "
-            f"traj={metrics['bc_traj_loss']:.4f} mae={metrics['bc_traj_mae_m']:.3f}m "
+            f"traj={metrics['bc_traj_loss']:.4f} traj_mse_m2={metrics['bc_traj_mse']:.4f} "
+            f"traj_mae_m={metrics['bc_traj_mae_m']:.3f}m "
             f"action={metrics['bc_action_loss']:.4f} router={metrics['bc_router_loss']:.4f} "
-            f"mu_ds={metrics['bc_action_mu_ds_mean']:.3f}m"
+            f"mu_ds={metrics['bc_action_mu_ds_mean']:.3f}m "
+            f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s "
+            f"it/s={batches / max(data_seconds + forward_seconds + backward_seconds, 1e-9):.2f}"
         )
 
     # ---------------------------------------------------------------- 汇总统计
@@ -1847,13 +2124,25 @@ def pretrain_bc(
         metrics[f"bc_action_err_slice_{name}_weighted_mean"] = metrics[f"bc_action_err_slice_{name}"][
             "weighted_mean"
         ]
-    # 逐 horizon 轨迹误差（B1 6 点端点；权重与动作误差同源）
-    if traj_err_values:
-        traj_matrix = np.concatenate(traj_err_values)
+    # 逐 horizon 轨迹度量（B1 6 点端点；权重与动作误差同源，均为加权口径）：
+    # - bc_traj_mse_h{k}   ：加权 MSE（m²）
+    # - bc_traj_mae_h{k}_m ：加权 MAE（m）
+    # - bc_traj_err_h{k}   ：legacy alias = loss_type 口径（l2→MSE(m²)，l1→MAE(m)）
+    if traj_mse_values:
+        traj_mse_matrix = np.concatenate(traj_mse_values)
+        traj_mae_matrix = np.concatenate(traj_mae_values)
         traj_weights = np.concatenate(weight_values)
-        for k in range(traj_matrix.shape[1]):
-            stats = weighted_stats(traj_matrix[:, k], traj_weights, prefix="")
-            metrics[f"bc_traj_err_h{k + 1}"] = stats["weighted_mean"]
+        legacy_matrix = traj_mse_matrix if config.loss_type == "l2" else traj_mae_matrix
+        for k in range(traj_mse_matrix.shape[1]):
+            metrics[f"bc_traj_mse_h{k + 1}"] = weighted_stats(
+                traj_mse_matrix[:, k], traj_weights, prefix=""
+            )["weighted_mean"]
+            metrics[f"bc_traj_mae_h{k + 1}_m"] = weighted_stats(
+                traj_mae_matrix[:, k], traj_weights, prefix=""
+            )["weighted_mean"]
+            metrics[f"bc_traj_err_h{k + 1}"] = weighted_stats(
+                legacy_matrix[:, k], traj_weights, prefix=""
+            )["weighted_mean"]
     # 逐标签动作误差（样本可属于多个标签；顺序与 batch 累积一致）
     if label_values and action_err_values:
         labels_used = np.concatenate(label_values)

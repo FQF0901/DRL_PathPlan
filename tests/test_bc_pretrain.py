@@ -86,9 +86,11 @@ def test_bc_trajectory_loss_uses_time_aligned_targets() -> None:
     traj6 = torch.as_tensor(dataset.arrays["traj6"])
     traj30 = torch.as_tensor(dataset.arrays["traj30"])
 
-    loss, mae = bc_trajectory_loss(traj6, traj30)
+    loss, metrics = bc_trajectory_loss(traj6, traj30)
     assert float(loss) == pytest.approx(0.0, abs=1e-10)
-    assert float(mae) == pytest.approx(0.0, abs=1e-10)
+    assert metrics["traj_mae_weighted_m"] == pytest.approx(0.0, abs=1e-10)
+    assert metrics["traj_mse_weighted"] == pytest.approx(0.0, abs=1e-10)
+    assert metrics["traj_mae_all_m"] == pytest.approx(0.0, abs=1e-10)
 
     # 旧实现的取点（错误）确实与 traj6 不同 —— 保证上面的断言有意义
     old_idx = torch.linspace(0, 29, 6).round().long()

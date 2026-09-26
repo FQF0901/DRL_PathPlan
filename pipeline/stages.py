@@ -16,8 +16,8 @@
   （``traj_xy`` vs 专家 ``traj6``，WM 冻结；新 net 的合成帧 detach 语义）+ **router 软目标
   CE/KL**（聚类分布 + 温度；软目标缺失时跳过并记录 ``bc_router_soft_placeholder=1``，
   不再回退 8 维硬标签 BCE）。
-  日志：动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）+ 逐 horizon ego 误差 +
-  router top-1/簇准确率/NMI/门控熵/专家利用率。
+  日志：动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）+ 逐 horizon 轨迹误差
+  （加权 MAE m / MSE m²，2026-09-26 单位修正）+ router top-1/簇准确率/NMI/门控熵/专家利用率。
 - **C = PPO RL（EXPERIMENTAL）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）与
   P0-2（router 标签错位）未修复前**不得用于 RL 结论**，仅保留管线冒烟。KL 锚 = 阶段 B 快照
   （``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
@@ -61,6 +61,8 @@ from pipeline.trainer import (  # noqa: E402
     BCConfig,
     BCDataset,
     DEFAULT_PROBE_BATCH,
+    DEFAULT_STAGE_BATCH_SIZE,
+    MaterializedBCDataset,
     PPOConfig,
     PPOTrainer,
     apply_freeze_prefixes,
@@ -77,6 +79,8 @@ from pipeline.trainer import (  # noqa: E402
     save_checkpoint,
     stack_history,
     squeeze_single_slot,
+    to_device_tensor,
+    to_device_tensors,
     trim_memory,
     weighted_od_multi_step_loss,
 )
@@ -723,6 +727,76 @@ class FrameWindows:
 
 
 # --------------------------------------------------------------------------- #
+# 阶段 A/B 快路径：逐样本窗口/目标的一次性物化（训练循环只做切片 + H2D）
+# --------------------------------------------------------------------------- #
+#
+# 实测（2026-09-26，v2 数据 / H=128）：逐样本 build_obs_batch + build_future 占单 batch
+# 墙钟 >95%（batch=256 时 Stage A ~0.44 s vs GPU 前反向 5–15 ms）。物化后循环内只做
+# numpy 切片 + pin/non-blocking H2D（`MaterializedBCDataset` 见 pipeline.trainer）。
+
+#: Stage A 未来目标物化保留的键（Stage A 只消费这些：LD 损失已移除、od_mask_raw 仅内部诊断）
+_MATERIALIZED_FUTURE_KEYS: Tuple[str, ...] = (
+    "od_fut",
+    "od_mask",
+    "wm_valid",
+    "valid",
+    "ego_fut",
+    "od_presence_fut",
+    "od_id_fut",
+    "od_presence_t0",
+    "od_id_t0",
+)
+
+
+class _ArrayBatchSource:
+    """连续数组上的只读 batch 视图（``arr[idx]`` 切片；训练循环唯一的数据操作）。"""
+
+    def __init__(self, arrays: Mapping[str, np.ndarray]):
+        self.arrays: Dict[str, np.ndarray] = {str(key): np.asarray(value) for key, value in arrays.items()}
+        self.nbytes = int(sum(value.nbytes for value in self.arrays.values()))
+
+    def batch(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
+        idx = np.asarray(indices, dtype=np.int64)
+        return {key: value[idx] for key, value in self.arrays.items()}
+
+
+def _materialize_future_targets(
+    future_fn: Any,
+    obs_source: MaterializedBCDataset,
+    count: int,
+    *,
+    batch_size: int = 1024,
+    logger: Any = print,
+) -> _ArrayBatchSource:
+    """阶段 A 未来目标一次性物化（分块调用 ``future_fn``，与逐 batch 完全同路径）。
+
+    ``future_fn(indices, obs_np) -> dict`` = ``run_stage_a`` 内的 ``_future_targets``
+    （含 ``wm_valid`` 门控 / 身份匹配 / v1 最近邻回退），因此物化结果与旧逐 batch 路径
+    逐值一致（等价性测试见 ``tests/test_fast_data_path.py``）。
+    """
+    started = time.perf_counter()
+    chunk = max(1, int(batch_size))
+    arrays: Dict[str, np.ndarray] = {}
+    for start in range(0, int(count), chunk):
+        stop = min(start + chunk, int(count))
+        indices = np.arange(start, stop, dtype=np.int64)
+        future = future_fn(indices, obs_source.obs_batch(indices))
+        if not arrays:
+            arrays = {
+                key: np.empty((int(count), ) + tuple(np.asarray(future[key]).shape[1:]), dtype=np.asarray(future[key]).dtype)
+                for key in _MATERIALIZED_FUTURE_KEYS
+            }
+        for key in _MATERIALIZED_FUTURE_KEYS:
+            arrays[key][start:stop] = future[key]
+    source = _ArrayBatchSource(arrays)
+    logger(
+        f"[materialize] future targets {count} 行 → {source.nbytes / 1e6:.1f} MB "
+        f"（{time.perf_counter() - started:.1f}s，chunk={chunk}）"
+    )
+    return source
+
+
+# --------------------------------------------------------------------------- #
 # 阶段 A：world model（教师强制）
 # --------------------------------------------------------------------------- #
 
@@ -950,8 +1024,24 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         parameter.requires_grad_(True)
     optimizer = torch.optim.Adam(trainable, lr=float(args.lr))
     model.to(device).train()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
-    batch_size = int(args.batch_size or 128)
+    train_cfg = dict(config.get("train", {}) or {})
+    batch_size = int(
+        args.batch_size or (train_cfg.get("wm", {}) or {}).get("batch_size") or DEFAULT_STAGE_BATCH_SIZE
+    )
+    micro_cfg = args.micro_batch_size if args.micro_batch_size is not None else (train_cfg.get("wm", {}) or {}).get(
+        "micro_batch_size"
+    )
+    micro_batch = batch_size if not micro_cfg else max(1, min(batch_size, int(micro_cfg)))
+    use_accum = micro_batch < batch_size
+    use_pin = device.type == "cuda"
+    use_materialized = bool(getattr(args, "materialize", False))
+
+    def _tensor(value: Any, *, dtype: Optional["torch.dtype"] = None) -> "torch.Tensor":
+        """numpy → device（物化路径走 pin_memory + non_blocking H2D）。"""
+        return to_device_tensor(value, device, dtype=dtype, pin=use_pin)
     noise_std = torch.tensor(
         [float(args.plan_noise_ds), float(args.plan_noise_dtheta)], dtype=torch.float32, device=device
     )
@@ -979,10 +1069,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     presence_state = {"available": 0.0, "warning": False}
 
     def _to_tensor(batch: Mapping[str, np.ndarray]) -> Dict[str, "torch.Tensor"]:
-        return {key: torch.as_tensor(value, dtype=torch.float32, device=device) for key, value in batch.items()}
+        return to_device_tensors(batch, device, dtype=torch.float32, pin=use_pin)
 
     def _frame_weight(batch_indices: np.ndarray) -> "torch.Tensor":
-        return torch.as_tensor(train_weight_all[batch_indices], dtype=torch.float32, device=device)
+        return _tensor(train_weight_all[batch_indices], dtype=torch.float32)
 
     def _future_targets(batch_indices: np.ndarray, obs_np: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """未来目标（精确查表 + ``wm_valid`` 门控 + 身份匹配）。
@@ -1008,6 +1098,15 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             future["valid"], dtype=np.float32
         )
         return future
+
+    # 快路径：obs + 未来目标一次性物化（训练循环只做切片 + H2D；见 pipeline.trainer）
+    obs_source: Optional[MaterializedBCDataset] = None
+    future_source: Optional[_ArrayBatchSource] = None
+    if use_materialized:
+        obs_source = MaterializedBCDataset(dataset, include_targets=False)
+        future_source = _materialize_future_targets(
+            _future_targets, obs_source, dataset.count, batch_size=batch_size
+        )
 
     def _wm_predictions(
         obs: Mapping[str, "torch.Tensor"],
@@ -1095,23 +1194,88 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             key: torch.stack(values, dim=1) for key, values in predictions.items()
         }
 
-    def _forward_terms(batch_indices: np.ndarray, *, noise: bool) -> Dict[str, Any]:
-        """一次前向：OD 直接多步损失（加权）+ plan head ``ego_next`` 监督 + presence/entry BCE（id 轴）。"""
-        obs_np = dataset.build_obs_batch(batch_indices)
+    def _term_denominators(
+        future: Mapping[str, np.ndarray], frame_weight_np: np.ndarray
+    ) -> Dict[str, float]:
+        """宏/micro 口径的损失分母（纯数据计算，无需前向）。
+
+        - ``od``：``Σ w·valid·od_mask``（= ``weighted_od_multi_step_loss`` 的分母）；
+        - ``step``：``Σ w·valid``（= ``ego_next`` 的 ``step_weight`` 分母）；
+        - ``presence``：``step × 槽位数``（= presence/entry BCE 的分母口径）。
+        """
+        wm_valid = np.asarray(future["wm_valid"], dtype=np.float64)
+        od_mask = np.asarray(future["od_mask"], dtype=np.float64)
+        weight = np.asarray(frame_weight_np, dtype=np.float64).reshape(-1, 1)
+        od_weight = od_mask * wm_valid[:, :, None] * weight[:, :, None]
+        step_weight = weight * wm_valid
+        slots = int(od_mask.shape[-1]) if od_mask.ndim >= 2 else 0
+        return {
+            "od": float(od_weight.sum()),
+            "step": float(step_weight.sum()),
+            "presence": float(step_weight.sum()) * float(slots),
+        }
+
+    def _scale_factors(
+        micro: Mapping[str, float], macro: Mapping[str, float]
+    ) -> Dict[str, float]:
+        """micro → 宏口径的精确缩放因子（``Σ_m s_m·L_m = L_macro``；宏分母 0 → 该 term 恒 0）。"""
+        return {
+            key: (float(micro[key]) / float(macro[key]) if float(macro[key]) > 0.0 else 0.0)
+            for key in macro
+        }
+
+    def _prepare_inputs(
+        batch_indices: np.ndarray, timing: Optional[Dict[str, float]] = None
+    ) -> Tuple[
+        Dict[str, "torch.Tensor"], Dict[str, np.ndarray], np.ndarray, "torch.Tensor", "torch.Tensor"
+    ]:
+        """obs/未来目标 + H2D（物化后只剩切片 + pin 拷贝）。
+
+        返回 ``(obs, future_np, frame_weight_np, frame_weight, plan)``；``scale`` 型调用方
+        用同一宏 batch 的输入，微批时再切张量/数组（GPU 切片廉价）。
+        """
+        data_started = time.perf_counter()
+        if obs_source is not None:
+            obs_np = obs_source.obs_batch(batch_indices)
+        else:
+            obs_np = dataset.build_obs_batch(batch_indices)
+        if future_source is not None:
+            future = future_source.batch(batch_indices)
+        else:
+            future = _future_targets(batch_indices, obs_np)
+        frame_weight_np = np.asarray(train_weight_all[batch_indices], dtype=np.float32)
         obs = _to_tensor(obs_np)
-        future = _future_targets(batch_indices, obs_np)
-        frame_weight = _frame_weight(batch_indices)
-        plan = torch.as_tensor(action_all[batch_indices], dtype=torch.float32, device=device)
+        frame_weight = _tensor(frame_weight_np, dtype=torch.float32)
+        plan = _tensor(action_all[batch_indices], dtype=torch.float32)
+        if timing is not None:
+            timing["data"] = timing.get("data", 0.0) + time.perf_counter() - data_started
+        return obs, future, frame_weight_np, frame_weight, plan
+
+    def _forward_terms(
+        obs: Mapping[str, "torch.Tensor"],
+        future: Mapping[str, np.ndarray],
+        frame_weight: "torch.Tensor",
+        plan: "torch.Tensor",
+        *,
+        noise: bool,
+        scales: Optional[Mapping[str, float]] = None,
+        auc_pool: Optional[Dict[str, List[np.ndarray]]] = None,
+    ) -> Dict[str, Any]:
+        """一次前向（输入已备好）：OD 直接多步损失 + plan head ``ego_next`` + presence/entry BCE。
+
+        ``scales``（梯度累积）：按宏 batch 口径缩放各损失项（``od``/``step``/``presence``），
+        使 ``Σ_m s_m·L_m = L_macro``；``None`` = 不分片（数值与旧版逐位一致）。
+        ``auc_pool``：presence/entry 的逐 micro scores/labels 汇入池，AUC 由调用方在宏 batch
+        上一次性计算（训练路径 AUC 仅诊断；评估路径不传 → 旧行为）。
+        """
         predictions = _wm_predictions(obs, future, plan, noise=noise)
         od_pred = predictions["od_pred"]
-        od_target = model.st_gnn.od_state_from_features(
-            torch.as_tensor(future["od_fut"], device=device)
-        )
-        wm_valid = torch.as_tensor(future["wm_valid"], device=device)
+        od_target = model.st_gnn.od_state_from_features(_tensor(future["od_fut"]))
+        wm_valid = _tensor(future["wm_valid"])
         od_loss, od_per_horizon = weighted_od_multi_step_loss(
             od_pred,
             od_target,
-            torch.as_tensor(future["od_mask"], device=device),
+            _tensor(future["od_mask"]),
             frame_weight=frame_weight,
             valid=wm_valid,
         )
@@ -1128,8 +1292,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         ego_next_pred = predictions.get("ego_next_pred")
         ego_fut = future.get("ego_fut")
         if ego_next_pred is not None and ego_fut is not None:
-            ego_target = torch.as_tensor(
-                np.asarray(ego_fut)[:, :, : int(ego_next_pred.shape[-1])], dtype=torch.float32, device=device
+            ego_target = _tensor(
+                np.asarray(ego_fut)[:, :, : int(ego_next_pred.shape[-1])], dtype=torch.float32
             )
             horizon = min(int(ego_target.shape[1]), int(ego_next_pred.shape[1]))
             error = torch.nn.functional.smooth_l1_loss(
@@ -1165,14 +1329,19 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 entry_pred = predictions["entry_pred"]
                 # id 轴目标（v1.2；见 presence_entry_targets）：未来帧同 id 是否在盒内 / 新 id 是否出现
                 presence_target_np, entry_target_np = presence_entry_targets(future)
-                presence_target = torch.as_tensor(presence_target_np, dtype=torch.float32, device=device)
-                entry_target = torch.as_tensor(entry_target_np, dtype=torch.float32, device=device)
+                presence_target = _tensor(presence_target_np, dtype=torch.float32)
+                entry_target = _tensor(entry_target_np, dtype=torch.float32)
                 if presence_pred.ndim == 2:  # 兜底：只给当前帧的旧形状
                     presence_target = presence_target[:, 0, :]
                     entry_target = entry_target[:, 0, :]
                 step_weight = frame_weight.reshape(-1, 1) * wm_valid if presence_pred.ndim == 3 else frame_weight
                 presence_terms = presence_entry_loss(
-                    presence_pred, entry_pred, presence_target, entry_target, frame_weight=step_weight
+                    presence_pred,
+                    entry_pred,
+                    presence_target,
+                    entry_target,
+                    frame_weight=step_weight,
+                    collect=auc_pool,
                 )
                 terms["presence"] = presence_terms["presence"]
                 terms["entry"] = presence_terms["entry"]
@@ -1180,6 +1349,16 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 terms["entry_auc"] = presence_terms["entry_auc"]
                 terms["presence_pos_rate"] = presence_terms["presence_pos_rate"]
                 terms["entry_pos_rate"] = presence_terms["entry_pos_rate"]
+        if scales:
+            # 梯度累积：把 micro 损失缩放到宏 batch 口径（MicroNum/MacroDen = L_micro·(Den_micro/Den_macro)）
+            terms["od"] = terms["od"] * float(scales["od"])
+            if "ego_next" in terms:
+                terms["ego_next"] = terms["ego_next"] * float(scales["step"])
+            if "presence" in terms:
+                terms["presence"] = terms["presence"] * float(scales["presence"])
+                terms["entry"] = terms["entry"] * float(scales["presence"])
+                terms["presence_auc"] = float("nan")
+                terms["entry_auc"] = float("nan")
         total = terms["od"]
         if "ego_next" in terms:
             total = total + ego_next_coef * terms["ego_next"]
@@ -1192,14 +1371,15 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     def _evaluate(indices: np.ndarray, limit: int) -> Dict[str, Any]:
         model.eval()
         eval_idx = np.asarray(indices, dtype=np.int64)[: max(1, int(limit))]
-        terms = _forward_terms(eval_idx, noise=False)
+        obs_eval, future_eval, _, frame_weight_eval, plan_eval = _prepare_inputs(eval_idx)
+        terms = _forward_terms(obs_eval, future_eval, frame_weight_eval, plan_eval, noise=False)
         od_pred = terms["od_pred"]
         future = terms["future"]
         frame_weight = terms["frame_weight"]
         obs = terms["obs"]
-        weight = torch.as_tensor(future["od_mask"], device=device)
-        wm_valid = torch.as_tensor(future["wm_valid"], device=device)
-        od_target = torch.as_tensor(future["od_fut"], device=device)[..., 0:2]
+        weight = _tensor(future["od_mask"])
+        wm_valid = _tensor(future["wm_valid"])
+        od_target = _tensor(future["od_fut"])[..., 0:2]
         model_ade, model_fde = _ade_fde(od_pred[..., 0:2], od_target, weight)
         # 匀速基线（t0 帧内：位置 + k·dt·相对速度；未学习时 WM 的先验与其同源）
         current = obs["od"]
@@ -1264,6 +1444,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "device": device,
         "epochs": epochs,
         "batch_size": batch_size,
+        "micro_batch_size": micro_batch,
+        "grad_accum": bool(use_accum),
         "lr": float(args.lr),
         "match_future_slots": bool(args.match_future_slots),
         "match_gate_m": float(args.match_gate_m),
@@ -1273,6 +1455,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "ego_next_coef": ego_next_coef,
         "presence_entry_axis": "id",
         "ld_loss": "removed",  # 规格：阶段 A 不再监督未来 LD
+        "materialize": bool(obs_source is not None),
+        "fast_data": bool(obs_source is not None and future_source is not None),
     }
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
@@ -1284,29 +1468,90 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "encoders.", "mem_encoder.", "plan_head.", "plan_head.moe.router.",
         "plan_head.moe.experts.", "st_gnn.", "policy.", "value.",
     )
+    if use_accum:
+        print(
+            f"[stageA] 梯度累积：宏 batch={batch_size} · micro batch={micro_batch}"
+            "（ST-GNN 6 步展开显存 ~32MB/样本；损失按宏 batch 口径精确缩放）",
+            flush=True,
+        )
     for epoch in range(epochs):
         order = rng.permutation(train_idx)
         totals: Dict[str, float] = {
             "total": 0.0, "od": 0.0, "presence": 0.0, "entry": 0.0, "ego_next": 0.0
         }
         batches = 0
+        data_seconds = forward_seconds = backward_seconds = 0.0
         for start in range(0, len(order), batch_size):
             batch_indices = order[start : start + batch_size]
-            terms = _forward_terms(batch_indices, noise=True)
-            optimizer.zero_grad(set_to_none=True)
-            terms["total"].backward()
-            if not grad_probe_first:  # 首个 batch：plan head/MoE/编码器可微性自检
-                grad_probe_first = _grad_norms(model, grad_prefixes)
-            grad_probe_last = _grad_norms(model, grad_prefixes)  # 训练结束时（router 需 experts 非零）
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            optimizer.step()
-            totals["total"] += float(terms["total"].detach())
-            totals["od"] += float(terms["od"].detach())
-            if "ego_next" in terms:
-                totals["ego_next"] += float(terms["ego_next"].detach())
-            if "presence" in terms:
-                totals["presence"] += float(terms["presence"].detach())
-                totals["entry"] += float(terms["entry"].detach())
+            timing = {"data": 0.0}
+            obs_macro, future_macro, weight_np_macro, weight_macro, plan_macro = _prepare_inputs(
+                batch_indices, timing
+            )
+            if not use_accum:
+                forward_started = time.perf_counter()
+                terms = _forward_terms(obs_macro, future_macro, weight_macro, plan_macro, noise=True)
+                forward_seconds += time.perf_counter() - forward_started
+                backward_started = time.perf_counter()
+                optimizer.zero_grad(set_to_none=True)
+                terms["total"].backward()
+                if not grad_probe_first:  # 首个 batch：plan head/MoE/编码器可微性自检
+                    grad_probe_first = _grad_norms(model, grad_prefixes)
+                grad_probe_last = _grad_norms(model, grad_prefixes)  # 训练结束时（router 需 experts 非零）
+                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                optimizer.step()
+                backward_seconds += time.perf_counter() - backward_started
+                totals["total"] += float(terms["total"].detach())
+                totals["od"] += float(terms["od"].detach())
+                if "ego_next" in terms:
+                    totals["ego_next"] += float(terms["ego_next"].detach())
+                if "presence" in terms:
+                    totals["presence"] += float(terms["presence"].detach())
+                    totals["entry"] += float(terms["entry"].detach())
+            else:
+                # 梯度累积：micro 前向/反向 + 宏口径精确缩放（Σ_m s_m·L_m = L_macro），
+                # optimizer 每宏 batch 一次；grad 探针/clip 与单 batch 路径同一位置。
+                macro_denom = _term_denominators(future_macro, weight_np_macro)
+                n_macro = int(batch_indices.shape[0])
+                auc_pool: Dict[str, List[np.ndarray]] = {}
+                optimizer.zero_grad(set_to_none=True)
+                for m_start in range(0, n_macro, micro_batch):
+                    m_lo, m_hi = m_start, min(m_start + micro_batch, n_macro)
+                    obs_micro = {key: value[m_lo:m_hi] for key, value in obs_macro.items()}
+                    plan_micro = plan_macro[m_lo:m_hi]
+                    weight_micro = weight_macro[m_lo:m_hi]
+                    future_micro = {key: value[m_lo:m_hi] for key, value in future_macro.items()}
+                    scales = _scale_factors(
+                        _term_denominators(future_micro, weight_np_macro[m_lo:m_hi]), macro_denom
+                    )
+                    forward_started = time.perf_counter()
+                    terms_m = _forward_terms(
+                        obs_micro,
+                        future_micro,
+                        weight_micro,
+                        plan_micro,
+                        noise=True,
+                        scales=scales,
+                        auc_pool=auc_pool,
+                    )
+                    forward_seconds += time.perf_counter() - forward_started
+                    backward_started = time.perf_counter()
+                    terms_m["total"].backward()
+                    backward_seconds += time.perf_counter() - backward_started
+                    totals["total"] += float(terms_m["total"].detach())
+                    totals["od"] += float(terms_m["od"].detach())
+                    if "ego_next" in terms_m:
+                        totals["ego_next"] += float(terms_m["ego_next"].detach())
+                    if "presence" in terms_m:
+                        totals["presence"] += float(terms_m["presence"].detach())
+                        totals["entry"] += float(terms_m["entry"].detach())
+                backward_started = time.perf_counter()
+                if not grad_probe_first:
+                    grad_probe_first = _grad_norms(model, grad_prefixes)
+                grad_probe_last = _grad_norms(model, grad_prefixes)
+                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                optimizer.step()
+                backward_seconds += time.perf_counter() - backward_started
+            data_seconds += timing["data"]
             batches += 1
             if args.max_batches and batches >= int(args.max_batches):
                 break
@@ -1349,6 +1594,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "batches": batches,
                 "val_valid_count": counts["valid_sum"],
                 "val_valid_weight": counts["valid_weight_sum"],
+                "epoch_data_seconds": data_seconds,
+                "epoch_forward_seconds": forward_seconds,
+                "epoch_backward_seconds": backward_seconds,
+                "epoch_batches_per_sec": batches / max(data_seconds + forward_seconds + backward_seconds, 1e-9),
             }
         )
         if monitor is not None:
@@ -1399,11 +1648,15 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             f"FDE={eval_metrics['model_fde']:.3f}/{eval_metrics['cv_fde']:.3f} "
             f"presence_avail={int(presence_state['available'])} "
             f"ego_next={int(eval_metrics['ego_next_available'])} "
-            f"grad(plan_head)={grad_probe_last.get('plan_head', 0.0):.3f}",
+            f"grad(plan_head)={grad_probe_last.get('plan_head', 0.0):.3f} "
+            f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s "
+            f"it/s={batches / max(data_seconds + forward_seconds + backward_seconds, 1e-9):.2f}",
             flush=True,
         )
     if monitor is not None:
         monitor.close()
+    if device.type == "cuda":
+        metrics["vram_peak_mb"] = float(torch.cuda.max_memory_allocated(device) / 1e6)
     save_checkpoint(out_dir / "world_model.pt", model, meta=metrics)
     save_checkpoint(out_dir / "final.pt", model, meta={"stage": "A", "epochs": epochs})
     metrics["checkpoint"] = str(out_dir / "final.pt")
@@ -1434,12 +1687,21 @@ _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
 )
 
 
-def _action_mu_stats(model: Any, dataset: BCDataset, device: Any, *, batch_size: int = 256) -> Dict[str, float]:
+def _action_mu_stats(
+    model: Any,
+    dataset: BCDataset,
+    device: Any,
+    *,
+    batch_size: int = 256,
+    obs_source: Optional[MaterializedBCDataset] = None,
+) -> Dict[str, float]:
     """全数据集确定性前向（cheap path）：``action_mu`` 与专家动作的**计数/加权双口径**统计。
 
     - count 口径：``*_mean``（旧键，逐样本算术均值）；
     - weighted 口径：``*_weighted_mean``（``Σ w·x/Σ w``，w = ``train_weight×balance_weight``）；
     - ``*_weight``：权重和；``action_mu_ds_abs_err_weighted_mean``：|μ−专家| 加权误差。
+
+    ``obs_source``（物化快路径）传入时只切片，否则回退逐样本 ``build_obs_batch``。
     """
     import torch
 
@@ -1453,8 +1715,10 @@ def _action_mu_stats(model: Any, dataset: BCDataset, device: Any, *, batch_size:
     with torch.no_grad():
         for start in range(0, dataset.count, max(1, int(batch_size))):
             indices = np.arange(start, min(start + max(1, int(batch_size)), dataset.count), dtype=np.int64)
-            obs = {key: torch.as_tensor(value, dtype=torch.float32, device=device) for key, value in
-                   dataset.build_obs_batch(indices).items()}
+            obs_batch = (
+                obs_source.obs_batch(indices) if obs_source is not None else dataset.build_obs_batch(indices)
+            )
+            obs = to_device_tensors(obs_batch, device, dtype=torch.float32, pin=obs_source is not None)
             out = model(obs, rollout=False, world_model=False)
             mu = out["action_mu"]
             expert = torch.as_tensor(
@@ -1495,7 +1759,11 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     apply_thread_limits(workers=1, config=config)
+    import torch
+
     device = resolve_device(args.device, config)
+    if torch.device(device).type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     model = build_model(_load_yaml(args.model_config))
     ckpt = args.ckpt or "runs/train/stage_a/final.pt"
     if Path(ckpt).exists():
@@ -1519,8 +1787,18 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     router_temperature = float(
         args.router_temperature if args.router_temperature is not None else bc_cfg.get("router_temperature", 1.0)
     )
-    batch_size = int(args.batch_size or (train_cfg.get("bc", {}) or {}).get("batch_size") or 256)
+    batch_size = int(
+        args.batch_size or (train_cfg.get("bc", {}) or {}).get("batch_size") or DEFAULT_STAGE_BATCH_SIZE
+    )
+    micro_cfg = args.micro_batch_size if args.micro_batch_size is not None else (train_cfg.get("bc", {}) or {}).get(
+        "micro_batch_size"
+    )
+    micro_batch_size = max(1, min(batch_size, int(micro_cfg))) if micro_cfg else None
     history_stride = int(args.history_stride if args.history_stride is not None else dataset.history_stride)
+    use_materialized = bool(getattr(args, "materialize", False))
+    obs_source: Optional[MaterializedBCDataset] = None
+    if use_materialized:
+        obs_source = MaterializedBCDataset(dataset, include_targets=True)
 
     # 聚类 lane：router 软目标（pipeline.clusters 冻结 spec；k 必须 = net router 宽度 8）
     cluster_spec = None
@@ -1564,6 +1842,8 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "primary_epochs": primary_epochs,
         "specific_epochs": specific_epochs,
         "batch_size": batch_size,
+        "micro_batch_size": micro_batch_size,
+        "grad_accum": bool(micro_batch_size is not None and micro_batch_size < batch_size),
         "lr": float(args.lr),
         "action_weight": action_weight,
         "traj_aux_weight": traj_weight,
@@ -1575,6 +1855,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "cluster_soft_targets": bool(router_soft_fn is not None),
         "wm_detach": True,
         "history_stride": history_stride,
+        "materialize": bool(obs_source is not None),
     }
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
@@ -1597,6 +1878,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         cfg = BCConfig(
             epochs=phase_epochs,
             batch_size=batch_size,
+            micro_batch_size=micro_batch_size,
             lr=float(args.lr),
             loss_type=loss_type,
             traj_weight=traj_weight,
@@ -1614,7 +1896,12 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             router_cluster_k=(int(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0),
         )
         result = pretrain_bc(
-            model, dataset, cfg, logger=print, router_soft_targets_fn=router_soft_fn
+            model,
+            dataset,
+            cfg,
+            logger=print,
+            router_soft_targets_fn=router_soft_fn,
+            batch_source=obs_source,
         )
         if monitor is not None:
             monitor.on_train_step(
@@ -1622,10 +1909,20 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 step=phase_epochs,
             )
             # 专用 per-horizon / per-label / 分切片序列（CSV + tensorboard）
-            horizon_groups = {}
+            # 轨迹度量带单位（2026-09-26）：traj_mse_m2（加权 MSE，m²）/ traj_mae_m（加权 MAE，m）；
+            # 旧标签 horizon/<h>/traj_err 语义混淆（l2 下实为 m²）已移除。
+            horizon_groups: Dict[str, Dict[str, float]] = {}
             for key, value in result.items():
-                if key.startswith("bc_traj_err_h") and isinstance(value, (int, float)) and value == value:
-                    horizon_groups[key.replace("bc_traj_err_", "")] = {"traj_err": float(value)}
+                if not isinstance(value, (int, float)) or value != value:
+                    continue
+                if key.startswith("bc_traj_mse_h"):
+                    horizon, metric = key[len("bc_traj_mse_h"):], "traj_mse_m2"
+                elif key.startswith("bc_traj_mae_h") and key.endswith("_m"):
+                    horizon, metric = key[len("bc_traj_mae_h"):-2], "traj_mae_m"
+                else:
+                    continue
+                if horizon.isdigit():
+                    horizon_groups.setdefault(f"h{horizon}", {})[metric] = float(value)
             slice_groups = {}
             for name in ("brake", "turn", "curve"):
                 stats = result.get(f"bc_action_err_slice_{name}")
@@ -1644,9 +1941,11 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
     metrics["primary"] = _run_phase("primary", primary_epochs, _PRIMARY_PHASE_FREEZE)
     metrics["specific"] = _run_phase("specific", specific_epochs, _SPECIFIC_PHASE_FREEZE)
-    metrics.update(_action_mu_stats(model, dataset, device, batch_size=batch_size))
+    metrics.update(_action_mu_stats(model, dataset, device, batch_size=batch_size, obs_source=obs_source))
     if monitor is not None:
         monitor.close()
+    if torch.device(device).type == "cuda":
+        metrics["vram_peak_mb"] = float(torch.cuda.max_memory_allocated(device) / 1e6)
     save_checkpoint(out_dir / "bc.pt", model, meta=metrics)
     save_checkpoint(out_dir / "final.pt", model, meta={"stage": "B", "epochs": epochs})
     metrics["checkpoint"] = str(out_dir / "final.pt")
@@ -1912,7 +2211,14 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
     # ---- 通用 ----
     parser.add_argument("--batch-size", type=int, default=None,
-                        help="A 默认 128；B 默认取 config/train.yaml train.bc.batch_size（256）")
+                        help="A/B 默认取 config train.wm.batch_size / train.bc.batch_size（1024）")
+    parser.add_argument("--materialize", action=argparse.BooleanOptionalAction, default=True,
+                        help="A/B 快路径（默认开）：逐样本历史/未来目标一次性物化，训练循环只做切片 + "
+                             "pin/non-blocking H2D；--no-materialize = 旧逐 batch 重建路径（等价性对照）")
+    parser.add_argument("--micro-batch-size", type=int, default=None,
+                        help="梯度累积 micro batch（默认取 config train.wm/bc.micro_batch_size；"
+                             "None/≥--batch-size = 不分片）。ST-GNN 6 步展开显存 ~32MB/样本，"
+                             "12GB 卡 micro≤256/512；损失按宏 batch 口径精确缩放，宏 batch 一次更新")
     parser.add_argument("--max-batches", type=int, default=None, help="A/B 每轮批数上限（冒烟用）")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--router-coef", type=float, default=None,

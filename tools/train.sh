@@ -14,6 +14,7 @@
 #   STAGE=both|A|B   CONFIG   MODEL_CONFIG   BC_DIR=runs/bc_expert_full
 #   OUT=runs/train/pipeline_<时间戳>   WM_EPOCHS   BC_EPOCHS   BATCH_SIZE
 #   LIMIT_DATASET    DEVICE    SEED    EXTRA_A / EXTRA_B（附加 CLI 片段，会做简单分词）
+#   OMP_NUM_THREADS / MKL_NUM_THREADS（默认：A/B=8，C=1）
 #
 # 保证：`set -euo pipefail`；GL 运行库守卫（缺 libGL 时先跑 tools/setup_gl_libs.sh）；
 # 记录 git hash + 配置副本 + 环境到 `<OUT>/manifest.txt`；每阶段 stdout/stderr 同时
@@ -73,9 +74,15 @@ elif [[ -x "$ROOT/tools/setup_gl_libs.sh" ]]; then
     echo "[train.sh] 警告：GL 运行库仍缺失；MetaDrive 可能需要显示环境" >&2
   fi
 fi
-# torch 线程纪律（避免与其它 env-heavy 任务抢核；stages 内部也会按 config 设）
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
-export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+# torch 线程纪律（2026-09-26）：数据集型训练（A/B，无 env worker）默认 8 核；
+# Stage C 仍走 env-heavy 路径 → 默认 1（避免与 MetaDrive 抢核）。均可显式覆盖。
+if [[ "$STAGE" == "C" ]]; then
+  THREADS_DEFAULT=1
+else
+  THREADS_DEFAULT=8
+fi
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$THREADS_DEFAULT}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$THREADS_DEFAULT}"
 
 mkdir -p "$OUT/logs"
 
@@ -96,6 +103,8 @@ mkdir -p "$OUT/logs"
   echo "limit_dataset: ${LIMIT_DATASET:-<none>}"
   echo "device: ${DEVICE:-<auto>}"
   echo "seed: $SEED"
+  echo "omp_num_threads: $OMP_NUM_THREADS"
+  echo "mkl_num_threads: $MKL_NUM_THREADS"
   echo "extra_A: $EXTRA_A"
   echo "extra_B: $EXTRA_B"
   echo "python: $("$PYTHON" -c 'import sys; print(sys.version.split()[0])' 2>/dev/null || echo unknown)"

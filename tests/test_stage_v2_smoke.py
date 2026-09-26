@@ -112,9 +112,14 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
         stats = primary[f"bc_action_err_slice_{slice_name}"]
         assert stats and stats["count"] > 0 and np.isfinite(stats["weighted_mean"]), f"切片 {slice_name} 无样本"
 
-    # 逐 horizon ego 误差（B1 6 点）
+    # 逐 horizon 轨迹度量（B1 6 点）：加权 MSE（m²）与加权 MAE（m）双口径 + 旧 alias
     for k in range(1, 7):
-        assert np.isfinite(primary[f"bc_traj_err_h{k}"]), f"缺少逐 horizon 误差 h{k}"
+        assert np.isfinite(primary[f"bc_traj_mse_h{k}"]), f"缺少逐 horizon MSE h{k}"
+        assert np.isfinite(primary[f"bc_traj_mae_h{k}_m"]), f"缺少逐 horizon MAE h{k}"
+        assert primary[f"bc_traj_mse_h{k}"] >= 0.0 and primary[f"bc_traj_mae_h{k}_m"] >= 0.0
+        # Jensen：MAE ≤ sqrt(MSE)；旧 alias 在 l2 下等于 MSE
+        assert primary[f"bc_traj_mae_h{k}_m"] ** 2 <= primary[f"bc_traj_mse_h{k}"] + 1e-9
+        assert primary[f"bc_traj_err_h{k}"] == pytest.approx(primary[f"bc_traj_mse_h{k}"], rel=1e-9)
 
     # router 软目标（聚类 lane v1 artifact 计算 → 非占位）+ 路由指标
     assert primary["bc_router_soft_placeholder"] == 0.0
@@ -141,9 +146,11 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
 
     tags = _csv_tags(out_dir)
     for tag in ("train/primary_bc_action_err_weighted_mean", "train/primary_bc_traj_err_h1",
+                "train/primary_bc_traj_mse", "train/primary_bc_traj_mae_m",
                 "train/primary_bc_router_soft_ce", "train/primary_bc_router_cluster_version_num",
                 "train/cluster_soft_targets",
-                "horizon/h1/traj_err/mean", "slice/brake/action_err/mean",
+                "horizon/h1/traj_mse_m2/mean", "horizon/h1/traj_mae_m/mean",
+                "slice/brake/action_err/mean",
                 "slice/turn/action_err/count", "label/on_curve/action_err/mean"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
     assert (out_dir / "final.pt").exists()
