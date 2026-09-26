@@ -62,7 +62,7 @@ import os
 import sys
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 

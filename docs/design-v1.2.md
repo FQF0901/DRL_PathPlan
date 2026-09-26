@@ -100,6 +100,21 @@ rollout（6 步）
 
 ---
 
+### 3.5 数据/产物目录纪律（2026-09-26 定稿，事故驱动）
+
+**`runs/` 清理绝不应影响数据。** 2026-09-26 出现过"全清 `runs/` → 连数据集一起删掉 → 被迫重采 30 分钟"的事故，固化为：
+
+| 目录 | 放什么 | 可清理？ | 命名 |
+| --- | --- | --- | --- |
+| `datasets/` | 专家 BC 数据集（`expert_bc.npz` + meta + report）| **不可**（仅 obs 版本变更或规模调整时重采）| `BTC<YYYYMMDD-HHMM（北京）>_expert<N>k` |
+| `runs/` | 训练/评测/基线产物（stageA/stageB/eval/baseline/…）| 可随时清 | `BTC<ts>_stageA`、`BTC<ts>_stageB`、`BTC<ts>_eval_<tracker><N>`、`BTC<ts>_baseline` |
+| `checkpoints/` | 需要长期复用的 ckpt（跨清理保留）| 谨慎 | `BTC<ts>_stageB.pt` |
+| `tools/diagnostics/` | 一次性诊断/侦察脚本（非主流程）| 可清 | 原文件名 |
+| `config/baselines/` | 冻结的 KPI 基线参考 JSON（评测协议依赖）| **不可** | `BTC<ts>_val_reference/` |
+
+- **重采的唯一理由**：`obs_fingerprint` 变更（观测契约变了）或用户明确要求扩规模；同版本内一律 `BC_DIR` 复用。
+- 数据集与 `runs/` 分离后，"清理 runs/" 是安全的日常操作。
+
 ## 4. 路由与聚类（替代手工规则标签）
 
 - **监督**：无监督聚类（8 簇）→ top-2 softmax（τ 默认 0.5）软目标（形如 0.65/0.35）+ 边界平滑；**不再用 BCE/手工标签**（规则标签仅用于体检）。

@@ -26,10 +26,12 @@
 
 ## BC 专家数据集（2026-09-25）
 
+> 下列数据集目录为历史产物（`runs/` 已清理，可由本节命令重采）；当前约定输出目录为 `datasets/BTC<时间戳>_expert<N>k`（`docs/design-v1.2.md` §3.5）。
+
 | 数据集 | 场景数 | 样本数 | 产出率 | 备注 |
 | --- | --- | --- | --- | --- |
-| `runs/bc_expert_full` | 200 | 10,777 | 0.727 | 早期版本（旧观测 scope 重采版）|
-| `runs/bc_expert_2k` | 2,000 | **103,938** | 0.718 | 当前训练用；6 workers 并行采集（输出与单进程逐字节一致）|
+| `runs/bc_expert_full` | 200 | 10,777 | 0.727 | 早期版本（旧观测 scope 重采版）；历史产物 |
+| `runs/bc_expert_2k` | 2,000 | **103,938** | 0.718 | v1.2 IL 2k 训练用；6 workers 并行采集（输出与单进程逐字节一致）；历史产物 |
 
 - 过滤规则（2k 采集）：`roundtrip_fail` 28,982 + `terminal_window` 11,865；候选 144,785 → 保留 103,938。
 - 标签分布（逐步标签，下限 50）：cutin_active 1,777 / cutout_active 3,212 / crowded 15,892 /
@@ -37,7 +39,7 @@
 - 配平：难度 × 主标签共 30 组，采样权重范围 0.62–3.69。
 - **版本纪律**：`expert_bc.meta.json` 记录 `obs_fingerprint`；观测 scope 变更后必须重采，`BCDataset.load`
   在不匹配时告警。
-- 采集命令：
+- 采集命令（历史路径；当前约定输出到 `datasets/BTC<时间戳>_expert<N>k`）：
   ```bash
   tools/venv-python tools/collect_expert.py --specs env/specs/scenarios_train.json \
       --limit 2000 --out runs/bc_expert_2k --workers 6

@@ -369,7 +369,7 @@ tools/          # gene_env.sh, train.py, test.py
 | 8 | 地图：spec 固化 `BIG_BLOCK_SEQUENCE`（跳过随机搜索）+ 有界 LRU 工作集（几百张） |
 | 9 | 范围：限速 ✅；导航用现有 `get_checkpoints()`+`navigation_command`（不算距离）✅；实线合规 ✅；cut-in/out 脚本化 ✅；掉头/匝道/分叉/merge ✅；**新增收费站/瓶颈/双向**；**交通灯全部移除**（含输入通道，保留占位通道）；**多智能体暂不做** |
 | 10 | 小地图 + 短路线 ✅ |
-| 11 | 解耦/可插拔结构；监控补**场景 label 统计 + MoE 路由统计**；hook/probe 非侵入；需要**可视化入口**（`tools/visualize.py`、`tools/inspect_dataset.py`） |
+| 11 | 解耦/可插拔结构；监控补**场景 label 统计 + MoE 路由统计**；hook/probe 非侵入；需要**可视化入口**（`tools/visualize.py`） |
 | 12 | 验收：① 数据集抽验无"与物理时间相悖"现象（帧间位移/航向一致、速度有界、无时间倒流）；② 各训练阶段 loss/KPI 符合预设期望区间 |
 
 **默认决策（可否决）**：动作参数化 `(Δs, Δθ)`；BC 专家 = MetaDrive `IDMPolicy`；验收标准写入 `config/eval.yaml`。
@@ -386,7 +386,7 @@ tools/          # gene_env.sh, train.py, test.py
 
 | 阶段 | 内容 | 可训练 | 监督 GT | 验收证据 |
 |---|---|---|---|---|
-| **A：WM teacher forcing** | ego 条件=专家 GT 动作序列；目标=未来 OD/LD 帧（(episode, step+5k) 查表、t0 对齐、mask+valid）；直接多步损失（Huber+角度）；ego 计划噪声增强 | 编码器/时序/空间/**MoE（共享）**/WM | 未来 OD/LD 真值 | **ADE 1.647 / FDE 2.739 vs 匀速 3.269 / 4.483 ✓**（`runs/train/stage_a_matched`）|
+| **A：WM teacher forcing** | ego 条件=专家 GT 动作序列；目标=未来 OD/LD 帧（(episode, step+5k) 查表、t0 对齐、mask+valid）；直接多步损失（Huber+角度）；ego 计划噪声增强 | 编码器/时序/空间/**MoE（共享）**/WM | 未来 OD/LD 真值 | **ADE 1.647 / FDE 2.739 vs 匀速 3.269 / 4.483 ✓**（历史产物 `runs/train/stage_a_matched`，已清理；数字见 `docs/experiments.md` §2）|
 | **B：Planner BC** | 先 primary(+主干) 后 specific（冻结 primary）；动作 BC（`action_mu` vs 专家首动作）+ **rollout 轨迹小权重辅助**（WM 冻结+detach）+ router BCE | 主干/MoE/策略头/specific | 专家动作 + 专家 traj6 + 逐步标签 | ds **3.319m**（专家 3.260）；aux=0 消融 off-road 1.0 → 0.5（辅助必需）；10 条评测 succ 0.4 / off-road 0.5 / speed 0.75 |
 | **C：PPO RL** | rollout + 闭环（LQR 跟踪 6 点预瞄）；KL 锚到 **Stage B 快照**、系数 0.05→0 衰减；primary lr×0.1；WM 先冻后放 | specific/策略头/价值头（WM 后放） | 规则奖励（PPO/GAE） | 50 updates 跑通（44–49 steps/s，无坍塌）；`explained_var≈0` → 下一版加 critic 预热 |
 

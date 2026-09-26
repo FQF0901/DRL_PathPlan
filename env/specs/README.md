@@ -9,7 +9,6 @@
 | `scenarios_val.json` | 1,000 | 冻结验证集（基线冻结与评测，不参与训练） |
 | `scenarios_train_slice200.json` | 200 | 冒烟/薄切片训练 |
 | `scenarios_val_slice50.json` | 50 | 冒烟评测切片 |
-| `validation_scenarios_*.json` | 同上 | validator 报告：`summary` / `coverage` / `failure_categories` / 逐条 `results` |
 
 ## schema
 - 落盘包装 `{"schema_version": 1, "count": N, "specs": [...]}`；spec 字段 11 个：`id/seed/split/blocks/geometry/traffic/limits/nav/ego/difficulty/labels`（见 `env/scenario/spec.py`）。

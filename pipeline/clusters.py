@@ -641,7 +641,7 @@ def _split_cluster(
     x0 = x[idx] - mu
     wc = w[idx]
     cov = (x0 * wc[:, None]).T @ x0 / max(float(wc.sum()), 1e-12)
-    evals, evecs = np.linalg.eigh(cov)
+    _, evecs = np.linalg.eigh(cov)
     direction = evecs[:, -1]
     proj = x0 @ direction
     order = np.argsort(proj, kind="stable")

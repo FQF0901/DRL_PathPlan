@@ -1,4 +1,4 @@
-"""Stage B 监控/留出集回归（2026-09-26）：逐 epoch step 轴、按 episode 留出、val 命名。
+"""Stage B 监控/留出集回归（2026-09-26；瘦身口径 2026-09-27）：逐 epoch step 轴、留出、Tier-1 tag。
 
 覆盖交付项：
 
@@ -6,8 +6,9 @@
   全局单调），不再两相位撞点丢点；
 - Stage B 按 episode 留出（与 Stage A 同 ``seed/val_frac`` → 同一批留出 episode），
   每 epoch 末 ``evaluate_bc`` 产出同族 val 指标，epoch 行打印 ``val=``；
-- 监控命名：``train/<phase>_*`` vs ``val/<phase>_*``；分组 ``horizon|slice|label/*``
-  vs ``val/horizon|val/slice|val/label/*``；``n_updates``（不是 ``/count``）。
+- 监控密集口径（默认瘦身）：``stageB/<phase>/loss_terms`` / ``ego/traj/mae_m`` /
+  ``ego/action/err_weighted`` / ``router/*``（留出 ``val_*``）；旧 tag、slice/label、
+  ``n_updates`` 不再写；``--monitor-legacy-tags`` 回退旧全量 tag。
 """
 
 from __future__ import annotations
@@ -144,25 +145,50 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
 
     series = _csv_series(out_dir)
     # 逐 epoch step 轴：primary 1..2、specific 3..4（全局单调；step 0 = 阶段元数据）
-    assert sorted(series["train/primary_bc_loss"]) == [1, 2]
-    assert sorted(series["train/specific_bc_loss"]) == [3, 4]
-    assert sorted(series["val/primary_bc_loss"]) == [1, 2]
-    assert sorted(series["val/specific_bc_loss"]) == [3, 4]
-    # 每族点数 = 该相位 epoch 数
-    assert len(series["train/primary_bc_traj_mse"]) == 2
-    assert len(series["val/primary_bc_traj_mse"]) == 2
-    assert sorted(series["horizon/h1/traj_mse_m2/mean"]) == [1, 2, 3, 4]
-    assert sorted(series["val/horizon/h1/traj_mse_m2/mean"]) == [1, 2, 3, 4]
+    assert sorted(series["stageB/primary/loss_terms/loss"]) == [1, 2]
+    assert sorted(series["stageB/specific/loss_terms/loss"]) == [3, 4]
+    assert sorted(series["val_stageB/primary/loss_terms/loss"]) == [1, 2]
+    assert sorted(series["val_stageB/specific/loss_terms/loss"]) == [3, 4]
+    # 逐 horizon 族每相位每 epoch 一点（train 4 点 + val 4 点）
+    assert sorted(series["ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
+    assert sorted(series["val_ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
     # 真留出：val 与 train 数值不同（同 step 同族指标）
-    for tag in ("bc_loss", "bc_traj_mse", "bc_action_err_weighted_mean"):
+    for train_tag, val_tag in (
+        ("stageB/primary/loss_terms/loss", "val_stageB/primary/loss_terms/loss"),
+        ("ego/traj/mae_m/h1", "val_ego/traj/mae_m/h1"),
+        ("ego/action/err_weighted", "val_ego/action/err_weighted"),
+    ):
         for step in (1, 2):
-            assert series[f"val/primary_{tag}"][step] != series[f"train/primary_{tag}"][step], tag
-    # 命名与降噪：val/ 前缀 + val 分组；旧 /count 名与 train/per_horizon 不存在
-    assert "val/slice/brake/action_err/mean" in series
-    assert "val/label/on_curve/action_err/mean" in series
-    assert "horizon/h1/traj_mse_m2/n_updates" in series
-    assert not [tag for tag in series if tag.endswith("/count")]
-    assert not [tag for tag in series if tag.startswith("train/per_horizon/")]
+            assert series[val_tag][step] != series[train_tag][step], (train_tag, step)
+    # Tier-1 保留：router KPI + 专家混合权重 + 动作误差主口径
+    for tag in ("router/soft_ce", "router/soft_kl", "router/entropy",
+                "router/primary/expert_mix_weight/e0", "ego/action/err_weighted"):
+        assert tag in series, f"保留 tag 缺失：{tag}"
+    # 瘦身：旧 tag 族 / n_updates / count / slice / label 一个不留
+    assert not [tag for tag in series
+                if tag.startswith(("horizon/", "slice/", "label/", "train/", "val/"))]
+    assert not [tag for tag in series if tag.endswith(("/count", "/n_updates"))]
     # epoch 行打印 val=
     captured = capsys.readouterr().out
     assert "val=" in captured, "epoch 行必须打印 val= 摘要"
+
+
+def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> None:
+    """``--monitor-legacy-tags``（回退）：旧 canonical tag 全量落 CSV。"""
+    dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=4, steps_per_episode=6)
+    out_dir = tmp_path / "stage_b_legacy"
+    args = _parse_args([
+        "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
+        "--ckpt", str(tmp_path / "missing_stage_a.pt"),
+        "--model-config", str(_model_cfg(tmp_path)),
+        "--bc-epochs", "1", "--val-frac", "0.34",
+        "--batch-size", "8", "--device", "cpu", "--seed", "0",
+        "--monitor", "--monitor-legacy-tags", "--router-coef", "0.1",
+    ])
+    run_stage_b(args, {})
+    series = _csv_series(out_dir)
+    for tag in ("train/primary_bc_loss", "train/primary_bc_action_err_median",
+                "horizon/h1/traj_mae_m/mean", "val/horizon/h1/traj_mae_m/mean",
+                "slice/brake/action_err/mean"):
+        assert tag in series, f"legacy tag 缺失：{tag}"
+    assert "stageB/primary/loss_terms/loss" not in series

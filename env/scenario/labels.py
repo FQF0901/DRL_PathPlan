@@ -33,8 +33,6 @@ from metadrive.component.vehicle.base_vehicle import BaseVehicle
 
 from env.scenario.behaviors import (
     INTERSECTION_BLOCK_IDS,
-    MERGE_BLOCK_IDS,
-    ROUNDABOUT_BLOCK_IDS,
     ego_lane,
     ego_vehicle,
     event_state,

@@ -27,7 +27,6 @@ nav/signal/others 作为全局上下文 token 单独返回，不参与空间消�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
 
 import torch
 from torch import Tensor, nn
@@ -185,55 +184,6 @@ class ObsEncoders(nn.Module):
     def ld_pose(feat: Tensor, mask: Tensor) -> Tensor:
         """LD 位姿：位置取 ``dx,dy``，朝向取 ``heading_rel``（自车系）。"""
         return torch.cat([feat[..., 0:2], feat[..., 2:3]], dim=-1) * mask.unsqueeze(-1)
-
-    # ---------------------------------------------------------------- 组装
-    def encode_frame(
-        self,
-        ego_feat: Tensor,
-        od_feat: Tensor,
-        od_mask: Tensor,
-        ld_feat: Tensor,
-        ld_mask: Tensor,
-    ) -> FrameEncoding:
-        """由原始特征组装一帧的 ``FrameEncoding``（当前帧 / rollout 合成帧共用）。"""
-        batch = ego_feat.shape[0]
-        ego_mask = torch.ones((batch, ), dtype=ego_feat.dtype, device=ego_feat.device)
-        ego_h = self.embed_ego(ego_feat, ego_mask).unsqueeze(1)
-        od_h = self.embed_od(od_feat, od_mask)
-        ld_h = self.embed_ld(ld_feat, ld_mask)
-
-        nodes = torch.cat([ego_h, od_h, ld_h], dim=1)
-        node_mask = torch.cat(
-            [torch.ones((batch, 1), dtype=ego_feat.dtype, device=ego_feat.device), od_mask, ld_mask], dim=1
-        )
-        type_ids = torch.cat(
-            [
-                torch.full((batch, 1), TYPE_EGO, dtype=torch.long, device=ego_feat.device),
-                torch.full((batch, self.od_slots), TYPE_OD, dtype=torch.long, device=ego_feat.device),
-                torch.full((batch, self.ld_slots), TYPE_LD, dtype=torch.long, device=ego_feat.device),
-            ],
-            dim=1,
-        )
-        zeros = torch.zeros((batch, 1, 3), dtype=ego_feat.dtype, device=ego_feat.device)
-        pose = torch.cat([zeros, self.od_pose(od_feat, od_mask), self.ld_pose(ld_feat, ld_mask)], dim=1)
-        return FrameEncoding(
-            nodes=nodes,
-            node_mask=node_mask,
-            type_ids=type_ids,
-            pose=pose,
-            ego_feat=ego_feat,
-            od_feat=od_feat,
-            od_mask=od_mask,
-            ld_feat=ld_feat,
-            ld_mask=ld_mask,
-        )
-
-    def encode_current(self, obs: Mapping[str, Tensor]) -> tuple[FrameEncoding, Tensor, Tensor]:
-        """当前帧编码；返回 ``(frame, nav_token (B,1,H), signal_token (B,1,H))``。"""
-        frame = self.encode_frame(obs["ego"], obs["od"], obs["od_mask"], obs["ld"], obs["ld_mask"])
-        nav_token = self.embed_nav(obs["nav"].unsqueeze(1), obs["nav_mask"].reshape(-1, 1))
-        signal_token = self.embed_signal(obs["signal"].unsqueeze(1), obs["signal_mask"].reshape(-1, 1))
-        return frame, nav_token, signal_token
 
     # ---------------------------------------------------------------- 历史帧
     # 说明：v2 mem-bank 直接用 ``embed_od/embed_ld/embed_ego/embed_others`` 编码整段 6 帧

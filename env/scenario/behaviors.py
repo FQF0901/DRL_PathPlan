@@ -813,10 +813,6 @@ class ScenarioBehaviorManager(BaseManager):
     def actors(self) -> dict[str, _Actor]:
         return self._actors
 
-    @property
-    def installed_epoch(self) -> Optional[int]:
-        return self._installed_epoch
-
     # ---- 安装 ----
     def install(self, spec: Any, spawn_now: bool = False) -> None:
         """登记 spec 并重置内部状态；``spawn_now`` 时若地图就绪立即生成。"""

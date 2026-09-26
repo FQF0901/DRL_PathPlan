@@ -124,7 +124,6 @@ OVERALL_MARGIN = 0.05             # overall target = max(baseline - 0.05, OVERAL
 OVERALL_ABS_FLOOR = 0.70
 ZERO_BASELINE_EPSILON = 0.01      # 零基线保护 ε（collision/off_road）
 DEFAULT_BASELINE_REF = "runs/baseline_eval/val_reference.json"
-DEFAULT_BASELINE_PRIMARY_REF = "runs/baseline_eval/val_reference_by_primary.json"
 
 KPI_DEFINITIONS: Dict[str, str] = {
     "success": "episode 内 info['arrive_dest'] 曾为 True（envs/metadrive_env.py:218-231）",

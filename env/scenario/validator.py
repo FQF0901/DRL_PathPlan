@@ -310,7 +310,7 @@ def _rollout(env: Any, spec: Any, rollout_steps: int) -> dict:
             break
         n_steps = step + 1
         state = event_state(env)
-        for key, event in (state.get("events", {}) or {}).items():
+        for event in (state.get("events", {}) or {}).values():
             kind = str(event.get("type", "")).lower()
             if not kind:
                 continue

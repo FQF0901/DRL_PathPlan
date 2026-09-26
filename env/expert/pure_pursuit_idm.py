@@ -550,7 +550,7 @@ class PurePursuitIDMPolicy(BasePolicy):
         if self.lane_change_safety_gap <= 0.0:
             return True
         try:
-            long_ego, _ = target_lane.local_coordinates(ego.position)
+            _, _ = target_lane.local_coordinates(ego.position)
             found = FrontBackObjects.get_find_front_back_objs(
                 self._surrounding_vehicles(ego),
                 target_lane,

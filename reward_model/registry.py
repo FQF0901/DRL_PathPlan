@@ -60,24 +60,6 @@ class Term(ABC):
         """是否终止型项（``kind == "terminating"`` 的便捷属性）。"""
         return self.kind == TERMINATING
 
-    def weighted(self, step_ctx: Mapping[str, Any]) -> float:
-        """``weight * compute(step_ctx)``（已加权贡献）。"""
-        return self.weight * float(self.compute(step_ctx))
-
-    def is_triggered(self, step_ctx: Mapping[str, Any]) -> bool:
-        """原始值 > 0 视为触发（终止型项据此结束 episode）。"""
-        return float(self.compute(step_ctx)) > 0.0
-
-    def describe(self) -> dict[str, Any]:
-        """可序列化描述（配置回显/日志用）。"""
-        return {
-            "name": self.name,
-            "weight": self.weight,
-            "kind": self.kind,
-            "shaping": self.shaping,
-            "params": dict(self.params),
-        }
-
 
 #: 注册名 -> 奖励项类（同一进程内唯一）
 _TERM_REGISTRY: dict[str, type[Term]] = {}

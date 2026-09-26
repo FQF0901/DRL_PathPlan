@@ -1,9 +1,9 @@
-"""监控回归：既有序列不退化 + v2 分组序列（per-horizon / per-label / 分切片）。
+"""监控回归：GroupedMetricStatistics + Tier-1 瘦身落盘（2026-09-27）。
 
-- 既有 42+ 序列（``train/...`` / ``kpi/...`` / ``scene_label/...`` / ``moe/...``）
-  继续按原 tag 写 CSV；
-- 新增 ``horizon/<h>/<m>``、``label/<name>/<m>``、``slice/<name>/<m>``
-  （``mean``/``count``/``weighted_mean``）序列同时进 CSV。
+- ``GroupedMetricStatistics`` 窗口统计本身不变（mean/n_updates/weighted_mean；legacy 模式使用）；
+- 新口径 monitor 落盘前重命名：既有路径（KPI/episode/train/val/分组）经 ``_slim_tag``
+  过滤，只保留 ``docs/metrics.md`` 的 Tier-1 tag；
+- ``legacy_tags=True`` 保留旧 tag 全量（回退）。
 """
 
 from __future__ import annotations
@@ -38,23 +38,36 @@ def test_grouped_statistics_weighted_and_n_updates() -> None:
     assert stats.flush() == {}, "flush 后窗口必须清空"
 
 
-def test_monitor_writes_legacy_and_grouped_series(tmp_path: Path) -> None:
+def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
     monitor = TrainingMonitor(str(tmp_path), tensorboard=False, csv=True)
-    # 既有路径 1：episode KPI / train step（嵌套 dict 自动展平）
+    # 既有路径 1：episode KPI / train step（嵌套 dict 自动展平）→ 非 Tier-1，全部丢弃
     monitor.on_episode({"success": 1.0, "collision": 0.0}, step=1)
     monitor.on_train_step({"loss": 0.5, "reward": {"total": 1.0, "dense": 0.7}}, step=1)
-    # 既有路径 2：场景标签 / MoE 窗口
+    # 既有路径 2：场景标签 / MoE 窗口 → 丢弃
     monitor.on_scene_step({"cutin_active": 1.0, "crowded": 0.0})
     monitor.on_moe_step(np.array([[0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]))
-    # v2 分组窗口（训练侧）
+    # Stage A：wm 标量 + 逐 horizon（loss/ade/cv_ade/ego_next_loss；fde/计数丢弃）
+    monitor.on_train_step({"wm_loss": 0.8, "presence_auc": 0.9, "entry_auc": 0.8,
+                           "grad_norm_plan_head": 1.0, "cv_ade": 0.1}, step=1)
     monitor.on_grouped_step(
-        horizon={"h1": {"loss": 1.0, "ade": 2.0}, "h2": {"loss": 3.0, "ade": 4.0}},
-        labels={"cutin_active": {"err": 0.4}},
+        horizon={"h1": {"loss": 1.0, "ade": 2.0, "cv_ade": 0.5, "ego_next_loss": 0.3,
+                        "fde": 3.0, "valid_samples": 12.0},
+                 "h2": {"loss": 3.0, "ade": 4.0, "cv_ade": 0.6, "ego_next_loss": 0.4}},
+        labels={"cutin_active": {"action_err": 0.4}},
         slices={"brake": {"action_err": 0.2}, "turn": {"action_err": 0.6}},
         step=1,
     )
-    # 留出侧标量 + 分组窗口（val/ 前缀，与训练侧不互相覆盖）
-    monitor.on_val_step({"loss": 0.7, "traj_mse": 1.1}, step=1)
+    # Stage B：相位标量 + 逐 horizon traj MAE + 留出族
+    monitor.on_train_step(
+        {"primary_bc_loss": 0.4, "primary_bc_traj_loss": 0.3, "primary_bc_action_loss": 0.2,
+         "primary_bc_router_loss": 0.1, "primary_bc_action_err_weighted_mean": 0.05,
+         "primary_bc_action_err_median": 0.01, "primary_bc_router_soft_ce": 0.7,
+         "primary_bc_router_soft_kl": 0.3, "primary_bc_router_entropy": 1.2,
+         "primary_bc_router_expert_mix_weight_0": 0.5},
+        step=1,
+    )
+    monitor.on_grouped_step(horizon={"h1": {"traj_mae_m": 0.1, "traj_mse_m2": 2.0}}, step=1)
+    monitor.on_val_step({"primary_bc_loss": 0.7, "primary_bc_traj_mse": 1.1}, step=1)
     monitor.on_val_grouped_step(
         horizon={"h1": {"traj_mse_m2": 1.1, "traj_mae_m": 0.8}},
         labels={"cutin_active": {"action_err": 0.3}},
@@ -65,25 +78,35 @@ def test_monitor_writes_legacy_and_grouped_series(tmp_path: Path) -> None:
     monitor.close()
 
     tags = _read_tags(tmp_path / "metrics.csv")
-    # 既有序列不退化
-    for tag in ("kpi/success", "train/loss", "train/reward/total", "train/reward/dense",
-                "scene_label/cutin_active/freq", "moe/effective_n"):
-        assert tag in tags, f"既有序列缺失：{tag}"
-    # 分组序列（CSV + tensorboard 同一套 tag；count → n_updates）
-    for tag in ("horizon/h1/loss/mean", "horizon/h1/loss/n_updates", "horizon/h2/ade/mean",
-                "label/cutin_active/err/mean", "slice/brake/action_err/mean",
-                "slice/turn/action_err/n_updates"):
-        assert tag in tags, f"分组序列缺失：{tag}"
-    # 留出序列（val/ 前缀）
-    for tag in ("val/loss", "val/traj_mse", "val/horizon/h1/traj_mse_m2/mean",
-                "val/label/cutin_active/action_err/mean", "val/slice/brake/action_err/mean",
-                "val/horizon/h1/traj_mse_m2/n_updates"):
-        assert tag in tags, f"留出序列缺失：{tag}"
-    assert "horizon/h1/loss/count" not in tags, "旧 /count 名必须移除"
-    # 窗口 flush 后再次 flush 不产生重复 tag（幂等 + 清空）
-    monitor2 = TrainingMonitor(str(tmp_path / "second"), tensorboard=False, csv=True)
-    monitor2.log_scalar("x", float("nan"), step=1)  # NaN 静默跳过
-    monitor2.log_scalar("y", 3.0, step=1)
-    monitor2.close()
-    tags2 = _read_tags(tmp_path / "second" / "metrics.csv")
-    assert "x" not in tags2 and tags2["y"] == 3.0
+    for tag in ("wm/loss", "wm/presence_auc", "wm/entry_auc",
+                "wm/od/loss/h1", "wm/od/ade_m/h1", "wm/od/ade_m/cv_h1", "wm/ego_next/loss/h1",
+                "stageB/primary/loss_terms/loss", "stageB/primary/loss_terms/traj",
+                "stageB/primary/loss_terms/action", "stageB/primary/loss_terms/router",
+                "ego/action/err_weighted", "ego/traj/mae_m/h1",
+                "router/soft_ce", "router/soft_kl", "router/entropy",
+                "router/primary/expert_mix_weight/e0",
+                "val_stageB/primary/loss_terms/loss", "val_ego/traj/mae_m/h1"):
+        assert tag in tags, f"保留 tag 缺失：{tag}"
+    # 已移除 tag 一个不留（包括旧命名与 n_updates / 计数 / slice / label / median / grad_norm）
+    for tag in ("kpi/success", "train/loss", "train/reward/total", "scene_label/cutin_active/freq",
+                "moe/effective_n", "horizon/h1/loss/mean", "horizon/h1/loss/n_updates",
+                "horizon/h1/valid_samples/mean", "horizon/h1/fde/mean", "horizon/h1/traj_mse_m2/mean",
+                "label/cutin_active/action_err/mean", "slice/brake/action_err/mean",
+                "train/primary_bc_action_err_median", "train/grad_norm_plan_head",
+                "train/cv_ade", "val/primary_bc_loss", "val/horizon/h1/traj_mse_m2/mean",
+                "val/slice/brake/action_err/mean", "val/label/cutin_active/action_err/mean",
+                "train/primary_bc_traj_mse"):
+        assert tag not in tags, f"已移除 tag 仍写入：{tag}"
+
+
+def test_monitor_legacy_flag_keeps_old_tags(tmp_path: Path) -> None:
+    monitor = TrainingMonitor(str(tmp_path), tensorboard=False, csv=True, legacy_tags=True)
+    monitor.on_train_step({"wm_loss": 0.8, "grad_norm_router": 1.0}, step=1)
+    monitor.on_grouped_step(horizon={"h1": {"loss": 1.0, "traj_mse_m2": 2.0}}, step=1)
+    monitor.flush(step=1)
+    monitor.close()
+    tags = _read_tags(tmp_path / "metrics.csv")
+    for tag in ("train/wm_loss", "train/grad_norm_router", "horizon/h1/loss/mean",
+                "horizon/h1/traj_mse_m2/mean", "horizon/h1/loss/n_updates"):
+        assert tag in tags, f"legacy tag 缺失：{tag}"
+    assert "wm/loss" not in tags and "wm/od/loss/h1" not in tags

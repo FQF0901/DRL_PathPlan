@@ -29,8 +29,6 @@ from net.spatial import SpatialEncoder
 
 OD_PRED_DIM = 5
 LD_PRED_DIM = 4
-OD_PRED_NAMES: tuple[str, ...] = ("dx", "dy", "vx", "vy", "heading_rel")
-LD_PRED_NAMES: tuple[str, ...] = ("dx", "dy", "heading_rel", "curvature")
 
 
 class SpatioTemporalGNN(nn.Module):

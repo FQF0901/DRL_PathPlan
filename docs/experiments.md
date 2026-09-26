@@ -2,10 +2,14 @@
 
 > 本文件把关键实验的数字与命令固化进仓库（`runs/` 为 gitignored，评审者无法离线查看）。
 > 所有数字来自实际运行产物（`runs/*/metrics.json`、`runs/*/monitor/metrics.csv`、日志）。
+> **2026-09-26 清理**：文中 `runs/*` 产物目录已随 `runs/` 清理删除（可按各节命令重生成）；数据集落在
+> `datasets/`（命名 `BTC<时间戳>_expert<N>k`，见 `docs/design-v1.2.md` §3.5），不随 `runs/` 清理。
 
 ---
 
 ## 0. 运行清单
+
+> 下列目录为历史运行记录（产物已清除），可由对应章节的命令重新生成。
 
 | 目录 | 类型 | 关键配置 | 状态 |
 | --- | --- | --- | --- |
@@ -79,7 +83,7 @@ tools/venv-python -m pipeline.stages --stage B --bc-dir runs/bc_expert_2k \
 
 ## 4. 评测（冻结协议：primary 分组 + Wilson CI + 弱类 floor）
 
-基线参考：`runs/baseline_eval/val_reference.json` / `val_reference_by_primary.json`。
+基线参考（历史产物，已清理；可由 `tools/baseline_eval.py` 重生成）：`runs/baseline_eval/val_reference.json` / `val_reference_by_primary.json`。
 
 | 对象 | tracker | 样本 | success | collision | off-road | rc | speed_ratio |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -155,7 +159,7 @@ tools/venv-python -m pipeline.stages --stage C --ckpt runs/train/stage_b_2k_aux3
 
 ## 8. v1.2 IL 正式运行（2026-09-26，新架构 + schema v2）
 
-数据：`runs/bc_expert_2k_v2`（144,763 行入库 / 103,932 可训练；`obs_fingerprint` v2；scope 前 150）。
+数据（历史数据集，已清理；同规模可由 `tools/collect_expert.py` 重采到 `datasets/BTC<时间戳>_expert2k`）：`runs/bc_expert_2k_v2`（144,763 行入库 / 103,932 可训练；`obs_fingerprint` v2；scope 前 150）。
 命令：
 ```bash
 BC_DIR=runs/bc_expert_2k_v2 OUT=runs/train/il_v2_10x10 WM_EPOCHS=10 BC_EPOCHS=10 \
@@ -228,7 +232,7 @@ ramp_in 0.40、**curve 0.00 / roundabout 0.00 / uturn 0.00 / tollgate 0.00**；�
 
 ## 9. v1.2 IL 第二轮：5k 数据 × 20/20 epochs（2026-09-26）
 
-数据：`runs/bc_expert_5k_v2`（**360,509 行入库 / 259,606 可训练**；train spec 前 5,000 条；指纹 v2-e2adf9319719）。
+数据（历史数据集，已清理；同规模可由 `tools/collect_expert.py` 重采到 `datasets/BTC<时间戳>_expert5k`）：`runs/bc_expert_5k_v2`（**360,509 行入库 / 259,606 可训练**；train spec 前 5,000 条；指纹 v2-e2adf9319719）。
 命令：
 ```bash
 BC_DIR=runs/bc_expert_5k_v2 OUT=runs/train/il_5k_20x20 WM_EPOCHS=20 bash tools/train.sh            # Stage A

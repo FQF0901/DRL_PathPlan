@@ -116,9 +116,6 @@ BLOCK_CHARS = {
     "tollgate": "$",
 }
 
-# 反查表：block 字符 -> 几何标签。
-BLOCK_CHARS_INV = {char: label for label, char in BLOCK_CHARS.items()}
-
 # 禁止出现在 blocks 字符串里的字符：
 # - "I"：BIG 会自动前置 First block（BIG.py:86），显式写出会 get_block 失败；
 # - "f"/"F"：两个 Fork block 均直接 raise ValueError（fork.py:28/178）。

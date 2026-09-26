@@ -254,10 +254,6 @@ class ExactTracker:
     def n_points(self) -> int:
         return 0 if self.reference is None else int(self.reference.shape[0])
 
-    @property
-    def remaining(self) -> int:
-        return max(self.n_points - self.index, 0)
-
     def arm(
         self,
         env: Any,
@@ -328,12 +324,6 @@ class ExactTracker:
         vehicle.set_velocity(np.asarray(velocity, dtype=np.float64)[:2])
         vehicle.set_angular_velocity(float(angular_velocity))
 
-    def world_pose_at(self, index: int) -> np.ndarray:
-        """第 ``index`` 个子步参考的世界位姿 ``(x, y, theta)``。"""
-        if self.reference is None:
-            raise RuntimeError("ExactTracker 未 arm")
-        return np.array(self._world[int(index)], dtype=np.float64, copy=True)
-
     def apply(self, env: Any, index: Optional[int] = None) -> np.ndarray:
         """把 ego 置于第 ``index`` 个子步参考位姿；``index=None`` 时消费当前 cursor。
 
@@ -380,11 +370,8 @@ class LqrTracker(BasePolicy):
 
     ``set_reference`` 每次策略步（0.5 s）调用一次：``(N,2)`` 动作或 ``(N,3)`` 自车系位姿。
 
-    构造方式（两种都支持）：
-    1. ``engine.add_policy(ego.id, LqrTracker, ego, seed)`` → 每个策略步 ``set_reference``
-       （训练器 canonical 路径）；
-    2. ``LqrTracker(ego, reference)``：第二个位置参数不是整数 seed 时视为**初始参考**
-       （兼容 eval_runner 的构造约定，构造即捕获当前 ego 位姿为参考原点）。
+    构造方式：``engine.add_policy(ego.id, LqrTracker, ego, seed)`` → 每个策略步
+    ``set_reference``（训练器 canonical 路径）。
     """
 
     DEFAULT_WHEELBASE = 1.05234 + 1.4166  # DefaultVehicle 前后轴距（vehicle_type.py:21-22）
@@ -432,11 +419,6 @@ class LqrTracker(BasePolicy):
             accel_action_scale / brake_action_scale: 加速度/减速度 → 动作的归一化尺度（m/s²）。
             reference_dt / reference_hz: 参考动作步长与子步频率（与 :func:`interpolate` 一致）。
         """
-        # 兼容 eval_runner 构造约定：第二个位置参数是数组/列表时视为初始参考（见类 docstring）
-        initial_reference: Optional[np.ndarray] = None
-        if random_seed is not None and np.ndim(random_seed) >= 1:
-            initial_reference = np.asarray(random_seed, dtype=np.float64)
-            random_seed = None
         super().__init__(control_object=control_object, random_seed=random_seed, config=config)
         self.wheelbase = float(wheelbase) if wheelbase is not None else self._infer_wheelbase(control_object)
         self.max_steer_angle_rad = (
@@ -475,8 +457,6 @@ class LqrTracker(BasePolicy):
         self._ref_speed: Optional[np.ndarray] = None  # (N,) 参考速度 m/s
         self._cursor = 0
         self._gain_cache: dict[int, np.ndarray] = {}
-        if initial_reference is not None:  # eval_runner 式构造：构造即 armed
-            self.set_reference(initial_reference)
 
     # ------------------------------------------------------------------ 参考
     def set_reference(self, reference: Any, *, base_pose: Optional[Sequence[float]] = None) -> np.ndarray:
@@ -508,11 +488,6 @@ class LqrTracker(BasePolicy):
         self._ref_speed = chords / dt_sub
         self._ref_arc = np.cumsum(chords)
         self._cursor = 0
-        return self._ref_world
-
-    @property
-    def reference_world(self) -> Optional[np.ndarray]:
-        """当前参考（世界系，``(N,3)``）；未设置时为 None。"""
         return self._ref_world
 
     # ------------------------------------------------------------------ 主入口

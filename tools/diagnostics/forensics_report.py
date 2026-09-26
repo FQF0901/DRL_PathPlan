@@ -3,7 +3,7 @@
 
 用法::
 
-    tools/venv-python tools/forensics_report.py --in runs/forensics/closed_lqr.json \
+    tools/venv-python tools/diagnostics/forensics_report.py --in runs/forensics/closed_lqr.json \
         --out runs/forensics/closed_lqr_summary.json
 """
 

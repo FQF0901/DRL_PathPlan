@@ -136,11 +136,6 @@ class RolloutBuffer:
     def full(self) -> bool:
         return self._len >= self.capacity
 
-    def clear(self) -> None:
-        """清空（不释放底层数组）。"""
-        self._len = 0
-        self._invalidate_lookup()
-
     def _invalidate_lookup(self) -> None:
         self._lookup = None
         self._lookup_len = -1
@@ -206,9 +201,6 @@ class RolloutBuffer:
         self._len += 1
         self._invalidate_lookup()
         return index
-
-    #: 别名（语义更直白）
-    add = add_step
 
     def _resolve_episode(self, episode: Optional[int]) -> int:
         if episode is not None:

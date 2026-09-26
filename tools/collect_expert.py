@@ -150,7 +150,7 @@ DEFAULT_MIN_SAMPLES_PER_CATEGORY = 50
 #: 并行采集默认/上限：单 worker env RSS ≈0.65 GB（pipeline/vector_env.ENV_RSS_PER_WORKER_MB），
 #: 本机 15 GB → 建议 <=8 个 worker（超出只告警，不阻塞）。
 DEFAULT_WORKERS = 0  # 0 = auto：按 CPU 核数取半、上限 MAX_RECOMMENDED_WORKERS（默认吃满多核；内存 ≈1.3GB/worker）
-MAX_RECOMMENDED_WORKERS = 8
+MAX_RECOMMENDED_WORKERS = 10  # 上限（用户要求数据集生成默认 8–10 并发）
 #: worker 进程级回收间隔（spec 数）：MetaDrive ``build_env``+``close`` 实测残留
 #: ≈3.5 MB/spec（与 pipeline/vector_env.DEFAULT_RECYCLE_EVERY_SPECS 同口径），
 #: 长跑线性上涨；每块跑完重启进程把 RSS 拉回基线。0 = 不回收。
@@ -158,11 +158,19 @@ RECYCLE_EVERY_SPECS = 150
 
 
 def _resolve_workers(requested: int) -> int:
-    """``--workers`` 解析：0/负值 = auto（CPU 核数取半、上限 ``MAX_RECOMMENDED_WORKERS``），至少 1。"""
+    """``--workers`` 解析：0/负值 = auto。
+
+    auto = min(CPU 核数取半, 按**当前可用内存**折算（每 worker ≈1.3GB、留 10% 余量）, ``MAX_RECOMMENDED_WORKERS``)，至少 1。
+    用户要求：数据集生成默认吃满 8–10 并发；内存口径只用于避免把机器压进 swap（2026-09-26 实测：8 workers +
+    并发冒烟 → 可用内存 2GB、load 9.6、采集慢 6×，故保留内存上限但放宽余量）。
+    """
     value = int(requested)
     if value > 0:
         return value
-    return min(MAX_RECOMMENDED_WORKERS, max(1, (os.cpu_count() or 4) // 2))
+    # 用户要求：数据集生成默认吃满 8–10 并发（本机 cpu=20 → 10）。内存不足时由调用方打印警告，
+    # 不做静默降级（2026-09-26 用户明确要求）。
+    cpu_cap = max(1, (os.cpu_count() or 4) // 2)
+    return max(1, min(cpu_cap, MAX_RECOMMENDED_WORKERS))
 
 _CRASH_KEYS = ("crash", "crash_vehicle", "crash_object", "crash_building", "crash_sidewalk", "crash_human")
 
@@ -1331,10 +1339,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "traffic_density": args.traffic_density,
     }
     num_workers = _resolve_workers(args.workers)
-    if int(args.workers) <= 0:  # 0 = auto：按 CPU 核数取半，上限 MAX_RECOMMENDED_WORKERS（默认吃满多核）
+    if int(args.workers) <= 0:  # 0 = auto：CPU 取半、上限 MAX_RECOMMENDED_WORKERS（用户要求默认 8–10）
+        try:
+            avail_gb = 0.0
+            with open("/proc/meminfo") as handle:
+                for line in handle:
+                    if line.startswith("MemAvailable:"):
+                        avail_gb = int(line.split()[1]) / 1024.0 / 1024.0
+                        break
+            if avail_gb and avail_gb < num_workers * 1.3:
+                print(
+                    f"[collect_expert] 警告：可用内存 {avail_gb:.1f}GB < workers×1.3GB={num_workers * 1.3:.1f}GB，"
+                    "可能与并发任务抖动（本项不做静默降级；需要时显式 --workers 调低）",
+                    flush=True,
+                )
+        except OSError:  # pragma: no cover
+            pass
         print(
             f"[collect_expert] workers=auto → {num_workers}（cpu={os.cpu_count()}，上限 {MAX_RECOMMENDED_WORKERS}；"
-            "每 worker 峰值 ≈1.3GB，并发大型训练时请显式调低）",
+            "每 worker 峰值 ≈1.3GB）",
             flush=True,
         )
     if num_workers > len(specs):

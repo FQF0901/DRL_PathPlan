@@ -1,11 +1,12 @@
-"""Stage A/B 小样本冒烟（schema v2 + 新 net 契约 + 逐 horizon/切片日志）。
+"""Stage A/B 小样本冒烟（schema v2 + 新 net 契约 + Tier-1 监控 tag）。
 
 覆盖交付项：
 
 - Stage A：多步直接监督（LD 移除）、``train_weight × wm_valid`` 加权、逐 horizon
-  loss/ADE/FDE/有效样本数、presence/entry BCE + AUC、监控序列落盘；
-- Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ router 软目标，动作误差
-  mean/median/p95 + 分切片（急刹/急转/弯道）+ 逐 horizon ego 误差 + router 指标。
+  loss/ADE + 匀速基线（``wm/od/*``）、presence/entry BCE + AUC、Tier-1 监控落盘；
+- Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ router 软目标，动作加权误差
+  （``ego/action/err_weighted``）+ 逐 horizon ego 轨迹 MAE（``ego/traj/mae_m``）+
+  router KPI；median/p95/slice/label 已按监控瘦身移除（``docs/metrics.md``）。
 
 用小型 DrivingModel（hidden=16 / 8 experts）与合成 v2 数据集，CPU 数秒内完成。
 """
@@ -80,14 +81,15 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["dataset/weight_min"] == 0.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("train/wm_loss", "horizon/h1/loss/mean", "horizon/h1/ade/mean",
-                "horizon/h6/valid_samples/mean", "horizon/h6/valid_weight_sum/mean",
-                "horizon/h1/cv_ade/mean", "horizon/h1/loss/n_updates"):
+    for tag in ("wm/loss", "wm/od/loss/h1", "wm/od/ade_m/h1", "wm/od/ade_m/cv_h1",
+                "wm/ego_next/loss/h1"):
         assert tag in tags, f"Stage A 监控序列缺失：{tag}"
-    # 去重：train/per_horizon/* 已移除（唯一 per-horizon 口径 = horizon/*）；count 旧名移除
-    assert not [tag for tag in tags if tag.startswith("train/per_horizon/")], "train/per_horizon/* 必须移除"
-    assert not [tag for tag in tags if tag.endswith("/count")], "分组 /count 旧名必须移除"
-    # val 集常量（cv 基线/有效样本计数）只在首个 epoch 记一次；本用例 epochs=1 → 恰 1 行
+    if np.isfinite(metrics["presence_auc"]):
+        assert "wm/presence_auc" in tags
+    # 监控瘦身（docs/metrics.md）：旧族（horizon/train/slice/label）与计数/n_updates 一个不留
+    assert not [tag for tag in tags if tag.startswith(("horizon/", "train/", "slice/", "label/"))]
+    assert not [tag for tag in tags if tag.endswith(("/count", "/n_updates"))]
+    # val 集常量（cv 基线/AUC）与逐 horizon 曲线只在保留族；本用例 epochs=1 → 恰 1 行
     assert (out_dir / "final.pt").exists() and (out_dir / "metrics.json").exists()
 
 
@@ -116,15 +118,16 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     assert metrics["val_episodes"] > 0 and metrics["val_frames"] > 0
     assert metrics["train_frames"] + metrics["val_frames"] == 36
     assert primary["val"]["bc_loss"] == primary["val"]["bc_loss"]  # 非 NaN
-    # 动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）；count 是训练子集（留出已剔除）
-    for key in ("bc_action_err_mean", "bc_action_err_median", "bc_action_err_p95",
-                "bc_action_err_weighted_mean", "bc_action_err_count", "bc_action_err_weight"):
+    # 动作误差：加权主口径 + 计数/权重在 metrics.json；median/p95 与全部切片已瘦身移除
+    for key in ("bc_action_err_mean", "bc_action_err_weighted_mean",
+                "bc_action_err_count", "bc_action_err_weight"):
         assert key in primary, f"缺少动作误差指标 {key}"
     assert primary["bc_action_err_weight"] > 0.0
     assert primary["bc_action_err_count"] == float(metrics["train_frames"])
-    for slice_name in ("brake", "turn", "curve"):
-        stats = primary[f"bc_action_err_slice_{slice_name}"]
-        assert stats and stats["count"] > 0 and np.isfinite(stats["weighted_mean"]), f"切片 {slice_name} 无样本"
+    for key in ("bc_action_err_median", "bc_action_err_p95",
+                "bc_action_err_slice_brake", "bc_action_err_slice_brake_weighted_mean",
+                "bc_router_expert_util_0", "bc_router_expert_mix_util_0"):
+        assert key not in primary, f"已移除指标仍在 metrics.json：{key}"
 
     # 逐 horizon 轨迹度量（B1 6 点）：加权 MSE（m²）与加权 MAE（m）双口径 + 旧 alias
     for k in range(1, 7):
@@ -143,11 +146,11 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     for key in ("bc_router_top1_cluster_acc", "bc_router_nmi", "bc_router_entropy"):
         assert key in primary, f"缺少 router 指标 {key}"
     assert np.isfinite(primary["bc_router_entropy"])
-    # 专家利用率（top-1 比例 / top-2 混合）与平均权重逐专家记录
+    # 专家混合权重保留（利用率 util 已瘦身移除）
     for index in range(8):
-        assert f"bc_router_expert_util_{index}" in primary
         assert f"bc_router_expert_weight_{index}" in primary
-        assert f"bc_router_expert_mix_util_{index}" in primary
+        assert f"bc_router_expert_util_{index}" not in primary
+        assert f"bc_router_expert_mix_util_{index}" not in primary
     assert metrics["cluster_version"] == "v1" and metrics["cluster_k"] == 8
     assert metrics["cluster_soft_targets"] is True
 
@@ -159,17 +162,19 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     assert metrics["action_mu_abs_err_count"] == 36.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("train/primary_bc_action_err_weighted_mean", "train/primary_bc_traj_err_h1",
-                "train/primary_bc_traj_mse", "train/primary_bc_traj_mae_m",
-                "train/primary_bc_router_soft_ce", "train/primary_bc_router_cluster_version_num",
-                "train/cluster_soft_targets",
-                "horizon/h1/traj_mse_m2/mean", "horizon/h1/traj_mae_m/mean",
-                "slice/brake/action_err/mean",
-                "slice/turn/action_err/n_updates", "label/on_curve/action_err/mean",
-                # 留出集（val/ 前缀；同族指标 + 关键切分）
-                "val/primary_bc_loss", "val/primary_bc_traj_mse", "val/primary_bc_router_soft_ce",
-                "val/horizon/h1/traj_mse_m2/mean", "val/slice/brake/action_err/mean",
-                "val/label/on_curve/action_err/mean"):
+    for tag in ("stageB/primary/loss_terms/loss", "stageB/primary/loss_terms/traj",
+                "stageB/primary/loss_terms/action", "stageB/primary/loss_terms/router",
+                "ego/traj/mae_m/h1", "ego/action/err_weighted",
+                "router/soft_ce", "router/soft_kl", "router/top1_cluster_acc",
+                "router/entropy", "router/primary/expert_mix_weight/e0",
+                # 留出集（val_ 前缀；同族指标）
+                "val_stageB/primary/loss_terms/loss", "val_ego/traj/mae_m/h1",
+                "val_ego/action/err_weighted", "val_router/soft_ce"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
-    assert not [tag for tag in tags if tag.endswith("/count")], "分组 /count 旧名必须移除"
+    # NMI 在极小数据集上可能因簇标签单一而为 NaN（NaN 静默跳过）→ 有值才断言
+    if np.isfinite(primary["bc_router_nmi"]):
+        assert "router/nmi" in tags
+    # 监控瘦身：旧族（horizon/train/val/slice/label）与计数/n_updates 一个不留
+    assert not [tag for tag in tags if tag.startswith(("horizon/", "train/", "val/", "slice/", "label/"))]
+    assert not [tag for tag in tags if tag.endswith(("/count", "/n_updates"))]
     assert (out_dir / "final.pt").exists()

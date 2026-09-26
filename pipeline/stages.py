@@ -9,15 +9,20 @@
   监督**（方案①：每步挤入 GT 帧前用同一 mem 预测第 k 帧 ego 前 6 维，plan head/MoE 因此在
   A 阶段有梯度，design-v1.2 §2.3）+ **presence/entry BCE + AUC（id 轴，见
   :func:`presence_entry_targets`）**；**未来 LD 损失已移除**。
-  逐 horizon 记录 loss/ADE/FDE + 有效样本数（count 与 weight 双口径）。
+  监控（Tier-1，2026-09-27）：逐 horizon ``wm/od/loss``、``wm/od/ade_m``（含 ``cv_h*`` 匀速
+  基线）、``wm/ego_next/loss`` + 标量 ``wm/loss``/``wm/presence_auc``/``wm/entry_auc``；
+  FDE/有效样本计数等已从曲线移除（``docs/metrics.md``）。
   可训练：encoders/mem-encoder/plan head/MoE/ST-GNN；policy/value 头不参与。
 - **B = planner BC**：可训练 backbone+MoE+policy head，**primary→specific** 两段。
   损失 = **首步动作**（``action_mu`` vs 专家即时动作，权重感知）+ **6 点 rollout 轨迹辅助**
   （``traj_xy`` vs 专家 ``traj6``，WM 冻结；新 net 的合成帧 detach 语义）+ **router 软目标
   CE/KL**（聚类分布 + 温度；软目标缺失时跳过并记录 ``bc_router_soft_placeholder=1``，
   不再回退 8 维硬标签 BCE）。
-  日志：动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）+ 逐 horizon 轨迹误差
-  （加权 MAE m / MSE m²，2026-09-26 单位修正）+ router top-1/簇准确率/NMI/门控熵/专家利用率。
+  监控（Tier-1，2026-09-27）：``stageB/<phase>/loss_terms``（loss/traj/action/router）、
+  ``ego/action/err_weighted``、``ego/traj/mae_m``（逐 horizon 加权 MAE，留出 ``val_ego/...``）、
+  ``router/{soft_ce,soft_kl,top1_cluster_acc,nmi,entropy}``、
+  ``router/<phase>/expert_mix_weight``（e0..e7 一图 8 线）；动作误差 median/p95、全部
+  slice/label、expert_util、``traj_mse_m2`` 曲线等已移除（``docs/metrics.md``）。
 - **C = PPO RL（EXPERIMENTAL）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）与
   P0-2（router 标签错位）未修复前**不得用于 RL 结论**，仅保留管线冒烟。KL 锚 = 阶段 B 快照
   （``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
@@ -45,6 +50,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -153,16 +159,45 @@ def _monitor_enabled(args: argparse.Namespace, config: Mapping[str, Any]) -> boo
     return any(bool(cfg.get(key)) for key in ("tensorboard", "csv", "scene_labels", "moe_routing"))
 
 
-def _make_monitor(log_dir: Path, enabled: bool) -> Optional[Any]:
+def _make_monitor(log_dir: Path, enabled: bool, *, legacy_tags: bool = False) -> Optional[Any]:
+    """构造 :class:`pipeline.monitoring.TrainingMonitor`（``legacy_tags`` = 回退旧 tag 口径）。"""
     if not enabled:
         return None
     try:
         from pipeline.monitoring import TrainingMonitor
 
-        return TrainingMonitor(str(log_dir))
+        return TrainingMonitor(str(log_dir), legacy_tags=legacy_tags)
     except Exception as exc:  # noqa: BLE001
         print(f"[stages] monitoring 不可用（{type(exc).__name__}: {exc}）→ 跳过", flush=True)
         return None
+
+
+def _monitor_legacy_tags(args: argparse.Namespace) -> bool:
+    """``--monitor-legacy-tags``（默认关）：监控回退到旧 tag/旧写入行为。"""
+    return bool(getattr(args, "monitor_legacy_tags", False))
+
+
+#: 监控瘦身清单（docs/metrics.md）：这些阶段结果键不再进 metrics.json（CSV/TB 侧由
+#: ``pipeline.monitoring`` 的白名单过滤）。保留项示例：``bc_traj_mse*``（损失口径字段）、
+#: ``bc_router_*``（cluster/router 元数据）。
+_SLIMMED_RESULT_RES = (
+    re.compile(r"^bc_action_err_slice_"),
+    re.compile(r"^bc_action_err_label_"),
+    re.compile(r"^bc_action_err_(median|p95)$"),
+    re.compile(r"^bc_router_expert_(util|mix_util)_\d+$"),
+)
+
+
+def _slim_phase_result(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """递归剔除已移除的切片/分位数/利用率键（metrics.json 只保留损失/KPI 口径字段）。"""
+    slim: Dict[str, Any] = {}
+    for key, value in result.items():
+        if isinstance(key, str) and any(rx.match(key) for rx in _SLIMMED_RESULT_RES):
+            continue
+        if key in ("slices", "labels"):
+            continue
+        slim[key] = _slim_phase_result(value) if isinstance(value, Mapping) else value
+    return slim
 
 
 def _resolve_specs(args: argparse.Namespace, config: Mapping[str, Any]) -> List[Any]:
@@ -1540,7 +1575,11 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     }
     metrics.update(dataset_contract)
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
-    monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
+    monitor = _make_monitor(
+        out_dir / "monitor",
+        enabled=_monitor_enabled(args, config),
+        legacy_tags=_monitor_legacy_tags(args),
+    )
     rng = np.random.default_rng(int(args.seed))
     loss_curve: List[float] = []
     grad_probe_first: Dict[str, float] = {}
@@ -2046,7 +2085,11 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     }
     metrics.update(dataset_contract)
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
-    monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
+    monitor = _make_monitor(
+        out_dir / "monitor",
+        enabled=_monitor_enabled(args, config),
+        legacy_tags=_monitor_legacy_tags(args),
+    )
     if monitor is not None:
         version_digits = "".join(
             ch for ch in (str(cluster_spec.cluster_version) if cluster_spec is not None else "") if ch.isdigit()
@@ -2065,6 +2108,9 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
         - 训练侧：``train/<phase>_*`` 标量 + ``horizon|slice|label/*``（逐 epoch 增量）；
         - 留出侧：``val/<phase>_*`` 标量 + ``val/horizon|val/slice|val/label/*``；
+        - 喂入 tag 均为旧命名，由 ``pipeline.monitoring`` 按 Tier-1 清单重命名/过滤
+          （``stageB/<phase>/loss_terms`` / ``ego/*`` / ``router/*``；见 docs/metrics.md）；
+          ``--monitor-legacy-tags`` 时全量落盘；
         - 阶段末只补记逐 epoch 未覆盖的标量（router 汇总/元数据），避免同 (step, tag) 重复。
         """
         if phase_epochs <= 0:
@@ -2148,8 +2194,10 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             monitor.flush(step=phase_offset + phase_epochs)
         return result
 
-    metrics["primary"] = _run_phase("primary", primary_epochs, _PRIMARY_PHASE_FREEZE, 0)
-    metrics["specific"] = _run_phase("specific", specific_epochs, _SPECIFIC_PHASE_FREEZE, primary_epochs)
+    metrics["primary"] = _slim_phase_result(_run_phase("primary", primary_epochs, _PRIMARY_PHASE_FREEZE, 0))
+    metrics["specific"] = _slim_phase_result(
+        _run_phase("specific", specific_epochs, _SPECIFIC_PHASE_FREEZE, primary_epochs)
+    )
     metrics.update(_action_mu_stats(model, dataset, device, batch_size=batch_size, obs_source=obs_source))
     if monitor is not None:
         monitor.close()
@@ -2261,7 +2309,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "device": device,
         "probe_batch": probe_batch,
     }
-    monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
+    monitor = _make_monitor(
+        out_dir / "monitor",
+        enabled=_monitor_enabled(args, config),
+        legacy_tags=_monitor_legacy_tags(args),
+    )
     try:
         reward_adapter, reward_source = build_reward_adapter(logger=print)
         ppo_cfg = PPOConfig(
@@ -2444,6 +2496,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--monitor", action=argparse.BooleanOptionalAction, default=None,
                         help="使用 pipeline.monitoring（tensorboard/CSV）；默认读 config/train.yaml::monitoring")
+    parser.add_argument("--monitor-legacy-tags", action="store_true",
+                        help="监控回退：按旧 tag 名/旧写入行为记录全部指标（默认关）。"
+                             "默认只记 Tier-1（OD/EGO loss+KPI、router loss+KPI），其余丢弃；"
+                             "清单见 docs/metrics.md")
     return parser.parse_args(argv)
 
 

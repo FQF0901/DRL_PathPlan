@@ -73,11 +73,6 @@ class FrameMemory:
         self._buf.clear()
         self._last_step = None
 
-    @property
-    def num_stored(self) -> int:
-        """已入库帧数（预热期 < frames）。"""
-        return len(self._buf)
-
     # ------------------------------------------------------------------- 入库
     def push(
         self,

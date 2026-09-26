@@ -11,9 +11,9 @@
 
 用法::
 
-    tools/venv-python tools/forensics_offline.py --section counts
-    tools/venv-python tools/forensics_offline.py --section clusters
-    tools/venv-python tools/forensics_offline.py --section plan --rows 20000
+    tools/venv-python tools/diagnostics/forensics_offline.py --section counts
+    tools/venv-python tools/diagnostics/forensics_offline.py --section clusters
+    tools/venv-python tools/diagnostics/forensics_offline.py --section plan --rows 20000
 """
 
 from __future__ import annotations
@@ -37,11 +37,6 @@ EASY = ("straight",)
 def _load_arrays(npz: str) -> dict:
     with np.load(npz) as payload:
         return {key: payload[key] for key in payload.files}
-
-
-def _geometry_primary(geometry: np.ndarray) -> np.ndarray:
-    """数据侧 geometry 字段是分号串；取**包含**焦点几何的标记（可多标记）。"""
-    return geometry
 
 
 def section_counts(arrays: dict) -> dict:

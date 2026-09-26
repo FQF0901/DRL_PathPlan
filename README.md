@@ -218,9 +218,9 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | `reward_model/` | 规则奖励项（9 项）、聚合（dense+terminal+CaRL+potential shaping）、KPI（primary 分组 + Wilson CI）|
 | `net/` | 编码器 / 时序 / 空间 / MoE / world model / 策略头 / rollout |
 | `pipeline/` | 阶段 A/B/C、trainer、buffer、vector_env、eval_runner、monitoring、gl_runtime |
-| `tools/` | `gene_env.sh`、`train.py`、`test.py`、`collect_expert.py`、`baseline_eval.py`、`visualize.py`、`measure/*` |
+| `tools/` | `gene_env.sh`、`train.py`、`test.py`、`collect_expert.py`、`baseline_eval.py`、`visualize.py`、`measure/*`、`diagnostics/*` |
 | `tests/` | 88 项测试（`tools/venv-python -m pytest tests/ -q`）|
-| `runs/`、`data/` | 运行产物（gitignored）|
+| `datasets/`、`runs/` | 专家数据集（不可清）与运行产物（gitignored，可随时清）；命名纪律见 `docs/design-v1.2.md` §3.5 |
 
 ```bash
 # 环境（一次性；本机无系统 libGL，需 glvnd 本地解包）
@@ -264,16 +264,17 @@ tools/venv-python tools/test.py --policy ckpt --ckpt runs/train/stage_b/final.pt
 
 ## 6. 证据索引
 
+> 运行产物按 `docs/design-v1.2.md` §3.5 落在 `datasets/`（数据）与 `runs/BTC<北京时间戳>_*`（产物），可随时清理/重生成；数据集不随 `runs/` 清理。
+
 | 内容 | 路径 |
 | --- | --- |
-| 阶段 A 产物/曲线 | `runs/train/stage_a_matched/` |
-| 阶段 B（1k / 2k / 2k-aux0.3） | `runs/train/stage_b_matched/`、`stage_b_2k/`、`stage_b_2k_aux3/` |
-| 阶段 C（v1 / v2） | `runs/train/stage_c_run1/`、`stage_c_v2/`（含 `monitor/metrics.csv` 42 条序列）|
-| 评测记录 | `runs/eval/*/metrics.json` + `episodes.csv` |
-| 冻结基线 | `runs/baseline_eval/val_reference.json`、`val_reference_by_primary.json` |
-| BC 数据 | `runs/bc_expert_full/`、`runs/bc_expert_2k/`（`report.json` 含过滤/配平统计）|
-| P0 测量 / 数据集统计 / 可行性分析 | `docs/p0-measurements.md`、`docs/dataset_stats.md`、`docs/feasibility-analysis.md` |
-| 场景级失败取证（只读，2026-09-26）| `docs/forensics-2026-09-26.md`（+ `tools/forensics_*.py`；原始证据 JSON 在 `runs/forensics/`）|
-| v1.2 IL 正式运行 | `runs/train/il_v2_10x10*/`（`il_report/il_report.md`）+ `runs/eval/il_v2_fixed_lqr50/` |
+| v1.2 IL 结果表（§8 2k / §9 5k：开环 + 闭环 + 失败模式） | `docs/experiments.md` |
+| 场景级失败取证（只读，2026-09-26） | `docs/forensics-2026-09-26.md`（脚本：`tools/diagnostics/forensics_*.py`）|
+| 数据/产物目录纪律与命名 | `docs/design-v1.2.md` §3.5 |
+| P0 实测 / 数据集统计 / 可行性分析 | `docs/p0-measurements.md`、`docs/dataset_stats.md`、`docs/feasibility-analysis.md` |
+| 系统架构图 | `docs/architecture-BTC20260925-2234.svg` |
+
+> 历史运行（Stage A/B/C、评测、冻结基线、BC 数据集）的产物目录随 `runs/` 清理已删除；数字与复现命令已固化在
+> `docs/experiments.md`，按文中命令可重生成。
 
 > 依赖：MetaDrive 0.4.3、numpy<2、Python 3.10、torch 2.3（`.venv` 复用系统已装包）。

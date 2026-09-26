@@ -174,9 +174,6 @@ class FrameLookup:
         """返回 ``(episode_id, step)`` 的行下标；不存在返回 None。"""
         return self._index.get((int(episode_id), int(step)))
 
-    def contains(self, episode_id: int, step: int) -> bool:
-        return (int(episode_id), int(step)) in self._index
-
     def _anchor(self, step: int, stride: int) -> int:
         """目标 step 锚到的 stride 网格点（floor；step 为负数时 Python 向下取整语义一致）。"""
         return (int(step) // int(stride)) * int(stride)

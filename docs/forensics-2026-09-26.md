@@ -1,8 +1,8 @@
 # curve / roundabout / uturn / tollgate 四类 0% 的根因诊断（只读；未改任何行为代码）
 
-输入：`runs/eval/il_v2_fixed_lqr50/`（50 条冻结 val slice，ckpt=`runs/train/il_v2_10x10_b_fixed/stage_b/final.pt`，tracker=lqr，H=128）
-新增（只读脚本）：`tools/forensics_offline.py`、`tools/forensics_closed_loop.py`、`tools/forensics_report.py`
-产物：`runs/forensics/{offline_counts,offline_clusters,offline_plan,closed_lqr,closed_exact,closed_baseline,closed_oracle,closed_gain2,closed_gain4}.json`
+输入（历史产物，已清理）：`runs/eval/il_v2_fixed_lqr50/`（50 条冻结 val slice，ckpt=`runs/train/il_v2_10x10_b_fixed/stage_b/final.pt`，tracker=lqr，H=128）
+新增（只读脚本）：`tools/diagnostics/forensics_offline.py`、`tools/diagnostics/forensics_closed_loop.py`、`tools/diagnostics/forensics_report.py`
+产物（历史产物，已随 `runs/` 清理；可由文末命令重生成）：`runs/forensics/{offline_counts,offline_clusters,offline_plan,closed_lqr,closed_exact,closed_baseline,closed_oracle,closed_gain2,closed_gain4}.json`
 ## 结论（按证据强度）
 
 1. **[事实·强] 主瓶颈是"预瞄/plan 不是一条能回到车道的路径"，不是 tracker、不是数据量。**
@@ -18,7 +18,7 @@
 6. **[非因] 数据量**：四类 trainable 行数 7534–11284（占 7.3–10.9%），与 straight（9723, 9.4%）同级；簇空间无类别专属簇（详情见 Q4）。
 7. **[次因] 纵向**：LQR 实测 v/参考 v 中位数 0.807（p10 0.53）——P-only 稳态差（oracle 组 7/17 因此超时）；plan 的 ds 预测本身没问题。
 8. **[次因·仅 tollgate]** 2/4 是**撞岗亭**（rc 0.93/0.55，'$' 内），且 oracle 回放同样在 rc≈0.53 撞 2 次 → 除 plan 外还缺"过闸"行为/避障（专家实现里有专门的 tollgate 扫描逻辑，`env/expert/pure_pursuit_idm.py:572,777`）。
-## Q1 失败形态（`runs/forensics/closed_lqr.json`；20 条重跑与 `episodes.csv` 的 termination/rc/steps 逐条一致）
+## Q1 失败形态（`runs/forensics/closed_lqr.json`，历史产物已清理、可由文末命令重生成；20 条重跑与 `episodes.csv` 的 termination/rc/steps 逐条一致）
 
 | class | n | 冻结 eval 终止 | rc@fail | 失败所在 block | 失败前1s均速(m/s) | max&#124;lane_lat&#124;(m) | tracker e_y p95(m) |
 |---|---|---|---|---|---|---|---|
@@ -31,7 +31,7 @@
 KPI 口径提醒：`episodes.csv::mean_speed_mps` 实为**末步速度**（`eval_runner.py:966` 只取 `info['velocity']`）；ckpt 路径的 `steer_abs_mean/throttle_mean` 恒为 0（`_CkptController._action` 从不更新）。本报告的速度/横向量均来自重跑记录。
 ## Q2 预瞄保真（WM/plan 侧）
 
-- 逐 horizon `traj_xy` vs `traj6` 加权 MAE（m，`tools/venv-python tools/forensics_offline.py --section plan`）：
+- 逐 horizon `traj_xy` vs `traj6` 加权 MAE（m，`tools/venv-python tools/diagnostics/forensics_offline.py --section plan`）：
   curve .19/.44/.75/1.09/1.46/1.89；roundabout .14/.34/.56/.77/.99/1.25；uturn .15/.38/.65/.95/1.28/1.67；tollgate .19/.47/.83/1.21/1.63/2.10；straight .18/.42/.74/1.07/1.42/1.83
   → **四类并不比 straight 差**（roundabout/uturn 更好）；问题不在"整体预测精度"，而在**条件于大转角时的转向响应**（见结论 3）。
 - 闭环"plan vs 实际执行"偏差（每 0.5 s 窗口最大横向 / 航向）：focus 0.081 m / 0.041 rad，easy 0.110 m / 0.058 rad → 执行保真不是瓶颈。
@@ -40,7 +40,7 @@ KPI 口径提醒：`episodes.csv::mean_speed_mps` 实为**末步速度**（`eval
 - 跟随误差（同 plan、同场景）：focus e_y p95 0.46 / e_ψ p95 0.069；easy 0.57 / 0.084 → **无类别差异**。
 - 曲率可行域（合成圆弧 + 真实 LQR，`--mode arc`，id 0/34，v=4/6/8 m/s）：直线 0.001 m；R=60 m 瞬态 0.21–0.44 m；R=25 m 0.63–0.87 m → R≥60（本批 block 实际 R≈57–64 m）够用；R≤25 会额外贡献 ~0.5–0.9 m（次要）。
 - 纵向：v/ref 中位 0.807（p10 0.53，n=6013 step）→ P-only 稳态差，独立于本次 0% 问题。
-## Q4 数据覆盖（`runs/bc_expert_2k_v2/report.json` + `expert_bc.npz`）
+## Q4 数据覆盖（`runs/bc_expert_2k_v2/report.json` + `expert_bc.npz`，历史数据集已清理、可重采）
 
 | geometry | trainable rows | 占比 | |dθ|≥0.1 rad 行 | ≥0.2 rad 行 | |dθ| 均值(rad/0.5s) | stage B 加权动作误差 |
 |---|---|---|---|---|---|---|
@@ -65,12 +65,12 @@ KPI 口径提醒：`episodes.csv::mean_speed_mps` 实为**末步速度**（`eval
 5. **不建议先动 tracker 横向增益**：e_y 已足够小，且完美执行同样失败；tollgate 的"过闸"需要单独行为（专家有专门逻辑），可用 oracle 组 rc≈0.53 碰撞作为回归锚点。
 6. 评测口径：四类当前 n=4–5（Wilson CI 很宽，如 roundabout [0,0.49]），修完请用 1000 条 val 集里这四类的全部 spec 复评。
 
-复现命令：
+复现命令（`--out` 产物落在 `runs/forensics/`，可重生成）：
 ```
-tools/venv-python tools/forensics_offline.py --section all --rows 24000
-tools/venv-python tools/forensics_closed_loop.py --mode lqr   --ids 0,5,11,14,18,19,22,23,28,29,30,32,34,40,43,44,47,3,6,25 --out runs/forensics/closed_lqr.json
-tools/venv-python tools/forensics_closed_loop.py --mode exact --ids ... --out runs/forensics/closed_exact.json
-tools/venv-python tools/forensics_closed_loop.py --mode baseline --ids ... --out runs/forensics/closed_baseline.json
-tools/venv-python tools/forensics_closed_loop.py --mode oracle --ids ... --out runs/forensics/closed_oracle.json
-tools/venv-python tools/forensics_closed_loop.py --mode lqr_gain --dtheta-gain 4 --ids ... --out runs/forensics/closed_gain4.json
+tools/venv-python tools/diagnostics/forensics_offline.py --section all --rows 24000
+tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr   --ids 0,5,11,14,18,19,22,23,28,29,30,32,34,40,43,44,47,3,6,25 --out runs/forensics/closed_lqr.json
+tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode exact --ids ... --out runs/forensics/closed_exact.json
+tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode baseline --ids ... --out runs/forensics/closed_baseline.json
+tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode oracle --ids ... --out runs/forensics/closed_oracle.json
+tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr_gain --dtheta-gain 4 --ids ... --out runs/forensics/closed_gain4.json
 ```

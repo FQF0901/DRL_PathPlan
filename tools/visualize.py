@@ -44,7 +44,7 @@ import textwrap
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import matplotlib
 

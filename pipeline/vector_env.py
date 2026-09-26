@@ -1105,10 +1105,6 @@ class SpecAssigner:
                     self._batches.append(batch)
         self._cursor = 0
 
-    @property
-    def n_batches(self) -> int:
-        return len(self._batches)
-
     def next_batch(self, *, advance_epoch: bool = True) -> list:
         """取下一批（长度 ≤ num_workers）；耗尽后 ``repeat=True`` 时开新 epoch。"""
         if self._cursor >= len(self._batches):

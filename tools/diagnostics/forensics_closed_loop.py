@@ -15,7 +15,7 @@
 
 用法::
 
-    tools/venv-python tools/forensics_closed_loop.py --mode lqr --ids 0,5,11,14,18,19,22,23,28,29,30,32,34,40,43,44,47 --out runs/forensics/closed_lqr.json
+    tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr --ids 0,5,11,14,18,19,22,23,28,29,30,32,34,40,43,44,47 --out runs/forensics/closed_lqr.json
 """
 
 from __future__ import annotations
@@ -55,7 +55,6 @@ def _lane_block(env) -> str:
         from env.scenario.behaviors import map_info
 
         info = map_info(env)
-        lane = getattr(env.agent, "lane", None)
         idx = getattr(env.agent, "lane_index", None)
         if info is not None and idx is not None:
             return str(info.lane_block.get(tuple(idx), "?"))
@@ -76,17 +75,6 @@ def _lane_lat(env) -> float:
         if proj is None:
             return float("nan")
         return float(proj[1]) if not isinstance(proj, float) else float(proj)
-    except Exception:  # noqa: BLE001
-        return float("nan")
-
-
-def _lane_width(env) -> float:
-    try:
-        lane = getattr(env.agent, "lane", None)
-        idx = getattr(env.agent, "lane_index", None)
-        if lane is None or idx is None:
-            return float("nan")
-        return float(lane.width_at(0.0))
     except Exception:  # noqa: BLE001
         return float("nan")
 
@@ -282,7 +270,6 @@ class ArcController(InstrumentedCkpt):
     def action(self, env):
         ego = env.agent
         self._measured_prev_action(env)
-        obs = None  # 不用网络
         rec = {
             "step": int(self._steps),
             "decision": bool(self._steps % self.decision_interval == 0),
@@ -345,7 +332,6 @@ class InstrumentedBaseline:
         return self._inner.action_info(env)
 
     def tracker_info(self):
-        info = self._inner.action_info(None) if False else {}
         return {}
 
     def params(self):
@@ -367,8 +353,6 @@ class LanePlanController(InstrumentedCkpt):
         self.speed_cap = float(speed_cap)
 
     def _route_poses(self, env, horizon_s=3.0, dt=0.1):
-        from env.tracking import ego_to_world, world_to_ego  # noqa: F401  (文档用途)
-
         ego = env.agent
         nav = getattr(ego, "navigation", None)
         lane = getattr(ego, "lane", None)
@@ -510,9 +494,6 @@ class OracleReplayController(InstrumentedCkpt):
         super().__init__(env, spec, task, tracker_json=tracker_json)
         self.oracle = np.asarray(oracle_poses, dtype=np.float64)  # (N,3) 世界系
         self.k = 0
-
-    def set_cursor(self, k: int) -> None:
-        self.k = int(k)
 
     def action(self, env):
         ego = env.agent

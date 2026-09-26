@@ -7,16 +7,21 @@
         --stage-a runs/train/<runA>/stage_a --stage-b runs/train/<runB>/stage_b \
         --out runs/train/<runB>/plots
 
-读取各 stage 的 ``monitor/metrics.csv``（长表 step,tag,value），按预设"面板"出图：
+读取各 stage 的 ``monitor/metrics.csv``（长表 step,tag,value），按预设"面板"出图。
+**每个面板内同族多线同图**（与 tensorboard 一致），只画保留清单（``docs/metrics.md``）：
 
-- Stage A：`A_horizon_loss.png`（逐 horizon loss）、`A_ade_vs_cv.png`（逐 horizon ADE vs 匀速）、
-  `A_health.png`（presence/entry AUC + grad_norm）、`A_wm_terms.png`（wm_loss_*）
-- Stage B：`B_loss_terms.png`（bc/traj/action/router，train vs val）、`B_action_err.png`
-  （mean/median/p95 + 分切片，train vs val）、`B_traj_horizon.png`（逐 horizon MAE）、
-  `B_router.png`（CE/KL/entropy/top1/NMI + 专家混合权重）
+- Stage A：`A_wm_od_loss.png`（`wm/od/loss` h1..h6）、`A_wm_od_ade.png`
+  （`wm/od/ade_m` h1..h6 + cv_h1..cv_h6 共 12 线）、`A_wm_ego_next.png`
+  （`wm/ego_next/loss` h1..h6）、`A_wm_kpi.png`（`wm/loss` + presence/entry AUC）
+- Stage B：`B_loss_terms_{primary,specific}.png`（`stageB/<phase>/loss_terms` 4 项，
+  train vs val）、`B_ego_traj_mae.png`（`ego/traj/mae_m` + `val_ego/traj/mae_m` h1..h6）、
+  `B_ego_action_err.png`（`ego/action/err_weighted` train/val）、
+  `B_router.png`（soft CE/KL + top1/NMI/entropy train/val）、
+  `B_router_experts_{primary,specific}.png`（`router/<phase>/expert_mix_weight` e0..e7）
 
-缺失的 tag 自动跳过；每个面板一个 PNG。tag 命名兼容 2026-09-26 前后的两套（`/count`→`/n_updates`、
-`valid_count`→`valid_samples`、`train/per_horizon/*` 已移除）。
+已删除的面板：slice/label 切片、median/p95、expert_util（见 ``docs/metrics.md``）。
+旧 run（2026-09-27 前 tag）自动回退到 ``horizon/*`` / ``train|val/<phase>_bc_*``；
+缺失的 tag 自动跳过；每个面板一个 PNG。
 """
 from __future__ import annotations
 
@@ -25,8 +30,6 @@ import csv
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
-
-import numpy as np
 
 
 def load_monitor(stage_dir: str) -> Dict[str, Dict[int, float]]:
@@ -45,9 +48,9 @@ def load_monitor(stage_dir: str) -> Dict[str, Dict[int, float]]:
 
 
 def pick(series: Dict[str, Dict[int, float]], *candidates: str) -> Optional[Tuple[str, Dict[int, float]]]:
-    """按候选顺序返回第一个存在的 tag。"""
+    """按候选顺序返回第一个存在的 tag（新 tag 优先、旧 tag 回退）。"""
     for tag in candidates:
-        if tag in series:
+        if tag and tag in series:
             return tag, series[tag]
     return None
 
@@ -89,57 +92,68 @@ def panel(series: Dict[str, Dict[int, float]], specs: List[Tuple[str, Tuple[str,
 
 
 def stage_a_panels(series: Dict[str, Dict[int, float]], out_dir: str) -> None:
-    panel(series, [(f"h{k} loss", (f"horizon/h{k}/loss/mean",)) for k in range(1, 7)],
-          "Stage A · per-horizon WM loss", os.path.join(out_dir, "A_horizon_loss.png"))
-    panel(series, [(f"h{k} ADE", (f"horizon/h{k}/ade/mean",)) for k in range(1, 7)]
-          + [("h1 CV", ("horizon/h1/cv_ade/mean",)), ("h6 CV", ("horizon/h6/cv_ade/mean",))],
-          "Stage A · per-horizon ADE vs constant-velocity", os.path.join(out_dir, "A_ade_vs_cv.png"))
-    panel(series, [("presence AUC", ("train/presence_auc",)), ("entry AUC", ("train/entry_auc",)),
-                   ("grad plan_head", ("train/grad_norm_plan_head",)), ("grad st_gnn", ("train/grad_norm_st_gnn",)),
-                   ("grad router", ("train/grad_norm_router",))],
-          "Stage A · health", os.path.join(out_dir, "A_health.png"))
-    panel(series, [("wm_loss", ("train/wm_loss",)), ("od", ("train/wm_loss_od",)),
-                   ("ego_next", ("train/wm_loss_ego_next",)), ("presence", ("train/presence_loss",)),
-                   ("entry", ("train/entry_loss",))],
-          "Stage A · WM loss terms", os.path.join(out_dir, "A_wm_terms.png"))
-    # 逐 horizon ego_next（若存在）
-    panel(series, [(f"h{k} ego_next", (f"horizon/h{k}/ego_next_loss/mean",)) for k in range(1, 7)],
-          "Stage A · per-horizon ego_next loss", os.path.join(out_dir, "A_ego_next.png"))
+    panel(series, [(f"h{k}", (f"wm/od/loss/h{k}", f"horizon/h{k}/loss/mean")) for k in range(1, 7)],
+          "Stage A · WM OD loss（逐 horizon）", os.path.join(out_dir, "A_wm_od_loss.png"))
+    panel(series,
+          [(f"h{k} ADE", (f"wm/od/ade_m/h{k}", f"horizon/h{k}/ade/mean")) for k in range(1, 7)]
+          + [(f"cv h{k}", (f"wm/od/ade_m/cv_h{k}", f"horizon/h{k}/cv_ade/mean")) for k in range(1, 7)],
+          "Stage A · WM OD ADE vs 匀速基线（12 线同图）", os.path.join(out_dir, "A_wm_od_ade.png"))
+    panel(series,
+          [(f"h{k}", (f"wm/ego_next/loss/h{k}", f"horizon/h{k}/ego_next_loss/mean")) for k in range(1, 7)],
+          "Stage A · plan head ego_next loss（逐 horizon）", os.path.join(out_dir, "A_wm_ego_next.png"))
+    panel(series, [("wm loss", ("wm/loss", "train/wm_loss")),
+                   ("presence AUC", ("wm/presence_auc", "train/presence_auc")),
+                   ("entry AUC", ("wm/entry_auc", "train/entry_auc"))],
+          "Stage A · WM loss / presence / entry KPI", os.path.join(out_dir, "A_wm_kpi.png"))
+
+
+#: 旧 tag 的 loss 项后缀（term → ``bc_*`` 键）
+_BC_TERM_KEYS = {"loss": "loss", "traj": "traj_loss", "action": "action_loss", "router": "router_loss"}
+_ROUTER_KPIS = ("soft_ce", "soft_kl", "top1_cluster_acc", "nmi", "entropy")
 
 
 def stage_b_panels(series: Dict[str, Dict[int, float]], out_dir: str) -> None:
-    panel(series, [("bc(t)", ("train/primary_bc_loss", "train/specific_bc_loss")),
-                   ("bc(v)", ("val/primary_bc_loss", "val/specific_bc_loss")),
-                   ("traj(t)", ("train/primary_bc_traj_loss", "train/specific_bc_traj_loss")),
-                   ("traj(v)", ("val/primary_bc_traj_loss", "val/specific_bc_traj_loss")),
-                   ("action(t)", ("train/primary_bc_action_loss", "train/specific_bc_action_loss")),
-                   ("router(t)", ("train/primary_bc_router_loss", "train/specific_bc_router_loss")),
-                   ("router(v)", ("val/primary_bc_router_loss", "val/specific_bc_router_loss"))],
-          "Stage B · loss terms (train vs val)", os.path.join(out_dir, "B_loss_terms.png"))
-    panel(series, [("err mean(t)", ("train/primary_bc_action_err_weighted_mean", "train/specific_bc_action_err_weighted_mean")),
-                   ("err mean(v)", ("val/primary_bc_action_err_weighted_mean", "val/specific_bc_action_err_weighted_mean")),
-                   ("median(t)", ("train/primary_bc_action_err_median", "train/specific_bc_action_err_median")),
-                   ("p95(t)", ("train/primary_bc_action_err_p95", "train/specific_bc_action_err_p95")),
-                   ("brake", ("train/primary_bc_action_err_slice_brake_weighted_mean",)),
-                   ("turn", ("train/primary_bc_action_err_slice_turn_weighted_mean",)),
-                   ("curve", ("train/primary_bc_action_err_slice_curve_weighted_mean",))],
-          "Stage B · action error (weighted L1) + slices", os.path.join(out_dir, "B_action_err.png"))
-    panel(series, [(f"h{k} traj MAE(t)", (f"train/primary_bc_traj_mae_h{k}_m", f"train/specific_bc_traj_mae_h{k}_m")) for k in range(1, 7)]
-          + [(f"h{k} traj MAE(v)", (f"val/primary_bc_traj_mae_h{k}_m", f"val/specific_bc_traj_mae_h{k}_m")) for k in (1, 3, 6)],
-          "Stage B · per-horizon trajectory MAE (m)", os.path.join(out_dir, "B_traj_horizon.png"))
-    panel(series, [("soft CE(t)", ("train/primary_bc_router_soft_ce", "train/specific_bc_router_soft_ce")),
-                   ("soft CE(v)", ("val/primary_bc_router_soft_ce", "val/specific_bc_router_soft_ce")),
-                   ("soft KL(t)", ("train/primary_bc_router_soft_kl", "train/specific_bc_router_soft_kl")),
-                   ("top1(t)", ("train/primary_bc_router_top1_cluster_acc", "train/specific_bc_router_top1_cluster_acc")),
-                   ("NMI(t)", ("train/primary_bc_router_nmi", "train/specific_bc_router_nmi")),
-                   ("entropy(t)", ("train/primary_bc_router_entropy", "train/specific_bc_router_entropy"))],
-          "Stage B · router (cluster soft targets)", os.path.join(out_dir, "B_router.png"))
-    panel(series, [(f"expert {i} mix", (f"train/primary_bc_router_expert_mix_weight_{i}", f"train/specific_bc_router_expert_mix_weight_{i}")) for i in range(8)],
-          "Stage B · expert mix weights", os.path.join(out_dir, "B_experts.png"))
+    for phase in ("primary", "specific"):
+        specs: List[Tuple[str, Tuple[str, ...]]] = []
+        for split in ("train", "val"):
+            new_prefix = "val_stageB" if split == "val" else "stageB"
+            old_prefix = f"{split}/{phase}_bc_"
+            for term, key in _BC_TERM_KEYS.items():
+                specs.append((f"{term}({split[0]})",
+                              (f"{new_prefix}/{phase}/loss_terms/{term}", f"{old_prefix}{key}")))
+        panel(series, specs, f"Stage B · {phase} loss terms（train vs val）",
+              os.path.join(out_dir, f"B_loss_terms_{phase}.png"))
+    panel(series,
+          [(f"h{k} MAE(t)", (f"ego/traj/mae_m/h{k}", f"horizon/h{k}/traj_mae_m/mean",
+                             f"train/primary_bc_traj_mae_h{k}_m")) for k in range(1, 7)]
+          + [(f"h{k} MAE(v)", (f"val_ego/traj/mae_m/h{k}", f"val/horizon/h{k}/traj_mae_m/mean",
+                               f"val/primary_bc_traj_mae_h{k}_m")) for k in range(1, 7)],
+          "Stage B · ego 6 点轨迹逐 horizon 加权 MAE（m，train vs val）",
+          os.path.join(out_dir, "B_ego_traj_mae.png"))
+    panel(series, [("err weighted(t)", ("ego/action/err_weighted", "train/primary_bc_action_err_weighted_mean")),
+                   ("err weighted(v)", ("val_ego/action/err_weighted", "val/primary_bc_action_err_weighted_mean"))],
+          "Stage B · 首步动作加权误差（weighted L1）", os.path.join(out_dir, "B_ego_action_err.png"))
+    panel(series, [(f"{name}({split[0]})",
+                    (f"{'val_router' if split == 'val' else 'router'}/{name}",
+                     f"{split}/primary_bc_router_{name}"))
+                   for split in ("train", "val") for name in _ROUTER_KPIS],
+          "Stage B · router（soft CE/KL + top1/NMI/entropy）", os.path.join(out_dir, "B_router.png"))
+    for phase in ("primary", "specific"):
+        specs = [
+            (f"e{i}(t)", (f"router/{phase}/expert_mix_weight/e{i}",
+                          f"train/{phase}_bc_router_expert_mix_weight_{i}"))
+            for i in range(8)
+        ] + [
+            (f"e{i}(v)", (f"val_router/{phase}/expert_mix_weight/e{i}",
+                          f"val/{phase}_bc_router_expert_mix_weight_{i}"))
+            for i in range(8)
+        ]
+        panel(series, specs, f"Stage B · {phase} 专家混合权重（e0..e7，train vs val）",
+              os.path.join(out_dir, f"B_router_experts_{phase}.png"))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="离线曲线绘图（monitor CSV → PNG）")
+    ap = argparse.ArgumentParser(description="离线曲线绘图（monitor CSV → PNG；Tier-1 精简面板）")
     ap.add_argument("--stage-a", default=None, help="Stage A 运行目录（含 monitor/metrics.csv）")
     ap.add_argument("--stage-b", default=None, help="Stage B 运行目录")
     ap.add_argument("--out", required=True, help="PNG 输出目录")
