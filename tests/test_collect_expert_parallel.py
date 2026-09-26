@@ -8,13 +8,16 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 
 from tools.collect_expert import (
+    MAX_RECOMMENDED_WORKERS,
     RECYCLE_EVERY_SPECS,
     _chunk_tasks,
     _merge_records,
     _parse_args,
+    _resolve_workers,
     _worker_spec_indices,
 )
 
@@ -77,9 +80,16 @@ def test_merge_records_reports_missing_specs() -> None:
     assert missing == [1]
 
 
-def test_workers_cli_default_is_single_process() -> None:
+def test_workers_cli_default_is_auto() -> None:
+    """默认 0=auto（CPU 核数取半、上限 ``MAX_RECOMMENDED_WORKERS``）；显式 1 仍走单进程路径。"""
     args = _parse_args(["--specs", "env/specs/x.json", "--out", "runs/x"])
-    assert int(args.workers) == 1
+    assert int(args.workers) == 0
     assert int(args.recycle_every) == RECYCLE_EVERY_SPECS
+    expected_auto = min(MAX_RECOMMENDED_WORKERS, max(1, (os.cpu_count() or 4) // 2))
+    assert _resolve_workers(0) == expected_auto
+    assert _resolve_workers(-1) == expected_auto
+    assert _resolve_workers(1) == 1
+    assert _resolve_workers(4) == 4
     assert int(_parse_args(["--specs", "x", "--out", "y", "--workers", "4"]).workers) == 4
+    assert int(_parse_args(["--specs", "x", "--out", "y", "--workers", "1"]).workers) == 1
     assert int(_parse_args(["--specs", "x", "--out", "y", "--recycle-every", "0"]).recycle_every) == 0

@@ -18,13 +18,31 @@
    ``on_moe_step``（monitor 会累计，但语义不同，推荐默认传 softmax 分布）；
 4. **分组指标（v2）**：``on_grouped_step`` 接收 per-horizon / per-label / 分切片三组
    窗口统计（``GroupedMetricStatistics``），flush 时输出 ``horizon/<h>/<m>``、
-   ``label/<name>/<m>``、``slice/<name>/<m>`` 的 ``mean``/``count``/``weighted_mean``。
-   轨迹分组标签**自带单位**（``horizon/h1/traj_mse_m2``、``horizon/h1/traj_mae_m``），
-   不再用无单位的 ``traj_err``（2026-09-26：旧标签在 l2 下实为 m²，易误读为 m）；
-5. **PPO 诊断序列**（训练侧已写成嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
+   ``label/<name>/<m>``、``slice/<name>/<m>`` 的 ``mean``/``n_updates``/``weighted_mean``。
+   ``n_updates`` = 该均值由几次 ``update`` 贡献合成（**不是样本数**；样本数看
+   ``*_count`` 物理口径标量）。轨迹分组标签**自带单位**（``horizon/h1/traj_mse_m2``、
+   ``horizon/h1/traj_mae_m``），不再用无单位的 ``traj_err``（2026-09-26：旧标签在
+   l2 下实为 m²，易误读为 m）；
+5. **train/val 命名（Stage B）**：``on_train_step`` 写 ``train/<name>``；留出集用
+   ``on_val_step`` 写 ``val/<name>``（同族指标同后缀），分组指标用 ``on_val_grouped_step``
+   写 ``val/horizon/...`` / ``val/label/...`` / ``val/slice/...``（前缀二选一时统一取
+   ``val/`` 前缀）。训练侧分组（``horizon/*`` 等）与留出侧（``val/horizon/*``）
+   因此不会互相覆盖；
+6. **PPO 诊断序列**（训练侧已写成嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
    ``log_scalars`` 递归展平嵌套 Mapping → 标签 ``a/b/c``，因此奖励分解 / 优势-价值统计 /
    固定探针动作漂移全部自动进 CSV + tensorboard；
-6. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
+7. **tensorboard 多线成图（2026-09-26）**：``flush()`` 末尾把本步已记录的标量按族额外写一份
+   ``SummaryWriter.add_scalars(main_tag, {sub: value}, step)``，让同一信号家族的
+   ``h1..h6`` / ``brake|turn|curve`` / ``e0..e7`` / loss 项在 tensorboard 里**一张图多条线**
+   （与 ``tools/plot_curves.py`` 的 PNG 面板同分组）：``horizon_loss``、``horizon_ade``、
+   ``horizon_cv_ade``、``horizon_ego_next``、``horizon_traj_mse_m2``、``horizon_traj_mae_m``、
+   ``slice_action_err``、``label_action_err``、``expert_mix_weight_<phase>``、
+   ``bc_terms_<phase>``、Stage A 的 ``wm_terms`` / ``grad_norm`` / ``health``；
+   ``val/`` 同族 main 加 ``val_`` 前缀（train/val 各一图）。注意 torch 的 ``add_scalars``
+   语义：每个 sub 写成独立 sub-run 事件文件 ``<log_dir>/<main>_<sub>/``，文件内 tag =
+   ``main_tag``，因此 tensorboard 标量面板里同一 tag 的多 run 即多线同图；canonical tag
+   与 CSV 长表**不变**；同族 <2 个 sub 时不写（避免单点噪声）；
+8. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
 
 设计
 ----
@@ -54,9 +72,10 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 from collections.abc import Mapping as _MappingABC
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -66,6 +85,7 @@ _SCENE_LABEL_PREFIX = "scene_label"
 _MOE_PREFIX = "moe"
 _KPI_PREFIX = "kpi"
 _TRAIN_PREFIX = "train"
+_VAL_PREFIX = "val"
 _HORIZON_PREFIX = "horizon"
 _LABEL_PREFIX = "label"
 _SLICE_PREFIX = "slice"
@@ -114,6 +134,93 @@ def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, A
         else:
             flat[name] = value
     return flat
+
+
+# --------------------------------------------------------------------------- #
+# tensorboard 多线成图：canonical tag → (main_tag, sub_tag)
+# --------------------------------------------------------------------------- #
+# 同一信号家族（h1..h6 / brake|turn|curve / 专家 e0..e7 / loss 项）在 tensorboard 里
+# 应画在一张图内（与 tools/plot_curves.py 的 PNG 面板同分组），因此 flush 时用
+# ``add_scalars(main_tag, {sub: value}, step)`` 写同一 tag 的多条线（每 sub 一个 sub-run）。
+# 纯增量：canonical tag 与 CSV 长表不变；仅 ≥2 个 sub 的族才写（避免单点噪声）。
+
+_HORIZON_FAMILIES: Dict[str, str] = {
+    "loss": "horizon_loss",
+    "ade": "horizon_ade",
+    "cv_ade": "horizon_cv_ade",
+    "ego_next_loss": "horizon_ego_next",
+    "traj_mse_m2": "horizon_traj_mse_m2",
+    "traj_mae_m": "horizon_traj_mae_m",
+}
+_STAGE_A_WM_TERMS = ("wm_loss", "wm_loss_od", "wm_loss_ego_next", "presence_loss", "entry_loss")
+_STAGE_A_HEALTH = ("presence_auc", "entry_auc")
+_BC_TERM_SUBS = {"loss": "loss", "traj_loss": "traj", "action_loss": "action", "router_loss": "router"}
+
+_HORIZON_GROUP_RE = re.compile(r"^horizon/(?P<group>h\d+)/(?P<metric>[^/]+)/mean$")
+_SLICE_GROUP_RE = re.compile(r"^slice/(?P<group>[^/]+)/action_err/mean$")
+_LABEL_GROUP_RE = re.compile(r"^label/(?P<group>[^/]+)/action_err/mean$")
+_EXPERT_MIX_RE = re.compile(
+    r"^(?P<phase>[A-Za-z][A-Za-z0-9_]*)_bc_router_expert_mix_weight_(?P<index>\d+)$"
+)
+_BC_TERM_RE = re.compile(
+    r"^(?P<phase>[A-Za-z][A-Za-z0-9_]*)_bc_(?P<term>loss|traj_loss|action_loss|router_loss)$"
+)
+_GRAD_NORM_RE = re.compile(r"^grad_norm_(?P<name>.+)$")
+
+
+def _group_of_tag(tag: str) -> Optional[Tuple[str, str]]:
+    """单 tag → ``(main_tag, sub_tag)``；不属于任何分组族 → None（规则见模块 docstring 第 7 条）。"""
+    prefix = ""
+    name = tag
+    if tag.startswith(f"{_VAL_PREFIX}/"):
+        prefix, name = f"{_VAL_PREFIX}_", tag[len(_VAL_PREFIX) + 1:]
+    elif tag.startswith(f"{_TRAIN_PREFIX}/"):
+        name = tag[len(_TRAIN_PREFIX) + 1:]
+
+    match = _HORIZON_GROUP_RE.match(name)
+    if match:
+        family = _HORIZON_FAMILIES.get(match.group("metric"))
+        return None if family is None else (f"{prefix}{family}", match.group("group"))
+    match = _SLICE_GROUP_RE.match(name)
+    if match:
+        return f"{prefix}slice_action_err", match.group("group")
+    match = _LABEL_GROUP_RE.match(name)
+    if match:
+        return f"{prefix}label_action_err", match.group("group")
+    match = _EXPERT_MIX_RE.match(name)
+    if match:
+        return f"{prefix}expert_mix_weight_{match.group('phase')}", f"e{match.group('index')}"
+    match = _BC_TERM_RE.match(name)
+    if match:
+        return f"{prefix}bc_terms_{match.group('phase')}", _BC_TERM_SUBS[match.group("term")]
+    if not prefix:  # Stage A 规则只在 train/ 前缀下生效（val/ 无同族）
+        if name in _STAGE_A_WM_TERMS:
+            return "wm_terms", name
+        if name in _STAGE_A_HEALTH:
+            return "health", name
+        match = _GRAD_NORM_RE.match(name)
+        if match:
+            return "grad_norm", match.group("name")
+    return None
+
+
+def _grouped_scalars(scalars: Mapping[str, Any]) -> Dict[str, Dict[str, float]]:
+    """扁平 ``tag → value`` → ``{main_tag: {sub: value}}``（仅保留 ≥2 个 sub 的族）。
+
+    供 :meth:`TrainingMonitor.flush` 用 ``add_scalars`` 多线成图；归类规则见
+    :func:`_group_of_tag`（``val/`` 同族 main 加 ``val_`` 前缀 → train/val 各一图）。
+    """
+    groups: Dict[str, Dict[str, float]] = {}
+    for raw_tag, raw_value in scalars.items():
+        number = _finite(raw_value)
+        if number is None:
+            continue
+        identified = _group_of_tag(str(raw_tag))
+        if identified is None:
+            continue
+        main_tag, sub_tag = identified
+        groups.setdefault(main_tag, {})[sub_tag] = number
+    return {main: subs for main, subs in groups.items() if len(subs) >= 2}
 
 
 class SceneLabelStatistics:
@@ -267,12 +374,14 @@ class GroupedMetricStatistics:
     训练侧按 ``update({"h1": {"traj_mae_m": 2.3, "traj_mse_m2": 5.5}}`` 的形式喂入窗口统计，
     ``flush()`` 输出（CSV + tensorboard 同一套 tag）：
 
-    - ``<prefix>/<group>/<metric>/mean``：窗口内计数口径均值（与旧日志可比）；
-    - ``<prefix>/<group>/<metric>/count``：窗口内样本数；
+    - ``<prefix>/<group>/<metric>/mean``：窗口内均值（算术）；
+    - ``<prefix>/<group>/<metric>/n_updates``：**该均值由几次 ``update`` 贡献合成**
+      （逐 epoch flush 时恒 1；旧名 ``/count`` 会被误读为样本数，2026-09-26 改名）；
     - 传入组权重时额外输出 ``/weighted_mean``（``Σ w·x/Σ w``）与 ``/weight``（权重和）。
 
     ``group`` 可以是任意字符串（``h1..h6`` / 标签名 / ``brake|turn|curve``）；
-    非标量/NaN 值静默跳过（与 :func:`_finite` 同口径）。
+    非标量/NaN 值静默跳过（与 :func:`_finite` 同口径）。物理样本数（有效帧/槽位数）
+    由调用方以独立标量记录（如 ``valid_samples``/``valid_weight_sum``），不复用本窗口口径。
     """
 
     def __init__(self, prefix: str):
@@ -294,9 +403,9 @@ class GroupedMetricStatistics:
                     continue
                 key = (str(group), str(name))
                 entry = self._entries.setdefault(
-                    key, {"count": 0.0, "sum": 0.0, "wsum": 0.0, "weighted": 0.0, "weighted_flag": 0.0}
+                    key, {"n_updates": 0.0, "sum": 0.0, "wsum": 0.0, "weighted": 0.0, "weighted_flag": 0.0}
                 )
-                entry["count"] += 1.0
+                entry["n_updates"] += 1.0
                 entry["sum"] += number
                 entry["wsum"] += weight
                 entry["weighted"] += weight * number
@@ -307,8 +416,8 @@ class GroupedMetricStatistics:
         out: Dict[str, float] = {}
         for (group, name), entry in self._entries.items():
             base = f"{self.prefix}/{group}/{name}"
-            out[f"{base}/mean"] = entry["sum"] / max(entry["count"], 1.0)
-            out[f"{base}/count"] = entry["count"]
+            out[f"{base}/mean"] = entry["sum"] / max(entry["n_updates"], 1.0)
+            out[f"{base}/n_updates"] = entry["n_updates"]
             if entry["weighted_flag"] > 0.0 and entry["wsum"] > 0.0:
                 out[f"{base}/weighted_mean"] = entry["weighted"] / entry["wsum"]
                 out[f"{base}/weight"] = entry["wsum"]
@@ -320,7 +429,12 @@ class GroupedMetricStatistics:
 
 
 class TrainingMonitor:
-    """tensorboard + CSV 监控器（hook 式；见模块 docstring）。"""
+    """tensorboard + CSV 监控器（hook 式；见模块 docstring）。
+
+    命名（Stage B 训练/留出对照）：``on_train_step`` → ``train/<name>``；
+    ``on_val_step`` → ``val/<name>``；``on_grouped_step`` → ``horizon|label|slice/...``；
+    ``on_val_grouped_step`` → ``val/horizon|val/label|val/slice/...``。
+    """
 
     def __init__(
         self,
@@ -339,10 +453,16 @@ class TrainingMonitor:
         self.horizon = GroupedMetricStatistics(_HORIZON_PREFIX)
         self.labels = GroupedMetricStatistics(_LABEL_PREFIX)
         self.slices = GroupedMetricStatistics(_SLICE_PREFIX)
+        # 留出集分组窗口（Stage B；前缀 val/ 避免与训练侧互相覆盖）
+        self.val_horizon = GroupedMetricStatistics(f"{_VAL_PREFIX}/{_HORIZON_PREFIX}")
+        self.val_labels = GroupedMetricStatistics(f"{_VAL_PREFIX}/{_LABEL_PREFIX}")
+        self.val_slices = GroupedMetricStatistics(f"{_VAL_PREFIX}/{_SLICE_PREFIX}")
         self._csv_path: Optional[Path] = None
         self._csv_handle = None
         self._csv_writer = None
         self._writer: Any = None
+        # 自上次 flush 以来记录的标量（tag → value），flush 末尾按族写 add_scalars 多线图
+        self._pending_group_tags: Dict[str, float] = {}
         self._closed = False
 
         if csv:
@@ -369,15 +489,17 @@ class TrainingMonitor:
 
     # ------------------------------------------------------------------ 基础写
     def log_scalar(self, tag: str, value: Any, step: Optional[int] = None) -> None:
-        """写单个标量（NaN/Inf/非数值静默跳过）。"""
+        """写单个标量（NaN/Inf/非数值静默跳过；同时暂存到分组缓存，见 ``flush``）。"""
         number = _finite(value)
         if number is None:
             return
+        key = str(tag)
+        self._pending_group_tags[key] = number
         if self._csv_writer is not None:
-            self._csv_writer.writerow(["" if step is None else int(step), str(tag), repr(number)])
+            self._csv_writer.writerow(["" if step is None else int(step), key, repr(number)])
             self._csv_handle.flush()
         if self._writer is not None:
-            self._writer.add_scalar(str(tag), number, global_step=0 if step is None else int(step))
+            self._writer.add_scalar(key, number, global_step=0 if step is None else int(step))
 
     def log_scalars(self, values: Mapping[str, Any], step: Optional[int] = None) -> None:
         """批量写标量（嵌套 Mapping 递归展平为 ``a/b/c`` 标签）。"""
@@ -385,14 +507,34 @@ class TrainingMonitor:
             self.log_scalar(str(tag), value, step=step)
 
     def flush(self, step: Optional[int] = None) -> None:
-        """把场景标签 / MoE / 分组（horizon/label/slice）窗口统计写入后端，并重置窗口。"""
+        """把场景标签 / MoE / 分组（训练 + 留出）窗口统计写入后端，并重置窗口。
+
+        末尾额外把自上次 flush 以来记录的标量按族写一份 tensorboard 多线图
+        （``add_scalars`` → 同一 main tag 多条线，规则见 :func:`_group_of_tag`）；CSV 长表不受影响。
+        """
         self.log_scalars(self.scene_labels.flush(), step=step)
         self.log_scalars(self.moe.flush(), step=step)
         self.log_scalars(self.horizon.flush(), step=step)
         self.log_scalars(self.labels.flush(), step=step)
         self.log_scalars(self.slices.flush(), step=step)
+        self.log_scalars(self.val_horizon.flush(), step=step)
+        self.log_scalars(self.val_labels.flush(), step=step)
+        self.log_scalars(self.val_slices.flush(), step=step)
+        self._write_grouped_tensorboard(step)
         if self._writer is not None:
             self._writer.flush()
+
+    def _write_grouped_tensorboard(self, step: Optional[int]) -> None:
+        """把自上次 flush 以来记录的标量按族追加写成 ``main_tag/sub`` 多线图（仅 TB）。
+
+        canonical 标量与 CSV 长表不变；无 tensorboard writer（或缓存为空）时只清缓存。
+        """
+        pending, self._pending_group_tags = self._pending_group_tags, {}
+        if self._writer is None or not pending:
+            return
+        global_step = 0 if step is None else int(step)
+        for main_tag, subs in _grouped_scalars(pending).items():
+            self._writer.add_scalars(main_tag, subs, global_step=global_step)
 
     # ------------------------------------------------------------------ hooks
     def on_scene_step(self, labels: Mapping[str, Any]) -> None:
@@ -418,6 +560,14 @@ class TrainingMonitor:
         """hook：训练指标（写 ``train/<name>``）。"""
         self.log_scalars({f"{_TRAIN_PREFIX}/{name}": value for name, value in metrics.items()}, step=step)
 
+    def on_val_step(self, metrics: Mapping[str, Any], step: Optional[int] = None) -> None:
+        """hook：留出集指标（写 ``val/<name>``；与 ``on_train_step`` 同族同后缀）。
+
+        Stage B 每 epoch 末在**按 episode 留出**的 val 子集上评估后调用；训练集数字
+        不写这里，避免 train/val 混淆（命名约定见模块 docstring 第 5 条）。
+        """
+        self.log_scalars({f"{_VAL_PREFIX}/{name}": value for name, value in metrics.items()}, step=step)
+
     def on_grouped_step(
         self,
         *,
@@ -439,6 +589,28 @@ class TrainingMonitor:
             self.labels.update(labels, weights=weights)
         if slices:
             self.slices.update(slices, weights=weights)
+
+    def on_val_grouped_step(
+        self,
+        *,
+        horizon: Optional[Mapping[str, Any]] = None,
+        labels: Optional[Mapping[str, Any]] = None,
+        slices: Optional[Mapping[str, Any]] = None,
+        weights: Optional[Mapping[str, Any]] = None,
+        step: Optional[int] = None,
+    ) -> None:
+        """hook：留出集分组指标（写 ``val/horizon|val/label|val/slice/...``）。
+
+        与 :meth:`on_grouped_step` 同口径，仅前缀不同（训练侧保留 ``horizon|label|slice``）；
+        窗口在 ``flush()`` 时统一落盘。
+        """
+        _ = step
+        if horizon:
+            self.val_horizon.update(horizon, weights=weights)
+        if labels:
+            self.val_labels.update(labels, weights=weights)
+        if slices:
+            self.val_slices.update(slices, weights=weights)
 
     # ------------------------------------------------------------------ 生命周期
     def close(self) -> None:

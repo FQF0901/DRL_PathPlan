@@ -112,6 +112,7 @@ __all__ = [
     "build_reward_adapter",
     "load_supervised_labels",
     "pretrain_bc",
+    "evaluate_bc",
     "save_checkpoint",
     "load_checkpoint",
     "expand_policy_action",
@@ -510,6 +511,15 @@ class BCConfig:
       T=1 时 soft∈{0,1} 的软目标退化为硬 BCE）；
     - ``slice_*``：动作误差分切片阈值（急刹/急转；弯道用 ``on_curve`` 标签）；
     - ``history_stride``：BC harvest 帧间距（env step，默认 5 = 0.5 s）。
+
+    留出集 / 逐 epoch 回调（2026-09-26）：
+    - ``train_indices``：训练行索引子集（``None`` = 全量；Stage B 按 episode 留出后传
+      ``train_idx``，保证 val 集完全不参与梯度）；
+    - ``val_indices``：留出行索引；非空时每 epoch 末在留出集上做确定性前向
+      （:func:`evaluate_bc`），val 指标经 ``epoch_callback`` 的第二个 dict 传出；
+    - ``epoch_callback(epoch_index, train_metrics, val_metrics)``：0 基 epoch、
+      epoch 内增量指标（**不含**全阶段累计汇总），供编排层逐 epoch 落盘
+      （step 轴由调用方负责；见 ``pipeline.stages.run_stage_b``）。
     """
 
     epochs: int = 10
@@ -541,6 +551,12 @@ class BCConfig:
     slice_turn_dtheta: float = 0.10
     #: BC harvest 帧间距（env step）；v2 数据集可在 meta 里覆盖。
     history_stride: int = 5
+    #: 训练行索引子集（None = ``dataset.sample_indices()`` 全量）。
+    train_indices: Optional[np.ndarray] = None
+    #: 留出行索引（非空时每 epoch 末跑确定性评估，见 :func:`evaluate_bc`）。
+    val_indices: Optional[np.ndarray] = None
+    #: 每 epoch 回调 ``(epoch_index, train_metrics, val_metrics)``（0 基；指标为 epoch 增量）。
+    epoch_callback: Optional[Callable[[int, Mapping[str, Any], Mapping[str, Any]], None]] = None
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -1282,6 +1298,64 @@ def normalized_mutual_info(a: Any, b: Any) -> float:
     return float(mutual / math.sqrt(entropy_a * entropy_b))
 
 
+def _router_summary(
+    *,
+    prob_sum: Optional[np.ndarray],
+    top1: Optional[np.ndarray],
+    cluster: Optional[np.ndarray],
+    count: int,
+    entropy_sum: float,
+    ce_sum: float,
+    kl_sum: float,
+    mix_weight_sum: Optional[np.ndarray],
+    mix_selected: Optional[np.ndarray],
+    num_experts: int,
+    temperature: float,
+    cluster_version: str,
+    cluster_k: int,
+    soft_used: bool,
+) -> Dict[str, Any]:
+    """router 诊断标量汇总（``pretrain_bc`` 全阶段累计 / 逐 epoch 增量 / val 评估共用同一公式）。
+
+    ``prob_sum`` = ``Σ softmax(logits)``（B,8 轴求和）；``top1`` = argmax 展平数组；
+    ``cluster`` = 软目标 argmax（同序）；``count`` = 贡献 token 数。``count<=0`` 时只返回
+    占位/温度/版本元数据（不编造质量指标）。
+    """
+    out: Dict[str, Any] = {
+        "bc_router_soft_placeholder": 0.0 if soft_used else 1.0,
+        "bc_router_temperature": float(temperature),
+        "bc_router_cluster_version": str(cluster_version),
+        "bc_router_cluster_k": int(cluster_k),
+    }
+    version_digits = "".join(ch for ch in str(cluster_version) if ch.isdigit())
+    out["bc_router_cluster_version_num"] = float(version_digits) if version_digits else float("nan")
+    if int(count) <= 0 or prob_sum is None:
+        return out
+    mean_weight = np.asarray(prob_sum, dtype=np.float64) / int(count)
+    out["bc_router_count"] = int(count)
+    out["bc_router_entropy"] = float(entropy_sum) / int(count)
+    out["bc_router_soft_ce"] = float(ce_sum) / int(count)
+    out["bc_router_soft_kl"] = float(kl_sum) / int(count)
+    top1_array = np.asarray(top1) if top1 is not None else np.zeros(0, dtype=np.int64)
+    for index in range(int(num_experts)):
+        out[f"bc_router_expert_weight_{index}"] = float(mean_weight[index])
+        out[f"bc_router_expert_util_{index}"] = (
+            float((top1_array == index).mean()) if top1_array.size else float("nan")
+        )
+        if mix_weight_sum is not None and mix_selected is not None:
+            out[f"bc_router_expert_mix_weight_{index}"] = float(
+                np.asarray(mix_weight_sum)[index] / int(count)
+            )
+            out[f"bc_router_expert_mix_util_{index}"] = float(
+                np.asarray(mix_selected)[index] / int(count)
+            )
+    cluster_array = np.asarray(cluster) if cluster is not None else None
+    if cluster_array is not None and top1_array.size == cluster_array.size and top1_array.size > 0:
+        out["bc_router_top1_cluster_acc"] = float((top1_array == cluster_array).mean())
+        out["bc_router_nmi"] = normalized_mutual_info(top1_array, cluster_array)
+    return out
+
+
 def dataset_weight_report(dataset: Any, *, prefix: str = "dataset") -> Dict[str, float]:
     """数据集统计的**计数/加权双口径**报告（配平前后权重量级、train_weight=0 占比）。
 
@@ -1794,8 +1868,17 @@ def pretrain_bc(
     宏 batch 一次更新；各损失项按宏口径精确缩放（``Σ_m s_m·L_m = L_macro``），
     12GB 卡上宏 batch 1024 靠它把显存峰值压到 micro 级别（net ST-GNN 6 步展开 ~32MB/样本）。
 
+    留出集与逐 epoch 落盘（2026-09-26）：``config.train_indices`` 限定训练行（Stage B
+    传按 episode 留出后的 ``train_idx``）；``config.val_indices`` 非空时每 epoch 末调用
+    :func:`evaluate_bc` 在留出集上评估（``torch.no_grad()``，不参与梯度）；
+    ``config.epoch_callback(epoch, epoch_metrics, val_metrics)`` 每 epoch 末回调，
+    ``epoch_metrics`` 是**该 epoch 增量**（含逐 horizon/切片/标签/router 统计），
+    ``val_metrics`` 为留出集指标（无留出集时 ``{}``）。step 轴由编排层负责。
+
     返回指标（既有键不退化，新增按 horizon/label/slice 分组；全部带 count/weighted 双口径；
-    2026-09-26 轨迹度量单位修正）：
+    2026-09-26 轨迹度量单位修正；**末尾汇总仍为全阶段累计**，逐 epoch 增量走回调；
+    有 ``val_indices`` 时另含 ``metrics["val"]`` = 最后一个 epoch 的留出集快照
+    （:func:`evaluate_bc` 返回，供 metrics.json/il_report 读取））：
 
     - 轨迹全局：``bc_traj_loss``（加权损失项，含 ``traj_weight``）、``bc_traj_mse``（加权 MSE，m²）、
       ``bc_traj_mae_m``（**加权 MAE，m**；旧语义 = 未加权 MSE(m²)，已修正）、
@@ -1819,7 +1902,19 @@ def pretrain_bc(
     model.to(device).train()
     frozen = apply_freeze_prefixes(model, config.freeze_prefixes)
     optimizer = build_optimizer(model, config.lr)
-    indices = dataset.sample_indices()
+    if config.train_indices is not None:
+        indices = np.asarray(config.train_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
+            raise ValueError("config.train_indices 为空 → 无训练样本")
+    else:
+        indices = dataset.sample_indices()
+    val_indices = (
+        None
+        if config.val_indices is None
+        else np.asarray(config.val_indices, dtype=np.int64).reshape(-1)
+    )
+    if val_indices is not None and val_indices.size == 0:
+        val_indices = None
     rng = np.random.default_rng(config.seed)
     metrics: Dict[str, Any] = {
         "epochs": int(config.epochs),
@@ -1854,6 +1949,137 @@ def pretrain_bc(
     router_soft_used = False
     router_soft_warned = False
 
+    def _router_snapshot() -> Dict[str, Any]:
+        """router 累计状态的 epoch 起点快照（用于增量统计；数组复制、列表记长度）。"""
+        return {
+            "prob_sum": None if router_prob_sum is None else router_prob_sum.copy(),
+            "mix_weight": None if router_mix_weight_sum is None else router_mix_weight_sum.copy(),
+            "mix_selected": None if router_mix_selected is None else router_mix_selected.copy(),
+            "top1": len(router_top1),
+            "cluster": len(router_cluster),
+            "entropy_sum": float(router_entropy_sum),
+            "count": int(router_count),
+            "ce_sum": float(router_soft_ce_sum),
+            "kl_sum": float(router_soft_kl_sum),
+        }
+
+    def _router_epoch_metrics(start: Mapping[str, Any]) -> Dict[str, Any]:
+        """epoch 增量 router 指标（与全阶段累计块同一 :func:`_router_summary` 公式）。"""
+        prob_sum = None
+        if router_prob_sum is not None:
+            prob_sum = np.asarray(router_prob_sum)
+            if start["prob_sum"] is not None:  # 首个累计 epoch：起点为 0（直接用累计值）
+                prob_sum = prob_sum - np.asarray(start["prob_sum"])
+        mix_weight = None
+        if router_mix_weight_sum is not None:
+            mix_weight = np.asarray(router_mix_weight_sum)
+            if start["mix_weight"] is not None:
+                mix_weight = mix_weight - np.asarray(start["mix_weight"])
+        mix_selected = None
+        if router_mix_selected is not None:
+            mix_selected = np.asarray(router_mix_selected)
+            if start["mix_selected"] is not None:
+                mix_selected = mix_selected - np.asarray(start["mix_selected"])
+        top1 = np.concatenate(router_top1[start["top1"]:]) if len(router_top1) > start["top1"] else None
+        cluster = (
+            np.concatenate(router_cluster[start["cluster"]:])
+            if len(router_cluster) > start["cluster"]
+            else None
+        )
+        return _router_summary(
+            prob_sum=prob_sum,
+            top1=top1,
+            cluster=cluster,
+            count=int(router_count) - int(start["count"]),
+            entropy_sum=float(router_entropy_sum) - float(start["entropy_sum"]),
+            ce_sum=float(router_soft_ce_sum) - float(start["ce_sum"]),
+            kl_sum=float(router_soft_kl_sum) - float(start["kl_sum"]),
+            mix_weight_sum=mix_weight,
+            mix_selected=mix_selected,
+            num_experts=num_experts,
+            temperature=float(config.router_temperature),
+            cluster_version=str(config.router_cluster_version or ""),
+            cluster_k=int(config.router_cluster_k or 0),
+            soft_used=bool(router_soft_used),
+        )
+
+    def _epoch_stats(mark: Mapping[str, Any]) -> Dict[str, Any]:
+        """epoch 增量统计：动作误差（count/weighted 双口径）、分切片/标签、逐 horizon 轨迹、router。
+
+        与末尾全阶段累计块同公式（同一 :func:`weighted_stats` / :func:`_router_summary`），
+        只是对 epoch 起点快照后的缓冲切片计算；对齐异常时跳过并记
+        ``bc_action_err_alignment_warning=1``（正常数据不应出现）。
+        """
+        out: Dict[str, Any] = {}
+        epoch_errors = (
+            np.concatenate(action_err_values[mark["action_err"]:])
+            if len(action_err_values) > mark["action_err"]
+            else None
+        )
+        epoch_weights = (
+            np.concatenate(weight_values[mark["weights"]:])
+            if len(weight_values) > mark["weights"]
+            else None
+        )
+        if epoch_errors is not None:
+            if epoch_weights is None or epoch_weights.shape[0] != epoch_errors.shape[0]:
+                out["bc_action_err_alignment_warning"] = 1.0
+            else:
+                out.update(weighted_stats(epoch_errors, epoch_weights, prefix="bc_action_err_"))
+                for name, parts in slice_err_values.items():
+                    err_start, weight_start = mark["slices"][name]
+                    if len(parts["err"]) <= err_start:
+                        continue
+                    err_slice = np.concatenate(parts["err"][err_start:])
+                    weight_slice = np.concatenate(parts["weight"][weight_start:])
+                    if err_slice.shape != weight_slice.shape:
+                        continue
+                    stats = weighted_stats(err_slice, weight_slice, prefix="")
+                    out[f"bc_action_err_slice_{name}"] = stats
+                    out[f"bc_action_err_slice_{name}_weighted_mean"] = stats["weighted_mean"]
+                if len(label_values) > mark["labels"]:
+                    labels_epoch = np.concatenate(label_values[mark["labels"]:])
+                    if labels_epoch.ndim == 2 and labels_epoch.shape[0] == epoch_errors.shape[0]:
+                        for label_index, label_name in enumerate(dataset.label_names):
+                            if label_index >= labels_epoch.shape[1]:
+                                break
+                            mask = labels_epoch[:, label_index] > 0.5
+                            if not bool(np.any(mask)):
+                                continue
+                            stats = weighted_stats(epoch_errors[mask], epoch_weights[mask], prefix="")
+                            out[f"bc_action_err_label_{label_name}"] = stats["weighted_mean"]
+                            out[f"bc_action_err_label_{label_name}_count"] = stats["count"]
+        if len(traj_mse_values) > mark["traj_mse"] and len(traj_mae_values) > mark["traj_mae"]:
+            epoch_mse = np.concatenate(traj_mse_values[mark["traj_mse"]:])
+            epoch_mae = np.concatenate(traj_mae_values[mark["traj_mae"]:])
+            if (
+                epoch_weights is not None
+                and epoch_weights.shape[0] == epoch_mse.shape[0]
+                and epoch_mse.shape == epoch_mae.shape
+            ):
+                legacy = epoch_mse if config.loss_type == "l2" else epoch_mae
+                for k in range(epoch_mse.shape[1]):
+                    out[f"bc_traj_mse_h{k + 1}"] = weighted_stats(
+                        epoch_mse[:, k], epoch_weights, prefix=""
+                    )["weighted_mean"]
+                    out[f"bc_traj_mae_h{k + 1}_m"] = weighted_stats(
+                        epoch_mae[:, k], epoch_weights, prefix=""
+                    )["weighted_mean"]
+                    out[f"bc_traj_err_h{k + 1}"] = weighted_stats(
+                        legacy[:, k], epoch_weights, prefix=""
+                    )["weighted_mean"]
+        router_epoch = _router_epoch_metrics(mark["router"])
+        # 版本/温度/簇 K 等阶段常量不进逐 epoch 载荷（阶段末汇总补记一次，避免逐 epoch 重复）
+        for constant_key in (
+            "bc_router_temperature",
+            "bc_router_cluster_version",
+            "bc_router_cluster_version_num",
+            "bc_router_cluster_k",
+        ):
+            router_epoch.pop(constant_key, None)
+        out.update(router_epoch)
+        return out
+
     macro_size = max(1, int(config.batch_size))
     micro_size = (
         macro_size
@@ -1869,6 +2095,19 @@ def pretrain_bc(
         order = indices.copy()
         if config.shuffle:
             rng.shuffle(order)
+        # epoch 起点快照：用于该 epoch 增量的动作/轨迹/router 统计（监控逐 epoch 落盘）
+        epoch_mark: Dict[str, Any] = {
+            "action_err": len(action_err_values),
+            "labels": len(label_values),
+            "weights": len(weight_values),
+            "traj_mse": len(traj_mse_values),
+            "traj_mae": len(traj_mae_values),
+            "slices": {
+                name: (len(parts["err"]), len(parts["weight"]))
+                for name, parts in slice_err_values.items()
+            },
+            "router": _router_snapshot(),
+        }
         totals = {
             "loss": 0.0,
             "traj": 0.0,
@@ -2080,23 +2319,55 @@ def pretrain_bc(
             batches += 1
         metrics["batches"] += batches
         divisor = max(1, batches)
-        metrics.update(
-            {
-                "bc_loss": totals["loss"] / divisor,
-                "bc_traj_loss": totals["traj"] / divisor,
-                "bc_action_loss": totals["action"] / divisor,
-                "bc_router_loss": totals["router"] / divisor,
-                # 轨迹度量（单位见 docstring）：bc_traj_loss 是加权损失项（含 traj_weight）；
-                # bc_traj_mse 加权 MSE(m²)；bc_traj_mae_m 加权 MAE(m)；
-                # bc_traj_mae_all_m 未加权 MAE(m，含被过滤帧)；bc_traj_mse_unweighted 旧口径 alias(m²)。
-                "bc_traj_mse": totals["traj_mse"] / divisor,
-                "bc_traj_mae_m": totals["traj_mae"] / divisor,
-                "bc_traj_mae_all_m": totals["traj_mae_all"] / divisor,
-                "bc_traj_mse_unweighted": totals["traj_mse_all"] / divisor,
-                "bc_action_mu_ds_mean": totals["mu_ds"] / divisor,
-                "bc_batches_count": int(batches),
-                "last_epoch": epoch + 1,
-            }
+        epoch_update: Dict[str, Any] = {
+            "bc_loss": totals["loss"] / divisor,
+            "bc_traj_loss": totals["traj"] / divisor,
+            "bc_action_loss": totals["action"] / divisor,
+            "bc_router_loss": totals["router"] / divisor,
+            # 轨迹度量（单位见 docstring）：bc_traj_loss 是加权损失项（含 traj_weight）；
+            # bc_traj_mse 加权 MSE(m²)；bc_traj_mae_m 加权 MAE(m)；
+            # bc_traj_mae_all_m 未加权 MAE(m，含被过滤帧)；bc_traj_mse_unweighted 旧口径 alias(m²)。
+            "bc_traj_mse": totals["traj_mse"] / divisor,
+            "bc_traj_mae_m": totals["traj_mae"] / divisor,
+            "bc_traj_mae_all_m": totals["traj_mae_all"] / divisor,
+            "bc_traj_mse_unweighted": totals["traj_mse_all"] / divisor,
+            "bc_action_mu_ds_mean": totals["mu_ds"] / divisor,
+            "bc_batches_count": int(batches),
+            "last_epoch": epoch + 1,
+        }
+        if epoch == 0:
+            # 阶段常量只记一次（监控降噪；完整值在 metrics.json phase 结果里）
+            epoch_update.update(
+                {
+                    "epochs": int(config.epochs),
+                    "frozen_params": int(metrics["frozen_params"]),
+                    "trainable_params": int(metrics["trainable_params"]),
+                }
+            )
+        epoch_update.update(_epoch_stats(epoch_mark))
+        metrics.update(epoch_update)
+        val_metrics: Dict[str, Any] = {}
+        if val_indices is not None:
+            model.eval()
+            try:
+                val_metrics = evaluate_bc(
+                    model,
+                    dataset,
+                    config,
+                    val_indices,
+                    batch_source=batch_source,
+                    router_soft_targets_fn=router_soft_targets_fn,
+                )
+            finally:
+                model.train()
+            metrics["val"] = val_metrics
+        if config.epoch_callback is not None:
+            config.epoch_callback(epoch, dict(epoch_update), dict(val_metrics))
+        val_text = (
+            f" val={val_metrics['bc_loss']:.4f}(traj={val_metrics['bc_traj_loss']:.4f}"
+            f"/action={val_metrics['bc_action_loss']:.4f}/router={val_metrics['bc_router_loss']:.4f})"
+            if val_metrics
+            else ""
         )
         logger(
             f"[bc] phase={config.phase} epoch {epoch + 1}/{config.epochs} loss={metrics['bc_loss']:.4f} "
@@ -2106,6 +2377,7 @@ def pretrain_bc(
             f"mu_ds={metrics['bc_action_mu_ds_mean']:.3f}m "
             f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s "
             f"it/s={batches / max(data_seconds + forward_seconds + backward_seconds, 1e-9):.2f}"
+            f"{val_text}"
         )
 
     # ---------------------------------------------------------------- 汇总统计
@@ -2158,38 +2430,264 @@ def pretrain_bc(
             metrics[f"bc_action_err_label_{label_name}"] = stats["weighted_mean"]
             metrics[f"bc_action_err_label_{label_name}_count"] = stats["count"]
     # router 指标（软目标 top-1 vs 簇准确率 / NMI / gate 熵 / 专家利用率 / 软目标 CE-KL）
-    metrics["bc_router_soft_placeholder"] = 0.0 if router_soft_used else 1.0
-    metrics["bc_router_temperature"] = float(config.router_temperature)
-    cluster_version = str(config.router_cluster_version or "")
-    metrics["bc_router_cluster_version"] = cluster_version
-    version_digits = "".join(ch for ch in cluster_version if ch.isdigit())
-    metrics["bc_router_cluster_version_num"] = float(version_digits) if version_digits else float("nan")
-    metrics["bc_router_cluster_k"] = int(config.router_cluster_k or 0)
-    if router_count > 0 and router_prob_sum is not None:
-        mean_weight = router_prob_sum / router_count
-        top1 = np.concatenate(router_top1) if router_top1 else np.zeros(0, dtype=np.int64)
-        cluster = np.concatenate(router_cluster) if router_cluster else None
-        metrics["bc_router_count"] = int(router_count)
-        metrics["bc_router_entropy"] = router_entropy_sum / router_count
-        metrics["bc_router_soft_ce"] = router_soft_ce_sum / router_count
-        metrics["bc_router_soft_kl"] = router_soft_kl_sum / router_count
-        for index in range(num_experts):
-            metrics[f"bc_router_expert_weight_{index}"] = float(mean_weight[index])
-            metrics[f"bc_router_expert_util_{index}"] = (
-                float((top1 == index).mean()) if top1.size else float("nan")
-            )
-            if router_mix_weight_sum is not None and router_mix_selected is not None:
-                metrics[f"bc_router_expert_mix_weight_{index}"] = float(
-                    router_mix_weight_sum[index] / router_count
-                )
-                metrics[f"bc_router_expert_mix_util_{index}"] = float(router_mix_selected[index] / router_count)
-        if cluster is not None and top1.size == cluster.size and top1.size > 0:
-            metrics["bc_router_top1_cluster_acc"] = float((top1 == cluster).mean())
-            metrics["bc_router_nmi"] = normalized_mutual_info(top1, cluster)
+    metrics.update(
+        _router_summary(
+            prob_sum=router_prob_sum,
+            top1=np.concatenate(router_top1) if router_top1 else None,
+            cluster=np.concatenate(router_cluster) if router_cluster else None,
+            count=int(router_count),
+            entropy_sum=float(router_entropy_sum),
+            ce_sum=float(router_soft_ce_sum),
+            kl_sum=float(router_soft_kl_sum),
+            mix_weight_sum=router_mix_weight_sum,
+            mix_selected=router_mix_selected,
+            num_experts=num_experts,
+            temperature=float(config.router_temperature),
+            cluster_version=str(config.router_cluster_version or ""),
+            cluster_k=int(config.router_cluster_k or 0),
+            soft_used=bool(router_soft_used),
+        )
+    )
     metrics["bc_action_mu_ds_weighted_mean"] = (
         mu_ds_sum / mu_ds_weight if mu_ds_weight > 0 else float("nan")
     )
     return metrics
+
+
+@torch.no_grad()
+@_with_safe_od_pose
+def evaluate_bc(
+    model: "nn.Module",
+    dataset: BCDataset,
+    config: BCConfig,
+    indices: np.ndarray,
+    *,
+    batch_source: Optional[MaterializedBCDataset] = None,
+    router_soft_targets_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+) -> Dict[str, Any]:
+    """**留出集**确定性前向（Stage B 每 epoch 末调用；不参与梯度/优化器）。
+
+    指标口径与 :func:`pretrain_bc` 的训练统计同族（`loss/action/traj/router` + 关键切分）：
+    权重 = ``train_weight×配平``，动作误差为显式 L1（m/rad），轨迹为加权 MSE(m²)/MAE(m)；
+    全局与逐 horizon 统计都在**整个留出子集**上按权重合成（非 batch 均值），
+    ``bc_traj_loss``/``bc_action_loss``/``bc_router_loss`` 仍然按 batch 求平均
+    （与训练侧逐 epoch 口径一致）。返回：
+
+    - 扁平标量：``bc_loss``/``bc_traj_*``/``bc_action_*``/``bc_action_mu_*``/``bc_router_*``；
+    - ``per_horizon``：``h{k} -> {traj_mse_m2, traj_mae_m, traj_err}``（加权口径）；
+    - ``slices`` / ``labels``：``{name: weighted_stats(...)}``（含 ``count``/``weight``）。
+
+    调用方负责 train/eval 模式切换（本函数把模型置为 ``eval`` 且不恢复）；
+    空 ``indices`` 返回 ``{}``。
+    """
+    _require_torch()
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if idx.size == 0:
+        return {}
+    device = torch.device(resolve_device(config.device))
+    model.to(device).eval()
+    macro_size = max(1, int(config.batch_size))
+    num_experts = 8
+    on_curve_index = (
+        dataset.label_names.index("on_curve") if "on_curve" in dataset.label_names else None
+    )
+    traj_mse_values: List[np.ndarray] = []
+    traj_mae_values: List[np.ndarray] = []
+    weight_values: List[np.ndarray] = []
+    action_err_values: List[np.ndarray] = []
+    label_values: List[np.ndarray] = []
+    slice_err_values: Dict[str, Dict[str, List[np.ndarray]]] = {
+        "brake": {"err": [], "weight": []},
+        "turn": {"err": [], "weight": []},
+        "curve": {"err": [], "weight": []},
+    }
+    mu_ds_num, mu_ds_den = 0.0, 0.0
+    mu_ds_batch_sum = 0.0
+    batch_count = 0
+    batch_traj_loss = batch_action_loss = batch_router_loss = 0.0
+    router_prob_sum: Optional[np.ndarray] = None
+    router_top1: List[np.ndarray] = []
+    router_cluster: List[np.ndarray] = []
+    router_entropy_sum, router_count = 0.0, 0
+    router_soft_ce_sum, router_soft_kl_sum = 0.0, 0.0
+    router_mix_weight_sum: Optional[np.ndarray] = None
+    router_mix_selected: Optional[np.ndarray] = None
+    router_soft_used = False
+
+    for start in range(0, idx.size, macro_size):
+        batch_indices = idx[start : start + macro_size]
+        if batch_source is not None:
+            obs_np = batch_source.obs_batch(batch_indices)
+            targets_np = batch_source.targets_batch(batch_indices)
+        else:
+            obs_np = dataset.build_obs_batch(batch_indices)
+            targets_np = dataset.targets(batch_indices)
+        obs = _to_device_obs(obs_np, device, pin=batch_source is not None)
+        targets = to_device_tensors(targets_np, device, pin=batch_source is not None)
+        frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
+        out = model(obs, rollout=True, world_model=False, wm_detach=config.wm_detach)
+        traj_pred = out.get("traj_xy")
+        if traj_pred is None:
+            raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
+        batch_count += 1
+        diff = traj_pred - targets["traj6"]
+        traj_mse_point = (diff ** 2).mean(dim=-1)
+        traj_mae_point = diff.abs().mean(dim=-1)
+        traj_mse_values.append(traj_mse_point.detach().double().cpu().numpy())
+        traj_mae_values.append(traj_mae_point.detach().double().cpu().numpy())
+        sample_error = diff.detach().abs().mean(dim=(-1, -2)).double().cpu().numpy()
+        sample_weight = frame_weight.detach().double().cpu().numpy()
+        weight_values.append(sample_weight)
+        action_err_values.append(sample_error)
+        batch_weight_sum = float(frame_weight.sum().clamp(min=1e-8))
+        batch_traj_loss += config.traj_weight * (
+            float((traj_mse_point * frame_weight.reshape(-1, 1)).sum()) / batch_weight_sum
+            if config.loss_type == "l2"
+            else float((traj_mae_point * frame_weight.reshape(-1, 1)).sum()) / batch_weight_sum
+        )
+        action_pred = out.get("action_mu")
+        target_action = targets["action"][:, 0, :]
+        if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
+            action_diff = action_pred - target_action
+            per_sample = (
+                (action_diff ** 2).mean(dim=-1)
+                if config.loss_type == "l2"
+                else action_diff.abs().mean(dim=-1)
+            )
+            batch_action_loss += config.action_weight * float(
+                (per_sample * frame_weight).sum() / frame_weight.sum().clamp(min=1e-8)
+            )
+            mu_ds_num += float((action_pred[:, 0] * frame_weight).sum())
+            mu_ds_den += batch_weight_sum
+            mu_ds_batch_sum += float((action_pred[:, 0] * frame_weight).sum()) / batch_weight_sum
+            labels_np = targets["labels"].detach().double().cpu().numpy()
+            label_values.append(labels_np)
+            expert_action = target_action.detach().double().cpu().numpy()
+            slice_masks = {
+                "brake": expert_action[:, 0] < float(config.slice_brake_ds),
+                "turn": np.abs(expert_action[:, 1]) >= float(config.slice_turn_dtheta),
+            }
+            if on_curve_index is not None:
+                slice_masks["curve"] = labels_np[:, on_curve_index] > 0.5
+            for name, mask in slice_masks.items():
+                if bool(np.any(mask)):
+                    slice_err_values[name]["err"].append(sample_error[mask])
+                    slice_err_values[name]["weight"].append(sample_weight[mask])
+        logits = out.get("router_logits")
+        if config.router_coef > 0.0 and logits is not None:
+            soft_targets_np = None
+            if router_soft_targets_fn is not None:
+                try:
+                    soft_targets_np = router_soft_targets_fn(obs_np)
+                except Exception:  # noqa: BLE001 - 与训练侧同口径：不可用即跳过
+                    soft_targets_np = None
+            if soft_targets_np is None:
+                soft_targets_np = targets.get("router_soft")
+            if soft_targets_np is not None:
+                if hasattr(soft_targets_np, "detach"):
+                    soft_targets_np = soft_targets_np.detach().cpu().numpy()
+                soft_targets_np = np.asarray(soft_targets_np, dtype=np.float32)
+                if tuple(soft_targets_np.shape) == tuple(logits.shape):
+                    soft_targets = torch.as_tensor(soft_targets_np, dtype=torch.float32, device=device)
+                    router_soft_used = True
+                    router_loss = config.router_coef * router_soft_target_loss(
+                        logits, soft_targets, temperature=float(config.router_temperature)
+                    )
+                    batch_router_loss += float(router_loss.detach())
+                    probs = torch.softmax(logits, dim=-1).detach().double().cpu().numpy()
+                    if router_prob_sum is None:
+                        router_prob_sum = np.zeros(int(probs.shape[1]), dtype=np.float64)
+                        router_mix_weight_sum = np.zeros(int(probs.shape[1]), dtype=np.float64)
+                        router_mix_selected = np.zeros(int(probs.shape[1]), dtype=np.float64)
+                    router_prob_sum += probs.sum(axis=0)
+                    router_top1.append(np.argmax(probs, axis=1))
+                    clip = np.clip(probs, 1e-9, 1.0)
+                    router_entropy_sum += float((-(clip * np.log(clip)).sum(axis=1)).mean())
+                    router_count += int(probs.shape[0])
+                    router_cluster.append(
+                        torch.argmax(soft_targets, dim=-1).detach().cpu().numpy().astype(np.int64)
+                    )
+                    soft_stats = router_soft_target_stats(
+                        logits, soft_targets, temperature=float(config.router_temperature)
+                    )
+                    router_soft_ce_sum += soft_stats["ce"]
+                    router_soft_kl_sum += soft_stats["kl"]
+                    mix = out.get("expert_weights")
+                    if mix is not None and tuple(mix.shape) == tuple(logits.shape):
+                        mix_np = mix.detach().double().cpu().numpy()
+                        router_mix_weight_sum += mix_np.sum(axis=0)
+                        router_mix_selected += (mix_np > 1e-6).sum(axis=0)
+
+    # ---------------------------------------------------------------- 汇总（全留出子集）
+    mse_matrix = np.concatenate(traj_mse_values) if traj_mse_values else np.zeros((0, 6))
+    mae_matrix = np.concatenate(traj_mae_values) if traj_mae_values else np.zeros((0, 6))
+    error_matrix = np.concatenate(action_err_values) if action_err_values else np.zeros(0)
+    all_weights = np.concatenate(weight_values) if weight_values else np.zeros(0)
+    divisor = max(1, batch_count)
+    mse_sample = mse_matrix.mean(axis=1) if mse_matrix.size else np.zeros(0)
+    mae_sample = mae_matrix.mean(axis=1) if mae_matrix.size else np.zeros(0)
+    weighted = weighted_stats(mse_sample, all_weights, prefix="")
+    weighted_mae = weighted_stats(mae_sample, all_weights, prefix="")
+    result: Dict[str, Any] = {
+        "bc_loss": batch_traj_loss / divisor + batch_action_loss / divisor + batch_router_loss / divisor,
+        "bc_traj_loss": batch_traj_loss / divisor,
+        "bc_action_loss": batch_action_loss / divisor,
+        "bc_router_loss": batch_router_loss / divisor,
+        "bc_traj_mse": weighted["weighted_mean"],
+        "bc_traj_mae_m": weighted_mae["weighted_mean"],
+        "bc_traj_mae_all_m": float(np.mean(mae_sample)) if mae_sample.size else float("nan"),
+        "bc_traj_mse_unweighted": float(np.mean(mse_sample)) if mse_sample.size else float("nan"),
+        "bc_action_mu_ds_mean": mu_ds_batch_sum / divisor,
+        "bc_action_mu_ds_weighted_mean": mu_ds_num / mu_ds_den if mu_ds_den > 0 else float("nan"),
+    }
+    result.update(weighted_stats(error_matrix, all_weights, prefix="bc_action_err_"))
+    per_horizon: Dict[str, Dict[str, float]] = {}
+    legacy_matrix = mse_matrix if config.loss_type == "l2" else mae_matrix
+    for k in range(int(mse_matrix.shape[1])):
+        per_horizon[f"h{k + 1}"] = {
+            "traj_mse_m2": weighted_stats(mse_matrix[:, k], all_weights, prefix="")["weighted_mean"],
+            "traj_mae_m": weighted_stats(mae_matrix[:, k], all_weights, prefix="")["weighted_mean"],
+            "traj_err": weighted_stats(legacy_matrix[:, k], all_weights, prefix="")["weighted_mean"],
+        }
+    slices: Dict[str, Dict[str, float]] = {}
+    for name, parts in slice_err_values.items():
+        if parts["err"]:
+            slices[name] = weighted_stats(
+                np.concatenate(parts["err"]), np.concatenate(parts["weight"]), prefix=""
+            )
+    labels: Dict[str, Dict[str, float]] = {}
+    if label_values and action_err_values:
+        labels_used = np.concatenate(label_values)
+        if labels_used.ndim == 2 and labels_used.shape[0] == error_matrix.shape[0]:
+            for label_index, label_name in enumerate(dataset.label_names):
+                if label_index >= labels_used.shape[1]:
+                    break
+                mask = labels_used[:, label_index] > 0.5
+                if not bool(np.any(mask)):
+                    continue
+                labels[label_name] = weighted_stats(error_matrix[mask], all_weights[mask], prefix="")
+    result["per_horizon"] = per_horizon
+    result["slices"] = slices
+    result["labels"] = labels
+    result.update(
+        _router_summary(
+            prob_sum=router_prob_sum,
+            top1=np.concatenate(router_top1) if router_top1 else None,
+            cluster=np.concatenate(router_cluster) if router_cluster else None,
+            count=int(router_count),
+            entropy_sum=float(router_entropy_sum),
+            ce_sum=float(router_soft_ce_sum),
+            kl_sum=float(router_soft_kl_sum),
+            mix_weight_sum=router_mix_weight_sum,
+            mix_selected=router_mix_selected,
+            num_experts=num_experts,
+            temperature=float(config.router_temperature),
+            cluster_version=str(config.router_cluster_version or ""),
+            cluster_k=int(config.router_cluster_k or 0),
+            soft_used=bool(router_soft_used),
+        )
+    )
+    return result
 
 
 # --------------------------------------------------------------------------- #

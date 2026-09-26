@@ -139,6 +139,29 @@ rollout（6 步）
 
 ---
 
+### 5.2 监控口径（2026-09-26 定稿，fix-1/fix-2）
+
+**写盘节奏（逐 epoch）**：Stage A 每 epoch 一个 `step`（1..N）；Stage B `step = phase_offset + epoch`（primary 1..P、specific P+1..P+S，全局单调）；
+`step 0` 仅写元数据（`cluster_version/k/soft_targets`）。
+
+**tag 约定（CSV 长表 `step,tag,value` 保持不变）**
+- 分组统计：`*/mean` 为均值，**`*/n_updates` = 该均值由几次 update 贡献合成**（与物理样本数无关）；
+- 物理计数：`valid_samples`（有效样本数）、`valid_weight_sum`（有效权重和）、`slot_count`；
+- **val 常量只记一次**（`cv_ade/cv_fde`、`valid_samples/valid_weight_sum`、`train/cv_ade|cv_fde` 仅在首个 epoch）；
+- Stage B 同时写 `train/<phase>_*` 与 `val/<phase>_*`（val = 与 Stage A **同 seed/val_frac** 的 episode 留出，`--val-frac` 对 B 生效）；
+- 已删除 `train/per_horizon/*`（与 `horizon/*` 逐位重复）。
+
+**TensorBoard 分组多线（`add_scalars`）**：`flush()` 末尾把同族 canonical tag 归到一张图（≥2 sub 才写）。
+torch 的 `add_scalars` 语义是**每个 sub 写成一个子 run**（`<logdir>/<main>_<sub>/`，文件内 tag = `main_tag`）→ 在 TB 里勾选同族子 run 即叠加为**一张多线图**；run 列表会多出 `main_sub` 条目。
+受影响族：`horizon_loss/ade/cv_ade/ego_next`（A）、`horizon_traj_mae_m/traj_mse_m2`、`slice_action_err`、`label_action_err`、`expert_mix_weight_{primary,specific}`、`bc_terms_{primary,specific}`、`wm_terms`、`grad_norm`、`health`（`val_` 前缀同名分图）。
+**离线替代**：`tools/plot_curves.py --stage-a <dir> --stage-b <dir> --out <dir>` 直接出多线 PNG（不依赖 TB）。
+
+**度量 vs 监督的边界（review 必读）**
+- 参与优化：A → 逐 horizon `loss`、`ego_next_loss`、`wm_loss_{od,presence,entry}`；B → `bc_loss = action + traj + router`（router 用**聚类软目标** CE/KL）。
+- 影响损失但不被优化：`valid_samples/valid_weight_sum/slot_count/wm_valid/train_weight`（掩码与分母）。
+- 纯诊断：`ade/fde/cv_ade/cv_fde`、`traj_mae_m/traj_mse_m2`、`action_err_*`（含 `label/`、`slice/` 切分）、`presence/entry AUC`、`top1/NMI/entropy/expert utilization`、`grad_norm`、计时/显存。
+- **规则标签只用于体检**（`label/*`），不进 router 监督。
+
 ## 6. 实施顺序与合并验收
 
 | 步骤 | 内容 | 验收 |

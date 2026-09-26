@@ -55,15 +55,18 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     ])
     metrics = run_stage_a(args, {})
 
-    # 逐 horizon 损失/ADE/FDE + 每 horizon 有效样本数（count 与 weighted 双口径）
+    # 逐 horizon 损失/ADE/FDE + 每 horizon 有效样本数（物理计数 = valid_samples/valid_weight_sum，
+    # 与分组窗口的 n_updates 区分）
     per_horizon = metrics["per_horizon"]
     assert list(per_horizon) == [f"h{k}" for k in range(1, 7)]
     for name, item in per_horizon.items():
         for key in ("loss", "model_ade", "model_fde", "cv_ade", "cv_fde",
-                    "valid_count", "valid_weight", "slot_count"):
+                    "valid_samples", "valid_weight_sum", "slot_count"):
             assert key in item, f"{name} 缺少 {key}"
-    assert any(item["valid_count"] > 0 for item in per_horizon.values())
-    assert metrics["val_valid_count"] > 0
+        assert "valid_count" not in item and "valid_weight" not in item, "旧物理计数名必须移除"
+    assert any(item["valid_samples"] > 0 for item in per_horizon.values())
+    assert metrics["val_valid_samples"] > 0
+    assert metrics["val_valid_weight_sum"] > 0.0
 
     # 规格：未来 LD 损失移除；presence/entry 可用（新 net 有对应头）
     assert metrics["ld_loss"] == "removed"
@@ -77,9 +80,14 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["dataset/weight_min"] == 0.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("train/wm_loss", "train/per_horizon/h1/loss", "train/per_horizon/h6/valid_count",
-                "horizon/h1/loss/mean", "horizon/h1/ade/mean", "horizon/h6/valid_weight/mean"):
+    for tag in ("train/wm_loss", "horizon/h1/loss/mean", "horizon/h1/ade/mean",
+                "horizon/h6/valid_samples/mean", "horizon/h6/valid_weight_sum/mean",
+                "horizon/h1/cv_ade/mean", "horizon/h1/loss/n_updates"):
         assert tag in tags, f"Stage A 监控序列缺失：{tag}"
+    # 去重：train/per_horizon/* 已移除（唯一 per-horizon 口径 = horizon/*）；count 旧名移除
+    assert not [tag for tag in tags if tag.startswith("train/per_horizon/")], "train/per_horizon/* 必须移除"
+    assert not [tag for tag in tags if tag.endswith("/count")], "分组 /count 旧名必须移除"
+    # val 集常量（cv 基线/有效样本计数）只在首个 epoch 记一次；本用例 epochs=1 → 恰 1 行
     assert (out_dir / "final.pt").exists() and (out_dir / "metrics.json").exists()
 
 
@@ -98,16 +106,22 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
         "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
         "--ckpt", str(stage_a_dir / "final.pt"), "--model-config", str(_model_cfg(tmp_path)),
         "--bc-epochs", "1", "--bc-phase-split", "0.5", "--batch-size", "8",
+        "--val-frac", "0.34",  # 与 Stage A 同比例 → 同一批留出 episode
         "--device", "cpu", "--seed", "0", "--monitor", "--router-coef", "0.1",
     ])
     metrics = run_stage_b(args, {})
     primary = metrics["primary"]
 
-    # 动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）
+    # 留出集：按 episode 切分（A/B 同 seed/val_frac），val 不参与训练
+    assert metrics["val_episodes"] > 0 and metrics["val_frames"] > 0
+    assert metrics["train_frames"] + metrics["val_frames"] == 36
+    assert primary["val"]["bc_loss"] == primary["val"]["bc_loss"]  # 非 NaN
+    # 动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）；count 是训练子集（留出已剔除）
     for key in ("bc_action_err_mean", "bc_action_err_median", "bc_action_err_p95",
                 "bc_action_err_weighted_mean", "bc_action_err_count", "bc_action_err_weight"):
         assert key in primary, f"缺少动作误差指标 {key}"
-    assert primary["bc_action_err_weight"] > 0.0 and primary["bc_action_err_count"] == 36.0
+    assert primary["bc_action_err_weight"] > 0.0
+    assert primary["bc_action_err_count"] == float(metrics["train_frames"])
     for slice_name in ("brake", "turn", "curve"):
         stats = primary[f"bc_action_err_slice_{slice_name}"]
         assert stats and stats["count"] > 0 and np.isfinite(stats["weighted_mean"]), f"切片 {slice_name} 无样本"
@@ -151,6 +165,11 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
                 "train/cluster_soft_targets",
                 "horizon/h1/traj_mse_m2/mean", "horizon/h1/traj_mae_m/mean",
                 "slice/brake/action_err/mean",
-                "slice/turn/action_err/count", "label/on_curve/action_err/mean"):
+                "slice/turn/action_err/n_updates", "label/on_curve/action_err/mean",
+                # 留出集（val/ 前缀；同族指标 + 关键切分）
+                "val/primary_bc_loss", "val/primary_bc_traj_mse", "val/primary_bc_router_soft_ce",
+                "val/horizon/h1/traj_mse_m2/mean", "val/slice/brake/action_err/mean",
+                "val/label/on_curve/action_err/mean"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
+    assert not [tag for tag in tags if tag.endswith("/count")], "分组 /count 旧名必须移除"
     assert (out_dir / "final.pt").exists()

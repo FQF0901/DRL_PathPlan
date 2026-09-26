@@ -55,6 +55,14 @@ def find(series: Dict[str, Dict[int, float]], pattern: str) -> Dict[str, Dict[in
     return {tag: val for tag, val in series.items() if rx.search(tag)}
 
 
+def latest_tag(series: Dict[str, Dict[int, float]], pattern: str) -> Optional[float]:
+    """按 tag 正则取最近 ≤3 点均值；无匹配 → ``None``（缺失，不编造）。"""
+    found = find(series, pattern)
+    if not found:
+        return None
+    return latest(next(iter(found.values())))
+
+
 def table(rows: List[List[Any]], header: List[str]) -> List[str]:
     out = ["| " + " | ".join(str(c) for c in header) + " |",
            "|" + "|".join("---" for _ in header) + "|"]
@@ -174,13 +182,14 @@ def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
         m = per_h[k]
         ade, cv_ade = latest(m.get("ade", {})), latest(m.get("cv_ade", {}))
         fde, cv_fde = latest(m.get("fde", {})), latest(m.get("cv_fde", {}))
-        valid = last(m.get("valid_count", {}))
+        # 物理计数：新 tag = valid_samples；旧 run 回退 valid_count（2026-09-26 改名）
+        valid = last(m.get("valid_samples", m.get("valid_count", {})))
         rows.append([f"h{k}", num(ade), num(cv_ade), num(fde), num(cv_fde),
                      "PASS" if (ade is not None and cv_ade is not None and ade < cv_ade) else
                      ("FAIL" if ade is not None and cv_ade is not None else "缺失"),
                      "" if valid is None else int(valid[1])])
         gates[f"h{k}"] = None if (ade is None or cv_ade is None) else bool(ade < cv_ade)
-    lines += table(rows, ["horizon", "ADE", "CV ADE", "FDE", "CV FDE", "ADE<CV", "valid_count"])
+    lines += table(rows, ["horizon", "ADE", "CV ADE", "FDE", "CV FDE", "ADE<CV", "valid_samples"])
     for name in ("presence_loss", "presence_auc", "entry_loss", "entry_auc"):
         s = find(series, rf"train/{name}$")
         if s:
@@ -195,11 +204,25 @@ def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
     return lines, summary
 
 
-def stage_b_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dict[str, Any]]:
+def stage_b_section(
+    series: Dict[str, Dict[int, float]], run_meta: Optional[Dict[str, Any]] = None
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Stage B 段落：**最终值优先读 metrics.json 的 ``primary`` 汇总**（新旧 run 都有），
+    CSV 序列作为回退（旧 run 的 phase-end 汇总 tag / 新 run 的逐 epoch tag 都能读）。
+
+    新 tag（2026-09-26）：逐 epoch ``train/primary_bc_*`` / ``train/specific_bc_*``，
+    留出 ``val/<phase>_bc_*`` + ``val/horizon|val/slice|val/label/*``（旧 run 无 val → 缺失）。
+    """
     lines: List[str] = ["### Stage B（规划器 BC）", ""]
     summary: Dict[str, Any] = {}
+    primary_summary: Dict[str, Any] = {}
+    if isinstance(run_meta, dict) and isinstance(run_meta.get("primary"), dict):
+        primary_summary = run_meta["primary"]
 
     def scalar(name: str) -> Optional[float]:
+        value = primary_summary.get(f"bc_{name}")
+        if isinstance(value, (int, float)):
+            return float(value)
         s = find(series, rf"train/primary_bc_{name}$")
         if not s:
             return None
@@ -217,8 +240,10 @@ def stage_b_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
         lines += table([[k, num(v)] for k, v in sorted(slices.items())], ["slice", "weighted action err"])
     summary["slices"] = slices
 
-    labels = {re.search(r"_label_(\w+?)(?:_count)?$", t).group(1): latest(v)
-              for t, v in find(series, r"train/primary_bc_action_err_label_\w+$").items()}
+    # 逐标签动作误差：排除 `_count` 伴生 tag（旧实现里 `\w+$` 会把它当误差值，值≈样本数）
+    labels = {re.search(r"_label_(\w+?)$", t).group(1): latest(v)
+              for t, v in find(series, r"train/primary_bc_action_err_label_\w+$").items()
+              if not t.endswith("_count")}
     if labels:
         lines += table([[k, num(v)] for k, v in sorted(labels.items())], ["label", "action err"])
     summary["labels"] = labels
@@ -328,6 +353,84 @@ def stage_b_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
         lines.append(f"**判定：router 软目标非占位 → "
                      f"{'PASS' if placeholder == 0 else 'FAIL（仍为占位实现）'}**")
         summary["soft_targets_real"] = (placeholder == 0)
+
+    # ---- 留出集（按 episode 留出；新 tag = val/*；旧 run 无 → 明确「缺失」）----
+    val_snapshot = primary_summary.get("val") if isinstance(primary_summary.get("val"), dict) else {}
+    lines.append("")
+    lines.append("**留出集（按 episode 留出；train/val 同族指标对照）**")
+
+    def val_scalar(name: str) -> Optional[float]:
+        value = val_snapshot.get(f"bc_{name}")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return latest_tag(series, rf"val/primary_bc_{name}$")
+
+    compare_names = {
+        "bc_loss": "loss",
+        "bc_traj_mse (m²)": "traj_mse",
+        "bc_action_loss": "action_loss",
+        "bc_action_err_weighted_mean": "action_err_weighted_mean",
+        "bc_router_soft_ce": "router_soft_ce",
+    }
+    train_compare = {label: scalar(name) for label, name in compare_names.items()}
+    val_compare = {label: val_scalar(name) for label, name in compare_names.items()}
+    if all(value is None for value in val_compare.values()):
+        lines.append("> 未发现留出集序列（旧 run 或 `--val-frac 0`）：训练曲线均为训练集数字，"
+                     "需用修复后的 Stage B 重跑（与 Stage A 同 `--seed/--val-frac` 即同一批留出 episode）。")
+        summary["val"] = {"available": False}
+        return lines, summary
+    lines += table([[label, num(train_compare[label]), num(val_compare[label])]
+                    for label in compare_names], ["metric", "train", "val"])
+
+    # 逐 horizon（val）：CSV 优先，metrics.json 的 val 快照回退
+    val_mae_h: Dict[int, Optional[float]] = {}
+    val_mse_h: Dict[int, Optional[float]] = {}
+    for tag, s in find(series, r"val/horizon/h\d+/traj_mae_m/mean").items():
+        val_mae_h[int(re.search(r"/h(\d+)/", tag).group(1))] = latest(s)
+    for tag, s in find(series, r"val/horizon/h\d+/traj_mse_m2/mean").items():
+        val_mse_h[int(re.search(r"/h(\d+)/", tag).group(1))] = latest(s)
+    for key, item in (val_snapshot.get("per_horizon") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        index = int(str(key).lstrip("h"))
+        val_mae_h.setdefault(index, item.get("traj_mae_m"))
+        val_mse_h.setdefault(index, item.get("traj_mse_m2"))
+    if val_mae_h or val_mse_h:
+        lines += table([[f"h{k}", num(val_mae_h.get(k)), num(val_mse_h.get(k))]
+                        for k in sorted(set(val_mae_h) | set(val_mse_h))],
+                       ["horizon", "MAE (m)", "MSE (m²)"])
+
+    # 关键切分（val）：急刹/急转/弯道 + 逐标签
+    val_slices = {m.group(1): latest(s) for m, s in
+                  ((re.search(r"val/slice/(\w+)/action_err/mean", tag), values)
+                   for tag, values in find(series, r"val/slice/\w+/action_err/mean").items())}
+    for name, stats in (val_snapshot.get("slices") or {}).items():
+        if isinstance(stats, dict):
+            val_slices.setdefault(str(name), stats.get("weighted_mean"))
+    val_labels = {m.group(1): latest(s) for m, s in
+                  ((re.search(r"val/label/(\w+)/action_err/mean", tag), values)
+                   for tag, values in find(series, r"val/label/\w+/action_err/mean").items())}
+    for name, stats in (val_snapshot.get("labels") or {}).items():
+        if isinstance(stats, dict):
+            val_labels.setdefault(str(name), stats.get("weighted_mean"))
+    if val_slices:
+        lines += table([[k, num(v)] for k, v in sorted(val_slices.items())],
+                       ["slice", "val weighted action err"])
+    if val_labels:
+        lines += table([[k, num(v)] for k, v in sorted(val_labels.items())],
+                       ["label", "val weighted action err"])
+    summary["val"] = {
+        "available": True,
+        "compare": {"train": train_compare, "val": val_compare},
+        "per_horizon": {
+            f"h{k}": {"mae_m": val_mae_h.get(k), "mse_m2": val_mse_h.get(k)}
+            for k in sorted(set(val_mae_h) | set(val_mse_h))
+        },
+        "slices": val_slices,
+        "labels": val_labels,
+        "action_err_count": val_scalar("action_err_count"),
+        "action_err_weight": val_scalar("action_err_weight"),
+    }
     return lines, summary
 
 
@@ -339,7 +442,9 @@ def meta_section(metrics_path: str) -> Tuple[List[str], Dict[str, Any]]:
     meta = json.load(open(metrics_path))
     keys = ["stage", "kind", "bc_dir", "samples", "device", "epochs", "primary_epochs", "specific_epochs",
             "batch_size", "lr", "action_weight", "traj_aux_weight", "router_coef", "wm_detach",
-            "cluster_version", "cluster_k", "cluster_config", "obs_fingerprint", "dataset"]
+            "cluster_version", "cluster_k", "cluster_config", "obs_fingerprint", "dataset",
+            # 留出集（2026-09-26；旧 run 缺失 → 不显示）
+            "val_frac", "train_frames", "val_frames", "val_episodes"]
     rows = [[k, str(meta[k])[:120]] for k in keys if k in meta]
     lines += table(rows, ["key", "value"]) if rows else ["（无匹配字段）"]
     return lines, {k: meta[k] for k in keys if k in meta}
@@ -359,7 +464,17 @@ def main() -> int:
     os.makedirs(out_dir, exist_ok=True)
 
     series_b = load_monitor(os.path.join(args.run, "monitor", "metrics.csv"))
-    meta_lines, meta = meta_section(os.path.join(args.run, "metrics.json"))
+    metrics_path = os.path.join(args.run, "metrics.json")
+    meta_lines, meta = meta_section(metrics_path)
+    run_meta: Dict[str, Any] = {}
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path) as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                run_meta = loaded
+        except (OSError, json.JSONDecodeError):
+            run_meta = {}
 
     lines: List[str] = ["# IL 评审报告", "",
                         f"- Stage B 运行：`{args.run}`",
@@ -368,7 +483,7 @@ def main() -> int:
     payload: Dict[str, Any] = {"stage_b_run": args.run, "meta": meta,
                                "n_monitor_series": len(series_b)}
 
-    b_lines, payload["stage_b"] = stage_b_section(series_b)
+    b_lines, payload["stage_b"] = stage_b_section(series_b, run_meta)
     lines += b_lines
     lines.append("")
     lines += meta_lines
@@ -387,6 +502,9 @@ def main() -> int:
     lines += ["", "## 备注", "",
               "- 闭环 KPI（50 条 LQR slice）由 `tools/test.sh` 单独评测；用本脚本 "
               "`--eval <runs/eval/<name>>` 可单独列出（速度/crawl/动作口径），不进 IL 判定门；",
+              "- Stage B 自 2026-09-26 起按 episode 留出（与 Stage A 同 `--seed/--val-frac`）："
+              "训练/留出曲线分别在 `train/<phase>_*` / `val/<phase>_*`；本报告「留出集」段落"
+              "优先读 `val/*` 序列与 metrics.json 的 `primary.val` 快照，旧 run 无 val → 显示缺失；",
               "- 判定门口径见 `docs/design-v1.2.md` §5.1；缺失项显示为「缺失」而不是默认通过。",
               f"- 生成时间：{__import__('datetime').datetime.now().isoformat(timespec='seconds')}"]
 

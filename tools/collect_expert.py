@@ -149,12 +149,20 @@ DEFAULT_MIN_YIELD = 0.60
 DEFAULT_MIN_SAMPLES_PER_CATEGORY = 50
 #: 并行采集默认/上限：单 worker env RSS ≈0.65 GB（pipeline/vector_env.ENV_RSS_PER_WORKER_MB），
 #: 本机 15 GB → 建议 <=8 个 worker（超出只告警，不阻塞）。
-DEFAULT_WORKERS = 1
+DEFAULT_WORKERS = 0  # 0 = auto：按 CPU 核数取半、上限 MAX_RECOMMENDED_WORKERS（默认吃满多核；内存 ≈1.3GB/worker）
 MAX_RECOMMENDED_WORKERS = 8
 #: worker 进程级回收间隔（spec 数）：MetaDrive ``build_env``+``close`` 实测残留
 #: ≈3.5 MB/spec（与 pipeline/vector_env.DEFAULT_RECYCLE_EVERY_SPECS 同口径），
 #: 长跑线性上涨；每块跑完重启进程把 RSS 拉回基线。0 = 不回收。
 RECYCLE_EVERY_SPECS = 150
+
+
+def _resolve_workers(requested: int) -> int:
+    """``--workers`` 解析：0/负值 = auto（CPU 核数取半、上限 ``MAX_RECOMMENDED_WORKERS``），至少 1。"""
+    value = int(requested)
+    if value > 0:
+        return value
+    return min(MAX_RECOMMENDED_WORKERS, max(1, (os.cpu_count() or 4) // 2))
 
 _CRASH_KEYS = ("crash", "crash_vehicle", "crash_object", "crash_building", "crash_sidewalk", "crash_human")
 
@@ -1279,7 +1287,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--workers",
         type=int,
         default=DEFAULT_WORKERS,
-        help="并行采集的 spawn worker 数（默认 1=单进程）；每 worker 峰值 ≈1.3GB 内存，本机建议 <=8",
+        help="并行采集的 spawn worker 数（0=auto：cpu 核数取半、上限 8；默认 auto）；每 worker 峰值 ≈1.3GB 内存，本机建议 <=8",
     )
     parser.add_argument(
         "--recycle-every",
@@ -1322,7 +1330,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "roundtrip_dense_mean": float(args.roundtrip_dense_mean),
         "traffic_density": args.traffic_density,
     }
-    num_workers = max(1, int(args.workers))
+    num_workers = _resolve_workers(args.workers)
+    if int(args.workers) <= 0:  # 0 = auto：按 CPU 核数取半，上限 MAX_RECOMMENDED_WORKERS（默认吃满多核）
+        print(
+            f"[collect_expert] workers=auto → {num_workers}（cpu={os.cpu_count()}，上限 {MAX_RECOMMENDED_WORKERS}；"
+            "每 worker 峰值 ≈1.3GB，并发大型训练时请显式调低）",
+            flush=True,
+        )
     if num_workers > len(specs):
         print(f"[collect_expert] --workers {num_workers} > specs {len(specs)}，按 specs 数收敛", flush=True)
         num_workers = len(specs)

@@ -226,6 +226,49 @@ ramp_in 0.40、**curve 0.00 / roundabout 0.00 / uturn 0.00 / tollgate 0.00**；�
   参数量 1,149,663（H=128）。
 - 评测：两版都用 LQR 闭环 + 同一 50 条切片 + 同一位姿/随机种子协议 ✓。
 
+## 9. v1.2 IL 第二轮：5k 数据 × 20/20 epochs（2026-09-26）
+
+数据：`runs/bc_expert_5k_v2`（**360,509 行入库 / 259,606 可训练**；train spec 前 5,000 条；指纹 v2-e2adf9319719）。
+命令：
+```bash
+BC_DIR=runs/bc_expert_5k_v2 OUT=runs/train/il_5k_20x20 WM_EPOCHS=20 bash tools/train.sh            # Stage A
+STAGE=B BC_EPOCHS=20 BC_DIR=runs/bc_expert_5k_v2 STAGE_A_OUT=runs/train/il_5k_20x20/stage_a \
+  OUT=runs/train/il_5k_20x20_b2 bash tools/train.sh                                                 # Stage B
+```
+（聚类在 5k/60k 子采样上重拟合：两段式胜出，max_enrich 2.87×。）
+
+### 9.1 开环（对比 §8 的 2k 版）
+
+| 指标 | 2k 版 | **5k 版（本轮）** |
+| --- | --- | --- |
+| Stage A ADE（WM / 匀速） | 1.447 / 6.987 | **1.433 / 12.229**（6/6 horizon 胜）|
+| Stage A val loss | 0.614 | **0.580** |
+| 动作加权误差（首步） | 0.1201 | **0.0710**（median 0.036 / p95 0.251）|
+| 逐 horizon 加权 MAE（h1→h6） | 0.125 → 1.240 m | **0.057 → 0.822 m** |
+| 轨迹（全局） | — | mae 0.406 m / mse 1.028 m²（加权）；未加权 1.144 m |
+| 分切片（brake / turn / curve） | 0.230 / 0.275 / 0.156 | **0.062 / 0.168 / 0.075** |
+| router：CE / top-1 簇准确率 / NMI | 0.0038 / 0.265 / 0.081 | **0.0018 / 0.856 / 0.155** |
+
+Stage B 逐 epoch：primary `traj MAE 0.772→0.406`、val `2.600→2.108`；specific `0.386→0.373`、val `1.944→1.922`。
+
+### 9.2 闭环（50 条 val，LQR，配对同场景）
+
+| 策略 | success | collision | off-road | rc | speed_ratio |
+| --- | --- | --- | --- | --- | --- |
+| 规则基线（冻结） | **0.82** | 0.10 | **0.06** | 0.925 | 0.734 |
+| v1.2 IL 2k（§8） | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
+| **v1.2 IL 5k（本轮）** | **0.30** | 0.04 | **0.64** | 0.550 | 0.439 |
+
+分主标签：curve / roundabout / uturn / tollgate 仍 **0%**；难度 easy 0.667 / medium 0.167 / hard **0.000**（比 2k 更差）。
+真均速 4.33 m/s、crawl 4.8% 步 / 2.22 s、min-TTC 7.74、errors=0。
+
+### 9.3 结论（重要，供决策）
+
+**数据 2.5×、epochs 2×、开环全线变好（router 从 26.5% 升到 85.6%），但闭环反而变差（succ 0.38→0.30、off-road 0.52→0.64）。**
+与 §8 与 `docs/forensics-2026-09-26.md` 的取证一致：**瓶颈不是数据量 / 训练时长 / 开环保真，而是 plan 缺少"车道绝对锚点 + 横向偏差回收"**
+（失败仍集中在同一批几何，机制为"直道爬行段起漂 + 大转角转向通道塌缩"）。
+→ 下一步应是 **E2b 扰动增广**（让监督目标包含"从偏移位姿回车道"）与/或 **E3 DAgger-lite**（治 crawl/OOD），而不是继续堆数据或加 epoch。
+
 ## 7. 口径与注意事项
 
 1. **tracker 语义**：`exact` = Stage B 语义（运动学精确执行预瞄，不引入动力学）；`lqr` = Stage C 闭环

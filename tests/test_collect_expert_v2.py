@@ -317,7 +317,7 @@ def test_v2_constants_and_cli_defaults():
     assert INT64_KEYS == frozenset({"od_id", "od_id_hist"})
     args = _parse_args(["--specs", "x.json", "--out", "runs/x"])
     assert args.balance == "weights"
-    assert args.workers == 1
+    assert args.workers == 0  # 0 = auto（CPU 核数取半、上限 8）
     manifest = _npz_schema_manifest(num_slots=16, frames=6, others_dim=28, label_count=8)
     assert manifest["train_weight"]["semantics"].startswith("过滤门")
     assert manifest["frame_usable"]["shape"] == ["<N>"]

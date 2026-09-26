@@ -33,6 +33,7 @@ for arg in "$@"; do
 done
 
 STAGE="${STAGE:-both}"
+BC_DIR_EXPLICIT="${BC_DIR:+1}"  # 记录 BC_DIR 是否由用户显式提供（用于 Stage B 的防呆守卫）
 CONFIG="${CONFIG:-config/default.yaml}"
 MODEL_CONFIG="${MODEL_CONFIG:-config/model.yaml}"
 BC_DIR="${BC_DIR:-runs/bc_expert_full}"
@@ -48,6 +49,11 @@ EXTRA_B="${EXTRA_B:-}"
 
 PYTHON="$ROOT/tools/venv-python"
 TRAIN_PY="$ROOT/tools/train.py"
+
+# ---------------------------------------------------------------- BC_DIR 防呆（2026-09-26 事故：漏设 BC_DIR 静默落到 v1 数据集）
+if [[ "$STAGE" != "A" && -z "$BC_DIR_EXPLICIT" ]]; then
+  echo "[train.sh] 警告：未显式设置 BC_DIR → 使用默认 $BC_DIR（请确认它与 Stage A 使用的是同一数据集）" >&2
+fi
 
 # ---------------------------------------------------------------- 前置检查/GL 守卫
 if [[ ! -x "$PYTHON" ]]; then
@@ -142,6 +148,18 @@ run_stage_b() {
   if [[ ! -f "$ckpt" ]]; then
     echo "[train.sh] 警告：Stage A 产物缺失（$ckpt）→ Stage B 将从随机初始化开始" >&2
     ckpt=""
+  fi
+  # 数据集一致性守卫：BC_DIR 必须与 Stage A manifest 记录的数据集一致（除非显式放行）
+  local a_manifest
+  a_manifest="$(dirname "$stage_a_out")/manifest.txt"
+  if [[ -f "$a_manifest" ]]; then
+    local recorded_bc_dir
+    recorded_bc_dir="$(grep -m1 '^bc_dir:' "$a_manifest" | sed 's/^bc_dir: *//')"
+    if [[ -n "$recorded_bc_dir" && "$recorded_bc_dir" != "$BC_DIR" ]]; then
+      echo "[train.sh] 错误：BC_DIR=$BC_DIR 与 Stage A 使用的数据集（$recorded_bc_dir）不一致；" >&2
+      echo "           若确认要用不同数据集请设置 ALLOW_BC_MISMATCH=1（注意 B 必须与 A 的观测版本一致）" >&2
+      [[ "${ALLOW_BC_MISMATCH:-0}" == "1" ]] || exit 3
+    fi
   fi
   echo "[train.sh] ===== Stage B（planner BC；$BC_EPOCHS epochs）→ $stage_out ====="
   local ckpt_args=()

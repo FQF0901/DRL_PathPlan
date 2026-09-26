@@ -85,7 +85,8 @@ from pipeline.trainer import (  # noqa: E402
     weighted_od_multi_step_loss,
 )
 
-__all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_c", "load_config", "build_model", "FrameWindows"]
+__all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_c", "load_config", "build_model", "FrameWindows",
+           "validate_bc_dataset"]
 
 _DEFAULT_MODEL_CFG = "config/model.yaml"
 _DEFAULT_TRAIN_CFG = "config/train.yaml"
@@ -192,6 +193,81 @@ def _limit_dataset(dataset: BCDataset, limit: Optional[int]) -> BCDataset:
         return dataset
     keep = np.arange(int(limit), dtype=np.int64)
     return BCDataset({key: value[keep] for key, value in dataset.arrays.items()}, dataset.meta)
+
+
+# --------------------------------------------------------------------------- #
+# Stage A/B 启动数据集契约守卫（2026-09-26 事故防复发）
+# --------------------------------------------------------------------------- #
+#
+# 事故：``STAGE=B BC_EPOCHS=20 STAGE_A_OUT=... bash tools/train.sh`` 漏设 ``BC_DIR``
+# → 静默回退默认 ``runs/bc_expert_full``（schema v1，10,777 行，无 ``others``）→
+# Stage B 照常训练，router 损失全程为 0，只打印一行
+# ``[bc] router 软目标不可用（...）→ 本轮跳过 router 损失``。
+# 防复发：Stage A/B 在训练循环开始前硬校验数据集契约（schema≥2 + v2 通道），
+# 不满足即 ``raise SystemExit``；显式逃生门（``--allow-legacy-dataset`` /
+# ``ALLOW_LEGACY_DATASET=1``）放行时打印醒目警告并在 metrics.json 标注
+# ``legacy_dataset=true``。
+
+#: v2 采集（``tools/collect_expert.py``）必有、v1 数据集（``runs/bc_expert_full``）完全没有的通道。
+#: ``hist_valid`` 在 v1 也存在（无区分度）故不入列；``others`` 缺失正是 router 损失静默归零的根因。
+_BC_V2_REQUIRED_ARRAYS: Tuple[str, ...] = ("others", "od_id", "od_presence")
+#: 逃生门环境变量（与 CLI ``--allow-legacy-dataset`` 等价；放行时打印醒目警告）。
+_LEGACY_DATASET_ENV = "ALLOW_LEGACY_DATASET"
+
+
+def _allow_legacy_dataset(args: argparse.Namespace) -> bool:
+    """逃生门：CLI ``--allow-legacy-dataset`` 或环境变量 ``ALLOW_LEGACY_DATASET=1``。"""
+    if bool(getattr(args, "allow_legacy_dataset", False)):
+        return True
+    return str(os.environ.get(_LEGACY_DATASET_ENV, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def validate_bc_dataset(
+    dataset: BCDataset, bc_dir: str, stage: str, *, allow_legacy: bool = False
+) -> Dict[str, Any]:
+    """Stage A/B 训练前校验 BC 数据集契约；返回需并入 metrics 的元数据。
+
+    - 通过（``schema_version>=2`` 且含 :data:`_BC_V2_REQUIRED_ARRAYS`）→ 打印启动横幅
+      ``[stage{X}] dataset=<dir> rows=<n> fingerprint=<fp> schema=v2``，返回
+      ``{"legacy_dataset": False, "dataset_fingerprint": ...}``；
+    - 不通过 → ``allow_legacy`` 时打印醒目警告并返回 ``legacy_dataset=True``；
+      否则 ``raise SystemExit``（消息含当前 BC_DIR、实际 schema/缺通道/行数、
+      正确示例命令）。
+    """
+    meta = dict(getattr(dataset, "meta", {}) or {})
+    schema = int(getattr(dataset, "schema_version", 0) or 0)
+    fingerprint = str(meta.get("obs_fingerprint") or "")
+    rows = int(getattr(dataset, "count", 0))
+    arrays = getattr(dataset, "arrays", {}) or {}
+    missing = tuple(key for key in _BC_V2_REQUIRED_ARRAYS if key not in arrays)
+    problems: List[str] = []
+    if schema < 2:
+        problems.append(f"schema_version={schema}（要求 ≥2）")
+    if missing:
+        problems.append("缺少 v2 通道：" + ", ".join(missing))
+    tag = f"[stage{stage}]"
+    if problems:
+        detail = "；".join(problems)
+        if allow_legacy:
+            print(
+                f"{tag} ⚠⚠ 警告：放行 legacy/不兼容 BC 数据集（{detail}）—— "
+                f"dataset={bc_dir} rows={rows} fingerprint={fingerprint or '<缺失>'} schema=v{schema}；"
+                "router/others 相关损失可能全程无效（结果作废风险），metrics.json 标注 legacy_dataset=true",
+                flush=True,
+            )
+            return {"legacy_dataset": True, "dataset_fingerprint": fingerprint}
+        raise SystemExit(
+            f"{tag} BC 数据集契约校验失败：BC_DIR={bc_dir} 不满足 Stage {stage} 要求。\n"
+            f"{tag} 实际内容：{detail}，rows={rows}，obs_fingerprint={fingerprint or '<缺失>'}\n"
+            f"{tag} 继续训练会导致 router/others 相关损失静默为 0（2026-09-26 事故：漏设 BC_DIR 落到 v1 数据集）。\n"
+            f"{tag} 正确示例：BC_DIR=runs/bc_expert_5k_v2 STAGE={stage} bash tools/train.sh\n"
+            f"{tag} 确认要用 legacy 数据集（结果可能作废）：追加 --allow-legacy-dataset 或 ALLOW_LEGACY_DATASET=1"
+        )
+    print(
+        f"{tag} dataset={bc_dir} rows={rows} fingerprint={fingerprint or '<none>'} schema=v{schema}",
+        flush=True,
+    )
+    return {"legacy_dataset": False, "dataset_fingerprint": fingerprint}
 
 
 # --------------------------------------------------------------------------- #
@@ -994,6 +1070,9 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         print(f"[stageA] 载入 {args.ckpt}（missing={len(meta.get('missing_keys', []))}）", flush=True)
 
     dataset = _limit_dataset(BCDataset.load(args.bc_dir), args.limit_dataset)
+    dataset_contract = validate_bc_dataset(
+        dataset, str(args.bc_dir), "A", allow_legacy=_allow_legacy_dataset(args)
+    )
     arrays = dataset.arrays
     if "step" not in arrays:
         raise SystemExit("[stageA] BC 数据集缺少 'step'（未来目标需要 (episode, step+k) 查表）")
@@ -1402,8 +1481,9 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "model_fde": float(model_fde_k),
                 "cv_ade": float(cv_ade_k),
                 "cv_fde": float(cv_fde_k),
-                "valid_count": float(future["valid"][:, k].sum()),
-                "valid_weight": float(w_frame.sum()),
+                # 物理计数（与分组窗口的 n_updates 区分）：有效帧数 / 权重和 / 有效槽位和
+                "valid_samples": float(future["valid"][:, k].sum()),
+                "valid_weight_sum": float(w_frame.sum()),
                 "slot_count": slot_count,
                 "ego_next_loss": (
                     float(ego_next_per_horizon[k]) if ego_next_per_horizon is not None and k < len(ego_next_per_horizon)
@@ -1458,6 +1538,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "materialize": bool(obs_source is not None),
         "fast_data": bool(obs_source is not None and future_source is not None),
     }
+    metrics.update(dataset_contract)
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
     rng = np.random.default_rng(int(args.seed))
@@ -1559,8 +1640,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         loss_curve.append(train_loss)
         eval_metrics = _evaluate(val_idx, int(args.eval_frames))
         counts = {
-            "valid_sum": int(sum(item["valid_count"] for item in eval_metrics["per_horizon"].values())),
-            "valid_weight_sum": float(sum(item["valid_weight"] for item in eval_metrics["per_horizon"].values())),
+            "valid_samples": int(sum(item["valid_samples"] for item in eval_metrics["per_horizon"].values())),
+            "valid_weight_sum": float(
+                sum(item["valid_weight_sum"] for item in eval_metrics["per_horizon"].values())
+            ),
         }
         metrics.update(
             {
@@ -1592,8 +1675,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "beats_cv_ade": bool(eval_metrics["model_ade"] < eval_metrics["cv_ade"]),
                 "beats_cv_fde": bool(eval_metrics["model_fde"] < eval_metrics["cv_fde"]),
                 "batches": batches,
-                "val_valid_count": counts["valid_sum"],
-                "val_valid_weight": counts["valid_weight_sum"],
+                "val_valid_samples": counts["valid_samples"],
+                "val_valid_weight_sum": counts["valid_weight_sum"],
                 "epoch_data_seconds": data_seconds,
                 "epoch_forward_seconds": forward_seconds,
                 "epoch_backward_seconds": backward_seconds,
@@ -1601,46 +1684,51 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             }
         )
         if monitor is not None:
-            monitor.on_train_step(
-                {
-                    "wm_loss": train_loss,
-                    "wm_loss_od": metrics["wm_loss_od"],
-                    "wm_loss_ego_next": metrics["wm_loss_ego_next"],
-                    "val_loss": eval_metrics["eval_loss"],
-                    "val_loss_od": eval_metrics["eval_od_loss"],
-                    "presence_available": float(presence_state["available"]),
-                    "presence_loss": eval_metrics["presence_loss"],
-                    "entry_loss": eval_metrics["entry_loss"],
-                    "presence_auc": eval_metrics["presence_auc"],
-                    "entry_auc": eval_metrics["entry_auc"],
-                    "model_ade": eval_metrics["model_ade"],
-                    "model_fde": eval_metrics["model_fde"],
-                    "cv_ade": eval_metrics["cv_ade"],
-                    "cv_fde": eval_metrics["cv_fde"],
-                    "per_horizon": eval_metrics["per_horizon"],
-                    "grad_norm_plan_head": grad_probe_last.get("plan_head", 0.0),
-                    "grad_norm_router": grad_probe_last.get("plan_head.moe.router", 0.0),
-                    "grad_norm_st_gnn": grad_probe_last.get("st_gnn", 0.0),
-                },
-                step=epoch + 1,
-            )
-            # 专用 per-horizon 序列（CSV + tensorboard：horizon/h{k}/...）
-            monitor.on_grouped_step(
-                horizon={
-                    f"h{k + 1}": {
-                        "loss": item["loss"],
-                        "ade": item["model_ade"],
-                        "fde": item["model_fde"],
-                        "cv_ade": item["cv_ade"],
-                        "cv_fde": item["cv_fde"],
-                        "valid_count": item["valid_count"],
-                        "valid_weight": item["valid_weight"],
-                        "ego_next_loss": item["ego_next_loss"],
-                    }
-                    for k, item in enumerate(eval_metrics["per_horizon"].values())
-                },
-                step=epoch + 1,
-            )
+            train_payload: Dict[str, Any] = {
+                "wm_loss": train_loss,
+                "wm_loss_od": metrics["wm_loss_od"],
+                "wm_loss_ego_next": metrics["wm_loss_ego_next"],
+                "val_loss": eval_metrics["eval_loss"],
+                "val_loss_od": eval_metrics["eval_od_loss"],
+                "presence_available": float(presence_state["available"]),
+                "presence_loss": eval_metrics["presence_loss"],
+                "entry_loss": eval_metrics["entry_loss"],
+                "presence_auc": eval_metrics["presence_auc"],
+                "entry_auc": eval_metrics["entry_auc"],
+                "model_ade": eval_metrics["model_ade"],
+                "model_fde": eval_metrics["model_fde"],
+                "grad_norm_plan_head": grad_probe_last.get("plan_head", 0.0),
+                "grad_norm_router": grad_probe_last.get("plan_head.moe.router", 0.0),
+                "grad_norm_st_gnn": grad_probe_last.get("st_gnn", 0.0),
+            }
+            if epoch == 0:
+                # val 集常量（匀速基线/有效样本计数只与固定 val 子集有关）只记一次
+                train_payload["cv_ade"] = eval_metrics["cv_ade"]
+                train_payload["cv_fde"] = eval_metrics["cv_fde"]
+            # 逐 horizon 序列（CSV + tensorboard：horizon/h{k}/...）；**唯一** per-horizon
+            # 落盘口径（旧的 train/per_horizon/* 与这里逐位重复，已移除）
+            horizon_payload: Dict[str, Dict[str, float]] = {}
+            for k, item in enumerate(eval_metrics["per_horizon"].values()):
+                group = {
+                    "loss": item["loss"],
+                    "ade": item["model_ade"],
+                    "fde": item["model_fde"],
+                    "ego_next_loss": item["ego_next_loss"],
+                }
+                if epoch == 0:
+                    # val 集常量：只记首个 epoch（cv 基线 / 有效样本与槽位计数，不逐 epoch 重复）
+                    group.update(
+                        {
+                            "cv_ade": item["cv_ade"],
+                            "cv_fde": item["cv_fde"],
+                            "valid_samples": item["valid_samples"],
+                            "valid_weight_sum": item["valid_weight_sum"],
+                            "slot_count": item["slot_count"],
+                        }
+                    )
+                horizon_payload[f"h{k + 1}"] = group
+            monitor.on_train_step(train_payload, step=epoch + 1)
+            monitor.on_grouped_step(horizon=horizon_payload, step=epoch + 1)
             monitor.flush(step=epoch + 1)
         print(
             f"[stageA] epoch {epoch + 1}/{epochs} loss={train_loss:.4f} val={eval_metrics['eval_loss']:.4f} "
@@ -1668,6 +1756,19 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 # --------------------------------------------------------------------------- #
 # 阶段 B：planner BC（primary → specific）
 # --------------------------------------------------------------------------- #
+
+#: Stage B val 标量里的阶段常量（router 温度/版本/簇 K + val 集样本计数/权重和）：
+#: 只在首个 epoch 记一次（监控降噪；完整值仍在 metrics.json 的 phase ``val`` 快照里）
+_VAL_CONSTANT_KEYS = frozenset(
+    {
+        "bc_router_temperature",
+        "bc_router_cluster_version",
+        "bc_router_cluster_version_num",
+        "bc_router_cluster_k",
+        "bc_action_err_count",
+        "bc_action_err_weight",
+    }
+)
 
 #: primary 段冻结：WM（ST-GNN）、value 头、8 个 specific experts
 #: （可训练 = encoders/mem_encoder/plan head（含 primary + router）/policy）
@@ -1754,8 +1855,77 @@ def _action_mu_stats(
     }
 
 
+def _train_grouped_groups(
+    metrics: Mapping[str, Any], label_names: Sequence[str]
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    """逐 epoch 训练标量 → ``(horizon, slices, labels)`` 三组 grouped 监控载荷。
+
+    轨迹度量带单位（2026-09-26）：``traj_mse_m2``（加权 MSE，m²）/ ``traj_mae_m``（加权 MAE，m）/
+    ``traj_err``（loss_type 口径 legacy）；无标签/切片样本时对应组缺失（监控显示为空）。
+    """
+    horizon: Dict[str, Dict[str, float]] = {}
+    for key, value in metrics.items():
+        if not isinstance(value, (int, float)) or value != value:
+            continue
+        if key.startswith("bc_traj_mse_h"):
+            group, metric = key[len("bc_traj_mse_h"):], "traj_mse_m2"
+        elif key.startswith("bc_traj_mae_h") and key.endswith("_m"):
+            group, metric = key[len("bc_traj_mae_h"):-2], "traj_mae_m"
+        elif key.startswith("bc_traj_err_h"):
+            group, metric = key[len("bc_traj_err_h"):], "traj_err"
+        else:
+            continue
+        if group.isdigit():
+            horizon.setdefault(f"h{group}", {})[metric] = float(value)
+    slices: Dict[str, Dict[str, float]] = {}
+    for name in ("brake", "turn", "curve"):
+        value = metrics.get(f"bc_action_err_slice_{name}_weighted_mean")
+        if isinstance(value, (int, float)) and value == value:
+            slices[name] = {"action_err": float(value)}
+    labels: Dict[str, Dict[str, float]] = {}
+    for label_name in label_names:
+        value = metrics.get(f"bc_action_err_label_{label_name}")
+        if isinstance(value, (int, float)) and value == value:
+            labels[label_name] = {"action_err": float(value)}
+    return horizon, slices, labels
+
+
+def _val_grouped_groups(
+    val_metrics: Mapping[str, Any]
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    """留出集指标（``evaluate_bc`` 的嵌套返回）→ ``(horizon, slices, labels)`` 三组载荷。"""
+    horizon: Dict[str, Dict[str, float]] = {}
+    for key, item in (val_metrics.get("per_horizon") or {}).items():
+        if not isinstance(item, Mapping):
+            continue
+        group = str(key)
+        name = group if group.startswith("h") else f"h{group}"
+        horizon[name] = {
+            "traj_mse_m2": item.get("traj_mse_m2"),
+            "traj_mae_m": item.get("traj_mae_m"),
+            "traj_err": item.get("traj_err"),
+        }
+    slices = {
+        str(name): {"action_err": stats.get("weighted_mean")}
+        for name, stats in (val_metrics.get("slices") or {}).items()
+        if isinstance(stats, Mapping)
+    }
+    labels = {
+        str(name): {"action_err": stats.get("weighted_mean")}
+        for name, stats in (val_metrics.get("labels") or {}).items()
+        if isinstance(stats, Mapping)
+    }
+    return horizon, slices, labels
+
+
 def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """阶段 B：planner BC（动作主损失 + rollout 轨迹辅助（WM detach）+ router 软目标 CE/KL）。"""
+    """阶段 B：planner BC（动作主损失 + rollout 轨迹辅助（WM detach）+ router 软目标 CE/KL）。
+
+    留出集（2026-09-26）：与阶段 A 同 ``--val-frac``/``--seed`` 按 episode 切分（A/B 同一批
+    留出 episode）；每 epoch 末在留出集上做无梯度确定性评估（:func:`pipeline.trainer.evaluate_bc`），
+    epoch 行打印 ``val=``；monitor 命名：训练 ``train/<phase>_*``、留出 ``val/<phase>_*``，
+    分组指标训练 ``horizon|slice|label/*``、留出 ``val/horizon|val/slice|val/label/*``。
+    """
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     apply_thread_limits(workers=1, config=config)
@@ -1773,6 +1943,18 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         print(f"[stageB] 警告：checkpoint {ckpt} 不存在 → 从随机初始化开始（world model 未训练）", flush=True)
 
     dataset = _limit_dataset(BCDataset.load(args.bc_dir), args.limit_dataset)
+    dataset_contract = validate_bc_dataset(
+        dataset, str(args.bc_dir), "B", allow_legacy=_allow_legacy_dataset(args)
+    )
+    # 按 episode 留出（与 Stage A 同 seed/val_frac → 同一批留出 episode；val 不参与梯度）。
+    train_idx, val_idx, val_episodes = _episode_split(
+        dataset.arrays["episode_id"], float(args.val_frac), int(args.seed)
+    )
+    if val_idx.size == 0:
+        print("[stageB] 警告：留出集为空（episode 数过少/val_frac=0）→ 用训练帧自评", flush=True)
+        val_idx = train_idx
+    if train_idx.size == 0:
+        raise SystemExit("[stageB] 训练帧为空（留出比例过高）")
     stage_cfg = _stage_section(config, "B")
     bc_cfg = dict(stage_cfg.get("bc", {}) or {})
     train_cfg = dict(config.get("train", {}) or {})
@@ -1856,7 +2038,13 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "wm_detach": True,
         "history_stride": history_stride,
         "materialize": bool(obs_source is not None),
+        # 按 episode 留出（与 Stage A 同 seed/val_frac → 同一批留出 episode）
+        "val_frac": float(args.val_frac),
+        "train_frames": int(train_idx.size),
+        "val_frames": int(val_idx.size),
+        "val_episodes": int(val_episodes.size),
     }
+    metrics.update(dataset_contract)
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
     if monitor is not None:
@@ -1872,9 +2060,52 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             step=0,
         )
 
-    def _run_phase(phase: str, phase_epochs: int, freeze_prefixes: Sequence[str]) -> Dict[str, Any]:
+    def _run_phase(phase: str, phase_epochs: int, freeze_prefixes: Sequence[str], phase_offset: int) -> Dict[str, Any]:
+        """跑一个 BC 相位：逐 epoch 落盘（step = ``phase_offset + epoch``，全局单调 1..2N）。
+
+        - 训练侧：``train/<phase>_*`` 标量 + ``horizon|slice|label/*``（逐 epoch 增量）；
+        - 留出侧：``val/<phase>_*`` 标量 + ``val/horizon|val/slice|val/label/*``；
+        - 阶段末只补记逐 epoch 未覆盖的标量（router 汇总/元数据），避免同 (step, tag) 重复。
+        """
         if phase_epochs <= 0:
             return {"skipped": True, "epochs": 0, "phase": phase}
+        epoch_keys: set = set()
+
+        def _on_epoch(
+            epoch_index: int, train_metrics: Mapping[str, Any], val_metrics: Mapping[str, Any]
+        ) -> None:
+            if monitor is None:
+                return
+            step = phase_offset + epoch_index + 1
+            train_scalars = {
+                f"{phase}_{key}": value
+                for key, value in train_metrics.items()
+                if isinstance(value, (int, float))
+            }
+            epoch_keys.update(train_scalars)
+            monitor.on_train_step(train_scalars, step=step)
+            if val_metrics:
+                monitor.on_val_step(
+                    {
+                        f"{phase}_{key}": value
+                        for key, value in val_metrics.items()
+                        if isinstance(value, (int, float))
+                        and (epoch_index == 0 or key not in _VAL_CONSTANT_KEYS)
+                    },
+                    step=step,
+                )
+                val_horizon, val_slices, val_labels = _val_grouped_groups(val_metrics)
+                monitor.on_val_grouped_step(
+                    horizon=val_horizon, slices=val_slices, labels=val_labels, step=step
+                )
+            horizon_groups, slice_groups, label_groups = _train_grouped_groups(
+                train_metrics, dataset.label_names
+            )
+            monitor.on_grouped_step(
+                horizon=horizon_groups, slices=slice_groups, labels=label_groups, step=step
+            )
+            monitor.flush(step=step)
+
         cfg = BCConfig(
             epochs=phase_epochs,
             batch_size=batch_size,
@@ -1894,6 +2125,9 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             history_stride=history_stride,
             router_cluster_version=(str(cluster_spec.cluster_version) if cluster_spec is not None else ""),
             router_cluster_k=(int(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0),
+            train_indices=train_idx,
+            val_indices=val_idx,
+            epoch_callback=_on_epoch,
         )
         result = pretrain_bc(
             model,
@@ -1904,43 +2138,18 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             batch_source=obs_source,
         )
         if monitor is not None:
-            monitor.on_train_step(
-                {f"{phase}_{key}": value for key, value in result.items() if isinstance(value, (int, float))},
-                step=phase_epochs,
-            )
-            # 专用 per-horizon / per-label / 分切片序列（CSV + tensorboard）
-            # 轨迹度量带单位（2026-09-26）：traj_mse_m2（加权 MSE，m²）/ traj_mae_m（加权 MAE，m）；
-            # 旧标签 horizon/<h>/traj_err 语义混淆（l2 下实为 m²）已移除。
-            horizon_groups: Dict[str, Dict[str, float]] = {}
-            for key, value in result.items():
-                if not isinstance(value, (int, float)) or value != value:
-                    continue
-                if key.startswith("bc_traj_mse_h"):
-                    horizon, metric = key[len("bc_traj_mse_h"):], "traj_mse_m2"
-                elif key.startswith("bc_traj_mae_h") and key.endswith("_m"):
-                    horizon, metric = key[len("bc_traj_mae_h"):-2], "traj_mae_m"
-                else:
-                    continue
-                if horizon.isdigit():
-                    horizon_groups.setdefault(f"h{horizon}", {})[metric] = float(value)
-            slice_groups = {}
-            for name in ("brake", "turn", "curve"):
-                stats = result.get(f"bc_action_err_slice_{name}")
-                if isinstance(stats, Mapping) and stats:
-                    slice_groups[name] = {"action_err": stats.get("weighted_mean")}
-            label_groups = {}
-            for label_name in dataset.label_names:
-                value = result.get(f"bc_action_err_label_{label_name}")
-                if value is not None:
-                    label_groups[label_name] = {"action_err": value}
-            monitor.on_grouped_step(
-                horizon=horizon_groups, slices=slice_groups, labels=label_groups, step=phase_epochs
-            )
-            monitor.flush(step=phase_epochs)
+            summary = {
+                f"{phase}_{key}": value
+                for key, value in result.items()
+                if isinstance(value, (int, float)) and f"{phase}_{key}" not in epoch_keys
+            }
+            if summary:
+                monitor.on_train_step(summary, step=phase_offset + phase_epochs)
+            monitor.flush(step=phase_offset + phase_epochs)
         return result
 
-    metrics["primary"] = _run_phase("primary", primary_epochs, _PRIMARY_PHASE_FREEZE)
-    metrics["specific"] = _run_phase("specific", specific_epochs, _SPECIFIC_PHASE_FREEZE)
+    metrics["primary"] = _run_phase("primary", primary_epochs, _PRIMARY_PHASE_FREEZE, 0)
+    metrics["specific"] = _run_phase("specific", specific_epochs, _SPECIFIC_PHASE_FREEZE, primary_epochs)
     metrics.update(_action_mu_stats(model, dataset, device, batch_size=batch_size, obs_source=obs_source))
     if monitor is not None:
         monitor.close()
@@ -2156,6 +2365,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "C=阶段 B 快照（默认 runs/train/stage_b/final.pt）")
     parser.add_argument("--bc-dir", default="runs/bc_expert_full", help="阶段 A/B 的 BC 专家数据集目录")
     parser.add_argument("--limit-dataset", type=int, default=None, help="BC 数据集前缀抽样上限（冒烟用）")
+    parser.add_argument("--allow-legacy-dataset", action="store_true",
+                        help="放行 schema<2/缺 v2 通道（others/od_id/od_presence）的 BC 数据集。"
+                             "默认硬失败（防漏设 BC_DIR 落到 v1 数据集、router 损失全程 0）；"
+                             "等价环境变量 ALLOW_LEGACY_DATASET=1。放行时 metrics.json 标注 "
+                             "legacy_dataset=true，训练结果可能作废")
     # ---- 阶段 A ----
     parser.add_argument("--wm-epochs", type=int, default=None, help="阶段 A world model 轮数（默认 config/stages.A.world_model.epochs=10）")
     parser.add_argument("--val-frac", type=float, default=0.15, help="阶段 A 按 episode 留出比例（默认 0.15）")
