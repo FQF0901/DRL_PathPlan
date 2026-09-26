@@ -16,7 +16,14 @@
    （MetaDrive 每 ``build_env``+``close`` 残留 ~3.5MB/spec）；
 3. **KPI 口径**（config/eval.yaml 冻结）：success / collision / off_road / min_ttc /
    a_lon / a_lat / jerk / speed_ratio / solid_line_crossing / speed_limit_violation /
-   route_completion；按 **primary 标签**（``spec.labels.geometry``）分组，其余附带标签单列
+   route_completion；**速度取逐 env step 口径**（2026-09-26 修正）：``mean_speed_mps`` =
+   episode 内逐 step 速度**真均值**，``final_speed_mps`` = 末步速度（旧 ``mean_speed_mps``
+   的实际口径，保留对照），``low_speed_step_ratio`` / ``crawl_seconds`` = v < 2 m/s
+   （``CRAWL_SPEED_MPS``，与 trainer ``probe/low_speed_alert`` 同阈值）的步占比 / 累计秒数；
+   ckpt 路径另记实际下发动作 ``action_ds_mean_m`` / ``action_dtheta_abs_mean_rad``（m / rad，
+   每 0.5 s 决策的 ``plan[0] == action_mu``），``steer_abs_mean`` / ``throttle_mean`` 仅在
+   存在 [steer, throttle] 概念时有效（ckpt+exact 无此概念 → NaN/N-A，不静默填 0）；
+   按 **primary 标签**（``spec.labels.geometry``）分组，其余附带标签单列
    ``compound``（报告口径，不判定）；每组 n >= ``per_category_n_min`` 才判定，并给 Wilson 95% CI；
 4. 与冻结基线（``runs/baseline_eval/val_reference.json`` + ``..._by_primary.json``）比较，
    生成阈值判定：overall_success、collision/offroad ε 保护、route_completion、speed_ratio
@@ -106,6 +113,7 @@ PAUSE_WAIT_S = 30.0               # 暂停训练池后等待 MemAvailable 回升
 DEFAULT_TTC_CAP_S = 10.0          # min_ttc cap（无风险目标记 cap）
 DEFAULT_TTC_LATERAL_M = 2.0       # min_ttc 只统计自车前方 |lat| <= 2m 的车辆
 DEFAULT_SPEED_LIMIT_FALLBACK = 13.9
+CRAWL_SPEED_MPS = 2.0             # crawl（低速蠕动）阈值：v < 2 m/s，与 trainer probe 同阈值
 WILSON_Z = 1.96                   # 95% Wilson CI
 PRIMARY_GROUP_MIN_N = 30          # config/eval.yaml::thresholds.per_category_n_min
 WEAK_BASELINE_SUCCESS = 0.7       # 弱类判定阈值
@@ -128,6 +136,19 @@ KPI_DEFINITIONS: Dict[str, str] = {
     "a_lat": "相邻步差分 a_lat=0.5(v_t+v_{t-1})*Δθ/dt，Δθ 回绕到 (-π,π]",
     "jerk": "相邻步 a_lon 差分 jerk=(a_t-a_{t-1})/dt",
     "speed_ratio": "逐步 v/车道限速(m/s)；限速未设置(>=1000)时用 13.9 m/s 兜底",
+    "mean_speed_mps": "episode 内逐 env step 速度的真均值（m/s；v = info['velocity']，缺省回退 ego.speed）；"
+                      "组内取逐 episode 均值",
+    "final_speed_mps": "episode 末步速度（m/s；2026-09-26 前 mean_speed_mps 的实际口径，保留对照）",
+    "low_speed_step_ratio": f"episode 内 v < {CRAWL_SPEED_MPS:g} m/s 的步占比（0–1）；组内取逐 episode 均值",
+    "crawl_seconds": f"episode 内 v < {CRAWL_SPEED_MPS:g} m/s 的累计秒数（= 低速步数 × dt，dt=0.1 s）；"
+                     "组内取逐 episode 均值",
+    "steer_abs_mean": "|转向动作| 均值：baseline=PurePursuitIDMPolicy 归一化 steer∈[-1,1]；"
+                      "ckpt+lqr=LqrTracker 实测归一化 steer（同单位）；ckpt+exact=运动学执行、"
+                      "无 [steer,throttle] 动作概念 → NaN（N/A，不静默填 0）",
+    "throttle_mean": "油门动作均值（可用性口径同 steer_abs_mean）",
+    "action_ds_mean_m": "ckpt 路径实际下发的 |ds| 均值（m）：每 0.5 s 决策的 plan 首动作（= action_mu），"
+                        "exact/lqr 同口径；baseline 无 (ds,dθ) 概念 → NaN（N/A）",
+    "action_dtheta_abs_mean_rad": "ckpt 路径实际下发的 |dθ| 均值（rad；来源同 action_ds_mean_m）",
     "solid_line_crossing": "episode 内 ego.on_white/yellow_continuous_line 曾为 True（MetaDrive 该标志"
                            "只置位不复位，故仅 episode 级有效）",
     "speed_limit_violation": "episode 内任一步 v > 车道限速(m/s) 记为 True；CSV 另给 step_rate",
@@ -240,6 +261,31 @@ def _p95_abs(values: Iterable[float]) -> float:
     return float(np.percentile(np.abs(array), 95.0))
 
 
+def _speed_metrics(speeds: Sequence[float], dt: float) -> Dict[str, float]:
+    """逐 env step 速度 → 真均速 / 末步速度 / 低速步占比 / 蠕动秒数（纯函数，供单测覆盖）。
+
+    - 均值用 :func:`_finite_mean`（过滤非有限值）；低速判据 ``v < CRAWL_SPEED_MPS``
+      （与 trainer ``probe/low_speed_alert`` 的 speed<2 m/s 档同阈值）；
+    - 步数分母为全部 step（非有限速度不判低速，但仍计一步）；无 step → 全 NaN。
+    """
+    if not speeds:
+        return {
+            "mean_speed_mps": float("nan"),
+            "final_speed_mps": float("nan"),
+            "low_speed_step_ratio": float("nan"),
+            "crawl_seconds": float("nan"),
+        }
+    low_steps = sum(
+        1 for value in speeds if math.isfinite(float(value)) and float(value) < CRAWL_SPEED_MPS
+    )
+    return {
+        "mean_speed_mps": _finite_mean(speeds),
+        "final_speed_mps": float(speeds[-1]),
+        "low_speed_step_ratio": float(low_steps / len(speeds)),
+        "crawl_seconds": float(low_steps * dt),
+    }
+
+
 def _pool_samples(episodes: Sequence[Mapping[str, Any]], key: str) -> np.ndarray:
     arrays = [np.asarray(ep[key], dtype=np.float64) for ep in episodes if ep.get(key)]
     if not arrays:
@@ -304,6 +350,13 @@ def summarize(episodes: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "jerk_abs_p95": _p95_abs(jerk) if jerk.size else _per_episode_mean("jerk_abs_p95"),
         "speed_ratio_mean": speed_ratio_mean,
         "mean_speed_mps": _per_episode_mean("mean_speed_mps"),
+        "final_speed_mps": _per_episode_mean("final_speed_mps"),
+        "low_speed_step_ratio": _per_episode_mean("low_speed_step_ratio"),
+        "crawl_seconds": _per_episode_mean("crawl_seconds"),
+        "steer_abs_mean": _per_episode_mean("steer_abs_mean"),
+        "throttle_mean": _per_episode_mean("throttle_mean"),
+        "action_ds_mean_m": _per_episode_mean("action_ds_mean_m"),
+        "action_dtheta_abs_mean_rad": _per_episode_mean("action_dtheta_abs_mean_rad"),
         "mean_steps": _per_episode_mean("steps"),
         "mean_duration_s": _per_episode_mean("duration_s"),
         "terminations": dict(sorted(terminations.items())),
@@ -582,6 +635,9 @@ class _BaselineController:
             "steer": float(action[0]),
             "throttle": float(action[1]),
             "lead_gap_m": float(info.get("pp_lead_gap_m", -1.0)),
+            # 规则基线的动作 = (steer, throttle)：无 (ds,dθ) 概念 → N/A（不静默填 0）
+            "action_ds_m": float("nan"),
+            "action_dtheta_rad": float("nan"),
         }
 
     def params(self) -> Dict[str, Any]:
@@ -733,6 +789,8 @@ class _CkptController:
         self.tracker = None
         self._steps = 0
         self._action = [0.0, 0.0]
+        #: 最近一次策略决策实际下发的 ``(ds[m], dθ[rad])``（``plan[0] == action_mu``）
+        self._plan_action = np.zeros(2, dtype=np.float64)
         #: 逐 env step 的自车实测位姿（用于重建"上一策略步实测动作"，见 _measured_prev_action）
         self._pose_history: List[Tuple[float, float, float]] = []
 
@@ -743,6 +801,7 @@ class _CkptController:
         self.builder.reset()
         self._steps = 0
         self._action = [0.0, 0.0]
+        self._plan_action = np.zeros(2, dtype=np.float64)
         self._pose_history = []
         # §8.4：episode 起点没有上一动作（与 collect_expert/training pools 同口径）
         env.prev_policy_action = np.zeros(2, dtype=np.float64)
@@ -817,6 +876,8 @@ class _CkptController:
             mu = np.asarray(output["action_mu"].detach().cpu(), dtype=np.float64).reshape(-1)
             plan = np.asarray(output["plan"].detach().cpu(), dtype=np.float64).reshape(-1, 2)
             plan[0] = mu[:2]  # 执行动作与策略均值一致（确定性评测）
+            # 实际下发动作（供 action_ds/action_dtheta 指标；见 action_info）
+            self._plan_action = np.array(plan[0], dtype=np.float64, copy=True)
             if self.tracker_kind == "exact":
                 # 阶段 A/B：把 6 步预览插值成 30 点参考，逐步 apply（env.step 之后）
                 self.tracker.arm(env, actions=plan)
@@ -833,7 +894,28 @@ class _CkptController:
             self.tracker.apply(env)
 
     def action_info(self, env: Any) -> Dict[str, float]:
-        return {"steer": self._action[0], "throttle": self._action[1], "lead_gap_m": -1.0}
+        """本 env step 实际下发的动作（2026-09-26 修正：不再恒为 0）。
+
+        - ``action_ds_m`` / ``action_dtheta_rad``：每 0.5 s 决策下发的 ``(ds[m], dθ[rad])``
+          首动作（``plan[0] == action_mu``），exact/lqr 两个 tracker 同口径；
+        - ``steer`` / ``throttle``：仅 ``lqr`` tracker 有该概念（LqrTracker 每 env step 实测
+          ``[steer, throttle]``，归一化 [-1,1]，与 baseline 同单位）；``exact`` 是运动学执行，
+          无转向/油门动作 → NaN（N/A，不静默填 0）。
+        """
+        info: Dict[str, float] = {
+            "action_ds_m": float(self._plan_action[0]),
+            "action_dtheta_rad": float(self._plan_action[1]),
+            "lead_gap_m": -1.0,
+        }
+        if self.tracker_kind == "lqr":
+            tracker_info = getattr(self.tracker, "action_info", None) or {}
+            action = tracker_info.get("action") or [float("nan"), float("nan")]
+            info["steer"] = float(action[0])
+            info["throttle"] = float(action[1])
+        else:
+            info["steer"] = float("nan")
+            info["throttle"] = float("nan")
+        return info
 
 
 def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dict[str, Any]:
@@ -850,8 +932,11 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
     a_lat_samples: List[float] = []
     jerk_samples: List[float] = []
     speed_ratio_samples: List[float] = []
+    speed_samples: List[float] = []
     steer_abs_samples: List[float] = []
     throttle_samples: List[float] = []
+    action_ds_samples: List[float] = []
+    action_dtheta_samples: List[float] = []
     lead_gap_samples: List[float] = []
 
     prev_speed = float(ego.speed)
@@ -881,6 +966,7 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
         steps = step_index + 1
 
         speed = float(info.get("velocity", float(ego.speed)))
+        speed_samples.append(speed)
         theta = float(ego.heading_theta)
         delta_theta = _wrap_to_pi(theta - prev_theta)
         a_lon = (speed - prev_speed) / dt
@@ -918,6 +1004,8 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
         action_info = controller.action_info(env)
         steer_abs_samples.append(abs(float(action_info["steer"])))
         throttle_samples.append(float(action_info["throttle"]))
+        action_ds_samples.append(abs(float(action_info.get("action_ds_m", float("nan")))))
+        action_dtheta_samples.append(abs(float(action_info.get("action_dtheta_rad", float("nan")))))
         lead_gap = float(action_info["lead_gap_m"])
         if lead_gap >= 0.0:
             lead_gap_samples.append(lead_gap)
@@ -940,6 +1028,7 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
     a_lat_array = np.asarray(a_lat_samples, dtype=np.float64)
     jerk_array = np.asarray(jerk_samples, dtype=np.float64)
     speed_ratio_array = np.asarray(speed_ratio_samples, dtype=np.float64)
+    speed_metrics = _speed_metrics(speed_samples, dt)
     return {
         "id": int(getattr(spec, "id", -1)),
         "seed": int(getattr(spec, "seed", -1)),
@@ -963,7 +1052,10 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
         "steps": int(steps),
         "duration_s": float(time.time() - started_at),
         "min_ttc": float(min_ttc),
-        "mean_speed_mps": _finite_mean([float(info.get("velocity", 0.0))]),
+        "mean_speed_mps": speed_metrics["mean_speed_mps"],
+        "final_speed_mps": speed_metrics["final_speed_mps"],
+        "low_speed_step_ratio": speed_metrics["low_speed_step_ratio"],
+        "crawl_seconds": speed_metrics["crawl_seconds"],
         "a_lon_mean": _finite_mean(a_lon_array),
         "a_lon_abs_p95": _p95_abs(a_lon_array),
         "a_lat_mean": _finite_mean(a_lat_array),
@@ -976,6 +1068,8 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
         ),
         "steer_abs_mean": _finite_mean(steer_abs_samples),
         "throttle_mean": _finite_mean(throttle_samples),
+        "action_ds_mean_m": _finite_mean(action_ds_samples),
+        "action_dtheta_abs_mean_rad": _finite_mean(action_dtheta_samples),
         "lead_gap_mean_m": float(np.mean(lead_gap_samples)) if lead_gap_samples else -1.0,
         # 池化样本（聚合后由 _public_episode 剥离，不进 JSON/CSV）
         "_a_lon": a_lon_samples,
@@ -1012,6 +1106,9 @@ def _error_episode(spec: Any, task: Mapping[str, Any], exc: BaseException) -> Di
         "duration_s": 0.0,
         "min_ttc": float("nan"),
         "mean_speed_mps": float("nan"),
+        "final_speed_mps": float("nan"),
+        "low_speed_step_ratio": float("nan"),
+        "crawl_seconds": float("nan"),
         "a_lon_mean": float("nan"),
         "a_lon_abs_p95": float("nan"),
         "a_lat_mean": float("nan"),
@@ -1022,6 +1119,8 @@ def _error_episode(spec: Any, task: Mapping[str, Any], exc: BaseException) -> Di
         "speed_ratio_p95": float("nan"),
         "steer_abs_mean": float("nan"),
         "throttle_mean": float("nan"),
+        "action_ds_mean_m": float("nan"),
+        "action_dtheta_abs_mean_rad": float("nan"),
         "lead_gap_mean_m": -1.0,
         "_a_lon": [],
         "_a_lat": [],
@@ -1146,9 +1245,11 @@ CSV_FIELDS = (
     "id", "seed", "split", "difficulty", "primary", "geometry", "extra_geometry", "compound",
     "success", "collision", "off_road", "solid_line_crossing", "speed_limit_violation",
     "speed_limit_violation_step_rate", "termination", "route_completion", "max_route_completion",
-    "steps", "duration_s", "min_ttc", "mean_speed_mps",
+    "steps", "duration_s", "min_ttc", "mean_speed_mps", "final_speed_mps",
+    "low_speed_step_ratio", "crawl_seconds",
     "a_lon_mean", "a_lon_abs_p95", "a_lat_mean", "a_lat_abs_p95", "jerk_mean", "jerk_abs_p95",
-    "speed_ratio_mean", "speed_ratio_p95", "steer_abs_mean", "throttle_mean", "lead_gap_mean_m",
+    "speed_ratio_mean", "speed_ratio_p95", "steer_abs_mean", "throttle_mean",
+    "action_ds_mean_m", "action_dtheta_abs_mean_rad", "lead_gap_mean_m",
     "policy", "error",
 )
 
@@ -1174,7 +1275,7 @@ def _print_summary(report: Mapping[str, Any]) -> None:
     """打印 overall / by_primary / by_difficulty 简表 + 判定结论。"""
     header = (
         f"{'group':<22}{'n':>5}{'succ':>8}{'95% CI':>18}{'coll':>7}{'offrd':>7}"
-        f"{'ttc':>7}{'a_lat95':>9}{'spd':>7}{'pass':>7}"
+        f"{'ttc':>7}{'a_lat95':>9}{'spd':>7}{'crwls':>8}{'pass':>7}"
     )
     print("[eval_runner] " + header, flush=True)
 
@@ -1196,7 +1297,8 @@ def _print_summary(report: Mapping[str, Any]) -> None:
             f"{group.get('off_road_rate', float('nan')):>7.3f}"
             f"{group.get('min_ttc_mean', float('nan')):>7.2f}"
             f"{group.get('a_lat_abs_p95', float('nan')):>9.3f}"
-            f"{group.get('speed_ratio_mean', float('nan')):>7.3f}{pass_text:>7}",
+            f"{group.get('speed_ratio_mean', float('nan')):>7.3f}"
+            f"{group.get('crawl_seconds', float('nan')):>8.1f}{pass_text:>7}",
             flush=True,
         )
 

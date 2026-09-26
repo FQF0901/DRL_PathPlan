@@ -193,6 +193,55 @@ def test_summarize_rates_and_wilson() -> None:
     assert er.summarize([]) == {"n": 0}
 
 
+def test_speed_metrics_true_mean_final_and_crawl() -> None:
+    """``_speed_metrics``：真均速（非末步）、末步速度、v<2 m/s 步占比与累计秒数。"""
+    metrics = er._speed_metrics([10.0, 8.0, 1.0, 0.5, 4.0], 0.1)
+    assert metrics["mean_speed_mps"] == pytest.approx(4.7)       # (10+8+1+0.5+4)/5
+    assert metrics["final_speed_mps"] == pytest.approx(4.0)      # 末步（旧 mean_speed_mps 口径）
+    assert metrics["low_speed_step_ratio"] == pytest.approx(0.4)  # 1.0 与 0.5 两步
+    assert metrics["crawl_seconds"] == pytest.approx(0.2)         # 2 步 × 0.1 s
+    # 边界 = 2.0 m/s 不算 crawl（严格 <）
+    boundary = er._speed_metrics([2.0, 5.0], 0.1)
+    assert boundary["low_speed_step_ratio"] == 0.0
+    assert boundary["crawl_seconds"] == 0.0
+    # 空 / 非有限：全 NaN（不静默填 0）；NaN 速度不拉低均值、不判低速
+    empty = er._speed_metrics([], 0.1)
+    assert all(math.isnan(value) for value in empty.values())
+    with_nan = er._speed_metrics([float("nan"), 3.0], 0.1)
+    assert with_nan["mean_speed_mps"] == pytest.approx(3.0)
+    assert with_nan["final_speed_mps"] == pytest.approx(3.0)
+    assert with_nan["low_speed_step_ratio"] == 0.0
+
+
+def test_summarize_speed_crawl_and_action_metrics() -> None:
+    """overall 汇总：速度/crawl 取逐 episode 均值；NaN（ckpt+exact 的 N/A）被过滤。"""
+    episodes = [
+        {"mean_speed_mps": 4.0, "final_speed_mps": 6.0, "low_speed_step_ratio": 0.5,
+         "crawl_seconds": 10.0, "steer_abs_mean": 0.2, "throttle_mean": 0.3,
+         "action_ds_mean_m": 2.0, "action_dtheta_abs_mean_rad": 0.1},
+        {"mean_speed_mps": 6.0, "final_speed_mps": 2.0, "low_speed_step_ratio": 0.0,
+         "crawl_seconds": 0.0, "steer_abs_mean": float("nan"), "throttle_mean": float("nan"),
+         "action_ds_mean_m": 4.0, "action_dtheta_abs_mean_rad": 0.3},
+    ]
+    view = er.summarize(episodes)
+    assert view["mean_speed_mps"] == pytest.approx(5.0)
+    assert view["final_speed_mps"] == pytest.approx(4.0)
+    assert view["low_speed_step_ratio"] == pytest.approx(0.25)
+    assert view["crawl_seconds"] == pytest.approx(5.0)
+    assert view["action_ds_mean_m"] == pytest.approx(3.0)
+    assert view["action_dtheta_abs_mean_rad"] == pytest.approx(0.2)
+    # NaN（ckpt+exact 的 N/A）被过滤：混合组取有限值均值，而不是把 N/A 当 0
+    assert view["steer_abs_mean"] == pytest.approx(0.2)
+    assert view["throttle_mean"] == pytest.approx(0.3)
+    # 全为 NaN（整组 ckpt+exact）→ 整体 NaN，而不是 0
+    all_na = er.summarize([{
+        "steer_abs_mean": float("nan"), "throttle_mean": float("nan"),
+        "action_ds_mean_m": 3.0, "action_dtheta_abs_mean_rad": 0.2,
+    }])
+    assert math.isnan(all_na["steer_abs_mean"])
+    assert math.isnan(all_na["throttle_mean"])
+
+
 def test_evaluate_verdicts_against_frozen_baseline() -> None:
     """overall_success target = max(baseline-0.05, 0.70)；废弃缺参照时 passed=None。"""
     episodes = [_episode(i, "straight", True) for i in range(40)]

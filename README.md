@@ -142,9 +142,15 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 
 ### 3.1 已定位的核心问题
 
-- **P1 横向车道保持 / 场景集中失败（最高优先级）**：v1.2 把闭环 off-road 从 0.72 压到 0.52、success 0.26 → 0.38，
-  但失败高度集中在 **curve 0.00 / roundabout 0.00 / uturn 0.00 / tollgate 0.00**（难度：easy 0.72、medium 0.28、hard 0.07）。
-  下一步应先做这些场景的失败取证（是 WM 预瞄保真、跟踪器曲率跟随，还是 BC 在这些几何上的专家覆盖不足），再决定 DAgger/数据补强。
+- **P1 plan 缺乏车道锚点与偏差回收（已取证定性，最高优先级）**：四类 0% 场景（curve/roundabout/uturn/tollgate）的取证结论
+  （`docs/forensics-2026-09-26.md`）：**策略自己的 plan 用 ExactTracker 完美执行仍 17/17 失败，而同一 LqrTracker 换规则专家路径
+  → 6 arrive + 7 条 rc 0.72–0.98** → 瓶颈在 plan 本身。机理：① plan 锚在自车位姿、**无车道中心反馈**，失败前 1 s 横向偏移峰值
+  0.92 m（基线同场景 0.07 m），且从**直道爬行段**（0.8–2 m/s、10–20 s）就开始漂移；② **转向通道在大转角塌缩**
+  （`plan.dθ` vs 专家：corr 0.31–0.51、过原点斜率 0.14–0.27；|专家 dθ|≥0.2 的薄尾仅 0.3–1.4%、比值 ≈0.05；`ds` 通道正常 corr 0.88–0.96）；
+  ③ 单纯放大转向（×2/×4）无效。
+  排除项：tracker（跟随 e_y p95 0.46 m；实测曲率 R≈57–64 m 在其能力内）、数据量（四类行数与 straight 同级）、预瞄保真（四类 traj MAE 不比 straight 差）。
+  **修法待你批**：E2b 扰动增广（离线，≤1 h；判据 offline 强转段 plan/expert ≥0.6 + 闭环 ≥8/17）/ E3 DAgger-lite（治 crawl/OOD）。
+  次因：纵向 P-only 稳态差（v/ref 0.81）；tollgate 另有"过闸"缺口（oracle 同样在 rc≈0.53 撞 2 次）。
 - **P2 闭环执行链**：LQR 跟踪比 exact 执行差约 0.12 off-road（0.60 → 0.72）；跟踪器参考已修为 6 点预瞄（见 3.3），
   但增益未做干净标定（此前的扫描指标被"冲过终点后继续开"污染）。
 - **P3 critic 几乎无解释力**：`value/explained_var ≈ 0`（value_loss 6–33）→ 优势噪声大。已实现 critic 预热
@@ -194,6 +200,8 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | 数据管线瓶颈（GPU 18%、0.44 s/batch）| 训练慢、硬件闲置 | 一次性物化 + 宏 batch 1024（micro 精确累积）+ 线程放开 → **GPU 95%/97%** |
 | 物理 batch 1024 OOM（6 步 ST-GNN ≈32 MB/样本）| 无法直接大 batch | **精确梯度累积**（A micro 256 / B 512；等价性 ≤1e-4 实测）|
 | Stage B 阶段冻结前缀仍是 v1（`world_model.` 等）| "primary→specific" 冻结静默失效 | 改为 v2 前缀（`st_gnn./plan_head.…`）+ 可训练集合断言测试 |
+| 评测 `mean_speed_mps` 实为**末步速度**（`_finite_mean([单值])`）| 速度口径误读（3.844 vs 真值 **4.135**）| 真均值 + 新增 `final_speed_mps`（旧值逐条一致复现）+ `low_speed_step_ratio`/`crawl_seconds` |
+| ckpt 路径 `steer_abs_mean`/`throttle_mean` 恒 0 | 执行侧无从审计 | ckpt 记录实际下发 (ds,dθ)（mean\|ds\| 2.51 m、mean\|dθ\| 0.0071 rad）；lqr 记录 tracker 实测；exact 显式 N/A |
 
 ---
 
@@ -261,5 +269,7 @@ tools/venv-python tools/test.py --policy ckpt --ckpt runs/train/stage_b/final.pt
 | 冻结基线 | `runs/baseline_eval/val_reference.json`、`val_reference_by_primary.json` |
 | BC 数据 | `runs/bc_expert_full/`、`runs/bc_expert_2k/`（`report.json` 含过滤/配平统计）|
 | P0 测量 / 数据集统计 / 可行性分析 | `docs/p0-measurements.md`、`docs/dataset_stats.md`、`docs/feasibility-analysis.md` |
+| 场景级失败取证（只读，2026-09-26）| `docs/forensics-2026-09-26.md`（+ `tools/forensics_*.py`；原始证据 JSON 在 `runs/forensics/`）|
+| v1.2 IL 正式运行 | `runs/train/il_v2_10x10*/`（`il_report/il_report.md`）+ `runs/eval/il_v2_fixed_lqr50/` |
 
 > 依赖：MetaDrive 0.4.3、numpy<2、Python 3.10、torch 2.3（`.venv` 复用系统已装包）。

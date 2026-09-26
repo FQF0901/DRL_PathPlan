@@ -67,6 +67,98 @@ def num(value: Optional[float], nd: int = 4) -> str:
     return "缺失" if value is None else f"{value:.{nd}f}"
 
 
+def wilson_text(interval: Any) -> str:
+    if (
+        isinstance(interval, (list, tuple))
+        and len(interval) == 2
+        and all(isinstance(item, (int, float)) for item in interval)
+    ):
+        return f"[{interval[0]:.3f}, {interval[1]:.3f}]"
+    return "缺失"
+
+
+def closed_loop_section(eval_paths: List[str]) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """可选：把冻结集闭环评测单独列出（design-v1.2 §5.1 第 6 条「单独列」）。
+
+    读取 ``tools/test.sh`` 产物 ``<out>/<name>/metrics.json``（``--eval`` 可给目录或 json
+    路径，可重复）。重点显示速度真均值/末步速度/低速（crawl）指标与动作口径；
+    **不参与 IL 判定门**，缺失项显示「缺失」而不是默认通过。
+    """
+    lines: List[str] = ["### 闭环评测（单独列；不进 IL 判定门）", ""]
+    payload: List[Dict[str, Any]] = []
+    for raw in eval_paths:
+        metrics_path = os.path.join(raw, "metrics.json") if os.path.isdir(raw) else raw
+        if not os.path.exists(metrics_path):
+            lines.append(f"- `{raw}`：未找到 metrics.json（缺失）")
+            continue
+        try:
+            with open(metrics_path) as handle:
+                doc = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            lines.append(f"- `{raw}`：metrics.json 读取失败（{type(exc).__name__}: {exc}）")
+            continue
+        meta: Dict[str, Any] = doc.get("meta") or {}
+        overall: Dict[str, Any] = doc.get("overall") or {}
+        verdict: Dict[str, Any] = doc.get("verdict") or {}
+        name = os.path.basename(os.path.dirname(os.path.abspath(metrics_path)))
+        rows = [
+            ["n / n_error", f"{overall.get('n', '缺失')} / {overall.get('n_error', '缺失')}"],
+            ["success（Wilson 95%）",
+             f"{num(overall.get('success_rate'))} {wilson_text(overall.get('success_wilson'))}"],
+            ["collision / off_road",
+             f"{num(overall.get('collision_rate'))} / {num(overall.get('off_road_rate'))}"],
+            ["speed_ratio_mean", num(overall.get("speed_ratio_mean"))],
+            ["mean_speed_mps（逐 step 真均值）", num(overall.get("mean_speed_mps"))],
+            ["final_speed_mps（末步；旧 mean_speed_mps 口径）", num(overall.get("final_speed_mps"))],
+            ["low_speed_step_ratio（v < 2 m/s 步占比）", num(overall.get("low_speed_step_ratio"))],
+            ["crawl_seconds（v < 2 m/s 累计秒数）", num(overall.get("crawl_seconds"))],
+            ["steer_abs_mean / throttle_mean",
+             f"{num(overall.get('steer_abs_mean'))} / {num(overall.get('throttle_mean'))}"],
+            ["action_ds_mean_m / action_dtheta_abs_mean_rad",
+             f"{num(overall.get('action_ds_mean_m'))} / {num(overall.get('action_dtheta_abs_mean_rad'))}"],
+            ["verdict",
+             f"all_passed={verdict.get('all_passed', '缺失')}（judged={verdict.get('n_checks_judged', '?')}）"],
+        ]
+        lines.append(
+            f"**{name}**（policy={meta.get('policy', '?')}, tracker={meta.get('tracker') or '—'}, "
+            f"ckpt={meta.get('ckpt') or '—'}）"
+        )
+        lines += table(rows, ["metric", "value"])
+        if "final_speed_mps" not in overall:
+            lines.append("")
+            lines.append(
+                "> 旧产物（2026-09-26 指标修复前）：`mean_speed_mps` 实为末步速度均值；"
+                "`final_speed_mps`/crawl/动作字段缺失（需用修复后的 `tools/test.sh` 重跑）。"
+            )
+        if meta.get("policy") == "ckpt" and str(meta.get("tracker") or "exact") == "exact":
+            lines.append("")
+            lines.append(
+                "> ckpt+exact 为运动学执行：无 `[steer, throttle]` 动作概念，`steer_abs_mean`/"
+                "`throttle_mean` = N/A（NaN）；动作幅度看 `action_ds_mean_m`/"
+                "`action_dtheta_abs_mean_rad`（m / rad）。"
+            )
+        lines.append("")
+        payload.append({
+            "name": name,
+            "metrics_path": metrics_path,
+            "policy": meta.get("policy"),
+            "tracker": meta.get("tracker"),
+            "ckpt": meta.get("ckpt"),
+            "overall": {
+                key: overall.get(key)
+                for key in (
+                    "n", "n_error", "success_rate", "success_wilson", "collision_rate",
+                    "off_road_rate", "speed_ratio_mean", "mean_speed_mps", "final_speed_mps",
+                    "low_speed_step_ratio", "crawl_seconds", "steer_abs_mean", "throttle_mean",
+                    "action_ds_mean_m", "action_dtheta_abs_mean_rad",
+                )
+            },
+            "verdict": {"all_passed": verdict.get("all_passed"),
+                        "n_checks_judged": verdict.get("n_checks_judged")},
+        })
+    return lines, payload
+
+
 # ---------------------------------------------------------------- 各段落
 def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dict[str, Any]]:
     per_h = defaultdict(dict)  # k -> metric -> tag series
@@ -257,6 +349,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="IL report (design-v1.2 §5.1)")
     ap.add_argument("--run", required=True, help="Stage B 运行目录（含 monitor/metrics.csv）")
     ap.add_argument("--stage-a", default=None, help="可选：Stage A 运行目录")
+    ap.add_argument("--eval", action="append", default=None,
+                    help="可选：闭环评测目录（含 metrics.json）或 json 路径，可重复；"
+                         "仅单独列出（速度/crawl/动作口径），不进 IL 判定门")
     ap.add_argument("--out", default=None, help="输出目录（默认 <run>/il_report）")
     args = ap.parse_args()
 
@@ -284,8 +379,14 @@ def main() -> int:
         a_lines, payload["stage_a"] = stage_a_section(series_a)
         lines += a_lines
 
+    if args.eval:
+        lines.append("")
+        eval_lines, payload["closed_loop"] = closed_loop_section(list(args.eval))
+        lines += eval_lines
+
     lines += ["", "## 备注", "",
-              "- 闭环 KPI（50 条 LQR slice）由 `tools/test.sh` 单独评测，不在本报告内；",
+              "- 闭环 KPI（50 条 LQR slice）由 `tools/test.sh` 单独评测；用本脚本 "
+              "`--eval <runs/eval/<name>>` 可单独列出（速度/crawl/动作口径），不进 IL 判定门；",
               "- 判定门口径见 `docs/design-v1.2.md` §5.1；缺失项显示为「缺失」而不是默认通过。",
               f"- 生成时间：{__import__('datetime').datetime.now().isoformat(timespec='seconds')}"]
 

@@ -200,7 +200,8 @@ gate 熵 0.0038；专家混合集中在 expert2 0.297 / expert6 0.232。`mu_ds` 
 | v1 Stage-C v2（300 updates） | 0.18 | 0.14 | 0.68 | 0.453 | 0.631 |
 | **v1.2 IL（本次）** | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
 
-95% CI [0.259, 0.518]；n=50、errors=0、mean_speed 3.84 m/s、min-TTC 7.37 s、a_lat95 2.15。
+95% CI [0.259, 0.518]；n=50、errors=0；**真均速 4.135 m/s**（旧 `mean_speed_mps`=3.844 实为**末步速度**，已修）、min-TTC 7.37 s、
+a_lat95 2.15；**crawl：9.85% 步 < 2 m/s、4.48 s/episode**（22/50 episode 有 crawl）。
 分主标签：ramp_out 0.80、merge 0.60、split 0.60、straight 0.60、intersection 0.50、t_intersection 0.50、
 ramp_in 0.40、**curve 0.00 / roundabout 0.00 / uturn 0.00 / tollgate 0.00**；难度 easy 0.72 / medium 0.28 / hard 0.07。
 （修正版 ckpt 复评与修前**逐位一致** → 度量修正未改动模型。）
@@ -213,8 +214,9 @@ ramp_in 0.40、**curve 0.00 / roundabout 0.00 / uturn 0.00 / tollgate 0.00**；�
 | 数据管线瓶颈（GPU 18%、0.44 s/batch）| **已修**（物化 + 宏 batch + 线程放开 → GPU 95%/97%）|
 | 物理 batch 1024 OOM（6 步 ST-GNN ≈32 MB/样本）| 用**精确梯度累积**（已验证 ≤1e-4 等价）|
 | router 负载集中（8 专家中 2 个占 53%，其余 <0.12）| **记录**：软目标过平滑（top-2 gap p50 = 0.017）→ 待定夺（降 τ / 减边界平滑）|
-| 弯道 / 环岛 / 掉头 / 收费站成功率 0% | **记录**：下一步主攻方向 |
-| speed_ratio 0.407（基线 0.734，偏慢）| **记录** |
+| 弯道 / 环岛 / 掉头 / 收费站成功率 0% | **已取证定性**（`docs/forensics-2026-09-26.md`）：瓶颈在 **plan 缺车道锚点与偏差回收**（策略 plan 用 ExactTracker 完美执行仍 17/17 失败；换专家路径则 6 arrive + 7 条 rc≥0.72）；机理 = 爬行段横向漂移 + 大转角转向通道塌缩 |
+| speed_ratio 0.407（基线 0.734，偏慢）| **记录**；真均速 4.135 m/s、crawl 9.85% 步 < 2 m/s（纵向 P-only v/ref 0.81 为次因）|
+| 评测 `mean_speed_mps` 实为末步速度 / ckpt `steer,throttle` 恒 0 | **已修**（真均值 + `final_speed_mps`；ckpt 记录实际 (ds,dθ)，exact 显式 N/A；新增 crawl 指标）|
 
 ### 8.5 与 v1 的可比性说明
 
