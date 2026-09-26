@@ -5,6 +5,8 @@ __pycache__
 .cache/
 .venv/
 data/
+datasets/
+checkpoints/
 runs/
 *.pkl
 env/specs/*.json
