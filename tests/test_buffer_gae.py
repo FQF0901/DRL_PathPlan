@@ -171,7 +171,11 @@ def test_episode_slices_and_to_arrays():
 # --------------------------------------------------------------------------- #
 
 def test_build_history_sampling_warmup_and_valid_mask():
-    """interval=5：index=11 → 采样帧 step∈{0,5,10}，预热补 3 帧且 hist_valid 标记。"""
+    """interval=5：index=11 → 网格帧 step∈{0,5,10}，缺帧（step<0）valid=0 且特征全零。
+
+    v2 变更：不再"复制最旧采样帧"补位（那会让下游误把复制帧当真历史）；缺帧统一
+    零填充 + ``hist_valid=0`` + ``mask=0``，由 frames 精确查表保证时间均匀。
+    """
     buffer = RolloutBuffer(12, channels=_obs_template(), history_frames=6, history_interval=5)
     for step in range(12):
         _add(buffer, step, step=step)
@@ -183,8 +187,11 @@ def test_build_history_sampling_warmup_and_valid_mask():
     np.testing.assert_allclose(history["od_hist"][-1], buffer.obs["od"][10])
     np.testing.assert_allclose(history["od_hist"][-2], buffer.obs["od"][5])
     np.testing.assert_allclose(history["od_hist"][-3], buffer.obs["od"][0])
-    # 预热槽复制最旧的采样帧（index 0）
-    np.testing.assert_allclose(history["od_hist"][0], buffer.obs["od"][0])
+    np.testing.assert_allclose(history["od_hist_mask"][-3:], 1.0)
+    # 缺帧（step -15/-10/-5）零填充：特征全 0、mask 全 0、frame_index=-1
+    np.testing.assert_allclose(history["od_hist"][:3], 0.0)
+    np.testing.assert_allclose(history["od_hist_mask"][:3], 0.0)
+    assert history["frame_index_hist"].tolist() == [-1, -1, -1, 0, 5, 10]
 
 
 def test_build_history_batch_and_episode_boundary():

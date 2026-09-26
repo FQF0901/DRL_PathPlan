@@ -1,19 +1,22 @@
-"""Rollout 缓冲（P2 契约 §4）：**按帧存储** + 历史窗口在线重建 + GAE(λ)。
+"""Rollout 缓冲（P2 契约 §4）：**按帧存储** + 历史窗口精确查表重建 + GAE(λ)。
 
 RAM 关键设计（契约明确要求）
----------------------------
-**绝不缓存 6 帧堆叠**。每帧只存当前帧通道与掩码 + 该帧 ego 位姿，历史窗口在
-``build_history`` 里按需重建（与 ``env/obs/memory.FrameMemory`` 完全同口径：
-每 ``interval`` 个 env step 采一帧、按 SE(2) 对齐到目标帧、预热期复制最旧真实帧
-并把 ``hist_valid`` 置 0）。单帧 ≈ 323 个 float32 ≈ 1.3 KB；若直接存 od/ld 历史堆叠
-要多出 ``6×16×(9+7)=1536`` 个 float（≈6 KB/帧，约 4.8×），万级 rollout 会显著吃掉
-16GB 内存预算。
+--------------------------
+**绝不缓存 6 帧堆叠**。每帧只存当前帧通道与掩码 + 槽位级伴随数组 + 该帧 ego 位姿，历史窗口在
+``build_history`` 里按需重建（与 ``env/obs/memory.FrameMemory`` 同口径：每 ``interval`` 个
+env step 采一帧、按 SE(2) 对齐到目标帧、窗口锚到 stride 网格、缺帧 ``hist_valid=0``）。
+v2 起窗口由 ``pipeline.frames.FrameLookup`` 做 ``(episode, step)`` **精确查表**（不再按行位置
+取"最近的 interval 倍数帧"再补最旧帧），并携带 ``od_id``/``od_presence`` 伴随历史；
+slot 身份由 OD 通道固定（槽位 = track id，见 ``env/obs/od.py``）。
+
+单帧 ≈ 323 个 float32（+2×16 伴随）≈ 1.4 KB；若直接存 od/ld 历史堆叠要多出
+``6×16×(9+7)=1536`` 个 float（≈6 KB/帧，约 4.8×），万级 rollout 会显著吃掉 16GB 内存预算。
 
 接口
 ----
 - :meth:`RolloutBuffer.add_step`：逐帧入库（env-step 粒度，0.1 s）；
 - :meth:`RolloutBuffer.build_history`：给定帧下标批量重建历史窗口
-  （``<ch>_hist (B,6,N,F)`` / ``<ch>_hist_mask (B,6,N)`` / ``hist_valid (B,6)``）；
+  （``<ch>_hist (B,6,N,F)`` / ``<ch>_hist_mask (B,6,N)`` / ``od_id_hist`` / ``hist_valid``）；
 - :meth:`RolloutBuffer.compute_gae`：GAE(λ) 优势/回报（按 episode 切断，终局不 bootstrap，
   截断处按 ``truncation_bootstrap`` 处理）；
 - :meth:`RolloutBuffer.episode_slices`：按 episode 的连续区间（PPO 分段用）。
@@ -25,19 +28,38 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
+from pipeline.frames import FrameLookup
+
 __all__ = ["RolloutBuffer", "DEFAULT_CHANNELS"]
 
+
+def _others_dim() -> int:
+    """others 通道特征维（nav 11 + speed_limit 1 + signal 4 + road_class K）。"""
+    try:
+        from env.obs.others import OTHERS_HEAD_DIM, road_class_labels
+
+        return int(OTHERS_HEAD_DIM) + len(road_class_labels())
+    except Exception:  # noqa: BLE001 - 极端环境（缺 taxonomy）下退回默认 12 类
+        return 28
+
+
 #: 与 ``env/obs/builder.ObservationBuilder`` 默认输出一致的通道形状（含槽位维）：
-#: ego(1,8) / od(16,9) / ld(16,7) / nav(1,11) / signal(1,4)。
+#: ego(1,8) / od(16,9) / ld(16,7) / nav(1,11) / signal(1,4) / others(1,28)。
 DEFAULT_CHANNELS: dict[str, tuple[int, ...]] = {
     "ego": (1, 8),
     "od": (16, 9),
     "ld": (16, 7),
     "nav": (1, 11),
     "signal": (1, 4),
+    "others": (1, _others_dim()),
 }
-#: 默认重建历史的通道（与 ``config/env.yaml`` 的 memory.channels 一致）
-DEFAULT_HISTORY_CHANNELS: tuple[str, ...] = ("od", "ld")
+#: 默认重建历史的通道（与 ``config/env.yaml`` / FrameMemory 一致）
+DEFAULT_HISTORY_CHANNELS: tuple[str, ...] = ("ego", "others", "od", "ld")
+#: OD 槽位级伴随数组（dtype, 缺省填充值）：身份 / 本帧观测标志
+DEFAULT_COMPANIONS: dict[str, tuple[Any, Any]] = {
+    "od_id": (np.int64, -1),
+    "od_presence": (np.float32, 0.0),
+}
 
 
 def _frame_pose(env: Any) -> np.ndarray:
@@ -48,23 +70,6 @@ def _frame_pose(env: Any) -> np.ndarray:
         return np.array([position[0], position[1], float(ego.heading_theta)], dtype=np.float32)
     except Exception:  # noqa: BLE001 - 缓冲不应因观测失败而中断
         return np.zeros(3, dtype=np.float32)
-
-
-def _alignments_for(channels: Sequence[str]) -> dict:
-    """按通道取 SE(2) 对齐规则（惰性导入，避免缓冲模块把 MetaDrive 拉进导入链）。"""
-    from env.obs.base import FrameAlignment
-    from env.obs.ld import LDChannel
-    from env.obs.nav import NavChannel
-    from env.obs.od import ODChannel
-
-    known = {
-        "od": ODChannel.alignment,
-        "ld": LDChannel.alignment,
-        "nav": NavChannel.alignment,
-        "ego": FrameAlignment(),
-        "signal": FrameAlignment(),
-    }
-    return {name: known.get(name, FrameAlignment()) for name in channels}
 
 
 class RolloutBuffer:
@@ -85,7 +90,7 @@ class RolloutBuffer:
             channels: ``{通道名: 槽位形状}``；``None`` = :data:`DEFAULT_CHANNELS`。
             history_frames: 历史窗口帧数（6 帧 @0.5 s）。
             history_interval: 采样间隔（env-step 数，5 = 0.5 s）。
-            history_channels: 需要重建历史的通道（默认 od/ld，与 builder 一致）。
+            history_channels: 需要重建历史的通道（默认 ego/others/od/ld，与 builder 一致）。
         """
         if int(capacity) < 1:
             raise ValueError(f"capacity 必须 >= 1，收到 {capacity}")
@@ -104,6 +109,12 @@ class RolloutBuffer:
             name: np.zeros((self.capacity, ) + shape[:-1], dtype=np.float32)
             for name, shape in self.channels.items()
         }
+        #: 槽位级伴随数组（OD 身份/存在性）；仅在 channels 含 od 时启用
+        od_slots = self.channels.get("od", (0, ))[0]
+        self.companions: dict[str, np.ndarray] = {}
+        if od_slots:
+            for name, (dtype, fill) in DEFAULT_COMPANIONS.items():
+                self.companions[name] = np.full((self.capacity, int(od_slots)), fill, dtype=dtype)
         self.pose = np.zeros((self.capacity, 3), dtype=np.float32)
         self.action = np.zeros((self.capacity, 2), dtype=np.float32)
         self.logprob = np.zeros(self.capacity, dtype=np.float32)
@@ -114,7 +125,8 @@ class RolloutBuffer:
         self.episode = np.zeros(self.capacity, dtype=np.int32)
         self.step_index = np.zeros(self.capacity, dtype=np.int32)
         self._len = 0
-        self._alignments: Optional[dict] = None
+        self._lookup: Optional[FrameLookup] = None
+        self._lookup_len = -1
 
     # ------------------------------------------------------------------ 基本信息
     def __len__(self) -> int:
@@ -127,6 +139,11 @@ class RolloutBuffer:
     def clear(self) -> None:
         """清空（不释放底层数组）。"""
         self._len = 0
+        self._invalidate_lookup()
+
+    def _invalidate_lookup(self) -> None:
+        self._lookup = None
+        self._lookup_len = -1
 
     # ------------------------------------------------------------------ 入库
     def add_step(
@@ -144,11 +161,11 @@ class RolloutBuffer:
         episode: Optional[int] = None,
         step: Optional[int] = None,
     ) -> int:
-        """写入一帧（当前帧通道 + 掩码 + 位姿 + 动作/回报等元信息），返回帧下标。
+        """写入一帧（当前帧通道 + 掩码 + 伴随数组 + 位姿 + 动作/回报等元信息），返回帧下标。
 
-        ``obs`` 只取**当前帧**通道（``ego/od/ld/nav/signal`` 与 ``*_mask``），
-        ``*_hist`` 之类的键被忽略。``episode``/``step`` 缺省时按"上一帧终局则新
-        episode、步号自增"自动维护，足以还原 FrameMemory 的采样节奏。
+        ``obs`` 只取**当前帧**通道（``ego/od/ld/nav/signal/others`` 与 ``*_mask``）与伴随数组
+        （``od_id``/``od_presence``），``*_hist`` 之类的键被忽略。``episode``/``step`` 缺省时按
+        "上一帧终局则新 episode、步号自增"自动维护。
         """
         if self._len >= self.capacity:
             raise BufferError(f"RolloutBuffer 已满（capacity={self.capacity}）")
@@ -160,6 +177,18 @@ class RolloutBuffer:
             self.obs[name][index] = self._frame_channel(obs, name, shape)
             mask = obs.get(f"{name}_mask")
             self.obs_mask[name][index] = self._frame_mask(mask, shape[:-1], name)
+        for name in self.companions:
+            fill = DEFAULT_COMPANIONS[name][1]
+            value_array = obs.get(name)
+            if value_array is None:
+                self.companions[name][index] = fill
+            else:
+                arr = np.asarray(value_array)
+                if arr.shape != self.companions[name].shape[1:]:
+                    raise ValueError(
+                        f"伴随数组 {name} 期望 shape={self.companions[name].shape[1:]}，收到 {arr.shape}"
+                    )
+                self.companions[name][index] = arr
 
         resolved_pose = pose if pose is not None else (_frame_pose(env) if env is not None else None)
         self.pose[index] = np.zeros(3, dtype=np.float32) if resolved_pose is None else np.asarray(
@@ -175,6 +204,7 @@ class RolloutBuffer:
         self.episode[index] = episode_id
         self.step_index[index] = step_id
         self._len += 1
+        self._invalidate_lookup()
         return index
 
     #: 别名（语义更直白）
@@ -216,6 +246,26 @@ class RolloutBuffer:
         return arr
 
     # ------------------------------------------------------------------ 历史重建
+    def _frame_lookup(self) -> FrameLookup:
+        """按需构建精确查表的索引（数据网格 = 逐 env step → stride=1）。"""
+        if self._lookup is not None and self._lookup_len == self._len:
+            return self._lookup
+        features = {name: self.obs[name][: self._len] for name in self.history_channels if name in self.obs}
+        masks = {name: self.obs_mask[name][: self._len] for name in features}
+        companions = {key: value[: self._len] for key, value in self.companions.items()} if "od" in features else {}
+        self._lookup = FrameLookup(
+            self.episode[: self._len],
+            self.step_index[: self._len],
+            pose=self.pose[: self._len],
+            features=features,
+            masks=masks,
+            companions=companions,
+            stride=1,
+            check=True,
+        )
+        self._lookup_len = self._len
+        return self._lookup
+
     def build_history(
         self,
         indices: Any,
@@ -224,7 +274,11 @@ class RolloutBuffer:
         interval: Optional[int] = None,
         current_pose: Optional[Sequence[float]] = None,
     ) -> dict[str, np.ndarray]:
-        """在线重建指定帧的历史窗口（与 ``FrameMemory.stack`` 同口径）。
+        """在线重建指定帧的历史窗口（``pipeline.frames`` 精确查表，与 FrameMemory 同口径）。
+
+        窗口 = 以 ``floor(step/interval)*interval`` 为锚的 ``frames`` 个 stride 网格帧（旧→新）；
+        ``hist_valid``/``<ch>_hist_mask`` 对缺帧为 0（buffer 逐 step 记录，缺帧只可能出现在
+        episode 头部）。
 
         Args:
             indices: 帧下标（int 或序列）。
@@ -232,69 +286,51 @@ class RolloutBuffer:
             current_pose: 对齐目标位姿；``None`` = 用各帧自身位姿（即"以该帧为当前帧"）。
 
         Returns:
-            ``{"<ch>_hist": (B,F,N,Dim), "<ch>_hist_mask": (B,F,N), "hist_valid": (B,F)}``；
-            标量 ``indices`` 时去掉 batch 维。
+            ``{"<ch>_hist": (B,F,N,Dim), "<ch>_hist_mask": (B,F,N), "od_id_hist": (B,F,N),
+            "hist_valid": (B,F)}``；标量 ``indices`` 时去掉 batch 维。
         """
         frames = self.history_frames if frames is None else int(frames)
         interval = self.history_interval if interval is None else int(interval)
         if frames < 1 or interval < 1:
             raise ValueError("frames / interval 必须 >= 1")
-        if self._alignments is None:
-            self._alignments = _alignments_for(self.history_channels)
         batched = np.ndim(indices) > 0
         index_array = np.atleast_1d(np.asarray(indices, dtype=np.int64))
-        out: dict[str, np.ndarray] = {}
-        for name in self.history_channels:
-            shape = self.channels.get(name)
-            if shape is None:
-                raise KeyError(f"history_channels 含未知通道 {name!r}")
-            out[f"{name}_hist"] = np.zeros((len(index_array), frames) + shape, dtype=np.float32)
-            out[f"{name}_hist_mask"] = np.zeros((len(index_array), frames) + shape[:-1], dtype=np.float32)
-        out["hist_valid"] = np.zeros((len(index_array), frames), dtype=np.float32)
-
-        for batch_index, frame_index in enumerate(index_array):
+        lookup = self._frame_lookup()
+        out: Optional[dict[str, np.ndarray]] = None
+        for position, frame_index in enumerate(index_array):
             if not 0 <= frame_index < self._len:
                 raise IndexError(f"帧下标越界：{frame_index}（当前 {self._len} 帧）")
-            real = self._sample_frames(int(frame_index), frames, interval)
-            if not real:
-                continue
-            padded = [real[0]] * (frames - len(real)) + real
-            out["hist_valid"][batch_index, frames - len(real):] = 1.0
             target_pose = (
-                np.asarray(current_pose, dtype=np.float32).reshape(3) if current_pose is not None
-                else self.pose[frame_index]
+                np.asarray(current_pose, dtype=np.float32).reshape(3) if current_pose is not None else None
             )
-            for slot, source in enumerate(padded):
-                source_pose = self.pose[source]
-                delta_theta = float(target_pose[2] - source_pose[2])
-                delta_xy = target_pose[:2] - source_pose[:2]
-                for name, alignment in self._alignments.items():
-                    out[f"{name}_hist"][batch_index, slot] = _se2_align(
-                        self.obs[name][source],
-                        alignment=alignment,
-                        delta_theta=delta_theta,
-                        delta_xy=delta_xy,
-                        current_theta=float(target_pose[2]),
-                    )
-                    out[f"{name}_hist_mask"][batch_index, slot] = self.obs_mask[name][source]
+            window = lookup.build_history(
+                int(self.episode[frame_index]),
+                int(self.step_index[frame_index]),
+                stride=interval,
+                k=frames,
+                target_pose=target_pose,
+            )
+            if out is None:
+                out = {key: np.zeros((len(index_array), ) + value.shape, dtype=value.dtype) for key, value in window.items()}
+            for key, value in window.items():
+                out[key][position] = value
+        if out is None:  # 空输入：返回空 batch（保持键集合与正常路径一致）
+            out = {
+                f"{name}_hist": np.zeros((0, frames) + self.channels[name], dtype=np.float32)
+                for name in self.history_channels
+                if name in self.channels
+            }
+            out.update(
+                {
+                    f"{name}_hist_mask": np.zeros((0, frames) + self.channels[name][:-1], dtype=np.float32)
+                    for name in self.history_channels
+                    if name in self.channels
+                }
+            )
+            out["hist_valid"] = np.zeros((0, frames), dtype=np.float32)
         if not batched:
             return {key: value[0] for key, value in out.items()}
         return out
-
-    def _sample_frames(self, index: int, frames: int, interval: int) -> list:
-        """取 ``index``（含）之前同 episode 的最近 ``frames`` 个采样帧（旧 → 新）。"""
-        episode_id = int(self.episode[index])
-        start = index
-        while start > 0 and int(self.episode[start - 1]) == episode_id:
-            start -= 1
-        sampled: list = []
-        cursor = index
-        while cursor >= start and len(sampled) < frames:
-            if int(self.step_index[cursor]) % interval == 0:
-                sampled.append(cursor)
-            cursor -= 1
-        sampled.reverse()
-        return sampled
 
     # ------------------------------------------------------------------ GAE
     def compute_gae(
@@ -355,6 +391,7 @@ class RolloutBuffer:
         data = {
             **{f"obs.{name}": value[: self._len] for name, value in self.obs.items()},
             **{f"mask.{name}": value[: self._len] for name, value in self.obs_mask.items()},
+            **{f"companion.{name}": value[: self._len] for name, value in self.companions.items()},
             "pose": self.pose[: self._len],
             "action": self.action[: self._len],
             "logprob": self.logprob[: self._len],
@@ -368,16 +405,3 @@ class RolloutBuffer:
         if copy:
             return {key: value.copy() for key, value in data.items()}
         return data
-
-
-def _se2_align(features: np.ndarray, *, alignment: Any, delta_theta: float, delta_xy: np.ndarray, current_theta: float):
-    """``env.obs.base.se2_align`` 的惰性包装（避免模块级导入 MetaDrive 依赖链）。"""
-    from env.obs.base import se2_align
-
-    return se2_align(
-        features,
-        alignment=alignment,
-        delta_theta=delta_theta,
-        delta_xy=delta_xy,
-        current_theta=current_theta,
-    )

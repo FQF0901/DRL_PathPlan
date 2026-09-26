@@ -33,16 +33,23 @@ MetaDrive 场景（spec JSON）
    └─ 评测时：env/tracking.py 的 ExactTracker / LqrTracker 跟踪 plan 预瞄（插值成 30 点 @10 Hz）
 ```
 
-**观测通道**（`env/obs/`，全部可插拔注册）：
+**观测通道**（`env/obs/`，全部可插拔注册；**schema v2，2026-09-26**）：
 
 | 通道 | 形状 | 说明 |
 | --- | --- | --- |
 | `ego` | (1, 8) | 自车运动学；**维度 6:8 承载上一策略步 `(ds,dθ)`**（采集/评测注入，见 §4 已修 bug）|
-| `od` | (16, 9) | 周围车辆，盒式 scope（前 100 / 后 50 / 左 25 / 右 25 m），TTC 排序 top-16，零填充 + mask |
+| `od` | (16, 9) | 周围车辆，盒式 scope（**前 150** / 后 50 / 左 25 / 右 25 m），**固定槽位 = track id**（不再逐帧按 TTC 重排），零填充 + mask |
+| `od_id` / `od_presence` | (16,) int64 / (16,) | 槽位身份（-1=空槽，episode 内稳定）/ 本帧观测标志（0=出盒未释放，特征陈旧）；`od_mask=1` 只表示"槽位本帧有效" |
 | `ld` | (16, 7) | 车道线点（同 scope） |
-| `nav` | (1, 11) | 路线导航（相对坐标 + route_completion 等） |
-| `signal` | (1, 4) | 本场景无信号灯，预留 |
-| `od_hist` / `ld_hist` | (6, 16, F) | 6 帧历史 @0.5 s，**对齐到当前自车系（SE(2) 变换）**；含 `hist_valid(6)` 门控（episode 起点不足 6 帧时置 0） |
+| `nav` | (1, 11) | 路线导航（相对坐标 + route_completion 等）；兼容保留 |
+| `signal` | (1, 4) | 本场景无信号灯，预留；兼容保留 |
+| `others` | (1, 28) | **规范上下文输入** = nav(11) + speed_limit(1, 归一化 [0,1]，分母 30 m/s) + signal(4) + road_class one-hot(12, taxonomy.GEOMETRY_LABELS 顺序) |
+| `*_hist` | (6, …) | 6 帧历史 @0.5 s，对齐到当前自车系（SE(2)）；`ego_hist(6,1,8)` / `others_hist(6,1,28)` / `od_hist(6,16,9)` / `od_id_hist(6,16)` / `od_presence_hist(6,16)` / `ld_hist(6,16,7)` + masks + `hist_valid(6)` |
+
+> **v2 与旧版差异**：scope 前向由旧的 **100 m 扩到 150 m**（记忆库要预测 3 s 未来，高速 ~30 m/s 需 ~90 m 前视；
+> 后/侧向不变）；OD 槽位身份稳定（旧实现逐帧重排导致实测 12.5%/步 的槽位换车）；历史按 `(episode_id, step−5j)`
+> **精确查表**（旧实现按行位置重建，16.8% 窗口时间不均匀、最大 3 s 洞）；`hist_valid` 由真实帧决定
+> （episode 头部补位帧不再伪装有效）。schema 清单见 `env/obs/schema.py` 与 `expert_bc.meta.json::schema`。
 
 ### 1.2 网络（`net/`）
 
@@ -142,8 +149,8 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
   （ds > v·0.5，在缓慢加速），但恢复增益小；`probe/low_speed_alert` 每次 update 报警。
 - **P5 仿真非确定性**：少数脚本事件场景（cut-in 等）同种子 run-to-run 有微小差异（排除 PYTHONHASHSEED →
   MetaDrive 内部线程/时钟时序）→ **事件类 KPI 有噪声**，Gate 4 需记录；候选修复：事件脚本改纯步数驱动。
-- **P6 观测/历史设计未消融**：盒式 scope（前100/后50/左25/右25）、top-16、6 帧历史、`hist_valid` 门控、
-  `prev_action` 注入——均为设计决策，未做消融实验。
+- **P6 观测/历史设计未消融**：盒式 scope（v2：**前150**/后50/左25/右25；旧版前 100 已弃用）、top-16、6 帧历史、
+  固定槽位 = track id、`hist_valid` 门控、`prev_action` 注入——均为设计决策，未做消融实验。
 - **P7 Stage C 的 WM 解冻是"记账"**：PPO loss 目前不消费 WM 输出，解冻只让参数回到优化器（为后续 WM 辅助
   损失预留）→ 当前 Stage C 对世界模型没有直接梯度。
 - **P8 评测样本量**：10 条协议切片噪声大（n=10，Wilson CI 宽），50 条 slice 更可信。

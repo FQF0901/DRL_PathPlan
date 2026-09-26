@@ -17,7 +17,7 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 MODULES = [
-    "net.encoders", "net.temporal", "net.spatial", "net.moe", "net.world_model",
+    "net.encoders", "net.temporal", "net.spatial", "net.moe", "net.st_gnn",
     "net.policy", "net.model",
     "reward_model.registry", "reward_model.terms", "reward_model.aggregation", "reward_model.kpi",
     "env.tracking",

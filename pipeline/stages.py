@@ -1,20 +1,26 @@
-"""阶段 A/B/C 编排（v1.1：WM 教师强制 → planner BC → PPO RL）。
+"""阶段 A/B/C 编排（v1.2：WM 教师强制 → planner BC → PPO RL）。
 
-阶段语义（user v1.1，2026-09-25 修订）
+阶段语义（2026-09-26 schema v2 修订）
 ------------------------------------
-- **A = world model 训练（教师强制）**：ego 条件 = 专家 GT 动作序列 ``action (6,2)``
-  （harvest 数据集），目标 = 由 ``(episode, step+k)`` 查表重建的未来 OD/LD 帧
-  （对齐到 t0 帧、mask+valid，见 :class:`FrameWindows.build_future`），
-  **直接多步损失**（Huber + 角度 ``1-cos``）+ **ego plan 噪声增强**。
-  可训练：encoders/temporal/spatial/MoE + world model；policy/value 头不参与。
-- **B = planner BC**：可训练 backbone+MoE+policy head，**primary→specific** 两段：
-  先训练 shared+primary（experts 冻结），再冻结 primary+shared、训练 8 个 specific experts。
-  损失 = **动作**（``action_mu`` vs 专家即时动作，主项）+ **小权重 rollout 轨迹辅助**
-  （``traj_xy`` vs 专家 ``traj6``，**WM 冻结且 rollout 内输出 detach**，因果链有效）+ router BCE。
-- **C = PPO RL**：KL 锚 = **阶段 B 策略快照**（``--ckpt``，冻结参考模型），系数**线性衰减**
-  （默认 0.05 → 0）；primary lr ×0.1；world model 初始冻结、``--wm-freeze-updates`` 后解冻
-  （PPO 损失本身不消费 WM 输出，解冻 = 参数重新进入优化器，供后续 WM 辅助损失使用）；
-  critic warmup ``--critic-warmup-updates N`` 前 N 个 update 只拟合 value 头（策略不动）。
+- **A = world model 训练（教师强制）**：ego 条件 = 专家 GT 动作序列 + **目标帧真实 ego**
+  （``build_future.ego_fut``，退回解析运动学）；目标 = ``(episode_id, base+5k)`` 精确查表
+  的未来 OD 帧（对齐到 t0、``od_id`` 身份匹配、``wm_valid`` 门控）。
+  **直接多步 OD 损失**（``train_weight × wm_valid`` 显式加权）+ **plan head ``ego_next``
+  监督**（方案①：每步挤入 GT 帧前用同一 mem 预测第 k 帧 ego 前 6 维，plan head/MoE 因此在
+  A 阶段有梯度，design-v1.2 §2.3）+ **presence/entry BCE + AUC（id 轴，见
+  :func:`presence_entry_targets`）**；**未来 LD 损失已移除**。
+  逐 horizon 记录 loss/ADE/FDE + 有效样本数（count 与 weight 双口径）。
+  可训练：encoders/mem-encoder/plan head/MoE/ST-GNN；policy/value 头不参与。
+- **B = planner BC**：可训练 backbone+MoE+policy head，**primary→specific** 两段。
+  损失 = **首步动作**（``action_mu`` vs 专家即时动作，权重感知）+ **6 点 rollout 轨迹辅助**
+  （``traj_xy`` vs 专家 ``traj6``，WM 冻结；新 net 的合成帧 detach 语义）+ **router 软目标
+  CE/KL**（聚类分布 + 温度；软目标缺失时跳过并记录 ``bc_router_soft_placeholder=1``，
+  不再回退 8 维硬标签 BCE）。
+  日志：动作误差 mean/median/p95 + 分切片（急刹/急转/弯道）+ 逐 horizon ego 误差 +
+  router top-1/簇准确率/NMI/门控熵/专家利用率。
+- **C = PPO RL（EXPERIMENTAL）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）与
+  P0-2（router 标签错位）未修复前**不得用于 RL 结论**，仅保留管线冒烟。KL 锚 = 阶段 B 快照
+  （``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
 
 环境约束（§8.1）
 ----------------
@@ -29,6 +35,8 @@ MetaDrive 每进程只能有一个 engine，``LocalEnvPool`` 因此恒为 1 env�
         --bc-dir runs/bc_expert_full --bc-epochs 10 --out runs/train/stage_b
     tools/venv-python tools/train.py --stage C --ckpt runs/train/stage_b/final.pt \\
         --spec env/specs/scenarios_train_slice200.json --envs 2 --updates 20 --out runs/train/stage_c
+
+（串行 A→B + 冻结评测协议见 ``tools/train.sh`` / ``tools/test.sh``。）
 """
 
 from __future__ import annotations
@@ -59,14 +67,18 @@ from pipeline.trainer import (  # noqa: E402
     apply_thread_limits,
     build_pool,
     build_reward_adapter,
+    dataset_weight_report,
     load_checkpoint,
+    presence_entry_loss,
     pretrain_bc,
     resolve_device,
+    row_action_weights,
     sanitize_masked_od,
     save_checkpoint,
     stack_history,
     squeeze_single_slot,
     trim_memory,
+    weighted_od_multi_step_loss,
 )
 
 __all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_c", "load_config", "build_model", "FrameWindows"]
@@ -179,8 +191,16 @@ def _limit_dataset(dataset: BCDataset, limit: Optional[int]) -> BCDataset:
 
 
 # --------------------------------------------------------------------------- #
-# 按帧数据的窗口构建（阶段 A：BC 专家数据集的未来目标）
+# 按帧数据的窗口构建（阶段 A/B：精确查表历史 + 未来目标）
 # --------------------------------------------------------------------------- #
+#
+# **禁止按行位置取窗口**（旧实现）：等距假设在帧被过滤后失效（实测 16.8% 窗口时间
+# 不均匀），且 episode 头部会伪造 ``hist_valid=1``。v2 起一律按
+# ``(episode_id, step − 5j)`` / ``(episode_id, step + 5k)`` 精确查表 + per-slot valid。
+#
+# lane A 的 ``pipeline/frames.py::build_history/build_future`` 落地后优先使用；
+# 未落地时用本文件的等价实现（语义一致，测试覆盖）。
+# TODO(lane): 若 lane A 的函数签名/返回键不同，请同步 ``_lane_frames_api`` 适配器。
 
 _REPLAY_CHANNELS = ("ego", "od", "ld", "nav", "signal")
 #: BC harvest 的 ``step`` 单位是 env step（0.1 s），帧只在策略步边界记录
@@ -197,11 +217,441 @@ def _bc_channel_keys() -> Dict[str, Tuple[str, Optional[str]]]:
     return {name: (name, f"{name}_mask") for name in _REPLAY_CHANNELS}
 
 
+def _lane_frames_api() -> Optional[Any]:
+    """lane A 的 ``pipeline/frames.py`` 适配器（不可用 → None，用本地等价实现）。
+
+    lane A 的接口是**逐帧**的（``FrameLookup.build_history(episode_id, step)`` /
+    ``build_future(...)`` + ``lookup_from_arrays``）；本文件把它批量化成
+    ``build_history(arrays, indices)`` / ``build_future(arrays, indices)``。
+    lane A 尚在迁移中（异常/缺键）时自动回退到本地精确查表实现并告警一次。
+    """
+    try:
+        from pipeline import frames as lane  # type: ignore
+    except Exception:  # noqa: BLE001 - lane 未落地
+        return None
+    if callable(getattr(lane, "lookup_from_arrays", None)) and hasattr(lane, "FrameLookup"):
+        return lane
+    return None
+
+
+#: lane A FrameLookup 缓存（按 arrays 身份 + stride/episode/step 键；构造 O(N)，避免每 batch 重建）
+_FRAMES_LOOKUP_CACHE: Dict[Any, Tuple[Any, Any]] = {}
+_FRAMES_FALLBACK_WARNED: Dict[str, bool] = {}
+
+
+def _warn_frames_fallback(where: str, exc: BaseException) -> None:
+    if not _FRAMES_FALLBACK_WARNED.get(where):
+        print(
+            f"[stages] WARN：pipeline.frames.{where} 不可用（{type(exc).__name__}: {exc}）"
+            "→ 使用本地精确查表等价实现（TODO(lane)：接口稳定后移除此回退）",
+            flush=True,
+        )
+        _FRAMES_FALLBACK_WARNED[where] = True
+
+
+def _frames_lookup(
+    arrays: Mapping[str, np.ndarray],
+    *,
+    episode_key: str,
+    step_key: str,
+    stride: int,
+) -> Optional[Any]:
+    """构造/取缓存 lane A ``FrameLookup``；lane 不可用或构造失败 → None。"""
+    lane = _lane_frames_api()
+    if lane is None:
+        return None
+    key = (id(arrays), int(stride), episode_key, step_key)
+    cached = _FRAMES_LOOKUP_CACHE.get(key)
+    if cached is not None and cached[0] is arrays:
+        return cached[1]
+    usable_key = "frame_usable" if "frame_usable" in arrays else ("usable" if "usable" in arrays else None)
+    try:
+        lookup = lane.lookup_from_arrays(
+            arrays,
+            episode_key=episode_key,
+            step_key=step_key,
+            stride=max(1, int(stride)),
+            usable_key=usable_key,
+            check=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - lane 迁移期（缺键/断言未定案）
+        _warn_frames_fallback("lookup_from_arrays", exc)
+        return None
+    if len(_FRAMES_LOOKUP_CACHE) > 8:
+        _FRAMES_LOOKUP_CACHE.clear()
+    _FRAMES_LOOKUP_CACHE[key] = (arrays, lookup)  # 强引用 arrays，避免 id 复用
+    return lookup
+
+
+def _mem_history_available(arrays: Mapping[str, np.ndarray]) -> bool:
+    """数据集是否内嵌 v2 mem 历史数组（od/ld + hist_valid 必需）。"""
+    return all(key in arrays for key in ("od_hist", "od_hist_mask", "ld_hist", "ld_hist_mask", "hist_valid"))
+
+
+def _entry_from_arrays(
+    arrays: Mapping[str, np.ndarray], row: int, keys: Mapping[str, Tuple[str, Optional[str]]]
+) -> Dict[str, Any]:
+    """单行 → ``stack_history`` 需要的 entry（当前通道 + mask + pose）。"""
+    obs: Dict[str, np.ndarray] = {}
+    for name, (feat_key, mask_key) in keys.items():
+        value = arrays.get(feat_key)
+        if value is None:
+            continue
+        obs[name] = np.asarray(value[row], dtype=np.float32)
+        if mask_key and mask_key in arrays:
+            obs[f"{name}_mask"] = np.asarray(arrays[mask_key][row], dtype=np.float32)
+    return {"obs": obs, "pose": np.asarray(arrays["pose"][row], dtype=np.float32)}
+
+
+#: 历史输出里保留的键（其余 lane A 内部键丢弃，避免污染 net 输入）
+_HISTORY_CHANNELS = tuple(dict.fromkeys(_REPLAY_CHANNELS + ("others",)))
+#: 未来输出键（lane A 与本文件等价实现的统一契约）
+_FUTURE_OUTPUT_KEYS = (
+    "od_fut",
+    "ld_fut",
+    "od_mask",
+    "od_mask_raw",
+    "ld_mask",
+    "valid",
+    "wm_valid",
+    "od_id_fut",
+    "od_presence_fut",
+    "od_id_t0",
+    "od_presence_t0",
+    "ego_fut",
+)
+
+
+def _batch_lane_history(
+    lookup: Any, indices: np.ndarray, *, frames: int, stride: int, alignments: Optional[Mapping[str, Any]]
+) -> Dict[str, np.ndarray]:
+    """逐帧调用 lane A ``build_history`` 并批量化（旧→新，含 ``hist_valid``）。"""
+    rows: List[Dict[str, np.ndarray]] = []
+    for index in indices:
+        episode = int(lookup.episode[index])
+        step = int(lookup.step[index])
+        kwargs: Dict[str, Any] = {}
+        if alignments:
+            kwargs["alignments"] = alignments
+        if lookup.pose is not None:
+            kwargs["target_pose"] = lookup.pose[index]
+        rows.append(lookup.build_history(episode, step, stride=int(stride), k=int(frames), **kwargs))
+    out: Dict[str, np.ndarray] = {}
+    allowed = {f"{name}_hist" for name in _HISTORY_CHANNELS} | {
+        f"{name}_hist_mask" for name in _HISTORY_CHANNELS
+    } | {"hist_valid", "od_id_hist", "od_presence_hist"}
+    for key in rows[0]:
+        if key not in allowed:
+            continue
+        out[key] = np.stack([np.asarray(row[key], dtype=np.float32) for row in rows], axis=0)
+    return out
+
+
+def _batch_lane_future(
+    lookup: Any,
+    indices: np.ndarray,
+    *,
+    future: int,
+    stride: int,
+    wm_valid: Optional[np.ndarray],
+    alignments: Optional[Mapping[str, Any]],
+) -> Dict[str, np.ndarray]:
+    """逐帧调用 lane A ``build_future`` 并批量化（+ 显式 ``wm_valid`` 覆盖 + ``ego_fut``）。"""
+    rows: List[Dict[str, np.ndarray]] = []
+    for index in indices:
+        episode = int(lookup.episode[index])
+        step = int(lookup.step[index])
+        kwargs: Dict[str, Any] = {}
+        if alignments:
+            kwargs["alignments"] = alignments
+        if lookup.pose is not None:
+            kwargs["target_pose"] = lookup.pose[index]
+        rows.append(lookup.build_future(episode, step, stride=int(stride), k=int(future), **kwargs))
+    out: Dict[str, np.ndarray] = {}
+    for key in _FUTURE_OUTPUT_KEYS:
+        if key == "ego_fut":
+            continue
+        if key in rows[0]:
+            out[key] = np.stack([np.asarray(row[key]) for row in rows], axis=0)
+    # ego 未来帧（teacher forcing：目标帧真实 ego，reserved 维 = 该帧上一动作）
+    ego = lookup.features.get("ego")
+    if ego is not None:
+        if ego.ndim == 3 and ego.shape[1] == 1:
+            ego = ego[:, 0, :]  # 单槽通道 (N,1,8) → (N,8)
+        ego_fut = np.zeros((indices.shape[0], int(future)) + tuple(ego.shape[1:]), dtype=ego.dtype)
+        for row_index, index in enumerate(indices):
+            episode = int(lookup.episode[index])
+            step = int(lookup.step[index])
+            base = (step // int(stride)) * int(stride)
+            for k in range(1, int(future) + 1):
+                target = lookup.index_of(episode, base + k * int(stride))
+                if target is not None:
+                    ego_fut[row_index, k - 1] = ego[target]
+        out["ego_fut"] = ego_fut
+    if wm_valid is not None:
+        wm = np.asarray(wm_valid, dtype=np.float32).reshape(indices.shape[0], int(future))
+        out["wm_valid"] = wm
+        out["od_mask"] = out.get("od_mask", np.zeros_like(wm[:, :, None])) * wm[:, :, None]
+        if "ld_mask" in out:
+            out["ld_mask"] = out["ld_mask"] * wm[:, :, None]
+        out["valid"] = out.get("valid", wm) * 1.0  # 步存在性不受可用性影响
+    # 无身份伴随数组（旧 schema）时 lane A 的同 id 匹配会把 mask 全清零 → 回退原始 mask
+    if not lookup.companions and "od_mask_raw" in out:
+        out["od_mask"] = out["od_mask_raw"].copy()
+        if "wm_valid" in out:
+            out["od_mask"] = out["od_mask"] * out["wm_valid"][:, :, None]
+    return out
+
+
+def _local_build_history(
+    arrays: Mapping[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    episode_key: str,
+    step_key: str,
+    keys: Optional[Mapping[str, Tuple[str, Optional[str]]]],
+    frames: int,
+    stride: int,
+    alignments: Optional[Mapping[str, Any]],
+) -> Dict[str, np.ndarray]:
+    """本地精确查表历史（lane A 不可用时的等价实现）。"""
+    from pipeline.trainer import stack_history
+
+    idx = np.asarray(indices, dtype=np.int64)
+    if not alignments:
+        from pipeline.trainer import _alignment_from_meta
+
+        alignments = _alignment_from_meta({})
+    if _mem_history_available(arrays):
+        out: Dict[str, np.ndarray] = {}
+        for name in ("ego", "others", "od", "ld"):
+            feat_key, mask_key = f"{name}_hist", f"{name}_hist_mask"
+            if feat_key in arrays and mask_key in arrays:
+                out[feat_key] = np.asarray(arrays[feat_key], dtype=np.float32)[idx]
+                out[mask_key] = np.asarray(arrays[mask_key], dtype=np.float32)[idx]
+        out["hist_valid"] = np.asarray(arrays["hist_valid"], dtype=np.float32)[idx]
+        return out
+    channel_keys = dict(keys) if keys is not None else dict(_bc_channel_keys())
+    episode = np.asarray(arrays[episode_key], dtype=np.int64)
+    step = np.asarray(arrays[step_key], dtype=np.int64)
+    lookup = {(int(episode[i]), int(step[i])): i for i in range(len(episode))}
+    pose = np.asarray(arrays["pose"], dtype=np.float32)
+    history: Dict[str, List[np.ndarray]] = {}
+    valid_rows: List[np.ndarray] = []
+    for index in idx:
+        ep, st = int(episode[index]), int(step[index])
+        rows = [lookup.get((ep, st - stride * j)) for j in range(frames - 1, -1, -1)]
+        fallback = next((row for row in reversed(rows) if row is not None), int(index))
+        entries = [
+            _entry_from_arrays(arrays, fallback if row is None else row, channel_keys) for row in rows
+        ]
+        valid = np.asarray([1.0 if row is not None else 0.0 for row in rows], dtype=np.float32)
+        patch = stack_history(entries, alignments, current_pose=pose[index], valid=valid)
+        for key, value in patch.items():
+            history.setdefault(key, []).append(value)
+        valid_rows.append(valid)
+    out = {key: np.stack(values, axis=0).astype(np.float32) for key, values in history.items()}
+    out["hist_valid"] = np.stack(valid_rows, axis=0).astype(np.float32)
+    return out
+
+
+def _local_build_future(
+    arrays: Mapping[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    episode_key: str,
+    step_key: str,
+    future: int,
+    stride: int,
+    keys: Optional[Mapping[str, Tuple[str, Optional[str]]]],
+    alignments: Optional[Mapping[str, Any]],
+    wm_valid: Optional[np.ndarray],
+) -> Dict[str, np.ndarray]:
+    """本地精确查表未来目标（lane A 等价实现；含 id 匹配 / presence / ego_fut）。"""
+    from pipeline.trainer import stack_history
+
+    idx = np.asarray(indices, dtype=np.int64)
+    if not alignments:
+        from pipeline.trainer import _alignment_from_meta
+
+        alignments = _alignment_from_meta({})
+    channel_keys = dict(keys) if keys is not None else dict(_bc_channel_keys())
+    episode = np.asarray(arrays[episode_key], dtype=np.int64)
+    step = np.asarray(arrays[step_key], dtype=np.int64)
+    lookup = {(int(episode[i]), int(step[i])): i for i in range(len(episode))}
+    pose = np.asarray(arrays["pose"], dtype=np.float32)
+    od_id = np.asarray(arrays["od_id"]) if "od_id" in arrays else None
+    presence = np.asarray(arrays["od_presence"], dtype=np.float32) if "od_presence" in arrays else None
+    ego = arrays.get("ego")
+    if ego is not None:
+        ego = np.asarray(ego)
+        if ego.ndim == 3 and ego.shape[1] == 1:
+            ego = ego[:, 0, :]
+    slots = int(np.asarray(arrays["od"]).shape[1])
+    od_fut: List[np.ndarray] = []
+    ld_fut: List[np.ndarray] = []
+    od_masks: List[np.ndarray] = []
+    od_masks_raw: List[np.ndarray] = []
+    ld_masks: List[np.ndarray] = []
+    valid_rows: List[np.ndarray] = []
+    wm_valid_rows: List[np.ndarray] = []
+    od_presence_fut: List[np.ndarray] = []
+    od_id_fut: List[np.ndarray] = []
+    od_presence_t0: List[np.ndarray] = []
+    od_id_t0: List[np.ndarray] = []
+    ego_fut: List[np.ndarray] = []
+    for row_index, index in enumerate(idx):
+        ep, st = int(episode[index]), int(step[index])
+        rows = [lookup.get((ep, st + stride * (k + 1))) for k in range(future)]
+        step_valid = np.asarray([1.0 if row is not None else 0.0 for row in rows], dtype=np.float32)
+        explicit_wm = (
+            np.asarray(wm_valid, dtype=np.float32).reshape(idx.shape[0], future)[row_index]
+            if wm_valid is not None
+            else step_valid
+        )
+        fallback = next((row for row in rows if row is not None), int(index))
+        entries = [
+            _entry_from_arrays(arrays, fallback if row is None else row, channel_keys) for row in rows
+        ]
+        patch = stack_history(entries, alignments, current_pose=pose[index], valid=None)
+        od_fut.append(patch["od_hist"])
+        ld_fut.append(patch["ld_hist"])
+        raw_mask = patch["od_hist_mask"]
+        od_masks_raw.append(raw_mask * step_valid[:, None])
+        ld_masks.append(patch["ld_hist_mask"] * explicit_wm[:, None])
+        frame_presence = np.zeros((future, slots), dtype=np.float32)
+        frame_ids = np.full((future, slots), -1, dtype=np.int64)
+        for k, row in enumerate(rows):
+            if row is None:
+                continue
+            frame_presence[k] = (
+                presence[row] if presence is not None else np.asarray(arrays["od_mask"][row], dtype=np.float32)
+            )
+            if od_id is not None:
+                frame_ids[k] = od_id[row]
+        t0_presence = (
+            presence[index] if presence is not None else np.asarray(arrays["od_mask"][index], dtype=np.float32)
+        )
+        t0_ids = od_id[index] if od_id is not None else np.full(slots, -1, dtype=np.int64)
+        if od_id is not None:
+            same_identity = (frame_ids == t0_ids[None, :]) & (t0_ids[None, :] >= 0)
+            od_masks.append(explicit_wm[:, None] * frame_presence * same_identity.astype(np.float32))
+        else:
+            od_masks.append(explicit_wm[:, None] * raw_mask)
+        valid_rows.append(step_valid)
+        wm_valid_rows.append(explicit_wm)
+        od_presence_fut.append(frame_presence)
+        od_id_fut.append(frame_ids)
+        od_presence_t0.append(np.asarray(t0_presence, dtype=np.float32))
+        od_id_t0.append(np.asarray(t0_ids, dtype=np.int64))
+        if ego is not None:
+            frame_ego = np.zeros((future, ) + tuple(np.asarray(ego).shape[1:]), dtype=np.float32)
+            for k, row in enumerate(rows):
+                if row is not None:
+                    frame_ego[k] = np.asarray(ego[row], dtype=np.float32)
+            ego_fut.append(frame_ego)
+    result: Dict[str, np.ndarray] = {
+        "od_fut": np.stack(od_fut, axis=0).astype(np.float32),
+        "ld_fut": np.stack(ld_fut, axis=0).astype(np.float32),
+        "od_mask": np.stack(od_masks, axis=0).astype(np.float32),
+        "od_mask_raw": np.stack(od_masks_raw, axis=0).astype(np.float32),
+        "ld_mask": np.stack(ld_masks, axis=0).astype(np.float32),
+        "valid": np.stack(valid_rows, axis=0).astype(np.float32),
+        "wm_valid": np.stack(wm_valid_rows, axis=0).astype(np.float32),
+        "od_presence_fut": np.stack(od_presence_fut, axis=0).astype(np.float32),
+        "od_id_fut": np.stack(od_id_fut, axis=0),
+        "od_presence_t0": np.stack(od_presence_t0, axis=0).astype(np.float32),
+        "od_id_t0": np.stack(od_id_t0, axis=0),
+    }
+    if ego_fut:
+        result["ego_fut"] = np.stack(ego_fut, axis=0).astype(np.float32)
+    return result
+
+
+def build_history(
+    arrays: Mapping[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    episode_key: str = "episode_id",
+    step_key: str = "step",
+    keys: Optional[Mapping[str, Tuple[str, Optional[str]]]] = None,
+    frames: int = 6,
+    stride: int = _BC_STEP_STRIDE,
+    alignments: Optional[Dict[str, Any]] = None,
+) -> Dict[str, np.ndarray]:
+    """6 帧历史窗口（旧→新）+ ``hist_valid``（精确查表；**禁止按行位置取窗口**）。
+
+    优先级：lane A ``pipeline/frames``（逐帧查表，权威）→ 数据集内嵌 mem 历史
+    （``od_hist/...`` + ``hist_valid``）→ 本地精确查表等价实现。
+    """
+    idx = np.asarray(indices, dtype=np.int64)
+    lookup = _frames_lookup(arrays, episode_key=episode_key, step_key=step_key, stride=stride)
+    if lookup is not None:
+        try:
+            return _batch_lane_history(
+                lookup, idx, frames=int(frames), stride=int(stride), alignments=alignments
+            )
+        except Exception as exc:  # noqa: BLE001 - lane 迁移期
+            _warn_frames_fallback("build_history", exc)
+    return _local_build_history(
+        arrays,
+        idx,
+        episode_key=episode_key,
+        step_key=step_key,
+        keys=keys,
+        frames=int(frames),
+        stride=int(stride),
+        alignments=alignments,
+    )
+
+
+def build_future(
+    arrays: Mapping[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    episode_key: str = "episode_id",
+    step_key: str = "step",
+    future: int = 6,
+    stride: int = _BC_STEP_STRIDE,
+    keys: Optional[Mapping[str, Tuple[str, Optional[str]]]] = None,
+    alignments: Optional[Dict[str, Any]] = None,
+    wm_valid: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray]:
+    """未来 1..K 步目标（t0 帧对齐）+ mask + per-step valid（精确查表）。
+
+    - 目标帧 = ``(episode_id, base + stride·k)``；缺失/越界 → ``valid=0``、mask 清零；
+    - ``wm_valid (B,K)``（v2）优先于 lane A 的 ``usable``（显式传入时覆盖）；
+    - ``od_mask`` 含**身份匹配**（lane A 同 id；本地回退用 ``od_id`` 同 id）；
+    - ``ego_fut (B,K,8)``：目标帧真实 ego（teacher forcing 用）；
+    - ``od_presence_fut/od_id_fut/od_presence_t0/od_id_t0``：presence/entry BCE 目标来源。
+    """
+    idx = np.asarray(indices, dtype=np.int64)
+    lookup = _frames_lookup(arrays, episode_key=episode_key, step_key=step_key, stride=stride)
+    if lookup is not None:
+        try:
+            return _batch_lane_future(
+                lookup, idx, future=int(future), stride=int(stride), wm_valid=wm_valid, alignments=alignments
+            )
+        except Exception as exc:  # noqa: BLE001 - lane 迁移期
+            _warn_frames_fallback("build_future", exc)
+    return _local_build_future(
+        arrays,
+        idx,
+        episode_key=episode_key,
+        step_key=step_key,
+        future=int(future),
+        stride=int(stride),
+        keys=keys,
+        alignments=alignments,
+        wm_valid=wm_valid,
+    )
+
+
 class FrameWindows:
     """把"每帧当前通道 + 位姿"的数组建成模型输入窗口与未来目标。
 
-    - 历史窗口：同 episode 内向前最多 5 帧，按 ``stack_history`` SE(2) 对齐到当前帧；
-    - 未来目标：向后 1..K 帧（对齐到当前帧），缺失步 ``valid=0`` 并在 mask 中清零。
+    - 历史窗口：``build_history``（v2 mem 历史 → 精确查表，见函数 docstring）；
+    - 未来目标：``build_future``（精确查表 + ``wm_valid`` 门控）。
 
     键名可配置（``episode_key``/``step_key``/``keys``）：PPO replay 用默认
     （``episode``/``step_index``/``obs.*``）；BC 专家数据集用
@@ -223,98 +673,53 @@ class FrameWindows:
         self.arrays = arrays
         self.alignments = alignments if alignments is not None else _alignment_from_meta({})
         self.keys = dict(keys) if keys is not None else dict(_REPLAY_CHANNEL_KEYS)
+        self.episode_key = episode_key
+        self.step_key = step_key
         self.step_stride = max(1, int(step_stride))
         self.episode = np.asarray(arrays[episode_key], dtype=np.int64)
         self.step_index = np.asarray(arrays[step_key], dtype=np.int64)
         self.pose = np.asarray(arrays["pose"], dtype=np.float32)
         self.count = int(len(self.episode))
-        self._lookup = {
-            (int(self.episode[i]), int(self.step_index[i])): i for i in range(self.count)
-        }
-        self._episode_starts: Dict[int, int] = {}
-        for index in range(self.count):
-            self._episode_starts.setdefault(int(self.episode[index]), index)
-
-    # ---------------------------------------------------------------- 单帧
-    def _frame_obs(self, index: int) -> Dict[str, np.ndarray]:
-        obs: Dict[str, np.ndarray] = {}
-        for name, (feat_key, mask_key) in self.keys.items():
-            value = self.arrays.get(feat_key)
-            if value is None:
-                continue
-            obs[name] = np.asarray(value[index], dtype=np.float32)
-            mask = self.arrays.get(mask_key) if mask_key else None
-            if mask is not None:
-                obs[f"{name}_mask"] = np.asarray(mask[index], dtype=np.float32)
-        return obs
-
-    def _entry(self, index: int) -> Dict[str, Any]:
-        return {"obs": self._frame_obs(index), "pose": np.asarray(self.pose[index], dtype=np.float32)}
 
     # ---------------------------------------------------------------- 组装
     def build_obs(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
-        """当前帧 + 历史窗口（与训练器 ``BCDataset.build_obs_batch`` 同口径）。"""
+        """当前帧 + 历史窗口（v2 mem 历史优先 → 精确查表；B 维在前）。"""
+        from pipeline.trainer import sanitize_masked_od, squeeze_single_slot
+
+        idx = np.asarray(indices, dtype=np.int64)
         batch: Dict[str, List[np.ndarray]] = {}
-        hist_valid: List[np.ndarray] = []
-        for row, index in enumerate(np.asarray(indices, dtype=np.int64)):
-            episode = int(self.episode[index])
-            start = self._episode_starts[episode]
-            entries = [self._entry(j) for j in range(max(start, index - 5), index + 1)]
-            valid = np.zeros(6, dtype=np.float32)
-            valid[6 - len(entries) :] = 1.0
-            if len(entries) < 6:
-                entries = [entries[0]] * (6 - len(entries)) + entries
-            patch = stack_history(entries, self.alignments, current_pose=self.pose[index], valid=valid)
-            frame = self._frame_obs(index)
+        for index in idx:
+            frame = _entry_from_arrays(self.arrays, int(index), self.keys)["obs"]
             for key, value in frame.items():
                 batch.setdefault(key, []).append(np.asarray(value, dtype=np.float32))
-            for key, value in patch.items():
-                batch.setdefault(key, []).append(np.asarray(value, dtype=np.float32))
-            hist_valid.append(valid)
-        batch["hist_valid"] = [np.asarray(item) for item in hist_valid]
+        patch = build_history(
+            self.arrays,
+            idx,
+            episode_key=self.episode_key,
+            step_key=self.step_key,
+            keys=self.keys,
+            stride=self.step_stride,
+            alignments=self.alignments,
+        )
+        for key, value in patch.items():
+            batch[key] = [np.asarray(item, dtype=np.float32) for item in value]
         return sanitize_masked_od(
             squeeze_single_slot({key: np.stack(values, axis=0).astype(np.float32) for key, values in batch.items()})
         )
 
-    def build_future(self, indices: np.ndarray, future: int = 6) -> Dict[str, np.ndarray]:
-        """未来 1..K 步目标（对齐到当前帧）+ 掩码 + 有效步（``(B,K,16,...)``）。
-
-        通过 ``(episode, step + k·step_stride)`` 查表取**未来帧的原始通道**，因此 mask 是
-        未来帧自身的槽位掩码；缺失步（episode 结束 / 帧被过滤）``valid=0`` 且 mask 清零。
-
-        ``step_stride``：harvest 数据集只在策略步边界记录帧（``STEPS_PER_POLICY=5`` env steps
-        = 0.5 s），因此 BC schema 用 stride=5；PPO replay（逐 env step 记录）用默认 1。
-        """
-        od_fut: List[np.ndarray] = []
-        ld_fut: List[np.ndarray] = []
-        od_masks: List[np.ndarray] = []
-        ld_masks: List[np.ndarray] = []
-        valid: List[np.ndarray] = []
-        for index in np.asarray(indices, dtype=np.int64):
-            episode = int(self.episode[index])
-            step = int(self.step_index[index])
-            entries: List[Dict[str, Any]] = []
-            step_valid = np.zeros(future, dtype=np.float32)
-            for k in range(1, future + 1):
-                target = self._lookup.get((episode, step + k * self.step_stride))
-                if target is None:
-                    entries.append(entries[-1] if entries else self._entry(index))
-                else:
-                    entries.append(self._entry(target))
-                    step_valid[k - 1] = 1.0
-            patch = stack_history(entries, self.alignments, current_pose=self.pose[index], valid=None)
-            od_fut.append(patch["od_hist"])
-            ld_fut.append(patch["ld_hist"])
-            od_masks.append(patch["od_hist_mask"] * step_valid[:, None])
-            ld_masks.append(patch["ld_hist_mask"] * step_valid[:, None])
-            valid.append(step_valid)
-        return {
-            "od_fut": np.stack(od_fut, axis=0).astype(np.float32),
-            "ld_fut": np.stack(ld_fut, axis=0).astype(np.float32),
-            "od_mask": np.stack(od_masks, axis=0).astype(np.float32),
-            "ld_mask": np.stack(ld_masks, axis=0).astype(np.float32),
-            "valid": np.stack(valid, axis=0).astype(np.float32),
-        }
+    def build_future(self, indices: np.ndarray, future: int = 6, wm_valid: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+        """未来 1..K 步目标（精确查表 + ``wm_valid`` 门控 + 对齐到当前帧）。"""
+        return build_future(
+            self.arrays,
+            np.asarray(indices, dtype=np.int64),
+            episode_key=self.episode_key,
+            step_key=self.step_key,
+            future=future,
+            stride=self.step_stride,
+            keys=self.keys,
+            alignments=self.alignments,
+            wm_valid=wm_valid,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -331,10 +736,11 @@ def _ade_fde(pred_xy: "Any", target_xy: "Any", weight: "Any") -> Tuple["Any", "A
         nan = torch.tensor(float("nan"))
         return nan, nan
     ade = (error * weight).sum() / weight_sum
-    fde_weight = weight[:, -1, :]
+    fde_weight = weight if weight.ndim == 2 else weight[:, -1, :]
     if float(fde_weight.sum()) <= 0.0:
         return ade, torch.tensor(float("nan"))
-    fde = (error[:, -1, :] * fde_weight).sum() / fde_weight.sum()
+    fde_error = error if error.ndim == 2 else error[:, -1, :]
+    fde = (fde_error * fde_weight).sum() / fde_weight.sum()
     return ade, fde
 
 
@@ -363,14 +769,21 @@ def match_future_od_slots(
     *,
     gate_m: float = 8.0,
     dt: float = 0.5,
+    current_od_id: Optional[np.ndarray] = None,
+    current_presence: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
-    """把未来帧 OD 槽位按 **t0 帧最近邻** 匹配到当前槽位（identity association）。
+    """把未来帧 OD 槽位匹配到当前槽位（identity association）。
+
+    两条路径：
+
+    1. **id 精确匹配**（v2；``future["od_id_fut"]`` + ``current_od_id``）：同 id = 同对象，
+       比匀速先验最近邻更可靠（变道/遮挡/排序切换时不串位）；``id<=0`` 或 presence=0
+       视为空槽；无匹配 → mask=0（对象离场）。
+    2. **t0 帧最近邻回退**（v1）：匹配键用 WM 自己的匀速先验，gate 过滤对象离场/新入场。
 
     为什么需要：OD 通道按 ``min(TTC, cap) + 距离`` 排序 → 未来帧的槽位顺序会变
     （同一对象可能从 slot i 换到 slot j）。直接按 index 回归是 ill-posed：实测未匹配时
-    匀速基线 ADE ≈ 9–14 m，其中大部分是槽位错配而非物理误差，世界模型的残差头
-    也学不到"哪个槽位是哪个对象"。匹配后每个当前槽位的目标是"**该对象**未来在 t0 帧的
-    状态"，物理可学（匹配键用 WM 自己的匀速先验，gate 过滤对象离场/新入场）。
+    匀速基线 ADE ≈ 9–14 m，其中大部分是槽位错配而非物理误差。
 
     仅改 ``od_fut``/``od_mask``（槽位轴重排 + 有效门控）；``valid``（步存在性）与 LD 不变。
     """
@@ -378,6 +791,28 @@ def match_future_od_slots(
     mask = np.asarray(current_mask, dtype=np.float32)  # (B,16)
     od_fut = np.asarray(future["od_fut"], dtype=np.float32)  # (B,K,16,9)
     od_mask = np.asarray(future["od_mask"], dtype=np.float32)  # (B,K,16)
+    if current_od_id is not None and "od_id_fut" in future:
+        target_id = np.asarray(future["od_id_fut"])  # (B,K,S)
+        cur_id = np.asarray(current_od_id)  # (B,S)
+        presence = (
+            np.asarray(current_presence, dtype=np.float32)
+            if current_presence is not None
+            else (mask > 0.5).astype(np.float32)
+        )
+        valid_current = (presence > 0.5) & (cur_id > 0)  # (B,S)
+        matches = (target_id[:, :, None, :] == cur_id[:, None, :, None]) & (cur_id[:, None, :, None] > 0)
+        any_match = matches.any(axis=-1)  # (B,K,S)
+        nearest = matches.argmax(axis=-1)  # (B,K,S)
+        batch_index = np.arange(od_fut.shape[0])[:, None, None]
+        step_index = np.arange(od_fut.shape[1])[None, :, None]
+        matched_feat = od_fut[batch_index, step_index, nearest]  # (B,K,S,9)
+        matched_mask = od_mask[batch_index, step_index, nearest]  # (B,K,S)
+        out = dict(future)
+        out["od_fut"] = matched_feat.astype(np.float32)
+        out["od_mask"] = (
+            valid_current[:, None, :] * any_match * matched_mask
+        ).astype(np.float32)
+        return out
     batch, steps, slots, _ = od_fut.shape
     horizon = np.arange(1, steps + 1, dtype=np.float32).reshape(1, steps, 1, 1)
     prior = cur[:, None, :, :2] + horizon * float(dt) * cur[:, None, :, 2:4]  # (B,K,16,2)
@@ -394,11 +829,86 @@ def match_future_od_slots(
     return out
 
 
+def presence_entry_targets(future: Mapping[str, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """未来目标 → **id 轴** presence/entry 目标（``(B,K,S)`` float32，0/1）。
+
+    v1.2 语义（与采集侧 id 轴一致；槽位轴版本已废弃）：
+
+    - ``od_presence`` = 对象本帧在盒内被观测（0 = 出盒未释放/空槽）；``od_id`` = episode
+      内稳定 track id（-1 = 空槽）。
+    - **presence target[k, j]**：t0 槽位 j 的 track id（``od_id_t0``）**在 t0 被观测**且在
+      目标帧 k 仍在盒内（同一 id 被观测到，``od_presence_fut > 0.5``，不限槽位）→ 1；
+      t0 未观测（空槽/出盒未释放）或目标帧未观测 → 0。即"未来帧该 track id 是否仍在盒内"。
+    - **entry target[k, j]**：目标帧 k 的槽位 j 上出现**新观测 id**——该 id 在 t0 未被观测
+      （"t0 无、t+k 有"：既有全新 id 入场，也有出盒 id 的回入）→ 1；目标帧该 id 在 t0
+      已被观测 → 0。即"新 id 是否出现"。（v2 固定槽位下 id 不迁移，presence/entry 互斥。）
+    - 无 id 伴随数组（v1 数据 / 全 -1）时回退槽位轴：presence = t0 presence 且未来
+      presence；entry = 未来 presence 且 t0 无 presence。**新数据一律走 id 轴。**
+
+    ``train_weight × wm_valid`` 加权由调用方施加（本函数只产出 0/1 目标）。
+    """
+    presence_fut = np.asarray(future["od_presence_fut"], dtype=np.float32)
+    presence_t0 = np.asarray(future.get("od_presence_t0", future["od_mask"]), dtype=np.float32)
+    id_fut = np.asarray(
+        future.get("od_id_fut", np.full_like(presence_fut, -1, dtype=np.int64)), dtype=np.int64
+    )
+    id_t0 = np.asarray(
+        future.get(
+            "od_id_t0",
+            np.full((presence_t0.shape[-1],), -1, dtype=np.int64)
+            if presence_t0.ndim == 1
+            else np.full_like(presence_t0, -1, dtype=np.int64),
+        ),
+        dtype=np.int64,
+    )
+    if presence_fut.ndim != 3:
+        raise ValueError(f"od_presence_fut 形状应为 (B,K,S)，收到 {presence_fut.shape}")
+    batch = int(presence_fut.shape[0])
+    if presence_t0.ndim == 1:
+        presence_t0 = np.broadcast_to(presence_t0[None, :], (batch, presence_t0.shape[0]))
+    if id_t0.ndim == 1:
+        id_t0 = np.broadcast_to(id_t0[None, :], (batch, id_t0.shape[0]))
+    if not (np.any(id_fut >= 0) and np.any(id_t0 >= 0)):
+        # v1 回退：无 id 轴信息 → 槽位轴（旧语义，仅兼容旧数据）
+        presence_target = (presence_t0 > 0.5)[:, None, :] * (presence_fut > 0.5)
+        entry_target = (presence_fut > 0.5) & (presence_t0[:, None, :] <= 0.5)
+        return presence_target.astype(np.float32), entry_target.astype(np.float32)
+    observed_fut = (presence_fut > 0.5) & (id_fut > 0)  # (B,K,S)
+    observed_t0 = (presence_t0 > 0.5) & (id_t0 > 0)  # (B,S)
+    # t0 槽位 j 的 id 是否在目标帧 k 被观测（id 轴持续存在；不限槽位）
+    same_id_fut = (
+        (id_fut[:, :, None, :] == id_t0[:, None, :, None]) & observed_fut[:, :, None, :]
+    ).any(axis=-1)  # (B,K,S)
+    presence_target = (observed_t0[:, None, :] & same_id_fut).astype(np.float32)
+    # 目标帧槽位 j 的 id 是否在 t0 已被观测（是 → 不是 entry）
+    known_at_t0 = (
+        (id_fut[:, :, :, None] == id_t0[:, None, None, :]) & observed_t0[:, None, None, :]
+    ).any(axis=-1)  # (B,K,S)
+    entry_target = (observed_fut & ~known_at_t0).astype(np.float32)
+    return presence_target, entry_target
+
+
+def _grad_norms(model: Any, prefixes: Sequence[str]) -> Dict[str, float]:
+    """按参数名前缀汇总梯度 L2 范数（Stage A 可微性自检；无梯度 = 0）。
+
+    用于验证 design-v1.2 §2.3：Stage A 里 plan head/MoE/ST-GNN/编码器必须有梯度，
+    policy/value（冻结）必须为 0。嵌套前缀（``plan_head.`` 与 ``plan_head.moe.router.``）
+    同时累计（单次遍历，无梯度参数跳过）。
+    """
+    out: Dict[str, float] = {str(prefix).rstrip("."): 0.0 for prefix in prefixes}
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        norm = float(parameter.grad.detach().norm())
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                out[str(prefix).rstrip(".")] += norm
+    return out
+
+
 def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
     """阶段 A：world model 教师强制训练（专家动作序列为 ego 条件，未来 OD/LD 为目标）。"""
     import torch
-
-    from net.world_model import WorldModel, direct_multi_step_loss
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -446,76 +956,297 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         [float(args.plan_noise_ds), float(args.plan_noise_dtheta)], dtype=torch.float32, device=device
     )
     action_all = np.asarray(arrays["action"], dtype=np.float32)
+    # 权重/目标可用性（v2；v1 退化到 sample_weight/查表存在性）
+    train_weight_all = row_action_weights(dataset, np.arange(dataset.count, dtype=np.int64))
+    wm_valid_all = np.asarray(arrays["wm_valid"], dtype=np.float32) if "wm_valid" in arrays else None
+    presence_all = np.asarray(arrays["od_presence"], dtype=np.float32) if "od_presence" in arrays else None
+    od_id_all = np.asarray(arrays["od_id"]) if "od_id" in arrays else None
+    presence_coef = float(
+        args.wm_presence_coef
+        if args.wm_presence_coef is not None
+        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("presence_coef", 0.1)
+    )
+    entry_coef = float(
+        args.wm_entry_coef
+        if args.wm_entry_coef is not None
+        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("entry_coef", 0.1)
+    )
+    ego_next_coef = float(
+        args.wm_ego_next_coef
+        if args.wm_ego_next_coef is not None
+        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ego_next_coef", 0.1)
+    )
+    presence_state = {"available": 0.0, "warning": False}
 
     def _to_tensor(batch: Mapping[str, np.ndarray]) -> Dict[str, "torch.Tensor"]:
         return {key: torch.as_tensor(value, dtype=torch.float32, device=device) for key, value in batch.items()}
 
+    def _frame_weight(batch_indices: np.ndarray) -> "torch.Tensor":
+        return torch.as_tensor(train_weight_all[batch_indices], dtype=torch.float32, device=device)
+
     def _future_targets(batch_indices: np.ndarray, obs_np: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """未来目标；``--match-future-slots`` 时把 OD 槽位按 t0 帧最近邻匹配到当前槽位。"""
-        future = windows.build_future(batch_indices)
-        if bool(args.match_future_slots):
+        """未来目标（精确查表 + ``wm_valid`` 门控 + 身份匹配）。
+
+        键契约（lane A 与本地等价实现一致）：``od_fut/ld_fut/od_mask/ld_mask/valid/wm_valid/
+        od_mask_raw/od_presence_fut/od_presence_t0/od_id_fut/od_id_t0/ego_fut``。
+        仅当数据集没有 ``od_id`` 时回退 v1 的最近邻槽位匹配。
+        """
+        wm_valid = wm_valid_all[batch_indices] if wm_valid_all is not None else None
+        future = windows.build_future(batch_indices, wm_valid=wm_valid)
+        has_identity = "od_id_fut" in future and bool(np.any(np.asarray(future["od_id_fut"]) >= 0))
+        if not has_identity and bool(args.match_future_slots):
             future = match_future_od_slots(
-                future, obs_np["od"], obs_np["od_mask"], gate_m=float(args.match_gate_m)
+                future,
+                obs_np["od"],
+                obs_np["od_mask"],
+                gate_m=float(args.match_gate_m),
             )
+        future.setdefault("wm_valid", future["valid"])
+        future.setdefault("od_mask_raw", future["od_mask"])
+        # 目标帧可用性 = 存在 ∧ usable（显式 wm_valid 与查表存在性取交，口径统一）
+        future["wm_valid"] = np.asarray(future["wm_valid"], dtype=np.float32) * np.asarray(
+            future["valid"], dtype=np.float32
+        )
         return future
 
-    def _forward_loss(batch_indices: np.ndarray, *, noise: bool) -> "torch.Tensor":
+    def _wm_predictions(
+        obs: Mapping[str, "torch.Tensor"],
+        future: Mapping[str, np.ndarray],
+        plan: "torch.Tensor",
+        *,
+        noise: bool,
+    ) -> Dict[str, "torch.Tensor"]:
+        """WM 前向：mem + ST-GNN 教师强制 + **plan head ``ego_next`` 监督**（net v2 唯一路径）。
+
+        教师强制（design-v1.2 §2.3）：
+
+        - 每步把**目标帧真实 ego**（``ego_fut``）挤入 mem 副本（无 ``ego_fut`` 时用
+          ``ego_next_features`` 解析构造），reserved 两维写入专家 GT 动作（可加噪声）；
+        - 合成/教师帧一律 ``detach``（state 切），但 st_gnn 输出到 encoder 的梯度保留；
+        - 每步调用 ``model.st_gnn(step_index=k)`` 得 t0 帧预测（直接多步，无递归误差累积）；
+        - **plan head/MoE 梯度（方案①）**：每步挤入 GT 帧**之前**，用同一教师强制 mem 跑
+          plan head 得 ``ego_next_pred``（预测第 k 帧 ego 前 6 维，返回键 ``ego_next_pred``）。
+          若只喂 GT ego 而不取该预测，plan head/MoE 在 Stage A 无任何梯度（旧 bug）。
+        """
+        encoded = model.encode(obs)
+        mem = encoded["mem"].clone()
+        enc0 = encoded["encoded"]
+        nav_token = encoded["nav_token"]
+        signal_token = encoded["signal_token"]
+        anchor_od = model.st_gnn.od_state_from_features(enc0.od_now, enc0.od_live)
+        anchor_ld = model.st_gnn.ld_state_from_features(enc0.ld_now, enc0.ld_live)
+        ego_fut = future.get("ego_fut")
+        horizon = int(plan.shape[1])
+        ego_now = obs["ego"]
+        if ego_now.ndim == 3:
+            ego_now = ego_now[:, 0]
+        predictions: Dict[str, List["torch.Tensor"]] = {
+            "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": []
+        }
+        analytic_ego = None
+        if ego_fut is None:
+            try:
+                from net.model import ego_next_features  # type: ignore
+
+                analytic_ego = ego_next_features
+            except Exception:  # noqa: BLE001
+                analytic_ego = None
+        enc_plan = enc0  # plan head 视角：mem 含 ≤ k-1 帧（第 k 帧挤入前）
+        for k in range(1, horizon + 1):
+            # (i) plan head 预测第 k 帧 ego 特征（唯一梯度来源，权重见 ego_next_coef）
+            _, ego_next_pred, _ = model.plan_step(enc_plan, nav_token, signal_token)
+            predictions["ego_next_pred"].append(ego_next_pred)
+            # (ii) 教师强制：挤入目标帧真实 ego（detach），ST-GNN 单步推演
+            raw_action = plan[:, k - 1]
+            if noise and bool(args.plan_noise) and float(args.plan_noise_p) > 0.0:
+                hit = (torch.rand_like(raw_action) < float(args.plan_noise_p)).to(raw_action.dtype)
+                raw_action = raw_action + torch.randn_like(raw_action) * noise_std * hit
+            if ego_fut is not None:
+                ego_frame = torch.as_tensor(
+                    np.asarray(ego_fut)[:, k - 1], dtype=torch.float32, device=device
+                )
+                if ego_frame.ndim == 3 and ego_frame.shape[1] == 1:
+                    ego_frame = ego_frame[:, 0, :]
+            elif analytic_ego is not None:
+                ego_frame = analytic_ego(
+                    ego_now, raw_action[:, 0], raw_action[:, 1], dt=float(model.dt), prev_speed=ego_now[:, 0]
+                )
+            else:  # 兜底：复制当前帧 + GT 动作（无 ego 历史时仍保留动作条件）
+                ego_frame = torch.cat([ego_now[:, :6], raw_action], dim=-1)
+            ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步 GT 动作
+            mem.shift_ego(ego_frame.detach())
+            enc_k = model.mem_encoder.encode(model.encoders, mem)
+            od_pred_k, ld_pred_k, presence_k, entry_k = model.st_gnn(
+                ego_ctx=enc_k.ego_ctx,
+                od_ctx=enc_k.od_ctx,
+                ld_ctx=enc_k.ld_ctx,
+                node_mask=enc_k.frame.node_mask,
+                pose=enc_k.frame.pose,
+                step_index=k,
+                od_anchor=anchor_od,
+                ld_anchor=anchor_ld,
+            )
+            predictions["od_pred"].append(od_pred_k)
+            predictions["ld_pred"].append(ld_pred_k)
+            predictions["presence_pred"].append(presence_k)
+            predictions["entry_pred"].append(entry_k)
+            enc_plan = enc_k  # 下一轮 plan head 看到 ≤ k 帧
+        return {
+            key: torch.stack(values, dim=1) for key, values in predictions.items()
+        }
+
+    def _forward_terms(batch_indices: np.ndarray, *, noise: bool) -> Dict[str, Any]:
+        """一次前向：OD 直接多步损失（加权）+ plan head ``ego_next`` 监督 + presence/entry BCE（id 轴）。"""
         obs_np = dataset.build_obs_batch(batch_indices)
         obs = _to_tensor(obs_np)
         future = _future_targets(batch_indices, obs_np)
-        encoded = model.encode(obs)
-        frame = encoded["frame"]
-        od_state = WorldModel.od_state_from_features(frame.od_feat, frame.od_mask)
-        ld_state = WorldModel.ld_state_from_features(frame.ld_feat, frame.ld_mask)
+        frame_weight = _frame_weight(batch_indices)
         plan = torch.as_tensor(action_all[batch_indices], dtype=torch.float32, device=device)
-        if noise and float(args.plan_noise_p) > 0.0:
-            hit = (torch.rand_like(plan) < float(args.plan_noise_p)).to(plan.dtype)
-            plan = plan + torch.randn_like(plan) * noise_std * hit
-        od_pred, ld_pred, _ = model.world_model(encoded["latent"], plan, od_state, ld_state)
-        od_target, ld_target = WorldModel.targets_from_features(
-            torch.as_tensor(future["od_fut"], device=device),
-            torch.as_tensor(future["ld_fut"], device=device),
+        predictions = _wm_predictions(obs, future, plan, noise=noise)
+        od_pred = predictions["od_pred"]
+        od_target = model.st_gnn.od_state_from_features(
+            torch.as_tensor(future["od_fut"], device=device)
         )
-        return direct_multi_step_loss(
+        wm_valid = torch.as_tensor(future["wm_valid"], device=device)
+        od_loss, od_per_horizon = weighted_od_multi_step_loss(
             od_pred,
-            ld_pred,
             od_target,
-            ld_target,
             torch.as_tensor(future["od_mask"], device=device),
-            torch.as_tensor(future["ld_mask"], device=device),
-            torch.as_tensor(future["valid"], device=device),
+            frame_weight=frame_weight,
+            valid=wm_valid,
         )
+        terms: Dict[str, Any] = {
+            "od": od_loss,
+            "per_horizon": od_per_horizon,
+            "od_pred": od_pred,
+            "future": future,
+            "frame_weight": frame_weight,
+            "obs": obs,
+        }
+        # plan head ``ego_next`` 监督（方案①）：目标 = 目标帧真实 ego 前 6 维；
+        # 无 ``ego_fut``（旧 schema）→ 跳过并在 metrics 记 ego_next_available=0。
+        ego_next_pred = predictions.get("ego_next_pred")
+        ego_fut = future.get("ego_fut")
+        if ego_next_pred is not None and ego_fut is not None:
+            ego_target = torch.as_tensor(
+                np.asarray(ego_fut)[:, :, : int(ego_next_pred.shape[-1])], dtype=torch.float32, device=device
+            )
+            horizon = min(int(ego_target.shape[1]), int(ego_next_pred.shape[1]))
+            error = torch.nn.functional.smooth_l1_loss(
+                ego_next_pred[:, :horizon] - ego_target[:, :horizon],
+                torch.zeros_like(ego_target[:, :horizon]),
+                beta=1.0,
+                reduction="none",
+            ).mean(dim=-1)  # (B,K)
+            step_weight = frame_weight.reshape(-1, 1) * wm_valid[:, :horizon]
+            terms["ego_next"] = (error * step_weight).sum() / step_weight.sum().clamp(min=1e-8)
+            terms["ego_next_per_horizon"] = [
+                float((error[:, k] * step_weight[:, k]).sum() / step_weight[:, k].sum().clamp(min=1e-8))
+                if float(step_weight[:, k].sum()) > 0.0
+                else float("nan")
+                for k in range(horizon)
+            ]
+            terms["ego_next_available"] = True
+        else:
+            terms["ego_next_available"] = False
+        if presence_coef > 0.0 or entry_coef > 0.0:
+            presence_pred = predictions.get("presence_pred")
+            if presence_pred is None:
+                presence_state["available"] = 0.0
+                if not presence_state["warning"]:
+                    print(
+                        "[stageA] WARN：net 无 od_presence_pred/od_entry_pred（TODO(lane)）→ "
+                        "presence/entry 损失本轮跳过（presence_available=0）",
+                        flush=True,
+                    )
+                    presence_state["warning"] = True
+            else:
+                presence_state["available"] = 1.0
+                entry_pred = predictions["entry_pred"]
+                # id 轴目标（v1.2；见 presence_entry_targets）：未来帧同 id 是否在盒内 / 新 id 是否出现
+                presence_target_np, entry_target_np = presence_entry_targets(future)
+                presence_target = torch.as_tensor(presence_target_np, dtype=torch.float32, device=device)
+                entry_target = torch.as_tensor(entry_target_np, dtype=torch.float32, device=device)
+                if presence_pred.ndim == 2:  # 兜底：只给当前帧的旧形状
+                    presence_target = presence_target[:, 0, :]
+                    entry_target = entry_target[:, 0, :]
+                step_weight = frame_weight.reshape(-1, 1) * wm_valid if presence_pred.ndim == 3 else frame_weight
+                presence_terms = presence_entry_loss(
+                    presence_pred, entry_pred, presence_target, entry_target, frame_weight=step_weight
+                )
+                terms["presence"] = presence_terms["presence"]
+                terms["entry"] = presence_terms["entry"]
+                terms["presence_auc"] = presence_terms["presence_auc"]
+                terms["entry_auc"] = presence_terms["entry_auc"]
+                terms["presence_pos_rate"] = presence_terms["presence_pos_rate"]
+                terms["entry_pos_rate"] = presence_terms["entry_pos_rate"]
+        total = terms["od"]
+        if "ego_next" in terms:
+            total = total + ego_next_coef * terms["ego_next"]
+        if "presence" in terms:
+            total = total + presence_coef * terms["presence"] + entry_coef * terms["entry"]
+        terms["total"] = total
+        return terms
 
     @torch.no_grad()
-    def _evaluate(indices: np.ndarray, limit: int) -> Dict[str, float]:
+    def _evaluate(indices: np.ndarray, limit: int) -> Dict[str, Any]:
         model.eval()
         eval_idx = np.asarray(indices, dtype=np.int64)[: max(1, int(limit))]
-        loss = float(_forward_loss(eval_idx, noise=False))
-        obs_np = dataset.build_obs_batch(eval_idx)
-        obs = _to_tensor(obs_np)
-        future = _future_targets(eval_idx, obs_np)
-        encoded = model.encode(obs)
-        frame = encoded["frame"]
-        od_state = WorldModel.od_state_from_features(frame.od_feat, frame.od_mask)
-        ld_state = WorldModel.ld_state_from_features(frame.ld_feat, frame.ld_mask)
-        plan = torch.as_tensor(action_all[eval_idx], dtype=torch.float32, device=device)
-        od_pred, ld_pred, _ = model.world_model(encoded["latent"], plan, od_state, ld_state)
+        terms = _forward_terms(eval_idx, noise=False)
+        od_pred = terms["od_pred"]
+        future = terms["future"]
+        frame_weight = terms["frame_weight"]
+        obs = terms["obs"]
         weight = torch.as_tensor(future["od_mask"], device=device)
+        wm_valid = torch.as_tensor(future["wm_valid"], device=device)
         od_target = torch.as_tensor(future["od_fut"], device=device)[..., 0:2]
         model_ade, model_fde = _ade_fde(od_pred[..., 0:2], od_target, weight)
         # 匀速基线（t0 帧内：位置 + k·dt·相对速度；未学习时 WM 的先验与其同源）
         current = obs["od"]
+        horizon = int(od_pred.shape[1])
         offset = current[..., 0:2].unsqueeze(1) + current[..., 2:4].unsqueeze(1) * 0.5 * torch.arange(
-            1, 7, device=device
-        ).reshape(1, 6, 1, 1)
+            1, horizon + 1, device=device
+        ).reshape(1, horizon, 1, 1)
         cv_ade, cv_fde = _ade_fde(offset, od_target, weight)
+        per_horizon: Dict[str, Dict[str, float]] = {}
+        ego_next_per_horizon = terms.get("ego_next_per_horizon")
+        for k in range(horizon):
+            w_k = weight[:, k, :]
+            model_ade_k, model_fde_k = _ade_fde(od_pred[:, k, :, 0:2], od_target[:, k], w_k)
+            cv_ade_k, cv_fde_k = _ade_fde(offset[:, k], od_target[:, k], w_k)
+            w_frame = frame_weight * wm_valid[:, k]
+            slot_count = float(w_k.sum())
+            per_horizon[f"h{k + 1}"] = {
+                "loss": float(terms["per_horizon"][k]["loss"].detach()) if slot_count > 0.0 else float("nan"),
+                "model_ade": float(model_ade_k),
+                "model_fde": float(model_fde_k),
+                "cv_ade": float(cv_ade_k),
+                "cv_fde": float(cv_fde_k),
+                "valid_count": float(future["valid"][:, k].sum()),
+                "valid_weight": float(w_frame.sum()),
+                "slot_count": slot_count,
+                "ego_next_loss": (
+                    float(ego_next_per_horizon[k]) if ego_next_per_horizon is not None and k < len(ego_next_per_horizon)
+                    else float("nan")
+                ),
+            }
         model.train()
         return {
-            "eval_loss": loss,
+            "eval_loss": float(terms["total"]),
+            "eval_od_loss": float(terms["od"]),
+            "ego_next_loss": float(terms["ego_next"]) if "ego_next" in terms else float("nan"),
+            "ego_next_available": bool(terms.get("ego_next_available", False)),
+            "presence_loss": float(terms["presence"]) if "presence" in terms else float("nan"),
+            "entry_loss": float(terms["entry"]) if "entry" in terms else float("nan"),
+            "presence_auc": float(terms.get("presence_auc", float("nan"))),
+            "entry_auc": float(terms.get("entry_auc", float("nan"))),
+            "presence_pos_rate": float(terms.get("presence_pos_rate", float("nan"))),
+            "entry_pos_rate": float(terms.get("entry_pos_rate", float("nan"))),
             "model_ade": float(model_ade),
             "model_fde": float(model_fde),
             "cv_ade": float(cv_ade),
             "cv_fde": float(cv_fde),
+            "per_horizon": per_horizon,
         }
 
     stage_cfg = _stage_section(config, "A")
@@ -525,6 +1256,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "stage": "A",
         "kind": "world_model_teacher_forcing",
         "bc_dir": str(args.bc_dir),
+        "dataset_schema": int(dataset.schema_version),
         "samples": int(dataset.count),
         "train_frames": int(train_idx.size),
         "val_frames": int(val_idx.size),
@@ -536,33 +1268,78 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "match_future_slots": bool(args.match_future_slots),
         "match_gate_m": float(args.match_gate_m),
         "plan_noise": {"p": float(args.plan_noise_p), "ds": float(args.plan_noise_ds), "dtheta": float(args.plan_noise_dtheta)},
+        "presence_coef": presence_coef,
+        "entry_coef": entry_coef,
+        "ego_next_coef": ego_next_coef,
+        "presence_entry_axis": "id",
+        "ld_loss": "removed",  # 规格：阶段 A 不再监督未来 LD
     }
+    metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
     rng = np.random.default_rng(int(args.seed))
     loss_curve: List[float] = []
+    grad_probe_first: Dict[str, float] = {}
+    grad_probe_last: Dict[str, float] = {}
+    grad_prefixes = (
+        "encoders.", "mem_encoder.", "plan_head.", "plan_head.moe.router.",
+        "plan_head.moe.experts.", "st_gnn.", "policy.", "value.",
+    )
     for epoch in range(epochs):
         order = rng.permutation(train_idx)
-        totals, batches = 0.0, 0
+        totals: Dict[str, float] = {
+            "total": 0.0, "od": 0.0, "presence": 0.0, "entry": 0.0, "ego_next": 0.0
+        }
+        batches = 0
         for start in range(0, len(order), batch_size):
             batch_indices = order[start : start + batch_size]
-            loss = _forward_loss(batch_indices, noise=True)
+            terms = _forward_terms(batch_indices, noise=True)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            terms["total"].backward()
+            if not grad_probe_first:  # 首个 batch：plan head/MoE/编码器可微性自检
+                grad_probe_first = _grad_norms(model, grad_prefixes)
+            grad_probe_last = _grad_norms(model, grad_prefixes)  # 训练结束时（router 需 experts 非零）
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             optimizer.step()
-            totals += float(loss.detach())
+            totals["total"] += float(terms["total"].detach())
+            totals["od"] += float(terms["od"].detach())
+            if "ego_next" in terms:
+                totals["ego_next"] += float(terms["ego_next"].detach())
+            if "presence" in terms:
+                totals["presence"] += float(terms["presence"].detach())
+                totals["entry"] += float(terms["entry"].detach())
             batches += 1
             if args.max_batches and batches >= int(args.max_batches):
                 break
-        train_loss = totals / max(1, batches)
+        train_loss = totals["total"] / max(1, batches)
         loss_curve.append(train_loss)
         eval_metrics = _evaluate(val_idx, int(args.eval_frames))
+        counts = {
+            "valid_sum": int(sum(item["valid_count"] for item in eval_metrics["per_horizon"].values())),
+            "valid_weight_sum": float(sum(item["valid_weight"] for item in eval_metrics["per_horizon"].values())),
+        }
         metrics.update(
             {
                 "last_epoch": epoch + 1,
                 "wm_loss": train_loss,
+                "wm_loss_od": totals["od"] / max(1, batches),
+                "wm_loss_ego_next": totals["ego_next"] / max(1, batches),
+                "wm_loss_presence": totals["presence"] / max(1, batches),
+                "wm_loss_entry": totals["entry"] / max(1, batches),
+                "ego_next_available": float(eval_metrics["ego_next_available"]),
+                "ego_next_loss": eval_metrics["ego_next_loss"],
+                "grad_norms_first_batch": dict(grad_probe_first),
+                "grad_norms_last_batch": dict(grad_probe_last),
                 "loss_curve": list(loss_curve),
                 "val_loss": eval_metrics["eval_loss"],
+                "val_loss_od": eval_metrics["eval_od_loss"],
+                "presence_available": float(presence_state["available"]),
+                "presence_loss": eval_metrics["presence_loss"],
+                "entry_loss": eval_metrics["entry_loss"],
+                "presence_auc": eval_metrics["presence_auc"],
+                "entry_auc": eval_metrics["entry_auc"],
+                "presence_pos_rate": eval_metrics["presence_pos_rate"],
+                "entry_pos_rate": eval_metrics["entry_pos_rate"],
+                "per_horizon": eval_metrics["per_horizon"],
                 "model_ade": eval_metrics["model_ade"],
                 "model_fde": eval_metrics["model_fde"],
                 "cv_ade": eval_metrics["cv_ade"],
@@ -570,17 +1347,48 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "beats_cv_ade": bool(eval_metrics["model_ade"] < eval_metrics["cv_ade"]),
                 "beats_cv_fde": bool(eval_metrics["model_fde"] < eval_metrics["cv_fde"]),
                 "batches": batches,
+                "val_valid_count": counts["valid_sum"],
+                "val_valid_weight": counts["valid_weight_sum"],
             }
         )
         if monitor is not None:
             monitor.on_train_step(
                 {
                     "wm_loss": train_loss,
+                    "wm_loss_od": metrics["wm_loss_od"],
+                    "wm_loss_ego_next": metrics["wm_loss_ego_next"],
                     "val_loss": eval_metrics["eval_loss"],
+                    "val_loss_od": eval_metrics["eval_od_loss"],
+                    "presence_available": float(presence_state["available"]),
+                    "presence_loss": eval_metrics["presence_loss"],
+                    "entry_loss": eval_metrics["entry_loss"],
+                    "presence_auc": eval_metrics["presence_auc"],
+                    "entry_auc": eval_metrics["entry_auc"],
                     "model_ade": eval_metrics["model_ade"],
                     "model_fde": eval_metrics["model_fde"],
                     "cv_ade": eval_metrics["cv_ade"],
                     "cv_fde": eval_metrics["cv_fde"],
+                    "per_horizon": eval_metrics["per_horizon"],
+                    "grad_norm_plan_head": grad_probe_last.get("plan_head", 0.0),
+                    "grad_norm_router": grad_probe_last.get("plan_head.moe.router", 0.0),
+                    "grad_norm_st_gnn": grad_probe_last.get("st_gnn", 0.0),
+                },
+                step=epoch + 1,
+            )
+            # 专用 per-horizon 序列（CSV + tensorboard：horizon/h{k}/...）
+            monitor.on_grouped_step(
+                horizon={
+                    f"h{k + 1}": {
+                        "loss": item["loss"],
+                        "ade": item["model_ade"],
+                        "fde": item["model_fde"],
+                        "cv_ade": item["cv_ade"],
+                        "cv_fde": item["cv_fde"],
+                        "valid_count": item["valid_count"],
+                        "valid_weight": item["valid_weight"],
+                        "ego_next_loss": item["ego_next_loss"],
+                    }
+                    for k, item in enumerate(eval_metrics["per_horizon"].values())
                 },
                 step=epoch + 1,
             )
@@ -588,7 +1396,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         print(
             f"[stageA] epoch {epoch + 1}/{epochs} loss={train_loss:.4f} val={eval_metrics['eval_loss']:.4f} "
             f"ADE(WM/CV)={eval_metrics['model_ade']:.3f}/{eval_metrics['cv_ade']:.3f} "
-            f"FDE={eval_metrics['model_fde']:.3f}/{eval_metrics['cv_fde']:.3f}",
+            f"FDE={eval_metrics['model_fde']:.3f}/{eval_metrics['cv_fde']:.3f} "
+            f"presence_avail={int(presence_state['available'])} "
+            f"ego_next={int(eval_metrics['ego_next_available'])} "
+            f"grad(plan_head)={grad_probe_last.get('plan_head', 0.0):.3f}",
             flush=True,
         )
     if monitor is not None:
@@ -605,27 +1416,40 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 # 阶段 B：planner BC（primary → specific）
 # --------------------------------------------------------------------------- #
 
-#: primary 段冻结：WM（阶段 A 产物）、value 头、8 个 specific experts
-_PRIMARY_PHASE_FREEZE: Tuple[str, ...] = ("world_model.", "value.", "moe.experts.")
-#: specific 段冻结：primary+shared backbone 冻结，只训练 8 个 experts（+router+policy head）
+#: primary 段冻结：WM（ST-GNN）、value 头、8 个 specific experts
+#: （可训练 = encoders/mem_encoder/plan head（含 primary + router）/policy）
+_PRIMARY_PHASE_FREEZE: Tuple[str, ...] = ("st_gnn.", "value.", "plan_head.moe.experts.")
+#: specific 段冻结：primary 主干（编码器/时序/空间/融合/primary expert/残差尺度）冻结，
+#: 只训练 8 个 specific experts + router + policy head（v1.2 前缀）
 _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
-    "world_model.",
+    "st_gnn.",
     "value.",
-    "moe.primary.",
     "encoders.",
-    "temporal.",
-    "spatial.",
-    "latent_mlp.",
-    "latent_norm.",
+    "mem_encoder.",
+    "plan_head.fusion.",
+    "plan_head.norm.",
+    "plan_head.ego_next.",
+    "plan_head.moe.primary.",
+    "plan_head.moe.residual_scale",
 )
 
 
 def _action_mu_stats(model: Any, dataset: BCDataset, device: Any, *, batch_size: int = 256) -> Dict[str, float]:
-    """全数据集确定性前向（cheap path）：``action_mu`` 的 ds 均值 + 专家 ds 均值。"""
+    """全数据集确定性前向（cheap path）：``action_mu`` 与专家动作的**计数/加权双口径**统计。
+
+    - count 口径：``*_mean``（旧键，逐样本算术均值）；
+    - weighted 口径：``*_weighted_mean``（``Σ w·x/Σ w``，w = ``train_weight×balance_weight``）；
+    - ``*_weight``：权重和；``action_mu_ds_abs_err_weighted_mean``：|μ−专家| 加权误差。
+    """
     import torch
+
+    from pipeline.trainer import row_action_weights, weighted_stats
 
     model.eval()
     total_ds, total_dtheta, count = 0.0, 0.0, 0
+    weighted_ds, weighted_dtheta, weight_sum = 0.0, 0.0, 0.0
+    errors: List[np.ndarray] = []
+    weights: List[np.ndarray] = []
     with torch.no_grad():
         for start in range(0, dataset.count, max(1, int(batch_size))):
             indices = np.arange(start, min(start + max(1, int(batch_size)), dataset.count), dtype=np.int64)
@@ -633,20 +1457,41 @@ def _action_mu_stats(model: Any, dataset: BCDataset, device: Any, *, batch_size:
                    dataset.build_obs_batch(indices).items()}
             out = model(obs, rollout=False, world_model=False)
             mu = out["action_mu"]
+            expert = torch.as_tensor(
+                dataset.arrays["action"][indices, 0], dtype=torch.float32, device=device
+            )
+            w = torch.as_tensor(row_action_weights(dataset, indices), dtype=torch.float32, device=device)
             total_ds += float(mu[:, 0].sum())
             total_dtheta += float(mu[:, 1].sum())
+            weighted_ds += float((mu[:, 0] * w).sum())
+            weighted_dtheta += float((mu[:, 1] * w).sum())
+            weight_sum += float(w.sum())
             count += int(mu.shape[0])
-    expert = np.asarray(dataset.arrays["action"], dtype=np.float32)[:, 0, :]
+            errors.append((mu - expert).abs().mean(dim=-1).detach().double().cpu().numpy())
+            weights.append(w.detach().double().cpu().numpy())
+    expert = np.asarray(dataset.arrays["action"], dtype=np.float64)[:, 0, :]
+    expert_w = row_action_weights(dataset, np.arange(dataset.count, dtype=np.int64))
+    error_stats = weighted_stats(np.concatenate(errors), np.concatenate(weights), prefix="")
     return {
+        # count 口径（与旧日志可比）
         "action_mu_ds_mean": total_ds / max(count, 1),
         "action_mu_dtheta_mean": total_dtheta / max(count, 1),
         "expert_action_ds_mean": float(expert[:, 0].mean()),
         "expert_action_dtheta_mean": float(expert[:, 1].mean()),
+        # weighted 口径（权重感知会计主口径）
+        "action_mu_ds_weighted_mean": weighted_ds / max(weight_sum, 1e-8),
+        "action_mu_dtheta_weighted_mean": weighted_dtheta / max(weight_sum, 1e-8),
+        "expert_action_ds_weighted_mean": float(np.dot(expert[:, 0], expert_w) / max(expert_w.sum(), 1e-8)),
+        "expert_action_dtheta_weighted_mean": float(np.dot(expert[:, 1], expert_w) / max(expert_w.sum(), 1e-8)),
+        "action_mu_weight_sum": float(weight_sum),
+        "action_mu_count": float(count),
+        "action_mu_abs_err_weighted_mean": error_stats["weighted_mean"],
+        "action_mu_abs_err_count": error_stats["count"],
     }
 
 
 def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """阶段 B：planner BC（动作主损失 + rollout 轨迹辅助（WM detach）+ router BCE）。"""
+    """阶段 B：planner BC（动作主损失 + rollout 轨迹辅助（WM detach）+ router 软目标 CE/KL）。"""
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     apply_thread_limits(workers=1, config=config)
@@ -671,14 +1516,48 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     traj_weight = float(args.traj_aux_weight if args.traj_aux_weight is not None else bc_cfg.get("traj_aux_weight", 0.1))
     loss_type = str(args.loss_type if args.loss_type is not None else bc_cfg.get("loss_type", "l2"))
     router_coef = float(args.router_coef if args.router_coef is not None else bc_cfg.get("router_coef", 0.1))
+    router_temperature = float(
+        args.router_temperature if args.router_temperature is not None else bc_cfg.get("router_temperature", 1.0)
+    )
     batch_size = int(args.batch_size or (train_cfg.get("bc", {}) or {}).get("batch_size") or 256)
+    history_stride = int(args.history_stride if args.history_stride is not None else dataset.history_stride)
 
-    # WM 冻结：阶段 A 已训练；rollout 内输出再 detach（wm_detach=True）→ 轨迹辅助损失不回传 WM。
-    apply_freeze_prefixes(model, ("world_model.",))
+    # 聚类 lane：router 软目标（pipeline.clusters 冻结 spec；k 必须 = net router 宽度 8）
+    cluster_spec = None
+    cluster_spec_path = str(getattr(args, "cluster_config", "") or "")
+    if cluster_spec_path:
+        try:
+            from pipeline.clusters import load as load_clusters
+
+            cluster_spec = load_clusters(args.cluster_config)
+        except Exception as exc:  # noqa: BLE001 - artifact/依赖缺失 → 退回数据集软目标/跳过
+            print(
+                f"[stageB] 警告：聚类 spec 加载失败（{type(exc).__name__}: {exc}）→ "
+                "router 软目标回退数据集/跳过",
+                flush=True,
+            )
+    router_soft_fn = None
+    if cluster_spec is not None:
+        if int(getattr(cluster_spec, "k", 0)) != 8:
+            print(
+                f"[stageB] 警告：cluster k={getattr(cluster_spec, 'k', 0)} != 8（net router 宽度）；"
+                "跳过 router 软目标",
+                flush=True,
+            )
+        else:
+            from pipeline.clusters import soft_targets_from_obs
+
+            def router_soft_fn(obs_batch, _spec=cluster_spec):  # noqa: ANN001
+                return soft_targets_from_obs(obs_batch, spec=_spec)
+
+    # WM 冻结：阶段 A 已训练；rollout 内合成帧再 detach（固定语义，wm_detach 为 no-op）→
+    # 轨迹辅助损失不回传 ST-GNN。
+    apply_freeze_prefixes(model, ("st_gnn.",))
     metrics: Dict[str, Any] = {
         "stage": "B",
         "kind": "planner_bc",
         "bc_dir": str(args.bc_dir),
+        "dataset_schema": int(dataset.schema_version),
         "samples": int(dataset.count),
         "device": device,
         "epochs": epochs,
@@ -689,9 +1568,28 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "action_weight": action_weight,
         "traj_aux_weight": traj_weight,
         "router_coef": router_coef,
+        "router_temperature": router_temperature,
+        "cluster_version": (str(cluster_spec.cluster_version) if cluster_spec is not None else ""),
+        "cluster_k": (int(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0),
+        "cluster_spec": cluster_spec_path,
+        "cluster_soft_targets": bool(router_soft_fn is not None),
         "wm_detach": True,
+        "history_stride": history_stride,
     }
+    metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(out_dir / "monitor", enabled=_monitor_enabled(args, config))
+    if monitor is not None:
+        version_digits = "".join(
+            ch for ch in (str(cluster_spec.cluster_version) if cluster_spec is not None else "") if ch.isdigit()
+        )
+        monitor.on_train_step(
+            {
+                "cluster_version_num": float(version_digits) if version_digits else float("nan"),
+                "cluster_k": float(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0.0,
+                "cluster_soft_targets": 1.0 if router_soft_fn is not None else 0.0,
+            },
+            step=0,
+        )
 
     def _run_phase(phase: str, phase_epochs: int, freeze_prefixes: Sequence[str]) -> Dict[str, Any]:
         if phase_epochs <= 0:
@@ -704,18 +1602,42 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             traj_weight=traj_weight,
             action_weight=action_weight,
             router_coef=router_coef,
+            router_temperature=router_temperature,
             seed=int(args.seed),
             device=device,
             max_batches=args.max_batches,
             wm_detach=True,
             freeze_prefixes=tuple(freeze_prefixes),
             phase=phase,
+            history_stride=history_stride,
+            router_cluster_version=(str(cluster_spec.cluster_version) if cluster_spec is not None else ""),
+            router_cluster_k=(int(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0),
         )
-        result = pretrain_bc(model, dataset, cfg, logger=print)
+        result = pretrain_bc(
+            model, dataset, cfg, logger=print, router_soft_targets_fn=router_soft_fn
+        )
         if monitor is not None:
             monitor.on_train_step(
                 {f"{phase}_{key}": value for key, value in result.items() if isinstance(value, (int, float))},
                 step=phase_epochs,
+            )
+            # 专用 per-horizon / per-label / 分切片序列（CSV + tensorboard）
+            horizon_groups = {}
+            for key, value in result.items():
+                if key.startswith("bc_traj_err_h") and isinstance(value, (int, float)) and value == value:
+                    horizon_groups[key.replace("bc_traj_err_", "")] = {"traj_err": float(value)}
+            slice_groups = {}
+            for name in ("brake", "turn", "curve"):
+                stats = result.get(f"bc_action_err_slice_{name}")
+                if isinstance(stats, Mapping) and stats:
+                    slice_groups[name] = {"action_err": stats.get("weighted_mean")}
+            label_groups = {}
+            for label_name in dataset.label_names:
+                value = result.get(f"bc_action_err_label_{label_name}")
+                if value is not None:
+                    label_groups[label_name] = {"action_err": value}
+            monitor.on_grouped_step(
+                horizon=horizon_groups, slices=slice_groups, labels=label_groups, step=phase_epochs
             )
             monitor.flush(step=phase_epochs)
         return result
@@ -731,7 +1653,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     _write_json(out_dir / "metrics.json", metrics)
     print(
         f"[stageB] DONE → {out_dir} action_mu_ds={metrics['action_mu_ds_mean']:.3f}m "
-        f"（专家 {metrics['expert_action_ds_mean']:.3f}m）",
+        f"（加权 {metrics['action_mu_ds_weighted_mean']:.3f}m；专家 {metrics['expert_action_ds_mean']:.3f}m）",
         flush=True,
     )
     return metrics
@@ -744,9 +1666,24 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
     """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ primary lr ×0.1 + WM 冻结/解冻。
 
+    .. warning::
+        **EXPERIMENTAL（2026-09-26）**：P0-1（环境有效动作 = 整条 6 步 plan，PPO 只对首动作
+        记账；WM 解冻无训练信号）与 P0-2（router 标签与观测错位一步）未修复前，本阶段
+        输出**不得用于任何 RL 结论**（见 ``docs/db44fefe-system-review.md``）。保留可运行仅用于
+        管线冒烟/回归；正式 RL 结论必须等两项修复 + 回归测试落地。
+
     ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
     update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
     """
+    print(
+        "[stageC] ============================================================\n"
+        "[stageC] EXPERIMENTAL：P0-1/P0-2 未修复前，Stage C 不得用于 RL 结论。\n"
+        "[stageC] P0-1 = 整条 plan 执行 vs 首动作 PPO 记账/ WM 解冻无信号；\n"
+        "[stageC] P0-2 = router 标签（动作后）配给动作前观测。\n"
+        "[stageC] 仅用于管线冒烟/回归（见 docs/db44fefe-system-review.md）。\n"
+        "[stageC] ============================================================",
+        flush=True,
+    )
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     specs = _resolve_specs(args, config)
@@ -788,7 +1725,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         wm_freeze_updates = max(1, updates // 4) if updates > 0 else 0
     wm_freeze_updates = int(wm_freeze_updates)
     if wm_freeze_updates > 0:
-        apply_freeze_prefixes(model, ("world_model.",))
+        apply_freeze_prefixes(model, ("st_gnn.",))
 
     bc_dataset = None
     if args.bc_anchor and Path(args.bc_dir).exists():
@@ -806,6 +1743,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     )
     metrics: Dict[str, Any] = {
         "stage": "C",
+        "experimental": True,
+        "blocked_by": ["P0-1", "P0-2"],
         "specs": len(specs),
         "primary_lr_scale": primary_lr_scale,
         "kl_anchor": {"initial": kl_initial, "final": kl_final, "decay": kl_decay, "source": str(ckpt)},
@@ -855,7 +1794,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             if wm_freeze_updates > 0 and update == wm_freeze_updates:
                 apply_freeze_prefixes(model, ())
                 wm_params = [
-                    parameter for name, parameter in model.named_parameters() if name.startswith("world_model.")
+                    parameter for name, parameter in model.named_parameters() if name.startswith("st_gnn.")
                 ]
                 existing = {
                     id(parameter) for group in trainer.optimizer.param_groups for parameter in group["params"]
@@ -863,7 +1802,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 fresh = [p for p in wm_params if id(p) not in existing and p.requires_grad]
                 if fresh:
                     trainer.optimizer.add_param_group({"params": fresh, "lr": float(args.lr)})
-                print(f"[stageC] update {update}: world model 解冻（{len(fresh)} 个参数进入优化器）", flush=True)
+                print(f"[stageC] update {update}: world model（ST-GNN）解冻（{len(fresh)} 个参数进入优化器）", flush=True)
             progress = update / max(updates - 1, 1) if updates > 1 else 0.0
             trainer.config.kl_anchor_coef = kl_initial + (kl_final - kl_initial) * progress if kl_decay else kl_initial
             kl_schedule.append(float(trainer.config.kl_anchor_coef))
@@ -905,7 +1844,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pipeline.stages", description="阶段 A/B/C 编排（v1.1）")
     parser.add_argument("--stage", choices=("A", "B", "C"), required=True,
-                        help="A=WM 教师强制训练；B=planner BC（primary→specific）；C=PPO RL")
+                        help="A=WM 教师强制训练；B=planner BC（primary→specific）；"
+                             "C=PPO RL（EXPERIMENTAL：P0-1/P0-2 未修，不得用于 RL 结论）")
     parser.add_argument("--config", default="config/default.yaml", help="主配置（includes 合并）")
     parser.add_argument("--model-config", default=_DEFAULT_MODEL_CFG)
     parser.add_argument("--spec", default=None, help="阶段 C 训练 spec（默认取 config data.spec）")
@@ -929,6 +1869,14 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--match-future-slots", action=argparse.BooleanOptionalAction, default=True,
                         help="阶段 A 未来 OD 槽位按 t0 帧最近邻匹配（默认开；关闭 = 原始 TTC 排序槽位）")
     parser.add_argument("--match-gate-m", type=float, default=8.0, help="槽位匹配距离门限（m）")
+    parser.add_argument("--wm-presence-coef", type=float, default=None,
+                        help="阶段 A presence BCE 权重（默认取 config stages.A.world_model.presence_coef=0.1；"
+                             "net 无 presence 头时自动跳过并记录 presence_available=0）")
+    parser.add_argument("--wm-entry-coef", type=float, default=None,
+                        help="阶段 A entry BCE 权重（默认取 config stages.A.world_model.entry_coef=0.1）")
+    parser.add_argument("--wm-ego-next-coef", type=float, default=None,
+                        help="阶段 A plan head ego_next 监督权重（默认取 config "
+                             "stages.A.world_model.ego_next_coef=0.1；plan head/MoE 的唯一梯度来源）")
     # ---- 阶段 B ----
     parser.add_argument("--bc-epochs", type=int, default=None, help="阶段 B 总轮数（默认 config/stages.B.bc.epochs=10）")
     parser.add_argument("--bc-phase-split", type=float, default=None,
@@ -937,6 +1885,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--traj-aux-weight", type=float, default=None, help="阶段 B rollout 轨迹辅助权重（默认 0.1）")
     parser.add_argument("--loss-type", choices=("l1", "l2"), default=None,
                         help="阶段 B 损失口径（默认取 config/stages.B.bc.loss_type=l2；l1 可减轻转向回归均值）")
+    parser.add_argument("--router-temperature", type=float, default=None,
+                        help="阶段 B router 软目标温度（softmax logits 温度；默认 1.0）")
+    parser.add_argument("--cluster-config", type=Path, default=Path("config/clusters/default.yaml"),
+                        help="聚类 lane 冻结 spec（router 软目标；加载失败 → 数据集软目标/跳过）")
+    parser.add_argument("--history-stride", type=int, default=None,
+                        help="历史/未来查表步距（env step；BC 默认 5 = 0.5 s）")
     # ---- 阶段 C ----
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
     parser.add_argument("--envs", type=int, default=1)
@@ -961,7 +1915,8 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="A 默认 128；B 默认取 config/train.yaml train.bc.batch_size（256）")
     parser.add_argument("--max-batches", type=int, default=None, help="A/B 每轮批数上限（冒烟用）")
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--router-coef", type=float, default=None, help="B/C router BCE 权重（默认 0.1）")
+    parser.add_argument("--router-coef", type=float, default=None,
+                        help="B/C router 软目标 CE/KL 权重（默认 0.1；软目标来自聚类 artifact）")
     parser.add_argument("--traffic-density", type=float, default=None)
     parser.add_argument("--mem-floor-mb", type=float, default=2000.0)
     parser.add_argument("--device", default=None,

@@ -171,7 +171,7 @@ class LDChannel(ObservationChannel):
         *,
         num_slots: int = 16,
         offsets: Sequence[float] = (5.0, 10.0, 15.0, 20.0, 30.0),
-        front_m: float = 100.0,
+        front_m: float = 150.0,
         rear_m: float = 50.0,
         left_m: float = 25.0,
         right_m: float = 25.0,

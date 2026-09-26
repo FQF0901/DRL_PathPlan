@@ -1,17 +1,24 @@
-"""MoE 模块：primary（恒激活）+ 8 个场景专家（零初始化残差）+ sigmoid 多标签路由。
+"""MoE 模块：primary（恒激活）+ 8 个场景专家（零初始化残差）+ **top-2 软混合**路由。
 
-设计（p2-contract §2 / 已确认决策 6）
--------------------------------------
+设计（v2 规格第 3 条：MoE 只在 plan head，不再共享）
+---------------------------------------------------
 - **primary 不受路由门控**（DeepSeekMoE shared-expert 模式）：
-  ``out = primary(x) + residual_scale · Σ_i gate_i · expert_i(x)``；
-- 8 个 expert 结构 ``H→192→H``，**输出层零初始化**：训练开始时 expert 分支严格为 0，
-  不破坏 primary 的初始表示；
-- router = ``sigmoid(W·x + b)``（多标签，非 softmax），与 `config/model.yaml` 的
-  ``moe.router.supervised_labels`` 8 个标签一一对应（固定顺序，见
-  :data:`net.model.SUPERVISED_LABELS`），训练时用 BCE 监督；
-- 对外暴露 ``router_logits (B,8)``、``expert_weights (B,8)``（即门控值，供监控
-  "有效专家数 N=Σw、每 expert 权重"）与 ``residual_scale``；
-- ``gates`` 可显式传入（测试/监控/固定路由消融），此时仍走同一条前向，
+  ``out = primary(x) + residual_scale · Σ_i w_i · expert_i(x)``；
+- **top-2 软混合**：router 输出 8 个 logits，取 top-2 后在**被选中的两个 logit 上做
+  softmax**（和为 1，其余 6 个权重恒为 0）；比 sigmoid 全专家加权更稀疏、比 hard top-1
+  更平滑。混合权重来自网络自身的路由（由训练侧软目标监督学习，见下）；
+- 8 个 expert 结构 ``H→expert_hidden→H``，**输出层零初始化**：训练开始时 expert 分支
+  严格为 0，不破坏 primary 的初始表示；
+- 对外暴露：
+
+  - ``router_logits (B,8)``：路由 logits，**监督面**——trainer 侧对聚类软目标
+    （``pipeline.trainer.router_soft_target_loss``）做 **CE/KL（softmax + 温度）**；
+    “权重由训练侧软目标提供”即指 router 通过这些软目标学习到最终用于混合的概率结构；
+  - ``expert_weights (B,8)``：top-2 softmax 的混合权重（恰好 2 个非零、和为 1）；
+  - ``effective_experts``：``Σw``（=1，供监控口径兼容；注意与 router softmax 分布的
+    ``Σw ∈ [1,E]`` 语义不同，见 ``pipeline.monitoring``）。
+
+- ``gates`` 可显式传入（测试/固定路由消融），此时跳过 top-2，仍走同一条前向，
   便于验证 primary 与门控严格解耦。
 """
 
@@ -36,8 +43,19 @@ def _mlp(in_dim: int, hidden_dim: int, out_dim: int, *, zero_init: bool = False)
     return layer
 
 
+def top_k_softmax(logits: Tensor, k: int = 2) -> Tensor:
+    """``(B,E)`` logits → ``(B,E)`` 权重：top-k 上 softmax，其余严格为 0。"""
+    if logits.ndim != 2:
+        raise ValueError(f"top_k_softmax 期望 (B,E)，收到 {tuple(logits.shape)}")
+    width = int(logits.shape[-1])
+    k = max(1, min(int(k), width))
+    values, indices = logits.topk(k, dim=-1)
+    weights = torch.zeros_like(logits).scatter(-1, indices, torch.softmax(values, dim=-1))
+    return weights
+
+
 class MoEBlock(nn.Module):
-    """场景级 MoE（作用于全局 latent token）。"""
+    """plan-head 内的 MoE（作用于 fusion 后的全局 token）。"""
 
     def __init__(
         self,
@@ -45,10 +63,12 @@ class MoEBlock(nn.Module):
         num_experts: int = 8,
         expert_hidden: int = 192,
         router_hidden: int = 64,
+        top_k: int = 2,
     ):
         super().__init__()
         self.hidden = int(hidden)
         self.num_experts = int(num_experts)
+        self.top_k = int(top_k)
         self.primary = _mlp(hidden, expert_hidden, hidden)
         self.experts = nn.ModuleList(
             [_mlp(hidden, expert_hidden, hidden, zero_init=True) for _ in range(self.num_experts)]
@@ -72,18 +92,17 @@ class MoEBlock(nn.Module):
         Args:
             x: MoE 输入（也是默认的 router 输入）。
             router_input: 覆盖 router 输入（默认等于 ``x``）。
-            gates: 显式门控 ``(B,E)``，覆盖 sigmoid(router)（测试/消融用）。
+            gates: 显式门控 ``(B,E)``，覆盖 top-2 softmax（测试/消融用）。
         """
         logits = self.router(x if router_input is None else router_input)
-        if gates is None:
-            gates = torch.sigmoid(logits)
+        weights = top_k_softmax(logits, self.top_k) if gates is None else gates
         primary_out = self.primary(x)
         expert_stack = torch.stack([expert(x) for expert in self.experts], dim=1)
-        mixed = (gates.unsqueeze(-1) * expert_stack).sum(dim=1)
+        mixed = (weights.unsqueeze(-1) * expert_stack).sum(dim=1)
         out = primary_out + self.residual_scale * mixed
         aux = {
             "router_logits": logits,
-            "expert_weights": gates,
-            "effective_experts": gates.sum(dim=-1),
+            "expert_weights": weights,
+            "effective_experts": weights.sum(dim=-1),
         }
         return out, aux

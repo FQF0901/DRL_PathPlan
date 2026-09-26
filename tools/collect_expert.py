@@ -1,4 +1,4 @@
-"""BC 专家数据采集工具（阶段 A 冷启动数据源）。
+"""BC 专家数据采集工具（阶段 A 冷启动数据源，schema v2 / ``per_frame_v2``）。
 
 用法::
 
@@ -33,24 +33,45 @@
     tools/venv-python tools/collect_expert.py \
         --specs env/specs/scenarios_train.json --limit 2000 --out runs/bc_expert_2k --workers 6
 
+v2 相对 v1 的变更（2026-09-26）
+-------------------------------
+1. **存全部 policy 帧，不再逐帧删行**。过滤命中（terminal_window / 不在车道 / cut 标签未验证 /
+   roundtrip 与密点失败）→ 该行 ``train_weight=0``，行仍写入 npz。这修复了"未来目标
+   ``step+5k`` 缺失 25%（k=6）"——缺失的根因是过滤行被删除后查表落空；
+2. 每行 ``wm_valid[6]``：horizon k 的目标帧**存在且仍可用**（未越过 episode 终止、自车仍在
+   车道容差内），供 Stage A 逐 horizon 掩码（缺失/污染 horizon 显式置 0，不再按有效项
+   归一造成隐性重加权）；
+3. 每帧存 OD 槽位身份：``od_id``（int64，track id，episode 内稳定）、``od_presence``，
+   以及 mem 所需的 ``od_id_hist``/``od_presence_hist``（6 帧，精确同槽位）；
+4. ``od_fingerprint`` 升级为 ``v2-`` 前缀，``schema_version=2``，``history_storage=per_frame_v2``；
+   ``expert_bc.meta.json::schema`` 写入完整 schema 清单（键/形状/dtype/语义/单位，单一出处
+   ``env/obs/schema.py``），下游按契约开发；
+5. report.json 权重感知：**计数口径 = 行数 / 加权口径 = 权重和**（见 ``report["counts"]`` 与
+   ``report["weighted"]``）；per-label 统计同时给出行数与加权和，dataset_gate 用行数口径
+   （保守下界），加权口径用于损失贡献分析。
+
 产出（``--out`` 目录）
 ----------------------
-- ``expert_bc.npz``：按帧存（**不存 6 帧堆叠**）的 BC 样本；历史窗口由训练侧在线拼；
-- ``expert_bc.meta.json``：schema / 通道形状 / 对齐元数据 / 过滤统计；
-- ``report.json``：产出率 ``bc_retained_step_yield`` + 每标签正样本数 + dataset_gate 判定。
+- ``expert_bc.npz``：按帧存（**不存 6 帧堆叠**）的 BC 样本 + ``od_id``/``od_presence`` 及其历史；
+  其余 6 帧历史（ego/others/od/ld）由训练侧用 ``pipeline.frames.FrameLookup`` 按
+  ``(episode_id, step)`` 精确查表重建；
+- ``expert_bc.meta.json``：schema / 通道形状 / 对齐元数据 / 过滤统计 / **完整 schema 清单**；
+- ``report.json``：产出率 ``bc_retained_step_yield``（行数口径 = train_weight>0 行数/候选行数）
+  + 计数/加权两套 per-label 统计 + dataset_gate 判定。
 
-过滤规则（p2-contract §8.2 规则 1–5，逐条落码）
------------------------------------------------
-1. **终末截断**：episode 遇 terminated/truncated 后不再产生任何样本（终末帧及其后目标丢弃）；
-2. **干净 3 s 窗口**：候选帧之后 6 个策略步（30 个 env step）内不得出现
+过滤规则（p2-contract §8.2 规则 1–5，v2 语义：命中 → 权重 0，不删行）
+------------------------------------------------------------------
+1. **终末截断**：候选帧之后 6 个策略步（30 个 env step）内不得出现
    crash / out_of_road / arrive_dest / 截断；
+2. **干净 3 s 窗口**：同上（合并入 1）；
 3. **on_lane + round-trip**：专家必须在自己车道内；且 6 个 ``(ds,dθ)`` 动作经运动学插值
    得到的 6 个关键点与实测关键点误差在阈值内（阈值可配；dense 30 点误差一并报告）；
 4. **事件标签可核验**：``cutin_active`` / ``cutout_active`` 为 1 的帧，仅当其事件
-   ``fired ∧ actor_alive`` 时保留；保留后核对每标签正样本数
+   ``fired ∧ actor_alive`` 时 ``train_weight=1``；保留后核对每标签正样本数
    （``config/eval.yaml::dataset_gate.min_samples_per_category=50``）；
 5. **难度/几何配平**：默认给每组 (difficulty, 主几何标签) 等贡献权重（``--balance weights``），
-   可选按组截断（``--balance cap``）或关闭（``--balance none``）。
+   可选按组封顶（``--balance cap``，把超出的可训练行 ``sample_weight`` 置 0，仍不删行）
+   或关闭（``--balance none``）。
 
 运动学单一真源（§8.5）
 ----------------------
@@ -83,7 +104,10 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from env.metadrive_env import build_env  # noqa: E402
+from env.obs import OBS_SCHEMA_VERSION  # noqa: E402
 from env.obs.builder import ObservationBuilder  # noqa: E402
+from env.obs.others import OTHERS_HEAD_DIM, road_class_labels  # noqa: E402
+from env.obs.schema import schema_manifest  # noqa: E402
 from env.scenario.behaviors import event_state  # noqa: E402
 from env.scenario.labels import LABEL_ORDER, compute_step_labels  # noqa: E402
 from env.scenario.spec import load_specs  # noqa: E402
@@ -100,7 +124,14 @@ PHYSICS_DT = 0.1  # env.step 步长（s）
 STEPS_PER_POLICY = 5  # POLICCY_DT / PHYSICS_DT
 WINDOW_POLICIES = 6  # 3 s 目标窗口 = 6 个策略步
 WINDOW_STEPS = WINDOW_POLICIES * STEPS_PER_POLICY  # 30 env steps
-CURRENT_CHANNELS = ("ego", "od", "ld", "nav", "signal")
+#: 逐帧存储的当前帧通道（v2 增加 others；nav/signal 兼容保留）
+CURRENT_CHANNELS = ("ego", "od", "ld", "nav", "signal", "others")
+#: OD 槽位级伴随键（int64 / float32）
+COMPANION_KEYS = ("od_id", "od_presence")
+#: 每帧额外存的历史键（id/presence 历史不能靠行位置重建）
+MEM_HISTORY_KEYS = ("od_id_hist", "od_presence_hist")
+#: 需要保持 int64 的 npz 键（其余一律 float32）
+INT64_KEYS = frozenset({"od_id", "od_id_hist"})
 SUPERVISED_LABELS: Tuple[str, ...] = (
     "cutin_active",
     "cutout_active",
@@ -332,10 +363,17 @@ def collect_episode(
             labels_raw = compute_step_labels(env, spec)
             state = event_state(env)
             on_lane, lateral, width = _on_lane(ego)
-            current = {key: np.array(obs[key], dtype=np.float32, copy=True) for key in obs if "_hist" not in key}
+            # 保留原始 dtype（od_id 是 int64；v1 的 float32 强转会把 track id 变成浮点）
+            current = {key: np.array(obs[key], copy=True) for key in obs if "_hist" not in key}
             frames[step] = {
                 "obs": current,
                 "hist_valid": np.array(obs.get("hist_valid", np.zeros(6, dtype=np.float32)), dtype=np.float32),
+                "od_id_hist": np.array(
+                    obs.get("od_id_hist", np.full((6, 16), -1, dtype=np.int64)), dtype=np.int64, copy=True
+                ),
+                "od_presence_hist": np.array(
+                    obs.get("od_presence_hist", np.zeros((6, 16), dtype=np.float32)), dtype=np.float32, copy=True
+                ),
                 "labels_raw": np.array([labels_raw.get(name, 0.0) for name in LABEL_ORDER], dtype=np.float32),
                 "events": _events_summary(state),
                 "pose": poses[-1].copy(),
@@ -412,7 +450,16 @@ def extract_samples(
     require_dense: bool = False,
     roundtrip_dense_mean: float = 0.5,
 ) -> List[Dict[str, Any]]:
-    """按 §8.2 规则 1–4 从 episode 记录中抽取保留样本。"""
+    """按 §8.2 规则 1–4 抽取**全部 policy 帧**（v2：命中过滤不删行，记 ``train_weight=0``）。
+
+    - ``train_weight``：1 = 可训练（BC 动作/轨迹/标签可用）；0 = 命中 terminal_window /
+      not_on_lane / cut_label_unverified / roundtrip_fail / roundtrip_dense_fail 中首个原因；
+    - ``wm_valid[6]``：horizon k 的目标帧存在且仍可用（未越终止、自车在车道容差内）；
+    - ``frame_usable``：本帧自身是否可用（同 ``wm_valid`` 的目标判据），供
+      ``pipeline.frames.lookup_from_arrays(usable_key="frame_usable")`` 复算未来掩码；
+    - 未命中过滤的行也照常计算动作/轨迹字段；窗口不可算（超出记录范围）时置零，此时
+      ``train_weight`` 必为 0（terminal_window），下游不得读取。
+    """
     poses, flags = episode["poses"], episode["flags"]
     frames: Dict[int, Dict[str, Any]] = episode["frames"]
     last_state = len(poses) - 1
@@ -428,50 +475,75 @@ def extract_samples(
     if episode.get("ended_by_env", False):
         first_bad = min(first_bad, last_state)
     limit = first_bad - 1  # 窗口末端最大可到 limit
+    key_indices = [i * STEPS_PER_POLICY - 1 for i in range(1, WINDOW_POLICIES + 1)]
+
+    def _frame_usable(step: int) -> bool:
+        """目标帧是否仍可用：存在 ∧ 未越过 episode 终止（step<=limit）∧ 自车仍在车道容差内。"""
+        target = frames.get(step)
+        if target is None or step > limit:
+            return False
+        return bool(target["on_lane"]) and _on_lane_ok(
+            target["lane_lat"], target["lane_width"], on_lane_frac, on_lane_margin
+        )
+
     out: List[Dict[str, Any]] = []
     for t in sorted(frames.keys()):
-        if t + WINDOW_STEPS > limit:
-            filter_counter["terminal_window"] += 1
-            continue
         frame = frames[t]
-        # 规则 3a：专家在车道内
-        if not frame["on_lane"] or not _on_lane_ok(
+        # ---- 过滤判定（v2：命中不删行，只把 train_weight 置 0；按优先级取首个原因）----
+        reason: Optional[str] = None
+        if t + WINDOW_STEPS > limit:
+            reason = "terminal_window"
+        elif not frame["on_lane"] or not _on_lane_ok(
             frame["lane_lat"], frame["lane_width"], on_lane_frac, on_lane_margin
         ):
-            filter_counter["not_on_lane"] += 1
-            continue
-        # 规则 4：cut*_active 仅事件 fired ∧ actor_alive 时保留
-        cut_ok = True
-        for cut_name, event_type in (("cutin_active", "cut_in"), ("cutout_active", "cut_out")):
-            if frame["labels_raw"][LABEL_ORDER.index(cut_name)] > 0.5:
-                if not any(
-                    ev["type"] == event_type and ev["fired"] and ev["alive"] for ev in frame["events"]
-                ):
-                    cut_ok = False
-                    break
-        if not cut_ok:
-            filter_counter["cut_label_unverified"] += 1
-            continue
+            reason = "not_on_lane"
+        if reason is None:
+            # 规则 4：cut*_active 仅事件 fired ∧ actor_alive 时保留
+            for cut_name, event_type in (("cutin_active", "cut_in"), ("cutout_active", "cut_out")):
+                if frame["labels_raw"][LABEL_ORDER.index(cut_name)] > 0.5:
+                    if not any(
+                        ev["type"] == event_type and ev["fired"] and ev["alive"] for ev in frame["events"]
+                    ):
+                        reason = "cut_label_unverified"
+                        break
 
-        # 规则 3b：6 点目标 round-trip 可复现
-        actions = _window_actions(poses, t)
-        try:
-            interp = np.asarray(interpolate_fn(actions, dt=POLICY_DT, hz=int(round(1.0 / PHYSICS_DT))), dtype=np.float64)
-        except TypeError:  # env.tracking.interpolate 可能不接受 kwargs
-            interp = np.asarray(interpolate_fn(actions), dtype=np.float64)
-        if interp.shape[0] != WINDOW_STEPS:
-            raise ValueError(f"interpolate 输出 {interp.shape}，期望 ({WINDOW_STEPS},3)")
-        measured = np.stack([poses[t + j][:2] for j in range(1, WINDOW_STEPS + 1)], axis=0)
-        measured_local = _to_local(measured, frame["pose"])
-        key_indices = [i * STEPS_PER_POLICY - 1 for i in range(1, WINDOW_POLICIES + 1)]
-        key_err = np.linalg.norm(interp[key_indices, :2] - measured_local[key_indices], axis=1)
-        dense_err = np.linalg.norm(interp[:, :2] - measured_local, axis=1)
-        if float(key_err.mean()) > roundtrip_key_mean or float(key_err.max()) > roundtrip_key_max:
-            filter_counter["roundtrip_fail"] += 1
-            continue
-        if require_dense and float(dense_err.mean()) > roundtrip_dense_mean:
-            filter_counter["roundtrip_dense_fail"] += 1
-            continue
+        # ---- 规则 3b：6 点目标 round-trip 可复现（窗口可算时才计算，供诊断与目标字段）----
+        computable = (t + WINDOW_STEPS) <= last_state
+        actions = np.zeros((WINDOW_POLICIES, 2), dtype=np.float64)
+        interp = np.zeros((WINDOW_STEPS, 3), dtype=np.float64)
+        measured_local = np.zeros((WINDOW_STEPS, 2), dtype=np.float64)
+        key_err = np.full(WINDOW_POLICIES, np.nan)
+        dense_err = np.full(WINDOW_STEPS, np.nan)
+        if computable:
+            actions = _window_actions(poses, t)
+            try:
+                interp = np.asarray(
+                    interpolate_fn(actions, dt=POLICY_DT, hz=int(round(1.0 / PHYSICS_DT))), dtype=np.float64
+                )
+            except TypeError:  # env.tracking.interpolate 可能不接受 kwargs
+                interp = np.asarray(interpolate_fn(actions), dtype=np.float64)
+            if interp.shape[0] != WINDOW_STEPS:
+                raise ValueError(f"interpolate 输出 {interp.shape}，期望 ({WINDOW_STEPS},3)")
+            measured = np.stack([poses[t + j][:2] for j in range(1, WINDOW_STEPS + 1)], axis=0)
+            measured_local = _to_local(measured, frame["pose"])
+            key_err = np.linalg.norm(interp[key_indices, :2] - measured_local[key_indices], axis=1)
+            dense_err = np.linalg.norm(interp[:, :2] - measured_local, axis=1)
+            if reason is None and (
+                float(key_err.mean()) > roundtrip_key_mean or float(key_err.max()) > roundtrip_key_max
+            ):
+                reason = "roundtrip_fail"
+            if reason is None and require_dense and float(dense_err.mean()) > roundtrip_dense_mean:
+                reason = "roundtrip_dense_fail"
+
+        if reason is not None:
+            filter_counter[reason] += 1
+        train_weight = 0.0 if reason else 1.0
+
+        # ---- wm_valid[6]：horizon k 的目标帧存在且仍可用（Stage A 逐 horizon 掩码）----
+        wm_valid = np.zeros(WINDOW_POLICIES, dtype=np.float32)
+        for k in range(1, WINDOW_POLICIES + 1):
+            if _frame_usable(t + k * STEPS_PER_POLICY):
+                wm_valid[k - 1] = 1.0
 
         if t >= STEPS_PER_POLICY:
             prev_action = _window_actions(poses, t - STEPS_PER_POLICY, n_policies=1)[0]
@@ -489,19 +561,25 @@ def extract_samples(
                 "geometry": str(getattr(spec, "labels", {}).get("geometry", "unknown")),
                 "obs": frame["obs"],
                 "hist_valid": frame["hist_valid"],
+                "od_id_hist": frame["od_id_hist"],
+                "od_presence_hist": frame["od_presence_hist"],
                 "pose": frame["pose"],
                 "action": actions.astype(np.float32),
                 "traj6": interp[key_indices, :2].astype(np.float32),
                 "traj30": interp[:, :2].astype(np.float32),
                 "traj30_measured": measured_local.astype(np.float32),
-                "roundtrip_key_err": float(key_err.mean()),
-                "roundtrip_dense_err": float(dense_err.mean()),
+                "roundtrip_key_err": float(key_err.mean()) if computable else float("nan"),
+                "roundtrip_dense_err": float(dense_err.mean()) if computable else float("nan"),
                 "labels": _supervised_vector(
                     {name: float(labels_raw[i]) for i, name in enumerate(LABEL_ORDER)}, label_order
                 ),
                 "labels_raw": np.array(labels_raw, dtype=np.float32),
                 "prev_action": prev_action.astype(np.float32),
                 "lane_lat": float(frame["lane_lat"]),
+                "train_weight": float(train_weight),
+                "wm_valid": wm_valid,
+                "frame_usable": 1.0 if _frame_usable(t) else 0.0,
+                "filter_reason": reason or "",
             }
         )
     return out
@@ -546,7 +624,7 @@ def _collect_one_spec(
             expert_kind=str(expert_kind),
             max_steps=int(max_steps),
         )
-        kept = extract_samples(
+        rows = extract_samples(
             episode,
             spec,
             episode_id=int(spec_index),
@@ -560,11 +638,13 @@ def _collect_one_spec(
             require_dense=bool(require_dense),
             roundtrip_dense_mean=float(roundtrip_dense_mean),
         )
+        candidates = len(episode["frames"])
+        trainable = int(sum(1 for row in rows if row["train_weight"] > 0.0))
         return {
             "spec_index": int(spec_index),
-            "kept": kept,
+            "kept": rows,  # v2：全部 policy 帧（train_weight 标过滤；键名保持以兼容 _merge_records）
             "filter_counts": filter_counter,
-            "candidates": len(episode["frames"]),
+            "candidates": candidates,
             "steps": int(episode["steps"]),
             "elapsed_s": time.perf_counter() - started,
             "report": {
@@ -574,9 +654,10 @@ def _collect_one_spec(
                 "geometry": str(getattr(spec, "labels", {}).get("geometry", "unknown")),
                 "termination": episode["termination"],
                 "env_steps": int(episode["steps"]),
-                "candidate_policy_steps": len(episode["frames"]),
-                "retained_steps": len(kept),
-                "step_yield": (len(kept) / len(episode["frames"])) if episode["frames"] else 0.0,
+                "candidate_policy_steps": candidates,
+                "stored_rows": len(rows),
+                "retained_steps": trainable,
+                "step_yield": (trainable / candidates) if candidates else 0.0,
             },
         }
     except Exception as exc:  # noqa: BLE001 - 单条失败不中断整批（与 validator 同口径）
@@ -759,7 +840,9 @@ def _run_workers(
                 print(
                     f"[collect_expert] {len(records)}/{total} [w{worker_index}] "
                     f"id={record['report'].get('id', -1)} term={record['report'].get('termination')} "
-                    f"steps={record['steps']} cand={record['candidates']} kept={len(record['kept'])} "
+                    f"steps={record['steps']} cand={record['candidates']} "
+                    f"stored={record['report'].get('stored_rows', len(record['kept']))} "
+                    f"trainable={record['report'].get('retained_steps', -1)} "
                     f"({record['elapsed_s']:.1f}s)",
                     flush=True,
                 )
@@ -819,19 +902,26 @@ def apply_balance(
     ratio: float,
     seed: int,
 ) -> Dict[str, Any]:
-    """按 (difficulty, 主几何) 组配平（规则 5）。
+    """按 (difficulty, 主几何) 组配平（规则 5，v2 权重感知）。
 
-    - ``weights``（默认）：保留全部样本，权重 ``n_total / (n_groups * n_group)``，
-      使每组对损失的贡献近似相等；
-    - ``cap``：每组最多保留 ``ceil(ratio * 最小非空组样本数)``，组内按 (spec,step)
-      确定性等距抽样（不引入 RNG，复现性最好）；
+    - ``weights``（默认）：对 ``train_weight>0`` 的行给权重 ``n_trainable / (n_groups * n_group)``，
+      使每组对损失的贡献近似相等；``train_weight=0`` 的行 ``sample_weight=1``（下游先乘
+      ``train_weight``，不参与损失）；
+    - ``cap``：每组最多 ``ceil(ratio * 最小非空组可训练行数)`` 个可训练行参与损失——
+      超出行的 ``sample_weight`` 置 0（**不删行**：行是历史/未来精确查表所需的帧；
+      v1 的物理删除会和 Stage A 的目标缺失问题冲突）；组内按 (spec_id, step) 确定性等距抽样；
     - ``none``：权重恒 1。
 
+    计数口径 = 行数；加权口径 = 权重和（见 report["counts"] / report["weighted"]）。
     返回统计 dict（写入 meta/report）。
     """
     groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     for index, sample in enumerate(samples):
         groups[(sample["difficulty"], sample["geometry"])].append(index)
+    trainable = [index for index, sample in enumerate(samples) if float(sample.get("train_weight", 1.0)) > 0.0]
+    trainable_groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+    for index in trainable:
+        trainable_groups[(samples[index]["difficulty"], samples[index]["geometry"])].append(index)
     weights = np.ones(len(samples), dtype=np.float64)
     group_key = np.array(
         [f"{sample['difficulty']}/{sample['geometry']}" for sample in samples], dtype="U64"
@@ -840,48 +930,79 @@ def apply_balance(
         "mode": mode,
         "ratio": float(ratio),
         "group_counts_before": {f"{k[0]}/{k[1]}": len(v) for k, v in sorted(groups.items())},
+        "group_trainable_before": {
+            f"{k[0]}/{k[1]}": len(v) for k, v in sorted(trainable_groups.items())
+        },
+        "counts": {"rows": len(samples), "trainable_rows": len(trainable)},
     }
-    if mode == "none" or not samples:
+    if mode == "none" or not samples or not trainable:
         stats["group_counts_after"] = dict(stats["group_counts_before"])
+        stats["weight_range"] = [1.0, 1.0]
         return {"sample_weight": weights, "balance_group": group_key, "stats": stats}
     if mode == "weights":
-        n_groups = max(1, len(groups))
-        for key, indices in groups.items():
-            weights[indices] = float(len(samples)) / (n_groups * len(indices))
-        stats["weight_range"] = [float(weights.min()), float(weights.max())]
+        n_groups = max(1, len(trainable_groups))
+        n_trainable = len(trainable)
+        for key, indices in trainable_groups.items():
+            weights[indices] = float(n_trainable) / (n_groups * len(indices))
+        stats["weight_range"] = [float(weights[trainable].min()), float(weights[trainable].max())]
     elif mode == "cap":
-        min_count = min(len(indices) for indices in groups.values())
+        min_count = min(len(indices) for indices in trainable_groups.values())
         cap = max(1, int(math.ceil(float(ratio) * min_count)))
-        keep: List[int] = []
-        for key in sorted(groups):
-            indices = sorted(groups[key], key=lambda i: (samples[i]["spec_id"], samples[i]["step"]))
+        dropped: List[int] = []
+        for key in sorted(trainable_groups):
+            indices = sorted(
+                trainable_groups[key], key=lambda i: (samples[i]["spec_id"], samples[i]["step"])
+            )
             if len(indices) <= cap:
-                keep.extend(indices)
-            else:
-                stride = len(indices) / float(cap)
-                picks = [indices[min(len(indices) - 1, int(round(i * stride)))] for i in range(cap)]
-                keep.extend(picks)
-        dropped = sorted(set(range(len(samples))) - set(keep))
+                continue
+            stride = len(indices) / float(cap)
+            picks = {indices[min(len(indices) - 1, int(round(i * stride)))] for i in range(cap)}
+            dropped.extend(index for index in indices if index not in picks)
+        weights[dropped] = 0.0
         stats["cap"] = cap
-        stats["min_group_count"] = min_count
-        stats["dropped_indices"] = dropped
-        samples[:] = [samples[i] for i in sorted(keep)]
-        weights = np.ones(len(samples), dtype=np.float64)
-        group_key = np.array(
-            [f"{s['difficulty']}/{s['geometry']}" for s in samples], dtype="U64"
-        ) if samples else np.zeros(0, dtype="U64")
-        groups = defaultdict(list)
-        for index, sample in enumerate(samples):
-            groups[(sample["difficulty"], sample["geometry"])].append(index)
+        stats["min_group_trainable"] = min_count
+        stats["dropped_indices"] = sorted(dropped)
+        stats["counts"]["trainable_after_cap"] = int((weights > 0.0).sum())
     else:
         raise ValueError(f"未知配平模式 {mode!r}")
-    stats["group_counts_after"] = {f"{k[0]}/{k[1]}": len(v) for k, v in sorted(groups.items())}
+    # "配平后有效行" = train_weight>0 且 sample_weight>0（下游损失真正使用的行）
+    stats["group_counts_after"] = {
+        f"{k[0]}/{k[1]}": sum(
+            1
+            for index in v
+            if weights[index] > 0.0 and float(samples[index].get("train_weight", 1.0)) > 0.0
+        )
+        for k, v in sorted(groups.items())
+    }
     return {"sample_weight": weights, "balance_group": group_key, "stats": stats}
 
 
 # --------------------------------------------------------------------------- #
 # 保存
 # --------------------------------------------------------------------------- #
+
+def label_statistics(
+    samples: Sequence[Dict[str, Any]], label_order: Sequence[str]
+) -> Tuple[Dict[str, int], Dict[str, float]]:
+    """per-label 正样本的两套口径：``counts`` = 行数，``weighted`` = 有效权重和。
+
+    - 只统计 ``train_weight>0`` 的行（可训练）；权重 = ``train_weight * sample_weight``；
+    - 计数口径是保守下界（dataset_gate 用），加权口径反映实际损失贡献。
+    """
+    counts = {str(name): 0 for name in label_order}
+    weighted = {str(name): 0.0 for name in label_order}
+    for sample in samples:
+        gate = float(sample.get("train_weight", 1.0))
+        if gate <= 0.0:
+            continue
+        weight = gate * float(sample.get("sample_weight", 1.0))
+        labels = sample["labels"]
+        for index, name in enumerate(label_order):
+            if float(labels[index]) > 0.5:
+                counts[str(name)] += 1
+                weighted[str(name)] += weight
+    return counts, {name: float(value) for name, value in weighted.items()}
+
 
 def _obs_fingerprint() -> str:
     """观测实现指纹（``env/obs/*.py`` 内容哈希）；用于检测"数据与观测版本不一致"。"""
@@ -908,12 +1029,101 @@ def _alignment_meta(builder: ObservationBuilder) -> Dict[str, Any]:
     return out
 
 
-def _stack_arrays(arrays: List[np.ndarray], key: str, shape: Tuple[int, ...]) -> np.ndarray:
-    arr = np.stack([np.asarray(item, dtype=np.float32) for item in arrays], axis=0)
+def _stack_arrays(
+    arrays: List[np.ndarray], key: str, shape: Tuple[int, ...], dtype: Any = np.float32
+) -> np.ndarray:
+    """按 key 堆叠并校验形状；dtype 显式给定（``od_id``/``od_id_hist`` 必须 int64）。"""
+    arr = np.stack([np.asarray(item) for item in arrays], axis=0)
+    if arr.dtype != np.dtype(dtype):
+        arr = arr.astype(dtype)
     expected = (len(arrays),) + shape
     if arr.shape != expected:
         raise ValueError(f"样本字段 {key} 形状 {arr.shape}，期望 {expected}")
     return arr
+
+
+def _npz_schema_manifest(num_slots: int, frames: int, others_dim: int, label_count: int) -> Dict[str, Any]:
+    """``expert_bc.npz`` 键清单（形状/dtype/语义/单位）——下游契约。"""
+    n = "<N>"  # 行数
+    manifest: Dict[str, Any] = {
+        "episode_id": {"shape": [n], "dtype": "int64", "semantics": "spec 全局下标；同一 episode 的行共享它", "unit": "-"},
+        "step": {"shape": [n], "dtype": "int64", "semantics": "env step（0.1 s；策略帧每 5 步一行）", "unit": "env step"},
+        "spec_id": {"shape": [n], "dtype": "int64", "semantics": "场景 spec id", "unit": "-"},
+        "seed": {"shape": [n], "dtype": "int64", "semantics": "MetaDrive start_seed", "unit": "-"},
+        "split": {"shape": [n], "dtype": "U16", "semantics": "train/val", "unit": "-"},
+        "difficulty": {"shape": [n], "dtype": "U16", "semantics": "easy/medium/hard", "unit": "-"},
+        "geometry": {"shape": [n], "dtype": "U32", "semantics": "主几何标签（配平键）", "unit": "-"},
+        "pose": {"shape": [n, 3], "dtype": "float32", "semantics": "该帧 ego 世界位姿 (x,y,theta)，历史/未来对齐用", "unit": "m, m, rad"},
+        "train_weight": {
+            "shape": [n],
+            "dtype": "float32",
+            "semantics": "过滤门（1=可训练；0=命中 terminal_window/not_on_lane/cut_label_unverified/roundtrip_fail/roundtrip_dense_fail 中首个原因）。BC 损失前先乘它",
+            "unit": "0/1",
+        },
+        "frame_usable": {
+            "shape": [n],
+            "dtype": "float32",
+            "semantics": "该帧是否可用（未越终止 ∧ 自车在车道容差内）；pipeline.frames 的 usable 输入",
+            "unit": "0/1",
+        },
+        "wm_valid": {
+            "shape": [n, frames],
+            "dtype": "float32",
+            "semantics": "Stage A：horizon k 的目标帧 (step+5(k+1)) 存在且仍可用（未越终止 ∧ 目标帧 on-lane）",
+            "unit": "0/1",
+        },
+        "hist_valid": {
+            "shape": [n, frames],
+            "dtype": "float32",
+            "semantics": "采集时真实缓冲长度算出的历史槽有效性（1=真实帧；0=预热补位）。v2 训练侧应以 pipeline.frames 精确查表为准",
+            "unit": "0/1",
+        },
+        "sample_weight": {"shape": [n], "dtype": "float32", "semantics": "配平权重（legacy 名；v2 规范名 balance_weight，两者同值）", "unit": "-"},
+        "balance_weight": {"shape": [n], "dtype": "float32", "semantics": "配平权重（v2 规范名；trainer row_balance_weights 消费）；有效权重 = train_weight*balance_weight", "unit": "-"},
+        "filter_reason": {"shape": [n], "dtype": "U24", "semantics": "train_weight=0 的原因（terminal_window/not_on_lane/cut_label_unverified/roundtrip_fail/roundtrip_dense_fail）；可训练行为空串", "unit": "-"},
+        "balance_group": {"shape": [n], "dtype": "U64", "semantics": "difficulty/geometry 组名", "unit": "-"},
+        "action": {"shape": [n, frames, 2], "dtype": "float32", "semantics": "6 个专家策略动作 (ds,dθ)（窗口不可算的零权重行为 0）", "unit": "m, rad"},
+        "traj6": {"shape": [n, frames, 2], "dtype": "float32", "semantics": "动作端点关键轨迹（自车系，t=0.5..3.0 s）", "unit": "m"},
+        "traj30": {"shape": [n, 30, 2], "dtype": "float32", "semantics": "10 Hz 插值轨迹（自车系）", "unit": "m"},
+        "traj30_measured": {"shape": [n, 30, 2], "dtype": "float32", "semantics": "实测位姿轨迹（自车系），round-trip 对照", "unit": "m"},
+        "roundtrip_key_err": {"shape": [n], "dtype": "float32", "semantics": "6 关键点误差均值（窗口不可算=NaN）", "unit": "m"},
+        "roundtrip_dense_err": {"shape": [n], "dtype": "float32", "semantics": "30 点误差均值（窗口不可算=NaN）", "unit": "m"},
+        "prev_action": {"shape": [n, 2], "dtype": "float32", "semantics": "上一策略步专家动作（ego 通道 reserved 两维的来源）", "unit": "m, rad"},
+        "lane_lat": {"shape": [n], "dtype": "float32", "semantics": "该帧 ego 相对车道中心横向偏差", "unit": "m"},
+        "labels": {"shape": [n, label_count], "dtype": "float32", "semantics": f"8 个受监督 router 标签（顺序=meta.label_names）", "unit": "0/1"},
+        "labels_raw": {"shape": [n, 9], "dtype": "float32", "semantics": "9 个原始标签（顺序=meta.raw_label_names）", "unit": "0/1"},
+    }
+    for channel in CURRENT_CHANNELS:
+        manifest[channel] = {"shape": [n, num_slots if channel not in ("ego", "nav", "signal", "others") else 1, _channel_dim(channel)],
+                             "dtype": "float32", "semantics": "当前帧通道（见 meta.schema.frame）", "unit": "-"}
+        manifest[f"{channel}_mask"] = {
+            "shape": [n, num_slots if channel not in ("ego", "nav", "signal", "others") else 1],
+            "dtype": "float32", "semantics": "当前帧掩码", "unit": "0/1",
+        }
+    manifest["od_id"] = {"shape": [n, num_slots], "dtype": "int64", "semantics": "OD track id（-1=空槽），episode 内稳定", "unit": "-"}
+    manifest["od_presence"] = {"shape": [n, num_slots], "dtype": "float32", "semantics": "OD 本帧观测标志（0=出盒未释放，特征陈旧）", "unit": "0/1"}
+    manifest["od_id_hist"] = {"shape": [n, frames, num_slots], "dtype": "int64", "semantics": "6 帧 od_id（同槽位，不做 SE(2) 变换）", "unit": "-"}
+    manifest["od_presence_hist"] = {"shape": [n, frames, num_slots], "dtype": "float32", "semantics": "6 帧 od_presence", "unit": "0/1"}
+    return manifest
+
+
+def _channel_dim(channel: str) -> int:
+    """当前帧通道的特征维（与 builder 输出一致）。"""
+    from env.obs.ego import EGO_DIM
+    from env.obs.ld import LDChannel
+    from env.obs.nav import NavChannel
+    from env.obs.others import OTHERS_HEAD_DIM, road_class_labels
+    from env.obs.signal import SIGNAL_DIM
+
+    dims = {
+        "ego": EGO_DIM,
+        "od": 9,
+        "ld": LDChannel.feature_dim,
+        "nav": NavChannel.feature_dim,
+        "signal": SIGNAL_DIM,
+        "others": OTHERS_HEAD_DIM + len(road_class_labels()),
+    }
+    return int(dims[channel])
 
 
 def save_dataset(
@@ -927,7 +1137,11 @@ def save_dataset(
     sample_weight: np.ndarray,
     balance_group: np.ndarray,
 ) -> Dict[str, str]:
-    """保存 ``expert_bc.npz`` / ``expert_bc.meta.json`` / ``report.json``，返回路径表。"""
+    """保存 ``expert_bc.npz`` / ``expert_bc.meta.json`` / ``report.json``，返回路径表。
+
+    v2：``od_id``/``od_id_hist`` 保持 int64；meta 写入完整 schema 清单（``schema`` +
+    ``dataset_schema``）；``history_storage="per_frame_v2"``。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     npz_path = out_dir / "expert_bc.npz"
     meta_path = out_dir / "expert_bc.meta.json"
@@ -935,15 +1149,34 @@ def save_dataset(
 
     arrays: Dict[str, np.ndarray] = {}
     for channel in CURRENT_CHANNELS:
+        if channel not in samples[0]["obs"]:
+            continue
         sample_shape = tuple(np.asarray(samples[0]["obs"][channel]).shape)
-        arrays[channel] = _stack_arrays([sample["obs"][channel] for sample in samples], channel, sample_shape)
+        dtype = np.int64 if channel in INT64_KEYS else np.float32
+        arrays[channel] = _stack_arrays([sample["obs"][channel] for sample in samples], channel, sample_shape, dtype)
         mask_key = f"{channel}_mask"
         if mask_key in samples[0]["obs"]:
             mask_shape = tuple(np.asarray(samples[0]["obs"][mask_key]).shape)
             arrays[mask_key] = _stack_arrays(
                 [sample["obs"][mask_key] for sample in samples], mask_key, mask_shape
             )
+    # 伴随数组（v2）：OD 槽位身份/存在性
+    for key in COMPANION_KEYS:
+        if key not in samples[0]["obs"]:
+            continue
+        shape = tuple(np.asarray(samples[0]["obs"][key]).shape)
+        arrays[key] = _stack_arrays(
+            [sample["obs"][key] for sample in samples], key, shape, np.int64 if key in INT64_KEYS else np.float32
+        )
+    for key in MEM_HISTORY_KEYS:
+        shape = tuple(np.asarray(samples[0][key]).shape)
+        arrays[key] = _stack_arrays(
+            [sample[key] for sample in samples], key, shape, np.int64 if key in INT64_KEYS else np.float32
+        )
     arrays["hist_valid"] = _stack_arrays([sample["hist_valid"] for sample in samples], "hist_valid", (6,))
+    arrays["wm_valid"] = _stack_arrays([sample["wm_valid"] for sample in samples], "wm_valid", (WINDOW_POLICIES,))
+    arrays["frame_usable"] = np.array([sample["frame_usable"] for sample in samples], dtype=np.float32)
+    arrays["train_weight"] = np.array([sample["train_weight"] for sample in samples], dtype=np.float32)
     arrays["pose"] = np.stack([np.asarray(sample["pose"], dtype=np.float32) for sample in samples], axis=0)
     arrays["action"] = np.stack([sample["action"] for sample in samples], axis=0)
     arrays["traj6"] = np.stack([sample["traj6"] for sample in samples], axis=0)
@@ -962,15 +1195,21 @@ def save_dataset(
     arrays["geometry"] = np.array([sample["geometry"] for sample in samples], dtype="U32")
     arrays["split"] = np.array([sample["split"] for sample in samples], dtype="U16")
     arrays["sample_weight"] = np.asarray(sample_weight, dtype=np.float32)
+    arrays["balance_weight"] = np.asarray(sample_weight, dtype=np.float32)  # v2 规范名（trainer 消费）
     arrays["balance_group"] = np.asarray(balance_group, dtype="U64")
+    arrays["filter_reason"] = np.array(
+        [str(sample.get("filter_reason", "")) for sample in samples], dtype="U24"
+    )
     arrays["lane_lat"] = np.array([sample["lane_lat"] for sample in samples], dtype=np.float32)
     np.savez_compressed(npz_path, **arrays)
 
+    others_dim = _channel_dim("others")
     meta = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "bc_expert",
         "created_by": "tools/collect_expert.py",
         "obs_fingerprint": _obs_fingerprint(),
+        "obs_schema_version": OBS_SCHEMA_VERSION,
         "label_names": list(label_order),
         "raw_label_names": list(LABEL_ORDER),
         "channel_shapes": {
@@ -982,7 +1221,30 @@ def save_dataset(
         "kinematics_source": report["kinematics_source"],
         "config": config,
         "count": len(samples),
-        "history_storage": "per_frame",  # 不存 6 帧堆叠；训练侧按 episode_id/step 在线拼
+        "history_storage": "per_frame_v2",  # 每帧存当前通道 + od_id/presence 历史；其余按 (episode_id, step) 精确查表
+        "history_lookup": {
+            "module": "pipeline.frames",
+            "api": "FrameLookup.build_history(episode_id, step, stride=5, k=6) / build_future(...)",
+            "window_anchor": "floor(step/stride)*stride（stride=5）；历史取 base-5j（旧→新），未来取 base+5(k+1)",
+            "missing_frame": "hist_valid=0 / mask=0 / 特征 0 / od_id=-1",
+        },
+        "weight_semantics": {
+            "train_weight": "过滤门（0/1）；terminal_window / not_on_lane / cut_label_unverified / roundtrip_fail / roundtrip_dense_fail 命中 → 0",
+            "balance_weight": "配平权重（weights 模式：组均衡；cap 模式：超限行置 0；none：1）；npz 同时存 legacy 别名 sample_weight（同值）",
+            "effective_weight": "train_weight * balance_weight（下游损失前必须相乘；pipeline.trainer.row_action_weights 的唯一入口）",
+            "wm_valid": "Stage A 逐 horizon 掩码：目标帧存在且仍可用（未越终止 ∧ on-lane）",
+        },
+        "schema": schema_manifest(
+            num_slots=int(np.asarray(samples[0]["obs"]["od"]).shape[0]) if "od" in samples[0]["obs"] else 16,
+            frames=6,
+            others_dim=others_dim,
+        ),
+        "dataset_schema": _npz_schema_manifest(
+            num_slots=int(np.asarray(samples[0]["obs"]["od"]).shape[0]) if "od" in samples[0]["obs"] else 16,
+            frames=6,
+            others_dim=others_dim,
+            label_count=len(label_order),
+        ),
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1098,7 +1360,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(
                     f"[collect_expert] {index}/{len(specs)} id={getattr(spec, 'id', -1)} "
                     f"term={record['report']['termination']} steps={record['steps']} "
-                    f"cand={record['candidates']} kept={len(record['kept'])} "
+                    f"cand={record['candidates']} stored={record['report'].get('stored_rows', len(record['kept']))} "
+                    f"trainable={record['report'].get('retained_steps', -1)} "
                     f"({record['elapsed_s']:.1f}s)",
                     flush=True,
                 )
@@ -1123,22 +1386,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ratio=float(args.balance_ratio),
         seed=int(args.seed),
     )
-    per_label = {
-        name: int(sum(1 for sample in samples if float(sample["labels"][i]) > 0.5))
-        for i, name in enumerate(label_order)
-    }
-    yield_value = (len(samples) / total_candidates) if total_candidates else 0.0
-    below_min = sorted(name for name, count in per_label.items() if count < DEFAULT_MIN_SAMPLES_PER_CATEGORY)
+    # 配平权重写回样本（label_statistics 的加权口径需要）
+    for index, sample in enumerate(samples):
+        sample["sample_weight"] = float(balance["sample_weight"][index])
+    per_label_count, per_label_weighted = label_statistics(samples, label_order)
+    stored_rows = len(samples)
+    trainable_rows = int(sum(1 for sample in samples if sample["train_weight"] > 0.0))
+    trainable_weight = float(sum(sample["train_weight"] * sample["sample_weight"] for sample in samples))
+    row_yield = (trainable_rows / total_candidates) if total_candidates else 0.0
+    weighted_yield = (trainable_weight / total_candidates) if total_candidates else 0.0
+    below_min = sorted(
+        name for name, count in per_label_count.items() if count < DEFAULT_MIN_SAMPLES_PER_CATEGORY
+    )
     report: Dict[str, Any] = {
         "specs": str(args.specs),
         "expert": str(args.expert),
         "kinematics_source": kinematics_source,
         "elapsed_s": round(time.perf_counter() - started, 3),
+        # ---- 行数口径（legacy 键保持：retained_steps / bc_retained_step_yield / per_label_positive）----
         "total_candidate_steps": int(total_candidates),
-        "retained_steps": int(len(samples)),
-        "bc_retained_step_yield": float(yield_value),
+        "stored_rows": int(stored_rows),
+        "retained_steps": int(trainable_rows),
+        "bc_retained_step_yield": float(row_yield),
+        "per_label_positive": per_label_count,
+        "counts": {
+            "convention": "行数（train_weight>0 的可训练行）",
+            "candidate_steps": int(total_candidates),
+            "stored_rows": int(stored_rows),
+            "trainable_rows": int(trainable_rows),
+            "zero_weight_rows": int(stored_rows - trainable_rows),
+            "step_yield": float(row_yield),
+            "per_label_positive": per_label_count,
+        },
+        # ---- 加权口径（权重和；有效权重 = train_weight * sample_weight）----
+        "weighted": {
+            "convention": "权重和（train_weight*sample_weight）",
+            "trainable_weight_sum": float(trainable_weight),
+            "step_yield_weighted": float(weighted_yield),
+            "per_label_positive_weighted": per_label_weighted,
+        },
         "filter_counts": dict(filter_counter),
-        "per_label_positive": per_label,
         "min_samples_per_category": DEFAULT_MIN_SAMPLES_PER_CATEGORY,
         "labels_below_min": below_min,
         "balance": balance,
@@ -1159,14 +1446,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         },
         "dataset_gate": {
             "bc_retained_step_yield": {
-                "value": float(yield_value),
+                "value": float(row_yield),
                 "min": DEFAULT_MIN_YIELD,
-                "pass": bool(yield_value >= DEFAULT_MIN_YIELD),
+                "pass": bool(row_yield >= DEFAULT_MIN_YIELD),
+                "convention": "行数口径：train_weight>0 行数 / 候选行数",
             },
             "min_samples_per_category": {
                 "min": DEFAULT_MIN_SAMPLES_PER_CATEGORY,
                 "labels_below_min": below_min,
                 "pass": bool(not below_min),
+                "convention": "行数口径（保守）；加权口径见 report.weighted.per_label_positive_weighted",
             },
         },
     }
@@ -1176,8 +1465,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "ratio": balance["stats"]["ratio"],
         "group_counts_before": balance["stats"]["group_counts_before"],
         "group_counts_after": balance["stats"]["group_counts_after"],
+        "group_trainable_before": balance["stats"]["group_trainable_before"],
+        "counts": balance["stats"]["counts"],
         **({"weight_range": balance["stats"]["weight_range"]} if "weight_range" in balance["stats"] else {}),
-        **({"cap": balance["stats"]["cap"], "min_group_count": balance["stats"]["min_group_count"]}
+        **({"cap": balance["stats"]["cap"], "min_group_trainable": balance["stats"]["min_group_trainable"],
+            "dropped_indices_count": len(balance["stats"].get("dropped_indices", []))}
            if "cap" in balance["stats"] else {}),
     }
     if missing:  # 仅并行 worker 崩溃时出现；单进程恒为空（报告可与单进程逐键对比）
@@ -1194,17 +1486,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     print("", flush=True)
-    print(f"[collect_expert] retained-step yield = {yield_value:.3f} "
-          f"({len(samples)}/{total_candidates})  gate>= {DEFAULT_MIN_YIELD}: "
-          f"{'PASS' if yield_value >= DEFAULT_MIN_YIELD else 'FAIL'}", flush=True)
-    print(f"[collect_expert] filter counts: {dict(filter_counter)}", flush=True)
-    print("[collect_expert] per-label positives "
-          f"(min {DEFAULT_MIN_SAMPLES_PER_CATEGORY}):", flush=True)
+    print(f"[collect_expert] retained-step yield = {row_yield:.3f} "
+          f"({trainable_rows} trainable / {stored_rows} stored / {total_candidates} candidates)  "
+          f"gate>= {DEFAULT_MIN_YIELD}: {'PASS' if row_yield >= DEFAULT_MIN_YIELD else 'FAIL'}  "
+          f"(weighted {weighted_yield:.3f})", flush=True)
+    print(f"[collect_expert] filter counts (rows): {dict(filter_counter)}", flush=True)
+    print("[collect_expert] per-label positives (count / weighted; min "
+          f"{DEFAULT_MIN_SAMPLES_PER_CATEGORY}):", flush=True)
     for name in label_order:
-        flag = "" if per_label[name] >= DEFAULT_MIN_SAMPLES_PER_CATEGORY else "  <-- below min"
-        print(f"  {name:>18}: {per_label[name]}{flag}", flush=True)
+        flag = "" if per_label_count[name] >= DEFAULT_MIN_SAMPLES_PER_CATEGORY else "  <-- below min"
+        print(f"  {name:>18}: {per_label_count[name]} / {per_label_weighted[name]:.1f}{flag}", flush=True)
     print(f"[collect_expert] balance: {report['balance']}", flush=True)
-    print(f"[collect_expert] wrote {paths['npz']} ({len(samples)} samples), "
+    print(f"[collect_expert] wrote {paths['npz']} ({stored_rows} rows, {trainable_rows} trainable), "
           f"{paths['meta']}, {paths['report']}", flush=True)
     return 0
 

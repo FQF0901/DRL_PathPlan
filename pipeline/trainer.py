@@ -54,10 +54,12 @@ PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
 预算与纪律
 ----------
 - γ=0.99、λ=0.95、clip=0.2、多 epoch × minibatch、value/entropy、梯度裁剪；
-- 阶段 C：``kl_anchor_coef``（冻结参考模型）+ ``bc_anchor_coef``（专家动作）+ primary lr ×0.1；
+- 阶段 C：``kl_anchor_coef``（冻结参考模型）+ ``bc_anchor_coef``（专家动作，权重感知）+ primary lr ×0.1；
   critic warmup（``train.critic_warmup_updates`` / CLI ``--critic-warmup-updates``）：前 N 个
   update 只拟合 value 头（策略/主干冻结，指标 ``critic_warmup=true``），之后恢复常规 PPO；
-- router 辅助损失 = 8 标签 BCE（固定顺序 = ``config/model.yaml``），另输出负载均衡/熵监控。
+- Stage B router 辅助损失 = **聚类软目标 CE/KL**（``pipeline.clusters.soft_targets_from_obs``，
+  温度 ``router_temperature``；缺失软目标时跳过并记录 ``bc_router_soft_placeholder=1``），
+  另输出 top-1/簇准确率、NMI、门控熵、专家利用率与聚类版本（``cluster_version``）。
 """
 
 from __future__ import annotations
@@ -115,6 +117,19 @@ __all__ = [
     "resolve_device",
     "resolve_torch_threads",
     "apply_thread_limits",
+    # schema v2 / 权重感知会计
+    "V2_HISTORY_KEYS",
+    "row_train_weights",
+    "row_balance_weights",
+    "row_action_weights",
+    "weighted_stats",
+    "binary_auc",
+    "weighted_od_multi_step_loss",
+    "presence_entry_loss",
+    "router_soft_target_loss",
+    "router_soft_target_stats",
+    "normalized_mutual_info",
+    "dataset_weight_report",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -483,6 +498,12 @@ class BCConfig:
     - ``wm_detach``：B1 rollout 内 WM 输出 detach（WM 冻结 + 因果链有效）；
     - ``freeze_prefixes``：按参数名前缀冻结模块（primary→specific 分阶段训练用）；
     - ``phase``：仅写入指标，便于区分 primary/specific 两段。
+
+    阶段 B（v2）扩展：
+    - ``router_temperature``：router 软目标温度（Bernoulli 概率空间；T<1 锐化、T>1 软化，
+      T=1 时 soft∈{0,1} 的软目标退化为硬 BCE）；
+    - ``slice_*``：动作误差分切片阈值（急刹/急转；弯道用 ``on_curve`` 标签）；
+    - ``history_stride``：BC harvest 帧间距（env step，默认 5 = 0.5 s）。
     """
 
     epochs: int = 10
@@ -500,6 +521,17 @@ class BCConfig:
     wm_detach: bool = False
     freeze_prefixes: Tuple[str, ...] = ()
     phase: str = "bc"
+    #: router 软目标温度（聚类 lane 的 top-2 混合权重；softmax logits 温度：<1 锐化、>1 软化）。
+    router_temperature: float = 1.0
+    #: 聚类 artifact 版本/K（写入 metrics/monitor；空 = 未接入聚类 lane）。
+    router_cluster_version: str = ""
+    router_cluster_k: int = 0
+    #: 动作误差切片阈值：专家即时 ``ds``（m/0.5 s）低于该值算急刹。
+    slice_brake_ds: float = 1.0
+    #: 动作误差切片阈值：专家即时 ``|dθ|``（rad/0.5 s）高于该值算急转。
+    slice_turn_dtheta: float = 0.10
+    #: BC harvest 帧间距（env step）；v2 数据集可在 meta 里覆盖。
+    history_stride: int = 5
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -899,8 +931,384 @@ def stack_history(
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Schema v2：权重感知会计（count vs weighted 两种口径）
+# --------------------------------------------------------------------------- #
+#
+# 数据集 v2（lane A）在 v1 基础上新增（全部可选；缺失时退化为 v1 语义）：
+#
+# - ``train_weight (N,)``：0 = 该帧不作为动作/轨迹目标（仍然可以进 WM 目标查表）；
+# - ``balance_weight (N,)``：难度/几何配平权重（与 train_weight 相乘）；
+# - ``wm_valid (N,6)``：WM 目标帧可用性（(episode, step+5k) 查表 + 帧可用）；
+# - ``od_id (N,16) / od_presence (N,16)``：OD 槽位对象 id / 占据真值（presence/entry BCE）；
+# - ``router_soft_targets (N,8) / router_cluster (N,)``：router 软目标 + 聚类簇（lane C 聚类）；
+# - mem 历史数组 ``ego_hist/others_hist/od_hist/ld_hist``（+ ``_mask``、``hist_valid``）：
+#   采集时按 env memory 精确入库，训练侧直接复用（禁止按行位置重拼，见
+#   ``pipeline.stages.build_history``）。
+#
+# 本节的"权重感知"约定（两套口径都记录，避免混淆）：
+# - **count 口径**：样本数 / 槽位数的算术统计（诊断用，和旧日志可比）；
+# - **weighted 口径**：``Σ w·x / Σ w``，训练损失与聚合指标的主口径。
+
+V2_HISTORY_KEYS: Tuple[str, ...] = ("ego_hist", "others_hist", "od_hist", "ld_hist")
+V2_TRAIN_WEIGHT = "train_weight"
+V2_BALANCE_WEIGHT = "balance_weight"
+V2_WM_VALID = "wm_valid"
+V2_OD_PRESENCE = "od_presence"
+V2_OD_ID = "od_id"
+V2_ROUTER_SOFT = "router_soft_targets"
+V2_ROUTER_CLUSTER = "router_cluster"
+
+
+def row_train_weights(dataset: Any, indices: np.ndarray) -> np.ndarray:
+    """每行**训练权重**（动作/轨迹目标可用性）：``train_weight`` → 1。
+
+    v2 采集侧保证 ``train_weight=0`` 的行不参与损失（配平权重在 ``sample_weight``，
+    见 :func:`row_balance_weights`，两者相乘 = :func:`row_action_weights`）。
+    """
+    arrays = getattr(dataset, "arrays", dataset)
+    index = np.asarray(indices, dtype=np.int64)
+    if V2_TRAIN_WEIGHT in arrays:
+        return np.asarray(arrays[V2_TRAIN_WEIGHT], dtype=np.float64)[index]
+    return np.ones(index.shape[0], dtype=np.float64)
+
+
+def row_balance_weights(dataset: Any, indices: np.ndarray) -> np.ndarray:
+    """每行**配平权重**：``balance_weight`` → ``sample_weight`` → 1。
+
+    v1 数据集只有 ``sample_weight``（难度/几何配平）；v2 采集侧继续用 ``sample_weight``
+    记录配平（``train_weight=0`` 的行置 1，由 train_weight 负责排除）。
+    """
+    arrays = getattr(dataset, "arrays", dataset)
+    index = np.asarray(indices, dtype=np.int64)
+    for key in (V2_BALANCE_WEIGHT, "sample_weight"):
+        if key in arrays:
+            return np.asarray(arrays[key], dtype=np.float64)[index]
+    return np.ones(index.shape[0], dtype=np.float64)
+
+
+def row_action_weights(dataset: Any, indices: np.ndarray) -> np.ndarray:
+    """动作/轨迹目标的**有效权重** = ``train_weight × 配平权重``（各缺失时取 1）。
+
+    配平权重优先 ``balance_weight``，否则 ``sample_weight``（v1/v2 采集口径一致）；
+    Stage A/B 的损失、``_action_mu_stats``、PPO BC 锚全部用本函数取权重
+    （权重感知会计的唯一入口）。
+    """
+    return row_train_weights(dataset, indices) * row_balance_weights(dataset, indices)
+
+
+def weighted_stats(values: Any, weights: Any = None, *, prefix: str = "") -> Dict[str, float]:
+    """标量的**计数/加权双口径**统计。
+
+    返回 ``{prefix}count``（样本数）、``{prefix}weight``（权重和）、``{prefix}mean``（计数均值）、
+    ``{prefix}weighted_mean``、``{prefix}median``、``{prefix}p95``（后三者为权重分位数）。
+    空集/全零权重 → 统计量为 ``nan``（预算 count/weight 仍保留，便于诊断）。
+    """
+    v = np.asarray(values, dtype=np.float64).reshape(-1)
+    if weights is None:
+        w = np.ones_like(v)
+    else:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if w.shape != v.shape:
+            raise ValueError(f"weights 形状 {w.shape} 与 values {v.shape} 不一致")
+    finite = np.isfinite(v) & np.isfinite(w) & (w >= 0.0)
+    v, w = v[finite], w[finite]
+    out: Dict[str, float] = {
+        f"{prefix}count": float(v.size),
+        f"{prefix}weight": float(w.sum()),
+    }
+    if v.size == 0 or float(w.sum()) <= 0.0:
+        for key in ("mean", "weighted_mean", "median", "p95"):
+            out[f"{prefix}{key}"] = float("nan")
+        return out
+    out[f"{prefix}mean"] = float(v.mean())
+    out[f"{prefix}weighted_mean"] = float(np.dot(v, w) / w.sum())
+    order = np.argsort(v, kind="mergesort")
+    v_sorted, w_sorted = v[order], w[order]
+    cumulative = np.cumsum(w_sorted)
+
+    def _weighted_quantile(q: float) -> float:
+        target = float(q) * float(cumulative[-1])
+        idx = int(np.searchsorted(cumulative, target, side="left"))
+        return float(v_sorted[min(idx, v_sorted.size - 1)])
+
+    out[f"{prefix}median"] = _weighted_quantile(0.5)
+    out[f"{prefix}p95"] = _weighted_quantile(0.95)
+    return out
+
+
+def binary_auc(scores: Any, labels: Any) -> float:
+    """rank-based AUC（Mann-Whitney U，含并列秩平均）；单类/空 → ``nan``。"""
+    s = np.asarray(scores, dtype=np.float64).reshape(-1)
+    y = np.asarray(labels, dtype=np.float64).reshape(-1) > 0.5
+    finite = np.isfinite(s) & np.isfinite(np.asarray(labels, dtype=np.float64).reshape(-1))
+    s, y = s[finite], y[finite]
+    positives = int(y.sum())
+    negatives = int(y.size - positives)
+    if positives == 0 or negatives == 0:
+        return float("nan")
+    order = np.argsort(s, kind="mergesort")
+    ranks = np.empty(s.size, dtype=np.float64)
+    ranks[order] = np.arange(1, s.size + 1, dtype=np.float64)
+    # 并列秩平均（否则 AUC 有偏）
+    sorted_scores = s[order]
+    start = 0
+    for end in range(1, s.size + 1):
+        if end == s.size or sorted_scores[end] != sorted_scores[start]:
+            if end - start > 1:
+                ranks[order[start:end]] = ranks[order[start:end]].mean()
+            start = end
+    return float((ranks[y].sum() - positives * (positives + 1) / 2.0) / (positives * negatives))
+
+
+def weighted_od_multi_step_loss(
+    od_pred: "torch.Tensor",
+    od_target: "torch.Tensor",
+    od_mask: "torch.Tensor",
+    *,
+    frame_weight: Optional["torch.Tensor"] = None,
+    valid: Optional["torch.Tensor"] = None,
+    beta: float = 1.0,
+) -> Tuple["torch.Tensor", List[Dict[str, float]]]:
+    """v2 加权直接多步 **OD** 损失（阶段 A；LD 目标按规格移除）。
+
+    与 ``net.world_model.direct_multi_step_loss`` 的差别是**显式加权**：
+
+    - 权重 ``w_b``（``train_weight × balance_weight``）与 ``valid[b,k]``（``wm_valid × 查表存在``）
+      逐帧生效；分子 ``Σ w_b·valid·mask·err``，分母 ``Σ w_b·valid·mask``；
+    - ``w_b = 0`` 的帧既不贡献损失也不贡献分母（不再用"有效项总数"做隐性重加权——
+      旧口径下权重大的帧的有效槽位越多，其对总损失的贡献被摊薄）；
+    - 返回 ``(total, per_horizon)``：``per_horizon[k]`` 含 ``loss/weight/count/frames``
+      四个标量（tensor/float），供逐 horizon 日志。
+
+    Args:
+        od_pred/od_target: ``(B,K,16,5)``；``od_mask``: ``(B,K,16)``。
+        frame_weight: ``(B,)`` 权重，默认全 1。
+        valid: ``(B,K)`` 未来步有效性，默认全 1。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if valid is None:
+        valid = torch.ones(od_mask.shape[:2], dtype=od_mask.dtype, device=od_mask.device)
+    if frame_weight is None:
+        frame_weight = torch.ones(od_mask.shape[0], dtype=od_mask.dtype, device=od_mask.device)
+    frame_weight = frame_weight.to(dtype=od_mask.dtype, device=od_mask.device).reshape(-1)
+    valid = valid.to(dtype=od_mask.dtype, device=od_mask.device)
+
+    smooth = F.smooth_l1_loss(od_pred[..., :4], od_target[..., :4], beta=beta, reduction="none").sum(dim=-1) / 4.0
+    angle = 1.0 - torch.cos(od_pred[..., 4] - od_target[..., 4])
+    err = smooth + angle  # (B,K,16)
+
+    weight = od_mask * valid.unsqueeze(-1) * frame_weight.reshape(-1, 1, 1)  # (B,K,16)
+    numerator = (err * weight).sum()
+    denominator = weight.sum().clamp(min=1e-8)
+    total = numerator / denominator
+
+    per_horizon: List[Dict[str, float]] = []
+    for k in range(int(od_mask.shape[1])):
+        wk = weight[:, k, :]
+        num_k = (err[:, k, :] * wk).sum()
+        den_k = wk.sum().clamp(min=1e-8)
+        frame_has = (wk > 0).any(dim=1)
+        per_horizon.append(
+            {
+                "loss": num_k / den_k,
+                "weight": float(den_k.detach()),
+                "count": float(wk.gt(0).sum().detach()),
+                "frames": float(frame_has.sum().detach()),
+            }
+        )
+    return total, per_horizon
+
+
+def presence_entry_loss(
+    pred_presence: "torch.Tensor",
+    pred_entry: "torch.Tensor",
+    presence_target: "torch.Tensor",
+    entry_target: "torch.Tensor",
+    *,
+    frame_weight: Optional["torch.Tensor"] = None,
+) -> Dict[str, Any]:
+    """presence/entry BCE + AUC（每槽位二分类；支持逐帧或逐 (帧,horizon) 权重）。
+
+    Args:
+        pred_presence/pred_entry: ``(B,S)`` 或 ``(B,K,S)`` logits。
+        presence_target/entry_target: 同形 0/1 目标。
+        frame_weight: ``(B,)`` 或 ``(B,K)``（v2：``train_weight × wm_valid``）；0 的样本
+            既不计损失也不计分母与 AUC。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    leading = pred_presence.shape[:-1]
+    num_slots = int(pred_presence.shape[-1])
+    logits_p = pred_presence.reshape(-1, num_slots)
+    logits_e = pred_entry.reshape(-1, num_slots)
+    target_p = presence_target.reshape(-1, num_slots)
+    target_e = entry_target.reshape(-1, num_slots)
+    if frame_weight is None:
+        weight = torch.ones((logits_p.shape[0], ), dtype=logits_p.dtype, device=logits_p.device)
+    else:
+        weight = frame_weight.to(dtype=logits_p.dtype, device=logits_p.device).reshape(-1)
+        if weight.numel() != logits_p.shape[0]:
+            num_frames = int(weight.numel())
+            repeats = logits_p.shape[0] // max(num_frames, 1)
+            weight = weight.repeat_interleave(max(repeats, 1))
+        weight = weight.reshape(-1)
+
+    def _bce(logits: "torch.Tensor", target: "torch.Tensor") -> "torch.Tensor":
+        element = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        denominator = weight.sum().clamp(min=1e-8) * num_slots
+        return (element * weight.unsqueeze(-1)).sum() / denominator
+
+    presence_loss = _bce(logits_p, target_p)
+    entry_loss = _bce(logits_e, target_e)
+    mask = (weight > 0.0).cpu().numpy()
+    presence_scores = logits_p.detach().float().cpu().numpy()[mask]
+    presence_labels = target_p.detach().float().cpu().numpy()[mask]
+    entry_scores = logits_e.detach().float().cpu().numpy()[mask]
+    entry_labels = target_e.detach().float().cpu().numpy()[mask]
+    presence_auc = binary_auc(presence_scores, presence_labels)
+    entry_auc = binary_auc(entry_scores, entry_labels)
+    return {
+        "presence": presence_loss,
+        "entry": entry_loss,
+        "presence_auc": float(presence_auc),
+        "entry_auc": float(entry_auc),
+        "presence_pos_rate": float(presence_labels.mean()) if presence_labels.size else float("nan"),
+        "entry_pos_rate": float(entry_labels.mean()) if entry_labels.size else float("nan"),
+    }
+
+
+def router_soft_target_loss(
+    logits: "torch.Tensor",
+    soft_targets: "torch.Tensor",
+    *,
+    temperature: float = 1.0,
+    kind: str = "ce",
+    eps: float = 1e-8,
+) -> "torch.Tensor":
+    """router 软目标 **CE / KL**（聚类 lane 的 ``(B,8)`` 分布 + 温度）。
+
+    - ``soft_targets`` 是簇分布（行和=1，``pipeline.clusters.soft_targets_from_obs``）；
+      ``logits`` 是 net 的 8 路 router logits（net 侧 top-2 softmax 混合）；
+    - ``p_T = softmax(logits / T)``；CE = ``−Σ p·log p_T``，KL = ``CE − H(p)``；
+      对 logits 的梯度 CE 与 KL 完全相同（推荐用 CE 反传、KL 做诊断）；
+    - ``kind="ce"``（默认）或 ``"kl"``。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if not str(kind).lower() in ("ce", "kl"):
+        raise ValueError(f"kind 必须是 'ce'|'kl'，收到 {kind!r}")
+    t = max(float(temperature), 1e-3)
+    prob = soft_targets.to(dtype=logits.dtype, device=logits.device).clamp(min=0.0)
+    prob = prob / prob.sum(dim=-1, keepdim=True).clamp(min=float(eps))
+    log_probs = F.log_softmax(logits / t, dim=-1)
+    if str(kind).lower() == "ce":
+        return -(prob * log_probs).sum(dim=-1).mean()
+    kl = (prob * (prob.clamp_min(float(eps)).log() - log_probs)).sum(dim=-1)
+    return kl.mean()
+
+
+def router_soft_target_stats(
+    logits: "torch.Tensor",
+    soft_targets: "torch.Tensor",
+    *,
+    temperature: float = 1.0,
+    eps: float = 1e-8,
+) -> Dict[str, float]:
+    """router 软目标诊断：``{"ce", "kl", "target_entropy"}``（不参与梯度）。"""
+    import torch
+
+    with torch.no_grad():
+        ce = router_soft_target_loss(logits, soft_targets, temperature=temperature, kind="ce", eps=eps)
+        kl = router_soft_target_loss(logits, soft_targets, temperature=temperature, kind="kl", eps=eps)
+        prob = soft_targets.detach().clamp_min(float(eps))
+        prob = prob / prob.sum(dim=-1, keepdim=True).clamp(min=float(eps))
+        entropy = (-(prob * prob.log()).sum(dim=-1)).mean()
+    return {"ce": float(ce), "kl": float(kl), "target_entropy": float(entropy)}
+
+
+def normalized_mutual_info(a: Any, b: Any) -> float:
+    """两列离散标签的 NMI（互信息 / sqrt(H(a)H(b))）；空/单类 → ``nan``。"""
+    a = np.asarray(a).reshape(-1)
+    b = np.asarray(b).reshape(-1)
+    if a.size == 0 or a.size != b.size:
+        return float("nan")
+    a_unique, a_inv = np.unique(a, return_inverse=True)
+    b_unique, b_inv = np.unique(b, return_inverse=True)
+    contingency = np.zeros((a_unique.size, b_unique.size), dtype=np.float64)
+    np.add.at(contingency, (a_inv, b_inv), 1.0)
+    total = float(contingency.sum())
+    if total <= 0:
+        return float("nan")
+
+    def _entropy(counts: np.ndarray) -> float:
+        prob = counts[counts > 0] / total
+        return float(-(prob * np.log(prob)).sum())
+
+    entropy_a = _entropy(contingency.sum(axis=1))
+    entropy_b = _entropy(contingency.sum(axis=0))
+    if entropy_a <= 0.0 or entropy_b <= 0.0:
+        return float("nan")
+    outer = np.outer(contingency.sum(axis=1), contingency.sum(axis=0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(contingency > 0, contingency * total / np.maximum(outer, 1e-12), 1.0)
+    mutual = float((contingency / total * np.log(ratio)).sum())
+    return float(mutual / math.sqrt(entropy_a * entropy_b))
+
+
+def dataset_weight_report(dataset: Any, *, prefix: str = "dataset") -> Dict[str, float]:
+    """数据集统计的**计数/加权双口径**报告（配平前后权重量级、train_weight=0 占比）。
+
+    输出（全部无偏标量，可直接进 JSON/CSV）：
+    ``<prefix>/rows``、``<prefix>/rows_weighted``（= Σw）、``<prefix>/train_weight_zero``、
+    ``<prefix>/weight_min|max|mean|p95``、``<prefix>/balance_weight_*``（若存在）。
+    """
+    arrays = getattr(dataset, "arrays", dataset)
+    count = int(len(arrays.get("episode_id", arrays.get("train_weight", []))))
+    report: Dict[str, float] = {}
+    if count <= 0:
+        return {f"{prefix}/rows": 0.0}
+    indices = np.arange(count, dtype=np.int64)
+    train_w = row_train_weights(dataset, indices)
+    balance_w = row_balance_weights(dataset, indices)
+    report[f"{prefix}/rows"] = float(count)
+    report[f"{prefix}/rows_weighted"] = float((train_w * balance_w).sum())
+    report[f"{prefix}/train_weight_zero"] = float((train_w <= 0.0).mean())
+    for name, values in (("weight", train_w), ("balance_weight", balance_w)):
+        if name == "balance_weight" and np.allclose(balance_w, 1.0):
+            continue
+        order = np.argsort(values, kind="mergesort")
+        sorted_w = values[order]
+        cumulative = np.cumsum(sorted_w)
+
+        def _q(q: float) -> float:
+            index = int(np.searchsorted(cumulative, q * float(cumulative[-1]), side="left"))
+            return float(sorted_w[min(index, sorted_w.size - 1)])
+
+        report[f"{prefix}/{name}_min"] = float(values.min())
+        report[f"{prefix}/{name}_max"] = float(values.max())
+        report[f"{prefix}/{name}_mean"] = float(values.mean())
+        report[f"{prefix}/{name}_p95"] = _q(0.95)
+    return report
+
+
 class BCDataset:
-    """按帧存 + 在线拼 6 帧历史的 BC/回放数据集（schema = ``tools/collect_expert.py``）。"""
+    """按帧存 + 在线拼 6 帧历史的 BC/回放数据集（schema = ``tools/collect_expert.py``）。
+
+    Schema v2（lane A）兼容（全部字段可选，缺失时退化为 v1 行为）：
+
+    - ``train_weight/balance_weight``：动作/轨迹目标权重（见 :func:`row_action_weights`）；
+    - ``wm_valid (N,6)``：WM 目标帧可用性；
+    - ``od_id/od_presence (N,16)``：OD 槽位对象 id / 占据真值；
+    - ``router_soft_targets (N,8)`` + ``router_cluster (N,)``：router 软目标/聚类（占位可缺）；
+    - **mem 历史数组**（``ego_hist/others_hist/od_hist/ld_hist`` + masks + ``hist_valid``）：
+      采集时按 env memory 精确入库。存在时训练侧**直接复用**（``build_obs_batch``），
+      否则按 ``(episode_id, step−5j)`` **精确查表**重拼（禁止按行位置取窗口）。
+    """
 
     def __init__(self, arrays: Dict[str, np.ndarray], meta: Dict[str, Any]):
         self.arrays = arrays
@@ -908,12 +1316,36 @@ class BCDataset:
         self.count = int(len(arrays["episode_id"]))
         self.label_names = tuple(meta.get("label_names") or SUPERVISED_LABELS)
         self.alignments = _alignment_from_meta(meta)
-        self._obs_keys = [key for key in ("ego", "od", "ld", "nav", "signal") if key in arrays]
+        self._obs_keys = [key for key in ("ego", "od", "ld", "nav", "signal", "others") if key in arrays]
+        self.history_stride = max(
+            1,
+            int(
+                meta.get("history_stride")
+                or meta.get("steps_per_policy")
+                or BCConfig.history_stride
+            ),
+        )
         self._episode_ranges: Dict[int, Tuple[int, int]] = {}
         for index in range(self.count):
             episode = int(arrays["episode_id"][index])
             start, stop = self._episode_ranges.get(episode, (index, index))
             self._episode_ranges[episode] = (min(start, index), max(stop, index))
+        # 精确查表 (episode_id, step) → 行号；无 step 的旧 schema 退化为按行位置。
+        self._step_lookup: Dict[Tuple[int, int], int] = {}
+        if "step" in arrays:
+            self._step_lookup = {
+                (int(arrays["episode_id"][i]), int(arrays["step"][i])): i for i in range(self.count)
+            }
+        # v2 mem 历史：od/ld 必需，ego/others 可选（TODO(lane)：net v2 接入 others_hist 语义）。
+        self._mem_history_keys = tuple(
+            key
+            for key in V2_HISTORY_KEYS
+            if key in arrays and f"{key}_mask" in arrays
+        )
+        self.has_mem_history = bool("od_hist" in arrays and "hist_valid" in arrays)
+        self.schema_version = int(
+            meta.get("schema_version") or (2 if (V2_TRAIN_WEIGHT in arrays or V2_WM_VALID in arrays) else 1)
+        )
 
     @classmethod
     def load(cls, path: str) -> "BCDataset":
@@ -946,50 +1378,114 @@ class BCDataset:
             arrays = {key: payload[key] for key in payload.files}
         return cls(arrays, meta)
 
-    def _entries(self, index: int) -> Tuple[List[Dict[str, Any]], np.ndarray]:
+    def _frame_obs(self, item: int) -> Dict[str, Any]:
+        """单帧当前通道 + mask（不拼历史）。"""
+        obs = {key: self.arrays[key][item] for key in self._obs_keys if key in self.arrays}
+        for key in list(obs):
+            mask_key = f"{key}_mask"
+            if mask_key in self.arrays:
+                obs[mask_key] = self.arrays[mask_key][item]
+        return obs
+
+    def history_valid(self, index: int) -> np.ndarray:
+        """训练侧使用的历史有效性（``(6,)``，旧→新）。
+
+        有 ``step`` 时按 ``(episode_id, step − 5j)`` 精确查表（缺帧 = 0，修复"头部假
+        valid=1/行位置时间不均匀"）；无 ``step`` 时退化为数据集 ``hist_valid``（兼容旧 schema）。
+        """
+        if not self._step_lookup:
+            return np.asarray(
+                self.arrays.get("hist_valid", np.ones((self.count, 6), dtype=np.float32))[index],
+                dtype=np.float32,
+            )
         episode = int(self.arrays["episode_id"][index])
-        start, _ = self._episode_ranges[episode]
-        first = max(start, index - 5)
-        entries: List[Dict[str, Any]] = []
-        for item in range(first, index + 1):
-            obs = {key: self.arrays[key][item] for key in self._obs_keys if key in self.arrays}
-            for key in list(obs):
-                mask_key = f"{key}_mask"
-                if mask_key in self.arrays:
-                    obs[mask_key] = self.arrays[mask_key][item]
-            entries.append({"obs": obs, "pose": self.arrays["pose"][item]})
-        valid = self.arrays.get("hist_valid", np.ones((self.count, 6), dtype=np.float32))[index]
-        if len(entries) < 6:
-            entries = [entries[0]] * (6 - len(entries)) + entries
-        return entries[-6:], valid
+        step = int(self.arrays["step"][index])
+        valid = np.zeros(6, dtype=np.float32)
+        for j in range(6):
+            if (episode, step - self.history_stride * j) in self._step_lookup:
+                valid[5 - j] = 1.0
+        return valid
+
+    def _entries(self, index: int) -> Tuple[List[Dict[str, Any]], np.ndarray]:
+        """6 帧历史 entries（旧→新）+ valid；优先精确查表，无 step 时按行位置（兼容）。"""
+        if not self._step_lookup:
+            episode = int(self.arrays["episode_id"][index])
+            start, _ = self._episode_ranges[episode]
+            first = max(start, index - 5)
+            entries: List[Dict[str, Any]] = []
+            for item in range(first, index + 1):
+                entries.append({"obs": self._frame_obs(item), "pose": self.arrays["pose"][item]})
+            valid = np.asarray(
+                self.arrays.get("hist_valid", np.ones((self.count, 6), dtype=np.float32))[index],
+                dtype=np.float32,
+            )
+            if len(entries) < 6:
+                entries = [entries[0]] * (6 - len(entries)) + entries
+            return entries[-6:], valid
+        episode = int(self.arrays["episode_id"][index])
+        step = int(self.arrays["step"][index])
+        valid = np.zeros(6, dtype=np.float32)
+        rows: List[Optional[int]] = []
+        for j in range(5, -1, -1):
+            row = self._step_lookup.get((episode, step - self.history_stride * j))
+            rows.append(row)
+            if row is not None:
+                valid[5 - j] = 1.0
+        # 缺失帧用最近的真实帧补位（mask 由 valid 清零；对齐结果不参与有效计算）
+        fallback = next((row for row in reversed(rows) if row is not None), int(index))
+        entries = [
+            {"obs": self._frame_obs(row), "pose": self.arrays["pose"][row]}  # type: ignore[index]
+            if row is not None
+            else {"obs": self._frame_obs(fallback), "pose": self.arrays["pose"][fallback]}
+            for row in rows
+        ]
+        return entries, valid
 
     def build_obs_batch(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
-        """样本索引 → 网络输入（当前帧 + 在线重拼的 6 帧历史，B 维在前）。"""
+        """样本索引 → 网络输入（当前帧 + 6 帧历史，B 维在前）。
+
+        v2 mem 历史数组存在时直接复用（采集时精确入库，避免按行位置重拼）；
+        否则按 :meth:`_entries` 的精确查表/行位置回退重建。
+        """
+        idx = np.asarray(indices, dtype=np.int64)
         current: Dict[str, List[np.ndarray]] = {key: [] for key in self._obs_keys}
         masks: Dict[str, List[np.ndarray]] = {
             f"{key}_mask": [] for key in self._obs_keys if f"{key}_mask" in self.arrays
         }
-        history: Dict[str, List[np.ndarray]] = {}
-        hist_valid: List[np.ndarray] = []
-        for index in np.asarray(indices, dtype=np.int64):
-            entries, valid = self._entries(int(index))
-            patch = stack_history(entries, self.alignments, current_pose=self.arrays["pose"][index], valid=valid)
-            for key, value in patch.items():
-                history.setdefault(key, []).append(value)
+        for index in idx:
             for key in self._obs_keys:
                 current[key].append(self.arrays[key][index])
             for key in masks:
                 masks[key].append(self.arrays[key][index])
-            hist_valid.append(valid)
         batch = {key: np.stack(values, axis=0).astype(np.float32) for key, values in current.items()}
         batch.update({key: np.stack(values, axis=0).astype(np.float32) for key, values in masks.items()})
-        batch.update({key: np.stack(values, axis=0).astype(np.float32) for key, values in history.items()})
-        batch["hist_valid"] = np.stack(hist_valid, axis=0).astype(np.float32)
+        # v2：od_presence 是 OD 有效性的优先口径（聚类特征/软目标与 net 都用它）
+        if "od_presence" in self.arrays:
+            batch["od_presence"] = np.asarray(self.arrays["od_presence"], dtype=np.float32)[idx]
+        if self.has_mem_history:
+            history = {key: self.arrays[key][idx] for key in self._mem_history_keys}
+            for key in self._mem_history_keys:
+                history[f"{key}_mask"] = self.arrays[f"{key}_mask"][idx]
+            history["hist_valid"] = self.arrays["hist_valid"][idx]
+        else:
+            history: Dict[str, List[np.ndarray]] = {}
+            hist_valid: List[np.ndarray] = []
+            for index in idx:
+                entries, valid = self._entries(int(index))
+                patch = stack_history(
+                    entries, self.alignments, current_pose=self.arrays["pose"][index], valid=valid
+                )
+                for key, value in patch.items():
+                    history.setdefault(key, []).append(value)
+                hist_valid.append(valid)
+            history = {key: np.stack(values, axis=0) for key, values in history.items()}
+            history["hist_valid"] = np.stack(hist_valid, axis=0)
+        batch.update({key: np.asarray(value, dtype=np.float32) for key, value in history.items()})
         return sanitize_masked_od(squeeze_single_slot(batch))
 
     def targets(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
         idx = np.asarray(indices, dtype=np.int64)
-        return {
+        out = {
             "action": self.arrays["action"][idx].astype(np.float32),
             "traj6": self.arrays["traj6"][idx].astype(np.float32),
             "traj30": self.arrays["traj30"][idx].astype(np.float32),
@@ -997,7 +1493,14 @@ class BCDataset:
             "sample_weight": self.arrays.get("sample_weight", np.ones(self.count, dtype=np.float32))[idx].astype(
                 np.float32
             ),
+            # v2 权重（train_weight/balance_weight 的合成分；缺失时 = sample_weight/1）
+            "train_weight": row_action_weights(self, idx).astype(np.float32),
         }
+        if V2_ROUTER_SOFT in self.arrays:
+            out["router_soft"] = self.arrays[V2_ROUTER_SOFT][idx].astype(np.float32)
+        if V2_WM_VALID in self.arrays:
+            out["wm_valid"] = self.arrays[V2_WM_VALID][idx].astype(np.float32)
+        return out
 
     def sample_indices(self) -> np.ndarray:
         return np.arange(self.count, dtype=np.int64)
@@ -1008,7 +1511,7 @@ def _to_device_obs(batch: Mapping[str, np.ndarray], device: "torch.device") -> D
 
 
 #: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``）
-SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "nav", "signal")
+SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "nav", "signal", "others")
 
 
 def squeeze_single_slot(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -1080,8 +1583,9 @@ def bc_trajectory_loss(
     diff = pred - target
     per_sample = (diff ** 2).mean(dim=(-1, -2)) if loss_type == "l2" else diff.abs().mean(dim=(-1, -2))
     if weights is not None:
-        weight = weights / (weights.mean() + 1e-8)
-        loss = (per_sample * weight).mean()
+        # 显式加权：Σ w·err / Σ w（等价于旧式 w/mean(w) 的 .mean()，但避免权重全 0 时除零放大）
+        weight = weights.reshape(-1)
+        loss = (per_sample * weight).sum() / weight.sum().clamp(min=1e-8)
     else:
         loss = per_sample.mean()
     return loss, per_sample.mean().detach()
@@ -1094,16 +1598,32 @@ def pretrain_bc(
     config: BCConfig,
     *,
     logger: Callable[[str], None] = print,
+    router_soft_targets_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
-    """BC 预热循环：轨迹 L1/L2 + 动作回归 + router BCE（样本加权）。
+    """BC 预热循环：轨迹 L1/L2 + **首步**动作回归 + router 软目标 CE/KL（权重感知）。
 
-    轨迹目标用 ``targets["traj6"]``（与模型 6 个 rollout 端点逐点时间对齐；``traj30``
-    是 0.1 s 密集采样，直接对 6 点预测使用会时间错位）。
-    动作目标 = ``targets["action"][:, 0, :]``（专家当前帧的**即时** (ds,dθ)），
-    监督 ``out["action_mu"]``（模型只输出均值，无 ``action_seq``），权重 ``action_weight``。
+    - 轨迹目标用 ``targets["traj6"]``（与模型 6 个 rollout 端点逐点时间对齐；``traj30``
+      是 0.1 s 密集采样，直接对 6 点预测使用会时间错位）；
+    - 动作目标 = ``targets["action"][:, 0, :]``（专家当前帧的**即时** (ds,dθ)），
+      监督 ``out["action_mu"]``；v2 语义只监督**首步**动作，6 点轨迹辅助承担多步信息；
+    - **权重感知**：动作/轨迹/router 损失与所有误差统计都用
+      ``targets["train_weight"]``（= ``train_weight × 配平权重``）；显式 ``Σ w·x / Σ w``，
+      权重 0 的帧不参与（不再按有效项均摊）；
+    - **router 软目标**：``router_soft_targets_fn(obs_batch) -> (B,8)``（聚类 lane 的
+      ``pipeline.clusters.soft_targets_from_obs``，Stage B 注入）优先；缺失时回退数据集
+      ``router_soft_targets``；两者都无 → **跳过 router 损失**（不再用 8 维硬标签 BCE，
+      记录 ``bc_router_soft_placeholder=1``）。损失 = 对软目标的 CE/KL（softmax，
+      温度 ``config.router_temperature``，见 :func:`router_soft_target_loss`）。
 
     阶段 B（v1.1）：``config.wm_detach`` 时 rollout 内 WM 输出 detach；
     ``config.freeze_prefixes`` 在优化器构建前生效（primary→specific 分段训练）。
+
+    返回指标（既有键不退化，新增按 horizon/label/slice 分组；全部带 count/weighted 双口径）：
+    ``bc_loss``、``bc_traj_loss``、``bc_action_loss``、``bc_router_loss``、``bc_traj_mae_m``、
+    ``bc_action_mu_ds_mean``，以及 ``bc_action_err_{mean,weighted_mean,median,p95}``、
+    ``bc_action_err_slice_{brake,turn,curve}_*``、``bc_action_err_label_<name>``、
+    ``bc_traj_err_h{k}``、``bc_router_{top1_cluster_acc,nmi,entropy,soft_ce,soft_kl,
+    expert_util_*, expert_weight_*, cluster_version,k,soft_placeholder}``。
     """
     _require_torch()
     order_config = load_supervised_labels()
@@ -1124,6 +1644,31 @@ def pretrain_bc(
         "frozen_params": len(frozen),
         "trainable_params": sum(1 for parameter in model.parameters() if parameter.requires_grad),
     }
+    num_experts = 8
+    on_curve_index = (
+        dataset.label_names.index("on_curve") if "on_curve" in dataset.label_names else None
+    )
+    # 逐样本误差/权重缓冲（整个训练累计后统一做 count/weighted 统计，避免 epoch 均值混淆口径）
+    action_err_values: List[np.ndarray] = []
+    label_values: List[np.ndarray] = []
+    slice_err_values: Dict[str, Dict[str, List[np.ndarray]]] = {
+        "brake": {"err": [], "weight": []},
+        "turn": {"err": [], "weight": []},
+        "curve": {"err": [], "weight": []},
+    }
+    traj_err_values: List[np.ndarray] = []
+    weight_values: List[np.ndarray] = []
+    mu_ds_sum, mu_ds_weight = 0.0, 0.0
+    router_prob_sum: Optional[np.ndarray] = None
+    router_top1: List[np.ndarray] = []
+    router_cluster: List[np.ndarray] = []
+    router_entropy_sum, router_count = 0.0, 0
+    router_soft_ce_sum, router_soft_kl_sum = 0.0, 0.0
+    router_mix_weight_sum: Optional[np.ndarray] = None
+    router_mix_selected: Optional[np.ndarray] = None
+    router_soft_used = False
+    router_soft_warned = False
+
     for epoch in range(int(config.epochs)):
         order = indices.copy()
         if config.shuffle:
@@ -1134,10 +1679,14 @@ def pretrain_bc(
             if config.max_batches is not None and batches >= int(config.max_batches):
                 break
             batch_indices = order[start : start + max(1, int(config.batch_size))]
-            obs = _to_device_obs(dataset.build_obs_batch(batch_indices), device)
+            obs_np = dataset.build_obs_batch(batch_indices)
+            obs = _to_device_obs(obs_np, device)
             targets = {
                 key: torch.as_tensor(value, device=device) for key, value in dataset.targets(batch_indices).items()
             }
+            frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
+            weight_sum = frame_weight.sum().clamp(min=1e-8)
+            weight_values.append(frame_weight.detach().double().cpu().numpy())
             # 阶段 B 只需要 traj_xy（B1 rollout）；WM 直接多步预测不参与损失（world_model=False），
             # 且 ``wm_detach`` 时 rollout 内 WM 预测不回传梯度（因果链：WM 冻结 + 输出 detach）。
             out = model(obs, rollout=True, world_model=False, wm_detach=config.wm_detach)
@@ -1145,25 +1694,110 @@ def pretrain_bc(
             if traj_pred is None:
                 raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
             traj_loss, traj_mae = bc_trajectory_loss(
-                traj_pred, targets["traj6"], loss_type=config.loss_type, weights=targets["sample_weight"]
+                traj_pred, targets["traj6"], loss_type=config.loss_type, weights=frame_weight
             )
             loss = config.traj_weight * traj_loss
+            traj_diff = traj_pred - targets["traj6"]
+            traj_per_point = (
+                (traj_diff ** 2).mean(dim=-1) if config.loss_type == "l2" else traj_diff.abs().mean(dim=-1)
+            )
+            traj_err_values.append(traj_per_point.detach().double().cpu().numpy())
             action_loss = torch.zeros((), device=device)
             action_pred = out.get("action_mu")
             target_action = targets["action"][:, 0, :]
             if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
                 diff = action_pred - target_action
                 per_sample = (diff ** 2).mean(dim=-1) if config.loss_type == "l2" else diff.abs().mean(dim=-1)
-                weight = targets["sample_weight"] / (targets["sample_weight"].mean() + 1e-8)
-                action_loss = (per_sample * weight).mean() * config.action_weight
+                action_loss = (per_sample * frame_weight).sum() / weight_sum * config.action_weight
                 loss = loss + action_loss
-                totals["mu_ds"] += float(action_pred[:, 0].mean().detach())
+                totals["mu_ds"] += float((action_pred[:, 0] * frame_weight).sum() / weight_sum)
+                # 统计口径：逐样本 L1（不受 loss_type 影响，便于跨实验比较）+ 分切片/分标签误差
+                sample_error = diff.abs().mean(dim=-1).detach().double().cpu().numpy()
+                sample_weight = frame_weight.detach().double().cpu().numpy()
+                action_err_values.append(sample_error)
+                labels_np = targets["labels"].detach().double().cpu().numpy()
+                label_values.append(labels_np)
+                expert_action = target_action.detach().double().cpu().numpy()
+                slice_masks = {
+                    "brake": expert_action[:, 0] < float(config.slice_brake_ds),
+                    "turn": np.abs(expert_action[:, 1]) >= float(config.slice_turn_dtheta),
+                }
+                if on_curve_index is not None:
+                    slice_masks["curve"] = labels_np[:, on_curve_index] > 0.5
+                for name, mask in slice_masks.items():
+                    if bool(np.any(mask)):
+                        slice_err_values[name]["err"].append(sample_error[mask])
+                        slice_err_values[name]["weight"].append(sample_weight[mask])
+                mu_ds_sum += float((action_pred[:, 0] * frame_weight).sum())
+                mu_ds_weight += float(weight_sum)
             router_loss = torch.zeros((), device=device)
             if config.router_coef > 0.0 and out.get("router_logits") is not None:
-                router_loss = config.router_coef * F.binary_cross_entropy_with_logits(
-                    out["router_logits"], targets["labels"]
-                )
-                loss = loss + router_loss
+                logits = out["router_logits"]
+                soft_targets_np = None
+                if router_soft_targets_fn is not None:
+                    try:
+                        soft_targets_np = router_soft_targets_fn(obs_np)
+                    except Exception as exc:  # noqa: BLE001 - 聚类 artifact/特征口径不匹配 → 跳过
+                        if not router_soft_warned:
+                            logger(
+                                f"[bc] router 软目标不可用（{type(exc).__name__}: {exc}）→ "
+                                "本轮跳过 router 损失（不再回退 8 维硬标签 BCE）"
+                            )
+                            router_soft_warned = True
+                        soft_targets_np = None
+                if soft_targets_np is None:
+                    soft_targets_np = targets.get("router_soft")
+                if soft_targets_np is None:
+                    if not router_soft_warned:
+                        logger(
+                            "[bc] 无 router 软目标（cluster fn / 数据集 router_soft_targets 均缺失）→ "
+                            "跳过 router 损失（bc_router_soft_placeholder=1）"
+                        )
+                        router_soft_warned = True
+                else:
+                    if hasattr(soft_targets_np, "detach"):
+                        soft_targets_np = soft_targets_np.detach().cpu().numpy()
+                    soft_targets_np = np.asarray(soft_targets_np, dtype=np.float32)
+                    soft_targets = torch.as_tensor(soft_targets_np, dtype=torch.float32, device=device)
+                    if tuple(soft_targets.shape) != tuple(logits.shape):
+                        if not router_soft_warned:
+                            logger(
+                                f"[bc] router 软目标形状 {tuple(soft_targets.shape)} != logits "
+                                f"{tuple(logits.shape)} → 跳过 router 损失"
+                            )
+                            router_soft_warned = True
+                    else:
+                        router_soft_used = True
+                        router_loss = config.router_coef * router_soft_target_loss(
+                            logits, soft_targets, temperature=float(config.router_temperature)
+                        )
+                        loss = loss + router_loss
+                if router_soft_used:
+                    with torch.no_grad():
+                        probs = torch.softmax(logits, dim=-1).detach().double().cpu().numpy()
+                        if router_prob_sum is None:
+                            num_experts = int(probs.shape[1])
+                            router_prob_sum = np.zeros(num_experts, dtype=np.float64)
+                            router_mix_weight_sum = np.zeros(num_experts, dtype=np.float64)
+                            router_mix_selected = np.zeros(num_experts, dtype=np.float64)
+                        router_prob_sum += probs.sum(axis=0)
+                        router_top1.append(np.argmax(probs, axis=1))
+                        clip = np.clip(probs, 1e-9, 1.0)
+                        router_entropy_sum += float((-(clip * np.log(clip)).sum(axis=1)).mean())
+                        router_count += int(probs.shape[0])
+                        router_cluster.append(
+                            torch.argmax(soft_targets, dim=-1).detach().cpu().numpy().astype(np.int64)
+                        )
+                        soft_stats = router_soft_target_stats(
+                            logits, soft_targets, temperature=float(config.router_temperature)
+                        )
+                        router_soft_ce_sum += soft_stats["ce"]
+                        router_soft_kl_sum += soft_stats["kl"]
+                        weights = out.get("expert_weights")
+                        if weights is not None and tuple(weights.shape) == tuple(logits.shape):
+                            mix = weights.detach().double().cpu().numpy()
+                            router_mix_weight_sum += mix.sum(axis=0)
+                            router_mix_selected += (mix > 1e-6).sum(axis=0)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -1186,6 +1820,7 @@ def pretrain_bc(
                 "bc_router_loss": totals["router"] / divisor,
                 "bc_traj_mae_m": totals["mae"] / divisor,
                 "bc_action_mu_ds_mean": totals["mu_ds"] / divisor,
+                "bc_batches_count": int(batches),
                 "last_epoch": epoch + 1,
             }
         )
@@ -1195,6 +1830,76 @@ def pretrain_bc(
             f"action={metrics['bc_action_loss']:.4f} router={metrics['bc_router_loss']:.4f} "
             f"mu_ds={metrics['bc_action_mu_ds_mean']:.3f}m"
         )
+
+    # ---------------------------------------------------------------- 汇总统计
+    error_matrix = np.concatenate(action_err_values) if action_err_values else np.zeros(0)
+    all_weights = np.concatenate(weight_values) if weight_values else np.zeros(0)
+    metrics.update(weighted_stats(error_matrix, all_weights, prefix="bc_action_err_"))
+    metrics["bc_action_err_slice_brake"] = {}
+    metrics["bc_action_err_slice_turn"] = {}
+    metrics["bc_action_err_slice_curve"] = {}
+    for name, parts in slice_err_values.items():
+        if not parts["err"]:
+            continue
+        metrics[f"bc_action_err_slice_{name}"] = weighted_stats(
+            np.concatenate(parts["err"]), np.concatenate(parts["weight"]), prefix=""
+        )
+        metrics[f"bc_action_err_slice_{name}_weighted_mean"] = metrics[f"bc_action_err_slice_{name}"][
+            "weighted_mean"
+        ]
+    # 逐 horizon 轨迹误差（B1 6 点端点；权重与动作误差同源）
+    if traj_err_values:
+        traj_matrix = np.concatenate(traj_err_values)
+        traj_weights = np.concatenate(weight_values)
+        for k in range(traj_matrix.shape[1]):
+            stats = weighted_stats(traj_matrix[:, k], traj_weights, prefix="")
+            metrics[f"bc_traj_err_h{k + 1}"] = stats["weighted_mean"]
+    # 逐标签动作误差（样本可属于多个标签；顺序与 batch 累积一致）
+    if label_values and action_err_values:
+        labels_used = np.concatenate(label_values)
+        err_all = error_matrix
+        w_all = all_weights
+        for label_index, label_name in enumerate(dataset.label_names):
+            if label_index >= labels_used.shape[1]:
+                break
+            mask = labels_used[:, label_index] > 0.5
+            if not bool(np.any(mask)):
+                continue
+            stats = weighted_stats(err_all[mask], w_all[mask], prefix="")
+            metrics[f"bc_action_err_label_{label_name}"] = stats["weighted_mean"]
+            metrics[f"bc_action_err_label_{label_name}_count"] = stats["count"]
+    # router 指标（软目标 top-1 vs 簇准确率 / NMI / gate 熵 / 专家利用率 / 软目标 CE-KL）
+    metrics["bc_router_soft_placeholder"] = 0.0 if router_soft_used else 1.0
+    metrics["bc_router_temperature"] = float(config.router_temperature)
+    cluster_version = str(config.router_cluster_version or "")
+    metrics["bc_router_cluster_version"] = cluster_version
+    version_digits = "".join(ch for ch in cluster_version if ch.isdigit())
+    metrics["bc_router_cluster_version_num"] = float(version_digits) if version_digits else float("nan")
+    metrics["bc_router_cluster_k"] = int(config.router_cluster_k or 0)
+    if router_count > 0 and router_prob_sum is not None:
+        mean_weight = router_prob_sum / router_count
+        top1 = np.concatenate(router_top1) if router_top1 else np.zeros(0, dtype=np.int64)
+        cluster = np.concatenate(router_cluster) if router_cluster else None
+        metrics["bc_router_count"] = int(router_count)
+        metrics["bc_router_entropy"] = router_entropy_sum / router_count
+        metrics["bc_router_soft_ce"] = router_soft_ce_sum / router_count
+        metrics["bc_router_soft_kl"] = router_soft_kl_sum / router_count
+        for index in range(num_experts):
+            metrics[f"bc_router_expert_weight_{index}"] = float(mean_weight[index])
+            metrics[f"bc_router_expert_util_{index}"] = (
+                float((top1 == index).mean()) if top1.size else float("nan")
+            )
+            if router_mix_weight_sum is not None and router_mix_selected is not None:
+                metrics[f"bc_router_expert_mix_weight_{index}"] = float(
+                    router_mix_weight_sum[index] / router_count
+                )
+                metrics[f"bc_router_expert_mix_util_{index}"] = float(router_mix_selected[index] / router_count)
+        if cluster is not None and top1.size == cluster.size and top1.size > 0:
+            metrics["bc_router_top1_cluster_acc"] = float((top1 == cluster).mean())
+            metrics["bc_router_nmi"] = normalized_mutual_info(top1, cluster)
+    metrics["bc_action_mu_ds_weighted_mean"] = (
+        mu_ds_sum / mu_ds_weight if mu_ds_weight > 0 else float("nan")
+    )
     return metrics
 
 
@@ -2156,11 +2861,24 @@ class PPOTrainer:
                             loss = loss + kl_anchor
                         bc_anchor = torch.zeros((), device=self.device)
                         if self.bc_dataset is not None and self.config.bc_anchor_coef > 0.0:
-                            expert_idx = self.rng.integers(0, self.bc_dataset.count, size=min(len(selection), 64))
+                            # 权重感知 BC 锚：每个 rollout 样本抽一个专家动作（等长，避免广播错位），
+                            # 用 row_action_weights（train_weight×balance_weight）显式加权
+                            # Σ w·|μ−a| / Σ w（P0-4 的完整修复=按 BC 观测前向，另行处理）。
+                            expert_idx = self.rng.integers(0, self.bc_dataset.count, size=len(selection))
                             expert_action = torch.as_tensor(
-                                self.bc_dataset.arrays["action"][expert_idx, 0], dtype=torch.float32, device=self.device
+                                self.bc_dataset.arrays["action"][expert_idx, 0],
+                                dtype=torch.float32,
+                                device=self.device,
                             )
-                            bc_anchor = self.config.bc_anchor_coef * F.l1_loss(mu, expert_action)
+                            expert_weight = torch.as_tensor(
+                                row_action_weights(self.bc_dataset, expert_idx),
+                                dtype=torch.float32,
+                                device=self.device,
+                            )
+                            per_sample = (mu - expert_action).abs().mean(dim=-1)
+                            bc_anchor = self.config.bc_anchor_coef * (
+                                (per_sample * expert_weight).sum() / expert_weight.sum().clamp(min=1e-8)
+                            )
                             loss = loss + bc_anchor
                     t_forward += time.perf_counter() - t1
                     t2 = time.perf_counter()

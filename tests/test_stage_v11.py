@@ -144,44 +144,66 @@ def test_match_future_od_slots_reorders_by_identity() -> None:
     assert out["od_mask"][0, 0].tolist() == [0.0, 0.0]
 
 
-# ------------------------------------------------------------- WM detach / 冻结
+# ------------------------------------------------------------- v2 detach / 冻结
 def _model_with_unsaturated_policy() -> DrivingModel:
-    """policy.mu 末层零初始化会在第一步挡住上游梯度 → 先给一个小的非零权重。"""
+    """零初始化的输出层会在第一步挡住上游梯度（设计使然：policy.mu / ST-GNN 解码器）
+
+    → 给小非零权重解阻，验证"梯度是否**能**沿该路径流动"（而非验证初始化行为）。
+    """
     torch.manual_seed(0)
     model = DrivingModel()
     with torch.no_grad():
         model.policy.mu.weight.normal_(0.0, 0.01)
+        model.st_gnn.od_head[-1].weight.normal_(0.0, 0.01)
+        model.st_gnn.ld_head[-1].weight.normal_(0.0, 0.01)
     return model
 
 
-def test_wm_detach_blocks_gradient_to_world_model() -> None:
+def test_trajectory_loss_does_not_reach_st_gnn() -> None:
+    """v2 detach：``traj_xy`` 只走 action/pose 链；状态链（ST-GNN）不得收到梯度。"""
     model = _model_with_unsaturated_policy()
     obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=False, wm_detach=True)
+    out = model(obs, rollout=True, world_model=False)
     out["traj_xy"].pow(2).mean().backward()
-    wm_grads = [p.grad for name, p in model.named_parameters() if name.startswith("world_model.")]
-    assert wm_grads, "模型应包含 world_model 参数"
-    assert all(g is None or float(g.abs().sum()) == 0.0 for g in wm_grads), "detach 后 WM 不得有梯度"
+    wm_grads = [p.grad for name, p in model.named_parameters() if name.startswith("st_gnn.")]
+    assert wm_grads, "模型应包含 st_gnn 参数"
+    assert all(g is None or float(g.abs().sum()) == 0.0 for g in wm_grads), "轨迹 loss 不得回传到 ST-GNN"
     assert model.policy.mu.weight.grad is not None and float(model.policy.mu.weight.grad.abs().sum()) > 0.0
     enc_grads = [p.grad for name, p in model.named_parameters() if name.startswith("encoders.")]
     assert any(g is not None and float(g.abs().sum()) > 0.0 for g in enc_grads), "共享主干仍应可训练"
 
 
-def test_wm_gradients_flow_without_detach() -> None:
+def test_prediction_loss_trains_st_gnn_but_not_policy() -> None:
+    """v2 detach：预测 loss 训练 ST-GNN / encoder（真实帧检测），不训练 policy。"""
     model = _model_with_unsaturated_policy()
     obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=False, wm_detach=False)
-    out["traj_xy"].pow(2).mean().backward()
-    wm_grads = [p.grad for name, p in model.named_parameters() if name.startswith("world_model.")]
-    assert any(g is not None and float(g.abs().sum()) > 0.0 for g in wm_grads), "不 detach 时 WM 应有梯度"
+    out = model(obs, rollout=True, world_model=True)
+    (out["od_pred"].pow(2).mean() + out["ld_pred"].pow(2).mean()).backward()
+    st_grads = [p.grad for name, p in model.named_parameters() if name.startswith("st_gnn.")]
+    assert any(g is not None and float(g.abs().sum()) > 0.0 for g in st_grads), "ST-GNN 应有梯度"
+    enc_grads = [p.grad for name, p in model.named_parameters() if name.startswith("encoders.")]
+    assert any(g is not None and float(g.abs().sum()) > 0.0 for g in enc_grads), "编码器应收到检测梯度"
+    policy_grads = [p.grad for name, p in model.named_parameters() if name.startswith("policy.")]
+    assert all(g is None or float(g.abs().sum()) == 0.0 for g in policy_grads), "预测 loss 不得训练 policy"
+
+
+def test_wm_detach_kwarg_is_accepted_noop() -> None:
+    """v2 兼容：``wm_detach`` 形参保留但语义固定（合成帧恒 detach），true/false 输出一致。"""
+    model = _model_with_unsaturated_policy().eval()
+    obs = make_obs(batch=2)
+    out_true = model(obs, rollout=True, world_model=True, wm_detach=True)
+    out_false = model(obs, rollout=True, world_model=True, wm_detach=False)
+    for key in ("traj_xy", "plan", "od_pred", "ld_pred"):
+        assert torch.equal(out_true[key], out_false[key]), f"wm_detach 不应改变 {key}"
 
 
 def test_apply_freeze_prefixes_scopes_and_restores() -> None:
     model = DrivingModel()
-    frozen = apply_freeze_prefixes(model, ("world_model.", "value.", "moe.experts."))
-    assert frozen and all(name.startswith(("world_model.", "value.", "moe.experts.")) for name in frozen)
+    prefixes = ("st_gnn.", "value.", "plan_head.moe.experts.")
+    frozen = apply_freeze_prefixes(model, prefixes)
+    assert frozen and all(name.startswith(prefixes) for name in frozen)
     assert all(
-        not p.requires_grad for name, p in model.named_parameters() if name.startswith(("world_model.", "value.", "moe.experts."))
+        not p.requires_grad for name, p in model.named_parameters() if name.startswith(prefixes)
     )
     assert all(p.requires_grad for name, p in model.named_parameters() if name.startswith("policy."))
     # 空前缀 = 全部解冻

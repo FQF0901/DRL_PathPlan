@@ -5,9 +5,10 @@
 本入口只做参数校验 + 默认值解析，训练编排全部委托给 ``pipeline.stages``（N4）：
 
 - ``A`` = world model 教师强制训练（ego 条件 = 专家 GT 动作序列；目标 = ``(episode, step+k)``
-  查表重建的未来 OD/LD；直接多步损失 + ego plan 噪声增强），产出 ``final.pt``（含 WM）；
+  查表重建的未来 OD；直接多步损失 + plan head ``ego_next`` 监督 + ego plan 噪声增强），
+  产出 ``final.pt``（含 WM）；
 - ``B`` = planner BC（primary→specific；动作主损失 + 小权重 rollout 轨迹辅助（WM 冻结 + detach）
-  + router BCE），产出 ``final.pt``（策略快照）；
+  + router 软目标 CE/KL），产出 ``final.pt``（策略快照）；
 - ``C`` = PPO RL（``LqrTracker`` 闭环 + **阶段 B 快照** KL 锚（系数衰减）+ primary lr ×0.1 +
   WM 冻结/解冻）。
 

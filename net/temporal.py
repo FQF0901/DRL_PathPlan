@@ -1,77 +1,85 @@
-"""时序编码：逐节点 GRU（6 帧 @0.5 s），``hist_valid`` 显式门控预热补位帧。
+"""时序聚合：对 mem 的 T 帧做**掩码注意力池化**（v2 mem-bank 契约）。
 
-为什么必须用 ``hist_valid`` 而不是 ``*_hist_mask``
-------------------------------------------------
-``env/obs/memory.py`` 在预热期（真实帧不足 6 帧）会**复制最旧的真实帧**补满窗口，
-且复制帧的 ``*_hist_mask`` 仍为 1（它确实是"有效槽位"）。若只用 mask，
-网络会把同一帧当成多帧历史（p2-contract §8.4 的 must-fix）。
-本模块的处理：
+为什么是注意力而不是 GRU
+------------------------
+v2 的输入是 4 个 per-modality mem（``(B,T,...)``，最后一帧 = 当前帧），网络对
+OD / Ego / Others **各自**做一次"6 帧 + validity mask"的注意力池化；LD 不做时序
+（见 :mod:`net.mem` 的说明）。注意力相对 GRU 的好处：
 
-- ``hist_valid[t] == 0`` 的帧：输入清零、GRU 隐状态保持不变（等价于整帧跳过）；
-- ``hist_valid[t] == 1`` 的帧：正常更新隐状态。
+- 每帧对当前决策的贡献可解释（输出权重即"看哪几帧"），且不引入跨帧隐状态；
+- ``hist_valid`` 的预热补位帧可直接用 mask 屏蔽（补位帧复制最旧真实帧但 mask=1）；
+- rollout 里 mem 窗口是"滑动 + 合成帧"的，注意力不需要维护/重置隐状态。
 
-由于 ``memory.stack`` 产生的是"前缀补位、后缀真实"的窗口，
-上述规则退化为"只从最早真实帧开始累积"，既不会引入复制帧，也不依赖补位位置。
+掩码语义
+--------
+``ok = slot_mask & valid``（``slot_mask`` 对 ego/others 为 None）：
+
+- 补位帧（``valid=0``）整帧不参与（不引入复制帧语义，兼容旧 §8.4 的 must-fix）；
+- 无效槽位不参与；
+- **整列全无效**（某槽在窗口内没有任何有效帧）时输出严格为 0，且反向有限
+  （softmax 用 ``-1e4`` 屏蔽 + 乘 ``ok`` 归零，避免 ``-inf`` 产生 NaN）。
+
+帧龄嵌入
+--------
+同样的特征出现在不同帧龄上应当可区分；键上加入可学的帧龄嵌入
+（``age = T-1-pos``，0 = 最新）。LD 不走本模块（见 :mod:`net.mem`）。
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 from torch import Tensor, nn
 
 from net.encoders import H
 
+#: softmax 屏蔽值（不用 ``-inf``：避免全屏蔽列在反向产生 NaN）
+_MASK_FILL = -1e4
 
-class TemporalEncoder(nn.Module):
-    """逐节点共享的 GRUCell（对 6 帧循环调用）。
 
-    使用 ``GRUCell`` 手写时间循环而非 ``nn.GRU``：需要在时间维按帧插入
-    ``hist_valid`` 门控（整帧无效时冻结隐状态），``nn.GRU`` 无法表达该操作。
-    """
+class TemporalAttention(nn.Module):
+    """单查询键值注意力池化：``(B,T,N,H) -> (B,N,H)``（N=1 或槽位数）。"""
 
-    def __init__(self, hidden: int = H):
+    def __init__(self, hidden: int = H, key_dim: int | None = None):
         super().__init__()
         self.hidden = int(hidden)
-        self.cell = nn.GRUCell(hidden, hidden)
-
-    def step(self, x: Tensor, hidden: Tensor, valid: Tensor | None = None) -> Tensor:
-        """单帧推进。
-
-        Args:
-            x: ``(B, N, H)`` 当前帧节点特征（无效槽位应为 0）。
-            hidden: ``(B, N, H)`` 上一帧隐状态。
-            valid: ``(B,)`` 帧有效标志；0 表示该帧整帧跳过（隐状态冻结）。
-        """
-        batch, num_nodes, _ = x.shape
-        updated = self.cell(
-            x.reshape(batch * num_nodes, -1),
-            hidden.reshape(batch * num_nodes, -1),
-        ).reshape(batch, num_nodes, self.hidden)
-        if valid is None:
-            return updated
-        return torch.where(valid.view(batch, 1, 1) > 0, updated, hidden)
+        self.key_dim = int(key_dim or max(8, hidden // 4))
+        self.query = nn.Parameter(torch.zeros(self.key_dim))
+        self.key = nn.Linear(hidden, self.key_dim)
+        self.value = nn.Linear(hidden, hidden)
+        self.out = nn.Linear(hidden, hidden)
+        self.age = nn.Embedding(64, hidden)
 
     def forward(
         self,
-        feat: Tensor,
-        frame_mask: Tensor | None = None,
+        x: Tensor,
+        slot_mask: Tensor | None = None,
         valid: Tensor | None = None,
     ) -> Tensor:
-        """``feat (B, T, N, H)`` -> ``(B, N, H)``。
+        """``x (B,T,N,H)`` -> ``(B,N,H)``。
 
         Args:
-            feat: 历史节点特征（编码器已按槽位 mask 清零）。
-            frame_mask: ``(B, T, N)`` 槽位掩码；无效槽位的输入再乘一次 0。
-            valid: ``(B, T)`` = ``hist_valid``；**决定哪些帧参与时序聚合**。
+            x: 编码后的 mem 帧（无效槽位应为 0，由编码器保证）。
+            slot_mask: ``(B,T,N)`` 槽位掩码；``None`` 表示无槽位维（ego/others）。
+            valid: ``(B,T)`` 帧有效性（``hist_valid``）；``None`` 表示全部有效。
         """
-        if feat.ndim != 4:
-            raise ValueError(f"TemporalEncoder 期望 (B,T,N,H)，收到 {tuple(feat.shape)}")
-        batch, frames, num_nodes, _ = feat.shape
-        hidden = torch.zeros((batch, num_nodes, self.hidden), dtype=feat.dtype, device=feat.device)
-        for t in range(frames):
-            x = feat[:, t]
-            if frame_mask is not None:
-                x = x * frame_mask[:, t].unsqueeze(-1)
-            frame_valid = None if valid is None else valid[:, t]
-            hidden = self.step(x, hidden, frame_valid)
-        return hidden
+        if x.ndim != 4:
+            raise ValueError(f"TemporalAttention 期望 (B,T,N,H)，收到 {tuple(x.shape)}")
+        batch, frames, slots, _ = x.shape
+        if self.age.num_embeddings < frames:
+            raise ValueError(f"帧数 {frames} 超过帧龄嵌入容量 {self.age.num_embeddings}")
+        age_ids = torch.arange(frames - 1, -1, -1, dtype=torch.long, device=x.device)
+        x = x + self.age(age_ids).view(1, frames, 1, self.hidden)
+
+        ok = torch.ones((batch, frames, slots), dtype=torch.bool, device=x.device)
+        if slot_mask is not None:
+            ok = ok & (slot_mask.reshape(batch, frames, slots) > 0.5)
+        if valid is not None:
+            ok = ok & (valid.reshape(batch, frames) > 0.5).unsqueeze(-1)
+
+        logits = (self.key(x) * self.query).sum(dim=-1) / math.sqrt(self.key_dim)
+        logits = torch.where(ok, logits, torch.full_like(logits, _MASK_FILL))
+        alpha = torch.softmax(logits, dim=1) * ok.to(logits.dtype)
+        pooled = (alpha.unsqueeze(-1) * self.value(x)).sum(dim=1)
+        return self.out(pooled)

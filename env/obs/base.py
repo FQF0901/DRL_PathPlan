@@ -28,7 +28,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -126,18 +126,38 @@ class ObservationChannel(ABC):
 
     子类只需实现 :meth:`build`；``name``/``feature_dim``/``alignment`` 为类属性，
     ``reset()`` 用于清空跨 step 缓存（默认无状态）。
+
+    伴随数组（v2）：某些通道除 features/mask 外还需要**槽位级伴随信号**（如 OD 的
+    ``od_id``/``od_presence``），它们随帧进入历史/缓冲区但**不做 SE(2) 对齐**。
+    通道声明 :attr:`companion_names` 并提供 :meth:`companions`（默认空）。
     """
 
     name: str = "channel"
     feature_dim: int = 0
     #: 历史帧对齐规则（见 :class:`FrameAlignment`），由 FrameMemory 读取
     alignment: FrameAlignment = FrameAlignment()
+    #: 槽位级伴随数组名（不参与 SE(2) 对齐），如 ``("od_id", "od_presence")``
+    companion_names: tuple[str, ...] = ()
+    #: 伴随数组在"缺帧"位置的填充值（缺省：整型 -1，浮点 0）
+    companion_fill: dict[str, Any] = {}
 
     @abstractmethod
     def build(self, env, spec: "ScenarioSpec | None") -> tuple[np.ndarray, np.ndarray]:
         """返回 ``(features (N,F) float32, mask (N,) float32)``；不得抛异常（不可用时返回全零+mask 0）。"""
         raise NotImplementedError
 
+    def companions(self, env=None, spec=None) -> dict[str, np.ndarray]:
+        """返回最近一次 :meth:`build` 的槽位级伴随数组（默认无）。"""
+        return {}
+
     def reset(self) -> None:
         """episode 开始（env.reset 后首次 build）时调用；默认无状态。"""
         return None
+
+
+def companion_fill_value(name: str, dtype, fill_map: "dict[str, Any] | None" = None) -> Any:
+    """伴随数组缺帧填充值：通道声明优先，其次按 dtype（整型 -1 / 浮点 0.0）。"""
+    value = (fill_map or {}).get(name)
+    if value is not None:
+        return value
+    return -1 if np.issubdtype(np.dtype(dtype), np.integer) else 0.0

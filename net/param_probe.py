@@ -5,8 +5,11 @@
 
     tools/venv-python net/param_probe.py
 
-输出各模块参数量（含占比）与总计；预算见 p2-contract §2（≤1.5M）。
-末尾用固定种子跑一次小 batch 前向 + ``rollout`` 形状冒烟，确保模型可实例化、可运行。
+输出两种配置：
+- 默认构造（H=96 / experts 192）——与旧探针口径可比；
+- 训练配置（``config/model.yaml``：H=128 / experts 256 / 8 experts）——ckpt 实际规模。
+并打印相对 v1 架构（mem-bank 之前）的净变化。末尾用固定种子跑一次小 batch
+forward + ``rollout`` 形状冒烟，确保模型可实例化、可运行。
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ from net.model import DrivingModel
 PARAM_BUDGET = 1_500_000
 #: 冒烟 batch（纯 CPU，固定种子）
 SMOKE_BATCH = 2
+#: v1（mem-bank 之前）同配置的历史实测总量，用于报告净变化
+V1_TOTALS = {96: 666_263, 128: 1_174_875}
 
 
 def count_parameters(module: torch.nn.Module) -> int:
@@ -33,77 +38,109 @@ def count_parameters(module: torch.nn.Module) -> int:
     return sum(param.numel() for param in module.parameters())
 
 
-def make_dummy_obs(batch: int = SMOKE_BATCH, seed: int = 0) -> dict[str, torch.Tensor]:
-    """构造与 ``env.obs.builder`` 同形状的假观测（仅用于形状冒烟）。"""
+def make_dummy_obs(batch: int = SMOKE_BATCH, seed: int = 0, others_dim: int = 28) -> dict[str, torch.Tensor]:
+    """构造与 env schema v2 / trainer 组装后同形状的假观测（仅形状冒烟）。"""
     generator = torch.Generator().manual_seed(seed)
     frames, od_slots, ld_slots = 6, 16, 16
 
     def rand(*shape: int) -> torch.Tensor:
         return torch.randn(*shape, generator=generator, dtype=torch.float32)
 
-    od_mask = (rand(batch, od_slots) > -0.3).float()
-    ld_mask = (rand(batch, ld_slots) > -0.3).float()
-    od_hist_mask = od_mask.unsqueeze(1).expand(batch, frames, od_slots).clone()
-    ld_hist_mask = ld_mask.unsqueeze(1).expand(batch, frames, ld_slots).clone()
+    od_mask = (rand(batch, frames, od_slots) > -0.3).float()
+    ld_mask = (rand(batch, frames, ld_slots) > -0.3).float()
+    presence = od_mask * (rand(batch, frames, od_slots) > -0.3).float()
     hist_valid = torch.zeros(batch, frames)
     hist_valid[:, frames - 3 :] = 1.0  # 预热 3 帧（前 3 帧为补位）
-    od_hist = rand(batch, frames, od_slots, 9)
-    ld_hist = rand(batch, frames, ld_slots, 7)
+    od_hist = rand(batch, frames, od_slots, 9) * od_mask.unsqueeze(-1)
+    ld_hist = rand(batch, frames, ld_slots, 7) * ld_mask.unsqueeze(-1)
+    ego_hist = rand(batch, frames, 1, 8)
+    others_hist = rand(batch, frames, 1, others_dim)
     od_hist[:, : frames - 3] = od_hist[:, frames - 3 : frames - 2]  # 复制最旧真实帧
     ld_hist[:, : frames - 3] = ld_hist[:, frames - 3 : frames - 2]
     return {
-        "ego": rand(batch, 8),
-        "od": rand(batch, od_slots, 9) * od_mask.unsqueeze(-1),
-        "od_mask": od_mask,
-        "ld": rand(batch, ld_slots, 7) * ld_mask.unsqueeze(-1),
-        "ld_mask": ld_mask,
-        "nav": rand(batch, 11),
-        "nav_mask": torch.ones(batch, 1),
-        "signal": rand(batch, 4),
-        "signal_mask": torch.ones(batch, 1),
+        "ego_hist": ego_hist,
+        "ego_hist_mask": torch.ones(batch, frames, 1),
         "od_hist": od_hist,
-        "od_hist_mask": od_hist_mask,
+        "od_hist_mask": od_mask,
+        "od_id_hist": (rand(batch, frames, od_slots).abs() * 10).long() + 1,
+        "od_presence_hist": presence,
         "ld_hist": ld_hist,
-        "ld_hist_mask": ld_hist_mask,
+        "ld_hist_mask": ld_mask,
+        "others_hist": others_hist,
+        "others_hist_mask": torch.ones(batch, frames, 1),
         "hist_valid": hist_valid,
+        "ego": rand(batch, 1, 8),
+        "od": od_hist[:, -1],
+        "od_mask": od_mask[:, -1],
+        "od_id": (rand(batch, od_slots).abs() * 10).long() + 1,
+        "od_presence": presence[:, -1],
+        "ld": ld_hist[:, -1],
+        "ld_mask": ld_mask[:, -1],
+        "others": rand(batch, 1, others_dim),
+        "others_mask": torch.ones(batch, 1, 1),
+        "nav": rand(batch, 1, 11),
+        "nav_mask": torch.ones(batch, 1, 1),
+        "signal": rand(batch, 1, 4),
+        "signal_mask": torch.ones(batch, 1, 1),
     }
 
 
-def main() -> int:
+def probe(hidden: int, expert_hidden: int, label: str) -> int:
+    """打印一种配置的各模块参数与总量；返回总量（超预算直接 assert 失败）。"""
     torch.manual_seed(0)
-    model = DrivingModel()
+    model = DrivingModel(hidden=hidden, expert_hidden=expert_hidden)
     total = count_parameters(model)
-
     rows: list[tuple[str, int]] = [
         ("encoders", count_parameters(model.encoders)),
-        ("temporal", count_parameters(model.temporal)),
-        ("spatial", count_parameters(model.spatial)),
-        ("latent_mlp", count_parameters(model.latent_mlp)),
-        ("moe", count_parameters(model.moe)),
-        ("world_model", count_parameters(model.world_model)),
+        ("mem_encoder", count_parameters(model.mem_encoder)),
+        ("plan_head", count_parameters(model.plan_head) - count_parameters(model.plan_head.moe)),
+        ("plan_head.moe", count_parameters(model.plan_head.moe)),
+        ("st_gnn", count_parameters(model.st_gnn)),
         ("policy", count_parameters(model.policy)),
         ("value", count_parameters(model.value)),
     ]
-    head_params = sum(v for _, v in rows)
-    print("== DrivingModel 参数探针（H=96, 8 experts 96->192->96）==")
+    accounted = sum(value for _, value in rows)
+    print(f"== DrivingModel 参数探针 [{label}]（H={hidden}）==")
     for name, value in rows:
-        print(f"  {name:<12} {value:>9,}  ({value / total:6.1%})")
-    print(f"  {'modules 小计':<12} {head_params:>9,}")
-    print(f"  {'buffers 等':<12} {total - head_params:>9,}")
-    print(f"  {'总计':<12} {total:>9,}  / 预算 {PARAM_BUDGET:,}  ({total / PARAM_BUDGET:.1%})")
-
+        print(f"  {name:<14} {value:>9,}  ({value / total:6.1%})")
+    print(f"  {'buffers 等':<14} {total - accounted:>9,}")
+    delta = total - V1_TOTALS.get(hidden, total)
+    change = f"{delta:+,}" if hidden in V1_TOTALS else "n/a"
+    print(f"  {'总计':<14} {total:>9,}  / 预算 {PARAM_BUDGET:,}  ({total / PARAM_BUDGET:.1%})"
+          f"  v1 净变化 {change}")
     assert total <= PARAM_BUDGET, f"参数超预算：{total:,} > {PARAM_BUDGET:,}"
+    return total
 
-    model.eval()
+
+def main() -> int:
+    default_total = probe(96, 192, "默认/旧探针口径")
+    configured_total = probe(128, 256, "训练配置 config/model.yaml")
+
+    model = DrivingModel().eval()
     obs = make_dummy_obs()
     with torch.no_grad():
         out = model(obs)
         rolled = model.rollout(obs)
-    print("== 形状冒烟 ==")
-    for key in ("action_mu", "action_logstd", "value", "traj_xy", "od_pred", "ld_pred", "router_logits", "latent"):
-        print(f"  {key:<15} forward={tuple(out[key].shape)}  rollout={tuple(rolled[key].shape)}")
+    print("== 形状冒烟（默认构造） ==")
+    for key in (
+        "action_mu",
+        "action_logstd",
+        "value",
+        "traj_xy",
+        "plan",
+        "od_pred",
+        "ld_pred",
+        "od_presence_pred",
+        "od_entry_pred",
+        "router_logits",
+        "expert_weights",
+        "latent",
+    ):
+        print(f"  {key:<18} forward={tuple(out[key].shape)}  rollout={tuple(rolled[key].shape)}")
     assert tuple(out["traj_xy"].shape) == (SMOKE_BATCH, 6, 2)
-    print("OK: 参数与形状检查通过")
+    assert tuple(out["od_presence_pred"].shape) == (SMOKE_BATCH, 6, 16)
+    assert tuple(out["od_entry_pred"].shape) == (SMOKE_BATCH, 6, 16)
+    print(f"OK: 参数与形状检查通过（默认 {default_total:,} / 训练配置 {configured_total:,}，预算 {PARAM_BUDGET:,}）")
     return 0
 
 

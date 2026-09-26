@@ -1,28 +1,41 @@
-"""观测组装：当前帧通道 + 6 帧历史堆叠。
+"""观测组装：当前帧通道 + 6 帧历史堆叠（schema v2）。
 
-``ObservationBuilder.build(env, spec)`` 输出（全部 float32）::
+``ObservationBuilder.build(env, spec)`` 输出（全部 float32，除标注外）::
 
     ego (1,8)          ego_mask (1,)
-    od  (16,9)         od_mask  (16,)
+    od  (16,9)         od_mask  (16,)      od_id (16,) int64    od_presence (16,)
     ld  (16,7)         ld_mask  (16,)
-    nav (1,11)         nav_mask (1,)
-    signal (1,4)       signal_mask (1,)
-    od_hist (6,16,9)   od_hist_mask (6,16)
-    ld_hist (6,16,7)   ld_hist_mask (6,16)
-    hist_valid (6,)    # 预热补位帧为 0
+    nav (1,11)         nav_mask (1,)       # 兼容保留（others 是规范输入）
+    signal (1,4)       signal_mask (1,)    # 兼容保留
+    others (1,16+K)    others_mask (1,)    # nav + speed_limit + signal + road_class one-hot(K)
+
+    ego_hist (6,1,8)           ego_hist_mask (6,1)
+    others_hist (6,1,16+K)     others_hist_mask (6,1)
+    od_hist (6,16,9)           od_hist_mask (6,16)
+    od_id_hist (6,16) int64    od_presence_hist (6,16)
+    ld_hist (6,16,7)           ld_hist_mask (6,16)
+    hist_valid (6,)            # 预热补位帧为 0；由真实缓冲长度计算
+
+``od_id`` 是槽位身份（见 ``env/obs/od.py``）：OD 槽位 = track id，跨帧稳定；``od_id_hist``/
+``od_presence_hist`` 与 ``od_hist`` 同槽位、身份一致且不做 SE(2) 变换。``od_mask`` = 槽位
+本帧有效（已分配），``od_presence`` = 对象本帧在盒内被观测（详见 od 通道文档）。
 
 config（全部可选；``topk_objects``/``topk_lanes``/``history_frames`` 为 config/env.yaml 口径别名）::
 
     {
-      "channels": ["ego", "od", "ld", "nav", "signal"],   # 顺序即输出顺序（可裁剪）
-      "od": {"num_slots": 16, "range_m": 100.0, "ttc_cap_s": 5.0},
+      "channels": ["ego", "od", "ld", "nav", "signal", "others"],  # 顺序即输出顺序（可裁剪）
+      "scope": {"front_m": 150.0, "rear_m": 50.0, "left_m": 25.0, "right_m": 25.0},
+      "od": {"num_slots": 16, "ttc_cap_s": 5.0, "release_after_s": 1.0},
       "ld": {"num_slots": 16, "offsets": [5, 10, 15, 20, 30]},
-      "memory": {"frames": 6, "interval": 5, "channels": ["od", "ld"]},
+      "others": {"speed_limit_norm_mps": 30.0},
+      "memory": {"frames": 6, "interval": 5, "channels": ["ego", "others", "od", "ld"]},
       "physics_dt": 0.1,
     }
 
-episode 边界由 ``env.episode_step == 0`` 自动识别（env.reset 后第一次 build 会清空历史），
-因此调用方只需要每步调用 ``build``；自定义通道用 :meth:`register` 挂载（不改已有通道）。
+``scope`` 是 OD/LD 共用的盒式范围（v2 默认 前 150 / 后 50 / 左右 25 m；旧默认前 100，
+扩展理由见 ``env/obs/od.py`` 文档）。episode 边界由 ``env.episode_step == 0`` 自动识别
+（env.reset 后第一次 build 会清空历史与槽位表），因此调用方只需要每步调用 ``build``；
+自定义通道用 :meth:`register` 挂载（不改已有通道）。
 """
 
 from __future__ import annotations
@@ -34,13 +47,17 @@ import numpy as np
 from env.obs.base import ObservationChannel
 from env.obs.ego import EgoChannel
 from env.obs.ld import LDChannel
+from env.obs.memory import DEFAULT_CHANNELS as DEFAULT_MEMORY_CHANNELS
 from env.obs.memory import FrameMemory
 from env.obs.nav import NavChannel
 from env.obs.od import ODChannel
+from env.obs.others import OthersChannel
 from env.obs.signal import SignalChannel
 
-DEFAULT_CHANNELS: tuple[str, ...] = ("ego", "od", "ld", "nav", "signal")
-DEFAULT_MEMORY_CHANNELS: tuple[str, ...] = ("od", "ld")
+DEFAULT_CHANNELS: tuple[str, ...] = ("ego", "od", "ld", "nav", "signal", "others")
+#: OD/LD 共用的默认盒式 scope（v2：前 150 / 后 50 / 左右 25）
+DEFAULT_SCOPE: dict[str, float] = {"front_m": 150.0, "rear_m": 50.0, "left_m": 25.0, "right_m": 25.0}
+_SCOPE_KEYS = ("front_m", "rear_m", "left_m", "right_m")
 
 
 class ObservationBuilder:
@@ -50,6 +67,7 @@ class ObservationBuilder:
         cfg = dict(config or {})
         od_cfg = dict(cfg.get("od") or {})
         ld_cfg = dict(cfg.get("ld") or {})
+        others_cfg = dict(cfg.get("others") or {})
         mem_cfg = dict(cfg.get("memory") or {})
         # config/env.yaml 扁平键别名，方便 pipeline 直接透传
         if "topk_objects" in cfg:
@@ -58,14 +76,22 @@ class ObservationBuilder:
             ld_cfg.setdefault("num_slots", cfg["topk_lanes"])
         if "history_frames" in cfg:
             mem_cfg.setdefault("frames", cfg["history_frames"])
+        scope_cfg = dict(DEFAULT_SCOPE)
+        scope_cfg.update(dict(cfg.get("scope") or {}))
+        for key in _SCOPE_KEYS:
+            if key in cfg:  # 兼容把 scope 写成一层的旧配置
+                scope_cfg[key] = cfg[key]
+            od_cfg.setdefault(key, scope_cfg[key])
+            ld_cfg.setdefault(key, scope_cfg[key])
         self.physics_dt = float(cfg.get("physics_dt", 0.1))
 
         built_in: dict[str, ObservationChannel] = {
             "ego": EgoChannel(physics_dt=self.physics_dt),
-            "od": ODChannel(**od_cfg),
+            "od": ODChannel(**{**od_cfg, "physics_dt": float(od_cfg.get("physics_dt", self.physics_dt))}),
             "ld": LDChannel(**ld_cfg),
             "nav": NavChannel(),
             "signal": SignalChannel(),
+            "others": OthersChannel(**others_cfg),
         }
         wanted = tuple(cfg.get("channels") or DEFAULT_CHANNELS)
         unknown = [name for name in wanted if name not in built_in]
@@ -97,16 +123,27 @@ class ObservationBuilder:
         self.memory.bind(self.channels)
 
         built: OrderedDict[str, tuple[np.ndarray, np.ndarray]] = OrderedDict()
+        companions: dict[str, dict[str, np.ndarray]] = {}
         for name, channel in self.channels.items():
             feats, mask = channel.build(env, spec)
             built[name] = (np.asarray(feats, dtype=np.float32), np.asarray(mask, dtype=np.float32))
+            getter = getattr(channel, "companions", None)
+            if getter is not None:
+                try:
+                    values = getter(env, spec) or {}
+                except Exception:  # noqa: BLE001 - 伴随数组失败不应影响主观测
+                    values = {}
+                if values:
+                    companions[name] = {key: np.asarray(value) for key, value in values.items()}
 
-        self.memory.push(env, spec, built)
+        self.memory.push(env, spec, built, companions=companions)
 
         out: dict[str, np.ndarray] = {}
         for name, (feats, mask) in built.items():
             out[name] = feats
             out[f"{name}_mask"] = mask
+        for values in companions.values():
+            out.update(values)
         out.update(self.memory.stack(env))
         return out
 

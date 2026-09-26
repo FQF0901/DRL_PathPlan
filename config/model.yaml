@@ -23,10 +23,12 @@ moe:
     hidden_dim: 256               # 结构 128 → 256 → 128
     init: zero_residual           # 零初始化，输出作为残差
   router:
-    type: sigmoid                 # sigmoid 路由器（多标签）
-    supervision: bce              # 多标签 BCE 监督
-    labels: per_step_observable   # 标签为逐步可观测标签
-    # Gate 3 定案：受监督标签 8 个（固定顺序）→ 8 个 expert 一一对应；
+    type: top2_softmax           # top-2 softmax 混合（net.moe.top_k_softmax；恰 2 个非零权重、和为 1）
+    top_k: 2                     # 每 token 取 top-2 logits 后在被选 logits 上 softmax
+    supervision: soft_cluster_ce # 聚类软目标 CE/KL（pipeline.clusters.soft_targets_from_obs + 温度）
+    temperature: 1.0             # router 软目标温度（CLI --router-temperature；trainer 侧独立旋钮）
+    # 数据集标签顺序（仅用于数据契约/切片分析；v1.2 起 router 不再用标签 BCE/手工标签监督）
+    # Gate 3 定案：受监督标签 8 个（固定顺序）；
     # 名义标签 lane_change / zipper_merge / maneuver(turns) 退出监督与 KPI（无脚本、运行期不可核验）；
     # in_intersection 与 near_intersection 语义重叠 → 只保留 near_intersection。
     supervised_labels:

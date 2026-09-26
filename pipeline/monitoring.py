@@ -11,10 +11,18 @@
    ``primary_output``，统计 **有效专家数 N=Σw**、每 expert 平均权重、输出 L2 范数、
    token 数（w > 阈值）、**primary 漂移**（``‖Σ w_e·expert_e‖ / (‖primary‖+ε)``，
    即 MoE 相对纯 primary 输出的残差占比）；
-4. **PPO 诊断序列**（训练侧已写成嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
+   ⚠️ ``router_weights`` 的口径是 **router logits 的 softmax 全专家概率分布**
+   （v2 监督面；``Σw ∈ [1,E]``，反映 gate 分布/熵），**不是** net 输出的
+   ``expert_weights``（top-2 混合权重：恰 2 个非零、每 token 和为 1，``Σw ≡ 1``）。
+   传 ``expert_weights`` 只适合看 top-2 利用率，effective_n 恒为 1；两者都要时分开两次
+   ``on_moe_step``（monitor 会累计，但语义不同，推荐默认传 softmax 分布）；
+4. **分组指标（v2）**：``on_grouped_step`` 接收 per-horizon / per-label / 分切片三组
+   窗口统计（``GroupedMetricStatistics``），flush 时输出 ``horizon/<h>/<m>``、
+   ``label/<name>/<m>``、``slice/<name>/<m>`` 的 ``mean``/``count``/``weighted_mean``；
+5. **PPO 诊断序列**（训练侧已写成嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
    ``log_scalars`` 递归展平嵌套 Mapping → 标签 ``a/b/c``，因此奖励分解 / 优势-价值统计 /
    固定探针动作漂移全部自动进 CSV + tensorboard；
-5. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
+6. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
 
 设计
 ----
@@ -29,7 +37,9 @@
     monitor = TrainingMonitor("runs/train/stageA/monitor")
     ...
     monitor.on_scene_step(compute_step_labels(env, spec))     # 每步（可降频）
-    monitor.on_moe_step(router_weights=out["router_logits"].sigmoid(),
+    # 口径：router_weights = router_logits 的 softmax 全专家分布（监督面；Σw∈[1,E]）。
+    # 不要传 net 的 expert_weights（top-2 混合，Σw≡1）；两者语义不同，见 MoERoutingStatistics。
+    monitor.on_moe_step(router_weights=out["router_logits"].softmax(dim=-1),
                         expert_outputs=expert_outs, primary_output=primary_out)
     monitor.on_episode(episode_kpi, step=train_step)
     monitor.on_train_step({"loss": loss.item(), "lr": lr}, step=train_step)
@@ -48,12 +58,15 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
-__all__ = ["TrainingMonitor", "SceneLabelStatistics", "MoERoutingStatistics"]
+__all__ = ["TrainingMonitor", "SceneLabelStatistics", "MoERoutingStatistics", "GroupedMetricStatistics"]
 
 _SCENE_LABEL_PREFIX = "scene_label"
 _MOE_PREFIX = "moe"
 _KPI_PREFIX = "kpi"
 _TRAIN_PREFIX = "train"
+_HORIZON_PREFIX = "horizon"
+_LABEL_PREFIX = "label"
+_SLICE_PREFIX = "slice"
 
 
 def _as_array(value: Any) -> Optional[np.ndarray]:
@@ -142,7 +155,12 @@ class SceneLabelStatistics:
 
 
 class MoERoutingStatistics:
-    """MoE 路由窗口统计（有效 N / 每 expert 权重 / 输出范数 / token 数 / primary 漂移）。"""
+    """MoE 路由窗口统计（有效 N / 每 expert 权重 / 输出范数 / token 数 / primary 漂移）。
+
+    ``router_weights`` 的规范口径 = **router logits 的 softmax 全专家概率**（v2 监督面，
+    ``Σw ∈ [1,E]``）；top-2 混合权重（``net.moe`` 的 ``expert_weights``，恰 2 个非零、
+    每 token 和为 1）**不是**本口径 —— 传它只会得到 ``effective_n ≡ 1``（见模块 docstring）。
+    """
 
     def __init__(self, *, token_threshold: float = 0.5, eps: float = 1e-6):
         self.token_threshold = float(token_threshold)
@@ -159,7 +177,9 @@ class MoERoutingStatistics:
         """累计一次前向（可多次调用再统一 flush）。
 
         Args:
-            router_weights: (B, E) 或 (E,) 门控权重，E = expert 数。
+            router_weights: (B, E) 或 (E,) **router logits 的 softmax 全专家概率**
+                （规范口径；E = expert 数）；top-2 混合权重（``expert_weights``）语义不同，
+                不要混用（Σw≡1 会让 effective_n 失去意义）。
             expert_outputs: 可选 (B, E, H)：每 expert 输出（用于范数/漂移）。
             primary_output: 可选 (B, H)：primary 输出（用于 primary 漂移）。
         """
@@ -239,6 +259,64 @@ class MoERoutingStatistics:
         self._primary_norm_calls = 0
 
 
+class GroupedMetricStatistics:
+    """**分组指标窗口**（per-horizon / per-label / 分切片序列）。
+
+    训练侧按 ``update({"h1": {"loss": 0.3, "ade": 1.2}}`` 的形式喂入窗口统计，
+    ``flush()`` 输出（CSV + tensorboard 同一套 tag）：
+
+    - ``<prefix>/<group>/<metric>/mean``：窗口内计数口径均值（与旧日志可比）；
+    - ``<prefix>/<group>/<metric>/count``：窗口内样本数；
+    - 传入组权重时额外输出 ``/weighted_mean``（``Σ w·x/Σ w``）与 ``/weight``（权重和）。
+
+    ``group`` 可以是任意字符串（``h1..h6`` / 标签名 / ``brake|turn|curve``）；
+    非标量/NaN 值静默跳过（与 :func:`_finite` 同口径）。
+    """
+
+    def __init__(self, prefix: str):
+        self.prefix = str(prefix)
+        self.reset()
+
+    def update(self, groups: Mapping[str, Any], *, weights: Optional[Mapping[str, Any]] = None) -> None:
+        """累计一个窗口步：``groups = {group: {metric: scalar}}``（可空）。"""
+        for group, metrics in (groups or {}).items():
+            if not isinstance(metrics, _MappingABC):
+                continue
+            weight_raw = weights.get(group) if isinstance(weights, _MappingABC) else None
+            weight = _finite(weight_raw)
+            has_weight = weight is not None
+            weight = 1.0 if weight is None else float(weight)
+            for name, value in metrics.items():
+                number = _finite(value)
+                if number is None:
+                    continue
+                key = (str(group), str(name))
+                entry = self._entries.setdefault(
+                    key, {"count": 0.0, "sum": 0.0, "wsum": 0.0, "weighted": 0.0, "weighted_flag": 0.0}
+                )
+                entry["count"] += 1.0
+                entry["sum"] += number
+                entry["wsum"] += weight
+                entry["weighted"] += weight * number
+                entry["weighted_flag"] = max(entry["weighted_flag"], 1.0 if has_weight else 0.0)
+
+    def flush(self) -> Dict[str, float]:
+        """输出窗口统计 ``{tag: value}`` 并清空窗口。"""
+        out: Dict[str, float] = {}
+        for (group, name), entry in self._entries.items():
+            base = f"{self.prefix}/{group}/{name}"
+            out[f"{base}/mean"] = entry["sum"] / max(entry["count"], 1.0)
+            out[f"{base}/count"] = entry["count"]
+            if entry["weighted_flag"] > 0.0 and entry["wsum"] > 0.0:
+                out[f"{base}/weighted_mean"] = entry["weighted"] / entry["wsum"]
+                out[f"{base}/weight"] = entry["wsum"]
+        self.reset()
+        return out
+
+    def reset(self) -> None:
+        self._entries: Dict[tuple, Dict[str, float]] = {}
+
+
 class TrainingMonitor:
     """tensorboard + CSV 监控器（hook 式；见模块 docstring）。"""
 
@@ -255,6 +333,10 @@ class TrainingMonitor:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.scene_labels = SceneLabelStatistics(scene_label_names)
         self.moe = MoERoutingStatistics(token_threshold=token_threshold)
+        # v2：per-horizon / per-label / 分切片分组窗口（flush 时写 CSV + tensorboard）
+        self.horizon = GroupedMetricStatistics(_HORIZON_PREFIX)
+        self.labels = GroupedMetricStatistics(_LABEL_PREFIX)
+        self.slices = GroupedMetricStatistics(_SLICE_PREFIX)
         self._csv_path: Optional[Path] = None
         self._csv_handle = None
         self._csv_writer = None
@@ -301,9 +383,12 @@ class TrainingMonitor:
             self.log_scalar(str(tag), value, step=step)
 
     def flush(self, step: Optional[int] = None) -> None:
-        """把场景标签 / MoE 窗口统计写入后端，并重置窗口。"""
+        """把场景标签 / MoE / 分组（horizon/label/slice）窗口统计写入后端，并重置窗口。"""
         self.log_scalars(self.scene_labels.flush(), step=step)
         self.log_scalars(self.moe.flush(), step=step)
+        self.log_scalars(self.horizon.flush(), step=step)
+        self.log_scalars(self.labels.flush(), step=step)
+        self.log_scalars(self.slices.flush(), step=step)
         if self._writer is not None:
             self._writer.flush()
 
@@ -330,6 +415,28 @@ class TrainingMonitor:
     def on_train_step(self, metrics: Mapping[str, Any], step: Optional[int] = None) -> None:
         """hook：训练指标（写 ``train/<name>``）。"""
         self.log_scalars({f"{_TRAIN_PREFIX}/{name}": value for name, value in metrics.items()}, step=step)
+
+    def on_grouped_step(
+        self,
+        *,
+        horizon: Optional[Mapping[str, Any]] = None,
+        labels: Optional[Mapping[str, Any]] = None,
+        slices: Optional[Mapping[str, Any]] = None,
+        weights: Optional[Mapping[str, Any]] = None,
+        step: Optional[int] = None,
+    ) -> None:
+        """hook：分组指标（per-horizon ``horizon/<h>/<m>``、per-label ``label/<name>/<m>``、
+        分切片 ``slice/<name>/<m>``）；写后端并清空对应窗口。
+
+        ``weights`` 可选（按组名给权重），用于 weighted_mean 口径；不给则只输出 mean/count。
+        """
+        _ = step  # 窗口在 flush() 时统一落盘；保留形参以便调用方显式传步号
+        if horizon:
+            self.horizon.update(horizon, weights=weights)
+        if labels:
+            self.labels.update(labels, weights=weights)
+        if slices:
+            self.slices.update(slices, weights=weights)
 
     # ------------------------------------------------------------------ 生命周期
     def close(self) -> None:

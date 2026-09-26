@@ -1,0 +1,19 @@
+# 场景原型聚类规格（lane C / fix-4；契约 docs/design-v1.2.md §4）
+#
+# `spec`：冻结的聚类 artifact（质心/PCA/白化/特征口径/数据指纹/git hash）。
+# `cluster_version`：与 artifact 内 `cluster_version` 必须一致，加载时不匹配直接报错。
+# temperature/boundary_margin/smooth_strength：soft_targets_from_obs 的软目标参数
+#   （只影响软目标形状；路由温度 router_temperature 是 trainer 侧独立旋钮）。
+#
+# 拟合/重拟合（v2 数据就绪后执行；见 config/clusters/README.md）：
+#   tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> \
+#       --out config/clusters/cluster_v1.npz --report config/clusters/cluster_v1.report.json
+cluster_version: v1
+spec: config/clusters/cluster_v1.npz
+
+k: 8
+pca_dim: 48
+temperature: 0.5          # top-2 softmax 温度 τ（距离空间；0.5 → 典型 0.65/0.35）
+boundary_margin: 0.05     # top-2 相对间隔低于该值 = 边界样本 → 向 top-3/均匀平滑
+smooth_strength: 0.5      # 边界平滑强度上限
+two_stage: false          # 体检 FLAG 时改 true（活跃 2-means + 7 簇活跃子集）

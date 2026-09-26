@@ -1,4 +1,5 @@
-# 分阶段训练（v1.1）：A = world model 教师强制；B = planner BC（primary→specific）；C = PPO RL
+# 分阶段训练（v1.2）：A = WM 教师强制（+ plan head ego_next 监督）；B = planner BC
+# （primary→specific，router 软目标 CE/KL）；C = PPO RL（EXPERIMENTAL）
 runtime:
   python: "3.10"                  # 运行 Python 版本
   seed: null                      # 全局种子（P1 固定）
@@ -32,7 +33,10 @@ stages:
       slot_matching: nearest_neighbor_t0 # OD 槽位按 t0 帧最近邻匹配（gate 8m；--no-match-future-slots 关闭）
       loss: direct_multi_step           # Huber + 角度 1-cos
       noise: ego_plan                   # ego plan 噪声增强（CLI --plan-noise*）
-      trainable: [encoders, temporal, spatial, moe, world_model]  # policy/value 头不参与
+      ego_next_coef: 0.1        # plan head `ego_next` 监督权重（方案①：A 阶段 plan head/MoE 唯一梯度源）
+      presence_coef: 0.1        # presence BCE 权重（id 轴：未来帧同 track id 是否仍在盒内）
+      entry_coef: 0.1           # entry BCE 权重（id 轴：新 id 是否出现，"t0 无、t+k 有"）
+      trainable: [encoders, mem_encoder, plan_head, moe, st_gnn]  # policy/value 头不参与
   B:
     name: planner_bc            # 阶段名
     bc:
@@ -40,9 +44,9 @@ stages:
       primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）
       action_weight: 1.0        # 主损失：action_mu vs 专家即时动作
       traj_aux_weight: 0.1      # 辅助：rollout traj_xy vs 专家 traj6（WM 冻结 + detach）
-      router_coef: 0.1          # router BCE
+      router_coef: 0.1          # router 软目标 CE/KL（聚类 artifact；非 BCE/硬标签）
       loss_type: l2
-      wm_detach: true           # rollout 内 WM 输出 detach（因果链有效）
+      wm_detach: true           # v2 固定语义：合成帧恒 detach；该键为 no-op（兼容保留）
   C:
     name: ppo_rl                # 阶段名
     tracker: mpc_lqr            # 环境内 MPC/LQR 跟踪器

@@ -1,0 +1,639 @@
+{
+  "alignment": {},
+  "cluster_version": "v1",
+  "clusters": [
+    {
+      "difficulty": {
+        "easy": 0.07916888652104422,
+        "hard": 0.675546084176878,
+        "medium": 0.2452850293020778
+      },
+      "geometry_top3": [
+        [
+          "ramp_in",
+          0.16185402237613214
+        ],
+        [
+          "curve",
+          0.1522642514651039
+        ],
+        [
+          "ramp_out",
+          0.1362812999467235
+        ]
+      ],
+      "id": 0,
+      "radius_max": 58.429779052734375,
+      "radius_mean": 8.104806689067793,
+      "radius_p95": 14.24048576354979,
+      "rare_enrichment": {
+        "cutin_active": 0.6783215590908294,
+        "cutout_active": 0.4851539850354016
+      },
+      "rule_label_rates": {
+        "car_following": 0.17378796637058258,
+        "crowded": 0.4351624846458435,
+        "cutin_active": 0.012786361388862133,
+        "cutout_active": 0.016196057200431824,
+        "merging": 0.24613745510578156,
+        "near_intersection": 0.1075119897723198,
+        "on_curve": 0.10974960029125214,
+        "roundabout_near": 0.012466702610254288
+      },
+      "share": 0.15641666666666668,
+      "size": 9385,
+      "soft_entropy_norm_mean": 0.3840165138244629,
+      "soft_top1_mean": 0.6145615577697754,
+      "soft_top2_mass_mean": 0.9220712780952454,
+      "weight_share": 0.22873162069336966
+    },
+    {
+      "difficulty": {
+        "easy": 0.07682040634732315,
+        "hard": 0.3102476642444016,
+        "medium": 0.6129319294082752
+      },
+      "geometry_top3": [
+        [
+          "t_intersection",
+          0.1438528844727866
+        ],
+        [
+          "split",
+          0.12457363191457808
+        ],
+        [
+          "intersection",
+          0.10559098324188047
+        ]
+      ],
+      "id": 1,
+      "radius_max": 35.273353576660156,
+      "radius_mean": 5.7004115712336825,
+      "radius_p95": 8.687337493896482,
+      "rare_enrichment": {
+        "cutin_active": 1.5734954285052476,
+        "cutout_active": 0.9373452326564626
+      },
+      "rule_label_rates": {
+        "car_following": 0.08023135364055634,
+        "crowded": 0.08468040823936462,
+        "cutin_active": 0.029660388827323914,
+        "cutout_active": 0.03129170835018158,
+        "merging": 0.08972267806529999,
+        "near_intersection": 0.13376834988594055,
+        "on_curve": 0.19457215070724487,
+        "roundabout_near": 0.029808690771460533
+      },
+      "share": 0.11238333333333334,
+      "size": 6743,
+      "soft_entropy_norm_mean": 0.33374860882759094,
+      "soft_top1_mean": 0.6765990257263184,
+      "soft_top2_mass_mean": 0.9569448828697205,
+      "weight_share": 0.11854590992066633
+    },
+    {
+      "difficulty": {
+        "easy": 0.5078719496195224,
+        "hard": 0.11033849383363946,
+        "medium": 0.3817895565468381
+      },
+      "geometry_top3": [
+        [
+          "roundabout",
+          0.2107058514825505
+        ],
+        [
+          "curve",
+          0.09931776436630806
+        ],
+        [
+          "intersection",
+          0.09577538703752296
+        ]
+      ],
+      "id": 2,
+      "radius_max": 37.209312438964844,
+      "radius_mean": 5.856418688101457,
+      "radius_p95": 9.025792455673214,
+      "rare_enrichment": {
+        "cutin_active": 1.336352143742994,
+        "cutout_active": 1.3283669159999205
+      },
+      "rule_label_rates": {
+        "car_following": 0.08344266563653946,
+        "crowded": 0.039490945637226105,
+        "cutin_active": 0.025190237909555435,
+        "cutout_active": 0.04434531554579735,
+        "merging": 0.07898189127445221,
+        "near_intersection": 0.1065337210893631,
+        "on_curve": 0.25531357526779175,
+        "roundabout_near": 0.12398320436477661
+      },
+      "share": 0.12703333333333333,
+      "size": 7622,
+      "soft_entropy_norm_mean": 0.3818437159061432,
+      "soft_top1_mean": 0.6127198338508606,
+      "soft_top2_mass_mean": 0.9342740774154663,
+      "weight_share": 0.10669455696663593
+    },
+    {
+      "difficulty": {
+        "easy": 0.4021648626144879,
+        "hard": 0.26061615320566195,
+        "medium": 0.33721898417985013
+      },
+      "geometry_top3": [
+        [
+          "roundabout",
+          0.11990008326394672
+        ],
+        [
+          "tollgate",
+          0.11956702747710242
+        ],
+        [
+          "ramp_in",
+          0.11307243963363864
+        ]
+      ],
+      "id": 3,
+      "radius_max": 28.005651473999023,
+      "radius_mean": 5.899086958879634,
+      "radius_p95": 9.14050636291504,
+      "rare_enrichment": {
+        "cutin_active": 1.015952672186834,
+        "cutout_active": 0.7881599660224458
+      },
+      "rule_label_rates": {
+        "car_following": 0.05878434702754021,
+        "crowded": 0.10457951575517654,
+        "cutin_active": 0.019150707870721817,
+        "cutout_active": 0.02631140686571598,
+        "merging": 0.14288093149662018,
+        "near_intersection": 0.08626145124435425,
+        "on_curve": 0.17035803198814392,
+        "roundabout_near": 0.07243963330984116
+      },
+      "share": 0.10008333333333333,
+      "size": 6005,
+      "soft_entropy_norm_mean": 0.400415301322937,
+      "soft_top1_mean": 0.5747881531715393,
+      "soft_top2_mass_mean": 0.9095648527145386,
+      "weight_share": 0.09264534788965198
+    },
+    {
+      "difficulty": {
+        "easy": 0.3201404835877347,
+        "hard": 0.16912062677292988,
+        "medium": 0.5107388896393354
+      },
+      "geometry_top3": [
+        [
+          "roundabout",
+          0.17290287721194111
+        ],
+        [
+          "curve",
+          0.12967715790895584
+        ],
+        [
+          "intersection",
+          0.1179251654734567
+        ]
+      ],
+      "id": 4,
+      "radius_max": 27.83322525024414,
+      "radius_mean": 6.0896405292236855,
+      "radius_p95": 9.866884517669677,
+      "rare_enrichment": {
+        "cutin_active": 1.0390798079556434,
+        "cutout_active": 1.7803903302727373
+      },
+      "rule_label_rates": {
+        "car_following": 0.0664595440030098,
+        "crowded": 0.07132243365049362,
+        "cutin_active": 0.019586654379963875,
+        "cutout_active": 0.05943536385893822,
+        "merging": 0.0883425623178482,
+        "near_intersection": 0.1880318820476532,
+        "on_curve": 0.3452654182910919,
+        "roundabout_near": 0.08847764134407043
+      },
+      "share": 0.12338333333333333,
+      "size": 7403,
+      "soft_entropy_norm_mean": 0.40294501185417175,
+      "soft_top1_mean": 0.5838438272476196,
+      "soft_top2_mass_mean": 0.9238699674606323,
+      "weight_share": 0.12031022186813835
+    },
+    {
+      "difficulty": {
+        "easy": 0.42965140697186055,
+        "hard": 0.15679686406271875,
+        "medium": 0.4135517289654207
+      },
+      "geometry_top3": [
+        [
+          "roundabout",
+          0.1629567408651827
+        ],
+        [
+          "curve",
+          0.15329693406131878
+        ],
+        [
+          "t_intersection",
+          0.0986980260394792
+        ]
+      ],
+      "id": 5,
+      "radius_max": 24.416759490966797,
+      "radius_mean": 5.953177949852525,
+      "radius_p95": 9.53198013305664,
+      "rare_enrichment": {
+        "cutin_active": 1.5150891019115398,
+        "cutout_active": 2.1932660581109764
+      },
+      "rule_label_rates": {
+        "car_following": 0.04997900128364563,
+        "crowded": 0.04997900128364563,
+        "cutin_active": 0.028559429571032524,
+        "cutout_active": 0.07321853190660477,
+        "merging": 0.06663867086172104,
+        "near_intersection": 0.0873582512140274,
+        "on_curve": 0.3516729772090912,
+        "roundabout_near": 0.04843902960419655
+      },
+      "share": 0.11905,
+      "size": 7143,
+      "soft_entropy_norm_mean": 0.38650205731391907,
+      "soft_top1_mean": 0.6014527082443237,
+      "soft_top2_mass_mean": 0.9285687804222107,
+      "weight_share": 0.10354615014963488
+    },
+    {
+      "difficulty": {
+        "easy": 0.5691638608305275,
+        "hard": 0.15684624017957352,
+        "medium": 0.273989898989899
+      },
+      "geometry_top3": [
+        [
+          "ramp_out",
+          0.14169472502805835
+        ],
+        [
+          "merge",
+          0.13257575757575757
+        ],
+        [
+          "ramp_in",
+          0.119668911335578
+        ]
+      ],
+      "id": 6,
+      "radius_max": 25.250703811645508,
+      "radius_mean": 5.440885822881352,
+      "radius_p95": 8.67253918647766,
+      "rare_enrichment": {
+        "cutin_active": 0.7293685598778156,
+        "cutout_active": 0.651379860286646
+      },
+      "rule_label_rates": {
+        "car_following": 0.051066216081380844,
+        "crowded": 0.05892255902290344,
+        "cutin_active": 0.013748597353696823,
+        "cutout_active": 0.0217452310025692,
+        "merging": 0.24859708547592163,
+        "near_intersection": 0.19430415332317352,
+        "on_curve": 0.14464084804058075,
+        "roundabout_near": 0.05204826220870018
+      },
+      "share": 0.1188,
+      "size": 7128,
+      "soft_entropy_norm_mean": 0.3601854741573334,
+      "soft_top1_mean": 0.6330372095108032,
+      "soft_top2_mass_mean": 0.9348406195640564,
+      "weight_share": 0.08633421830786216
+    },
+    {
+      "difficulty": {
+        "easy": 0.29296464823241164,
+        "hard": 0.45688951114222376,
+        "medium": 0.2501458406253646
+      },
+      "geometry_top3": [
+        [
+          "merge",
+          0.19309298798273247
+        ],
+        [
+          "ramp_out",
+          0.12810640532026601
+        ],
+        [
+          "ramp_in",
+          0.12168941780422354
+        ]
+      ],
+      "id": 7,
+      "radius_max": 42.02212905883789,
+      "radius_mean": 6.668213652974735,
+      "radius_p95": 11.116510391235352,
+      "rare_enrichment": {
+        "cutin_active": 0.3528027777962723,
+        "cutout_active": 0.09086824854983726
+      },
+      "rule_label_rates": {
+        "car_following": 0.10745537281036377,
+        "crowded": 0.22016100585460663,
+        "cutin_active": 0.006650332361459732,
+        "cutout_active": 0.0030334850307554007,
+        "merging": 0.3279663920402527,
+        "near_intersection": 0.04328549653291702,
+        "on_curve": 0.026017967611551285,
+        "roundabout_near": 0.012017267756164074
+      },
+      "share": 0.14285,
+      "size": 8571,
+      "soft_entropy_norm_mean": 0.40286439657211304,
+      "soft_top1_mean": 0.5786911845207214,
+      "soft_top2_mass_mean": 0.9112620949745178,
+      "weight_share": 0.14319197420404067
+    }
+  ],
+  "data": {
+    "fitted_at": "2026-09-26T04:55:15+00:00",
+    "git_hash": "cf2a8a0",
+    "history_storage": "per_frame_v2",
+    "obs_fingerprint": "v2-e2adf9319719",
+    "obs_fingerprint_current": "v2-e2adf9319719",
+    "rows": 60000,
+    "rows_total": 144763,
+    "schema_version": 2,
+    "seed": 0,
+    "source": "runs/bc_expert_2k_v2"
+  },
+  "fallback": {
+    "activity_stats": [
+      "od_present_count",
+      "od_interaction",
+      "ego_maneuver"
+    ],
+    "p_active": null,
+    "two_stage_available": true,
+    "two_stage_command": "tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> --two-stage --out config/clusters/cluster_v1.npz --report config/clusters/cluster_v1.report.json"
+  },
+  "feature_contract": {
+    "ego": {
+      "dims": 8
+    },
+    "frame": "current-frame obs only（禁用 latent/历史）",
+    "ld": {
+      "dims": 7,
+      "invalid_policy": "zero",
+      "slots": 16,
+      "validity": "ld_mask"
+    },
+    "name": "clusters.feature.v1",
+    "od": {
+      "dims": 9,
+      "invalid_policy": "zero",
+      "slot_order": "as_is（v2 固定槽位 = track id，禁止重排）",
+      "slots": 16,
+      "validity": "od_presence if present else od_mask"
+    },
+    "order": [
+      "ego",
+      "od",
+      "ld",
+      "others"
+    ],
+    "others": {
+      "fallback": "nav(11)+speed_limit(ld slot0 dim4, 原始 m/s)+signal(4)（v2 前的旧数据；v2 数据集必须用 raw）",
+      "raw_composition": "nav(11)+speed_limit(1, 归一化)+signal(4)+road_class one-hot(12)（v2 §3.2，共 28 维）",
+      "raw_key": "others"
+    }
+  },
+  "fit_params": {
+    "activity_clamped": null,
+    "alpha": 0.75,
+    "cap_ratio": 0.25,
+    "density_k": 16,
+    "iterations": 1,
+    "max_iters": 50,
+    "max_rows": 60000,
+    "max_share": 0.3,
+    "min_share": 0.02,
+    "objective": 7226242.1797582805,
+    "p_active": null,
+    "pca_dim": 48,
+    "postprocess_log": [
+      {
+        "cluster": 2,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 86
+      },
+      {
+        "cluster": 2,
+        "op": "merge_tiny",
+        "size_before": 239
+      },
+      {
+        "cluster": 1,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 3,
+        "op": "split_to_k"
+      }
+    ],
+    "seed": 0,
+    "two_stage": false,
+    "two_stage_max_bucket": 0.65
+  },
+  "flag": true,
+  "flag_reason": "无簇对稀有结构富集 ≥3×：max=2.19×（cutout_active @ cluster 5）；建议 --two-stage 两段式退路（先 2-means 分活跃/平稳，7 簇只花在活跃子集）",
+  "generated_at": "2026-09-26T04:55:15+00:00",
+  "k": 8,
+  "mode": "flat",
+  "objective": {
+    "iterations": 1,
+    "value": 7226242.1797582805
+  },
+  "postprocess_log": [
+    {
+      "cluster": 2,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 86
+    },
+    {
+      "cluster": 2,
+      "op": "merge_tiny",
+      "size_before": 239
+    },
+    {
+      "cluster": 1,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 3,
+      "op": "split_to_k"
+    }
+  ],
+  "rare": {
+    "details": {
+      "cutin_active": {
+        "cluster_rates": [
+          0.012786361388862133,
+          0.029660388827323914,
+          0.025190237909555435,
+          0.019150707870721817,
+          0.019586654379963875,
+          0.028559429571032524,
+          0.013748597353696823,
+          0.006650332361459732
+        ],
+        "global_rate": 0.01885,
+        "max_cluster": 1,
+        "max_enrichment": 1.5734954285052476,
+        "max_rate": 0.029660388827323914
+      },
+      "cutout_active": {
+        "cluster_rates": [
+          0.016196057200431824,
+          0.03129170835018158,
+          0.04434531554579735,
+          0.02631140686571598,
+          0.05943536385893822,
+          0.07321853190660477,
+          0.0217452310025692,
+          0.0030334850307554007
+        ],
+        "global_rate": 0.033383333333333334,
+        "max_cluster": 5,
+        "max_enrichment": 2.1932660581109764,
+        "max_rate": 0.07321853190660477
+      }
+    },
+    "enrichment_min": 3.0,
+    "global_rates": {
+      "car_following": 0.08825,
+      "crowded": 0.14626666666666666,
+      "cutin_active": 0.01885,
+      "cutout_active": 0.033383333333333334,
+      "merging": 0.16813333333333333,
+      "near_intersection": 0.11688333333333334,
+      "on_curve": 0.19388333333333332,
+      "roundabout_near": 0.05288333333333333
+    },
+    "labels": [
+      "cutin_active",
+      "cutout_active"
+    ],
+    "max_enrichment": 2.1932660581109764,
+    "max_enrichment_cluster": 5,
+    "max_enrichment_label": "cutout_active"
+  },
+  "size": {
+    "capacity_ok": true,
+    "counts": [
+      9385,
+      6743,
+      7622,
+      6005,
+      7403,
+      7143,
+      7128,
+      8571
+    ],
+    "max_share": 0.15641666666666668,
+    "min_share": 0.10008333333333333,
+    "share_entropy_norm": 0.9959003980164607,
+    "shares": [
+      0.15641666666666668,
+      0.11238333333333334,
+      0.12703333333333333,
+      0.10008333333333333,
+      0.12338333333333333,
+      0.11905,
+      0.1188,
+      0.14285
+    ]
+  },
+  "soft_target": {
+    "examples": [
+      {
+        "assigned": 2,
+        "kind": "face",
+        "row": 43514,
+        "top1_hard_match": true,
+        "top3": [
+          [
+            2,
+            0.980339527130127
+          ],
+          [
+            1,
+            0.019660480320453644
+          ],
+          [
+            7,
+            0.0
+          ]
+        ]
+      },
+      {
+        "assigned": 5,
+        "kind": "boundary",
+        "row": 7529,
+        "top1_hard_match": false,
+        "top3": [
+          [
+            1,
+            0.443316251039505
+          ],
+          [
+            5,
+            0.4433097541332245
+          ],
+          [
+            0,
+            0.11337399482727051
+          ]
+        ]
+      }
+    ],
+    "gap_p05": 0.001342630606816691,
+    "gap_p50": 0.021686294795880048,
+    "top1_mean": 0.6090391278266907,
+    "top2_mass_mean": 0.9272572994232178
+  },
+  "weight": {
+    "clip_high_frac": 0.0,
+    "clip_low_frac": 0.0446,
+    "max": 8.325460218933557,
+    "mean": 1.088494415282842,
+    "min": 0.1,
+    "p50": 1.0000000009665553
+  }
+}

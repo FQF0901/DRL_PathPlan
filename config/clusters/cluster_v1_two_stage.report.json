@@ -1,0 +1,927 @@
+{
+  "alignment": {},
+  "cluster_version": "v1",
+  "clusters": [
+    {
+      "difficulty": {
+        "easy": 0.40019474196689386,
+        "hard": 0.2553901794408123,
+        "medium": 0.34441507859229376
+      },
+      "geometry_top3": [
+        [
+          "merge",
+          0.12672137988593685
+        ],
+        [
+          "curve",
+          0.12574767005146753
+        ],
+        [
+          "tollgate",
+          0.10627347336208096
+        ]
+      ],
+      "id": 0,
+      "radius_max": 27.212202947036808,
+      "radius_mean": 5.846106774763994,
+      "radius_p95": 8.786603089409248,
+      "rare_enrichment": {
+        "cutin_active": 1.1010311159445754,
+        "cutout_active": 1.039276301395148
+      },
+      "rule_label_rates": {
+        "car_following": 0.09959660470485687,
+        "crowded": 0.06078731268644333,
+        "cutin_active": 0.02072610892355442,
+        "cutout_active": 0.030602309852838516,
+        "merging": 0.17123383283615112,
+        "near_intersection": 0.09556266665458679,
+        "on_curve": 0.12296564131975174,
+        "roundabout_near": 0.04548615962266922
+      },
+      "share": 0.7560206120517404,
+      "size": 7189,
+      "soft_entropy_norm_mean": 0.25328516960144043,
+      "soft_top1_mean": 0.8528544902801514,
+      "soft_top2_mass_mean": 0.93126380443573,
+      "weight_share": 0.6500573629913716
+    },
+    {
+      "difficulty": {
+        "easy": 0.0759493670886076,
+        "hard": 0.8354430379746836,
+        "medium": 0.08860759493670886
+      },
+      "geometry_top3": [
+        [
+          "curve",
+          0.25569620253164554
+        ],
+        [
+          "uturn",
+          0.18734177215189873
+        ],
+        [
+          "ramp_out",
+          0.15949367088607594
+        ]
+      ],
+      "id": 1,
+      "radius_max": 24.93733787536621,
+      "radius_mean": 9.952972474882875,
+      "radius_p95": 16.23444328308105,
+      "rare_enrichment": {
+        "cutin_active": 0.6724418527056468,
+        "cutout_active": 0.0859764924430887
+      },
+      "rule_label_rates": {
+        "car_following": 0.25569620728492737,
+        "crowded": 0.6253164410591125,
+        "cutin_active": 0.012658228166401386,
+        "cutout_active": 0.0025316455867141485,
+        "merging": 0.18734177947044373,
+        "near_intersection": 0.23797468841075897,
+        "on_curve": 0.3113923966884613,
+        "roundabout_near": 0.04303797334432602
+      },
+      "share": 0.04153959406877695,
+      "size": 395,
+      "soft_entropy_norm_mean": 0.5390440225601196,
+      "soft_top1_mean": 0.49042031168937683,
+      "soft_top2_mass_mean": 0.7825603485107422,
+      "weight_share": 0.06624284657461421
+    },
+    {
+      "difficulty": {
+        "easy": 0.11714285714285715,
+        "hard": 0.7171428571428572,
+        "medium": 0.1657142857142857
+      },
+      "geometry_top3": [
+        [
+          "curve",
+          0.32285714285714284
+        ],
+        [
+          "split",
+          0.18285714285714286
+        ],
+        [
+          "straight",
+          0.17714285714285713
+        ]
+      ],
+      "id": 2,
+      "radius_max": 11.1630277633667,
+      "radius_mean": 7.195389225823539,
+      "radius_p95": 9.265973997116088,
+      "rare_enrichment": {
+        "cutin_active": 0.15177972702564432,
+        "cutout_active": 0.09703061120567977
+      },
+      "rule_label_rates": {
+        "car_following": 0.22285714745521545,
+        "crowded": 0.654285728931427,
+        "cutin_active": 0.0028571428265422583,
+        "cutout_active": 0.0028571428265422583,
+        "merging": 0.07999999821186066,
+        "near_intersection": 0.09142857044935226,
+        "on_curve": 0.29428571462631226,
+        "roundabout_near": 0.07999999821186066
+      },
+      "share": 0.036807235250815015,
+      "size": 350,
+      "soft_entropy_norm_mean": 0.5309988856315613,
+      "soft_top1_mean": 0.49024710059165955,
+      "soft_top2_mass_mean": 0.7766517996788025,
+      "weight_share": 0.042928604668846446
+    },
+    {
+      "difficulty": {
+        "easy": 0.05660377358490566,
+        "hard": 0.7900943396226415,
+        "medium": 0.15330188679245282
+      },
+      "geometry_top3": [
+        [
+          "split",
+          0.3113207547169811
+        ],
+        [
+          "straight",
+          0.1957547169811321
+        ],
+        [
+          "ramp_in",
+          0.1391509433962264
+        ]
+      ],
+      "id": 3,
+      "radius_max": 23.697771072387695,
+      "radius_mean": 8.207645601821396,
+      "radius_p95": 12.174411487579345,
+      "rare_enrichment": {
+        "cutin_active": 0.6264493610793153,
+        "cutout_active": 0.7208642290705549
+      },
+      "rule_label_rates": {
+        "car_following": 0.15801887214183807,
+        "crowded": 0.599056601524353,
+        "cutin_active": 0.01179245300590992,
+        "cutout_active": 0.021226415410637856,
+        "merging": 0.19575472176074982,
+        "near_intersection": 0.07311321049928665,
+        "on_curve": 0.33726415038108826,
+        "roundabout_near": 0.06367924809455872
+      },
+      "share": 0.04458933641813019,
+      "size": 424,
+      "soft_entropy_norm_mean": 0.4833926856517792,
+      "soft_top1_mean": 0.559205174446106,
+      "soft_top2_mass_mean": 0.8154745101928711,
+      "weight_share": 0.06608428699012084
+    },
+    {
+      "difficulty": {
+        "easy": 0.12340425531914893,
+        "hard": 0.6723404255319149,
+        "medium": 0.20425531914893616
+      },
+      "geometry_top3": [
+        [
+          "uturn",
+          0.26382978723404255
+        ],
+        [
+          "ramp_in",
+          0.26382978723404255
+        ],
+        [
+          "intersection",
+          0.11063829787234042
+        ]
+      ],
+      "id": 4,
+      "radius_max": 16.508607864379883,
+      "radius_mean": 8.36744796265947,
+      "radius_p95": 11.734956264495848,
+      "rare_enrichment": {
+        "cutin_active": 0.0,
+        "cutout_active": 0.578054692942117
+      },
+      "rule_label_rates": {
+        "car_following": 0.12340425699949265,
+        "crowded": 0.5787234306335449,
+        "cutin_active": 0.0,
+        "cutout_active": 0.01702127605676651,
+        "merging": 0.27234041690826416,
+        "near_intersection": 0.36595743894577026,
+        "on_curve": 0.34893617033958435,
+        "roundabout_near": 0.07234042882919312
+      },
+      "share": 0.024713429382690083,
+      "size": 235,
+      "soft_entropy_norm_mean": 0.5052493214607239,
+      "soft_top1_mean": 0.5246308445930481,
+      "soft_top2_mass_mean": 0.8137556314468384,
+      "weight_share": 0.03302577119123514
+    },
+    {
+      "difficulty": {
+        "easy": 0.15760869565217392,
+        "hard": 0.6630434782608695,
+        "medium": 0.1793478260869565
+      },
+      "geometry_top3": [
+        [
+          "t_intersection",
+          0.22826086956521738
+        ],
+        [
+          "split",
+          0.1766304347826087
+        ],
+        [
+          "roundabout",
+          0.14130434782608695
+        ]
+      ],
+      "id": 5,
+      "radius_max": 21.44171905517578,
+      "radius_mean": 9.282391076502593,
+      "radius_p95": 13.088760519027703,
+      "rare_enrichment": {
+        "cutin_active": 0.0,
+        "cutout_active": 0.2768536463180291
+      },
+      "rule_label_rates": {
+        "car_following": 0.16032609343528748,
+        "crowded": 0.45652174949645996,
+        "cutin_active": 0.0,
+        "cutout_active": 0.008152173832058907,
+        "merging": 0.19565217196941376,
+        "near_intersection": 0.2445652186870575,
+        "on_curve": 0.4836956560611725,
+        "roundabout_near": 0.14130434393882751
+      },
+      "share": 0.03870017877799979,
+      "size": 368,
+      "soft_entropy_norm_mean": 0.5156469345092773,
+      "soft_top1_mean": 0.528738796710968,
+      "soft_top2_mass_mean": 0.8060978651046753,
+      "weight_share": 0.06592466648752734
+    },
+    {
+      "difficulty": {
+        "easy": 0.0627177700348432,
+        "hard": 0.6655052264808362,
+        "medium": 0.27177700348432055
+      },
+      "geometry_top3": [
+        [
+          "ramp_out",
+          0.23693379790940766
+        ],
+        [
+          "curve",
+          0.18466898954703834
+        ],
+        [
+          "tollgate",
+          0.14634146341463414
+        ]
+      ],
+      "id": 6,
+      "radius_max": 14.007914543151855,
+      "radius_mean": 7.485719197303161,
+      "radius_p95": 10.349213981628417,
+      "rare_enrichment": {
+        "cutin_active": 2.0360695396513577,
+        "cutout_active": 2.129940370177584
+      },
+      "rule_label_rates": {
+        "car_following": 0.10452961921691895,
+        "crowded": 0.2648083567619324,
+        "cutin_active": 0.038327526301145554,
+        "cutout_active": 0.06271777302026749,
+        "merging": 0.18815331161022186,
+        "near_intersection": 0.08013937622308731,
+        "on_curve": 0.30662021040916443,
+        "roundabout_near": 0.024390242993831635
+      },
+      "share": 0.030181932905668313,
+      "size": 287,
+      "soft_entropy_norm_mean": 0.4860790967941284,
+      "soft_top1_mean": 0.5279961824417114,
+      "soft_top2_mass_mean": 0.8354938626289368,
+      "weight_share": 0.04283916375253898
+    },
+    {
+      "difficulty": {
+        "easy": 0.19923371647509577,
+        "hard": 0.3218390804597701,
+        "medium": 0.4789272030651341
+      },
+      "geometry_top3": [
+        [
+          "roundabout",
+          0.1724137931034483
+        ],
+        [
+          "straight",
+          0.16475095785440613
+        ],
+        [
+          "ramp_in",
+          0.1532567049808429
+        ]
+      ],
+      "id": 7,
+      "radius_max": 16.52435302734375,
+      "radius_mean": 6.768687681220044,
+      "radius_p95": 10.198404312133789,
+      "rare_enrichment": {
+        "cutin_active": 1.6282882376693646,
+        "cutout_active": 3.12282429050122
+      },
+      "rule_label_rates": {
+        "car_following": 0.1149425283074379,
+        "crowded": 0.26053640246391296,
+        "cutin_active": 0.030651340261101723,
+        "cutout_active": 0.09195402264595032,
+        "merging": 0.08045977354049683,
+        "near_intersection": 0.07662834972143173,
+        "on_curve": 0.6206896305084229,
+        "roundabout_near": 0.13409961760044098
+      },
+      "share": 0.027447681144179198,
+      "size": 261,
+      "soft_entropy_norm_mean": 0.4862997531890869,
+      "soft_top1_mean": 0.5335896611213684,
+      "soft_top2_mass_mean": 0.8339759707450867,
+      "weight_share": 0.0328972973437457
+    }
+  ],
+  "data": {
+    "fitted_at": "2026-09-26T04:12:04+00:00",
+    "git_hash": "cf2a8a0",
+    "history_storage": "per_frame_v2",
+    "obs_fingerprint": "v2-58f1257a6c05",
+    "obs_fingerprint_current": "v2-58f1257a6c05",
+    "rows": 9509,
+    "rows_total": 9509,
+    "schema_version": 2,
+    "seed": 0,
+    "source": "/tmp/opencode/bc_v2_dev128"
+  },
+  "fallback": {
+    "activity_stats": [
+      "od_present_count",
+      "od_interaction",
+      "ego_maneuver"
+    ],
+    "p_active": 0.3499426370086286,
+    "two_stage_available": true,
+    "two_stage_command": "tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> --two-stage --out config/clusters/cluster_v1.npz --report config/clusters/cluster_v1.report.json"
+  },
+  "feature_contract": {
+    "ego": {
+      "dims": 8
+    },
+    "frame": "current-frame obs only（禁用 latent/历史）",
+    "ld": {
+      "dims": 7,
+      "invalid_policy": "zero",
+      "slots": 16,
+      "validity": "ld_mask"
+    },
+    "name": "clusters.feature.v1",
+    "od": {
+      "dims": 9,
+      "invalid_policy": "zero",
+      "slot_order": "as_is（v2 固定槽位 = track id，禁止重排）",
+      "slots": 16,
+      "validity": "od_presence if present else od_mask"
+    },
+    "order": [
+      "ego",
+      "od",
+      "ld",
+      "others"
+    ],
+    "others": {
+      "fallback": "nav(11)+speed_limit(ld slot0 dim4, 原始 m/s)+signal(4)（v2 前的旧数据；v2 数据集必须用 raw）",
+      "raw_composition": "nav(11)+speed_limit(1, 归一化)+signal(4)+road_class one-hot(12)（v2 §3.2，共 28 维）",
+      "raw_key": "others"
+    }
+  },
+  "fit_params": {
+    "activity_clamped": null,
+    "alpha": 0.75,
+    "cap_ratio": 0.25,
+    "density_k": 16,
+    "iterations": 1,
+    "max_iters": 50,
+    "max_rows": 0,
+    "max_share": 0.3,
+    "min_share": 0.02,
+    "objective": 408872.36271505017,
+    "p_active": 0.3499426370086286,
+    "pca_dim": 48,
+    "postprocess_log": [
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 4,
+        "op": "merge_tiny",
+        "size_before": 2
+      },
+      {
+        "cluster": 1,
+        "op": "merge_tiny",
+        "size_before": 80
+      },
+      {
+        "cluster": 1,
+        "op": "merge_tiny",
+        "size_before": 97
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 3,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 4,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 4,
+        "op": "merge_tiny",
+        "size_before": 4
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 17
+      },
+      {
+        "cluster": 2,
+        "op": "merge_tiny",
+        "size_before": 44
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 1,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 3,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 3,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 4,
+        "op": "merge_tiny",
+        "size_before": 0
+      },
+      {
+        "cluster": 3,
+        "op": "merge_tiny",
+        "size_before": 22
+      },
+      {
+        "cluster": 2,
+        "op": "merge_tiny",
+        "size_before": 55
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 1,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny_final",
+        "size_before": 0
+      },
+      {
+        "cluster": 3,
+        "op": "merge_tiny_final",
+        "size_before": 0
+      },
+      {
+        "cluster": 4,
+        "op": "merge_tiny_final",
+        "size_before": 3
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny_final",
+        "size_before": 16
+      },
+      {
+        "cluster": 2,
+        "op": "merge_tiny_final",
+        "size_before": 53
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k_final"
+      },
+      {
+        "cluster": 0,
+        "op": "split_to_k_final"
+      },
+      {
+        "cluster": 2,
+        "op": "split_to_k_final"
+      },
+      {
+        "cluster": 1,
+        "op": "split_to_k_final"
+      },
+      {
+        "cluster": 3,
+        "op": "split_to_k_final"
+      }
+    ],
+    "seed": 0,
+    "two_stage": true,
+    "two_stage_max_bucket": 0.65
+  },
+  "flag": false,
+  "flag_reason": "稀有富集达标：cutout_active 3.12× @ cluster 7",
+  "generated_at": "2026-09-26T04:12:04+00:00",
+  "k": 8,
+  "mode": "two_stage",
+  "objective": {
+    "iterations": 1,
+    "value": 408872.36271505017
+  },
+  "postprocess_log": [
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 4,
+      "op": "merge_tiny",
+      "size_before": 2
+    },
+    {
+      "cluster": 1,
+      "op": "merge_tiny",
+      "size_before": 80
+    },
+    {
+      "cluster": 1,
+      "op": "merge_tiny",
+      "size_before": 97
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 3,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 4,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 4,
+      "op": "merge_tiny",
+      "size_before": 4
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 17
+    },
+    {
+      "cluster": 2,
+      "op": "merge_tiny",
+      "size_before": 44
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 1,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 3,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 3,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 4,
+      "op": "merge_tiny",
+      "size_before": 0
+    },
+    {
+      "cluster": 3,
+      "op": "merge_tiny",
+      "size_before": 22
+    },
+    {
+      "cluster": 2,
+      "op": "merge_tiny",
+      "size_before": 55
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 1,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny_final",
+      "size_before": 0
+    },
+    {
+      "cluster": 3,
+      "op": "merge_tiny_final",
+      "size_before": 0
+    },
+    {
+      "cluster": 4,
+      "op": "merge_tiny_final",
+      "size_before": 3
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny_final",
+      "size_before": 16
+    },
+    {
+      "cluster": 2,
+      "op": "merge_tiny_final",
+      "size_before": 53
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k_final"
+    },
+    {
+      "cluster": 0,
+      "op": "split_to_k_final"
+    },
+    {
+      "cluster": 2,
+      "op": "split_to_k_final"
+    },
+    {
+      "cluster": 1,
+      "op": "split_to_k_final"
+    },
+    {
+      "cluster": 3,
+      "op": "split_to_k_final"
+    }
+  ],
+  "rare": {
+    "details": {
+      "cutin_active": {
+        "cluster_rates": [
+          0.02072610892355442,
+          0.012658228166401386,
+          0.0028571428265422583,
+          0.01179245300590992,
+          0.0,
+          0.0,
+          0.038327526301145554,
+          0.030651340261101723
+        ],
+        "global_rate": 0.01882427174255968,
+        "max_cluster": 6,
+        "max_enrichment": 2.0360695396513577,
+        "max_rate": 0.038327526301145554
+      },
+      "cutout_active": {
+        "cluster_rates": [
+          0.030602309852838516,
+          0.0025316455867141485,
+          0.0028571428265422583,
+          0.021226415410637856,
+          0.01702127605676651,
+          0.008152173832058907,
+          0.06271777302026749,
+          0.09195402264595032
+        ],
+        "global_rate": 0.029445788200652013,
+        "max_cluster": 7,
+        "max_enrichment": 3.12282429050122,
+        "max_rate": 0.09195402264595032
+      }
+    },
+    "enrichment_min": 3.0,
+    "global_rates": {
+      "car_following": 0.11673151750972763,
+      "crowded": 0.1698390998001893,
+      "cutin_active": 0.01882427174255968,
+      "cutout_active": 0.029445788200652013,
+      "merging": 0.1711010621516458,
+      "near_intersection": 0.1117888316331896,
+      "on_curve": 0.18540330213481965,
+      "roundabout_near": 0.05363339993690188
+    },
+    "labels": [
+      "cutin_active",
+      "cutout_active"
+    ],
+    "max_enrichment": 3.12282429050122,
+    "max_enrichment_cluster": 7,
+    "max_enrichment_label": "cutout_active"
+  },
+  "size": {
+    "capacity_ok": false,
+    "counts": [
+      7189,
+      395,
+      350,
+      424,
+      235,
+      368,
+      287,
+      261
+    ],
+    "max_share": 0.7560206120517404,
+    "min_share": 0.024713429382690083,
+    "share_entropy_norm": 0.4931391045254552,
+    "shares": [
+      0.7560206120517404,
+      0.04153959406877695,
+      0.036807235250815015,
+      0.04458933641813019,
+      0.024713429382690083,
+      0.03870017877799979,
+      0.030181932905668313,
+      0.027447681144179198
+    ]
+  },
+  "soft_target": {
+    "examples": [
+      {
+        "assigned": 0,
+        "kind": "face",
+        "row": 1,
+        "top1_hard_match": true,
+        "top3": [
+          [
+            0,
+            0.9002375602722168
+          ],
+          [
+            7,
+            0.058198481798172
+          ],
+          [
+            6,
+            0.03529655188322067
+          ]
+        ]
+      },
+      {
+        "assigned": 7,
+        "kind": "boundary",
+        "row": 9036,
+        "top1_hard_match": false,
+        "top3": [
+          [
+            2,
+            0.34712648391723633
+          ],
+          [
+            7,
+            0.3469032049179077
+          ],
+          [
+            0,
+            0.1801127791404724
+          ]
+        ]
+      }
+    ],
+    "gap_p05": 0.009779496973046718,
+    "gap_p50": 1.0,
+    "top1_mean": 0.7721360921859741,
+    "top2_mass_mean": 0.900924026966095
+  },
+  "weight": {
+    "clip_high_frac": 0.0,
+    "clip_low_frac": 0.03754337995583132,
+    "max": 3.9420269556844167,
+    "mean": 1.0264208094575913,
+    "min": 0.1,
+    "p50": 1.0
+  }
+}
