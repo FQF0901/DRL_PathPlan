@@ -21,10 +21,16 @@ from tools.collect_expert import (
     MEM_HISTORY_KEYS,
     SUPERVISED_LABELS,
     WINDOW_POLICIES,
+    _concat_shards,
     _npz_schema_manifest,
     _parse_args,
+    _samples_to_arrays,
+    _shard_segments,
+    _spec_entries,
+    _summarize_records,
     apply_balance,
     arc_interpolate,
+    balance_from_specs,
     extract_samples,
     label_statistics,
     save_dataset,
@@ -258,6 +264,95 @@ def test_balance_cap_zeroes_weights_without_deleting_rows():
     assert int((weights == 0.0).sum()) == 2
     assert balance["stats"]["cap"] == 2
     assert balance["stats"]["counts"]["trainable_after_cap"] == 4
+
+
+def test_balance_from_specs_matches_apply_balance():
+    """分片路径的配平（摘要 + train_weight 数组）与 apply_balance 逐行同值/同统计。"""
+    rng = np.random.default_rng(7)
+    samples, entries = [], []
+    start = 0
+    for spec_index in range(8):
+        difficulty, geometry = ("easy", "straight") if spec_index % 2 == 0 else ("hard", "curve")
+        n_rows = 4 + spec_index % 3
+        for step in range(n_rows):
+            labels = np.zeros(len(SUPERVISED_LABELS), dtype=np.float32)
+            if step == 0:
+                labels[spec_index % len(SUPERVISED_LABELS)] = 1.0
+            samples.append(
+                {
+                    "difficulty": difficulty,
+                    "geometry": geometry,
+                    "spec_id": spec_index,  # 唯一 → (spec_id, step) 序 = spec 序 + step 序
+                    "step": step,
+                    "labels": labels,
+                    "train_weight": float(rng.random() > 0.3),
+                }
+            )
+        entries.append(
+            {
+                "spec_index": spec_index,
+                "start": start,
+                "rows": n_rows,
+                "trainable": int(sum(1 for row in samples[start:] if row["train_weight"] > 0.0)),
+                "report": {"id": spec_index, "difficulty": difficulty, "geometry": geometry},
+            }
+        )
+        start += n_rows
+    train_weight = np.array([row["train_weight"] for row in samples], dtype=np.float32)
+    for mode, ratio in (("weights", 3.0), ("cap", 1.0), ("none", 3.0)):
+        reference = apply_balance(samples, mode=mode, ratio=ratio, seed=0)
+        got = balance_from_specs(entries, train_weight, mode=mode, ratio=ratio)
+        np.testing.assert_allclose(got["sample_weight"], reference["sample_weight"])
+        np.testing.assert_array_equal(got["balance_group"], reference["balance_group"])
+        reference_stats = dict(reference["stats"])
+        if "dropped_indices" in reference_stats:
+            reference_stats["dropped_indices_count"] = len(reference_stats.pop("dropped_indices"))
+        assert got["stats"] == reference_stats
+
+
+def test_shard_roundtrip_merge_matches_direct_arrays(tmp_path):
+    """分片乱序落盘 → 按 spec 序逐键拼接 == 直接对全量行建数组（键/值/dtype 一致）。"""
+    rows_a, counter_a = _extract(_episode(30))
+    rows_b = [dict(row, episode_id=1) for row in _extract(_episode(25))[0]]
+    records = [
+        {
+            "spec_index": 1,
+            "kept": rows_b,
+            "filter_counts": {},
+            "candidates": len(rows_b),
+            "report": {"id": 200, "difficulty": "hard", "geometry": "curve"},
+        },
+        {
+            "spec_index": 0,
+            "kept": rows_a,
+            "filter_counts": counter_a,
+            "candidates": len(rows_a),
+            "report": {"id": 100, "difficulty": "easy", "geometry": "straight"},
+        },
+    ]
+    # 分片乱序到达：spec 1 的摘要先入列，行序仍须按 spec 下标
+    summary_b = _summarize_records(1, 0, [records[0]], tmp_path)
+    summary_a = _summarize_records(0, 0, [records[1]], tmp_path)
+    entries, total_rows, missing = _spec_entries([summary_b, summary_a], 2)
+    assert missing == []
+    assert total_rows == len(rows_a) + len(rows_b)
+    assert [entry["spec_index"] for entry in entries] == [0, 1]
+    arrays = _concat_shards(tmp_path, _shard_segments(entries), total_rows)
+    expected = _samples_to_arrays(rows_a + rows_b)
+    assert set(arrays) == set(expected)
+    for key in expected:
+        np.testing.assert_array_equal(arrays[key], expected[key])
+
+
+def test_shard_writer_skips_empty_chunk(tmp_path):
+    summary = _summarize_records(
+        0, 0, [{"spec_index": 0, "kept": [], "candidates": 0, "filter_counts": {}, "report": {"id": 1, "termination": "error"}, "error": "Boom: x"}],
+        tmp_path,
+    )
+    assert summary["shard"] is None
+    assert summary["rows"] == 0
+    assert summary["specs"][0]["error"] == "Boom: x"
+    assert list(tmp_path.iterdir()) == []  # 无行不落分片
 
 
 # --------------------------------------------------------------------------- #

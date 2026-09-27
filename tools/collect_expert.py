@@ -11,24 +11,37 @@
 沿导航路线行驶）；``--expert pure_pursuit`` 可切换到仓库内的
 ``env/expert/pure_pursuit_idm.py::PurePursuitIDMPolicy``（确定性规则基线）。
 
-并行采集（``--workers``，默认 1 = 原单进程路径）
-------------------------------------------------
+并行采集（``--workers``，默认 auto）
+-----------------------------------
 ``--workers N`` 用 **spawn** 子进程并行跑 spec 列表（MetaDrive 每进程只能有一个 engine，
 见 ``pipeline/vector_env.py``；每个 worker 同一时刻只建一个 env，跑完即 ``close``）：
 
 - spec 按全局下标轮转分配（``index % N``，确定性、互斥、覆盖全部）；父进程按**原始
   spec 顺序**合并，``episode_id`` 直接用全局下标，因此 ``expert_bc.npz`` / meta /
   report 统计与 ``--workers 1`` 一致（worker 数不影响产出）；
+- **分片落盘（v3）**：worker 在**自己进程内**把每块（``--recycle-every`` 条 spec，默认
+  150）的逐帧记录写成 ``<out>/_shards/shard_w<worker>_c<chunk>.npz``（``np.savez``
+  不压缩，快），只把**逐 spec 标量摘要**（行数 / 过滤计数 / 可训练行 / 分组）经队列
+  回传父进程；父进程不再持有逐帧数据 → **父进程 RSS 不随数据量增长**。全部 worker
+  退出后自动合并（见下），合并峰值 ≈ 最终数据集一份；
 - 每个 worker 在建 env 前调用 ``pipeline.gl_runtime.ensure_gl_library_path()``，父进程
   spawn 前也先把 venv 本地 glvnd 写进 ``LD_LIBRARY_PATH``（spawn 子进程启动时继承），
   避免子进程的 "Known Pipes" 崩溃；
-- **内存**：单 worker 基线 ≈0.7 GB（``pipeline/vector_env.ENV_RSS_PER_WORKER_MB``=650 MB），
-  另加 MetaDrive ``build_env``+``close`` 每 spec ≈3.5–4 MB 残留（本机实测线性上涨）；worker
-  每 ``--recycle-every`` 条（默认 150，与 ``pipeline/vector_env`` 同口径）跑完即退出重启，
-  峰值 ≈0.7 + 150×4 MB ≈ 1.3 GB/worker；本机 15 GB 建议 ``--workers<=8``（6 更稳）；
+- **worker 内存**：单 worker 基线 ≈0.7 GB（``pipeline/vector_env.ENV_RSS_PER_WORKER_MB``
+  =650 MB），另加 MetaDrive ``build_env``+``close`` 每 spec ≈3.5–4 MB 残留（本机实测
+  线性上涨）与当前块待落盘的行（≈0.2 GB/150 spec）；worker 每 ``--recycle-every`` 条
+  落盘并退出重启，峰值 ≈1.5 GB/worker；本机 15 GB 建议 ``--workers<=8``（6 更稳）；
 - worker 异常退出时只丢失当前块，其余块继续；末尾打印 ``missing`` 统计。
 
-例（2000 条 spec、6 worker；父进程另缓存全量样本 ≈0.4 MB/spec）::
+分片合并（自动；``--keep-shards`` 保留分片）
+------------------------------------------
+收集结束后父进程按**原始 spec 下标顺序**逐分片、逐键拼接：每个键先分配最终数组，再按
+``episode_id`` 序从分片读入对应行（峰值 ≈ 最终数组一份，不把全部数据复制多份），最后
+``np.savez_compressed`` 写 ``expert_bc.npz``；``sample_weight`` / ``balance_weight`` /
+``balance_group`` 由逐 spec 摘要生成（额外内存 O(specs)，不随行数增长）。默认合并成功后
+删除 ``<out>/_shards/``；``--keep-shards`` 保留（调试 / 后处理）。
+
+例（2000 条 spec、6 worker）::
 
     tools/venv-python tools/collect_expert.py \
         --specs env/specs/scenarios_train.json --limit 2000 --out runs/bc_expert_2k --workers 6
@@ -57,7 +70,8 @@ v2 相对 v1 的变更（2026-09-26）
   ``(episode_id, step)`` 精确查表重建；
 - ``expert_bc.meta.json``：schema / 通道形状 / 对齐元数据 / 过滤统计 / **完整 schema 清单**；
 - ``report.json``：产出率 ``bc_retained_step_yield``（行数口径 = train_weight>0 行数/候选行数）
-  + 计数/加权两套 per-label 统计 + dataset_gate 判定。
+  + 计数/加权两套 per-label 统计 + dataset_gate 判定；
+- ``_shards/``：采集期逐块中间分片（默认合并后删除；``--keep-shards`` 保留）。
 
 过滤规则（p2-contract §8.2 规则 1–5，v2 语义：命中 → 权重 0，不删行）
 ------------------------------------------------------------------
@@ -88,9 +102,11 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import time
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from multiprocessing import get_context
 from pathlib import Path
 from queue import Empty
@@ -153,8 +169,10 @@ DEFAULT_WORKERS = 0  # 0 = auto：按 CPU 核数取半、上限 MAX_RECOMMENDED_
 MAX_RECOMMENDED_WORKERS = 10  # 上限（用户要求数据集生成默认 8–10 并发）
 #: worker 进程级回收间隔（spec 数）：MetaDrive ``build_env``+``close`` 实测残留
 #: ≈3.5 MB/spec（与 pipeline/vector_env.DEFAULT_RECYCLE_EVERY_SPECS 同口径），
-#: 长跑线性上涨；每块跑完重启进程把 RSS 拉回基线。0 = 不回收。
+#: 长跑线性上涨；每块跑完落一个分片并重启进程把 RSS 拉回基线。0 = 不回收。
 RECYCLE_EVERY_SPECS = 150
+#: 分片目录/文件名（``<out>/_shards/shard_w<worker>_c<chunk>.npz``，未压缩）
+SHARD_DIRNAME = "_shards"
 
 
 def _resolve_workers(requested: int) -> int:
@@ -720,25 +738,85 @@ def _chunk_tasks(tasks: List[Tuple[int, Any]], chunk_size: int) -> List[List[Tup
     return [list(tasks[start : start + size]) for start in range(0, len(tasks), size)]
 
 
+def _spec_progress_line(record: Dict[str, Any]) -> str:
+    """单 spec 进度行（worker 与单进程路径共用；不打印逐帧数据）。"""
+    report = record.get("report", {})
+    if "error" in record:
+        return f"id={report.get('id', -1)} 失败：{record['error']}"
+    kept = record.get("kept") or []
+    return (
+        f"id={report.get('id', -1)} term={report.get('termination')} steps={record.get('steps')} "
+        f"cand={record.get('candidates')} stored={report.get('stored_rows', len(kept))} "
+        f"trainable={report.get('retained_steps', -1)} ({record.get('elapsed_s', 0.0):.1f}s)"
+    )
+
+
+def _summarize_records(
+    worker_index: int,
+    chunk_id: int,
+    records: Sequence[Dict[str, Any]],
+    shard_dir: Path,
+) -> Dict[str, Any]:
+    """把一个块的逐 spec 记录落成 npz 分片，返回可跨进程传递的**标量摘要**。
+
+    逐帧数据只写进 ``<shard_dir>/shard_w<worker>_c<chunk>.npz``（``np.savez`` 未压缩），
+    摘要（每 spec 行数 / 候选数 / 过滤计数 / 可训练行 / report）走队列回父进程 →
+    父进程 RSS 与数据量无关。整块无行（全部 error）时不写分片（``shard=None``）。
+    """
+    specs: List[Dict[str, Any]] = []
+    rows_total = 0
+    for record in records:
+        kept = record.get("kept") or []
+        rows_total += len(kept)
+        specs.append(
+            {
+                "spec_index": int(record["spec_index"]),
+                "rows": len(kept),
+                "candidates": int(record.get("candidates", 0)),
+                "trainable": int(sum(1 for row in kept if float(row["train_weight"]) > 0.0)),
+                "filter_counts": dict(record.get("filter_counts", {})),
+                "report": record.get("report", {}),
+                "error": record.get("error"),
+            }
+        )
+    shard: Optional[str] = None
+    if rows_total > 0:
+        shard = f"shard_w{int(worker_index)}_c{int(chunk_id)}.npz"
+        write_shard(
+            Path(shard_dir) / shard,
+            [row for record in records for row in (record.get("kept") or [])],
+        )
+    return {
+        "worker_index": int(worker_index),
+        "chunk_id": int(chunk_id),
+        "shard": shard,
+        "specs": specs,
+        "rows": rows_total,
+    }
+
+
 def _expert_worker(
     worker_index: int,
     chunk_id: int,
     tasks: List[Tuple[int, Any]],
     config: Dict[str, Any],
+    shard_dir: str,
     out_queue: Any,
 ) -> None:
-    """spawn 子进程入口：顺序采集本块 spec，逐条把记录放入 ``out_queue``。
+    """spawn 子进程入口：顺序采集本块 spec，落一个分片，只回传标量摘要。
 
     每个 worker 同一时刻只持有一个 env（MetaDrive 每进程单 engine）。``ensure_gl_library_path``
     必须在建 env 前调用：父进程 spawn 前已写入 ``LD_LIBRARY_PATH``（子进程启动即继承），
     这里再兜底一次，确保不触发 "Known Pipes" 崩溃。
 
-    消息 ``(worker_index, chunk_id, record | None)``：``None`` = 本块完成（父进程据此
-    重启进程回收内存）；``chunk_id`` 让父进程忽略崩溃块的迟到消息（不误续块）。
+    消息 ``(worker_index, chunk_id, summary | None)``：``summary`` = 本块分片与逐 spec
+    摘要；``None`` = 本块完成（父进程据此重启进程回收内存）；``chunk_id`` 让父进程忽略
+    崩溃块的迟到哨兵（不误续块）。
     """
     ensure_gl_library_path()
     builder = ObservationBuilder({})
     interpolate_fn, _ = resolve_interpolate()
+    records: List[Dict[str, Any]] = []
     for spec_index, spec in tasks:
         record = _collect_one_spec(
             spec,
@@ -747,7 +825,13 @@ def _expert_worker(
             interpolate_fn=interpolate_fn,
             **config,
         )
-        out_queue.put((int(worker_index), int(chunk_id), record))
+        records.append(record)
+        print(
+            f"[collect_expert] [w{int(worker_index)}] spec#{int(spec_index)} {_spec_progress_line(record)}",
+            flush=True,
+        )
+    summary = _summarize_records(worker_index, chunk_id, records, Path(shard_dir))
+    out_queue.put((int(worker_index), int(chunk_id), summary))
     out_queue.put((int(worker_index), int(chunk_id), None))
 
 
@@ -755,13 +839,15 @@ def _run_workers(
     specs: Sequence[Any],
     num_workers: int,
     config: Dict[str, Any],
+    shard_dir: Path,
     recycle_every: int = RECYCLE_EVERY_SPECS,
 ) -> List[Dict[str, Any]]:
-    """父进程侧并行编排：静态分区 + 分块 spawn，返回逐 spec 记录（乱序）。
+    """父进程侧并行编排：静态分区 + 分块 spawn，返回逐块标量摘要（乱序）。
 
     每个分区（``index % N``）的 spec 按 ``recycle_every`` 切块，依次由一个 spawn
-    子进程处理；一块跑完进程即退出、父进程重启下一块 → RSS 回落到基线。结果仅按
-    ``spec_index`` 归并（:func:`_merge_records`），与 worker 数、分块方式无关。
+    子进程处理；一块跑完落盘一个分片、进程退出、父进程重启下一块 → RSS 回落到基线。
+    父进程只收摘要（O(specs) 标量），逐帧数据留在分片里，最终由 :func:`_spec_entries`
+    / :func:`_concat_shards` 按 ``spec_index`` 归并，与 worker 数、分块方式无关。
     """
     total = len(specs)
     ctx = get_context("spawn")
@@ -787,6 +873,7 @@ def _run_workers(
                 running_chunk[worker_index],
                 chunks[worker_index][running_chunk[worker_index]],
                 config,
+                str(shard_dir),
                 out_queue,
             ),
             name=f"collect-expert-{worker_index}",
@@ -814,12 +901,13 @@ def _run_workers(
         else:
             done.add(worker_index)
 
-    records: List[Dict[str, Any]] = []
+    summaries: List[Dict[str, Any]] = []
+    specs_done = 0
     dead: set = set()
     try:
         while len(done) < int(num_workers):
             try:
-                worker_index, chunk_id, record = out_queue.get(timeout=1.0)
+                worker_index, chunk_id, summary = out_queue.get(timeout=1.0)
             except Empty:
                 for worker_index, proc in list(procs.items()):
                     if proc.is_alive():
@@ -834,7 +922,7 @@ def _run_workers(
                     )
                     _advance(worker_index)
                 continue
-            if record is None:
+            if summary is None:
                 proc = procs.pop(worker_index, None)
                 if proc is None or running_chunk.get(worker_index) != int(chunk_id):
                     continue  # 崩溃块的迟到哨兵：忽略，避免误续
@@ -845,31 +933,23 @@ def _run_workers(
                     print(f"[collect_expert] worker {worker_index} 退出超时，已强制回收", flush=True)
                 _advance(worker_index)
                 continue
-            records.append(record)
-            if "error" in record:
-                print(
-                    f"[collect_expert] {len(records)}/{total} [w{worker_index}] "
-                    f"id={record['report'].get('id', -1)} 失败：{record['error']}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"[collect_expert] {len(records)}/{total} [w{worker_index}] "
-                    f"id={record['report'].get('id', -1)} term={record['report'].get('termination')} "
-                    f"steps={record['steps']} cand={record['candidates']} "
-                    f"stored={record['report'].get('stored_rows', len(record['kept']))} "
-                    f"trainable={record['report'].get('retained_steps', -1)} "
-                    f"({record['elapsed_s']:.1f}s)",
-                    flush=True,
-                )
-        # worker 正常退出会 flush 队列；这里兜底回收崩溃 worker 已入队但未读的记录
+            summaries.append(summary)
+            specs_done += len(summary.get("specs", []))
+            trainable = int(sum(int(spec.get("trainable", 0)) for spec in summary.get("specs", [])))
+            print(
+                f"[collect_expert] {specs_done}/{total} [w{worker_index}] 块 {int(chunk_id) + 1} 完成："
+                f"{len(summary.get('specs', []))} specs, {int(summary.get('rows', 0))} rows, "
+                f"{trainable} trainable → {summary.get('shard') or '空块（无行）'}",
+                flush=True,
+            )
+        # worker 正常退出会 flush 队列；这里兜底回收崩溃 worker 已入队但未读的摘要
         while True:
             try:
-                _, _, record = out_queue.get(timeout=1.0)
+                _, _, summary = out_queue.get(timeout=1.0)
             except Empty:
                 break
-            if record is not None:
-                records.append(record)
+            if summary is not None:
+                summaries.append(summary)
     finally:
         out_queue.close()
         for proc in procs.values():
@@ -878,33 +958,129 @@ def _run_workers(
             proc.join(timeout=10.0)
     if dead:
         print(f"[collect_expert] 异常退出的 worker：{sorted(dead)}", flush=True)
-    return records
+    return summaries
 
 
-def _merge_records(
-    records: Sequence[Dict[str, Any]],
-    total_specs: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Counter, int, List[int]]:
-    """按全局 spec 下标合并 worker 记录（与单进程顺序累加逐项一致）。
+def _collect_single(
+    specs: Sequence[Any],
+    config: Dict[str, Any],
+    shard_dir: Path,
+    builder: ObservationBuilder,
+    interpolate_fn: Any,
+    recycle_every: int = RECYCLE_EVERY_SPECS,
+) -> List[Dict[str, Any]]:
+    """``--workers 1``：与 worker **同一条分片落盘路径**（只是不 spawn 进程）。
 
-    Returns:
-        ``(samples, spec_reports, filter_counter, total_candidates, missing_indices)``；
-        ``samples`` 按原始 spec 顺序展开，``missing_indices`` = 无记录的 spec 下标
-        （单进程恒为空；并行下 worker 崩溃才会出现）。
+    每 ``recycle_every`` 条 spec 落一个分片并释放行引用，父进程 RSS 不随 specs 增长。
     """
-    by_index = sorted(records, key=lambda record: int(record["spec_index"]))
-    samples: List[Dict[str, Any]] = []
-    spec_reports: List[Dict[str, Any]] = []
-    filter_counter: Counter = Counter()
-    total_candidates = 0
-    for record in by_index:
-        samples.extend(record["kept"])
-        spec_reports.append(record["report"])
-        filter_counter.update(record["filter_counts"])
-        total_candidates += int(record["candidates"])
-    seen = {int(record["spec_index"]) for record in by_index}
-    missing = [index for index in range(int(total_specs)) if index not in seen]
-    return samples, spec_reports, filter_counter, total_candidates, missing
+    chunks = _chunk_tasks([(index, spec) for index, spec in enumerate(specs)], int(recycle_every))
+    summaries: List[Dict[str, Any]] = []
+    done = 0
+    for chunk_id, chunk in enumerate(chunks):
+        records: List[Dict[str, Any]] = []
+        for spec_index, spec in chunk:
+            record = _collect_one_spec(
+                spec, spec_index=int(spec_index), builder=builder, interpolate_fn=interpolate_fn, **config
+            )
+            records.append(record)
+            done += 1
+            print(f"[collect_expert] {done}/{len(specs)} {_spec_progress_line(record)}", flush=True)
+        summary = _summarize_records(0, chunk_id, records, shard_dir)
+        summaries.append(summary)
+        trainable = int(sum(int(spec.get("trainable", 0)) for spec in summary["specs"]))
+        print(
+            f"[collect_expert] 块 {chunk_id + 1}/{len(chunks)} 完成：{len(chunk)} specs, "
+            f"{summary['rows']} rows, {trainable} trainable → {summary['shard'] or '空块（无行）'}",
+            flush=True,
+        )
+    return summaries
+
+
+def _spec_entries(
+    summaries: Sequence[Dict[str, Any]],
+    total_specs: int,
+) -> Tuple[List[Dict[str, Any]], int, List[int]]:
+    """按全局 spec 下标展开摘要，返回 ``(entries, total_rows, missing_indices)``。
+
+    ``entries`` 按原始 spec 顺序（``spec_index`` 升序）排列；每项带最终全局行偏移
+    ``start`` 与分片内偏移 ``shard_offset``（分片内 spec 也是下标升序，见
+    :func:`_summarize_records` 的写入顺序）。``missing_indices`` = 无摘要的 spec
+    （单进程恒为空；并行下 worker 崩溃才会出现）。
+    """
+    entries: List[Dict[str, Any]] = []
+    offsets: Dict[str, int] = {}
+    for summary in summaries:
+        shard = summary.get("shard")
+        for spec in summary.get("specs", []):
+            entry = dict(spec)
+            entry["shard"] = shard
+            entry["shard_offset"] = int(offsets.get(shard, 0)) if shard else 0
+            entry["worker_index"] = int(summary.get("worker_index", -1))
+            entry["chunk_id"] = int(summary.get("chunk_id", -1))
+            if shard:
+                offsets[shard] = entry["shard_offset"] + int(entry["rows"])
+            entries.append(entry)
+    entries.sort(key=lambda item: int(item["spec_index"]))
+    covered = {int(entry["spec_index"]) for entry in entries}
+    missing = [index for index in range(int(total_specs)) if index not in covered]
+    start = 0
+    for entry in entries:
+        entry["start"] = start
+        start += int(entry["rows"])
+    return entries, start, missing
+
+
+def _merge_filter_counts(entries: Sequence[Dict[str, Any]]) -> Counter:
+    """按 spec 顺序合并过滤计数（键顺序 = 首次出现顺序，与单进程逐条累加一致）。"""
+    counter: Counter = Counter()
+    for entry in entries:
+        counter.update(entry.get("filter_counts", {}))
+    return counter
+
+
+def _shard_segments(entries: Sequence[Dict[str, Any]]) -> Dict[str, List[Tuple[int, int, int]]]:
+    """分片名 → ``[(分片内行偏移, 行数, 最终全局行偏移), ...]``。"""
+    segments: Dict[str, List[Tuple[int, int, int]]] = defaultdict(list)
+    for entry in entries:
+        if entry.get("shard") and int(entry["rows"]) > 0:
+            segments[str(entry["shard"])].append(
+                (int(entry["shard_offset"]), int(entry["rows"]), int(entry["start"]))
+            )
+    return dict(segments)
+
+
+def _concat_shards(
+    shard_dir: Path,
+    segments: Dict[str, List[Tuple[int, int, int]]],
+    total_rows: int,
+) -> Dict[str, np.ndarray]:
+    """逐分片、逐键拼接成最终逐行数组（峰值 ≈ 输出数组一份 + 单分片单键临时数组）。
+
+    每个键先按 ``total_rows`` 分配最终数组，再按分段把各分片对应行拷入；分片与键都
+    只读一份，不把全部数据复制多份。
+    """
+    names = sorted(segments)
+    if not names:
+        return {}
+    arrays: Dict[str, np.ndarray] = {}
+    with ExitStack() as stack:
+        payloads = {name: stack.enter_context(np.load(Path(shard_dir) / name)) for name in names}
+        keys = list(payloads[names[0]].files)
+        for key in keys:
+            out: Optional[np.ndarray] = None
+            for name in names:
+                payload = payloads[name]
+                if key not in payload.files:
+                    raise ValueError(f"分片 {name} 缺少键 {key}（schema 不一致）")
+                chunk = payload[key]
+                if out is None:
+                    out = np.empty((int(total_rows),) + tuple(chunk.shape[1:]), dtype=chunk.dtype)
+                for offset, count, start in segments[name]:
+                    out[start:start + count] = chunk[offset:offset + count]
+            if out is None:  # pragma: no cover - names 非空时必然分配
+                raise RuntimeError(f"键 {key} 没有任何分片数据")
+            arrays[key] = out
+    return arrays
 
 
 # --------------------------------------------------------------------------- #
@@ -989,6 +1165,112 @@ def apply_balance(
             if weights[index] > 0.0 and float(samples[index].get("train_weight", 1.0)) > 0.0
         )
         for k, v in sorted(groups.items())
+    }
+    return {"sample_weight": weights, "balance_group": group_key, "stats": stats}
+
+
+def _cap_picks(length: int, cap: int) -> set:
+    """cap 模式的确定性等距抽样位置（与 :func:`apply_balance` 逐字一致）。"""
+    stride = length / float(cap)
+    return {min(length - 1, int(round(i * stride))) for i in range(cap)}
+
+
+def _entry_group(entry: Dict[str, Any]) -> Tuple[str, str]:
+    report = entry["report"]
+    return str(report.get("difficulty", "unknown")), str(report.get("geometry", "unknown"))
+
+
+def balance_from_specs(
+    entries: Sequence[Dict[str, Any]],
+    train_weight: np.ndarray,
+    *,
+    mode: str,
+    ratio: float,
+) -> Dict[str, Any]:
+    """由逐 spec 摘要 + 最终 ``train_weight`` 数组生成配平权重（语义 = :func:`apply_balance`）。
+
+    额外内存 O(specs + groups)：组计数按 spec 累加；``cap`` 模式的抽样位置也按
+    ``(spec_id, spec_index)`` 序、逐 spec 的 ``train_weight`` 行内推进，不复制逐帧数据。
+    ``entries`` 需按**全局行序**给出，且每项含 ``start`` / ``rows`` / ``trainable`` /
+    ``report{difficulty,geometry,id}``；返回的 ``sample_weight`` / ``balance_group``
+    即最终 npz 的两列。
+    """
+    total_rows = int(train_weight.shape[0])
+    weights = np.ones(total_rows, dtype=np.float64)
+    group_key = np.empty(total_rows, dtype="U64")
+    group_counts: Dict[Tuple[str, str], int] = defaultdict(int)
+    trainable_counts: Dict[Tuple[str, str], int] = defaultdict(int)
+    for entry in entries:
+        rows = int(entry["rows"])
+        if rows <= 0:  # 错误 spec：无行，不参与分组（与 apply_balance 只遍历样本一致）
+            continue
+        key = _entry_group(entry)
+        name = f"{key[0]}/{key[1]}"
+        group_key[entry["start"]:entry["start"] + rows] = name
+        group_counts[key] += rows
+        trainable_counts[key] += int(entry["trainable"])
+    trainable_groups = {key: count for key, count in trainable_counts.items() if count > 0}
+    stats: Dict[str, Any] = {
+        "mode": mode,
+        "ratio": float(ratio),
+        "group_counts_before": {f"{k[0]}/{k[1]}": group_counts[k] for k in sorted(group_counts)},
+        "group_trainable_before": {
+            f"{k[0]}/{k[1]}": trainable_counts[k] for k in sorted(trainable_counts) if trainable_counts[k] > 0
+        },
+        "counts": {"rows": total_rows, "trainable_rows": int((train_weight > 0.0).sum())},
+    }
+    if mode == "none" or total_rows == 0 or not trainable_groups:
+        stats["group_counts_after"] = dict(stats["group_counts_before"])
+        stats["weight_range"] = [1.0, 1.0]
+        return {"sample_weight": weights, "balance_group": group_key, "stats": stats}
+    if mode == "weights":
+        n_groups = max(1, len(trainable_groups))
+        n_trainable = stats["counts"]["trainable_rows"]
+        group_weight = {key: float(n_trainable) / (n_groups * count) for key, count in trainable_groups.items()}
+        for entry in entries:
+            rows = int(entry["rows"])
+            if rows <= 0:
+                continue
+            weights[entry["start"]:entry["start"] + rows] = group_weight[_entry_group(entry)]
+        weights[train_weight <= 0.0] = 1.0  # 过滤行保持 1（下游先乘 train_weight）
+        stats["weight_range"] = [min(group_weight.values()), max(group_weight.values())]
+        after = dict(trainable_counts)
+    elif mode == "cap":
+        min_count = min(trainable_groups.values())
+        cap = max(1, int(math.ceil(float(ratio) * min_count)))
+        by_group: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for entry in entries:
+            if int(entry["rows"]) > 0 and int(entry["trainable"]) > 0:
+                by_group[_entry_group(entry)].append(entry)
+        after = dict(trainable_counts)
+        dropped_total = 0
+        for key in sorted(trainable_counts):
+            length = int(trainable_counts[key])
+            if length <= cap:
+                continue
+            picks = _cap_picks(length, cap)
+            ordered = sorted(
+                by_group[key],
+                key=lambda item: (int(item["report"].get("id", -1)), int(item["spec_index"])),
+            )
+            position = 0
+            for entry in ordered:
+                start, rows = int(entry["start"]), int(entry["rows"])
+                for offset in np.nonzero(train_weight[start:start + rows] > 0.0)[0]:
+                    if position not in picks:
+                        weights[start + int(offset)] = 0.0
+                        dropped_total += 1
+                    position += 1
+            after[key] = len(picks)
+        stats["cap"] = cap
+        stats["min_group_trainable"] = min_count
+        # 与 apply_balance 同口径（权重>0 的行数，含 train_weight=0 的行）
+        stats["counts"]["trainable_after_cap"] = total_rows - dropped_total
+        stats["dropped_indices_count"] = dropped_total
+    else:
+        raise ValueError(f"未知配平模式 {mode!r}")
+    stats["group_counts_after"] = {
+        f"{k[0]}/{k[1]}": after.get(k, 0) for k in sorted(group_counts)
     }
     return {"sample_weight": weights, "balance_group": group_key, "stats": stats}
 
@@ -1142,27 +1424,12 @@ def _channel_dim(channel: str) -> int:
     return int(dims[channel])
 
 
-def save_dataset(
-    out_dir: Path,
-    samples: List[Dict[str, Any]],
-    *,
-    label_order: Sequence[str],
-    builder: ObservationBuilder,
-    config: Dict[str, Any],
-    report: Dict[str, Any],
-    sample_weight: np.ndarray,
-    balance_group: np.ndarray,
-) -> Dict[str, str]:
-    """保存 ``expert_bc.npz`` / ``expert_bc.meta.json`` / ``report.json``，返回路径表。
+def _samples_to_arrays(samples: Sequence[Dict[str, Any]]) -> Dict[str, np.ndarray]:
+    """把逐行样本字典转成逐行 npz 数组（**不含**全局量 sample_weight/balance_weight/balance_group）。
 
-    v2：``od_id``/``od_id_hist`` 保持 int64；meta 写入完整 schema 清单（``schema`` +
-    ``dataset_schema``）；``history_storage="per_frame_v2"``。
+    单一实现供两条路径复用：worker 写分片（``write_shard``）与最终 ``save_dataset``；
+    分片键序 = 最终 npz 键序。
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    npz_path = out_dir / "expert_bc.npz"
-    meta_path = out_dir / "expert_bc.meta.json"
-    report_path = out_dir / "report.json"
-
     arrays: Dict[str, np.ndarray] = {}
     for channel in CURRENT_CHANNELS:
         if channel not in samples[0]["obs"]:
@@ -1210,14 +1477,84 @@ def save_dataset(
     arrays["difficulty"] = np.array([sample["difficulty"] for sample in samples], dtype="U16")
     arrays["geometry"] = np.array([sample["geometry"] for sample in samples], dtype="U32")
     arrays["split"] = np.array([sample["split"] for sample in samples], dtype="U16")
-    arrays["sample_weight"] = np.asarray(sample_weight, dtype=np.float32)
-    arrays["balance_weight"] = np.asarray(sample_weight, dtype=np.float32)  # v2 规范名（trainer 消费）
-    arrays["balance_group"] = np.asarray(balance_group, dtype="U64")
     arrays["filter_reason"] = np.array(
         [str(sample.get("filter_reason", "")) for sample in samples], dtype="U24"
     )
     arrays["lane_lat"] = np.array([sample["lane_lat"] for sample in samples], dtype=np.float32)
-    np.savez_compressed(npz_path, **arrays)
+    return arrays
+
+
+def write_shard(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
+    """把一个块的逐行记录写成**未压缩** npz 分片（worker 进程内调用；快、可逐键读回）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **_samples_to_arrays(rows))
+
+
+def _canonical_key_order(arrays: Dict[str, np.ndarray]) -> List[str]:
+    """npz 成员顺序 = v2 ``save_dataset`` 的顺序（仅影响 zip 内排列，便于与旧实现逐字节对比）。"""
+    order: List[str] = []
+    for channel in CURRENT_CHANNELS:
+        if channel in arrays:
+            order.append(channel)
+            if f"{channel}_mask" in arrays:
+                order.append(f"{channel}_mask")
+    for key in (
+        *COMPANION_KEYS,
+        *MEM_HISTORY_KEYS,
+        "hist_valid",
+        "wm_valid",
+        "frame_usable",
+        "train_weight",
+        "pose",
+        "action",
+        "traj6",
+        "traj30",
+        "traj30_measured",
+        "roundtrip_key_err",
+        "roundtrip_dense_err",
+        "labels",
+        "labels_raw",
+        "prev_action",
+        "episode_id",
+        "step",
+        "spec_id",
+        "seed",
+        "difficulty",
+        "geometry",
+        "split",
+        "sample_weight",
+        "balance_weight",
+        "balance_group",
+        "filter_reason",
+        "lane_lat",
+    ):
+        if key in arrays:
+            order.append(key)
+    known = set(order)
+    order.extend(key for key in arrays if key not in known)
+    return order
+
+
+def _write_dataset(
+    out_dir: Path,
+    arrays: Dict[str, np.ndarray],
+    *,
+    label_order: Sequence[str],
+    builder: ObservationBuilder,
+    config: Dict[str, Any],
+    report: Dict[str, Any],
+    num_slots: int,
+) -> Dict[str, str]:
+    """写 ``expert_bc.npz``（压缩）/ ``expert_bc.meta.json`` / ``report.json``，返回路径表。
+
+    v2：``od_id``/``od_id_hist`` 保持 int64；meta 写入完整 schema 清单（``schema`` +
+    ``dataset_schema``）；``history_storage="per_frame_v2"``。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    npz_path = out_dir / "expert_bc.npz"
+    meta_path = out_dir / "expert_bc.meta.json"
+    report_path = out_dir / "report.json"
+    np.savez_compressed(npz_path, **{key: arrays[key] for key in _canonical_key_order(arrays)})
 
     others_dim = _channel_dim("others")
     meta = {
@@ -1229,14 +1566,12 @@ def save_dataset(
         "label_names": list(label_order),
         "raw_label_names": list(LABEL_ORDER),
         "channel_shapes": {
-            name: list(np.asarray(samples[0]["obs"][name]).shape)
-            for name in CURRENT_CHANNELS
-            if name in samples[0]["obs"]
+            name: list(arrays[name].shape[1:]) for name in CURRENT_CHANNELS if name in arrays
         },
         "channel_alignments": _alignment_meta(builder),
         "kinematics_source": report["kinematics_source"],
         "config": config,
-        "count": len(samples),
+        "count": int(arrays["train_weight"].shape[0]),
         "history_storage": "per_frame_v2",  # 每帧存当前通道 + od_id/presence 历史；其余按 (episode_id, step) 精确查表
         "history_lookup": {
             "module": "pipeline.frames",
@@ -1251,12 +1586,12 @@ def save_dataset(
             "wm_valid": "Stage A 逐 horizon 掩码：目标帧存在且仍可用（未越终止 ∧ on-lane）",
         },
         "schema": schema_manifest(
-            num_slots=int(np.asarray(samples[0]["obs"]["od"]).shape[0]) if "od" in samples[0]["obs"] else 16,
+            num_slots=int(num_slots),
             frames=6,
             others_dim=others_dim,
         ),
         "dataset_schema": _npz_schema_manifest(
-            num_slots=int(np.asarray(samples[0]["obs"]["od"]).shape[0]) if "od" in samples[0]["obs"] else 16,
+            num_slots=int(num_slots),
             frames=6,
             others_dim=others_dim,
             label_count=len(label_order),
@@ -1265,6 +1600,29 @@ def save_dataset(
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"npz": str(npz_path), "meta": str(meta_path), "report": str(report_path)}
+
+
+def save_dataset(
+    out_dir: Path,
+    samples: List[Dict[str, Any]],
+    *,
+    label_order: Sequence[str],
+    builder: ObservationBuilder,
+    config: Dict[str, Any],
+    report: Dict[str, Any],
+    sample_weight: np.ndarray,
+    balance_group: np.ndarray,
+) -> Dict[str, str]:
+    """由全量逐行样本直接保存（单进程旧路径 / 测试用；worker 路径见 ``write_shard``）。"""
+    arrays = _samples_to_arrays(samples)
+    arrays["sample_weight"] = np.asarray(sample_weight, dtype=np.float32)
+    arrays["balance_weight"] = np.asarray(sample_weight, dtype=np.float32)  # v2 规范名（trainer 消费）
+    arrays["balance_group"] = np.asarray(balance_group, dtype="U64")
+    num_slots = int(np.asarray(samples[0]["obs"]["od"]).shape[0]) if "od" in samples[0]["obs"] else 16
+    return _write_dataset(
+        out_dir, arrays, label_order=label_order, builder=builder, config=config, report=report,
+        num_slots=num_slots,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1301,7 +1659,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--recycle-every",
         type=int,
         default=RECYCLE_EVERY_SPECS,
-        help="worker 跑满 N 条 spec 后重启进程回收内存（默认 150；0=不回收）。仅 --workers>1 生效",
+        help="每跑满 N 条 spec 落一个分片（--workers>1 时同时重启进程回收内存；默认 150；0=不分块）",
+    )
+    parser.add_argument(
+        "--keep-shards",
+        action="store_true",
+        help="合并后保留 <out>/_shards/ 分片（默认删除；调试 / 后处理用）",
     )
     parser.add_argument("--traffic-density", type=float, default=None, help="覆盖 build_env 的 traffic_density")
     parser.add_argument(
@@ -1376,36 +1739,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flush=True,
     )
 
-    records: List[Dict[str, Any]] = []
+    out_dir = Path(args.out)
+    shard_dir = out_dir / SHARD_DIRNAME
+    if shard_dir.exists():
+        shutil.rmtree(shard_dir, ignore_errors=True)
+        print(f"[collect_expert] 清理旧分片目录 {shard_dir}", flush=True)
+
+    summaries: List[Dict[str, Any]]
     if num_workers > 1:
-        records = _run_workers(
-            specs, num_workers, spec_config, recycle_every=int(args.recycle_every)
+        summaries = _run_workers(
+            specs, num_workers, spec_config, shard_dir, recycle_every=int(args.recycle_every)
         )
     else:
-        for index, spec in enumerate(specs, start=1):
-            record = _collect_one_spec(
-                spec,
-                spec_index=index - 1,
-                builder=builder,
-                interpolate_fn=interpolate_fn,
-                **spec_config,
-            )
-            records.append(record)
-            if "error" in record:
-                print(f"[collect_expert] id={getattr(spec, 'id', -1)} 失败：{record['error']}", flush=True)
-            else:
-                print(
-                    f"[collect_expert] {index}/{len(specs)} id={getattr(spec, 'id', -1)} "
-                    f"term={record['report']['termination']} steps={record['steps']} "
-                    f"cand={record['candidates']} stored={record['report'].get('stored_rows', len(record['kept']))} "
-                    f"trainable={record['report'].get('retained_steps', -1)} "
-                    f"({record['elapsed_s']:.1f}s)",
-                    flush=True,
-                )
+        summaries = _collect_single(
+            specs, spec_config, shard_dir, builder, interpolate_fn,
+            recycle_every=int(args.recycle_every),
+        )
 
-    samples, spec_reports, filter_counter, total_candidates, missing = _merge_records(
-        records, len(specs)
-    )
+    entries, stored_rows, missing = _spec_entries(summaries, len(specs))
     if missing:
         shown = missing[:8]
         print(
@@ -1413,23 +1764,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"：{shown}{' ...' if len(missing) > len(shown) else ''}",
             flush=True,
         )
-
-    if not samples:
+    if stored_rows == 0:
         print("[collect_expert] 未保留任何样本；检查过滤阈值或专家质量", flush=True)
+        return 1
 
-    balance = apply_balance(
-        samples,
-        mode=str(args.balance),
-        ratio=float(args.balance_ratio),
-        seed=int(args.seed),
+    total_candidates = int(sum(int(entry["candidates"]) for entry in entries))
+    filter_counter = _merge_filter_counts(entries)
+    arrays = _concat_shards(shard_dir, _shard_segments(entries), stored_rows)
+    expected_episode = np.concatenate(
+        [np.full(int(entry["rows"]), int(entry["spec_index"]), dtype=np.int64) for entry in entries]
     )
-    # 配平权重写回样本（label_statistics 的加权口径需要）
-    for index, sample in enumerate(samples):
-        sample["sample_weight"] = float(balance["sample_weight"][index])
-    per_label_count, per_label_weighted = label_statistics(samples, label_order)
-    stored_rows = len(samples)
-    trainable_rows = int(sum(1 for sample in samples if sample["train_weight"] > 0.0))
-    trainable_weight = float(sum(sample["train_weight"] * sample["sample_weight"] for sample in samples))
+    if "episode_id" not in arrays or not np.array_equal(arrays["episode_id"], expected_episode):
+        raise ValueError("分片拼接行序与 spec 下标不一致（分片写入顺序被破坏）")
+    del expected_episode
+
+    balance = balance_from_specs(
+        entries, arrays["train_weight"], mode=str(args.balance), ratio=float(args.balance_ratio)
+    )
+    arrays["sample_weight"] = np.asarray(balance["sample_weight"], dtype=np.float32)
+    arrays["balance_weight"] = np.asarray(balance["sample_weight"], dtype=np.float32)  # v2 规范名
+    arrays["balance_group"] = np.asarray(balance["balance_group"], dtype="U64")
+
+    # 统计口径与 v2 相同（计数=行数 / 加权=权重和），但直接在最终数组上向量化计算
+    train_weight = np.asarray(arrays["train_weight"], dtype=np.float64)
+    effective = train_weight * np.asarray(balance["sample_weight"], dtype=np.float64)
+    positive = np.asarray(arrays["labels"]) > 0.5
+    gate = train_weight > 0.0
+    per_label_count = {
+        str(name): int(np.count_nonzero(positive[:, index] & gate))
+        for index, name in enumerate(label_order)
+    }
+    per_label_weighted = {
+        str(name): float((positive[:, index] * effective).sum())
+        for index, name in enumerate(label_order)
+    }
+    trainable_rows = int(gate.sum())
+    trainable_weight = float(effective.sum())
     row_yield = (trainable_rows / total_candidates) if total_candidates else 0.0
     weighted_yield = (trainable_weight / total_candidates) if total_candidates else 0.0
     below_min = sorted(
@@ -1466,7 +1836,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "min_samples_per_category": DEFAULT_MIN_SAMPLES_PER_CATEGORY,
         "labels_below_min": below_min,
         "balance": balance,
-        "per_spec": spec_reports,
+        "per_spec": [entry["report"] for entry in entries],
         "config": {
             "limit": args.limit,
             "split": args.split,
@@ -1506,21 +1876,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "counts": balance["stats"]["counts"],
         **({"weight_range": balance["stats"]["weight_range"]} if "weight_range" in balance["stats"] else {}),
         **({"cap": balance["stats"]["cap"], "min_group_trainable": balance["stats"]["min_group_trainable"],
-            "dropped_indices_count": len(balance["stats"].get("dropped_indices", []))}
+            "dropped_indices_count": int(balance["stats"].get("dropped_indices_count", 0))}
            if "cap" in balance["stats"] else {}),
     }
     if missing:  # 仅并行 worker 崩溃时出现；单进程恒为空（报告可与单进程逐键对比）
         report["missing_spec_indices"] = [int(index) for index in missing]
-    paths = save_dataset(
-        Path(args.out),
-        samples,
+    paths = _write_dataset(
+        out_dir,
+        arrays,
         label_order=label_order,
         builder=builder,
         config=report["config"],
         report=report,
-        sample_weight=balance["sample_weight"],
-        balance_group=balance["balance_group"],
+        num_slots=int(arrays["od"].shape[1]) if "od" in arrays else 16,
     )
+    if args.keep_shards:
+        print(f"[collect_expert] 保留分片目录 {shard_dir}（--keep-shards）", flush=True)
+    else:
+        shutil.rmtree(shard_dir, ignore_errors=True)
 
     print("", flush=True)
     print(f"[collect_expert] retained-step yield = {row_yield:.3f} "

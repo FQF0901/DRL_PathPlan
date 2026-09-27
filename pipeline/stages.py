@@ -75,11 +75,17 @@ from pipeline.trainer import (  # noqa: E402
     apply_thread_limits,
     build_pool,
     build_reward_adapter,
+    capture_rng_state,
+    config_snapshot_hash,
     dataset_weight_report,
     load_checkpoint,
+    load_optimizer_state,
+    load_training_checkpoint,
+    move_optimizer_state_to_device,
     presence_entry_loss,
     pretrain_bc,
     resolve_device,
+    restore_rng_state,
     row_action_weights,
     sanitize_masked_od,
     save_checkpoint,
@@ -218,16 +224,78 @@ def _stage_section(config: Mapping[str, Any], stage: str) -> Dict[str, Any]:
     return dict(section) if isinstance(section, Mapping) else {}
 
 
-def _limit_dataset(dataset: BCDataset, limit: Optional[int]) -> BCDataset:
-    """``--limit-dataset`` 取**前缀**（harvest 按 episode 顺序追加 → 前缀 = 完整 episode）。
+#: 冒烟（``--limit-dataset``）CPU batch/eval 上限（见 :func:`_apply_smoke_batch_caps`）。
+_SMOKE_CPU_BATCH_CAP = 128
+_SMOKE_CPU_MICRO_CAP = 8
+#: 阶段 A 逐 epoch 评估帧上限（host no_grad 前向实测 ~2.4MB/帧 × 256 帧 ≈ 0.6GB）。
+_SMOKE_CPU_EVAL_FRAMES = 64
 
-    与旧的 ``linspace`` 抽样不同：阶段 A 的未来目标依赖 ``(episode, step+k)`` 查表，
-    随机抽样会把同 episode 的相邻帧拆散 → 目标大面积无效。
+
+def _smoke_cpu_guard(args: argparse.Namespace, device: Any) -> bool:
+    """``--limit-dataset`` + CPU → 启用冒烟 host 内存保护（GPU/正常训练不启用）。"""
+    return (
+        getattr(args, "limit_dataset", None) is not None
+        and str(getattr(device, "type", device)) == "cpu"
+    )
+
+
+def _apply_smoke_batch_caps(
+    args: argparse.Namespace,
+    device: Any,
+    batch_size: int,
+    micro_batch: Optional[int],
+    count: int,
+) -> Tuple[int, Optional[int]]:
+    """``--limit-dataset`` 冒烟 + CPU 时的 host 内存保护（返回 ``(宏 batch, micro batch)``）。
+
+    ``--limit-dataset`` 的前缀截断保证数据集/物化内存 ∝ N；但训练前向图仍按配置 batch
+    展开：CPU 无显存上限，ST-GNN 6 步展开实测 macro 1024/micro 256 峰值 RSS ≈ 10.4 GB
+    （A/B 均如此）→ 冒烟仍会挤爆机器、拖慢并行训练。故冒烟（limit 设置）且 ``device=cpu``
+    时把 batch 收敛到 host 安全上限（macro ≤ 128 / micro ≤ 8，实测峰值 ≈ 1.2–1.6 GB）。
+
+    GPU / 未设置 limit 时**原样返回**（正常训练语义不变；GPU 冒烟不受影响）。
     """
-    if limit is None or dataset.count <= int(limit):
-        return dataset
-    keep = np.arange(int(limit), dtype=np.int64)
-    return BCDataset({key: value[keep] for key, value in dataset.arrays.items()}, dataset.meta)
+    if not _smoke_cpu_guard(args, device):
+        return int(batch_size), micro_batch
+    macro = max(1, min(int(batch_size), _SMOKE_CPU_BATCH_CAP, max(1, int(count))))
+    micro = max(1, min(int(micro_batch) if micro_batch else macro, _SMOKE_CPU_MICRO_CAP, macro))
+    return macro, micro
+
+
+# --------------------------------------------------------------------------- #
+# 周期检查点 / resume（2026-09-27：防"跑 19/20 epoch 被静默杀掉 → 全部白跑"）
+# --------------------------------------------------------------------------- #
+
+def _resolve_ckpt_every(args: argparse.Namespace, config: Mapping[str, Any]) -> int:
+    """周期 ckpt 间隔（epoch）：CLI ``--ckpt-every`` 优先，否则 ``config train.ckpt_every``。
+
+    默认 5（config/train.yaml）；0 = 关闭周期保存（阶段末 ``final.pt`` 仍写）。
+    """
+    value = getattr(args, "ckpt_every", None)
+    if value is None:
+        value = dict(config.get("train", {}) or {}).get("ckpt_every", 5)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        print(f"[stages] 无法解析 ckpt_every={value!r} → 回退 5", flush=True)
+        return 5
+
+
+def _resume_path(args: argparse.Namespace) -> Optional[str]:
+    """``--resume <ckpt>``（空 = 不了 resume）。"""
+    path = getattr(args, "resume", None)
+    return str(path) if path else None
+
+
+def _periodic_ckpt_path(out_dir: Path, global_epoch: int) -> Path:
+    """周期 ckpt 命名（与 ``final.pt`` 同格式/payload）。"""
+    return out_dir / f"ckpt_epoch{int(global_epoch):03d}.pt"
+
+
+def _resume_epoch_of(resume_info: Mapping[str, Any], total_epochs: int) -> int:
+    """resume ckpt 的已完成 epoch 数（0 基；``epoch`` 键缺失/None → 0，超出总轮数 → 截断）。"""
+    epoch = resume_info.get("epoch") if resume_info else None
+    return min(max(0, int(epoch or 0)), max(0, int(total_epochs)))
 
 
 # --------------------------------------------------------------------------- #
@@ -1100,11 +1168,23 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     apply_thread_limits(workers=1, config=config)
     device = torch.device(resolve_device(args.device, config))
     model = build_model(_load_yaml(args.model_config))
-    if args.ckpt and Path(args.ckpt).exists():
+    resume_path = _resume_path(args)
+    resume_info: Dict[str, Any] = {}
+    if resume_path:
+        if not Path(resume_path).exists():
+            raise SystemExit(f"[stageA] --resume 文件不存在：{resume_path}")
+        resume_info = load_training_checkpoint(resume_path, model)
+        done = _resume_epoch_of(resume_info, 10**9)
+        print(
+            f"[stageA] resume {resume_path}：模型已载入（missing={len(resume_info['missing_keys'])}）"
+            f" · 已完成 epoch={done} → 从 epoch {done + 1} 继续",
+            flush=True,
+        )
+    elif args.ckpt and Path(args.ckpt).exists():
         meta = load_checkpoint(args.ckpt, model)
         print(f"[stageA] 载入 {args.ckpt}（missing={len(meta.get('missing_keys', []))}）", flush=True)
 
-    dataset = _limit_dataset(BCDataset.load(args.bc_dir), args.limit_dataset)
+    dataset = BCDataset.load(args.bc_dir, limit=args.limit_dataset)
     dataset_contract = validate_bc_dataset(
         dataset, str(args.bc_dir), "A", allow_legacy=_allow_legacy_dataset(args)
     )
@@ -1137,7 +1217,13 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     for parameter in trainable:
         parameter.requires_grad_(True)
     optimizer = torch.optim.Adam(trainable, lr=float(args.lr))
+    if resume_info and load_optimizer_state(optimizer, resume_info.get("optimizer")):
+        print("[stageA] resume：优化器状态已恢复", flush=True)
     model.to(device).train()
+    # 跨设备 resume：优化器在 CPU 上恢复状态、模型刚搬到 device → 状态张量必须跟随参数设备（幂等）
+    _moved = move_optimizer_state_to_device(optimizer)
+    if _moved:
+        print(f"[stageA] resume：优化器状态已迁移到 {device}（{_moved} 个张量）", flush=True)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -1149,7 +1235,18 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "micro_batch_size"
     )
     micro_batch = batch_size if not micro_cfg else max(1, min(batch_size, int(micro_cfg)))
+    batch_size, micro_batch = _apply_smoke_batch_caps(args, device, batch_size, micro_batch, dataset.count)
     use_accum = micro_batch < batch_size
+    eval_frames = max(1, int(args.eval_frames))
+    if _smoke_cpu_guard(args, device):
+        eval_frames = min(eval_frames, _SMOKE_CPU_EVAL_FRAMES)
+        print(
+            f"[stageA] 冒烟内存保护（--limit-dataset + CPU）：上限 macro≤{_SMOKE_CPU_BATCH_CAP} · "
+            f"micro≤{_SMOKE_CPU_MICRO_CAP} · eval_frames≤{_SMOKE_CPU_EVAL_FRAMES} → 实际 "
+            f"macro={batch_size} micro={micro_batch} eval_frames={eval_frames}"
+            "（CPU 前向图/评估无显存上限；避免冒烟挤爆 host / 拖慢并行训练）",
+            flush=True,
+        )
     use_pin = device.type == "cuda"
     use_materialized = bool(getattr(args, "materialize", False))
 
@@ -1547,11 +1644,24 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     stage_cfg = _stage_section(config, "A")
     wm_cfg = dict(stage_cfg.get("world_model", {}) or {})
     epochs = int(args.wm_epochs or wm_cfg.get("epochs") or 10)
+    ckpt_every = _resolve_ckpt_every(args, config)
+    config_hash = config_snapshot_hash(config)
+    start_epoch = _resume_epoch_of(resume_info, epochs)
+    if resume_info:
+        if start_epoch >= epochs:
+            print(f"[stageA] 警告：resume ckpt 已完成 {start_epoch} ≥ {epochs} epochs → 无剩余训练", flush=True)
+        if resume_info.get("config_hash") and resume_info["config_hash"] != config_hash:
+            print(
+                f"[stageA] 警告：resume ckpt 配置哈希 {resume_info['config_hash']} != 当前 {config_hash}"
+                "（配置快照已变，续跑结果可能不可比）",
+                flush=True,
+            )
     metrics: Dict[str, Any] = {
         "stage": "A",
         "kind": "world_model_teacher_forcing",
         "bc_dir": str(args.bc_dir),
         "dataset_schema": int(dataset.schema_version),
+        "limit_dataset": (int(args.limit_dataset) if args.limit_dataset is not None else None),
         "samples": int(dataset.count),
         "train_frames": int(train_idx.size),
         "val_frames": int(val_idx.size),
@@ -1560,6 +1670,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "epochs": epochs,
         "batch_size": batch_size,
         "micro_batch_size": micro_batch,
+        "eval_frames": int(eval_frames),
         "grad_accum": bool(use_accum),
         "lr": float(args.lr),
         "match_future_slots": bool(args.match_future_slots),
@@ -1572,7 +1683,12 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "ld_loss": "removed",  # 规格：阶段 A 不再监督未来 LD
         "materialize": bool(obs_source is not None),
         "fast_data": bool(obs_source is not None and future_source is not None),
+        "ckpt_every": ckpt_every,
+        "resume_epoch": start_epoch,
+        "config_hash": config_hash,
     }
+    if resume_info:
+        metrics["resumed_from"] = resume_path
     metrics.update(dataset_contract)
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(
@@ -1581,7 +1697,16 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         legacy_tags=_monitor_legacy_tags(args),
     )
     rng = np.random.default_rng(int(args.seed))
+    if start_epoch:
+        if resume_info.get("rng_state"):
+            restore_rng_state(resume_info["rng_state"], numpy_generator=rng)
+            print("[stageA] resume：RNG 状态已恢复（数据顺序/plan 噪声续跑）", flush=True)
+        else:
+            for _ in range(start_epoch):
+                rng.permutation(train_idx)
+            print(f"[stageA] resume：无 RNG 状态 → seed 重放 {start_epoch} 次 permutation", flush=True)
     loss_curve: List[float] = []
+    last_val: Dict[str, Any] = {}
     grad_probe_first: Dict[str, float] = {}
     grad_probe_last: Dict[str, float] = {}
     grad_prefixes = (
@@ -1594,7 +1719,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             "（ST-GNN 6 步展开显存 ~32MB/样本；损失按宏 batch 口径精确缩放）",
             flush=True,
         )
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         order = rng.permutation(train_idx)
         totals: Dict[str, float] = {
             "total": 0.0, "od": 0.0, "presence": 0.0, "entry": 0.0, "ego_next": 0.0
@@ -1677,7 +1802,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 break
         train_loss = totals["total"] / max(1, batches)
         loss_curve.append(train_loss)
-        eval_metrics = _evaluate(val_idx, int(args.eval_frames))
+        eval_metrics = _evaluate(val_idx, eval_frames)
+        last_val = eval_metrics
         counts = {
             "valid_samples": int(sum(item["valid_samples"] for item in eval_metrics["per_horizon"].values())),
             "valid_weight_sum": float(
@@ -1780,12 +1906,32 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             f"it/s={batches / max(data_seconds + forward_seconds + backward_seconds, 1e-9):.2f}",
             flush=True,
         )
+        global_epoch = epoch + 1
+        if ckpt_every > 0 and global_epoch % ckpt_every == 0:
+            ckpt_path = _periodic_ckpt_path(out_dir, global_epoch)
+            save_checkpoint(
+                ckpt_path,
+                model,
+                meta={"stage": "A", "epoch": global_epoch, "epochs": epochs},
+                optimizer=optimizer,
+                epoch=global_epoch,
+                val_metrics=last_val,
+                rng_state=capture_rng_state(rng),
+                config_hash=config_hash,
+            )
+            print(f"[stageA] ckpt → {ckpt_path}（epoch {global_epoch}/{epochs}）", flush=True)
     if monitor is not None:
         monitor.close()
     if device.type == "cuda":
         metrics["vram_peak_mb"] = float(torch.cuda.max_memory_allocated(device) / 1e6)
-    save_checkpoint(out_dir / "world_model.pt", model, meta=metrics)
-    save_checkpoint(out_dir / "final.pt", model, meta={"stage": "A", "epochs": epochs})
+    save_checkpoint(
+        out_dir / "world_model.pt", model, meta=metrics, optimizer=optimizer, epoch=epochs,
+        val_metrics=last_val, rng_state=capture_rng_state(rng), config_hash=config_hash,
+    )
+    save_checkpoint(
+        out_dir / "final.pt", model, meta={"stage": "A", "epochs": epochs}, optimizer=optimizer,
+        epoch=epochs, val_metrics=last_val, rng_state=capture_rng_state(rng), config_hash=config_hash,
+    )
     metrics["checkpoint"] = str(out_dir / "final.pt")
     _write_json(out_dir / "metrics.json", metrics)
     print(f"[stageA] DONE → {out_dir}", flush=True)
@@ -1974,14 +2120,25 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     if torch.device(device).type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     model = build_model(_load_yaml(args.model_config))
-    ckpt = args.ckpt or "runs/train/stage_a/final.pt"
-    if Path(ckpt).exists():
-        meta = load_checkpoint(ckpt, model)
-        print(f"[stageB] 载入阶段 A 产物 {ckpt}（missing={len(meta.get('missing_keys', []))}）", flush=True)
+    resume_path = _resume_path(args)
+    resume_info: Dict[str, Any] = {}
+    if resume_path:
+        if not Path(resume_path).exists():
+            raise SystemExit(f"[stageB] --resume 文件不存在：{resume_path}")
+        resume_info = load_training_checkpoint(resume_path, model)
+        print(
+            f"[stageB] resume {resume_path}：模型已载入（missing={len(resume_info['missing_keys'])}）",
+            flush=True,
+        )
     else:
-        print(f"[stageB] 警告：checkpoint {ckpt} 不存在 → 从随机初始化开始（world model 未训练）", flush=True)
+        ckpt = args.ckpt or "runs/train/stage_a/final.pt"
+        if Path(ckpt).exists():
+            meta = load_checkpoint(ckpt, model)
+            print(f"[stageB] 载入阶段 A 产物 {ckpt}（missing={len(meta.get('missing_keys', []))}）", flush=True)
+        else:
+            print(f"[stageB] 警告：checkpoint {ckpt} 不存在 → 从随机初始化开始（world model 未训练）", flush=True)
 
-    dataset = _limit_dataset(BCDataset.load(args.bc_dir), args.limit_dataset)
+    dataset = BCDataset.load(args.bc_dir, limit=args.limit_dataset)
     dataset_contract = validate_bc_dataset(
         dataset, str(args.bc_dir), "B", allow_legacy=_allow_legacy_dataset(args)
     )
@@ -2001,6 +2158,24 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     split = float(args.bc_phase_split if args.bc_phase_split is not None else bc_cfg.get("primary_phase_split", 0.5))
     primary_epochs = max(1, int(round(epochs * split))) if epochs > 1 else epochs
     specific_epochs = max(0, epochs - primary_epochs)
+    ckpt_every = _resolve_ckpt_every(args, config)
+    config_hash = config_snapshot_hash(config)
+    # resume：``epoch`` = 已完成的**全局** epoch 数（primary + specific 连续计数）
+    resume_epoch = _resume_epoch_of(resume_info, epochs)
+    if resume_info:
+        raw_done = int(resume_info.get("epoch") or 0)
+        suffix = "（超出总轮数 → 截断）" if raw_done > epochs else ""
+        print(
+            f"[stageB] resume：已完成全局 epoch={raw_done} → 从 epoch {resume_epoch + 1} 继续"
+            f"（primary={primary_epochs} + specific={specific_epochs}）{suffix}",
+            flush=True,
+        )
+        if resume_info.get("config_hash") and resume_info["config_hash"] != config_hash:
+            print(
+                f"[stageB] 警告：resume ckpt 配置哈希 {resume_info['config_hash']} != 当前 {config_hash}"
+                "（配置快照已变，续跑结果可能不可比）",
+                flush=True,
+            )
     action_weight = float(args.action_weight if args.action_weight is not None else bc_cfg.get("action_weight", 1.0))
     traj_weight = float(args.traj_aux_weight if args.traj_aux_weight is not None else bc_cfg.get("traj_aux_weight", 0.1))
     loss_type = str(args.loss_type if args.loss_type is not None else bc_cfg.get("loss_type", "l2"))
@@ -2015,6 +2190,16 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "micro_batch_size"
     )
     micro_batch_size = max(1, min(batch_size, int(micro_cfg))) if micro_cfg else None
+    batch_size, micro_batch_size = _apply_smoke_batch_caps(
+        args, device, batch_size, micro_batch_size, dataset.count
+    )
+    if _smoke_cpu_guard(args, device):
+        print(
+            f"[stageB] 冒烟内存保护（--limit-dataset + CPU）：上限 macro≤{_SMOKE_CPU_BATCH_CAP} · "
+            f"micro≤{_SMOKE_CPU_MICRO_CAP} → 实际 macro={batch_size} micro={micro_batch_size}"
+            "（CPU 前向图无显存上限；避免冒烟挤爆 host / 拖慢并行训练）",
+            flush=True,
+        )
     history_stride = int(args.history_stride if args.history_stride is not None else dataset.history_stride)
     use_materialized = bool(getattr(args, "materialize", False))
     obs_source: Optional[MaterializedBCDataset] = None
@@ -2057,6 +2242,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "kind": "planner_bc",
         "bc_dir": str(args.bc_dir),
         "dataset_schema": int(dataset.schema_version),
+        "limit_dataset": (int(args.limit_dataset) if args.limit_dataset is not None else None),
         "samples": int(dataset.count),
         "device": device,
         "epochs": epochs,
@@ -2082,7 +2268,12 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "train_frames": int(train_idx.size),
         "val_frames": int(val_idx.size),
         "val_episodes": int(val_episodes.size),
+        "ckpt_every": ckpt_every,
+        "resume_epoch": resume_epoch,
+        "config_hash": config_hash,
     }
+    if resume_info:
+        metrics["resumed_from"] = resume_path
     metrics.update(dataset_contract)
     metrics.update(dataset_weight_report(dataset, prefix="dataset"))
     monitor = _make_monitor(
@@ -2103,7 +2294,18 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             step=0,
         )
 
-    def _run_phase(phase: str, phase_epochs: int, freeze_prefixes: Sequence[str], phase_offset: int) -> Dict[str, Any]:
+    phase_state: Dict[str, Dict[str, Any]] = {}  # phase → 最近一次 epoch 回调的 optimizer/val/rng
+
+    def _run_phase(
+        phase: str,
+        phase_epochs: int,
+        freeze_prefixes: Sequence[str],
+        phase_offset: int,
+        *,
+        start_epoch: int = 0,
+        optimizer_state: Optional[Mapping[str, Any]] = None,
+        rng_state: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """跑一个 BC 相位：逐 epoch 落盘（step = ``phase_offset + epoch``，全局单调 1..2N）。
 
         - 训练侧：``train/<phase>_*`` 标量 + ``horizon|slice|label/*``（逐 epoch 增量）；
@@ -2111,11 +2313,47 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         - 喂入 tag 均为旧命名，由 ``pipeline.monitoring`` 按 Tier-1 清单重命名/过滤
           （``stageB/<phase>/loss_terms`` / ``ego/*`` / ``router/*``；见 docs/metrics.md）；
           ``--monitor-legacy-tags`` 时全量落盘；
-        - 阶段末只补记逐 epoch 未覆盖的标量（router 汇总/元数据），避免同 (step, tag) 重复。
+        - 阶段末只补记逐 epoch 未覆盖的标量（router 汇总/元数据），避免同 (step, tag) 重复；
+        - resume：``start_epoch`` = 本相位已完成的本地 epoch 数（0 基）→ ``pretrain_bc`` 从该处续跑；
+          ``optimizer_state``/``rng_state`` 只在 ckpt 与当前相位同源时传入（跨相位 → 全新优化器，
+          与原跑法一致：optimizer/rng 本就按相位重建）。
         """
-        if phase_epochs <= 0:
-            return {"skipped": True, "epochs": 0, "phase": phase}
+        if phase_epochs <= 0 or int(start_epoch) >= int(phase_epochs):
+            return {"skipped": True, "epochs": 0, "phase": phase, "start_epoch": int(start_epoch)}
         epoch_keys: set = set()
+
+        def _on_checkpoint(
+            epoch_index: int,
+            ckpt_model: Any,
+            ckpt_optimizer: Any,
+            ckpt_val_metrics: Mapping[str, Any],
+            ckpt_rng: Any,
+        ) -> None:
+            """周期 ckpt（全局 epoch 计数；与 final.pt 同格式/payload）。"""
+            # 供阶段末 bc.pt/final.pt 复用（优化器/RNG/val 与训练循环同源）
+            phase_state[phase] = {
+                "optimizer": ckpt_optimizer,
+                "val_metrics": dict(ckpt_val_metrics or {}),
+                "rng": ckpt_rng,
+            }
+            global_epoch = phase_offset + epoch_index + 1
+            if ckpt_every <= 0 or global_epoch % ckpt_every != 0:
+                return
+            ckpt_path = _periodic_ckpt_path(out_dir, global_epoch)
+            save_checkpoint(
+                ckpt_path,
+                ckpt_model,
+                meta={"stage": "B", "phase": phase, "epoch": global_epoch, "epochs": epochs},
+                optimizer=ckpt_optimizer,
+                epoch=global_epoch,
+                val_metrics=ckpt_val_metrics,
+                rng_state=capture_rng_state(ckpt_rng),
+                config_hash=config_hash,
+            )
+            print(
+                f"[stageB] ckpt → {ckpt_path}（phase={phase} · global epoch {global_epoch}/{epochs}）",
+                flush=True,
+            )
 
         def _on_epoch(
             epoch_index: int, train_metrics: Mapping[str, Any], val_metrics: Mapping[str, Any]
@@ -2174,6 +2412,10 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             train_indices=train_idx,
             val_indices=val_idx,
             epoch_callback=_on_epoch,
+            start_epoch=int(start_epoch),
+            optimizer_state=optimizer_state,
+            rng_state=rng_state,
+            checkpoint_callback=_on_checkpoint,
         )
         result = pretrain_bc(
             model,
@@ -2194,17 +2436,47 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             monitor.flush(step=phase_offset + phase_epochs)
         return result
 
-    metrics["primary"] = _slim_phase_result(_run_phase("primary", primary_epochs, _PRIMARY_PHASE_FREEZE, 0))
+    # resume：ckpt 与当前相位同源 → 传优化器/RNG；跨相位边界 → 全新（原跑法本身按相位重建）
+    mid_primary = 0 < resume_epoch < primary_epochs
+    mid_specific = resume_epoch > primary_epochs
+    metrics["primary"] = _slim_phase_result(
+        _run_phase(
+            "primary",
+            primary_epochs,
+            _PRIMARY_PHASE_FREEZE,
+            0,
+            start_epoch=min(resume_epoch, primary_epochs),
+            optimizer_state=(resume_info.get("optimizer") if mid_primary else None),
+            rng_state=(resume_info.get("rng_state") if mid_primary else None),
+        )
+    )
     metrics["specific"] = _slim_phase_result(
-        _run_phase("specific", specific_epochs, _SPECIFIC_PHASE_FREEZE, primary_epochs)
+        _run_phase(
+            "specific",
+            specific_epochs,
+            _SPECIFIC_PHASE_FREEZE,
+            primary_epochs,
+            start_epoch=max(0, resume_epoch - primary_epochs),
+            optimizer_state=(resume_info.get("optimizer") if mid_specific else None),
+            rng_state=(resume_info.get("rng_state") if mid_specific else None),
+        )
     )
     metrics.update(_action_mu_stats(model, dataset, device, batch_size=batch_size, obs_source=obs_source))
     if monitor is not None:
         monitor.close()
     if torch.device(device).type == "cuda":
         metrics["vram_peak_mb"] = float(torch.cuda.max_memory_allocated(device) / 1e6)
-    save_checkpoint(out_dir / "bc.pt", model, meta=metrics)
-    save_checkpoint(out_dir / "final.pt", model, meta={"stage": "B", "epochs": epochs})
+    tail = phase_state.get("specific") or phase_state.get("primary") or {}
+    save_checkpoint(
+        out_dir / "bc.pt", model, meta=metrics, optimizer=tail.get("optimizer"), epoch=epochs,
+        val_metrics=tail.get("val_metrics"), rng_state=capture_rng_state(tail.get("rng")),
+        config_hash=config_hash,
+    )
+    save_checkpoint(
+        out_dir / "final.pt", model, meta={"stage": "B", "epochs": epochs},
+        optimizer=tail.get("optimizer"), epoch=epochs, val_metrics=tail.get("val_metrics"),
+        rng_state=capture_rng_state(tail.get("rng")), config_hash=config_hash,
+    )
     metrics["checkpoint"] = str(out_dir / "final.pt")
     _write_json(out_dir / "metrics.json", metrics)
     print(
@@ -2285,7 +2557,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
     bc_dataset = None
     if args.bc_anchor and Path(args.bc_dir).exists():
-        bc_dataset = BCDataset.load(args.bc_dir)
+        bc_dataset = BCDataset.load(args.bc_dir, limit=args.limit_dataset)
         print(f"[stageC] BC 锚：{bc_dataset.count} 样本", flush=True)
 
     pool = build_pool(
@@ -2415,8 +2687,17 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ckpt", default=None,
                         help="A=初始化权重；B=阶段 A 产物（默认 runs/train/stage_a/final.pt）；"
                              "C=阶段 B 快照（默认 runs/train/stage_b/final.pt）")
+    parser.add_argument("--ckpt-every", type=int, default=None,
+                        help="A/B 周期 ckpt 间隔（epoch）：每 N 轮保存 <out>/ckpt_epoch{N:03d}.pt"
+                             "（0=关；默认取 config/train.yaml train.ckpt_every=5）")
+    parser.add_argument("--resume", default=None,
+                        help="A/B 从周期 ckpt 恢复（模型/优化器/epoch/RNG，从 epoch+1 继续）；"
+                             "无优化器状态/参数组不匹配时回退全新优化器（见日志）")
     parser.add_argument("--bc-dir", default="runs/bc_expert_full", help="阶段 A/B 的 BC 专家数据集目录")
-    parser.add_argument("--limit-dataset", type=int, default=None, help="BC 数据集前缀抽样上限（冒烟用）")
+    parser.add_argument("--limit-dataset", type=int, default=None,
+                        help="BC 数据集前缀上限（冒烟用）：按**完整 episode 前缀**截断（读取阶段只解压前 M 行，"
+                             "M ≤ N；首个 episode 超过 N 时保留该 episode），物化/val 切分/权重统计都基于该子集；"
+                             "CPU 上同时把 macro/micro batch 收敛到 host 内存安全上限（macro≤128/micro≤8）")
     parser.add_argument("--allow-legacy-dataset", action="store_true",
                         help="放行 schema<2/缺 v2 通道（others/od_id/od_presence）的 BC 数据集。"
                              "默认硬失败（防漏设 BC_DIR 落到 v1 数据集、router 损失全程 0）；"

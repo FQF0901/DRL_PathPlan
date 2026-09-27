@@ -2,22 +2,22 @@
 
 并行采集的正确性依赖两条与 worker 数无关的性质：
 1. spec 轮转分配（``index % N``）确定、互斥、覆盖全部；
-2. 父进程按**全局 spec 下标**合并记录 → 样本顺序 / ``episode_id`` / 过滤统计与
-   单进程逐条累加一致（``episode_id`` 就是全局下标）。
+2. 父进程只收**逐 spec 标量摘要**，按全局 spec 下标展开 → 样本顺序 / ``episode_id`` /
+   过滤统计与单进程逐条累加一致（``episode_id`` 就是全局下标），逐帧数据留在分片里。
 """
 
 from __future__ import annotations
 
 import os
-from collections import Counter
 
 from tools.collect_expert import (
     MAX_RECOMMENDED_WORKERS,
     RECYCLE_EVERY_SPECS,
     _chunk_tasks,
-    _merge_records,
+    _merge_filter_counts,
     _parse_args,
     _resolve_workers,
+    _spec_entries,
     _worker_spec_indices,
 )
 
@@ -39,45 +39,70 @@ def test_chunk_tasks_sizes_and_coverage() -> None:
     assert _chunk_tasks([], 4) == []
 
 
-def _record(spec_index: int, steps, filter_counts, candidates, error=None):
+def _summary(worker_index, chunk_id, specs, shard=None):
+    """构造一个块摘要；``specs = [(spec_index, rows, candidates, filter_counts), ...]``。"""
     return {
-        "spec_index": spec_index,
-        "kept": [{"episode_id": spec_index, "step": step} for step in steps],
-        "filter_counts": Counter(filter_counts),
-        "candidates": candidates,
-        "steps": 1,
-        "elapsed_s": 0.0,
-        "report": (
-            {"id": spec_index, "termination": "error", "error": error}
-            if error
-            else {"id": spec_index, "termination": "max_step"}
-        ),
-        **({"error": error} if error else {}),
+        "worker_index": worker_index,
+        "chunk_id": chunk_id,
+        "shard": shard,
+        "rows": sum(rows for _, rows, _, _ in specs),
+        "specs": [
+            {
+                "spec_index": index,
+                "rows": rows,
+                "candidates": candidates,
+                "trainable": rows,
+                "filter_counts": dict(counts),
+                "report": {
+                    "id": index,
+                    "termination": "max_step",
+                    "difficulty": "easy",
+                    "geometry": "straight",
+                },
+                "error": None,
+            }
+            for index, rows, candidates, counts in specs
+        ],
     }
 
 
-def test_merge_records_follows_global_spec_order() -> None:
+def test_spec_entries_follow_global_spec_order() -> None:
     # 乱序到达（w0 的 spec 2 先到）
-    records = [
-        _record(2, [0, 1], {"b": 1}, 10),
-        _record(0, [0], {"a": 2}, 5),
-        _record(1, [0, 1, 2], {"a": 1, "c": 3}, 7, error="Boom: x"),
+    summaries = [
+        _summary(0, 0, [(2, 2, 10, {"b": 1})]),
+        _summary(1, 0, [(0, 1, 5, {"a": 2})]),
+        _summary(2, 0, [(1, 3, 7, {"a": 1, "c": 3})]),
     ]
-    samples, spec_reports, filter_counts, total_candidates, missing = _merge_records(records, 3)
-    assert [sample["episode_id"] for sample in samples] == [0, 1, 1, 1, 2, 2]
-    assert [sample["step"] for sample in samples] == [0, 0, 1, 2, 0, 1]
-    assert [report["id"] for report in spec_reports] == [0, 1, 2]
-    # 计数合并 = 单进程顺序累加；键顺序也按 spec 原始顺序（a → c → b）
-    assert dict(filter_counts) == {"a": 3, "b": 1, "c": 3}
-    assert list(filter_counts) == ["a", "c", "b"]
-    assert total_candidates == 22
+    entries, total_rows, missing = _spec_entries(summaries, 3)
+    assert [entry["spec_index"] for entry in entries] == [0, 1, 2]
+    assert [entry["rows"] for entry in entries] == [1, 3, 2]
+    assert [entry["start"] for entry in entries] == [0, 1, 4]
+    assert total_rows == 6
     assert missing == []
+    # 过滤计数合并 = 单进程顺序累加；键顺序也按 spec 原始顺序（a → c → b）
+    counter = _merge_filter_counts(entries)
+    assert dict(counter) == {"a": 3, "b": 1, "c": 3}
+    assert list(counter) == ["a", "c", "b"]
 
 
-def test_merge_records_reports_missing_specs() -> None:
-    records = [_record(0, [0], {}, 1), _record(2, [0], {}, 1)]
-    _, _, _, _, missing = _merge_records(records, 3)
+def test_spec_entries_reports_missing_specs() -> None:
+    summaries = [_summary(0, 0, [(0, 1, 1, {})]), _summary(1, 0, [(2, 1, 1, {})])]
+    _, _, missing = _spec_entries(summaries, 3)
     assert missing == [1]
+
+
+def test_spec_entries_shard_offsets_accumulate_per_shard() -> None:
+    summaries = [
+        _summary(0, 0, [(0, 2, 2, {}), (1, 1, 1, {})], shard="shard_w0_c0.npz"),
+        _summary(0, 1, [(2, 3, 3, {})], shard="shard_w0_c1.npz"),
+    ]
+    entries, total_rows, _ = _spec_entries(summaries, 3)
+    assert [(entry["shard"], entry["shard_offset"]) for entry in entries] == [
+        ("shard_w0_c0.npz", 0),
+        ("shard_w0_c0.npz", 2),
+        ("shard_w0_c1.npz", 0),
+    ]
+    assert total_rows == 6
 
 
 def test_workers_cli_default_is_auto() -> None:
@@ -94,3 +119,5 @@ def test_workers_cli_default_is_auto() -> None:
     assert int(_parse_args(["--specs", "x", "--out", "y", "--workers", "4"]).workers) == 4
     assert int(_parse_args(["--specs", "x", "--out", "y", "--workers", "1"]).workers) == 1
     assert int(_parse_args(["--specs", "x", "--out", "y", "--recycle-every", "0"]).recycle_every) == 0
+    assert _parse_args(["--specs", "x", "--out", "y"]).keep_shards is False
+    assert _parse_args(["--specs", "x", "--out", "y", "--keep-shards"]).keep_shards is True

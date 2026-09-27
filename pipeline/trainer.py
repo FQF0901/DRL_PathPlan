@@ -66,12 +66,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
+import hashlib
 import importlib
 import json
 import math
 import os
+import random
 import sys
 import time
+import zipfile
 from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +103,7 @@ __all__ = [
     "PPOTrainer",
     "BCDataset",
     "MaterializedBCDataset",
+    "episode_prefix_row_count",
     "to_device_tensor",
     "to_device_tensors",
     "DEFAULT_STAGE_BATCH_SIZE",
@@ -115,6 +120,11 @@ __all__ = [
     "evaluate_bc",
     "save_checkpoint",
     "load_checkpoint",
+    "load_training_checkpoint",
+    "load_optimizer_state",
+    "capture_rng_state",
+    "restore_rng_state",
+    "config_snapshot_hash",
     "expand_policy_action",
     "sanitize_masked_od",
     "squeeze_single_slot",
@@ -557,6 +567,14 @@ class BCConfig:
     val_indices: Optional[np.ndarray] = None
     #: 每 epoch 回调 ``(epoch_index, train_metrics, val_metrics)``（0 基；指标为 epoch 增量）。
     epoch_callback: Optional[Callable[[int, Mapping[str, Any], Mapping[str, Any]], None]] = None
+    #: resume：起始 epoch（0 基；已完成 epoch 数）→ 循环从 ``start_epoch`` 继续。
+    start_epoch: int = 0
+    #: resume：优化器 state_dict（同相位恢复；参数组不匹配时忽略并用全新优化器）。
+    optimizer_state: Optional[Mapping[str, Any]] = None
+    #: resume：RNG 状态（见 :func:`capture_rng_state`）；缺省时按 seed 重放 shuffle。
+    rng_state: Optional[Mapping[str, Any]] = None
+    #: 周期 ckpt 回调 ``(epoch_index, model, optimizer, val_metrics, rng)``（0 基本地 epoch）。
+    checkpoint_callback: Optional[Callable[..., None]] = None
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -1392,6 +1410,135 @@ def dataset_weight_report(dataset: Any, *, prefix: str = "dataset") -> Dict[str,
     return report
 
 
+# --------------------------------------------------------------------------- #
+# ``--limit-dataset``：读取阶段按 **完整 episode 前缀** 截断（2026-09-27）
+# --------------------------------------------------------------------------- #
+#
+# 背景（2026-09-27 冒烟事故）：``--limit-dataset`` 旧实现先 ``BCDataset.load`` 全量解压
+# （5k 数据集实测峰值 RSS ≈ 2.0 GB）再切片，且训练侧默认 macro/micro batch（1024/256）
+# 的 host 前向图 ≈ 10 GB → 冒烟与全量训练同样挤爆机器。这里在**解压前**只读前缀行
+# （npz 成员是 C 连续 .npy → 逐成员流式解压前 N 行，不碰余下字节），并保持行内列值不变。
+
+#: 前缀读取的分块字节数（DEFLATE 流式解压；避免一次性超大 read）。
+_NPZ_PREFIX_READ_CHUNK = 8 << 20
+
+
+def episode_prefix_row_count(episode_ids: np.ndarray, limit: int) -> int:
+    """``--limit-dataset`` 的截断口径：覆盖前 ``limit`` 行的**完整 episode 前缀**行数。
+
+    - 数据按 episode 连续追加（``tools/collect_expert.py`` 的顺序）→ 前缀 = 若干完整 episode；
+    - 取累计行数 **≤ limit** 的最长完整 episode 前缀（避免半截 episode 破坏历史/未来查表）；
+    - 首个 episode 自身就长于 ``limit`` 时保留该 episode（保证冒烟子集非空）；
+    - ``limit`` ≥ 总行数时返回总行数。
+    """
+    ids = np.asarray(episode_ids)
+    count = int(ids.shape[0])
+    if count == 0:
+        return 0
+    limit = max(int(limit), 1)
+    if limit >= count:
+        return count
+    boundaries = np.flatnonzero(ids[1:] != ids[:-1]) + 1  # episode 结束行号（升序，不含末集）
+    if boundaries.size == 0:
+        return count  # 单个 episode 且比 limit 长 → 保留完整 episode
+    first = int(boundaries[0])
+    if first > limit:
+        return first
+    index = int(np.searchsorted(boundaries, limit, side="right")) - 1
+    return int(boundaries[index])
+
+
+def _read_exact(stream: Any, size: int) -> Optional[bytes]:
+    """从（zip）流精确读 ``size`` 字节；提前 EOF → ``None``（``read`` 可能短读）。"""
+    if size <= 0:
+        return b""
+    chunks: List[bytes] = []
+    remaining = int(size)
+    while remaining > 0:
+        chunk = stream.read(min(remaining, _NPZ_PREFIX_READ_CHUNK))
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return chunks[0] if len(chunks) == 1 else b"".join(chunks)
+
+
+def _npz_episode_prefix(
+    path: Path, limit: int
+) -> Optional[Tuple[Dict[str, np.ndarray], int, int, int]]:
+    """只解压 ``path``（npz）各成员的**前 M 行**（M = :func:`episode_prefix_row_count`）。
+
+    ``npz`` 成员是标准 C 连续 ``.npy``：前 M 行 = 前 ``M × row_bytes`` 字节，zipfile 流式
+    解压只覆盖该前缀。返回 ``(arrays, M, total_rows, total_episodes)``；结构不适用
+    （非 zip / Fortran order / 行数不一致 / 读截断）→ ``None``（调用方回退全量加载 + 同口径
+    内存截断）。
+    """
+    if not zipfile.is_zipfile(path):
+        return None
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            if any(name.endswith(".npy") and "/" in name for name in names):
+                return None  # 成员在子目录（key 含 "/"）→ 结构不符，回退全量加载
+            members = {
+                name[: -len(".npy")]: name for name in names if name.endswith(".npy")
+            }
+            episode_name = members.get("episode_id")
+            if episode_name is None:
+                return None
+            with archive.open(episode_name) as stream:
+                version = np.lib.format.read_magic(stream)
+                shape, fortran_order, dtype = np.lib.format._read_array_header(stream, version)
+                if fortran_order or len(shape) != 1 or dtype.hasobject or dtype.kind not in ("i", "u"):
+                    return None
+                total = int(shape[0])
+                buffer = _read_exact(stream, total * dtype.itemsize)
+                if buffer is None:
+                    return None
+                episode_ids = np.frombuffer(buffer, dtype=dtype, count=total)
+            total_episodes = int(np.unique(episode_ids).size)
+            rows = episode_prefix_row_count(episode_ids, int(limit))
+            if rows <= 0:
+                return None
+            arrays: Dict[str, np.ndarray] = {"episode_id": np.array(episode_ids[:rows], copy=True)}
+            for key, name in members.items():
+                if key == "episode_id":
+                    continue
+                with archive.open(name) as stream:
+                    version = np.lib.format.read_magic(stream)
+                    shape, fortran_order, dtype = np.lib.format._read_array_header(stream, version)
+                    if fortran_order or not shape or dtype.hasobject or int(shape[0]) < rows:
+                        return None
+                    row_items = 1
+                    for dim in shape[1:]:
+                        row_items *= int(dim)
+                    buffer = _read_exact(stream, rows * row_items * dtype.itemsize)
+                    if buffer is None:
+                        return None
+                    arrays[key] = np.array(
+                        np.frombuffer(buffer, dtype=dtype, count=rows * row_items).reshape(
+                            (rows,) + tuple(int(dim) for dim in shape[1:])
+                        ),
+                        copy=True,  # 与 np.load 语义一致：连续可写
+                    )
+            return arrays, rows, total, total_episodes
+    except (OSError, ValueError, EOFError, KeyError, TypeError, IndexError, zipfile.BadZipFile):
+        return None
+
+
+def _log_dataset_limit(
+    path: Path, limit: int, rows: int, total: int, kept_episode_ids: np.ndarray, total_episodes: int
+) -> None:
+    """打印 ``limit=N → rows=M``（含 episode 数；物化/val 切分都基于该子集）。"""
+    kept = np.asarray(kept_episode_ids)
+    kept_episodes = int(np.unique(kept).size) if rows > 0 else 0
+    print(
+        f"[dataset] limit={int(limit)} → rows={int(rows)}/{int(total)}"
+        f"（episodes={kept_episodes}/{int(total_episodes)}，按完整 episode 前缀截断；{path}）",
+        flush=True,
+    )
+
+
 class BCDataset:
     """按帧存 + 在线拼 6 帧历史的 BC/回放数据集（schema = ``tools/collect_expert.py``）。
 
@@ -1444,8 +1591,13 @@ class BCDataset:
         )
 
     @classmethod
-    def load(cls, path: str) -> "BCDataset":
-        """``path`` 可以是 npz 文件或包含 ``expert_bc.npz`` 的目录。"""
+    def load(cls, path: str, *, limit: Optional[int] = None) -> "BCDataset":
+        """``path`` 可以是 npz 文件或包含 ``expert_bc.npz`` 的目录。
+
+        ``limit``（``--limit-dataset``，冒烟用）：**读取阶段**按完整 episode 前缀截断
+        （口径见 :func:`episode_prefix_row_count`；只解压前 M 行 → 物化/val 切分/权重
+        统计都基于该子集，列语义不变）。不可前缀读取时回退「全量加载 + 同口径内存截断」。
+        """
         target = Path(path)
         if target.is_dir():
             target = target / "expert_bc.npz"
@@ -1470,9 +1622,38 @@ class BCDataset:
                     RuntimeWarning,
                     stacklevel=2,
                 )
+        if limit is not None:
+            prefixed = _npz_episode_prefix(target, int(limit))
+            if prefixed is not None:
+                arrays, rows, total, total_episodes = prefixed
+                _log_dataset_limit(
+                    target, int(limit), rows, total, arrays["episode_id"], total_episodes
+                )
+                return cls(arrays, meta)
+            print(
+                f"[dataset] 警告：{target} 不支持前缀读取（非 npz/C 连续）→ 全量加载后按 "
+                "episode 前缀截断（峰值 RSS 不随 limit 下降）",
+                flush=True,
+            )
         with np.load(target) as payload:
             arrays = {key: payload[key] for key in payload.files}
-        return cls(arrays, meta)
+        dataset = cls(arrays, meta)
+        if limit is not None:
+            rows = episode_prefix_row_count(dataset.arrays["episode_id"], int(limit))
+            if rows < dataset.count:
+                _log_dataset_limit(
+                    target,
+                    int(limit),
+                    rows,
+                    dataset.count,
+                    dataset.arrays["episode_id"][:rows],
+                    int(np.unique(dataset.arrays["episode_id"]).size),
+                )
+                keep = np.arange(rows, dtype=np.int64)
+                dataset = cls(
+                    {key: value[keep] for key, value in dataset.arrays.items()}, dataset.meta
+                )
+        return dataset
 
     def _frame_obs(self, item: int) -> Dict[str, Any]:
         """单帧当前通道 + mask（不拼历史）。"""
@@ -1902,6 +2083,9 @@ def pretrain_bc(
     model.to(device).train()
     frozen = apply_freeze_prefixes(model, config.freeze_prefixes)
     optimizer = build_optimizer(model, config.lr)
+    if config.optimizer_state:
+        load_optimizer_state(optimizer, config.optimizer_state, logger=logger)
+        move_optimizer_state_to_device(optimizer)  # 跨设备：状态张量跟随参数设备（幂等加固）
     if config.train_indices is not None:
         indices = np.asarray(config.train_indices, dtype=np.int64).reshape(-1)
         if indices.size == 0:
@@ -1915,7 +2099,19 @@ def pretrain_bc(
     )
     if val_indices is not None and val_indices.size == 0:
         val_indices = None
+    start_epoch = max(0, min(int(config.start_epoch or 0), int(config.epochs)))
+    if start_epoch:
+        logger(f"[bc] resume：跳过已完成 {start_epoch}/{int(config.epochs)} 个 epoch（phase={config.phase}）")
     rng = np.random.default_rng(config.seed)
+    if start_epoch:
+        if config.rng_state:
+            # 周期 ckpt 的 RNG 状态：数据顺序/前向随机性逐位续跑
+            restore_rng_state(config.rng_state, numpy_generator=rng)
+        elif config.shuffle:
+            # 无 RNG 状态（旧 ckpt/未捕获）→ seed 重放：跳过已完成 epoch 的 shuffle
+            for _ in range(start_epoch):
+                probe = indices.copy()
+                rng.shuffle(probe)
     metrics: Dict[str, Any] = {
         "epochs": int(config.epochs),
         "batches": 0,
@@ -2091,7 +2287,7 @@ def pretrain_bc(
             f"[bc] 梯度累积：宏 batch={macro_size} · micro batch={micro_size}"
             f"（phase={config.phase}；损失按宏口径精确缩放）"
         )
-    for epoch in range(int(config.epochs)):
+    for epoch in range(start_epoch, int(config.epochs)):
         order = indices.copy()
         if config.shuffle:
             rng.shuffle(order)
@@ -2335,7 +2531,7 @@ def pretrain_bc(
             "bc_batches_count": int(batches),
             "last_epoch": epoch + 1,
         }
-        if epoch == 0:
+        if epoch == start_epoch:
             # 阶段常量只记一次（监控降噪；完整值在 metrics.json phase 结果里）
             epoch_update.update(
                 {
@@ -2363,6 +2559,8 @@ def pretrain_bc(
             metrics["val"] = val_metrics
         if config.epoch_callback is not None:
             config.epoch_callback(epoch, dict(epoch_update), dict(val_metrics))
+        if config.checkpoint_callback is not None:
+            config.checkpoint_callback(epoch, model, optimizer, dict(val_metrics), rng)
         val_text = (
             f" val={val_metrics['bc_loss']:.4f}(traj={val_metrics['bc_traj_loss']:.4f}"
             f"/action={val_metrics['bc_action_loss']:.4f}/router={val_metrics['bc_router_loss']:.4f})"
@@ -3766,20 +3964,180 @@ class PPOTrainer:
 # checkpoint
 # --------------------------------------------------------------------------- #
 
+def config_snapshot_hash(config: Mapping[str, Any]) -> str:
+    """配置快照哈希（sha256 前 16 hex）：canonical JSON（键排序、非 JSON 值 ``str`` 化）。"""
+    canonical = json.dumps(dict(config or {}), sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def capture_rng_state(numpy_generator: Optional[np.random.Generator] = None) -> Dict[str, Any]:
+    """捕获 RNG 状态（``torch``/``numpy``/``random``；可选训练用 ``default_rng`` 生成器）。
+
+    周期 ckpt 恢复用：``numpy_generator`` 是训练数据顺序的来源（每个 epoch 一次 shuffle /
+    permutation），不捕获它就只能靠 seed 重放。CUDA 未初始化/无 torch 时对应键省略。
+    """
+    state: Dict[str, Any] = {
+        "numpy": np.random.get_state(),
+        "random": random.getstate(),
+    }
+    if numpy_generator is not None:
+        try:
+            state["numpy_generator"] = copy.deepcopy(numpy_generator.bit_generator.state)
+        except Exception:  # noqa: BLE001 - 非标准 bit_generator → 退化到重放
+            pass
+    try:
+        import torch
+
+        state["torch"] = torch.get_rng_state()
+        if torch.cuda.is_available():
+            try:
+                state["torch_cuda"] = torch.cuda.get_rng_state_all()
+            except Exception:  # noqa: BLE001 - CUDA 未初始化
+                pass
+    except Exception:  # noqa: BLE001 - 无 torch 环境
+        pass
+    return state
+
+
+def restore_rng_state(
+    state: Optional[Mapping[str, Any]], numpy_generator: Optional[np.random.Generator] = None
+) -> None:
+    """恢复 :func:`capture_rng_state` 的状态（缺失键跳过；非法状态忽略并告警）。"""
+    if not state:
+        return
+    try:
+        import torch
+
+        if state.get("torch") is not None:
+            value = state["torch"]
+            torch.set_rng_state(value.to("cpu") if hasattr(value, "to") else value)
+        if state.get("torch_cuda") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([item.to("cpu") if hasattr(item, "to") else item
+                                          for item in state["torch_cuda"]])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ckpt] torch RNG 状态恢复失败（{type(exc).__name__}: {exc}）→ 保持当前状态", flush=True)
+    if numpy_generator is not None and state.get("numpy_generator") is not None:
+        try:
+            numpy_generator.bit_generator.state = state["numpy_generator"]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ckpt] numpy 生成器状态恢复失败（{type(exc).__name__}: {exc}）→ 依赖 seed 重放", flush=True)
+    if state.get("numpy") is not None:
+        try:
+            np.random.set_state(state["numpy"])
+        except Exception:  # noqa: BLE001
+            pass
+    if state.get("random") is not None:
+        try:
+            random.setstate(state["random"])
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def move_optimizer_state_to_device(optimizer: "torch.optim.Optimizer") -> int:
+    """把优化器状态张量迁到**各参数当前所在设备**（跨设备 resume 必需；幂等，返回迁移个数）。
+
+    必须在 ``model.to(device)`` **之后**调用：优化器通常在 CPU 上创建/恢复状态，随后模型才搬到
+    CUDA；若顺序颠倒，Adam 会在首个 step 抛
+    ``RuntimeError: Expected all tensors to be on the same device, cuda:0 and cpu``（2026-09-27 事故）。
+    """
+    params_flat = [param for group in optimizer.param_groups for param in group.get("params", [])]
+    fallback = params_flat[0].device if params_flat else None
+    moved = 0
+    for key, entry in list((optimizer.state or {}).items()):
+        if not isinstance(entry, Mapping):
+            continue
+        device = None
+        try:
+            index = int(key)  # state_dict 载入后键是展开参数的下标
+            if 0 <= index < len(params_flat):
+                device = params_flat[index].device
+        except (TypeError, ValueError):
+            device = None
+        if device is None:
+            device = fallback
+        if device is None:
+            continue
+        for name, value in list(entry.items()):
+            if torch.is_tensor(value) and value.device != device:
+                entry[name] = value.to(device)
+                moved += 1
+    return moved
+
+
+def load_optimizer_state(
+    optimizer: "torch.optim.Optimizer",
+    state: Optional[Mapping[str, Any]],
+    *,
+    logger: Callable[[str], None] = print,
+) -> bool:
+    """把 ckpt 里的优化器状态载入 ``optimizer``；不可用/不匹配时告警并返回 False（用全新优化器）。
+
+    ⚠️ **跨设备**：ckpt 可能来自别的设备（如 GPU 训练 → `torch.load(map_location="cpu")` 载入），
+    载入前必须把状态张量搬到**对应参数所在设备**，否则第一个 step 会
+    ``RuntimeError: Expected all tensors to be on the same device``（2026-09-27 事故）。
+    """
+    if not state:
+        return False
+    try:
+        payload = dict(state)
+        # torch 约定：state 的键是 param_groups 展开后的参数下标 → 与 params_flat 一一对应
+        params_flat = [p for group in optimizer.param_groups for p in group.get("params", [])]
+        fallback_device = params_flat[0].device if params_flat else None
+        entries = payload.get("state")
+        if isinstance(entries, Mapping):
+            for key, entry in entries.items():
+                if not isinstance(entry, Mapping):
+                    continue
+                device = fallback_device
+                try:
+                    index = int(key)
+                    if 0 <= index < len(params_flat):
+                        device = params_flat[index].device
+                except (TypeError, ValueError):
+                    pass
+                if device is None:
+                    continue
+                for name, value in list(entry.items()):
+                    if torch.is_tensor(value) and value.device != device:
+                        entry[name] = value.to(device)
+        optimizer.load_state_dict(payload)
+        move_optimizer_state_to_device(optimizer)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 参数组/形状不匹配（如阶段切换）→ 全新优化器
+        logger(f"[ckpt] 优化器状态载入失败（{type(exc).__name__}: {exc}）→ 使用全新优化器")
+        return False
+
+
 def save_checkpoint(
     path: str,
     model: "nn.Module",
     *,
     meta: Optional[Dict[str, Any]] = None,
     optimizer: Optional["torch.optim.Optimizer"] = None,
+    epoch: Optional[int] = None,
+    val_metrics: Optional[Mapping[str, Any]] = None,
+    rng_state: Optional[Mapping[str, Any]] = None,
+    config_hash: Optional[str] = None,
 ) -> str:
-    """保存 ``model``（+ 可选 optimizer/meta）到 torch 文件。"""
+    """保存 checkpoint（**固定键集**，周期 ckpt 与 ``final.pt`` 同格式/payload）。
+
+    payload 键：``model``（state_dict）、``optimizer``（state_dict 或 None）、``epoch``
+    （已完成的全局 epoch 数；resume 从 ``epoch+1`` 继续）、``val_metrics``、``rng_state``
+    （见 :func:`capture_rng_state`）、``config_hash``（见 :func:`config_snapshot_hash`）、
+    ``meta``。键集固定 → ``torch.load(...).keys()`` 可跨文件比较。
+    """
     _require_torch()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, Any] = {"model": model.state_dict(), "meta": dict(meta or {})}
-    if optimizer is not None:
-        payload["optimizer"] = optimizer.state_dict()
+    payload: Dict[str, Any] = {
+        "model": model.state_dict(),
+        "meta": dict(meta or {}),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "epoch": None if epoch is None else int(epoch),
+        "val_metrics": dict(val_metrics or {}),
+        "rng_state": dict(rng_state or {}),
+        "config_hash": config_hash,
+    }
     torch.save(payload, target)
     return str(target)
 
@@ -3792,6 +4150,31 @@ def load_checkpoint(path: str, model: "nn.Module", *, strict: bool = True) -> Di
     meta = dict(payload.get("meta") or {})
     meta["missing_keys"], meta["unexpected_keys"] = list(missing), list(unexpected)
     return meta
+
+
+def load_training_checkpoint(
+    path: str, model: "nn.Module", *, strict: bool = True
+) -> Dict[str, Any]:
+    """加载训练恢复用 checkpoint（model + 可选优化器/epoch/val/rng/配置哈希）。
+
+    返回 dict：``meta``/``epoch``/``val_metrics``/``rng_state``/``config_hash``/
+    ``optimizer``（原始 state_dict，交给调用方在优化器建好后经
+    :func:`load_optimizer_state` 载入；``None`` = 无）/``missing_keys``/``unexpected_keys``。
+    旧格式（仅 ``model``+``meta``）兼容：缺失字段为 None/空。
+    """
+    _require_torch()
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    missing, unexpected = model.load_state_dict(payload["model"], strict=strict)
+    return {
+        "meta": dict(payload.get("meta") or {}),
+        "epoch": None if payload.get("epoch") is None else int(payload["epoch"]),
+        "val_metrics": dict(payload.get("val_metrics") or {}),
+        "rng_state": dict(payload.get("rng_state") or {}),
+        "config_hash": payload.get("config_hash"),
+        "optimizer": payload.get("optimizer"),
+        "missing_keys": list(missing),
+        "unexpected_keys": list(unexpected),
+    }
 
 
 # --------------------------------------------------------------------------- #
