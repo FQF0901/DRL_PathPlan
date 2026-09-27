@@ -328,6 +328,8 @@ intersection 0.25、roundabout 0.25；curve / uturn / tollgate 仍 **0.00**（to
 4. **基础设施首次全链路生效**：`ckpt_every=5` + `RESUME=` 在真实被中断（harness 会话轮换静默杀）后从 `ckpt_epoch010.pt`
    原地续跑 11–20（模型/优化器/RNG/val 状态恢复；含 Adam 设备迁移修复 `move_optimizer_state_to_device`）；
    后台长任务改为 `setsid` 分离 + 每阶段单日志（`[detach]`/`[exit]` 证据行）。
+   **存活验证（2026-09-27）**：`setsid` 分离的金丝雀连续运行 **75.0 min**（>历史 ~64 min 杀点）零中断
+   （101 ticks、最大间隔 45 s）→ 根因修复确认（harness 只清理自身作业进程组，独立会话不受影响）。
 5. 产物：`runs/BTC20260927-0920_stageA`（A 1–10）+ `runs/BTC20260927-1019_stageA_p4`（A 11–20）、
    `runs/BTC20260927-1100_stageB`（B）、`runs/BTC20260927-1147_eval_lqr50`、`runs/BTC20260927-1149_eval_baseline50`、
    报告 `runs/BTC20260927-1150_ilreport_5k`（`il_report.md/json` + 11 张 PNG）。
