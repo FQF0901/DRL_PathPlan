@@ -5,7 +5,7 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
 --------------------------------------------------------------------
 用户只关心 **OD/EGO 的 loss 与 KPI + router 的 loss 与 KPI**，其余不再记录：
 
-- 训练侧照旧喂 canonical tag（``train/wm_loss`` / ``train/primary_bc_router_soft_ce`` ...），
+- 训练侧照旧喂 canonical tag（``train/wm_loss`` / ``train/primary_bc_router_ce`` ...），
   monitor 落盘前按 :func:`_slim_tag` **重命名**为保留清单（``wm/...`` / ``val/...`` /
   ``ego/...`` / ``router/...`` / ``planner/...``）；**未列入的 tag 直接丢弃**（TB/CSV 都不写）：
   ``slice/*``、``label/*``、``*/n_updates``、计数/权重和、``cv_ade``/``cv_fde`` 独立 tag、
@@ -14,10 +14,9 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
 - ``legacy_tags=True``（CLI ``--monitor-legacy-tags``，默认关）= **旧行为原样落盘**
   （全部 tag + 旧多线分组），供需要时回退/对比；
 - tensorboard 写入只服务成图：多线族在主 run 内逐 sub 写 ``add_scalar("<main>/<sub>")``
-  （``val/od/loss`` h1..h6、``val/od/ade_m`` h1..h6+cv_h1..cv_h6、``val/ego_next/loss`` h1..h6、
-  ``ego/traj/mae_m`` 与 ``val/ego/traj/mae_m`` h1..h6、``router/<phase>/expert_mix_weight`` e0..e7、
-  ``planner/<phase>/loss_terms`` loss/traj/action/router 及其 ``val/`` 孪生），标量写单线
-  ``add_scalar``；**不再用 torch ``add_scalars``**（那会为每个 sub 建 ``<main>_<sub>/``
+  （``val/od/ade_m`` / ``val/od/fde_m`` 各 h1..h6+cv_h1..cv_h6、``ego/traj/mae_m`` 与
+  ``val/ego/traj/mae_m`` h1..h6、``loss/planner/<phase>`` total/traj/action/router 及其
+  ``val/`` 孪生），标量写单线 ``add_scalar``；**不再用 torch ``add_scalars``**（那会为每个 sub 建 ``<main>_<sub>/``
   sub-run 目录）——同一事件文件内 tag 后缀不同，TB 标量面板自动并成一张多线图；
   同族 <2 个 sub 不写（避免单点噪声）；
 - CSV 长表 ``step,tag,value`` 保留**全部**瘦身后 tag（供 ``tools/il_report.py`` /
@@ -162,39 +161,46 @@ def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, A
 # ``add_scalar(tag, value)``。
 
 #: 旧 canonical tag → 瘦身后独立标量（逐 key 直查）
+#: 命名纪律（2026-09-27 lane B）：``loss/…`` 只放**训练目标**；KPI 只放度量（ade/fde/err/acc/ce…）；
+#: 任何 val 口径曲线不得命名为 loss；留出集统一 ``val/`` 命名空间。
 _SLIM_DIRECT: Dict[str, str] = {
-    f"{_TRAIN_PREFIX}/wm_loss": "wm/loss",
+    f"{_TRAIN_PREFIX}/wm_loss": "loss/wm",
+    f"{_TRAIN_PREFIX}/wm_loss_od": "loss/od",
+    f"{_TRAIN_PREFIX}/wm_loss_ego_next": "loss/ego_next",
+    f"{_TRAIN_PREFIX}/wm_loss_presence": "loss/presence",
+    f"{_TRAIN_PREFIX}/wm_loss_entry": "loss/entry",
     f"{_TRAIN_PREFIX}/presence_auc": "val/od/presence_auc",   # Stage A 在 val 子集上评估 → val 命名空间
     f"{_TRAIN_PREFIX}/entry_auc": "val/od/entry_auc",
+    f"{_TRAIN_PREFIX}/ego_action_err_weighted": "val/ego/action/err_weighted",  # A 的 ego KPI（val 子集）
+    f"{_TRAIN_PREFIX}/ego_traj_fde_m": "val/ego/traj/fde_m",
 }
 
-#: 逐 horizon 分组窗口 tag（Stage A OD/ADE/ego_next + Stage B ego traj MAE）
+#: 逐 horizon 分组窗口 tag（Stage A OD ADE/FDE + Stage B ego traj MAE）
 #: ``horizon/h{k}/{metric}/mean`` → ``<main>/<sub>``；Stage A 族直接在 ``val/`` 命名空间，
 #: ``val/horizon/...`` 输入（Stage B 留出）经 ``val/`` 前缀加到 base tag 上。
+#: （loss/ego_next_loss 曲线已按 lane B 删除——训练损失只走 ``loss/…`` 标量。）
 _HORIZON_RE = re.compile(r"^(?P<val>%s/)?%s/h(?P<k>\d+)/(?P<metric>[^/]+)/mean$" % (_VAL_PREFIX, _HORIZON_PREFIX))
 _HORIZON_RENAMES: Dict[str, Tuple[str, str]] = {
-    "loss": ("val/od/loss", "h{k}"),                   # Stage A：WM 对 OD 未来位置预测损失（val 子集）
     "ade": ("val/od/ade_m", "h{k}"),                   # Stage A：OD ADE（米）
+    "fde": ("val/od/fde_m", "h{k}"),                   # Stage A：OD FDE（米，末点）
     "cv_ade": ("val/od/ade_m", "cv_h{k}"),             # Stage A：匀速基线 ADE（同一族另一组线）
-    "ego_next_loss": ("val/ego_next/loss", "h{k}"),    # Stage A：plan head 下一时刻 ego 损失
+    "cv_fde": ("val/od/fde_m", "cv_h{k}"),             # Stage A：匀速基线 FDE
     "traj_mae_m": ("ego/traj/mae_m", "h{k}"),          # Stage B：ego 6 点轨迹逐 horizon 加权 MAE
 }
 
 #: Stage B 相位标量（``train|val/<phase>_bc_*``）；``{phase}`` 插值，val 命名空间加 ``val/`` 前缀
 _BC_RE = re.compile(r"^(?P<phase>primary|specific)_(?P<key>.+)$")
 _BC_SCALAR_RENAMES: Dict[str, str] = {
-    "bc_loss": "planner/{phase}/loss_terms/loss",
-    "bc_traj_loss": "planner/{phase}/loss_terms/traj",
-    "bc_action_loss": "planner/{phase}/loss_terms/action",
-    "bc_router_loss": "planner/{phase}/loss_terms/router",
+    "bc_loss": "loss/planner/{phase}/total",
+    "bc_traj_loss": "loss/planner/{phase}/traj",
+    "bc_action_loss": "loss/planner/{phase}/action",
+    "bc_router_loss": "loss/planner/{phase}/router",
     "bc_action_err_weighted_mean": "ego/action/err_weighted",
-    "bc_router_soft_ce": "router/soft_ce",
-    "bc_router_soft_kl": "router/soft_kl",
-    "bc_router_top1_cluster_acc": "router/top1_cluster_acc",
-    "bc_router_nmi": "router/nmi",
-    "bc_router_entropy": "router/entropy",
+    "bc_traj_fde_m": "ego/traj/fde_m",
+    "bc_router_ce": "router/ce",
+    "bc_router_acc": "router/acc",
+    "bc_router_acc_majority": "router/acc_majority",
 }
-_BC_EXPERT_RE = re.compile(r"^bc_router_expert_mix_weight_(?P<index>\d+)$")
 
 
 def _slim_tag(tag: str) -> Optional[str]:
@@ -225,22 +231,16 @@ def _slim_tag(tag: str) -> Optional[str]:
     phase, key = match.group("phase"), match.group("key")
     if key in _BC_SCALAR_RENAMES:
         return f"{prefix}{_BC_SCALAR_RENAMES[key].format(phase=phase)}"
-    match = _BC_EXPERT_RE.match(key)
-    if match is not None:
-        return f"{prefix}router/{phase}/expert_mix_weight/e{match.group('index')}"
     return None
 
 
 #: 瘦身模式 tensorboard 多线族：``main``（不含 ``val/`` 命名空间）→ 合法 sub 正则
 _TB_FAMILIES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
-    ("od/loss", re.compile(r"^h[1-6]$")),
     ("od/ade_m", re.compile(r"^(cv_)?h[1-6]$")),
-    ("ego_next/loss", re.compile(r"^h[1-6]$")),
+    ("od/fde_m", re.compile(r"^(cv_)?h[1-6]$")),
     ("ego/traj/mae_m", re.compile(r"^h[1-6]$")),
-    ("router/primary/expert_mix_weight", re.compile(r"^e[0-7]$")),
-    ("router/specific/expert_mix_weight", re.compile(r"^e[0-7]$")),
-    ("planner/primary/loss_terms", re.compile(r"^(loss|traj|action|router)$")),
-    ("planner/specific/loss_terms", re.compile(r"^(loss|traj|action|router)$")),
+    ("loss/planner/primary", re.compile(r"^(total|traj|action|router)$")),
+    ("loss/planner/specific", re.compile(r"^(total|traj|action|router)$")),
 )
 
 

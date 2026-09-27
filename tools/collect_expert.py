@@ -110,7 +110,7 @@ from contextlib import ExitStack
 from multiprocessing import get_context
 from pathlib import Path
 from queue import Empty
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -1626,6 +1626,59 @@ def save_dataset(
 
 
 # --------------------------------------------------------------------------- #
+# 聚类硬标签 sidecar（lane B ②）：生数据集时算一次
+# --------------------------------------------------------------------------- #
+
+#: 聚类 spec 默认路径（存在且 k = net router 宽度时自动批注；可用环境变量覆盖）
+DEFAULT_CLUSTER_CONFIG = os.environ.get("CLUSTER_CONFIG", "config/clusters/default.yaml")
+#: net router 宽度（与 pipeline/trainer 的 8 路 router 对齐；不匹配则跳过并提示）
+ROUTER_WIDTH = 8
+
+
+def _annotate_sidecar(out_dir: Any, arrays: Mapping[str, np.ndarray], rows: int) -> Optional[str]:
+    """有可用 spec 时对刚写出的数据集批注 sidecar（``cluster_v<k>_assignments.npz``）。
+
+    失败只警告（数据集已落盘，不因批注失败丢弃）；生成命令在警告里给出。
+    """
+    try:
+        from pipeline.clusters import annotate_assignments, load as load_clusters
+        from pipeline.trainer import BCDataset
+
+        if not Path(DEFAULT_CLUSTER_CONFIG).is_file():
+            print(
+                f"[collect_expert] 提示：未找到聚类 spec（{DEFAULT_CLUSTER_CONFIG}）→ 跳过 sidecar 批注；"
+                "Stage B 训练前需先跑 tools/annotate_clusters.py",
+                flush=True,
+            )
+            return None
+        spec = load_clusters(DEFAULT_CLUSTER_CONFIG)
+        if int(getattr(spec, "k", 0) or 0) != ROUTER_WIDTH:
+            print(
+                f"[collect_expert] 提示：聚类 k={getattr(spec, 'k', 0)} != router 宽度 {ROUTER_WIDTH} → 跳过 sidecar",
+                flush=True,
+            )
+            return None
+        dataset = BCDataset(dict(arrays), {"obs_fingerprint": _obs_fingerprint()})
+        path = annotate_assignments(
+            dataset_dir=out_dir,
+            count=int(rows),
+            obs_batch_fn=dataset.build_obs_batch,
+            spec=spec,
+            dataset_meta=dataset.meta,
+        )
+        print(f"[collect_expert] 聚类硬标签 sidecar → {path}", flush=True)
+        return str(path)
+    except Exception as exc:  # noqa: BLE001 - 批注失败不阻塞采集
+        print(
+            f"[collect_expert] 警告：sidecar 批注失败（{type(exc).__name__}: {exc}）；"
+            f"可稍后补：tools/venv-python tools/annotate_clusters.py --dataset {out_dir} "
+            f"--cluster-config {DEFAULT_CLUSTER_CONFIG}",
+            flush=True,
+        )
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
 
@@ -1890,6 +1943,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report=report,
         num_slots=int(arrays["od"].shape[1]) if "od" in arrays else 16,
     )
+    # 聚类硬标签 sidecar（lane B ②）：有可用 spec 时自动批注一次（Stage B 训练只读 sidecar）
+    _annotate_sidecar(out_dir, arrays, int(stored_rows))
     if args.keep_shards:
         print(f"[collect_expert] 保留分片目录 {shard_dir}（--keep-shards）", flush=True)
     else:

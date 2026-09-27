@@ -23,13 +23,14 @@ import torch
 from net.model import DrivingModel
 from pipeline.stages import _episode_split, _parse_args, run_stage_b
 from pipeline.trainer import BCConfig, BCDataset, evaluate_bc, pretrain_bc
-from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
+from tests.v2_synthetic import TINY_MODEL_YAML, annotate_router_sidecar, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
 
 def _dataset(tmp_path: Path, *, episodes: int = 6, steps_per_episode: int = 6) -> BCDataset:
     directory = write_v2_dataset(tmp_path / "bc_v2", episodes=episodes, steps_per_episode=steps_per_episode)
+    annotate_router_sidecar(directory)  # Stage B 只读 sidecar（lane B ①）
     return BCDataset.load(str(directory))
 
 
@@ -69,8 +70,8 @@ def test_pretrain_bc_epoch_callback_train_increment_and_val_holdout(tmp_path: Pa
     train_idx, val_idx, val_episodes = _episode_split(dataset.arrays["episode_id"], 0.34, seed=0)
     assert val_idx.size > 0 and train_idx.size > 0
 
-    def soft_targets(obs_batch):  # noqa: ANN001 - 聚类 lane 的 stub（均匀软目标）
-        return np.full((obs_batch["ego"].shape[0], 8), 1.0 / 8.0, dtype=np.float32)
+    def cluster_labels(obs_batch):  # noqa: ANN001 - 聚类 lane 的 stub（全 0 类硬标签）
+        return np.zeros(obs_batch["ego"].shape[0], dtype=np.int64)
 
     calls: list = []
     config = BCConfig(
@@ -81,7 +82,7 @@ def test_pretrain_bc_epoch_callback_train_increment_and_val_holdout(tmp_path: Pa
         ),
     )
     metrics = pretrain_bc(
-        model, dataset, config, logger=lambda _: None, router_soft_targets_fn=soft_targets
+        model, dataset, config, logger=lambda _: None, router_cluster_fn=cluster_labels
     )
 
     assert [call[0] for call in calls] == [0, 1], "每 epoch 必须回调一次"
@@ -91,12 +92,14 @@ def test_pretrain_bc_epoch_callback_train_increment_and_val_holdout(tmp_path: Pa
         "bc_loss", "bc_traj_loss", "bc_action_loss", "bc_router_loss",
         "bc_action_err_weighted_mean", "bc_action_err_slice_brake_weighted_mean",
         "bc_action_err_label_on_curve", "bc_traj_mse_h1", "bc_traj_mae_h1_m",
-        "bc_traj_err_h6", "bc_router_soft_ce",
+        "bc_traj_err_h6", "bc_traj_fde_m", "bc_router_ce", "bc_router_acc",
+        "bc_router_acc_majority",
     ):
         assert key in train_metrics, f"训练 epoch 增量缺少 {key}"
     # val：同族标量 + 分组（per_horizon/slices/labels）
-    for key in ("bc_loss", "bc_traj_mse", "bc_traj_mae_m", "bc_action_err_weighted_mean",
-                "bc_router_soft_ce", "bc_action_err_count"):
+    for key in ("bc_loss", "bc_traj_mse", "bc_traj_mae_m", "bc_traj_fde_m",
+                "bc_action_err_weighted_mean", "bc_router_ce", "bc_router_acc",
+                "bc_action_err_count"):
         assert key in val_metrics, f"val 指标缺少 {key}"
     assert set(val_metrics["per_horizon"]) == {f"h{k}" for k in range(1, 7)}
     assert "brake" in val_metrics["slices"] and "on_curve" in val_metrics["labels"]
@@ -130,6 +133,7 @@ def test_evaluate_bc_deterministic_and_side_effect_free(tmp_path: Path) -> None:
 def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     """BC_EPOCHS=4（2 primary + 2 specific）→ monitor step 1..4 单调，val 与 train 同族。"""
     dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=6, steps_per_episode=6)
+    annotate_router_sidecar(dataset_dir)
     out_dir = tmp_path / "stage_b"
     args = _parse_args([
         "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
@@ -145,30 +149,33 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
 
     series = _csv_series(out_dir)
     # 逐 epoch step 轴：primary 1..2、specific 3..4（全局单调；step 0 = 阶段元数据）
-    assert sorted(series["planner/primary/loss_terms/loss"]) == [1, 2]
-    assert sorted(series["planner/specific/loss_terms/loss"]) == [3, 4]
-    assert sorted(series["val/planner/primary/loss_terms/loss"]) == [1, 2]
-    assert sorted(series["val/planner/specific/loss_terms/loss"]) == [3, 4]
+    assert sorted(series["loss/planner/primary/total"]) == [1, 2]
+    assert sorted(series["loss/planner/specific/total"]) == [3, 4]
+    assert sorted(series["val/loss/planner/primary/total"]) == [1, 2]
+    assert sorted(series["val/loss/planner/specific/total"]) == [3, 4]
     # 逐 horizon 族每相位每 epoch 一点（train 4 点 + val 4 点）
     assert sorted(series["ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
     assert sorted(series["val/ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
     # 真留出：val 与 train 数值不同（同 step 同族指标）
     for train_tag, val_tag in (
-        ("planner/primary/loss_terms/loss", "val/planner/primary/loss_terms/loss"),
+        ("loss/planner/primary/total", "val/loss/planner/primary/total"),
         ("ego/traj/mae_m/h1", "val/ego/traj/mae_m/h1"),
         ("ego/action/err_weighted", "val/ego/action/err_weighted"),
+        ("ego/traj/fde_m", "val/ego/traj/fde_m"),
     ):
         for step in (1, 2):
             assert series[val_tag][step] != series[train_tag][step], (train_tag, step)
-    # Tier-1 保留：router KPI + 专家混合权重 + 动作误差主口径
-    for tag in ("router/soft_ce", "router/soft_kl", "router/entropy",
-                "router/primary/expert_mix_weight/e0", "ego/action/err_weighted"):
+    # Tier-1 保留：router 硬标签 KPI + 动作误差主口径 + 末点 FDE
+    for tag in ("router/ce", "router/acc", "router/acc_majority",
+                "ego/action/err_weighted", "ego/traj/fde_m"):
         assert tag in series, f"保留 tag 缺失：{tag}"
-    # 瘦身：旧 tag 族 / n_updates / count / slice / label 一个不留
+    # 瘦身：旧 tag 族 / 软目标 router / n_updates / count / slice / label 一个不留
     assert not [tag for tag in series
                 if tag.startswith(("horizon/", "slice/", "label/", "train/",
-                                   "val/horizon/", "val/slice/", "val/label/"))]
-    assert not [tag for tag in series if "/bc_" in tag or tag.endswith(("/count", "/n_updates"))]
+                                   "val/horizon/", "val/slice/", "val/label/",
+                                   "planner/", "stageB/", "val_planner/", "val_stageB/"))]
+    assert not [tag for tag in series
+                if "soft_" in tag or "expert_mix" in tag or tag.endswith(("/count", "/n_updates"))]
     # epoch 行打印 val=
     captured = capsys.readouterr().out
     assert "val=" in captured, "epoch 行必须打印 val= 摘要"
@@ -177,6 +184,7 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
 def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> None:
     """``--monitor-legacy-tags``（回退）：旧 canonical tag 全量落 CSV。"""
     dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=4, steps_per_episode=6)
+    annotate_router_sidecar(dataset_dir)
     out_dir = tmp_path / "stage_b_legacy"
     args = _parse_args([
         "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
@@ -192,4 +200,4 @@ def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> No
                 "horizon/h1/traj_mae_m/mean", "val/horizon/h1/traj_mae_m/mean",
                 "slice/brake/action_err/mean"):
         assert tag in series, f"legacy tag 缺失：{tag}"
-    assert "planner/primary/loss_terms/loss" not in series and "val/planner/primary/loss_terms/loss" not in series
+    assert "loss/planner/primary/total" not in series and "val/loss/planner/primary/total" not in series

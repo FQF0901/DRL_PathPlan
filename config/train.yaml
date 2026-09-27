@@ -1,5 +1,5 @@
 # 分阶段训练（v1.2）：A = WM 教师强制（+ plan head ego_next 监督）；B = planner BC
-# （primary→specific，router 软目标 CE/KL）；C = PPO RL（EXPERIMENTAL）
+# （primary→specific，router 硬标签 CE）；C = PPO RL（EXPERIMENTAL）
 runtime:
   python: "3.10"                  # 运行 Python 版本
   seed: null                      # 全局种子（P1 固定）
@@ -69,7 +69,7 @@ stages:
       primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）
       action_weight: 1.0        # 主损失：action_mu vs 专家即时动作
       traj_aux_weight: *stage_b_traj_aux  # 辅助：rollout traj_xy vs 专家 traj6（WM 冻结 + detach）
-      router_coef: 0.1          # router 软目标 CE/KL（聚类 artifact；非 BCE/硬标签）
+      router_coef: 0.1          # router 硬标签 CE 权重（标签 = sidecar 聚类 top-1；lane B B3）
       loss_type: l2
       wm_detach: true           # v2 固定语义：合成帧恒 detach；该键为 no-op（兼容保留）
   C:

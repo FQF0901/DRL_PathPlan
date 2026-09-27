@@ -1,119 +1,110 @@
-# 训练监控指标清单（Tier-1 瘦身版，2026-09-27）
+# 训练监控指标清单（lane B 口径，2026-09-27）
 
-本文是 `pipeline/monitoring.py` 的落盘契约：**新 run 只记录下表 Tier-1 tag**
-（用户口径："只关心 OD/EGO 的 loss 和 KPI + router 的 loss 和 KPI"）。
-tensorboard 只写**成图所需**的写入：多线族在主 run 内逐 sub 写 `add_scalar("<main>/<sub>")`
-（tag 后缀 = 线名，TB 自动并成一张多线图），标量写单线 `add_scalar`；
-**不再用 torch `add_scalars`**（那会为每个 sub 建 `<main>_<sub>/` sub-run 目录）。
-CSV 长表 `<log_dir>/metrics.csv`（`step,tag,value`）保留全部 Tier-1 tag（供
-`tools/il_report.py` / `tools/plot_curves.py` 读取）。
+本文是 `pipeline/monitoring.py` 的落盘契约。**保留集 = TB 显示集 = 可评审集（一一对应）**：
+下表 tag 同时是（a）`monitor/metrics.csv` 长表行、（b）tensorboard 曲线、（c）`tools/il_report.py`
+与 `tools/plot_curves.py` 的读取口径——不存在"只有 CSV/metrics.json 有、TB 没有"的曲线。
+
+## 命名纪律
+
+1. `loss/…` 只放**训练目标**（宏 batch 均值）；KPI 只放度量（ADE/FDE/err/acc/ce…）。
+2. **任何 val 口径的曲线不得命名为 loss**：留出集统一 `val/` 命名空间
+   （`val/od/…`、`val/ego/…`、`val/router/…`、`val/loss/planner/…` 是**留出损失**，允许）；
+   `val_` 前缀机制已彻底废除。
+3. 家族 = **同一 run 内 tag 后缀**：多线族逐 sub 写 `add_scalar("<main>/<sub>")`
+   （TB 自动并成一张多线图）；**不再用 torch `add_scalars`**（会建 `<main>_<sub>/` sub-run 目录）。
+4. router 只保留"选得准不准"：**硬标签**（聚类 top-1，sidecar `cluster_v<k>_assignments.npz`）
+   的 CE/acc/acc_majority；软目标 KL/温度/专家混合权重路径已删除（lane B B3）。
 
 回退：`TrainingMonitor(legacy_tags=True)` 或 CLI `--monitor-legacy-tags`（默认关）=
-旧口径（全部 tag 原样落盘 + 旧多线分组），供对比/排查。
-**旧 run 不重建**：消费方（il_report / plot_curves）保留旧名回退（瘦身 v1
-`wm/od/*` / `stageB/*` / `val_*` 与更早 `horizon/*` / `train|val/<phase>_bc_*`）。
+旧口径（全部 tag 原样落盘 + 旧多线分组），仅供对比/排查旧 run。
+**旧 run 不重建**：消费方保留旧名回退（瘦身 v1 `wm/od/*`、`stageB/*`、`val_*` 与更早
+`horizon/*`、`train|val/<phase>_bc_*`）。
 
 ## Tier-1 保留清单
 
-层级说明：**E**=阶段/epoch 级聚合，**H**=逐 horizon（h1..h6 = 未来 0.5..3.0 s，步距 0.5 s）。
+层级：**E**=阶段/epoch 级聚合，**H**=逐 horizon（h1..h6 = 未来 0.5..3.0 s，步距 0.5 s）。
 
-| tag（canonical CSV） | main → subs（TB 同图） | 归属 | 物理意义 | 单位 | 口径 | 层级 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `val/od/loss/h{k}` | `val/od/loss` → h1..h6 | A | WM 对 OD（其他车）未来位置预测损失（加权 Huber + 角度项，验证子集确定性前向） | 无量纲（加权损失） | val 子集，`train_weight×wm_valid` 加权平均 | H |
-| `val/od/ade_m/h{k}` | `val/od/ade_m` → h1..h6（模型）+ cv_h1..cv_h6（匀速基线） | A | OD 预测 ADE（位移平均误差）；`cv_h*` = 同一数据上的匀速外推基线 | m | val 子集，按 `od_mask×train_weight` 加权 | H |
-| `val/ego_next/loss/h{k}` | `val/ego_next/loss` → h1..h6 | A | Stage A：plan head 预测"下一时刻 ego"的加权 Huber 损失 | 无量纲（加权损失） | val 子集，`train_weight×wm_valid` 加权 | H |
-| `wm/loss` | 标量（单线） | A | Stage A WM 总损失（OD + ego_next + presence/entry 的按权组合，训练 batch 均值） | 无量纲 | train，宏 batch 均值 | E |
-| `val/od/presence_auc` | 标量（单线） | A | OD presence 头 AUC（未来帧同 id 是否仍在盒内） | 1（概率） | val 子集（加权池） | E |
-| `val/od/entry_auc` | 标量（单线） | A | OD entry 头 AUC（新 id 是否出现） | 1（概率） | val 子集（加权池） | E |
-| `ego/traj/mae_m/h{k}` | `ego/traj/mae_m` → h1..h6 | B | Stage B：ego 6 点 rollout 轨迹逐 horizon 加权 MAE（`traj_xy` vs 专家 `traj6`） | m | train，`train_weight×balance_weight` 加权 | H |
-| `val/ego/traj/mae_m/h{k}` | `val/ego/traj/mae_m` → h1..h6 | B | 同上，**留出集**（按 episode 留出，与 Stage A 同 seed/val_frac） | m | val，加权 | H |
-| `ego/action/err_weighted` | 标量（单线） | B | 首步动作加权误差（显式 L1：ds/dθ 平均，不受 `loss_type` 影响） | 无量纲（ds 的 m 与 dθ 的 rad 平均后） | train，权重 = `train_weight×balance_weight`（`Σw·e/Σw`） | E |
-| `val/ego/action/err_weighted` | 标量（单线） | B | 同上，留出集 | 无量纲 | val，加权 | E |
-| `planner/primary/loss_terms/{loss,traj,action,router}` | 一图 4 线 | B | primary 相位损失分解：总/轨迹辅助/动作主/ router 软目标 | 无量纲 | train，batch 均值 | E |
-| `val/planner/primary/loss_terms/{loss,traj,action,router}` | 一图 4 线 | B | 同上（留出） | 无量纲 | val | E |
-| `planner/specific/loss_terms/{loss,traj,action,router}` | 一图 4 线 | B | specific 相位损失分解 | 无量纲 | train | E |
-| `val/planner/specific/loss_terms/{loss,traj,action,router}` | 一图 4 线 | B | 同上（留出） | 无量纲 | val | E |
-| `router/soft_ce` | 标量（单线） | B | router 对聚类软目标的 CE（温度软化的 softmax 分布） | 无量纲（nats/样本） | train，样本均值 | E |
-| `router/soft_kl` | 标量（单线） | B | 同上，KL（软目标 ∥ 预测分布） | 无量纲（nats/样本） | train | E |
-| `router/top1_cluster_acc` | 标量（单线） | B | router 预测 top-1 与聚类硬标签（软目标 argmax）一致率 | 1（比例） | train | E |
-| `router/nmi` | 标量（单线） | B | router top-1 与聚类标签的归一化互信息 | 1（[0,1]） | train | E |
-| `router/entropy` | 标量（单线） | B | 门控分布平均熵（越接近 0 越确定） | nats | train | E |
-| `val/router/soft_ce`（soft_kl/top1_cluster_acc/nmi/entropy 同族） | 标量（单线） | B | 上述 router KPI 的留出集口径 | 同上 | val | E |
-| `router/primary/expert_mix_weight/e{i}` | `router/primary/expert_mix_weight` → e0..e7 | B | primary 相位 8 专家 top-2 混合权重均值（`expert_weights`） | 1（8 线和 = top-2 选择率之和） | train | E |
-| `val/router/primary/expert_mix_weight/e{i}` | `val/router/primary/...` → e0..e7 | B | 同上（留出） | 1 | val | E |
-| `router/specific/expert_mix_weight/e{i}` | `router/specific/expert_mix_weight` → e0..e7 | B | specific 相位专家混合权重 | 1 | train | E |
-| `val/router/specific/expert_mix_weight/e{i}` | `val/router/specific/...` → e0..e7 | B | 同上（留出） | 1 | val | E |
+### Stage A（WM；KPI 在 val 子集上确定性前向）
 
-### Stage A 的 train/val 说明
+| tag（canonical CSV） | TB 形态 | 物理意义 | 口径 |
+| --- | --- | --- | --- |
+| `loss/wm` | 标量 | WM 总损失（OD + ego_next + presence/entry 按权组合） | **train**，宏 batch 均值 |
+| `loss/od` | 标量 | OD 未来位置预测损失项（加权 Huber + 角度） | train |
+| `loss/ego_next` | 标量 | plan head "下一时刻 ego" 损失项 | train |
+| `loss/presence` / `loss/entry` | 标量 | presence/entry BCE 损失项（id 轴） | train |
+| `val/od/ade_m/h{k}` | `val/od/ade_m` → h1..h6 + `cv_h{k}`（匀速基线） | OD 预测 ADE（m） | val 子集，按 `od_mask×train_weight` 加权 |
+| `val/od/fde_m/h{k}` | `val/od/fde_m` → h1..h6 + `cv_h{k}` | OD 预测 FDE（m，末点） | val 子集，加权 |
+| `val/od/presence_auc` / `val/od/entry_auc` | 标量 | OD presence/entry 头 AUC | val 子集（加权池） |
+| `val/ego/action/err_weighted` | 标量 | 首步动作加权误差（L1：ds/dθ 平均） | val 子集，`Σw·e/Σw` |
+| `val/ego/traj/mae_m/h{k}` | `val/ego/traj/mae_m` → h1..h6 | WM rollout ego 6 点逐 horizon MAE（m） | val 子集，加权 |
+| `val/ego/traj/fde_m` | 标量 | WM rollout ego 末点 FDE（m） | val 子集，加权 |
 
-Stage A 的 loss/ADE/ego_next/AUC 都在**验证子集**（`--val-frac` 留出 episode）上做确定性
-前向，因此没有 `train_`/`val_` 双份，落盘统一进 `val/` 命名空间（`val/od/*`、
-`val/ego_next/*`）；`wm/loss` 是训练 batch 的总损失（不带 `val/`）。
-LD（未来车道/可行驶区域）监督已在前一轮移除（`ld_loss=removed`），本轮不新增 LD 曲线。
+Stage A 的 loss/ADE/FDE/AUC/ego KPI 都在**验证子集**（`--val-frac` 留出 episode）上评估，
+故 KPI 进 `val/` 命名空间；训练损失（`loss/*`）是训练 batch 均值。
+
+### Stage B（planner BC；train / 留出成对）
+
+| tag（canonical CSV） | TB 形态 | 物理意义 |
+| --- | --- | --- |
+| `loss/planner/<phase>/total` | `loss/planner/<phase>` → total/traj/action/router | 相位总损失（train） |
+| `loss/planner/<phase>/{traj,action,router}` | 同上 | 轨迹辅助 / 动作主 / router CE 分解 |
+| `val/loss/planner/<phase>/{total,traj,action,router}` | `val/loss/planner/<phase>` → 4 项 | 留出集同族损失 |
+| `ego/traj/mae_m/h{k}` | `ego/traj/mae_m` → h1..h6 | 6 点 rollout 逐 horizon 加权 MAE（m，train） |
+| `val/ego/traj/mae_m/h{k}` | `val/ego/traj/mae_m` → h1..h6 | 同上（留出） |
+| `ego/traj/fde_m` / `val/ego/traj/fde_m` | 标量 | 末点 FDE（m，加权，train / 留出） |
+| `ego/action/err_weighted` / `val/ego/action/err_weighted` | 标量 | 首步动作加权误差（L1，train / 留出） |
+| `router/ce` / `val/router/ce` | 标量 | 硬标签交叉熵（聚类 top-1；train / 留出） |
+| `router/acc` / `val/router/acc` | 标量 | 硬标签 top-1 准确率 |
+| `router/acc_majority` / `val/router/acc_majority` | 标量 | **多数类占比基线**（"无脑选大类"；解释 acc 用） |
+
+`<phase>` = primary | specific；留出集 = 按 episode 留出（与 Stage A 同 `--seed/--val-frac`）。
+
+### 评测（`tools/test.sh` / `pipeline/eval_runner.py`）
+
+| tag | 形态 | 口径 |
+| --- | --- | --- |
+| `eval/<metric>` | 标量（step=1） | `metrics.json::overall` 全量 KPI（success/collision/off_road/route_completion/速度/动作…） |
+| `eval/by_primary/<metric>/<group>` | `eval/by_primary/<metric>` → 组名 | primary 几何分组视图 |
+| `eval/by_difficulty/<metric>/<group>` | `eval/by_difficulty/<metric>` → 组名 | difficulty 分组视图 |
+
+逐 spec 明细**不进 TB**（在 `episodes.csv`）。
+
+## TB run 命名（`bash tools/tb.sh`）
+
+run 名由代码生成（`pipeline/run_paths.tb_spec`；每个名字只取最新一个候选，避免重名；
+无事件文件则跳过）：
+
+| run 名 | 目录 |
+| --- | --- |
+| `train_stageA` / `train_stageB` | 最新 `runs/*/stage_a|b/monitor` |
+| `eval_stageB` / `eval_stageA` | 最新 `runs/*eval*/monitor`（按 manifest 的 ckpt 归属） |
+| `eval_baseline` | 同上（`policy: baseline` 评测） |
+
+```bash
+bash tools/tb.sh                 # 零参：自动 spec，端口 6006 起（占用自动 +1）
+PORT=6007 bash tools/tb.sh       # 指定端口；日志 /tmp/opencode/tb_<port>.log
+```
 
 ## 已移除 tag 及原因
 
 | 已移除 | 原因 / 说明 |
 | --- | --- |
-| `horizon/*/fde`、`cv_fde` 独立 tag | 用户只看 ADE；FDE 与 ADE 冗余。匀速基线改为 `val/od/ade_m/cv_h*` 的 sub（同一图 12 线） |
-| `horizon/*/traj_mse_m2` 曲线 | 轨迹误差主口径是 MAE（m）；MSE 数值仅在 metrics.json 保留为损失口径字段（`bc_traj_mse*`） |
-| `horizon/*/valid_samples`、`valid_weight_sum`、`slot_count`、`*/n_updates` | 物理计数/贡献次数只是监控记账，不参与判定；训练日志/metrics.json 仍有样本量 |
-| `slice/*`（`slice/brake|turn|curve/action_err`） | **按机动类型的动作误差切片**（急刹 ds<阈值 / 急转 |dθ|≥阈值 / 弯道 on_curve）：样本少、噪声大，用户不关心 |
-| `label/*`（`label/on_curve` 等逐标签切片） | **规则标签下的动作误差切片**（数据集 `label_names` 的 0/1 标签分组）：同上，不参与判定 |
-| 动作误差 `median`/`p95` | 与加权 mean 口径冗余（L1 回归看加权均值），切片/分位数全部清理 |
-| `expert_util_*`、`expert_mix_util_*` | 专家利用率（top-1 占比 / top-2 选择率）是负载均衡诊断，不是 loss/KPI |
-| `grad_norm_*` | 梯度范数探针（Stage A 的 plan_head/router/st_gnn 与 PPO 的 grad_norm）只在 metrics.json/stdout 留训练诊断 |
-| `train/update_timing_s/*`（data/fwd/bwd/it_s）、`vram_peak_mb` | 计时/显存只留在 stdout 日志与 metrics.json（monitor 不再记录） |
-| `kpi/*`、`moe/*`、`scene_label/*` | Stage C episode KPI / MoE 路由窗口 / 场景标签统计：非 A/B 训练 KPI，未列入 Tier-1 |
-| `train/cluster_version_num`、`train/cluster_k`、`train/cluster_soft_targets` | 聚类版本/软目标开关只是阶段元数据，只进 metrics.json 元数据（`cluster_version`/`cluster_k`/`cluster_soft_targets`） |
-| `train/per_horizon/*` | 已由 `val/od/*` / `ego/*` 族取代（避免逐 horizon 重复两份） |
-| `cv_ade`/`cv_fde` 常量标量 | 匀速基线是逐 horizon 量（`cv_h*`），聚合常量无信息 |
-
-`metrics.json` 同步瘦身（`pipeline.stages._slim_phase_result`）：`bc_action_err_slice_*`、
-`bc_action_err_label_*`、`bc_action_err_median/p95`、`bc_router_expert_{util,mix_util}_*`、
-`slices`/`labels` 快照不再写入；**保留**损失口径字段（`bc_traj_mse*`、`bc_traj_mae*`、
-`bc_action_err_weighted_mean`、`bc_router_soft_*` 等）与聚类元数据（`cluster_*`）。
-
-## tensorboard 分组（同 run tag 后缀，TB 自动并图）
-
-多线族**不建 sub-run 目录**：monitor 在主 run 的事件文件里逐 sub 写
-`add_scalar("<main>/<sub>")`，TB 标量面板把同前缀 tag 自动并成一张多线图。
-本仓库的分组（与 `tools/plot_curves.py` 的 PNG 面板一致）：
-
-| main | subs |
-| --- | --- |
-| `val/od/loss` | h1..h6 |
-| `val/od/ade_m` | h1..h6, cv_h1..cv_h6（12 线） |
-| `val/ego_next/loss` | h1..h6 |
-| `ego/traj/mae_m` / `val/ego/traj/mae_m` | h1..h6 |
-| `planner/{primary,specific}/loss_terms` / `val/planner/...` | loss, traj, action, router |
-| `router/{primary,specific}/expert_mix_weight` / `val/router/...` | e0..e7（每相位一图 8 线） |
-
-同族 <2 个 sub 时不写（避免单点噪声，数值仍在 CSV）；标量 tag（`wm/loss`、
-`val/od/presence_auc` 等）写单线 `add_scalar`。
-
-## TB run 命名（`bash tools/tb.sh`）
-
-run 名由代码生成（`pipeline/run_paths.tb_spec`，每个名字只取**最新一个候选**，避免重名；
-无事件文件则跳过）：
-
-| run 名 | 目录 |
-| --- | --- |
-| `train_stageA` | 最新 `runs/*/stage_a/monitor`（含 `events.out.tfevents*`） |
-| `train_stageB` | 最新 `runs/*/stage_b/monitor` |
-| `eval_stageB` / `eval_stageA` | 最新 `runs/*eval*/monitor`（按 manifest 的 ckpt 归属；评测目前不写 TB → 通常跳过） |
-
-```bash
-bash tools/tb.sh                 # 零参：自动 spec，端口 6006 起（占用自动 +1）
-PORT=6007 bash tools/tb.sh       # 指定端口；日志 /tmp/opencode/tb_<port>.log
-TB_SPEC="x:/path/monitor" bash tools/tb.sh   # 覆盖 spec
-```
+| val 口径 loss 曲线（`val/od/loss`、`val/ego_next/loss`，原 `wm/od/loss`、`wm/ego_next/loss`） | 命名纪律：val 曲线不得叫 loss；训练损失只走 `loss/*` 标量（lane B B1） |
+| router 软目标路径（`router/soft_ce|soft_kl|entropy|nmi|top1_cluster_acc`、`router/<phase>/expert_mix_weight`、`router_temperature`） | 监督改为硬标签 CE + acc/acc_majority；软分布物化/温度/专家混合权重全删（lane B B3） |
+| `horizon/*/fde`、`cv_fde` 独立 tag（旧口径） | FDE 改为 `val/od/fde_m` / `ego/traj/fde_m` 的家族 sub |
+| `horizon/*/traj_mse_m2` 曲线 | 轨迹误差主口径是 MAE/FDE（m）；MSE 只在 metrics.json 作为损失口径字段 |
+| `horizon/*/valid_samples`、`valid_weight_sum`、`slot_count`、`*/n_updates` | 物理计数/贡献次数只是监控记账；训练日志/metrics.json 仍有样本量 |
+| `slice/*`、`label/*`（动作误差切片） | 样本少、噪声大，不参与判定 |
+| 动作误差 `median`/`p95` | 与加权 mean 冗余 |
+| `expert_util_*`、`expert_mix_util_*`、`grad_norm_*`、计时/显存 | 诊断量只留在 stdout/metrics.json |
+| `kpi/*`、`moe/*`、`scene_label/*` | 非 A/B 训练 KPI，未列入 Tier-1 |
 
 ## 工具兼容
 
-- `tools/il_report.py`：新 tag 优先 + 旧名自动回退（瘦身 v1 `wm/od/*` / `stageB/*` / `val_*`
-  与更早 `horizon/*`、`train/<phase>_bc_*`、`val/*`、metrics.json 快照）；已移除项显示「已移除」。
+- `tools/il_report.py`：新 tag 优先 + 旧名自动回退（lane B 前 v1 名与更早 `horizon/*`、
+  `train/<phase>_bc_*`、metrics.json 快照）；已移除项显示「已移除」。
 - `tools/plot_curves.py`：按上表精简面板（删 slice/label/expert-util/median/p95 面板），
   同样多线同图；旧 run 回退旧 tag，缺失自动跳过。
-- `tools/tb.sh`：TensorBoard 入口（run 名固定，见上节）。
-- 旧 run 的 CSV 不受影响；需要旧口径新 run 时用 `--monitor-legacy-tags`。
+- `tools/tb.sh`：TensorBoard 入口（固定 run 名，见上节）。
+- `tools/annotate_clusters.py`：生成 router 硬标签 sidecar（`cluster_v<k>_assignments.npz`）；
+  `tools/collect_expert.py` 收尾自动调用一次。**Stage B 只读 sidecar，禁止在线重算**。

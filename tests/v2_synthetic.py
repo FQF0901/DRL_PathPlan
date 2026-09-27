@@ -160,3 +160,19 @@ def write_v2_dataset(
         json.dumps(meta, ensure_ascii=False), encoding="utf-8"
     )
     return directory
+
+
+def annotate_router_sidecar(directory: Path, *, cluster_config: str = "config/clusters/default.yaml") -> Path:
+    """为合成数据集写 router 硬标签 sidecar（真实 annotate 流程；Stage B 只读 sidecar）。"""
+    from pipeline.clusters import annotate_assignments, load as load_clusters
+    from pipeline.trainer import BCDataset
+
+    dataset = BCDataset.load(str(directory))
+    return annotate_assignments(
+        dataset_dir=directory,
+        count=int(dataset.count),
+        obs_batch_fn=dataset.build_obs_batch,
+        spec=load_clusters(cluster_config),
+        dataset_meta=dataset.meta,
+        logger=lambda _: None,
+    )

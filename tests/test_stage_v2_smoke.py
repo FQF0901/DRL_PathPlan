@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from pipeline.stages import _parse_args, run_stage_a, run_stage_b
-from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
+from tests.v2_synthetic import TINY_MODEL_YAML, annotate_router_sidecar, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
@@ -81,14 +81,16 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["dataset/weight_min"] == 0.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("wm/loss", "val/od/loss/h1", "val/od/ade_m/h1", "val/od/ade_m/cv_h1",
-                "val/ego_next/loss/h1"):
+    for tag in ("loss/wm", "loss/od", "loss/ego_next", "loss/presence", "loss/entry",
+                "val/od/ade_m/h1", "val/od/fde_m/h1", "val/od/ade_m/cv_h1", "val/od/fde_m/cv_h1",
+                "val/ego/action/err_weighted", "val/ego/traj/mae_m/h1", "val/ego/traj/fde_m"):
         assert tag in tags, f"Stage A 监控序列缺失：{tag}"
     if np.isfinite(metrics["presence_auc"]):
         assert "val/od/presence_auc" in tags
-    # 监控瘦身（docs/metrics.md）：旧族（horizon/train/slice/label 与瘦身 v1 名）与计数/n_updates 一个不留
+    # lane B：旧族（horizon/train/slice/label、val 口径 loss 曲线、瘦身 v1 名）与计数/n_updates 一个不留
     assert not [tag for tag in tags
-                if tag.startswith(("horizon/", "train/", "slice/", "label/", "wm/od/", "wm/presence"))]
+                if tag.startswith(("horizon/", "train/", "slice/", "label/",
+                                   "wm/", "val/od/loss", "val/ego_next/"))]
     assert not [tag for tag in tags if tag.endswith(("/count", "/n_updates"))]
     # val 集常量（cv 基线/AUC）与逐 horizon 曲线只在保留族；本用例 epochs=1 → 恰 1 行
     assert (out_dir / "final.pt").exists() and (out_dir / "metrics.json").exists()
@@ -96,6 +98,8 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
 
 def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     dataset_dir = _dataset(tmp_path)
+    # lane B ①：Stage B 只读 sidecar → 先生成（真实 annotate 流程）
+    annotate_router_sidecar(dataset_dir)
     stage_a_dir = tmp_path / "stage_a"
     args_a = _parse_args([
         "--stage", "A", "--bc-dir", str(dataset_dir), "--out", str(stage_a_dir),
@@ -139,21 +143,21 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
         assert primary[f"bc_traj_mae_h{k}_m"] ** 2 <= primary[f"bc_traj_mse_h{k}"] + 1e-9
         assert primary[f"bc_traj_err_h{k}"] == pytest.approx(primary[f"bc_traj_mse_h{k}"], rel=1e-9)
 
-    # router 软目标（聚类 lane v1 artifact 计算 → 非占位）+ 路由指标
-    assert primary["bc_router_soft_placeholder"] == 0.0
+    # router 硬标签（sidecar 载入 → 非占位）+ CE/acc/acc_majority KPI
+    assert primary["bc_router_placeholder"] == 0.0
     assert primary["bc_router_cluster_version"] == "v1"
     assert primary["bc_router_cluster_k"] == 8
-    assert np.isfinite(primary["bc_router_soft_ce"]) and np.isfinite(primary["bc_router_soft_kl"])
-    for key in ("bc_router_top1_cluster_acc", "bc_router_nmi", "bc_router_entropy"):
-        assert key in primary, f"缺少 router 指标 {key}"
-    assert np.isfinite(primary["bc_router_entropy"])
-    # 专家混合权重保留（利用率 util 已瘦身移除）
-    for index in range(8):
-        assert f"bc_router_expert_weight_{index}" in primary
-        assert f"bc_router_expert_util_{index}" not in primary
-        assert f"bc_router_expert_mix_util_{index}" not in primary
+    for key in ("bc_router_ce", "bc_router_acc", "bc_router_acc_majority"):
+        assert np.isfinite(primary[key]), f"缺少 router 指标 {key}"
+    assert 0.0 <= primary["bc_router_acc"] <= 1.0
+    assert 0.0 <= primary["bc_router_acc_majority"] <= 1.0
+    # 软目标路径已删除：KL/温度/利用率/专家混合权重不再进 metrics.json
+    for key in ("bc_router_soft_ce", "bc_router_soft_kl", "bc_router_entropy",
+                "bc_router_nmi", "bc_router_top1_cluster_acc", "bc_router_temperature",
+                "bc_router_expert_weight_0", "bc_router_expert_mix_weight_0"):
+        assert key not in primary, f"软目标路径残留：{key}"
     assert metrics["cluster_version"] == "v1" and metrics["cluster_k"] == 8
-    assert metrics["cluster_soft_targets"] is True
+    assert metrics["router_cluster_source"] == "sidecar"
 
     # 权重感知统计（Stage B）
     assert metrics["action_mu_count"] == 36.0
@@ -163,22 +167,19 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     assert metrics["action_mu_abs_err_count"] == 36.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("planner/primary/loss_terms/loss", "planner/primary/loss_terms/traj",
-                "planner/primary/loss_terms/action", "planner/primary/loss_terms/router",
-                "ego/traj/mae_m/h1", "ego/action/err_weighted",
-                "router/soft_ce", "router/soft_kl", "router/top1_cluster_acc",
-                "router/entropy", "router/primary/expert_mix_weight/e0",
+    for tag in ("loss/planner/primary/total", "loss/planner/primary/traj",
+                "loss/planner/primary/action", "loss/planner/primary/router",
+                "ego/traj/mae_m/h1", "ego/traj/fde_m", "ego/action/err_weighted",
+                "router/ce", "router/acc", "router/acc_majority",
                 # 留出集（val/ 命名空间；同族指标）
-                "val/planner/primary/loss_terms/loss", "val/ego/traj/mae_m/h1",
-                "val/ego/action/err_weighted", "val/router/soft_ce"):
+                "val/loss/planner/primary/total", "val/ego/traj/mae_m/h1",
+                "val/ego/traj/fde_m", "val/ego/action/err_weighted", "val/router/ce"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
-    # NMI 在极小数据集上可能因簇标签单一而为 NaN（NaN 静默跳过）→ 有值才断言
-    if np.isfinite(primary["bc_router_nmi"]):
-        assert "router/nmi" in tags
-    # 监控瘦身：旧族（horizon/train/slice/label、val/horizon|slice|label、瘦身 v1 名）与计数/n_updates 一个不留
+    # lane B：旧族（horizon/train/slice/label、val/horizon|slice|label、软目标/专家混合权重、v1 名）一个不留
     assert not [tag for tag in tags
                 if tag.startswith(("horizon/", "train/", "slice/", "label/",
                                    "val/horizon/", "val/slice/", "val/label/",
-                                   "stageB/", "val_stageB/", "val_ego/", "val_router/"))]
+                                   "planner/", "stageB/", "val_stageB/", "val_ego/", "val_router/"))
+                or "soft_" in tag or "expert_mix" in tag]
     assert not [tag for tag in tags if tag.endswith(("/count", "/n_updates"))]
     assert (out_dir / "final.pt").exists()

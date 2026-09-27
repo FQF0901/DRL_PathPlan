@@ -61,47 +61,53 @@ def series_first(series: Dict[str, Dict[int, float]], *candidates: str) -> Dict[
 
 #: Stage B 训练标量：瘦身 tag 候选（metrics.json 缺失时回退用；新名在前，v1/旧名回退）
 _SLIM_TRAIN_SCALARS: Dict[str, Tuple[str, ...]] = {
-    "loss": ("planner/primary/loss_terms/loss", "planner/specific/loss_terms/loss",
+    "loss": ("loss/planner/primary/total", "loss/planner/specific/total",
+             "planner/primary/loss_terms/loss", "planner/specific/loss_terms/loss",
              "stageB/primary/loss_terms/loss", "stageB/specific/loss_terms/loss"),
-    "traj_loss": ("planner/primary/loss_terms/traj", "planner/specific/loss_terms/traj",
+    "traj_loss": ("loss/planner/primary/traj", "loss/planner/specific/traj",
+                  "planner/primary/loss_terms/traj", "planner/specific/loss_terms/traj",
                   "stageB/primary/loss_terms/traj", "stageB/specific/loss_terms/traj"),
-    "action_loss": ("planner/primary/loss_terms/action", "planner/specific/loss_terms/action",
+    "action_loss": ("loss/planner/primary/action", "loss/planner/specific/action",
+                    "planner/primary/loss_terms/action", "planner/specific/loss_terms/action",
                     "stageB/primary/loss_terms/action", "stageB/specific/loss_terms/action"),
-    "router_loss": ("planner/primary/loss_terms/router", "planner/specific/loss_terms/router",
+    "router_loss": ("loss/planner/primary/router", "loss/planner/specific/router",
+                    "planner/primary/loss_terms/router", "planner/specific/loss_terms/router",
                     "stageB/primary/loss_terms/router", "stageB/specific/loss_terms/router"),
     "action_err_weighted_mean": ("ego/action/err_weighted",),
-    "router_soft_ce": ("router/soft_ce",),
-    "router_soft_kl": ("router/soft_kl",),
-    "router_top1_cluster_acc": ("router/top1_cluster_acc",),
-    "router_nmi": ("router/nmi",),
-    "router_entropy": ("router/entropy",),
+    "traj_fde_m": ("ego/traj/fde_m",),
+    "router_ce": ("router/ce",),
+    "router_acc": ("router/acc",),
+    "router_acc_majority": ("router/acc_majority",),
 }
 
 #: Stage B 留出标量：瘦身 tag 候选（新名 `val/...` 在前，瘦身 v1 `val_*` 回退）
 _SLIM_VAL_SCALARS: Dict[str, Tuple[str, ...]] = {
-    "loss": ("val/planner/primary/loss_terms/loss", "val/planner/specific/loss_terms/loss",
+    "loss": ("val/loss/planner/primary/total", "val/loss/planner/specific/total",
+             "val/planner/primary/loss_terms/loss", "val/planner/specific/loss_terms/loss",
              "val_stageB/primary/loss_terms/loss", "val_stageB/specific/loss_terms/loss"),
-    "action_loss": ("val/planner/primary/loss_terms/action", "val/planner/specific/loss_terms/action",
+    "action_loss": ("val/loss/planner/primary/action", "val/loss/planner/specific/action",
+                    "val/planner/primary/loss_terms/action", "val/planner/specific/loss_terms/action",
                     "val_stageB/primary/loss_terms/action", "val_stageB/specific/loss_terms/action"),
-    "router_loss": ("val/planner/primary/loss_terms/router", "val/planner/specific/loss_terms/router",
+    "router_loss": ("val/loss/planner/primary/router", "val/loss/planner/specific/router",
+                    "val/planner/primary/loss_terms/router", "val/planner/specific/loss_terms/router",
                     "val_stageB/primary/loss_terms/router", "val_stageB/specific/loss_terms/router"),
-    "traj_loss": ("val/planner/primary/loss_terms/traj", "val/planner/specific/loss_terms/traj",
+    "traj_loss": ("val/loss/planner/primary/traj", "val/loss/planner/specific/traj",
+                  "val/planner/primary/loss_terms/traj", "val/planner/specific/loss_terms/traj",
                   "val_stageB/primary/loss_terms/traj", "val_stageB/specific/loss_terms/traj"),
     "action_err_weighted_mean": ("val/ego/action/err_weighted", "val_ego/action/err_weighted"),
-    "router_soft_ce": ("val/router/soft_ce", "val_router/soft_ce"),
-    "router_soft_kl": ("val/router/soft_kl", "val_router/soft_kl"),
-    "router_top1_cluster_acc": ("val/router/top1_cluster_acc", "val_router/top1_cluster_acc"),
-    "router_nmi": ("val/router/nmi", "val_router/nmi"),
-    "router_entropy": ("val/router/entropy", "val_router/entropy"),
+    "traj_fde_m": ("val/ego/traj/fde_m", "val_ego/traj/fde_m"),
+    "router_ce": ("val/router/ce", "val_router/ce"),
+    "router_acc": ("val/router/acc", "val_router/acc"),
+    "router_acc_majority": ("val/router/acc_majority", "val_router/acc_majority"),
 }
 
 
 def is_slim_run(series: Dict[str, Dict[int, float]]) -> bool:
-    """是否为新（2026-09-27 监控瘦身）tag 口径的 run（含 v1 名回退识别）。"""
+    """是否为新（lane B 瘦身）tag 口径的 run（含 v1 名回退识别）。"""
     return any(
-        tag.startswith(("planner/", "ego/", "router/", "val/planner/", "val/ego/", "val/router/",
-                        "val/od/", "val/ego_next/", "wm/", "stageB/", "val_ego/", "val_router/",
-                        "val_stageB/"))
+        tag.startswith(("loss/", "val/loss/", "planner/", "ego/", "router/", "val/planner/",
+                        "val/ego/", "val/router/", "val/od/", "val/ego_next/", "wm/", "stageB/",
+                        "val_ego/", "val_router/", "val_stageB/"))
         for tag in series
     )
 
@@ -236,8 +242,8 @@ def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
                                 f"horizon/h{k}/ade/mean"),
             "cv_ade": series_first(series, f"val/od/ade_m/cv_h{k}", f"wm/od/ade_m/cv_h{k}",
                                    f"horizon/h{k}/cv_ade/mean"),
-            "fde": series_first(series, f"horizon/h{k}/fde/mean"),
-            "cv_fde": series_first(series, f"horizon/h{k}/cv_fde/mean"),
+            "fde": series_first(series, f"val/od/fde_m/h{k}", f"horizon/h{k}/fde/mean"),
+            "cv_fde": series_first(series, f"val/od/fde_m/cv_h{k}", f"horizon/h{k}/cv_fde/mean"),
         }
         if any(entry.values()):
             per_h[k] = entry
@@ -285,13 +291,13 @@ def stage_b_section(
     """Stage B 段落：**最终值优先读 metrics.json 的 ``primary`` 汇总**（新旧 run 都有），
     CSV 序列作为回退（新 tag 优先、旧 tag 回退）。
 
-    新 tag（2026-09-27 瘦身 v2）：``planner/<phase>/loss_terms/{loss,traj,action,router}``、
-    ``ego/action/err_weighted``、``ego/traj/mae_m/h*``、``router/{soft_ce,soft_kl,
-    top1_cluster_acc,nmi,entropy}``、``router/<phase>/expert_mix_weight/e*``；留出同族进
-    ``val/`` 命名空间（``val/planner/...`` / ``val/ego/...`` / ``val/router/...``）。瘦身 v1
-    名（``stageB/*`` / ``val_stageB/*`` / ``val_ego/*`` / ``val_router/*``）自动回退。
+    新 tag（lane B）：``loss/planner/<phase>/{total,traj,action,router}``、
+    ``ego/action/err_weighted``、``ego/traj/mae_m/h*``、``ego/traj/fde_m``、
+    ``router/{ce,acc,acc_majority}``；留出同族进 ``val/`` 命名空间（``val/loss/planner/...`` /
+    ``val/ego/...`` / ``val/router/...``）。瘦身 v1 名（``stageB/*`` / ``val_stageB/*`` /
+    ``val_ego/*`` / ``val_router/*``）与更早 ``train/<phase>_bc_*`` / ``horizon|slice|label/*``
+    自动回退；软目标 KL/温度/专家混合权重已删除（lane B B3）。
     median/p95、全部 slice/label、expert_util 已移除 → 明确写「已移除」。
-    旧 run：``train/<phase>_bc_*`` / ``val/<phase>_bc_*`` / ``horizon|slice|label/*``。
     """
     lines: List[str] = ["### Stage B（规划器 BC）", ""]
     summary: Dict[str, Any] = {}
@@ -437,46 +443,21 @@ def stage_b_section(
     summary["traj_global_legacy_bc_traj_mae_m"] = legacy_global_mae if legacy_global_semantics else None
     summary["traj_mae_estimated_from_mse"] = mae_estimated
 
-    router_soft = {k: scalar(f"router_soft_{k}") for k in ("ce", "kl", "placeholder")}
-    router = {k: scalar(f"router_{k}") for k in ("top1_cluster_acc", "nmi", "entropy")}
-    experts_w: Dict[int, Optional[float]] = {}
-    experts_u: Dict[int, Optional[float]] = {}
-    for index in range(8):
-        found = series_first(
-            series,
-            f"router/primary/expert_mix_weight/e{index}",
-            f"router/specific/expert_mix_weight/e{index}",
-            f"train/primary_bc_router_expert_mix_weight_{index}",
-        )
-        value = latest(found) if found else primary_summary.get(f"bc_router_expert_mix_weight_{index}")
-        if isinstance(value, (int, float)):
-            experts_w[index] = float(value)
-        util = primary_summary.get(f"bc_router_expert_mix_util_{index}")
-        if isinstance(util, (int, float)):
-            experts_u[index] = float(util)
+    router = {k: scalar(f"router_{k}") for k in ("ce", "acc", "acc_majority", "placeholder")}
     lines.append("")
-    lines.append("**路由（聚类软目标）**")
-    lines += table([[k, num(v)] for k, v in {**router_soft, **router}.items()], ["metric", "value"])
-    if experts_w:
-        if experts_u:
-            lines += table([[i, num(experts_w.get(i)), num(experts_u.get(i))] for i in sorted(experts_w)],
-                           ["expert", "mix weight", "mix util"])
-        else:
-            lines += table([[i, num(experts_w.get(i))] for i in sorted(experts_w)], ["expert", "mix weight"])
-            if slim:
-                lines.append("")
-                lines.append("> 监控瘦身（2026-09-27）：`expert_util_*`/`expert_mix_util_*` 已移除；"
-                             "专家混合权重见 `router/<phase>/expert_mix_weight`（e0..e7 一图 8 线）。")
+    lines.append("**路由（聚类硬标签 CE/acc）**")
+    lines += table([[k, num(v)] for k, v in router.items()], ["metric", "value"])
+    lines.append("")
+    lines.append("> `acc_majority` = 该集合标签多数类占比（“无脑选大类”基线，解释 acc 用）；"
+                 "软目标 KL/温度、专家混合权重已删除（lane B B3）。")
     cluster = {k: scalar(f"router_cluster_{k}") for k in ("version_num", "k")}
-    summary.update({"router_soft": router_soft, "router": router,
-                    "expert_mix_weight": experts_w, "expert_mix_util": experts_u,
-                    "cluster": cluster})
-    placeholder = router_soft.get("placeholder")
+    summary.update({"router": router, "cluster": cluster})
+    placeholder = router.get("placeholder")
     if placeholder is not None:
         lines.append("")
-        lines.append(f"**判定：router 软目标非占位 → "
-                     f"{'PASS' if placeholder == 0 else 'FAIL（仍为占位实现）'}**")
-        summary["soft_targets_real"] = (placeholder == 0)
+        lines.append(f"**判定：router 硬标签可用 → "
+                     f"{'PASS' if placeholder == 0 else 'FAIL（标签缺失）'}**")
+        summary["router_labels_available"] = (placeholder == 0)
 
     # ---- 留出集（按 episode 留出；新 tag = val_*/新族；旧 run = val/*；缺失 → 明确「缺失」）----
     val_snapshot = primary_summary.get("val") if isinstance(primary_summary.get("val"), dict) else {}
@@ -498,7 +479,8 @@ def stage_b_section(
         "bc_traj_mse (m²)": "traj_mse",
         "bc_action_loss": "action_loss",
         "bc_action_err_weighted_mean": "action_err_weighted_mean",
-        "bc_router_soft_ce": "router_soft_ce",
+        "bc_traj_fde_m": "traj_fde_m",
+        "bc_router_ce": "router_ce",
     }
     train_compare = {label: scalar(name) for label, name in compare_names.items()}
     val_compare = {label: val_scalar(name) for label, name in compare_names.items()}

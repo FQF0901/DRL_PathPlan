@@ -2,8 +2,8 @@
 #
 # `spec`：冻结的聚类 artifact（质心/PCA/白化/特征口径/数据指纹/git hash）。
 # `cluster_version`：与 artifact 内 `cluster_version` 必须一致，加载时不匹配直接报错。
-# temperature/boundary_margin/smooth_strength：soft_targets_from_obs 的软目标参数
-#   （只影响软目标形状；路由温度 router_temperature 是 trainer 侧独立旋钮）。
+# temperature/boundary_margin/smooth_strength：assign_soft（软目标形状）参数，仅 annotate 的
+#   argmax 硬标签与 survey 诊断使用；训练侧 router 只用硬标签 CE（无温度旋钮，lane B B3）。
 #
 # 拟合/重拟合（v2 数据就绪后执行；见 config/clusters/README.md）：
 #   tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> \

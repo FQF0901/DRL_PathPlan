@@ -56,11 +56,13 @@ torch 输入 → torch 输出（同 device；内部转 numpy 计算，确定性�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -96,6 +98,11 @@ __all__ = [
     "load",
     "assign_soft",
     "soft_targets_from_obs",
+    "cluster_labels_from_obs",
+    "assignments_path",
+    "annotate_assignments",
+    "load_assignments",
+    "spec_file_hash",
     "encode_obs",
     "clear_cache",
     "fit_feature_pipeline",
@@ -135,7 +142,7 @@ LD_DIM = 7
 EGO_DIM = 8
 FALLBACK_OTHERS_DIM = 16  # nav(11) + speed_limit(1) + signal(4)
 
-#: 特征口径（原样写入冻结 npz 的 ``meta.feature_contract``，加载时校验）
+#: 特征口径（原样写入冻结 npz 的 ``meta.feature_contract``，加载时校验；**机器可读字段**驱动 encode）
 FEATURE_CONTRACT: Dict[str, Any] = {
     "name": "clusters.feature.v1",
     "frame": "current-frame obs only（禁用 latent/历史）",
@@ -144,14 +151,20 @@ FEATURE_CONTRACT: Dict[str, Any] = {
     "od": {
         "slots": OD_SLOTS,
         "dims": OD_DIM,
+        "validity_keys": ["od_presence", "od_mask"],
         "validity": "od_presence if present else od_mask",
         "invalid_policy": "zero",
         "slot_order": "as_is（v2 固定槽位 = track id，禁止重排）",
     },
-    "ld": {"slots": LD_SLOTS, "dims": LD_DIM, "validity": "ld_mask", "invalid_policy": "zero"},
+    "ld": {"slots": LD_SLOTS, "dims": LD_DIM, "validity_keys": ["ld_mask"], "invalid_policy": "zero"},
     "others": {
         "raw_key": "others",
+        "raw_dims": 28,
+        "nav_dims": 11,
+        "signal_dims": 4,
         "raw_composition": "nav(11)+speed_limit(1, 归一化)+signal(4)+road_class one-hot(12)（v2 §3.2，共 28 维）",
+        "fallback_dims": FALLBACK_OTHERS_DIM,
+        "fallback_keys": ["nav", "signal"],
         "fallback": "nav(11)+speed_limit(ld slot0 dim4, 原始 m/s)+signal(4)（v2 前的旧数据；v2 数据集必须用 raw）",
     },
 }
@@ -209,39 +222,54 @@ def encode_obs(
     obs: Mapping[str, Any],
     *,
     others_source: str = "auto",
-    od_slots: int = OD_SLOTS,
-    ld_slots: int = LD_SLOTS,
+    contract: Optional[Mapping[str, Any]] = None,
 ) -> np.ndarray:
     """当前帧 obs → 原始特征 ``(N, ego+od+ld+others)``（float32）。
 
-    ``others_source``：``"auto"``（有 ``others`` 键用 raw，否则 fallback）、``"raw"``、
-    ``"fallback"``。无效 od/ld 槽位一律清零（od 有效性优先 ``od_presence``）。
-    不修改输入数组（od/ld 掩码乘法在副本上做）。
+    ``contract``：特征口径（默认 :data:`FEATURE_CONTRACT`）；**所有维数/槽位/有效性键都从
+    contract 读**（禁止硬编码，便于后续裁剪特征）。``others_source``：``"auto"``
+    （有 ``others`` 键用 raw，否则 fallback）、``"raw"``、``"fallback"``。
+    无效 od/ld 槽位一律清零（od 有效性优先 ``od_presence``）。不修改输入数组。
     """
+    contract = dict(contract or FEATURE_CONTRACT)
+    ego_dims = int((contract.get("ego") or {}).get("dims", EGO_DIM))
+    od_cfg = dict(contract.get("od") or {})
+    ld_cfg = dict(contract.get("ld") or {})
+    others_cfg = dict(contract.get("others") or {})
+    od_slots = int(od_cfg.get("slots", OD_SLOTS))
+    od_dims = int(od_cfg.get("dims", OD_DIM))
+    ld_slots = int(ld_cfg.get("slots", LD_SLOTS))
+    ld_dims = int(ld_cfg.get("dims", LD_DIM))
+    od_validity_keys = tuple(od_cfg.get("validity_keys") or _OD_VALIDITY_KEYS)
+    ld_validity_keys = tuple(ld_cfg.get("validity_keys") or ("ld_mask",))
+    nav_dims = int(others_cfg.get("nav_dims", 11))
+    signal_dims = int(others_cfg.get("signal_dims", 4))
     if not isinstance(obs, Mapping):
         raise TypeError(f"obs 必须是映射（dict），收到 {type(obs).__name__}")
     if "ego" not in obs:
         raise ValueError("obs 缺少必需通道 'ego'")
     ego = _squeeze_single_slot(_to_numpy(obs["ego"]).astype(np.float64, copy=False), "ego")
-    if ego.ndim != 2 or ego.shape[1] != EGO_DIM:
-        raise ValueError(f"obs['ego'] 形状应为 (B,{EGO_DIM})，收到 {tuple(ego.shape)}")
+    if ego.ndim != 2 or ego.shape[1] != ego_dims:
+        raise ValueError(f"obs['ego'] 形状应为 (B,{ego_dims})，收到 {tuple(ego.shape)}")
     n = int(ego.shape[0])
 
-    od = _channel(_to_numpy(obs.get("od")) if "od" in obs else np.zeros((n, od_slots, OD_DIM)), "od", od_slots, OD_DIM)
+    od = _channel(_to_numpy(obs.get("od")) if "od" in obs else np.zeros((n, od_slots, od_dims)), "od", od_slots, od_dims)
     od = od.astype(np.float64, copy=True)
     od_valid: Optional[np.ndarray] = None
-    for key in _OD_VALIDITY_KEYS:
+    for key in od_validity_keys:
         if key in obs:
             od_valid = _mask_channel(_to_numpy(obs[key]).astype(np.float64, copy=False), key, od_slots)
             break
     if od_valid is not None and od_valid.shape[0] == n:
         od *= (od_valid != 0.0)[..., None]
 
-    ld = _channel(_to_numpy(obs.get("ld")) if "ld" in obs else np.zeros((n, ld_slots, LD_DIM)), "ld", ld_slots, LD_DIM)
+    ld = _channel(_to_numpy(obs.get("ld")) if "ld" in obs else np.zeros((n, ld_slots, ld_dims)), "ld", ld_slots, ld_dims)
     ld = ld.astype(np.float64, copy=True)
-    if "ld_mask" in obs:
-        ld_valid = _mask_channel(_to_numpy(obs["ld_mask"]).astype(np.float64, copy=False), "ld_mask", ld_slots)
-        ld *= (ld_valid != 0.0)[..., None]
+    for key in ld_validity_keys:
+        if key in obs:
+            ld_valid = _mask_channel(_to_numpy(obs[key]).astype(np.float64, copy=False), key, ld_slots)
+            ld *= (ld_valid != 0.0)[..., None]
+            break
 
     if others_source == "auto":
         others_source = "raw" if "others" in obs else "fallback"
@@ -254,10 +282,10 @@ def encode_obs(
     elif others_source == "fallback":
         nav = _squeeze_single_slot(_to_numpy(obs["nav"]).astype(np.float64, copy=False), "nav")
         signal = _squeeze_single_slot(_to_numpy(obs["signal"]).astype(np.float64, copy=False), "signal")
-        if nav.ndim != 2 or nav.shape[1] != 11:
-            raise ValueError(f"obs['nav'] 形状应为 (B,11)，收到 {tuple(nav.shape)}")
-        if signal.ndim != 2 or signal.shape[1] != 4:
-            raise ValueError(f"obs['signal'] 形状应为 (B,4)，收到 {tuple(signal.shape)}")
+        if nav.ndim != 2 or nav.shape[1] != nav_dims:
+            raise ValueError(f"obs['nav'] 形状应为 (B,{nav_dims})，收到 {tuple(nav.shape)}")
+        if signal.ndim != 2 or signal.shape[1] != signal_dims:
+            raise ValueError(f"obs['signal'] 形状应为 (B,{signal_dims})，收到 {tuple(signal.shape)}")
         others = np.concatenate([nav, ld[:, 0, 4:5], signal], axis=1)  # speed_limit = ld 槽0 第4维
     else:
         raise ValueError(f"未知 others_source {others_source!r}（应为 auto/raw/fallback）")
@@ -819,6 +847,8 @@ class ClusterSpec:
     """冻结的聚类 spec（npz 可序列化）：预处理 + 质心 + 软目标参数 + 数据指纹。"""
 
     cluster_version: str = CLUSTER_VERSION
+    #: 加载来源（``load()`` 回填；用于 sidecar spec 哈希校验；不写入 artifact）
+    source_path: str = ""
     mode: str = "flat"  # flat | two_stage
     k: int = DEFAULT_K
     feature_contract: Dict[str, Any] = field(default_factory=lambda: dict(FEATURE_CONTRACT))
@@ -950,7 +980,7 @@ class ClusterSpec:
 
     # ------------------------------------------------------------------ 推理
     def encode(self, obs: Mapping[str, Any]) -> np.ndarray:
-        return encode_obs(obs, others_source=self.others_source)
+        return encode_obs(obs, others_source=self.others_source, contract=self.feature_contract)
 
     def transform(self, raw: np.ndarray) -> np.ndarray:
         """原始特征 → 白化特征 ``(N,d)``（严格按冻结参数）。"""
@@ -1077,6 +1107,7 @@ def load(spec: Any = None, *, refresh: bool = False) -> ClusterSpec:
     model = _CACHE.get(key)
     if model is None:
         model = ClusterSpec.load(path)
+        model = replace(model, source_path=str(path))  # sidecar spec 哈希校验用
         _CACHE[key] = model
     if expected is not None and expected != model.cluster_version:
         raise ValueError(
@@ -1118,9 +1149,215 @@ def soft_targets_from_obs(obs_batch: Mapping[str, Any], *, spec: Any = None, **k
     return out
 
 
-# --------------------------------------------------------------------------- #
-# 两段式退路：活跃度统计 + 对齐工具
-# --------------------------------------------------------------------------- #
+#: 硬标签 sidecar 文件名（lane B ①；``version`` = spec.cluster_version 的数字，如 v1）
+ASSIGNMENTS_FILENAME_TEMPLATE = "cluster_v{version}_assignments.npz"
+#: sidecar 缺失/不符时的生成命令（错误信息里原样打印）
+ANNOTATE_COMMAND = (
+    "tools/venv-python tools/annotate_clusters.py --dataset {dataset} "
+    "--cluster-config config/clusters/default.yaml"
+)
+#: ``cluster[i]`` 与数据集行的对齐口径（写入 sidecar，供消费方核对）
+ROW_ALIGNMENT = "cluster[i]/top1_prob[i]/top1_margin[i] 对应数据集（expert_bc.npz）第 i 行"
+TOP1_MARGIN_DEFINITION = "top1_prob - second_best_prob（软目标 top-2 间隔）"
+
+
+def cluster_labels_from_obs(obs_batch: Mapping[str, Any], *, spec: Any = None) -> np.ndarray:
+    """obs batch → **硬标签** ``(N,) int64``（= 软目标 argmax）。
+
+    ⚠️ 只允许在 **annotate/collect 生成 sidecar** 时使用；训练侧禁止在线重算（lane B ①）。
+    """
+    model = load(spec)
+    soft = model.soft_targets_from_obs(obs_batch)
+    return np.argmax(soft, axis=-1).astype(np.int64)
+
+
+def _version_digits(spec: Any) -> str:
+    return "".join(ch for ch in str(getattr(spec, "cluster_version", "")) if ch.isdigit())
+
+
+def assignments_path(dataset_dir: Any, *, spec: Any) -> Path:
+    """sidecar 路径：优先 ``cluster_v<version>_assignments.npz``，兼容其它 ``cluster_v*_assignments.npz``。"""
+    base = Path(str(dataset_dir))
+    version = _version_digits(spec)
+    if version:
+        primary = base / ASSIGNMENTS_FILENAME_TEMPLATE.format(version=version)
+        if primary.is_file():
+            return primary
+    existing = sorted(item for item in base.glob("cluster_v*_assignments.npz") if item.is_file())
+    if existing:
+        return existing[0]
+    return base / ASSIGNMENTS_FILENAME_TEMPLATE.format(version=version or "1")
+
+
+def spec_file_hash(spec: Any) -> str:
+    """spec artifact 文件 sha256（64 位十六进制）；无 ``source_path``/文件缺失 → ``""``。"""
+    path = str(getattr(spec, "source_path", "") or "")
+    if path and Path(path).is_file():
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return ""
+
+
+def _spec_obs_fingerprint(spec: Any) -> str:
+    """spec artifact 内 ``data_fingerprint.obs_fingerprint``（拟合时数据口径；缺失 → ""）。"""
+    path = str(getattr(spec, "source_path", "") or "")
+    if not path or not Path(path).is_file():
+        return ""
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            meta = json.loads(str(np.asarray(payload["meta"]).reshape(-1)[0]))
+        return str((meta.get("data_fingerprint") or {}).get("obs_fingerprint") or "")
+    except Exception:  # noqa: BLE001 - 仅 provenance 字段
+        return ""
+
+
+def _git_fields() -> Dict[str, str]:
+    """sidecar provenance：git hash / dirty 条目数（best-effort）。"""
+    try:
+        import subprocess
+
+        def _git(*args: str) -> str:
+            proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=5, check=False)
+            return proc.stdout.strip() or "unknown"
+
+        return {
+            "git_hash": _git("rev-parse", "HEAD"),
+            "git_dirty_entries": str(len(_git("status", "--porcelain").splitlines())),
+        }
+    except Exception:  # noqa: BLE001
+        return {"git_hash": "unknown", "git_dirty_entries": "unknown"}
+
+
+def annotate_assignments(
+    *,
+    dataset_dir: Any,
+    count: int,
+    obs_batch_fn: Callable[[np.ndarray], Mapping[str, Any]],
+    spec: Any,
+    dataset_meta: Optional[Mapping[str, Any]] = None,
+    chunk_size: int = 2048,
+    logger: Callable[[str], None] = print,
+) -> Path:
+    """分批计算硬标签并写 sidecar（``tools/annotate_clusters.py`` / ``tools/collect_expert.py`` 共用）。
+
+    产出键（与 ``tools/diagnostics/cluster_survey.py`` 口径一致）：
+    ``cluster``(N,) int16、``top1_margin``/``top1_prob``(N,) float32、``rows``、``cluster_k``、
+    ``spec_hash``（spec 文件 sha256）、``spec_path``、``obs_fingerprint_dataset``、
+    ``obs_fingerprint_spec``、``created_at``、``git_hash``、``git_dirty_entries``、``script_path``、
+    ``row_alignment``、``top1_margin_definition``；**不落地 (N,8) 软分布**。
+    """
+    model = load(spec)
+    total = int(count)
+    chunk = max(1, int(chunk_size))
+    cluster = np.empty(total, dtype=np.int16)
+    margin = np.empty(total, dtype=np.float32)
+    top1_prob = np.empty(total, dtype=np.float32)
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        indices = np.arange(start, stop, dtype=np.int64)
+        soft = np.asarray(model.soft_targets_from_obs(obs_batch_fn(indices)), dtype=np.float64)
+        order = np.argsort(soft, axis=-1)
+        cluster[start:stop] = order[:, -1].astype(np.int16)
+        top1_prob[start:stop] = soft[np.arange(soft.shape[0]), order[:, -1]].astype(np.float32)
+        if soft.shape[1] >= 2:
+            margin[start:stop] = (
+                soft[np.arange(soft.shape[0]), order[:, -1]]
+                - soft[np.arange(soft.shape[0]), order[:, -2]]
+            ).astype(np.float32)
+        else:
+            margin[start:stop] = 0.0
+    path = assignments_path(dataset_dir, spec=model)
+    np.savez_compressed(
+        path,
+        cluster=cluster,
+        top1_margin=margin,
+        top1_prob=top1_prob,
+        spec_hash=np.asarray([spec_file_hash(model)]),
+        spec_path=np.asarray([str(getattr(model, "source_path", "") or "")]),
+        obs_fingerprint_dataset=np.asarray([str((dataset_meta or {}).get("obs_fingerprint") or "")]),
+        obs_fingerprint_spec=np.asarray([_spec_obs_fingerprint(model)]),
+        rows=np.asarray([total], dtype=np.int64),
+        cluster_k=np.asarray([int(getattr(model, "k", 0) or 0)], dtype=np.int64),
+        created_at=np.asarray([datetime.now(timezone.utc).isoformat(timespec="seconds")]),
+        script_path=np.asarray(["tools/annotate_clusters.py"]),
+        row_alignment=np.asarray([ROW_ALIGNMENT]),
+        top1_margin_definition=np.asarray([TOP1_MARGIN_DEFINITION]),
+        **_git_fields(),
+    )
+    logger(
+        f"[annotate] sidecar → {path}（rows={total} · k={int(getattr(model, 'k', 0) or 0)} · "
+        f"version={getattr(model, 'cluster_version', '')}）"
+    )
+    return path
+
+
+def load_assignments(
+    dataset_dir: Any,
+    *,
+    spec: Any,
+    dataset_meta: Optional[Mapping[str, Any]] = None,
+    require: bool = True,
+) -> Optional[np.ndarray]:
+    """读 sidecar 硬标签并**严格校验**（行数 / K / spec 文件哈希 / 数据集 obs 指纹）。
+
+    训练侧禁止在线重算（lane B ①）：缺失或任何一项不符 → ``RuntimeError``（附生成命令）；
+    ``require=False`` 时缺失返回 ``None``（仅用于诊断工具）。
+    """
+    model = load(spec) if not isinstance(spec, ClusterSpec) else spec
+    path = assignments_path(dataset_dir, spec=model)
+    command = ANNOTATE_COMMAND.format(dataset=dataset_dir)
+    if not path.is_file():
+        if not require:
+            return None
+        raise RuntimeError(f"缺少聚类硬标签 sidecar：{path}\n生成：{command}")
+    try:
+        with np.load(path) as data:
+            files = set(data.files)
+            if "cluster" not in files:
+                raise RuntimeError(f"sidecar 缺少 'cluster' 键：{path}\n重新生成：{command}")
+            cluster = np.asarray(data["cluster"]).reshape(-1).astype(np.int64)
+
+            def _scalar(key: str) -> Any:
+                return np.asarray(data[key]).reshape(-1)[0]
+
+            checks: "list[tuple[str, Any, Any]]" = []
+            if "rows" in files:
+                checks.append(("rows", int(_scalar("rows")), int(cluster.size)))
+                expected_rows = int((dataset_meta or {}).get("count") or 0)
+                if expected_rows:
+                    checks.append(("rows(dataset)", int(_scalar("rows")), expected_rows))
+            if "cluster_k" in files:
+                checks.append(("cluster_k", int(_scalar("cluster_k")), int(getattr(model, "k", 0) or 0)))
+            if "cluster_version" in files:
+                checks.append(
+                    ("cluster_version", str(_scalar("cluster_version")), str(getattr(model, "cluster_version", "")))
+                )
+            expected_fingerprint = str((dataset_meta or {}).get("obs_fingerprint") or "")
+            if expected_fingerprint:
+                for key in ("obs_fingerprint_dataset", "obs_fingerprint"):
+                    if key in files:
+                        checks.append((key, str(_scalar(key)), expected_fingerprint))
+                        break
+            if "spec_hash" in files:
+                expected_hash = spec_file_hash(model)
+                if expected_hash:
+                    checks.append(("spec_hash", str(_scalar("spec_hash")), expected_hash))
+                elif "spec_path" in files:
+                    checks.append(
+                        ("spec_path", str(_scalar("spec_path")), str(getattr(model, "source_path", "") or ""))
+                    )
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - sidecar 损坏 → fail-fast
+        raise RuntimeError(f"sidecar 读取失败：{path}（{type(exc).__name__}: {exc}）\n重新生成：{command}") from exc
+    mismatched = [f"{name}: sidecar={got!r} != expected={want!r}" for name, got, want in checks if got != want]
+    if mismatched:
+        raise RuntimeError(
+            "聚类硬标签 sidecar 校验不过：" + "；".join(mismatched) + f"\n重新生成：{command}"
+        )
+    k = int(getattr(model, "k", 0) or 0)
+    if k and (int(cluster.min()) < 0 or int(cluster.max()) >= k):
+        raise RuntimeError(f"sidecar cluster 越界（应在 [0,{k})）：{path}\n重新生成：{command}")
+    return cluster
 
 
 def activity_statistics(raw: np.ndarray) -> np.ndarray:

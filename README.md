@@ -237,7 +237,9 @@ bash tools/setup_gl_libs.sh
 # 场景 + 专家数据（数据集放 datasets/，不随 runs/ 清理；命名 BTC<北京时间戳>_expert<N>k）
 bash tools/gene_env.sh
 tools/venv-python tools/collect_expert.py --specs env/specs/scenarios_train.json --limit 5000 \
-    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"   # --workers 默认 auto（8–10）；输出与单进程逐字节一致
+    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"   # --workers 默认 auto（8–10）；收尾自动批注 router 硬标签 sidecar
+# 已有数据集补标（Stage B 只读 sidecar，缺失会 fail-fast）：
+#   tools/venv-python tools/annotate_clusters.py --dataset datasets/BTC<ts>_expert5k
 
 # 分阶段训练（零参可跑：数据集/epoch/batch/resume 全在 config/train.yaml；脚本只做 setsid+nohup 分离启动）
 bash tools/train.sh                      # Stage A（默认）；STAGE=B bash tools/train.sh 跑 Stage B（自动用最新 A final、共用同一 run 根）

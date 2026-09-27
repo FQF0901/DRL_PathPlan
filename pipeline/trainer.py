@@ -57,8 +57,10 @@ PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
 - 阶段 C：``kl_anchor_coef``（冻结参考模型）+ ``bc_anchor_coef``（专家动作，权重感知）+ primary lr ×0.1；
   critic warmup（``train.critic_warmup_updates`` / CLI ``--critic-warmup-updates``）：前 N 个
   update 只拟合 value 头（策略/主干冻结，指标 ``critic_warmup=true``），之后恢复常规 PPO；
-- Stage B router 辅助损失 = **聚类软目标 CE/KL**（``pipeline.clusters.soft_targets_from_obs``，
-  温度 ``router_temperature``；缺失软目标时跳过并记录 ``bc_router_soft_placeholder=1``），
+- Stage B router 辅助损失 = **聚类硬标签 CE**（``router_cluster``，int；sidecar
+  ``cluster_v1_assignments.npz`` 优先 / materialize 在线 argmax 回退；标签缺失时跳过并记录
+  ``bc_router_placeholder=1``），KPI = ``router/ce`` + ``router/acc``（+ ``router/acc_majority``
+  多数类基线）；
   另输出 top-1/簇准确率、NMI、门控熵、专家利用率与聚类版本（``cluster_version``）。
 """
 
@@ -141,9 +143,9 @@ __all__ = [
     "binary_auc",
     "weighted_od_multi_step_loss",
     "presence_entry_loss",
-    "router_soft_target_loss",
-    "router_soft_target_stats",
-    "normalized_mutual_info",
+    "router_hard_label_loss",
+    "router_hard_label_stats",
+    "ego_kpi_arrays",
     "dataset_weight_report",
 ]
 
@@ -517,8 +519,8 @@ class BCConfig:
     - ``phase``：仅写入指标，便于区分 primary/specific 两段。
 
     阶段 B（v2）扩展：
-    - ``router_temperature``：router 软目标温度（Bernoulli 概率空间；T<1 锐化、T>1 软化，
-      T=1 时 soft∈{0,1} 的软目标退化为硬 BCE）；
+    - ``router_cluster_version/k``：聚类 artifact 版本/K（写入 metrics/monitor）；
+      router 监督 = 聚类**硬标签** CE（软目标温度旋钮已删除，CLI 参数保留但忽略）；
     - ``slice_*``：动作误差分切片阈值（急刹/急转；弯道用 ``on_curve`` 标签）；
     - ``history_stride``：BC harvest 帧间距（env step，默认 5 = 0.5 s）。
 
@@ -550,8 +552,7 @@ class BCConfig:
     wm_detach: bool = False
     freeze_prefixes: Tuple[str, ...] = ()
     phase: str = "bc"
-    #: router 软目标温度（聚类 lane 的 top-2 混合权重；softmax logits 温度：<1 锐化、>1 软化）。
-    router_temperature: float = 1.0
+    #: （lane B B3）router 监督 = 聚类硬标签 CE；软目标温度旋钮已删除（CLI 参数保留但忽略）。
     #: 聚类 artifact 版本/K（写入 metrics/monitor；空 = 未接入聚类 lane）。
     router_cluster_version: str = ""
     router_cluster_k: int = 0
@@ -984,7 +985,8 @@ def stack_history(
 # - ``balance_weight (N,)``：难度/几何配平权重（与 train_weight 相乘）；
 # - ``wm_valid (N,6)``：WM 目标帧可用性（(episode, step+5k) 查表 + 帧可用）；
 # - ``od_id (N,16) / od_presence (N,16)``：OD 槽位对象 id / 占据真值（presence/entry BCE）；
-# - ``router_soft_targets (N,8) / router_cluster (N,)``：router 软目标 + 聚类簇（lane C 聚类）；
+# - ``router_cluster (N,)``：router 硬标签（聚类分配 top-1，int；-1=缺失）；
+#   软分布 ``router_soft_targets (N,8)`` 是历史数据集键，**训练不再读取**（lane B B3）；
 # - mem 历史数组 ``ego_hist/others_hist/od_hist/ld_hist``（+ ``_mask``、``hist_valid``）：
 #   采集时按 env memory 精确入库，训练侧直接复用（禁止按行位置重拼，见
 #   ``pipeline.stages.build_history``）。
@@ -999,7 +1001,6 @@ V2_BALANCE_WEIGHT = "balance_weight"
 V2_WM_VALID = "wm_valid"
 V2_OD_PRESENCE = "od_presence"
 V2_OD_ID = "od_id"
-V2_ROUTER_SOFT = "router_soft_targets"
 V2_ROUTER_CLUSTER = "router_cluster"
 
 
@@ -1237,141 +1238,112 @@ def presence_entry_loss(
     }
 
 
-def router_soft_target_loss(
+def router_hard_label_loss(
     logits: "torch.Tensor",
-    soft_targets: "torch.Tensor",
+    cluster: "torch.Tensor",
     *,
-    temperature: float = 1.0,
-    kind: str = "ce",
-    eps: float = 1e-8,
+    sample_weight: Optional["torch.Tensor"] = None,
 ) -> "torch.Tensor":
-    """router 软目标 **CE / KL**（聚类 lane 的 ``(B,8)`` 分布 + 温度）。
+    """router **硬标签** CE（lane B B3）：``F.cross_entropy(logits, cluster, weight=…)``。
 
-    - ``soft_targets`` 是簇分布（行和=1，``pipeline.clusters.soft_targets_from_obs``）；
-      ``logits`` 是 net 的 8 路 router logits（net 侧 top-2 softmax 混合）；
-    - ``p_T = softmax(logits / T)``；CE = ``−Σ p·log p_T``，KL = ``CE − H(p)``；
-      对 logits 的梯度 CE 与 KL 完全相同（推荐用 CE 反传、KL 做诊断）；
-    - ``kind="ce"``（默认）或 ``"kl"``。
+    - ``cluster``：``(B,)`` int 标签（= 聚类分配 top-1；``<0`` 表示缺失，该样本被忽略）；
+    - ``sample_weight``：逐样本权重（沿用现有 ``train_weight×配平`` 口径），
+      损失 = ``Σ w·CE / Σ w``；标签全缺失时返回 0（调用方按 placeholder 跳过）。
     """
     import torch
     import torch.nn.functional as F
 
-    if not str(kind).lower() in ("ce", "kl"):
-        raise ValueError(f"kind 必须是 'ce'|'kl'，收到 {kind!r}")
-    t = max(float(temperature), 1e-3)
-    prob = soft_targets.to(dtype=logits.dtype, device=logits.device).clamp(min=0.0)
-    prob = prob / prob.sum(dim=-1, keepdim=True).clamp(min=float(eps))
-    log_probs = F.log_softmax(logits / t, dim=-1)
-    if str(kind).lower() == "ce":
-        return -(prob * log_probs).sum(dim=-1).mean()
-    kl = (prob * (prob.clamp_min(float(eps)).log() - log_probs)).sum(dim=-1)
-    return kl.mean()
+    labels = cluster.to(dtype=torch.long, device=logits.device).reshape(-1)
+    per_sample = F.cross_entropy(logits, labels.clamp_min(0), reduction="none")
+    valid = (labels >= 0).to(per_sample.dtype)
+    weights = torch.ones_like(per_sample) if sample_weight is None else sample_weight.to(per_sample.dtype)
+    weights = weights.reshape(-1) * valid
+    return (per_sample * weights).sum() / weights.sum().clamp(min=1e-8)
 
 
-def router_soft_target_stats(
+def router_hard_label_stats(
     logits: "torch.Tensor",
-    soft_targets: "torch.Tensor",
+    cluster: "torch.Tensor",
     *,
-    temperature: float = 1.0,
-    eps: float = 1e-8,
+    sample_weight: Optional["torch.Tensor"] = None,
 ) -> Dict[str, float]:
-    """router 软目标诊断：``{"ce", "kl", "target_entropy"}``（不参与梯度）。"""
+    """router 硬标签诊断：``{"ce", "acc", "count"}``（加权，不参与梯度；标签全缺 → nan/0）。"""
     import torch
 
     with torch.no_grad():
-        ce = router_soft_target_loss(logits, soft_targets, temperature=temperature, kind="ce", eps=eps)
-        kl = router_soft_target_loss(logits, soft_targets, temperature=temperature, kind="kl", eps=eps)
-        prob = soft_targets.detach().clamp_min(float(eps))
-        prob = prob / prob.sum(dim=-1, keepdim=True).clamp(min=float(eps))
-        entropy = (-(prob * prob.log()).sum(dim=-1)).mean()
-    return {"ce": float(ce), "kl": float(kl), "target_entropy": float(entropy)}
-
-
-def normalized_mutual_info(a: Any, b: Any) -> float:
-    """两列离散标签的 NMI（互信息 / sqrt(H(a)H(b))）；空/单类 → ``nan``。"""
-    a = np.asarray(a).reshape(-1)
-    b = np.asarray(b).reshape(-1)
-    if a.size == 0 or a.size != b.size:
-        return float("nan")
-    a_unique, a_inv = np.unique(a, return_inverse=True)
-    b_unique, b_inv = np.unique(b, return_inverse=True)
-    contingency = np.zeros((a_unique.size, b_unique.size), dtype=np.float64)
-    np.add.at(contingency, (a_inv, b_inv), 1.0)
-    total = float(contingency.sum())
-    if total <= 0:
-        return float("nan")
-
-    def _entropy(counts: np.ndarray) -> float:
-        prob = counts[counts > 0] / total
-        return float(-(prob * np.log(prob)).sum())
-
-    entropy_a = _entropy(contingency.sum(axis=1))
-    entropy_b = _entropy(contingency.sum(axis=0))
-    if entropy_a <= 0.0 or entropy_b <= 0.0:
-        return float("nan")
-    outer = np.outer(contingency.sum(axis=1), contingency.sum(axis=0))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(contingency > 0, contingency * total / np.maximum(outer, 1e-12), 1.0)
-    mutual = float((contingency / total * np.log(ratio)).sum())
-    return float(mutual / math.sqrt(entropy_a * entropy_b))
+        labels = cluster.to(dtype=torch.long, device=logits.device).reshape(-1)
+        valid = labels >= 0
+        if not bool(valid.any()):
+            return {"ce": float("nan"), "acc": float("nan"), "count": 0.0}
+        ce = router_hard_label_loss(logits, labels, sample_weight=sample_weight)
+        weights = (
+            torch.ones_like(labels, dtype=torch.float32)
+            if sample_weight is None
+            else sample_weight.to(torch.float32).reshape(-1)
+        )
+        weights = weights * valid.to(weights.dtype)
+        correct = (logits.argmax(dim=-1) == labels).to(torch.float32)
+        acc = (correct * weights).sum() / weights.sum().clamp(min=1e-8)
+    return {"ce": float(ce), "acc": float(acc), "count": float(valid.sum())}
 
 
 def _router_summary(
     *,
-    prob_sum: Optional[np.ndarray],
-    top1: Optional[np.ndarray],
-    cluster: Optional[np.ndarray],
     count: int,
-    entropy_sum: float,
-    ce_sum: float,
-    kl_sum: float,
-    mix_weight_sum: Optional[np.ndarray],
-    mix_selected: Optional[np.ndarray],
-    num_experts: int,
-    temperature: float,
+    ce_num: float,
+    ce_den: float,
+    acc_num: float,
+    acc_den: float,
+    class_weight_sum: Optional[np.ndarray] = None,
     cluster_version: str,
     cluster_k: int,
-    soft_used: bool,
+    used: bool,
 ) -> Dict[str, Any]:
-    """router 诊断标量汇总（``pretrain_bc`` 全阶段累计 / 逐 epoch 增量 / val 评估共用同一公式）。
+    """router 硬标签标量汇总（``pretrain_bc`` 全阶段累计 / 逐 epoch 增量 / val 评估共用同一公式）。
 
-    ``prob_sum`` = ``Σ softmax(logits)``（B,8 轴求和）；``top1`` = argmax 展平数组；
-    ``cluster`` = 软目标 argmax（同序）；``count`` = 贡献 token 数。``count<=0`` 时只返回
-    占位/温度/版本元数据（不编造质量指标）。
+    ``ce_num/ce_den`` = ``Σ w·CE`` / ``Σ w``；``acc_num/acc_den`` = ``Σ w·1[argmax=标签]`` / ``Σ w``；
+    ``class_weight_sum`` = 各簇权重和（→ ``bc_router_acc_majority`` = 多数类占比基线，解释 acc 用）；
+    ``count`` = 有效标签 token 数。``count<=0`` 时只返回占位/版本元数据（不编造质量指标）。
     """
     out: Dict[str, Any] = {
-        "bc_router_soft_placeholder": 0.0 if soft_used else 1.0,
-        "bc_router_temperature": float(temperature),
+        "bc_router_placeholder": 0.0 if used else 1.0,
         "bc_router_cluster_version": str(cluster_version),
         "bc_router_cluster_k": int(cluster_k),
     }
     version_digits = "".join(ch for ch in str(cluster_version) if ch.isdigit())
     out["bc_router_cluster_version_num"] = float(version_digits) if version_digits else float("nan")
-    if int(count) <= 0 or prob_sum is None:
+    if int(count) <= 0:
         return out
-    mean_weight = np.asarray(prob_sum, dtype=np.float64) / int(count)
     out["bc_router_count"] = int(count)
-    out["bc_router_entropy"] = float(entropy_sum) / int(count)
-    out["bc_router_soft_ce"] = float(ce_sum) / int(count)
-    out["bc_router_soft_kl"] = float(kl_sum) / int(count)
-    top1_array = np.asarray(top1) if top1 is not None else np.zeros(0, dtype=np.int64)
-    for index in range(int(num_experts)):
-        out[f"bc_router_expert_weight_{index}"] = float(mean_weight[index])
-        out[f"bc_router_expert_util_{index}"] = (
-            float((top1_array == index).mean()) if top1_array.size else float("nan")
-        )
-        if mix_weight_sum is not None and mix_selected is not None:
-            out[f"bc_router_expert_mix_weight_{index}"] = float(
-                np.asarray(mix_weight_sum)[index] / int(count)
-            )
-            out[f"bc_router_expert_mix_util_{index}"] = float(
-                np.asarray(mix_selected)[index] / int(count)
-            )
-    cluster_array = np.asarray(cluster) if cluster is not None else None
-    if cluster_array is not None and top1_array.size == cluster_array.size and top1_array.size > 0:
-        out["bc_router_top1_cluster_acc"] = float((top1_array == cluster_array).mean())
-        out["bc_router_nmi"] = normalized_mutual_info(top1_array, cluster_array)
+    out["bc_router_ce"] = float(ce_num) / max(float(ce_den), 1e-12)
+    out["bc_router_acc"] = float(acc_num) / max(float(acc_den), 1e-12)
+    if class_weight_sum is not None:
+        class_weight = np.asarray(class_weight_sum, dtype=np.float64)
+        total = float(class_weight.sum())
+        if total > 0.0:
+            out["bc_router_acc_majority"] = float(class_weight.max()) / total
     return out
+
+
+def ego_kpi_arrays(
+    out: Mapping[str, Any],
+    targets: Mapping[str, "torch.Tensor"],
+) -> Dict[str, "torch.Tensor"]:
+    """B2 统一 ego KPI 的逐样本数组：``action_err`` (B) / ``traj_mae_point`` (B,6) / ``traj_fde_end`` (B)。
+
+    定义（Stage A/B 同口径，均由 policy/plan 头 + WM rollout 产出）：
+    动作 = 首步 ``(ds,dθ)`` 的 L1 均值；轨迹 MAE = 6 点逐点 L1 均值；末点 FDE = 第 6 点 L2。
+    加权由调用方按 ``train_weight×配平`` 合成（``Σw·x/Σw``）。
+    """
+    import torch
+
+    diff = out["traj_xy"] - targets["traj6"]
+    action_diff = out["action_mu"] - targets["action"][:, 0, :]
+    return {
+        "action_err": action_diff.abs().mean(dim=-1),
+        "traj_mae_point": diff.abs().mean(dim=-1),
+        "traj_fde_end": torch.linalg.norm(diff[:, -1, :], dim=-1),
+    }
 
 
 def dataset_weight_report(dataset: Any, *, prefix: str = "dataset") -> Dict[str, float]:
@@ -1547,7 +1519,7 @@ class BCDataset:
     - ``train_weight/balance_weight``：动作/轨迹目标权重（见 :func:`row_action_weights`）；
     - ``wm_valid (N,6)``：WM 目标帧可用性；
     - ``od_id/od_presence (N,16)``：OD 槽位对象 id / 占据真值；
-    - ``router_soft_targets (N,8)`` + ``router_cluster (N,)``：router 软目标/聚类（占位可缺）；
+    - ``router_cluster (N,)``：router 硬标签（聚类分配 top-1，int；-1=缺失；sidecar 优先）；
     - **mem 历史数组**（``ego_hist/others_hist/od_hist/ld_hist`` + masks + ``hist_valid``）：
       采集时按 env memory 精确入库。存在时训练侧**直接复用**（``build_obs_batch``），
       否则按 ``(episode_id, step−5j)`` **精确查表**重拼（禁止按行位置取窗口）。
@@ -1773,8 +1745,8 @@ class BCDataset:
             # v2 权重（train_weight/balance_weight 的合成分；缺失时 = sample_weight/1）
             "train_weight": row_action_weights(self, idx).astype(np.float32),
         }
-        if V2_ROUTER_SOFT in self.arrays:
-            out["router_soft"] = self.arrays[V2_ROUTER_SOFT][idx].astype(np.float32)
+        if V2_ROUTER_CLUSTER in self.arrays:  # 硬标签（int；-1=缺失）——lane B B3
+            out["router_cluster"] = self.arrays[V2_ROUTER_CLUSTER][idx].astype(np.int64)
         if V2_WM_VALID in self.arrays:
             out["wm_valid"] = self.arrays[V2_WM_VALID][idx].astype(np.float32)
         return out
@@ -1809,6 +1781,8 @@ class MaterializedBCDataset:
         *,
         chunk_size: int = 2048,
         include_targets: bool = True,
+        router_cluster_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+        router_cluster_labels: Optional[np.ndarray] = None,
         logger: Callable[[str], None] = print,
     ):
         started = time.perf_counter()
@@ -1816,6 +1790,16 @@ class MaterializedBCDataset:
         self.count = int(dataset.count)
         chunk = max(1, int(chunk_size))
         self.arrays: Dict[str, np.ndarray] = {}
+        labels_source = None
+        if include_targets and router_cluster_labels is not None:
+            labels_source = np.asarray(router_cluster_labels).reshape(-1).astype(np.int64)
+            if labels_source.size < self.count:
+                labels_source = None  # 行数不足 → 回退在线/数据集
+        cluster_labels = (
+            np.empty(self.count, dtype=np.int64)
+            if (include_targets and labels_source is None and router_cluster_fn is not None)
+            else None
+        )
         for start in range(0, self.count, chunk):
             stop = min(start + chunk, self.count)
             batch = dataset.build_obs_batch(np.arange(start, stop, dtype=np.int64))
@@ -1828,14 +1812,20 @@ class MaterializedBCDataset:
                 }
             for key, value in batch.items():
                 self.arrays[key][start:stop] = value
+            if cluster_labels is not None:  # lane B B3：materialize 阶段取硬标签（软目标 argmax）
+                cluster_labels[start:stop] = np.asarray(router_cluster_fn(batch), dtype=np.int64).reshape(-1)
         self.targets: Dict[str, np.ndarray] = {}
         if include_targets:
             source = dataset.arrays
             for key in self.TARGET_SOURCE_KEYS:
                 if key in source:
                     self.targets[key] = np.asarray(source[key], dtype=np.float32)
-            if V2_ROUTER_SOFT in source:
-                self.targets["router_soft"] = np.asarray(source[V2_ROUTER_SOFT], dtype=np.float32)
+            if labels_source is not None:
+                self.targets["router_cluster"] = labels_source[: self.count]
+            elif cluster_labels is not None:
+                self.targets["router_cluster"] = cluster_labels
+            elif V2_ROUTER_CLUSTER in source:
+                self.targets["router_cluster"] = np.asarray(source[V2_ROUTER_CLUSTER], dtype=np.int64)
             if V2_WM_VALID in source:
                 self.targets["wm_valid"] = np.asarray(source[V2_WM_VALID], dtype=np.float32)
             self.targets["train_weight"] = row_action_weights(
@@ -2020,10 +2010,10 @@ def pretrain_bc(
     config: BCConfig,
     *,
     logger: Callable[[str], None] = print,
-    router_soft_targets_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+    router_cluster_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     batch_source: Optional[MaterializedBCDataset] = None,
 ) -> Dict[str, Any]:
-    """BC 预热循环：轨迹 L1/L2 + **首步**动作回归 + router 软目标 CE/KL（权重感知）。
+    """BC 预热循环：轨迹 L1/L2 + **首步**动作回归 + router **硬标签 CE**（权重感知）。
 
     - 轨迹目标用 ``targets["traj6"]``（与模型 6 个 rollout 端点逐点时间对齐；``traj30``
       是 0.1 s 密集采样，直接对 6 点预测使用会时间错位）；
@@ -2032,11 +2022,10 @@ def pretrain_bc(
     - **权重感知**：动作/轨迹/router 损失与所有误差统计都用
       ``targets["train_weight"]``（= ``train_weight × 配平权重``）；显式 ``Σ w·x / Σ w``，
       权重 0 的帧不参与（不再按有效项均摊）；
-    - **router 软目标**：``router_soft_targets_fn(obs_batch) -> (B,8)``（聚类 lane 的
-      ``pipeline.clusters.soft_targets_from_obs``，Stage B 注入）优先；缺失时回退数据集
-      ``router_soft_targets``；两者都无 → **跳过 router 损失**（不再用 8 维硬标签 BCE，
-      记录 ``bc_router_soft_placeholder=1``）。损失 = 对软目标的 CE/KL（softmax，
-      温度 ``config.router_temperature``，见 :func:`router_soft_target_loss`）。
+    - **router 硬标签**（lane B B3）：标签 = 聚类分配 top-1（``router_cluster``，int；
+      sidecar ``cluster_v1_assignments.npz`` 优先 / materialize 在线 argmax 回退），
+      损失 = ``F.cross_entropy(logits, cluster, weight=…)/Σw``；标签缺失（<0）的样本跳过，
+      全缺时跳过 router 损失并记 ``bc_router_placeholder=1``（不再使用 (N,8) 软分布/温度）。
 
     阶段 B（v1.1）：``config.wm_detach`` 时 rollout 内 WM 输出 detach；
     ``config.freeze_prefixes`` 在优化器构建前生效（primary→specific 分段训练）。
@@ -2063,6 +2052,7 @@ def pretrain_bc(
 
     - 轨迹全局：``bc_traj_loss``（加权损失项，含 ``traj_weight``）、``bc_traj_mse``（加权 MSE，m²）、
       ``bc_traj_mae_m``（**加权 MAE，m**；旧语义 = 未加权 MSE(m²)，已修正）、
+      ``bc_traj_fde_m``（**末点 FDE，m，加权**；lane B B2）、
       ``bc_traj_mae_all_m``（未加权 MAE，m，含 ``train_weight=0`` 的被过滤帧，仅诊断）、
       ``bc_traj_mse_unweighted``（旧 ``bc_traj_mae_m`` 口径 alias：未加权 MSE，m²）；
     - 轨迹逐 horizon：``bc_traj_mse_h{k}``（加权 MSE，m²）、``bc_traj_mae_h{k}_m``（加权 MAE，m）、
@@ -2070,8 +2060,7 @@ def pretrain_bc(
     - 动作侧统计是显式 L1（米/弧度），不受 ``loss_type`` 影响：``bc_action_err_{mean,weighted_mean,
       median,p95}``、``bc_action_err_slice_{brake,turn,curve}_*``、``bc_action_err_label_<name>``；
     - 另有 ``bc_loss``、``bc_action_loss``、``bc_router_loss``、``bc_action_mu_ds_mean``、
-      ``bc_router_{top1_cluster_acc,nmi,entropy,soft_ce,soft_kl,expert_util_*,expert_weight_*,
-      cluster_version,k,soft_placeholder}``。
+      ``bc_router_{ce,acc,acc_majority,count,cluster_version,k,placeholder}``（硬标签口径）。
     """
     _require_torch()
     order_config = load_supervised_labels()
@@ -2119,7 +2108,6 @@ def pretrain_bc(
         "frozen_params": len(frozen),
         "trainable_params": sum(1 for parameter in model.parameters() if parameter.requires_grad),
     }
-    num_experts = 8
     on_curve_index = (
         dataset.label_names.index("on_curve") if "on_curve" in dataset.label_names else None
     )
@@ -2133,70 +2121,44 @@ def pretrain_bc(
     }
     traj_mse_values: List[np.ndarray] = []
     traj_mae_values: List[np.ndarray] = []
+    traj_fde_values: List[np.ndarray] = []
     weight_values: List[np.ndarray] = []
     mu_ds_sum, mu_ds_weight = 0.0, 0.0
-    router_prob_sum: Optional[np.ndarray] = None
-    router_top1: List[np.ndarray] = []
-    router_cluster: List[np.ndarray] = []
-    router_entropy_sum, router_count = 0.0, 0
-    router_soft_ce_sum, router_soft_kl_sum = 0.0, 0.0
-    router_mix_weight_sum: Optional[np.ndarray] = None
-    router_mix_selected: Optional[np.ndarray] = None
-    router_soft_used = False
-    router_soft_warned = False
+    router_ce_num, router_ce_den = 0.0, 0.0
+    router_acc_num, router_acc_den = 0.0, 0.0
+    router_count = 0
+    router_class_weight_sum: Optional[np.ndarray] = None  # (K,) 权重和 → acc_majority 基线
+    router_used = False
+    router_warned = False
 
     def _router_snapshot() -> Dict[str, Any]:
-        """router 累计状态的 epoch 起点快照（用于增量统计；数组复制、列表记长度）。"""
+        """router 累计状态的 epoch 起点快照（用于增量统计；数组复制、计数记长度）。"""
         return {
-            "prob_sum": None if router_prob_sum is None else router_prob_sum.copy(),
-            "mix_weight": None if router_mix_weight_sum is None else router_mix_weight_sum.copy(),
-            "mix_selected": None if router_mix_selected is None else router_mix_selected.copy(),
-            "top1": len(router_top1),
-            "cluster": len(router_cluster),
-            "entropy_sum": float(router_entropy_sum),
+            "class_weight": None if router_class_weight_sum is None else router_class_weight_sum.copy(),
+            "ce_num": float(router_ce_num),
+            "ce_den": float(router_ce_den),
+            "acc_num": float(router_acc_num),
+            "acc_den": float(router_acc_den),
             "count": int(router_count),
-            "ce_sum": float(router_soft_ce_sum),
-            "kl_sum": float(router_soft_kl_sum),
         }
 
     def _router_epoch_metrics(start: Mapping[str, Any]) -> Dict[str, Any]:
         """epoch 增量 router 指标（与全阶段累计块同一 :func:`_router_summary` 公式）。"""
-        prob_sum = None
-        if router_prob_sum is not None:
-            prob_sum = np.asarray(router_prob_sum)
-            if start["prob_sum"] is not None:  # 首个累计 epoch：起点为 0（直接用累计值）
-                prob_sum = prob_sum - np.asarray(start["prob_sum"])
-        mix_weight = None
-        if router_mix_weight_sum is not None:
-            mix_weight = np.asarray(router_mix_weight_sum)
-            if start["mix_weight"] is not None:
-                mix_weight = mix_weight - np.asarray(start["mix_weight"])
-        mix_selected = None
-        if router_mix_selected is not None:
-            mix_selected = np.asarray(router_mix_selected)
-            if start["mix_selected"] is not None:
-                mix_selected = mix_selected - np.asarray(start["mix_selected"])
-        top1 = np.concatenate(router_top1[start["top1"]:]) if len(router_top1) > start["top1"] else None
-        cluster = (
-            np.concatenate(router_cluster[start["cluster"]:])
-            if len(router_cluster) > start["cluster"]
-            else None
-        )
+        class_weight = None
+        if router_class_weight_sum is not None:
+            class_weight = np.asarray(router_class_weight_sum)
+            if start["class_weight"] is not None:
+                class_weight = class_weight - np.asarray(start["class_weight"])
         return _router_summary(
-            prob_sum=prob_sum,
-            top1=top1,
-            cluster=cluster,
             count=int(router_count) - int(start["count"]),
-            entropy_sum=float(router_entropy_sum) - float(start["entropy_sum"]),
-            ce_sum=float(router_soft_ce_sum) - float(start["ce_sum"]),
-            kl_sum=float(router_soft_kl_sum) - float(start["kl_sum"]),
-            mix_weight_sum=mix_weight,
-            mix_selected=mix_selected,
-            num_experts=num_experts,
-            temperature=float(config.router_temperature),
+            ce_num=float(router_ce_num) - float(start["ce_num"]),
+            ce_den=float(router_ce_den) - float(start["ce_den"]),
+            acc_num=float(router_acc_num) - float(start["acc_num"]),
+            acc_den=float(router_acc_den) - float(start["acc_den"]),
+            class_weight_sum=class_weight,
             cluster_version=str(config.router_cluster_version or ""),
             cluster_k=int(config.router_cluster_k or 0),
-            soft_used=bool(router_soft_used),
+            used=bool(router_used),
         )
 
     def _epoch_stats(mark: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2264,10 +2226,13 @@ def pretrain_bc(
                     out[f"bc_traj_err_h{k + 1}"] = weighted_stats(
                         legacy[:, k], epoch_weights, prefix=""
                     )["weighted_mean"]
+        if len(traj_fde_values) > mark["traj_fde"]:
+            epoch_fde = np.concatenate(traj_fde_values[mark["traj_fde"]:])
+            if epoch_weights is not None and epoch_weights.shape[0] == epoch_fde.shape[0]:
+                out["bc_traj_fde_m"] = weighted_stats(epoch_fde, epoch_weights, prefix="")["weighted_mean"]
         router_epoch = _router_epoch_metrics(mark["router"])
         # 版本/温度/簇 K 等阶段常量不进逐 epoch 载荷（阶段末汇总补记一次，避免逐 epoch 重复）
         for constant_key in (
-            "bc_router_temperature",
             "bc_router_cluster_version",
             "bc_router_cluster_version_num",
             "bc_router_cluster_k",
@@ -2298,6 +2263,7 @@ def pretrain_bc(
             "weights": len(weight_values),
             "traj_mse": len(traj_mse_values),
             "traj_mae": len(traj_mae_values),
+            "traj_fde": len(traj_fde_values),
             "slices": {
                 name: (len(parts["err"]), len(parts["weight"]))
                 for name, parts in slice_err_values.items()
@@ -2385,6 +2351,9 @@ def pretrain_bc(
                 traj_mae_point = traj_diff.abs().mean(dim=-1)
                 traj_mse_values.append(traj_mse_point.detach().double().cpu().numpy())
                 traj_mae_values.append(traj_mae_point.detach().double().cpu().numpy())
+                traj_fde_values.append(
+                    torch.linalg.norm(traj_diff[:, -1, :], dim=-1).detach().double().cpu().numpy()
+                )
                 action_loss = torch.zeros((), device=device)
                 action_pred = out.get("action_mu")
                 target_action = targets["action"][:, 0, :]
@@ -2417,77 +2386,72 @@ def pretrain_bc(
                 router_loss = torch.zeros((), device=device)
                 if config.router_coef > 0.0 and out.get("router_logits") is not None:
                     logits = out["router_logits"]
-                    soft_targets_np = None
-                    if router_soft_targets_fn is not None:
+                    labels_np = None
+                    if router_cluster_fn is not None:
                         try:
-                            soft_targets_np = router_soft_targets_fn(obs_np)
-                        except Exception as exc:  # noqa: BLE001 - 聚类 artifact/特征口径不匹配 → 跳过
-                            if not router_soft_warned:
+                            labels_np = router_cluster_fn(obs_np)
+                        except Exception as exc:  # noqa: BLE001 - 聚类 artifact/特征口径不匹配 → 回退
+                            if not router_warned:
                                 logger(
-                                    f"[bc] router 软目标不可用（{type(exc).__name__}: {exc}）→ "
-                                    "本轮跳过 router 损失（不再回退 8 维硬标签 BCE）"
+                                    f"[bc] router 在线分配不可用（{type(exc).__name__}: {exc}）→ "
+                                    "回退数据集 router_cluster / 跳过 router 损失"
                                 )
-                                router_soft_warned = True
-                            soft_targets_np = None
-                    if soft_targets_np is None:
-                        soft_targets_np = targets.get("router_soft")
-                    if soft_targets_np is None:
-                        if not router_soft_warned:
+                                router_warned = True
+                            labels_np = None
+                    if labels_np is None:
+                        labels_np = targets.get("router_cluster")
+                    if labels_np is None:
+                        if not router_warned:
                             logger(
-                                "[bc] 无 router 软目标（cluster fn / 数据集 router_soft_targets 均缺失）→ "
-                                "跳过 router 损失（bc_router_soft_placeholder=1）"
+                                "[bc] 无 router 硬标签（sidecar/在线分配/数据集 router_cluster 均缺失）→ "
+                                "跳过 router 损失（bc_router_placeholder=1）"
                             )
-                            router_soft_warned = True
+                            router_warned = True
                     else:
-                        if hasattr(soft_targets_np, "detach"):
-                            soft_targets_np = soft_targets_np.detach().cpu().numpy()
-                        soft_targets_np = np.asarray(soft_targets_np, dtype=np.float32)
-                        soft_targets = torch.as_tensor(soft_targets_np, dtype=torch.float32, device=device)
-                        if tuple(soft_targets.shape) != tuple(logits.shape):
-                            if not router_soft_warned:
+                        if hasattr(labels_np, "detach"):
+                            labels_np = labels_np.detach().cpu().numpy()
+                        labels_np = np.asarray(labels_np).reshape(-1).astype(np.int64)
+                        if labels_np.shape[0] != int(logits.shape[0]):
+                            if not router_warned:
                                 logger(
-                                    f"[bc] router 软目标形状 {tuple(soft_targets.shape)} != logits "
-                                    f"{tuple(logits.shape)} → 跳过 router 损失"
+                                    f"[bc] router 硬标签行数 {labels_np.shape[0]} != logits "
+                                    f"{int(logits.shape[0])} → 跳过 router 损失"
                                 )
-                                router_soft_warned = True
+                                router_warned = True
                         else:
-                            router_soft_used = True
-                            router_loss = config.router_coef * router_soft_target_loss(
-                                logits, soft_targets, temperature=float(config.router_temperature)
-                            )
-                            router_term = router_loss
-                    if router_soft_used:
-                        with torch.no_grad():
-                            probs = torch.softmax(logits, dim=-1).detach().double().cpu().numpy()
-                            if router_prob_sum is None:
-                                num_experts = int(probs.shape[1])
-                                router_prob_sum = np.zeros(num_experts, dtype=np.float64)
-                                router_mix_weight_sum = np.zeros(num_experts, dtype=np.float64)
-                                router_mix_selected = np.zeros(num_experts, dtype=np.float64)
-                            router_prob_sum += probs.sum(axis=0)
-                            router_top1.append(np.argmax(probs, axis=1))
-                            clip = np.clip(probs, 1e-9, 1.0)
-                            router_entropy_sum += float((-(clip * np.log(clip)).sum(axis=1)).mean())
-                            router_count += int(probs.shape[0])
-                            router_cluster.append(
-                                torch.argmax(soft_targets, dim=-1).detach().cpu().numpy().astype(np.int64)
-                            )
-                            soft_stats = router_soft_target_stats(
-                                logits, soft_targets, temperature=float(config.router_temperature)
-                            )
-                            router_soft_ce_sum += soft_stats["ce"]
-                            router_soft_kl_sum += soft_stats["kl"]
-                            weights = out.get("expert_weights")
-                            if weights is not None and tuple(weights.shape) == tuple(logits.shape):
-                                mix = weights.detach().double().cpu().numpy()
-                                router_mix_weight_sum += mix.sum(axis=0)
-                                router_mix_selected += (mix > 1e-6).sum(axis=0)
+                            labels_t = torch.as_tensor(labels_np, dtype=torch.long, device=device)
+                            valid = labels_t >= 0
+                            if bool(valid.any()):
+                                router_used = True
+                                router_loss = config.router_coef * router_hard_label_loss(
+                                    logits, labels_t, sample_weight=frame_weight
+                                )
+                                router_term = router_loss
+                                with torch.no_grad():
+                                    weights_cpu = frame_weight.detach().double().cpu().numpy()
+                                    valid_np = valid.detach().cpu().numpy()
+                                    labels_valid = labels_np[valid_np]
+                                    w_valid = weights_cpu[valid_np]
+                                    router_ce_num += float(router_hard_label_loss(
+                                        logits, labels_t, sample_weight=frame_weight
+                                    ).detach()) * float(w_valid.sum())
+                                    router_ce_den += float(w_valid.sum())
+                                    correct = (
+                                        logits.argmax(dim=-1) == labels_t
+                                    ).detach().double().cpu().numpy()
+                                    router_acc_num += float((correct * weights_cpu).sum())
+                                    router_acc_den += float(weights_cpu.sum())
+                                    router_count += int(labels_valid.size)
+                                    if router_class_weight_sum is None:
+                                        router_class_weight_sum = np.zeros(int(logits.shape[1]), dtype=np.float64)
+                                    np.add.at(router_class_weight_sum, labels_valid, w_valid)
                 forward_seconds += time.perf_counter() - forward_started
                 # 组合缩放后的宏 batch 损失：Σ_m s_m·L_m = L_macro（micro == macro 时 s=1）
+                # router CE 现为**加权均值**（Σw·ce/Σw）→ 与 traj/action 同用权重比缩放
                 loss = (
                     traj_term * scale_weight
                     + action_term * scale_weight
-                    + router_term * scale_rows
+                    + router_term * scale_weight
                 )
                 backward_started = time.perf_counter()
                 loss.backward()
@@ -2495,7 +2459,7 @@ def pretrain_bc(
                 totals_micro["loss"] += float(loss.detach())
                 totals_micro["traj"] += float(traj_term.detach()) * scale_weight
                 totals_micro["action"] += float(action_term.detach()) * scale_weight
-                totals_micro["router"] += float(router_term.detach()) * scale_rows
+                totals_micro["router"] += float(router_term.detach()) * scale_weight
                 # 轨迹度量：加权口径按 W_m/W_macro、未加权诊断口径按 n_m/n_macro 缩放
                 totals_micro["traj_mse"] += traj_metrics["traj_mse_weighted"] * scale_weight
                 totals_micro["traj_mae"] += traj_metrics["traj_mae_weighted_m"] * scale_weight
@@ -2552,7 +2516,7 @@ def pretrain_bc(
                     config,
                     val_indices,
                     batch_source=batch_source,
-                    router_soft_targets_fn=router_soft_targets_fn,
+                    router_cluster_fn=router_cluster_fn,
                 )
             finally:
                 model.train()
@@ -2613,6 +2577,11 @@ def pretrain_bc(
             metrics[f"bc_traj_err_h{k + 1}"] = weighted_stats(
                 legacy_matrix[:, k], traj_weights, prefix=""
             )["weighted_mean"]
+    # ego 末点 FDE（m，加权；lane B B2：`ego/traj/fde_m`）
+    if traj_fde_values:
+        metrics["bc_traj_fde_m"] = weighted_stats(
+            np.concatenate(traj_fde_values), np.concatenate(weight_values), prefix=""
+        )["weighted_mean"]
     # 逐标签动作误差（样本可属于多个标签；顺序与 batch 累积一致）
     if label_values and action_err_values:
         labels_used = np.concatenate(label_values)
@@ -2627,23 +2596,18 @@ def pretrain_bc(
             stats = weighted_stats(err_all[mask], w_all[mask], prefix="")
             metrics[f"bc_action_err_label_{label_name}"] = stats["weighted_mean"]
             metrics[f"bc_action_err_label_{label_name}_count"] = stats["count"]
-    # router 指标（软目标 top-1 vs 簇准确率 / NMI / gate 熵 / 专家利用率 / 软目标 CE-KL）
+    # router 指标（硬标签 CE / acc / acc_majority 多数类基线）
     metrics.update(
         _router_summary(
-            prob_sum=router_prob_sum,
-            top1=np.concatenate(router_top1) if router_top1 else None,
-            cluster=np.concatenate(router_cluster) if router_cluster else None,
             count=int(router_count),
-            entropy_sum=float(router_entropy_sum),
-            ce_sum=float(router_soft_ce_sum),
-            kl_sum=float(router_soft_kl_sum),
-            mix_weight_sum=router_mix_weight_sum,
-            mix_selected=router_mix_selected,
-            num_experts=num_experts,
-            temperature=float(config.router_temperature),
+            ce_num=float(router_ce_num),
+            ce_den=float(router_ce_den),
+            acc_num=float(router_acc_num),
+            acc_den=float(router_acc_den),
+            class_weight_sum=router_class_weight_sum,
             cluster_version=str(config.router_cluster_version or ""),
             cluster_k=int(config.router_cluster_k or 0),
-            soft_used=bool(router_soft_used),
+            used=bool(router_used),
         )
     )
     metrics["bc_action_mu_ds_weighted_mean"] = (
@@ -2661,7 +2625,7 @@ def evaluate_bc(
     indices: np.ndarray,
     *,
     batch_source: Optional[MaterializedBCDataset] = None,
-    router_soft_targets_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+    router_cluster_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """**留出集**确定性前向（Stage B 每 epoch 末调用；不参与梯度/优化器）。
 
@@ -2669,7 +2633,8 @@ def evaluate_bc(
     权重 = ``train_weight×配平``，动作误差为显式 L1（m/rad），轨迹为加权 MSE(m²)/MAE(m)；
     全局与逐 horizon 统计都在**整个留出子集**上按权重合成（非 batch 均值），
     ``bc_traj_loss``/``bc_action_loss``/``bc_router_loss`` 仍然按 batch 求平均
-    （与训练侧逐 epoch 口径一致）。返回：
+    （与训练侧逐 epoch 口径一致）。router = **硬标签 CE + acc/acc_majority**（lane B B3）。
+    返回：
 
     - 扁平标量：``bc_loss``/``bc_traj_*``/``bc_action_*``/``bc_action_mu_*``/``bc_router_*``；
     - ``per_horizon``：``h{k} -> {traj_mse_m2, traj_mae_m, traj_err}``（加权口径）；
@@ -2685,12 +2650,12 @@ def evaluate_bc(
     device = torch.device(resolve_device(config.device))
     model.to(device).eval()
     macro_size = max(1, int(config.batch_size))
-    num_experts = 8
     on_curve_index = (
         dataset.label_names.index("on_curve") if "on_curve" in dataset.label_names else None
     )
     traj_mse_values: List[np.ndarray] = []
     traj_mae_values: List[np.ndarray] = []
+    traj_fde_values: List[np.ndarray] = []
     weight_values: List[np.ndarray] = []
     action_err_values: List[np.ndarray] = []
     label_values: List[np.ndarray] = []
@@ -2703,14 +2668,11 @@ def evaluate_bc(
     mu_ds_batch_sum = 0.0
     batch_count = 0
     batch_traj_loss = batch_action_loss = batch_router_loss = 0.0
-    router_prob_sum: Optional[np.ndarray] = None
-    router_top1: List[np.ndarray] = []
-    router_cluster: List[np.ndarray] = []
-    router_entropy_sum, router_count = 0.0, 0
-    router_soft_ce_sum, router_soft_kl_sum = 0.0, 0.0
-    router_mix_weight_sum: Optional[np.ndarray] = None
-    router_mix_selected: Optional[np.ndarray] = None
-    router_soft_used = False
+    router_ce_num, router_ce_den = 0.0, 0.0
+    router_acc_num, router_acc_den = 0.0, 0.0
+    router_count = 0
+    router_class_weight_sum: Optional[np.ndarray] = None
+    router_used = False
 
     for start in range(0, idx.size, macro_size):
         batch_indices = idx[start : start + macro_size]
@@ -2733,6 +2695,9 @@ def evaluate_bc(
         traj_mae_point = diff.abs().mean(dim=-1)
         traj_mse_values.append(traj_mse_point.detach().double().cpu().numpy())
         traj_mae_values.append(traj_mae_point.detach().double().cpu().numpy())
+        traj_fde_values.append(
+            torch.linalg.norm(diff[:, -1, :], dim=-1).detach().double().cpu().numpy()
+        )
         sample_error = diff.detach().abs().mean(dim=(-1, -2)).double().cpu().numpy()
         sample_weight = frame_weight.detach().double().cpu().numpy()
         weight_values.append(sample_weight)
@@ -2773,48 +2738,42 @@ def evaluate_bc(
                     slice_err_values[name]["weight"].append(sample_weight[mask])
         logits = out.get("router_logits")
         if config.router_coef > 0.0 and logits is not None:
-            soft_targets_np = None
-            if router_soft_targets_fn is not None:
+            labels_np = None
+            if router_cluster_fn is not None:
                 try:
-                    soft_targets_np = router_soft_targets_fn(obs_np)
-                except Exception:  # noqa: BLE001 - 与训练侧同口径：不可用即跳过
-                    soft_targets_np = None
-            if soft_targets_np is None:
-                soft_targets_np = targets.get("router_soft")
-            if soft_targets_np is not None:
-                if hasattr(soft_targets_np, "detach"):
-                    soft_targets_np = soft_targets_np.detach().cpu().numpy()
-                soft_targets_np = np.asarray(soft_targets_np, dtype=np.float32)
-                if tuple(soft_targets_np.shape) == tuple(logits.shape):
-                    soft_targets = torch.as_tensor(soft_targets_np, dtype=torch.float32, device=device)
-                    router_soft_used = True
-                    router_loss = config.router_coef * router_soft_target_loss(
-                        logits, soft_targets, temperature=float(config.router_temperature)
-                    )
-                    batch_router_loss += float(router_loss.detach())
-                    probs = torch.softmax(logits, dim=-1).detach().double().cpu().numpy()
-                    if router_prob_sum is None:
-                        router_prob_sum = np.zeros(int(probs.shape[1]), dtype=np.float64)
-                        router_mix_weight_sum = np.zeros(int(probs.shape[1]), dtype=np.float64)
-                        router_mix_selected = np.zeros(int(probs.shape[1]), dtype=np.float64)
-                    router_prob_sum += probs.sum(axis=0)
-                    router_top1.append(np.argmax(probs, axis=1))
-                    clip = np.clip(probs, 1e-9, 1.0)
-                    router_entropy_sum += float((-(clip * np.log(clip)).sum(axis=1)).mean())
-                    router_count += int(probs.shape[0])
-                    router_cluster.append(
-                        torch.argmax(soft_targets, dim=-1).detach().cpu().numpy().astype(np.int64)
-                    )
-                    soft_stats = router_soft_target_stats(
-                        logits, soft_targets, temperature=float(config.router_temperature)
-                    )
-                    router_soft_ce_sum += soft_stats["ce"]
-                    router_soft_kl_sum += soft_stats["kl"]
-                    mix = out.get("expert_weights")
-                    if mix is not None and tuple(mix.shape) == tuple(logits.shape):
-                        mix_np = mix.detach().double().cpu().numpy()
-                        router_mix_weight_sum += mix_np.sum(axis=0)
-                        router_mix_selected += (mix_np > 1e-6).sum(axis=0)
+                    labels_np = router_cluster_fn(obs_np)
+                except Exception:  # noqa: BLE001 - 与训练侧同口径：不可用即回退
+                    labels_np = None
+            if labels_np is None:
+                labels_np = targets.get("router_cluster")
+            if labels_np is not None:
+                if hasattr(labels_np, "detach"):
+                    labels_np = labels_np.detach().cpu().numpy()
+                labels_np = np.asarray(labels_np).reshape(-1).astype(np.int64)
+                if labels_np.shape[0] == int(logits.shape[0]):
+                    labels_t = torch.as_tensor(labels_np, dtype=torch.long, device=device)
+                    valid = labels_t >= 0
+                    if bool(valid.any()):
+                        router_used = True
+                        router_loss = config.router_coef * router_hard_label_loss(
+                            logits, labels_t, sample_weight=frame_weight
+                        )
+                        batch_router_loss += float(router_loss.detach())
+                        with torch.no_grad():
+                            weights_cpu = frame_weight.detach().double().cpu().numpy()
+                            valid_np = valid.detach().cpu().numpy()
+                            labels_valid = labels_np[valid_np]
+                            w_valid = weights_cpu[valid_np]
+                            ce = router_hard_label_loss(logits, labels_t, sample_weight=frame_weight)
+                            router_ce_num += float(ce.detach()) * float(w_valid.sum())
+                            router_ce_den += float(w_valid.sum())
+                            correct = (logits.argmax(dim=-1) == labels_t).detach().double().cpu().numpy()
+                            router_acc_num += float((correct * weights_cpu).sum())
+                            router_acc_den += float(weights_cpu.sum())
+                            router_count += int(labels_valid.size)
+                            if router_class_weight_sum is None:
+                                router_class_weight_sum = np.zeros(int(logits.shape[1]), dtype=np.float64)
+                            np.add.at(router_class_weight_sum, labels_valid, w_valid)
 
     # ---------------------------------------------------------------- 汇总（全留出子集）
     mse_matrix = np.concatenate(traj_mse_values) if traj_mse_values else np.zeros((0, 6))
@@ -2826,6 +2785,8 @@ def evaluate_bc(
     mae_sample = mae_matrix.mean(axis=1) if mae_matrix.size else np.zeros(0)
     weighted = weighted_stats(mse_sample, all_weights, prefix="")
     weighted_mae = weighted_stats(mae_sample, all_weights, prefix="")
+    fde_sample = np.concatenate(traj_fde_values) if traj_fde_values else np.zeros(0)
+    weighted_fde = weighted_stats(fde_sample, all_weights, prefix="")
     result: Dict[str, Any] = {
         "bc_loss": batch_traj_loss / divisor + batch_action_loss / divisor + batch_router_loss / divisor,
         "bc_traj_loss": batch_traj_loss / divisor,
@@ -2833,6 +2794,7 @@ def evaluate_bc(
         "bc_router_loss": batch_router_loss / divisor,
         "bc_traj_mse": weighted["weighted_mean"],
         "bc_traj_mae_m": weighted_mae["weighted_mean"],
+        "bc_traj_fde_m": weighted_fde["weighted_mean"],
         "bc_traj_mae_all_m": float(np.mean(mae_sample)) if mae_sample.size else float("nan"),
         "bc_traj_mse_unweighted": float(np.mean(mse_sample)) if mse_sample.size else float("nan"),
         "bc_action_mu_ds_mean": mu_ds_batch_sum / divisor,
@@ -2869,20 +2831,15 @@ def evaluate_bc(
     result["labels"] = labels
     result.update(
         _router_summary(
-            prob_sum=router_prob_sum,
-            top1=np.concatenate(router_top1) if router_top1 else None,
-            cluster=np.concatenate(router_cluster) if router_cluster else None,
             count=int(router_count),
-            entropy_sum=float(router_entropy_sum),
-            ce_sum=float(router_soft_ce_sum),
-            kl_sum=float(router_soft_kl_sum),
-            mix_weight_sum=router_mix_weight_sum,
-            mix_selected=router_mix_selected,
-            num_experts=num_experts,
-            temperature=float(config.router_temperature),
+            ce_num=float(router_ce_num),
+            ce_den=float(router_ce_den),
+            acc_num=float(router_acc_num),
+            acc_den=float(router_acc_den),
+            class_weight_sum=router_class_weight_sum,
             cluster_version=str(config.router_cluster_version or ""),
             cluster_k=int(config.router_cluster_k or 0),
-            soft_used=bool(router_soft_used),
+            used=bool(router_used),
         )
     )
     return result

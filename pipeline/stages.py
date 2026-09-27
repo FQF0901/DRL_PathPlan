@@ -9,20 +9,20 @@
   监督**（方案①：每步挤入 GT 帧前用同一 mem 预测第 k 帧 ego 前 6 维，plan head/MoE 因此在
   A 阶段有梯度，design-v1.2 §2.3）+ **presence/entry BCE + AUC（id 轴，见
   :func:`presence_entry_targets`）**；**未来 LD 损失已移除**。
-  监控（Tier-1，2026-09-27）：逐 horizon ``wm/od/loss``、``wm/od/ade_m``（含 ``cv_h*`` 匀速
-  基线）、``wm/ego_next/loss`` + 标量 ``wm/loss``/``wm/presence_auc``/``wm/entry_auc``；
-  FDE/有效样本计数等已从曲线移除（``docs/metrics.md``）。
+  监控（Tier-1，lane B）：``loss/wm|od|ego_next|presence|entry``（训练目标分解，宏 batch 均值）+
+  OD KPI ``val/od/ade_m|fde_m/h*``（含 ``cv_h*`` 匀速基线）+ ``val/od/presence_auc|entry_auc`` +
+  ego KPI ``val/ego/action/err_weighted`` / ``val/ego/traj/mae_m/h*`` / ``val/ego/traj/fde_m``；
+  val 口径 loss 曲线/有效样本计数等已移除（``docs/metrics.md``）。
   可训练：encoders/mem-encoder/plan head/MoE/ST-GNN；policy/value 头不参与。
 - **B = planner BC**：可训练 backbone+MoE+policy head，**primary→specific** 两段。
   损失 = **首步动作**（``action_mu`` vs 专家即时动作，权重感知）+ **6 点 rollout 轨迹辅助**
-  （``traj_xy`` vs 专家 ``traj6``，WM 冻结；新 net 的合成帧 detach 语义）+ **router 软目标
-  CE/KL**（聚类分布 + 温度；软目标缺失时跳过并记录 ``bc_router_soft_placeholder=1``，
-  不再回退 8 维硬标签 BCE）。
-  监控（Tier-1，2026-09-27）：``stageB/<phase>/loss_terms``（loss/traj/action/router）、
-  ``ego/action/err_weighted``、``ego/traj/mae_m``（逐 horizon 加权 MAE，留出 ``val_ego/...``）、
-  ``router/{soft_ce,soft_kl,top1_cluster_acc,nmi,entropy}``、
-  ``router/<phase>/expert_mix_weight``（e0..e7 一图 8 线）；动作误差 median/p95、全部
-  slice/label、expert_util、``traj_mse_m2`` 曲线等已移除（``docs/metrics.md``）。
+  （``traj_xy`` vs 专家 ``traj6``，WM 冻结；新 net 的合成帧 detach 语义）+ **router 硬标签
+  CE**（sidecar ``cluster_v<k>_assignments.npz`` 只读；标签缺失跳过并记录
+  ``bc_router_placeholder=1``；**禁止在线重算**）。
+  监控（Tier-1，lane B）：``loss/planner/<phase>/{total,traj,action,router}``（留出
+  ``val/loss/planner/...``）、``ego/action/err_weighted``、``ego/traj/mae_m|fde_m``（留出
+  ``val/ego/...``）、``router/{ce,acc,acc_majority}``（留出 ``val/router/...``）；动作误差
+  median/p95、全部 slice/label、软目标 KL/温度/专家混合权重等已移除（``docs/metrics.md``）。
 - **C = PPO RL（EXPERIMENTAL）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）与
   P0-2（router 标签错位）未修复前**不得用于 RL 结论**，仅保留管线冒烟。KL 锚 = 阶段 B 快照
   （``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
@@ -71,6 +71,7 @@ from pipeline.trainer import (  # noqa: E402
     MaterializedBCDataset,
     PPOConfig,
     PPOTrainer,
+    V2_ROUTER_CLUSTER,
     apply_freeze_prefixes,
     apply_thread_limits,
     build_pool,
@@ -78,6 +79,7 @@ from pipeline.trainer import (  # noqa: E402
     capture_rng_state,
     config_snapshot_hash,
     dataset_weight_report,
+    ego_kpi_arrays,
     load_checkpoint,
     load_optimizer_state,
     load_training_checkpoint,
@@ -1257,6 +1259,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         [float(args.plan_noise_ds), float(args.plan_noise_dtheta)], dtype=torch.float32, device=device
     )
     action_all = np.asarray(arrays["action"], dtype=np.float32)
+    traj6_all = np.asarray(arrays["traj6"], dtype=np.float32)
     # 权重/目标可用性（v2；v1 退化到 sample_weight/查表存在性）
     train_weight_all = row_action_weights(dataset, np.arange(dataset.count, dtype=np.int64))
     wm_valid_all = np.asarray(arrays["wm_valid"], dtype=np.float32) if "wm_valid" in arrays else None
@@ -1599,6 +1602,21 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             1, horizon + 1, device=device
         ).reshape(1, horizon, 1, 1)
         cv_ade, cv_fde = _ade_fde(offset, od_target, weight)
+        # lane B B2：A/B 同定义的 ego KPI（val 子集；WM rollout 6 点 vs 专家 traj6 + 首步动作）
+        ego = ego_kpi_arrays(
+            model(obs, rollout=True, world_model=True, wm_detach=True),
+            {
+                "traj6": _tensor(traj6_all[eval_idx], dtype=torch.float32),
+                "action": _tensor(action_all[eval_idx], dtype=torch.float32),
+            },
+        )
+        w_eval_sum = frame_weight.sum().clamp(min=1e-8)
+        ego_action_err_weighted = float((ego["action_err"] * frame_weight).sum() / w_eval_sum)
+        ego_traj_fde_m = float((ego["traj_fde_end"] * frame_weight).sum() / w_eval_sum)
+        ego_traj_mae_weighted = [
+            float((ego["traj_mae_point"][:, k] * frame_weight).sum() / w_eval_sum)
+            for k in range(int(ego["traj_mae_point"].shape[1]))
+        ]
         per_horizon: Dict[str, Dict[str, float]] = {}
         ego_next_per_horizon = terms.get("ego_next_per_horizon")
         for k in range(horizon):
@@ -1617,6 +1635,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "valid_samples": float(future["valid"][:, k].sum()),
                 "valid_weight_sum": float(w_frame.sum()),
                 "slot_count": slot_count,
+                "traj_mae_m": ego_traj_mae_weighted[k],
                 "ego_next_loss": (
                     float(ego_next_per_horizon[k]) if ego_next_per_horizon is not None and k < len(ego_next_per_horizon)
                     else float("nan")
@@ -1638,6 +1657,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             "model_fde": float(model_fde),
             "cv_ade": float(cv_ade),
             "cv_fde": float(cv_fde),
+            "ego_action_err_weighted": ego_action_err_weighted,
+            "ego_traj_fde_m": ego_traj_fde_m,
             "per_horizon": per_horizon,
         }
 
@@ -1853,47 +1874,29 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "wm_loss": train_loss,
                 "wm_loss_od": metrics["wm_loss_od"],
                 "wm_loss_ego_next": metrics["wm_loss_ego_next"],
-                "val_loss": eval_metrics["eval_loss"],
-                "val_loss_od": eval_metrics["eval_od_loss"],
-                "presence_available": float(presence_state["available"]),
-                "presence_loss": eval_metrics["presence_loss"],
-                "entry_loss": eval_metrics["entry_loss"],
+                "wm_loss_presence": metrics["wm_loss_presence"],
+                "wm_loss_entry": metrics["wm_loss_entry"],
                 "presence_auc": eval_metrics["presence_auc"],
                 "entry_auc": eval_metrics["entry_auc"],
-                "model_ade": eval_metrics["model_ade"],
-                "model_fde": eval_metrics["model_fde"],
-                "grad_norm_plan_head": grad_probe_last.get("plan_head", 0.0),
-                "grad_norm_router": grad_probe_last.get("plan_head.moe.router", 0.0),
-                "grad_norm_st_gnn": grad_probe_last.get("st_gnn", 0.0),
+                "ego_action_err_weighted": eval_metrics["ego_action_err_weighted"],
+                "ego_traj_fde_m": eval_metrics["ego_traj_fde_m"],
             }
-            if epoch == 0:
-                # val 集常量（匀速基线/有效样本计数只与固定 val 子集有关）只记一次
-                train_payload["cv_ade"] = eval_metrics["cv_ade"]
-                train_payload["cv_fde"] = eval_metrics["cv_fde"]
-            # 逐 horizon 序列（CSV + tensorboard：horizon/h{k}/...）；**唯一** per-horizon
-            # 落盘口径（旧的 train/per_horizon/* 与这里逐位重复，已移除）
+            # OD KPI（val 子集，lane B B1）：逐 horizon ADE/FDE + 匀速基线（同族同图）
             horizon_payload: Dict[str, Dict[str, float]] = {}
             for k, item in enumerate(eval_metrics["per_horizon"].values()):
-                group = {
-                    "loss": item["loss"],
-                    "ade": item["model_ade"],
-                    "fde": item["model_fde"],
-                    "ego_next_loss": item["ego_next_loss"],
-                }
+                group = {"ade": item["model_ade"], "fde": item["model_fde"]}
                 if epoch == 0:
-                    # val 集常量：只记首个 epoch（cv 基线 / 有效样本与槽位计数，不逐 epoch 重复）
-                    group.update(
-                        {
-                            "cv_ade": item["cv_ade"],
-                            "cv_fde": item["cv_fde"],
-                            "valid_samples": item["valid_samples"],
-                            "valid_weight_sum": item["valid_weight_sum"],
-                            "slot_count": item["slot_count"],
-                        }
-                    )
+                    # val 集常量：只记首个 epoch（cv 基线不逐 epoch 重复）
+                    group.update({"cv_ade": item["cv_ade"], "cv_fde": item["cv_fde"]})
                 horizon_payload[f"h{k + 1}"] = group
+            # ego 轨迹 KPI（val 子集，lane B B2）：逐 horizon MAE
+            ego_horizon = {
+                f"h{k + 1}": {"traj_mae_m": item["traj_mae_m"]}
+                for k, item in enumerate(eval_metrics["per_horizon"].values())
+            }
             monitor.on_train_step(train_payload, step=epoch + 1)
             monitor.on_grouped_step(horizon=horizon_payload, step=epoch + 1)
+            monitor.on_val_grouped_step(horizon=ego_horizon, step=epoch + 1)
             monitor.flush(step=epoch + 1)
         print(
             f"[stageA] epoch {epoch + 1}/{epochs} loss={train_loss:.4f} val={eval_metrics['eval_loss']:.4f} "
@@ -1946,7 +1949,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 #: 只在首个 epoch 记一次（监控降噪；完整值仍在 metrics.json 的 phase ``val`` 快照里）
 _VAL_CONSTANT_KEYS = frozenset(
     {
-        "bc_router_temperature",
         "bc_router_cluster_version",
         "bc_router_cluster_version_num",
         "bc_router_cluster_k",
@@ -2104,7 +2106,7 @@ def _val_grouped_groups(
 
 
 def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """阶段 B：planner BC（动作主损失 + rollout 轨迹辅助（WM detach）+ router 软目标 CE/KL）。
+    """阶段 B：planner BC（动作主损失 + rollout 轨迹辅助（WM detach）+ router 硬标签 CE）。
 
     留出集（2026-09-26）：与阶段 A 同 ``--val-frac``/``--seed`` 按 episode 切分（A/B 同一批
     留出 episode）；每 epoch 末在留出集上做无梯度确定性评估（:func:`pipeline.trainer.evaluate_bc`），
@@ -2180,9 +2182,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     traj_weight = float(args.traj_aux_weight if args.traj_aux_weight is not None else bc_cfg.get("traj_aux_weight", 0.1))
     loss_type = str(args.loss_type if args.loss_type is not None else bc_cfg.get("loss_type", "l2"))
     router_coef = float(args.router_coef if args.router_coef is not None else bc_cfg.get("router_coef", 0.1))
-    router_temperature = float(
-        args.router_temperature if args.router_temperature is not None else bc_cfg.get("router_temperature", 1.0)
-    )
+    # CLI ``--router-temperature`` 保留但忽略（lane B B3：router 监督 = 硬标签 CE，无温度）。
     batch_size = int(
         args.batch_size or (train_cfg.get("bc", {}) or {}).get("batch_size") or DEFAULT_STAGE_BATCH_SIZE
     )
@@ -2202,11 +2202,9 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         )
     history_stride = int(args.history_stride if args.history_stride is not None else dataset.history_stride)
     use_materialized = bool(getattr(args, "materialize", False))
-    obs_source: Optional[MaterializedBCDataset] = None
-    if use_materialized:
-        obs_source = MaterializedBCDataset(dataset, include_targets=True)
 
-    # 聚类 lane：router 软目标（pipeline.clusters 冻结 spec；k 必须 = net router 宽度 8）
+    # 聚类 lane：router **硬标签**（lane B B3）——sidecar 优先，缺失时在线 argmax 回退；
+    # 无 spec/标签 → 跳过 router 损失并记 placeholder（不再使用 (N,8) 软分布/温度）。
     cluster_spec = None
     cluster_spec_path = str(getattr(args, "cluster_config", "") or "")
     if cluster_spec_path:
@@ -2214,25 +2212,44 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             from pipeline.clusters import load as load_clusters
 
             cluster_spec = load_clusters(args.cluster_config)
-        except Exception as exc:  # noqa: BLE001 - artifact/依赖缺失 → 退回数据集软目标/跳过
+        except Exception as exc:  # noqa: BLE001 - artifact/依赖缺失 → 数据集标签/跳过
             print(
                 f"[stageB] 警告：聚类 spec 加载失败（{type(exc).__name__}: {exc}）→ "
-                "router 软目标回退数据集/跳过",
+                "router 硬标签回退数据集/跳过",
                 flush=True,
             )
-    router_soft_fn = None
+    router_cluster_fn = None
+    router_cluster_labels = None
     if cluster_spec is not None:
         if int(getattr(cluster_spec, "k", 0)) != 8:
             print(
                 f"[stageB] 警告：cluster k={getattr(cluster_spec, 'k', 0)} != 8（net router 宽度）；"
-                "跳过 router 软目标",
+                "跳过 router 监督",
                 flush=True,
             )
         else:
-            from pipeline.clusters import soft_targets_from_obs
+            from pipeline.clusters import assignments_path, load_assignments
 
-            def router_soft_fn(obs_batch, _spec=cluster_spec):  # noqa: ANN001
-                return soft_targets_from_obs(obs_batch, spec=_spec)
+            # lane B ①：只读 sidecar（严格校验行数/K/版本/指纹）；缺失或不符 → fail-fast
+            router_cluster_labels = load_assignments(
+                args.bc_dir, spec=cluster_spec, dataset_meta=dataset.meta
+            )
+            print(
+                f"[stageB] router 硬标签：sidecar {assignments_path(args.bc_dir, spec=cluster_spec)} 载入 "
+                f"{int(router_cluster_labels.size)} 行（禁止在线重算）",
+                flush=True,
+            )
+            # 非物化路径同样可用：注入数据集 arrays（BCDataset.targets 直接取）
+            dataset.arrays[V2_ROUTER_CLUSTER] = router_cluster_labels.astype(np.int16)
+
+    obs_source: Optional[MaterializedBCDataset] = None
+    if use_materialized:
+        obs_source = MaterializedBCDataset(
+            dataset,
+            include_targets=True,
+            router_cluster_fn=router_cluster_fn,
+            router_cluster_labels=router_cluster_labels,
+        )
 
     # WM 冻结：阶段 A 已训练；rollout 内合成帧再 detach（固定语义，wm_detach 为 no-op）→
     # 轨迹辅助损失不回传 ST-GNN。
@@ -2255,11 +2272,13 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "action_weight": action_weight,
         "traj_aux_weight": traj_weight,
         "router_coef": router_coef,
-        "router_temperature": router_temperature,
         "cluster_version": (str(cluster_spec.cluster_version) if cluster_spec is not None else ""),
         "cluster_k": (int(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0),
         "cluster_spec": cluster_spec_path,
-        "cluster_soft_targets": bool(router_soft_fn is not None),
+        "router_cluster_source": (
+            "sidecar" if router_cluster_labels is not None
+            else ("online" if router_cluster_fn is not None else "none")
+        ),
         "wm_detach": True,
         "history_stride": history_stride,
         "materialize": bool(obs_source is not None),
@@ -2289,7 +2308,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             {
                 "cluster_version_num": float(version_digits) if version_digits else float("nan"),
                 "cluster_k": float(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0.0,
-                "cluster_soft_targets": 1.0 if router_soft_fn is not None else 0.0,
+                "router_labels_available": 1.0 if (router_cluster_labels is not None or router_cluster_fn is not None) else 0.0,
             },
             step=0,
         )
@@ -2399,7 +2418,6 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             traj_weight=traj_weight,
             action_weight=action_weight,
             router_coef=router_coef,
-            router_temperature=router_temperature,
             seed=int(args.seed),
             device=device,
             max_batches=args.max_batches,
@@ -2422,7 +2440,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             dataset,
             cfg,
             logger=print,
-            router_soft_targets_fn=router_soft_fn,
+            router_cluster_fn=router_cluster_fn,
             batch_source=obs_source,
         )
         if monitor is not None:

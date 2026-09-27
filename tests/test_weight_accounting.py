@@ -7,7 +7,7 @@
   权重 0 的帧不贡献分子/分母，且不做"有效项总数"隐性重加权；
 - ``row_action_weights``：``train_weight × balance_weight``（缺失时的退化链）；
 - ``presence_entry_loss``：权重 0 的 (帧,horizon) 完全剔除；AUC 单类 → nan；
-- ``router_soft_target_loss``：T=1 且硬标签时与标准 BCEWithLogits 一致。
+- ``router_hard_label_loss``：硬标签 CE（F.cross_entropy 同式；权重 0 不出力；标签 <0 忽略）。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pipeline.trainer import (
     dataset_weight_report,
     presence_entry_loss,
     row_action_weights,
-    router_soft_target_loss,
+    router_hard_label_loss,
     weighted_od_multi_step_loss,
     weighted_stats,
 )
@@ -160,30 +160,25 @@ def test_binary_auc_rank_based() -> None:
     assert np.isnan(binary_auc([0.5, 0.6], [1, 1]))
 
 
-# ------------------------------------------------------------------ router 软目标
-def test_router_soft_target_loss_ce_kl_temperature_and_hard_equivalence() -> None:
-    from pipeline.trainer import router_soft_target_stats
+# ------------------------------------------------------------------ router 硬标签 CE（lane B B3）
+def test_router_hard_label_loss_weighting_and_missing_labels() -> None:
+    from pipeline.trainer import router_hard_label_loss, router_hard_label_stats
 
-    logits = torch.tensor([[2.0, -1.0, 0.5, 0.0, 0.1, -0.2, 0.3, 0.4]])
-    prob = torch.tensor([[0.7, 0.1, 0.05, 0.05, 0.025, 0.025, 0.025, 0.025]])
-    ce = float(router_soft_target_loss(logits, prob, kind="ce"))
-    kl = float(router_soft_target_loss(logits, prob, kind="kl"))
-    entropy = float(-(prob * prob.log()).sum(dim=-1))
-    assert kl == pytest.approx(ce - entropy, rel=1e-5), "KL = CE − H(p)"
-    stats = router_soft_target_stats(logits, prob)
-    assert stats["ce"] == pytest.approx(ce, rel=1e-5)
-    assert stats["kl"] == pytest.approx(kl, rel=1e-5)
-    assert stats["target_entropy"] == pytest.approx(entropy, rel=1e-5)
-    # logits = log p → softmax = p：KL = 0、CE = H(p)
-    perfect = prob.log()
-    assert float(router_soft_target_loss(perfect, prob, kind="kl")) == pytest.approx(0.0, abs=1e-5)
-    assert float(router_soft_target_loss(perfect, prob, kind="ce")) == pytest.approx(entropy, rel=1e-5)
-    # one-hot 软目标 = 标准交叉熵
-    hard = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
-    reference = torch.nn.functional.cross_entropy(logits, torch.tensor([0]))
-    assert float(router_soft_target_loss(logits, hard, kind="ce")) == pytest.approx(float(reference), rel=1e-5)
-    # 温度：T<1 锐化 logits → 与均匀目标更远 → KL 更大
-    uniform = torch.full((1, 8), 1.0 / 8.0)
-    kl_low = float(router_soft_target_loss(logits, uniform, temperature=0.5, kind="kl"))
-    kl_high = float(router_soft_target_loss(logits, uniform, temperature=2.0, kind="kl"))
-    assert kl_low > kl_high, "低温应锐化 logits（KL 对均匀目标更大）"
+    logits = torch.tensor([[2.0, -1.0, 0.5, 0.0, 0.1, -0.2, 0.3, 0.4],
+                           [0.0, 1.0, -1.0, 0.5, 0.2, 0.1, -0.3, 0.4]])
+    labels = torch.tensor([0, 2])
+    reference = torch.nn.functional.cross_entropy(logits, labels)
+    assert float(router_hard_label_loss(logits, labels)) == pytest.approx(float(reference), rel=1e-6)
+    # 权重 0 的样本不出力：weight=[0,1] 时等于只对第 2 行求 CE
+    weighted = router_hard_label_loss(logits, labels, sample_weight=torch.tensor([0.0, 2.0]))
+    single = torch.nn.functional.cross_entropy(logits[1:], labels[1:])
+    assert float(weighted) == pytest.approx(float(single), rel=1e-6)
+    # 标签缺失（<0）被忽略；全缺失 → loss=0、stats 为 nan/0（placeholder 语义由调用方记）
+    missing = router_hard_label_loss(logits, torch.tensor([-1, 2]))
+    assert float(missing) == pytest.approx(float(single), rel=1e-6)
+    assert float(router_hard_label_loss(logits, torch.tensor([-1, -1]))) == 0.0
+    stats = router_hard_label_stats(logits, labels)
+    assert stats["ce"] == pytest.approx(float(reference), rel=1e-6)
+    assert stats["acc"] == pytest.approx(0.5)  # 第 1 行 argmax=0=标签；第 2 行 argmax=1 ≠ 标签 2
+    assert stats["count"] == 2.0
+    assert np.isnan(router_hard_label_stats(logits, torch.tensor([-1, -1]))["acc"])

@@ -134,12 +134,17 @@ def resolve(root: Path, cfg: Mapping[str, Any], stage_arg: str = "") -> dict[str
 
 def resolve_eval(root: Path, cfg: Mapping[str, Any], policy: str = "ckpt", limit: str = "50",
                  tracker: str = "lqr") -> dict[str, str]:
-    """test 侧取值（``CKPT=...`` / ``LIMIT=...`` 等环境变量覆盖仍可用）。"""
+    """test 侧取值（``CKPT=...`` / ``LIMIT=...`` 等环境变量覆盖仍可用）。
+
+    ``POLICY=baseline`` 不解析/不传 ckpt（避免 argv 里出现误导性的 --ckpt）。
+    """
     run = dict(cfg.get("run") or {})
-    value = _over("CKPT", _over("EVAL_CKPT", run.get("eval_ckpt", "auto")))
-    if value == "auto":
-        found = run_paths.latest_final(root, "B") or run_paths.latest_final(root, "A")
-        value = _rel(found, root)
+    value = ""
+    if policy != "baseline":
+        value = _over("CKPT", _over("EVAL_CKPT", run.get("eval_ckpt", "auto")))
+        if value == "auto":
+            found = run_paths.latest_final(root, "B") or run_paths.latest_final(root, "A")
+            value = _rel(found, root)
     name = str(_over("NAME", "") or "")
     if not name:
         tag = f"eval_baseline{limit}" if policy == "baseline" else f"eval_{tracker}{limit}"

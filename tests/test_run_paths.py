@@ -129,12 +129,20 @@ def test_tb_spec_takes_latest_candidates_only(tmp_path: Path) -> None:
     assert spec == [("train_stageA", str(newer_a)), ("train_stageB", str(newer_b))]
     assert run_config.resolve_tb(tmp_path)["TB_SPEC"] == f"train_stageA:{newer_a},train_stageB:{newer_b}"
 
-    # eval 目录：按 manifest 的 ckpt 归属命名（eval_stageA/B），无事件文件则跳过
+    # eval 目录：按 manifest 的 ckpt 归属命名（eval_stageA/B；policy=baseline → eval_baseline），
+    # 无事件文件则跳过
     eval_dir = tmp_path / "runs/BTC20260202-0000_eval_lqr50"
     (eval_dir / "monitor").mkdir(parents=True)
     (eval_dir / "monitor/events.out.tfevents.9").write_bytes(b"")
     (eval_dir / "manifest.txt").write_text("ckpt: runs/BTC20260202-0000_train/stage_a/final.pt\n", encoding="utf-8")
     assert ("eval_stageA", str(eval_dir / "monitor")) in run_paths.tb_spec(tmp_path)
+
+    baseline_dir = tmp_path / "runs/BTC20260303-0000_eval_baseline2"
+    (baseline_dir / "monitor").mkdir(parents=True)
+    (baseline_dir / "monitor/events.out.tfevents.10").write_bytes(b"")
+    (baseline_dir / "manifest.txt").write_text("policy: baseline\nckpt: <none>\n", encoding="utf-8")
+    assert ("eval_baseline", str(baseline_dir / "monitor")) in run_paths.tb_spec(tmp_path)
+    assert "eval_baseline" in run_paths.TB_RUN_ORDER
 
 
 def test_entry_scripts_thin_and_parse() -> None:

@@ -229,7 +229,7 @@ def latest_dataset(root: Path = ROOT) -> Path | None:
 
 # ---------------------------------------------------------------- TensorBoard run 名（tools/tb.sh）
 #: ``--logdir_spec`` 的固定 run 名（顺序即展示顺序）
-TB_RUN_ORDER: tuple[str, ...] = ("train_stageA", "train_stageB", "eval_stageB", "eval_stageA")
+TB_RUN_ORDER: tuple[str, ...] = ("train_stageA", "train_stageB", "eval_stageB", "eval_stageA", "eval_baseline")
 
 
 def _monitor_with_events(run_dir: Path) -> Path | None:
@@ -240,16 +240,19 @@ def _monitor_with_events(run_dir: Path) -> Path | None:
     return None
 
 
-def _eval_stage_of(run_dir: Path) -> str:
-    """评测 run 归属：manifest 的 ckpt 路径含 ``stage_b`` → B，含 ``stage_a`` → A，否则 B（planner 语义）。"""
+def _eval_run_name(run_dir: Path) -> str:
+    """评测 run 归属：``policy: baseline``（或无 ckpt）→ ``eval_baseline``；否则按 manifest 的
+    ckpt 路径含 ``stage_b``/``stage_a`` 判 ``eval_stageB``/``eval_stageA``。"""
     manifest = run_dir / "manifest.txt"
     if manifest.is_file():
         text = manifest.read_text(encoding="utf-8", errors="ignore")
+        if "policy: baseline" in text or "--policy baseline" in text:
+            return "eval_baseline"
         if "stage_b" in text:
-            return "B"
+            return "eval_stageB"
         if "stage_a" in text:
-            return "A"
-    return "B"
+            return "eval_stageA"
+    return "eval_baseline"
 
 
 def tb_spec(root: Path = ROOT) -> list[tuple[str, str]]:
@@ -273,7 +276,7 @@ def tb_spec(root: Path = ROOT) -> list[tuple[str, str]]:
         reverse=True,
     )
     for run_dir in eval_dirs:
-        name = f"eval_stage{_eval_stage_of(run_dir)}"
+        name = _eval_run_name(run_dir)
         if name in spec:
             continue
         monitor = _monitor_with_events(run_dir)

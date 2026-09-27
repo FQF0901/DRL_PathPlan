@@ -251,13 +251,14 @@ def test_world_model_module_removed_and_unreferenced() -> None:
 
 # ---------------------------------------------------- 6. config v2 语义
 def test_config_router_and_stage_a_v2_semantics() -> None:
-    """config/model.yaml router = top-2 softmax + 软目标；train.yaml A 段有 ego_next_coef。"""
+    """config/model.yaml router = top-2 softmax + 硬标签 CE；train.yaml A 段有 ego_next_coef。"""
     import yaml
 
     model_cfg = yaml.safe_load((ROOT / "config/model.yaml").read_text(encoding="utf-8"))
     router = model_cfg["moe"]["router"]
     assert router["type"] == "top2_softmax"
-    assert router["supervision"] == "soft_cluster_ce"
+    assert router["supervision"] == "hard_cluster_ce"  # lane B B3：软目标/温度路径已删除
+    assert "temperature" not in router
     assert router["top_k"] == 2
     assert router.get("labels") != "per_step_observable"
     # 数据集标签顺序仍保留（数据契约/切片分析用，不再是 router 监督）

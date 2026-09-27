@@ -1270,6 +1270,47 @@ def write_episodes_csv(episodes: Sequence[Mapping[str, Any]], path: Path) -> Non
             writer.writerow(row)
 
 
+def write_eval_tensorboard(report: Mapping[str, Any], monitor_dir: Path, *, step: int = 1) -> bool:
+    """把 ``metrics.json`` 的 overall / by_primary / by_difficulty **全量 KPI** 写 TB（lane B B5）。
+
+    tag：``eval/<metric>``；分组 ``eval/by_primary/<metric>/<group>``、
+    ``eval/by_difficulty/<metric>/<group>``（同 run 内并图）；单点 ``step=1``；
+    **不写逐 spec**（明细在 episodes.csv）。tensorboard 不可用 → 返回 False（不 raise）。
+    """
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except Exception as exc:  # noqa: BLE001 - 可选依赖
+        print(f"[eval_runner] tensorboard 不可用（{type(exc).__name__}: {exc}）→ 跳过 eval TB", flush=True)
+        return False
+
+    def _numeric(group: Any) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for key, value in (group or {}).items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                out[str(key)] = float(value)
+        return out
+
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        writer = SummaryWriter(log_dir=str(monitor_dir))
+        for metric, value in _numeric(report.get("overall")).items():
+            writer.add_scalar(f"eval/{metric}", value, global_step=step)
+        for group_name, group in (report.get("by_primary") or {}).items():
+            for metric, value in _numeric(group).items():
+                writer.add_scalar(f"eval/by_primary/{metric}/{group_name}", value, global_step=step)
+        for group_name, group in (report.get("by_difficulty") or {}).items():
+            for metric, value in _numeric(group).items():
+                writer.add_scalar(f"eval/by_difficulty/{metric}/{group_name}", value, global_step=step)
+        writer.flush()
+        writer.close()
+    except Exception as exc:  # noqa: BLE001 - 评测结果不应因 TB 失败而丢失
+        print(f"[eval_runner] eval TB 写入失败（{type(exc).__name__}: {exc}）", flush=True)
+        return False
+    return True
+
+
 def _print_summary(report: Mapping[str, Any]) -> None:
     """打印 overall / by_primary / by_difficulty 简表 + 判定结论。"""
     header = (
@@ -1664,6 +1705,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dump(_sanitize(report), handle, ensure_ascii=False, indent=2)
     csv_path = out_dir / "episodes.csv"
     write_episodes_csv(episodes, csv_path)
+    if write_eval_tensorboard(report, out_dir / "monitor"):
+        print(f"[eval_runner] TB -> {out_dir / 'monitor'}（eval/* + by_primary/by_difficulty）")
 
     _print_summary(report)
     verdict = report["verdict"]

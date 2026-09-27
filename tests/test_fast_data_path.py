@@ -36,12 +36,12 @@ RTOL = 1e-5
 
 
 def _dataset(*, episodes: int = 6, steps_per_episode: int = 6) -> BCDataset:
-    """v2 合成数据集 + router 软目标（覆盖 targets 的全部可选键）。"""
+    """v2 合成数据集 + router 硬标签（覆盖 targets 的全部可选键）。"""
     arrays, _ = make_v2_arrays(episodes=episodes, steps_per_episode=steps_per_episode)
     rng = np.random.default_rng(7)
-    arrays["router_soft_targets"] = rng.dirichlet(
-        np.ones(8), size=arrays["episode_id"].shape[0]
-    ).astype(np.float32)
+    arrays["router_cluster"] = rng.integers(
+        0, 8, size=arrays["episode_id"].shape[0]
+    ).astype(np.int16)
     return BCDataset(
         arrays,
         {

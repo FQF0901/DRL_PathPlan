@@ -46,28 +46,36 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
     # 既有路径 2：场景标签 / MoE 窗口 → 丢弃
     monitor.on_scene_step({"cutin_active": 1.0, "crowded": 0.0})
     monitor.on_moe_step(np.array([[0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]))
-    # Stage A：wm 标量 + 逐 horizon（loss/ade/cv_ade/ego_next_loss；fde/计数丢弃）
-    monitor.on_train_step({"wm_loss": 0.8, "presence_auc": 0.9, "entry_auc": 0.8,
+    # Stage A：训练损失分解 + OD KPI（逐 horizon ADE/FDE + 匀速基线）
+    monitor.on_train_step({"wm_loss": 0.8, "wm_loss_od": 0.5, "wm_loss_ego_next": 0.3,
+                           "wm_loss_presence": 0.05, "wm_loss_entry": 0.02,
+                           "presence_auc": 0.9, "entry_auc": 0.8,
+                           "ego_action_err_weighted": 0.07, "ego_traj_fde_m": 0.9,
                            "grad_norm_plan_head": 1.0, "cv_ade": 0.1}, step=1)
     monitor.on_grouped_step(
         horizon={"h1": {"loss": 1.0, "ade": 2.0, "cv_ade": 0.5, "ego_next_loss": 0.3,
-                        "fde": 3.0, "valid_samples": 12.0},
-                 "h2": {"loss": 3.0, "ade": 4.0, "cv_ade": 0.6, "ego_next_loss": 0.4}},
+                        "fde": 3.0, "cv_fde": 3.3, "valid_samples": 12.0},
+                 "h2": {"loss": 3.0, "ade": 4.0, "cv_ade": 0.6, "ego_next_loss": 0.4,
+                        "fde": 4.0, "cv_fde": 4.4}},
         labels={"cutin_active": {"action_err": 0.4}},
         slices={"brake": {"action_err": 0.2}, "turn": {"action_err": 0.6}},
         step=1,
     )
-    # Stage B：相位标量 + 逐 horizon traj MAE + 留出族
+    monitor.on_val_grouped_step(horizon={"h1": {"traj_mae_m": 0.11}, "h2": {"traj_mae_m": 0.22}}, step=1)
+    # Stage B：相位损失分解 + 逐 horizon traj MAE/FDE + 留出族 + 硬标签 router
     monitor.on_train_step(
         {"primary_bc_loss": 0.4, "primary_bc_traj_loss": 0.3, "primary_bc_action_loss": 0.2,
          "primary_bc_router_loss": 0.1, "primary_bc_action_err_weighted_mean": 0.05,
-         "primary_bc_action_err_median": 0.01, "primary_bc_router_soft_ce": 0.7,
+         "primary_bc_traj_fde_m": 1.3,
+         "primary_bc_action_err_median": 0.01, "primary_bc_router_ce": 0.7,
+         "primary_bc_router_acc": 0.62, "primary_bc_router_acc_majority": 0.31,
          "primary_bc_router_soft_kl": 0.3, "primary_bc_router_entropy": 1.2,
          "primary_bc_router_expert_mix_weight_0": 0.5},
         step=1,
     )
     monitor.on_grouped_step(horizon={"h1": {"traj_mae_m": 0.1, "traj_mse_m2": 2.0}}, step=1)
-    monitor.on_val_step({"primary_bc_loss": 0.7, "primary_bc_traj_mse": 1.1}, step=1)
+    monitor.on_val_step({"primary_bc_loss": 0.7, "primary_bc_traj_fde_m": 1.4,
+                         "primary_bc_router_ce": 0.6, "primary_bc_router_acc": 0.5}, step=1)
     monitor.on_val_grouped_step(
         horizon={"h1": {"traj_mse_m2": 1.1, "traj_mae_m": 0.8}},
         labels={"cutin_active": {"action_err": 0.3}},
@@ -78,27 +86,32 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
     monitor.close()
 
     tags = _read_tags(tmp_path / "metrics.csv")
-    for tag in ("wm/loss", "val/od/presence_auc", "val/od/entry_auc",
-                "val/od/loss/h1", "val/od/ade_m/h1", "val/od/ade_m/cv_h1", "val/ego_next/loss/h1",
-                "planner/primary/loss_terms/loss", "planner/primary/loss_terms/traj",
-                "planner/primary/loss_terms/action", "planner/primary/loss_terms/router",
-                "ego/action/err_weighted", "ego/traj/mae_m/h1",
-                "router/soft_ce", "router/soft_kl", "router/entropy",
-                "router/primary/expert_mix_weight/e0",
-                "val/planner/primary/loss_terms/loss", "val/ego/traj/mae_m/h1"):
+    for tag in ("loss/wm", "loss/od", "loss/ego_next", "loss/presence", "loss/entry",
+                "val/od/presence_auc", "val/od/entry_auc",
+                "val/od/ade_m/h1", "val/od/fde_m/h1", "val/od/ade_m/cv_h1", "val/od/fde_m/cv_h1",
+                "loss/planner/primary/total", "loss/planner/primary/traj",
+                "loss/planner/primary/action", "loss/planner/primary/router",
+                "ego/action/err_weighted", "ego/traj/mae_m/h1", "ego/traj/fde_m",
+                "router/ce", "router/acc", "router/acc_majority",
+                "val/loss/planner/primary/total", "val/ego/traj/mae_m/h1",
+                "val/router/ce", "val/router/acc", "val/ego/traj/fde_m"):
         assert tag in tags, f"保留 tag 缺失：{tag}"
-    # 已移除 tag 一个不留（包括旧命名与 n_updates / 计数 / slice / label / median / grad_norm；
-    # 以及瘦身前一版的名字 wm/od/*、stageB/*、val_*/val/horizon*）
+    # 已移除 tag 一个不留（含旧命名、软目标 router、n_updates/计数/slice/label/median/grad_norm）
     for tag in ("kpi/success", "train/loss", "train/reward/total", "scene_label/cutin_active/freq",
                 "moe/effective_n", "horizon/h1/loss/mean", "horizon/h1/loss/n_updates",
-                "horizon/h1/valid_samples/mean", "horizon/h1/fde/mean", "horizon/h1/traj_mse_m2/mean",
+                "horizon/h1/valid_samples/mean", "horizon/h1/traj_mse_m2/mean",
                 "label/cutin_active/action_err/mean", "slice/brake/action_err/mean",
                 "train/primary_bc_action_err_median", "train/grad_norm_plan_head",
                 "train/cv_ade", "val/primary_bc_loss", "val/horizon/h1/traj_mse_m2/mean",
                 "val/slice/brake/action_err/mean", "val/label/cutin_active/action_err/mean",
                 "train/primary_bc_traj_mse",
+                "wm/loss", "val/od/loss/h1", "val/ego_next/loss/h1",
+                "planner/primary/loss_terms/loss", "val/planner/primary/loss_terms/loss",
+                "router/soft_ce", "router/soft_kl", "router/entropy", "router/nmi",
+                "router/top1_cluster_acc", "router/primary/expert_mix_weight/e0",
+                "val_ego/traj/mae_m/h1", "val_router/ce", "val_stageB/primary/loss_terms/loss",
                 "wm/od/loss/h1", "wm/presence_auc", "stageB/primary/loss_terms/loss",
-                "val_stageB/primary/loss_terms/loss", "val_ego/traj/mae_m/h1", "val_router/soft_ce"):
+                "val_ego/traj/mae_m/h1", "val_router/soft_ce"):
         assert tag not in tags, f"已移除 tag 仍写入：{tag}"
 
 
