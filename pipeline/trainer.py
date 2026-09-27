@@ -2677,10 +2677,8 @@ def evaluate_bc(
         traj_fde_values.append(
             torch.linalg.norm(diff[:, -1, :], dim=-1).detach().double().cpu().numpy()
         )
-        sample_error = diff.detach().abs().mean(dim=(-1, -2)).double().cpu().numpy()
         sample_weight = specific_weight.detach().double().cpu().numpy()
         weight_values.append(sample_weight)
-        action_err_values.append(sample_error)
         batch_weight_sum = float(specific_weight.sum().clamp(min=1e-8))
         batch_traj_loss += config.traj_weight * (
             float((traj_mse_point * specific_weight.reshape(-1, 1)).sum()) / batch_weight_sum
@@ -2689,8 +2687,18 @@ def evaluate_bc(
         )
         action_pred = out.get("action_mu")
         target_action = targets["action"][:, 0, :]
-        if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
-            action_diff = action_pred - target_action
+        action_ok = action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape)
+        action_diff = (action_pred - target_action) if action_ok else None
+        # 统计口径：逐样本 L1（与训练侧 pretrain_bc 同族；不受 loss_type 影响）
+        # NOTE(2026-09-28 修复)：此前误把轨迹误差（diff=traj_pred-traj6）写进 action_err_values，
+        # 导致 val 的 action_err/slices 与 traj_mae 数值雷同（train 侧口径一直正确）。
+        action_err_point = (
+            action_diff.abs().mean(dim=-1).detach().double().cpu().numpy()
+            if action_diff is not None
+            else np.full(int(traj_pred.shape[0]), np.nan, dtype=np.float64)
+        )
+        action_err_values.append(action_err_point)
+        if action_ok:
             per_sample = (
                 (action_diff ** 2).mean(dim=-1)
                 if config.loss_type == "l2"
@@ -2713,7 +2721,7 @@ def evaluate_bc(
                 slice_masks["curve"] = labels_np[:, on_curve_index] > 0.5
             for name, mask in slice_masks.items():
                 if bool(np.any(mask)):
-                    slice_err_values[name]["err"].append(sample_error[mask])
+                    slice_err_values[name]["err"].append(action_err_point[mask])
                     slice_err_values[name]["weight"].append(sample_weight[mask])
         # lane U1：MoE 负载 val 孪生（行数加权；与训练侧同公式）
         if out.get("expert_weights") is not None and config.moe_enabled:

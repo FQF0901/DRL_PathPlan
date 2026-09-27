@@ -389,6 +389,12 @@ def test_stage_b_two_phase_end_to_end_with_dagger(tmp_path: Path) -> None:
     assert val_metrics.get("bc_load_count") == val_metrics.get("bc_load_count") and val_metrics
     assert "bc_load_cv" in val_metrics and "bc_gate_entropy" in val_metrics
     assert "bc_load_balance_loss" in val_metrics
+    # 回归（2026-09-28 修复）：val 的"动作误差"必须来自 action_pred-target_action；
+    # 此前误用轨迹误差（traj_pred-traj6）→ 与 traj_mae 数值雷同。此断言锁死口径。
+    act_err = val_metrics.get("bc_action_err_weighted_mean")
+    traj_mae = val_metrics.get("bc_traj_mae_m")
+    assert act_err is not None and traj_mae is not None
+    assert abs(float(act_err) - float(traj_mae)) > 1e-9, "val action_err 不应与 traj_mae 同值（口径回归）"
     # 冻结语义端到端：primary 段权重在 phase 2 逐位不变；experts 已更新
     # 同一 run 内对比（两次 run 的随机初始化不同；run 2 自己的 primary.pt vs final.pt）
     primary_ckpt = torch.load(out / "primary.pt", map_location="cpu", weights_only=False)["model"]
