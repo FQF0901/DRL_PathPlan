@@ -181,9 +181,10 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
   **critic 全程 `explained_var ≈ 0.004`**（无法为终端风险定价）且 KL 锚系数衰减到 0 → 策略向廉价的速度项漂移。
   **修复方向**：速度项按在道状态门控（或乘安全指示）、提高 off-road/crash 权重、KL 系数下限 + primary lr 再降、
   critic 强化（解冻主干 / 更多预热），并且**先修横向弱点**（否则 RL 只是在一个易出界的策略上做速度优化）。
-- **P11 router 负载集中 + 软目标过平滑（v1.2 新观察）**：8 专家中 2 个占 53% 混合权重（expert2 0.297 / expert6 0.232），
-  其余 <0.12；cluster 软目标 top-2 gap 中位数仅 **0.017**（τ=0.5 + 边界平滑所致）→ 有效监督被稀释
-  （top-1 簇准确率 0.265、NMI 0.081）。候选：降 τ、减小边界平滑强度、对稀有簇重加权（待你确认后再动）。
+- **P11 router 负载集中（v1.2 历史观察，聚类方案已废止）**：8 专家中 2 个占 53% 混合权重
+  （expert2 0.297 / expert6 0.232），其余 <0.12；当时以聚类软目标监督（top-2 gap 中位数 0.017、
+  top-1 簇准确率 0.265、NMI 0.081）→ 有效监督被稀释。**lane U1 起取消聚类监督**，改为
+  Switch 式负载均衡 aux（`router/expert_load/*` / `router/load_cv` / `router/gate_entropy`）。
 - **P12 纵向速度偏慢（v1.2 新观察）**：闭环 speed_ratio **0.407**（基线 0.734；v1 最好 0.631），
   `mu_ds` 3.52 m/0.5 s vs 专家 3.22 → 需分解"动作克隆误差 vs 闭环执行速度差"的贡献。
 
@@ -237,9 +238,7 @@ bash tools/setup_gl_libs.sh
 # 场景 + 专家数据（数据集放 datasets/，不随 runs/ 清理；命名 BTC<北京时间戳>_expert<N>k）
 bash tools/gene_env.sh
 tools/venv-python tools/collect_expert.py --specs env/specs/scenarios_train.json --limit 5000 \
-    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"   # --workers 默认 auto（8–10）；收尾自动批注 router 硬标签 sidecar
-# 已有数据集补标（Stage B 只读 sidecar，缺失会 fail-fast）：
-#   tools/venv-python tools/annotate_clusters.py --dataset datasets/BTC<ts>_expert5k
+    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"   # --workers 默认 auto（8–10）
 
 # 分阶段训练（零参可跑：数据集/epoch/batch/resume 全在 config/train.yaml；脚本只做 setsid+nohup 分离启动）
 bash tools/train.sh                      # Stage A（默认）；STAGE=B bash tools/train.sh 跑 Stage B（自动用最新 A final、共用同一 run 根）

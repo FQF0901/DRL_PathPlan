@@ -123,55 +123,39 @@ rollout（6 步）
 **修复**：worker 各自把分片写到磁盘（`_shards/`），父进程只收标量摘要（RSS ≈O(1)），结束后再合并成最终 `expert_bc.npz`
 （峰值 = 最终数据一份）。`--workers` 默认 auto（CPU 取半、上限 10），内存不足只警告不降级。
 
-## 4. 路由与聚类（**历史**：lane U1 起已废止）
+## 4. 路由与聚类（**历史**：lane U1 起已废止，lane U3 已清理）
 
-> **lane U1（2026-09-27）起：聚类监督全部取消** —— 无簇标签、无 router CE/acc、无 sidecar 读取；
-> 本章 §4 / §4.1 仅作历史记录（`pipeline/clusters.py` 等 artifact 由清理 lane 删除），
-> 现行方案见 §4.2。**训练侧不得再引用本章的任何监督口径。**
+> **lane U1（2026-09-27）起：聚类监督全部取消**；**lane U3（2026-09-27）已把聚类管线整体删除**
+> （聚类拟合/批注/排查工具、聚类 artifact 目录、聚类 sidecar、聚类测试与全部可执行引用）。
+> 本节仅保留**叙述性历史结论**（不指向任何已删除路径/命令），现行方案见 §4.2。
+> **训练侧不得再引用本章的任何监督口径。**
 
-- **（历史）监督**（lane B B3）：router 只吃**硬标签**（聚类 top-1）CE（`F.cross_entropy(logits, cluster, weight=…)`）；
-  标签由 sidecar `datasets/<ds>/cluster_v<version>_assignments.npz` 提供，**训练侧只读**（缺失/行数/指纹/
-  spec 哈希不符 → 直接报错并打印生成命令）；KPI = `router/ce` + `router/acc` + `router/acc_majority`（多数类基线）。
-- **特征契约 v2**（lane D，合计 **47 维**；`pipeline/clusters.py::FEATURE_CONTRACT_V2`，机器可读、编码由契约驱动）：
-  - `ego(8)`：全保留；
-  - `od`：每帧 **6 个对象 × (dx, dy, vx, vy)**。选取规则（确定性）：
-    1. 候选 = `od_presence == 1`（fresh 观测；陈旧槽不参与）；
-    2. 先取 **TTC 最小的 3 个**：urgency = `min(TTC, 5 s)`，其中 `TTC = dx/(-vx)` 当 `dx>0` 且 `vx<-1e-3`，
-       否则 `inf`（即 urgency=cap）——与 `env/obs/od.py` 槽位分配**同公式、同参数**（本模块内置向量化实现）；
-    3. 再从**其余候选**中取距离（`√(dx²+dy²)`）最近的 3 个；
-    4. 不足 6 个 → 零填充；一切并列按**槽位下标升序** tie-break；
-    5. 槽位顺序 = TTC-3（urgency 升序）→ 距离-3（距离升序）；
-  - `nav`：命令 one-hot(3)（forward/left/right；checkpoints(4)/reserved(3)/route_completion(1) 丢弃）；
-  - `road_class`：one-hot(12)（类别特征的正确编码）；
-  - **丢弃**：ld 全部、od 的 cos/sin/length/width/type_id、others 的 speed_limit/signal。
-- **预处理**：去常数/近零方差 → 标准化 → **PCA 白化 `min(32, 去常量后维数, N-1)`**（显式 32，报告记 `pca_dim_actual`）
-  → 稀有度密度权重 `w = clip((ρ_med/ρ)^α, 0.1, 10)`（α=0.75，rule-free）→ 容量约束加权 k-means。
-- **强制均衡（lane D）**：k=8 不变（router 头 8 路）；目标每簇 ≈12.5%，约束 **cap≈15% / floor≈8%**，
-  `capacity_ok=True` 为验收门；flat 模式多次 restart（默认 8）取「满足约束且 objective 最低」；
-  15/8 达不到才放宽 20/5 并写进报告。两个变体：
-  (a) **flat + 严格容量**（默认）；(b) **活跃度分桶 + 两桶都做容量约束 k-means**（`--balanced-split`，
-  仍是 flat spec——soft/argmax 与 8 质心一致，杜绝"平稳桶"变巨簇）。
-- **冻结与版本**：`config/clusters/cluster_v2.npz`（质心/PCA/特征契约/数据指纹/git hash）+ `cluster_v2.report.json`
-  （shares/entropy/`capacity_ok`/稀有富集/soft gap，**含与 v1 对照**）；`cluster_v1.*` 保留；`default.yaml` 指向 v2。
-- **体检门**：簇规模/熵/半径；每簇难度/几何/规则标签占比；稀有结构富集（cut-in 等）≥3× 全局，否则 FLAG
-  并给两段式退路命令；规则标签只用于体检，绝不进入监督。
+- **（历史）监督**（lane B B3）：router 曾以聚类硬标签（top-1）CE 为唯一监督，KPI 为
+  `router/ce` + `router/acc` + `router/acc_majority`；标签由数据集内 sidecar 提供、训练侧只读。
+- **（历史）特征契约 v2（47 维）**：`ego(8)` 全保留；`od` 取 6 对象 × `(dx, dy, vx, vy)`
+  （候选 = presence=1；先取 TTC 最小 3，urgency = `min(TTC,5s)`、`TTC = dx/(-vx)` 当 `dx>0 且 vx<-1e-3`
+  否则 inf；再从其余候选取距离最近 3；不足零填充；并列按槽位下标升序）；`nav` 命令 one-hot(3)；
+  `road_class` one-hot(12)；丢弃 ld、od 的 cos/sin/length/width/type_id、speed_limit/signal。
+- **（历史）预处理与拟合**：去常量 → 标准化 → PCA 白化（≤32 维）→ 稀有度密度权重
+  （`w = clip((ρ_med/ρ)^α, 0.1, 10)`）→ 容量约束加权 k-means（k=8；cap 15% / floor 8% 为验收门；
+  达不到才放宽 20/5；多 restart 取满足约束且 objective 最低）。
+- **（历史）体检门**：簇规模/熵/半径、每簇难度/几何/规则标签占比、稀有结构富集 ≥3× 全局
+  （否则 FLAG）；规则标签只用于体检，绝不进入监督。
 
-### 4.1 实测口径与冻结产物（lane D，2026-09-27；**历史**，lane U1 起不参与训练）
+### 4.1 （历史）实测结论（lane D，2026-09-27；已随聚类管线删除，仅存档）
 
-- **v1 历史**：`cluster_v1.npz`（292 维 `ego+od+ld+others`、PCA 48、cap 25%/floor 2%）在 5k 全量上
-  c0=84.7%（train 86.8%）、`capacity_ok=False` → router 退化为多数类预测器（`acc 0.654 < acc_majority 0.952`）；
-  且拟合指纹 `v2-e2adf9319719` ≠ 当前数据集 `v2-6a4d5de3f669`。**v1 保留但不再使用。**
-- **v2 产物**（全量 360,501 行，`obs_fingerprint=v2-6a4d5de3f669`）：见 `cluster_v2.report.json`；
-  sidecar = `datasets/BTC20260926-2343_expert5k/cluster_v2_assignments.npz`（`rows/cluster_k/spec_hash/
-  obs_fingerprint_dataset` 严格校验）。
-- **调用契约**：`pipeline.clusters.load(path) → ClusterSpec`；`assign_hard/soft_targets_from_obs(obs_batch)`；
-  `od_top6_indices(od, presence)`（契约 v2 的确定性 top6 选择；紧迫度与 `env/obs/od.py` 槽位分配同公式、同参数）。
+- **v1**：292 维特征、PCA 48、cap 25%/floor 2% → 全量 c0=84.7%（train 86.8%）、`capacity_ok=False`
+  → router 退化为多数类预测器（`acc 0.654 < acc_majority 0.952`）；拟合指纹与当前数据集不一致。
+- **v2**：全量 360,501 行（`obs_fingerprint=v2-6a4d5de3f669`）拟合后 shares 9.4%–14.1%、
+  `capacity_ok=True`；子采样质心在全量上泛化退化（2.2%–24.9%）→ 需全量精修。
+- **hard 簇（lane T，已废止）**：在冻结 primary 的 IL 误差 top-50% 行上重拟合；因"去聚类"方案
+  获批而整体废弃。
 
 ### 4.2 去聚类 + MoE 负载均衡 + 权重化 specific（lane U1，2026-09-27 定稿）
 
 - **取消一切聚类监督**（无簇标签、无 router CE/acc、无二值门控/硬切）：
-  `pipeline/trainer.py` / `pipeline/stages.py` / `net/*` 不再读取任何 cluster sidecar；
-  `cluster_*` 相关文件由清理 lane 删除（本 lane 只摘除引用）。
+  `pipeline/trainer.py` / `pipeline/stages.py` / `net/*` 不再读取任何聚类 sidecar；
+  聚类管线（工具/artifact/sidecar/测试）已由 lane U3 整体删除。
 - **输出口径（推理与训练一致、全场景生效）**：
   ``out = primary + residual_scale · Σ_{i∈top2} g_i · expert_i`` —— 无 hard_mask、无二值门。
 - **Stage B 两相位**：
@@ -220,7 +204,8 @@ rollout（6 步）
    （去聚类后不再有簇 CE/acc、软目标 KL、NMI 等指标）；
 6. 闭环 50 条 LQR slice（集成测试，单独列）。
 
-所有曲线标注：`obs_fingerprint` + `cluster_version` + git hash + 种子。**IL 未过门不启动 RL。**
+所有曲线标注：`obs_fingerprint` + git hash + 种子（+ `load_balance_coef` 等阶段元数据）。
+**IL 未过门不启动 RL。**
 
 ---
 

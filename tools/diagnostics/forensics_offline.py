@@ -4,15 +4,13 @@
 回答"curve/roundabout/uturn/tollgate 四类 0% 成功率"的数据侧/预瞄头侧问题：
 
 1. ``--section counts``：逐几何（+难度）训练样本量：行数 / train_weight 和 / 非零权重行数；
-2. ``--section clusters``：逐几何的簇（router 软目标 argmax）分布 + 平均 top1 软权重；
-3. ``--section plan``：逐几何的**预瞄头误差**（stage_b final.pt 前向）：
+2. ``--section plan``：逐几何的**预瞄头误差**（stage_b final.pt 前向）：
    - ``traj_xy`` vs 数据集 ``traj6``（专家关键轨迹，自车系 m）→ 逐 horizon 横向 MAE；
    - ``plan[:,k]`` vs 数据集 ``action[:,k]``（专家 6 步动作）→ ds / dtheta MAE。
 
 用法::
 
     tools/venv-python tools/diagnostics/forensics_offline.py --section counts
-    tools/venv-python tools/diagnostics/forensics_offline.py --section clusters
     tools/venv-python tools/diagnostics/forensics_offline.py --section plan --rows 20000
 """
 
@@ -64,53 +62,6 @@ def section_counts(arrays: dict) -> dict:
                     "weight_sum": float(weight[sel].sum()),
                 }
     return report
-
-
-def section_clusters(arrays: dict, *, cluster_spec: str, batch: int = 4096) -> dict:
-    from pipeline.clusters import load as load_clusters
-    from pipeline.clusters import soft_targets_from_obs
-
-    spec = load_clusters(cluster_spec)
-    n = len(arrays["geometry"])
-    soft = np.zeros((n, int(spec.k)), dtype=np.float32)
-    idx_all = np.arange(n)
-    for start in range(0, n, batch):
-        idx = idx_all[start:start + batch]
-        obs = {
-            "ego": arrays["ego"][idx],
-            "od": arrays["od"][idx],
-            "od_mask": arrays["od_mask"][idx],
-            "ld": arrays["ld"][idx],
-            "ld_mask": arrays["ld_mask"][idx],
-            "nav": arrays["nav"][idx],
-            "signal": arrays["signal"][idx],
-        }
-        if "others" in arrays:
-            obs["others"] = arrays["others"][idx]
-        if "od_presence" in arrays:
-            obs["od_presence"] = arrays["od_presence"][idx]
-        soft[idx] = np.asarray(soft_targets_from_obs(obs, spec=spec), dtype=np.float32)
-    hard = soft.argmax(axis=1)
-    geom = np.asarray(arrays["geometry"])
-    out = {"k": int(spec.k), "cluster_version": str(spec.cluster_version), "per_geometry": {}}
-    for name in FOCUS + EASY:
-        sel = geom == name
-        if not sel.any():
-            continue
-        shares = np.bincount(hard[sel], minlength=int(spec.k)) / max(int(sel.sum()), 1)
-        top1 = soft[sel].max(axis=1)
-        out["per_geometry"][name] = {
-            "n": int(sel.sum()),
-            "argmax_share": [round(float(x), 4) for x in shares.tolist()],
-            "top1_mean": round(float(top1.mean()), 4),
-            "top2_share": round(float((np.argsort(-soft[sel], axis=1)[:, :2].shape[1] == 2)), 4),
-        }
-        # 主要簇（share >= 8%）
-        order = np.argsort(-shares)
-        out["per_geometry"][name]["dominant"] = [
-            {"cluster": int(c), "share": round(float(shares[c]), 4)} for c in order[:4] if shares[c] > 0.05
-        ]
-    return out
 
 
 def _build_model(ckpt: str, device: str):
@@ -276,8 +227,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="forensics_offline.py")
     parser.add_argument("--npz", default="runs/bc_expert_2k_v2/expert_bc.npz")
     parser.add_argument("--ckpt", default="runs/train/il_v2_10x10_b_fixed/stage_b/final.pt")
-    parser.add_argument("--cluster-spec", default="config/clusters/default.yaml")
-    parser.add_argument("--section", default="counts", choices=("counts", "clusters", "plan", "all"))
+    parser.add_argument("--section", default="counts", choices=("counts", "plan", "all"))
     parser.add_argument("--rows", type=int, default=20000, help="plan 段每类几何最多采样行数（0=全部）")
     parser.add_argument("--batch", type=int, default=1024)
     parser.add_argument("--device", default="cuda")
@@ -289,9 +239,6 @@ def main(argv=None) -> int:
     if args.section in ("counts", "all"):
         report["counts"] = section_counts(arrays)
         print(json.dumps(report["counts"], ensure_ascii=False, indent=1), flush=True)
-    if args.section in ("clusters", "all"):
-        report["clusters"] = section_clusters(arrays, cluster_spec=args.cluster_spec)
-        print(json.dumps(report["clusters"], ensure_ascii=False, indent=1), flush=True)
     if args.section in ("plan", "all"):
         report["plan"] = section_plan(
             arrays, ckpt=args.ckpt, device=args.device, rows=args.rows, batch=args.batch, npz=args.npz

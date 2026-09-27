@@ -5,7 +5,7 @@
 
 | 脚本 | 用途 | 对应文档 |
 | --- | --- | --- |
-| `forensics_offline.py` | 离线取证：四类几何的样本量 / 簇分布 / 预瞄头误差（`--section counts\|clusters\|plan`） | `docs/forensics-2026-09-26.md` |
+| `forensics_offline.py` | 离线取证：四类几何的样本量 / 预瞄头误差（`--section counts\|plan`） | `docs/forensics-2026-09-26.md` |
 | `forensics_closed_loop.py` | 闭环取证：复现冻结评测协议并逐 env-step 记录，区分 plan 不可跟 / tracker 不适配 / 动作错误（`--mode lqr\|lqr_gain\|exact\|baseline\|arc`） | `docs/forensics-2026-09-26.md` |
 | `forensics_report.py` | 闭环结果分析：plan-vs-执行偏差 / tracker 误差 / 失败形态（`--in` / `--out`） | `docs/forensics-2026-09-26.md` |
 

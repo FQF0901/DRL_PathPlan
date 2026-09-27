@@ -70,14 +70,12 @@ _SLIM_TRAIN_SCALARS: Dict[str, Tuple[str, ...]] = {
     "action_loss": ("loss/planner/primary/action", "loss/planner/specific/action",
                     "planner/primary/loss_terms/action", "planner/specific/loss_terms/action",
                     "stageB/primary/loss_terms/action", "stageB/specific/loss_terms/action"),
-    "router_loss": ("loss/planner/primary/router", "loss/planner/specific/router",
-                    "planner/primary/loss_terms/router", "planner/specific/loss_terms/router",
-                    "stageB/primary/loss_terms/router", "stageB/specific/loss_terms/router"),
+    "load_balance_loss": ("loss/planner/primary/load_balance", "loss/planner/specific/load_balance"),
     "action_err_weighted_mean": ("ego/action/err_weighted",),
     "traj_fde_m": ("ego/traj/fde_m",),
-    "router_ce": ("router/ce",),
-    "router_acc": ("router/acc",),
-    "router_acc_majority": ("router/acc_majority",),
+    "load_cv": ("router/load_cv",),
+    "gate_entropy": ("router/gate_entropy",),
+    "expert_load_0": ("router/expert_load/e0",),
 }
 
 #: Stage B 留出标量：瘦身 tag 候选（新名 `val/...` 在前，瘦身 v1 `val_*` 回退）
@@ -88,17 +86,15 @@ _SLIM_VAL_SCALARS: Dict[str, Tuple[str, ...]] = {
     "action_loss": ("val/loss/planner/primary/action", "val/loss/planner/specific/action",
                     "val/planner/primary/loss_terms/action", "val/planner/specific/loss_terms/action",
                     "val_stageB/primary/loss_terms/action", "val_stageB/specific/loss_terms/action"),
-    "router_loss": ("val/loss/planner/primary/router", "val/loss/planner/specific/router",
-                    "val/planner/primary/loss_terms/router", "val/planner/specific/loss_terms/router",
-                    "val_stageB/primary/loss_terms/router", "val_stageB/specific/loss_terms/router"),
+    "load_balance_loss": ("val/loss/planner/primary/load_balance", "val/loss/planner/specific/load_balance"),
     "traj_loss": ("val/loss/planner/primary/traj", "val/loss/planner/specific/traj",
                   "val/planner/primary/loss_terms/traj", "val/planner/specific/loss_terms/traj",
                   "val_stageB/primary/loss_terms/traj", "val_stageB/specific/loss_terms/traj"),
     "action_err_weighted_mean": ("val/ego/action/err_weighted", "val_ego/action/err_weighted"),
     "traj_fde_m": ("val/ego/traj/fde_m", "val_ego/traj/fde_m"),
-    "router_ce": ("val/router/ce", "val_router/ce"),
-    "router_acc": ("val/router/acc", "val_router/acc"),
-    "router_acc_majority": ("val/router/acc_majority", "val_router/acc_majority"),
+    "load_cv": ("val/router/load_cv",),
+    "gate_entropy": ("val/router/gate_entropy",),
+    "expert_load_0": ("val/router/expert_load/e0",),
 }
 
 
@@ -443,21 +439,19 @@ def stage_b_section(
     summary["traj_global_legacy_bc_traj_mae_m"] = legacy_global_mae if legacy_global_semantics else None
     summary["traj_mae_estimated_from_mse"] = mae_estimated
 
-    router = {k: scalar(f"router_{k}") for k in ("ce", "acc", "acc_majority", "placeholder")}
+    # lane U3：去聚类后 router 只保留 MoE 负载 KPI（无簇标签 CE/acc；旧 run 缺失 → 显示缺失）
+    router = {
+        k: scalar(f"router_{k}")
+        for k in ("expert_load_0", "load_cv", "gate_entropy")
+    }
     lines.append("")
-    lines.append("**路由（聚类硬标签 CE/acc）**")
+    lines.append("**MoE 负载（lane U1：无聚类监督；phase 1 MoE 关闭 → 缺失）**")
     lines += table([[k, num(v)] for k, v in router.items()], ["metric", "value"])
     lines.append("")
-    lines.append("> `acc_majority` = 该集合标签多数类占比（“无脑选大类”基线，解释 acc 用）；"
-                 "软目标 KL/温度、专家混合权重已删除（lane B B3）。")
-    cluster = {k: scalar(f"router_cluster_{k}") for k in ("version_num", "k")}
-    summary.update({"router": router, "cluster": cluster})
-    placeholder = router.get("placeholder")
-    if placeholder is not None:
-        lines.append("")
-        lines.append(f"**判定：router 硬标签可用 → "
-                     f"{'PASS' if placeholder == 0 else 'FAIL（标签缺失）'}**")
-        summary["router_labels_available"] = (placeholder == 0)
+    lines.append("> `expert_load_0` = e0 门控权重质量占比；`load_cv` = 负载变异系数（0 = 均衡）；"
+                 "`gate_entropy` = 逐 token 路由分布归一化熵（1 = 均匀）。"
+                 "聚类硬标签 CE/acc 与二值门控指标已删除（lane U1/U3）。")
+    summary.update({"router": router})
 
     # ---- 留出集（按 episode 留出；新 tag = val_*/新族；旧 run = val/*；缺失 → 明确「缺失」）----
     val_snapshot = primary_summary.get("val") if isinstance(primary_summary.get("val"), dict) else {}
@@ -480,7 +474,8 @@ def stage_b_section(
         "bc_action_loss": "action_loss",
         "bc_action_err_weighted_mean": "action_err_weighted_mean",
         "bc_traj_fde_m": "traj_fde_m",
-        "bc_router_ce": "router_ce",
+        "bc_load_cv": "load_cv",
+        "bc_gate_entropy": "gate_entropy",
     }
     train_compare = {label: scalar(name) for label, name in compare_names.items()}
     val_compare = {label: val_scalar(name) for label, name in compare_names.items()}
@@ -559,8 +554,8 @@ def meta_section(metrics_path: str) -> Tuple[List[str], Dict[str, Any]]:
         return lines, {}
     meta = json.load(open(metrics_path))
     keys = ["stage", "kind", "bc_dir", "samples", "device", "epochs", "primary_epochs", "specific_epochs",
-            "batch_size", "lr", "action_weight", "traj_aux_weight", "router_coef", "wm_detach",
-            "cluster_version", "cluster_k", "cluster_config", "obs_fingerprint", "dataset",
+            "batch_size", "lr", "action_weight", "traj_aux_weight", "wm_detach",
+            "load_balance_coef", "hard_weight", "mild_weight", "obs_fingerprint", "dataset",
             # 留出集（2026-09-26；旧 run 缺失 → 不显示）
             "val_frac", "train_frames", "val_frames", "val_episodes"]
     rows = [[k, str(meta[k])[:120]] for k in keys if k in meta]

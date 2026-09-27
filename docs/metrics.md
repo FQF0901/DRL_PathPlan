@@ -101,7 +101,7 @@ PORT=6007 bash tools/tb.sh       # 指定端口；日志 /tmp/opencode/tb_<port>
 | 已移除 | 原因 / 说明 |
 | --- | --- |
 | val 口径 loss 曲线（`val/od/loss`、`val/ego_next/loss`，原 `wm/od/loss`、`wm/ego_next/loss`） | 命名纪律：val 曲线不得叫 loss；训练损失只走 `loss/*` 标量（lane B B1） |
-| router 软目标路径（`router/soft_ce|soft_kl|entropy|nmi|top1_cluster_acc`、`router/<phase>/expert_mix_weight`、`router_temperature`） | 软分布物化/温度/专家混合权重全删（lane B B3）；lane U1 进一步删聚类硬标签 CE/acc（cluster/gate 族） |
+| router 软目标路径（`router/soft_ce|soft_kl|entropy|nmi|top1_cluster_acc`、`router/<phase>/expert_mix_weight`、`router_temperature`） | 软分布物化/温度/专家混合权重全删（lane B B3）；lane U1 删聚类硬标签 CE/acc 与二值门控（cluster/gate 族）；lane U3 删除聚类管线本体 |
 | `horizon/*/fde`、`cv_fde` 独立 tag（旧口径） | FDE 改为 `val/od/fde_m` / `ego/traj/fde_m` 的家族 sub |
 | `horizon/*/traj_mse_m2` 曲线 | 轨迹误差主口径是 MAE/FDE（m）；MSE 只在 metrics.json 作为损失口径字段 |
 | `horizon/*/valid_samples`、`valid_weight_sum`、`slot_count`、`*/n_updates` | 物理计数/贡献次数只是监控记账；训练日志/metrics.json 仍有样本量 |
@@ -117,5 +117,4 @@ PORT=6007 bash tools/tb.sh       # 指定端口；日志 /tmp/opencode/tb_<port>
 - `tools/plot_curves.py`：按上表精简面板（删 slice/label/expert-util/median/p95 面板），
   同样多线同图；旧 run 回退旧 tag，缺失自动跳过。
 - `tools/tb.sh`：TensorBoard 入口（固定 run 名，见上节）。
-- （**历史，lane U1 起训练侧不再消费**）`tools/annotate_clusters.py` / `tools/collect_expert.py`
-  的聚类 sidecar 批注路径：由清理 lane 一并移除。
+- （**历史**）聚类 sidecar 的生成/批注路径：lane U1 起训练侧不再消费，lane U3 已随聚类管线整体删除。

@@ -4,7 +4,7 @@
 
 运行：
 
-    tools/venv-python -m pytest tests/ -q      # 当前 221 passed
+    tools/venv-python -m pytest tests/ -q      # 当前 240 passed
 
 裸 `pytest` 可能解析到系统 Python（无 metadrive），一律用 `tools/venv-python`（venv + system-site-packages）。
 
