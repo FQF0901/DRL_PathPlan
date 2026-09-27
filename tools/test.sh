@@ -3,6 +3,7 @@
 # setsid+nohup 后台运行（脱离终端/harness 会话轮换）；[detach]/[exit] 证据写进 logs/stage_eval.log。
 # 可用环境变量临时覆盖（同名优先）：CKPT POLICY LIMIT TRACKER WORKERS GPUS DEVICE EXTRA
 set -e
+export PYTHONUNBUFFERED=1  # 评测 stdout 逐行落盘（否则块缓冲导致日志滞后）
 GPUS="${GPUS:-0}"; CONFIG="${CONFIG:-config/default.yaml}"
 POLICY="${POLICY:-ckpt}"; LIMIT="${LIMIT:-50}"; TRACKER="${TRACKER:-lqr}"
 cd "$(dirname "$0")/.."

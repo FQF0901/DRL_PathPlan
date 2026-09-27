@@ -3,6 +3,7 @@
 # 不在此写死。setsid+nohup 后台运行（脱离终端/harness 会话轮换）；[detach]/[exit] 证据写进 stage 日志。
 # 可用环境变量临时覆盖（同名优先）：STAGE RESUME BC_DIR WORK_DIR GPUS DEVICE LIMIT_DATASET EXTRA
 set -e
+export PYTHONUNBUFFERED=1  # 训练 stdout 必须逐行落盘（否则块缓冲会导致日志看起来"卡住"）
 GPUS="${GPUS:-0}"; CONFIG="${CONFIG:-config/default.yaml}"
 cd "$(dirname "$0")/.."
 eval "$(tools/venv-python tools/run_config.py --profile train --stage "${STAGE:-}")"
