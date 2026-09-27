@@ -18,7 +18,7 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
     micro_batch_size: &stage_a_micro 256  # ST-GNN 6 步展开实测 ~32MB/样本：12GB 卡 micro 上限 256（384 OOM）
   bc:
     batch_size: &stage_b_batch 1024   # 宏 batch（物化快路径 + 梯度累积；CLI --batch-size 覆盖）
-    micro_batch_size: &stage_b_micro 512  # rollout micro 512 实测峰值 6.6GB（768 = 9.9GB，1024 OOM）
+    micro_batch_size: &stage_b_micro 512  # rollout micro 512；2026-09-28 实测当前阶段 B 图峰值 ~3.7GB（去聚类+关 WM 前为 6.6GB；768/1024 未再标定）
   probe_batch: runs/bc_expert_full  # 固定探针批（动作 ds/logstd 漂移 + 低速吸引子；null=关闭，缺失=默认此路径）
   critic_warmup_updates: 0        # 阶段 C 前 N 个 update 只拟合 critic（value 头；策略/主干冻结；CLI --critic-warmup-updates）
   ckpt_every: &ckpt_every 5       # A/B 每 N 个 epoch 周期保存 <stage_out>/ckpt_epoch{N:03d}.pt（0=关；

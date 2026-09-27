@@ -354,6 +354,55 @@ intersection 0.25、roundabout 0.25；curve / uturn / tollgate 仍 **0.00**（to
    `runs/BTC20260927-1100_stageB`（B）、`runs/BTC20260927-1147_eval_lqr50`、`runs/BTC20260927-1149_eval_baseline50`、
    报告 `runs/BTC20260927-1150_ilreport_5k`（`il_report.md/json` + 11 张 PNG）。
 
+## 11. 去聚类 + MoE 负载均衡 + DAgger 恢复轮（2026-09-27/28）
+
+**方案变更（去聚类）**：取消聚类监督（簇 CE/acc、二值门、hard 切全部删除），输出统一为
+`primary + Σ_{i∈top2} g_i·expert_i`（残差 MoE，**全场景生效**）；路由**不再有监督标签**，只有
+**Switch 式负载均衡 aux**（`α·E·Σ f_i·P_i`，α=0.01）；**Stage A 与 Stage B-phase1 都关闭 MoE**
+（experts+gate 只在 B-phase2 训练）；phase2 数据 = 全量曝光 + 行权重（**worst-50% × 1.0 / 其余 × 0.1**，
+有效质量 0.55），可叠加 DAgger 恢复行（权重 1.0）。
+
+命令（统一评测/训练口径：train=`datasets/BTC20260926-2343_expert5k` 全部 360,501 行；
+val=`datasets/BTC20260927-1734_expert500val` 36,122 行；评测=`env/specs/scenarios_eval500.json`）：
+```bash
+STAGE=B bash tools/train.sh                                        # phase1 primary（MoE 关）→ primary.pt
+RESUME=<primary.pt> bash tools/train.sh                            # phase2 specific（MoE 开 + 权重）→ final.pt
+RESUME=<primary.pt> EXTRA="--dagger-dir datasets/BTC20260927-2218_dagger1" bash tools/train.sh   # DAgger 轮（掩码）
+```
+
+**负载均衡实测**（G2/G3' 同口径）：train `load_cv ≈ 0.14`（8 专家各 11–14% ✓，无饿死）；
+`gate_entropy ≈ 0.70`；val `load_cv ≈ 0.31`。对比旧"聚类 CE"路由（acc 0.65 < 多数类 0.95 的坍缩）✓。
+
+**500 集闭环五组对照**（LQR，CI ±0.04）：
+
+| 组 | 配置 | success [95% CI] | coll | off-road | rc |
+| --- | --- | --- | --- | --- | --- |
+| G1 | primary-only（MoE off） | 0.274 [0.237, 0.315] | 0.014 | 0.702 | 0.579 |
+| **G2** | +MoE（难例加权，无 DAgger） | 0.396 [0.354, 0.440] | 0.030 | 0.552 | 0.639 |
+| G3 | +DAgger（合成轨迹进 traj-aux ✗） | **0.040** [0.026, 0.061] | 0.006 | 0.948 | 0.405 |
+| G3c | +DAgger（全局关 traj-aux ✗） | 0.330 [0.290, 0.372] | 0.070 | 0.596 | 0.611 |
+| **G3′** | **+DAgger（逐行掩码 ✓）** | **0.420** [0.378, 0.464] | 0.024 | 0.508 | 0.652 |
+
+分几何（n≈45/类；格式 G2 / G3′）：split 0.69/0.82、merge 0.39/0.50、ramp_out 0.54/0.63、
+ramp_in 0.50/0.57、roundabout 0.18/0.24、straight 0.51/0.53、curve 0.02/0.04、tollgate 0.04/0.07、
+intersection 0.46/0.39、uturn 0.60/0.53、t_intersection 0.42/0.29。
+
+**结论**：
+1. **MoE 专家分支有真增益**：G2−G1 = **+0.122**（CI 不重叠）；off-road 0.702→0.552；负载均衡下 8 专家均衡使用
+   （无需任何人工标签）。
+2. **DAgger 轮首个实现是灾难（0.040）**，根因已定位：DAgger 行**只有首步动作标签**，其 `traj6` 由"常量动作外推"
+   **合成** → 喂进 traj-aux 把 experts 教成过度转向（渐进劣化：0.396 → ep15 0.304 → ep20 0.040；**val 不受影响**
+   → 坏在 plan/rollout 侧）。**修复 = 逐行掩码**（DAgger 行不吃 traj-aux）；反证：全局关 traj-aux 亦不可
+   （plan MAE 0.486→0.692，总分 0.330）。
+3. **掩码后（G3′）与 G2 无可分离差异**（0.420 vs 0.396，CI 重叠）：本 pilot 规模（80 specs / 4,321 行）下
+   **恢复数据的边际价值未获证明**；G3′ 为最佳点估计且无损。
+4. **生产建议**：当前采用 **G2**（无 DAgger）为基线配置；G3′ 为等价可选（掩码机制保留）。若要继续验证恢复数据，
+   需扩大 pilot（337 条失败场景全采 ≈2 h）或重设计标注（学生与专家动作在同一状态对齐后再打标）。
+5. 附带修复：val "动作误差"口径 bug（此前误用轨迹误差、与 `traj_mae` 雷同）已修复并加回归断言（`e011b6b`）。
+
+产物：G1/G2/G3/G3c/G3′ 评测目录 `runs/BTC20260928-0*_eval500_*`；训练目录
+`runs/BTC20260927-1019_stageA_p4/stage_b`（含 `primary.pt`/`final.pt`/`weight_sidecar.npz`/`metrics.json`/`monitor`）。
+
 ## 7. 口径与注意事项
 
 1. **tracker 语义**：`exact` = Stage B 语义（运动学精确执行预瞄，不引入动力学）；`lqr` = Stage C 闭环

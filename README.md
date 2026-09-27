@@ -4,12 +4,13 @@ MetaDrive 城市/高速驾驶规划 RL：观测 → 策略输出 `(ds, dθ)`（�
 world model rollout 产生 3 s / 6 点自车轨迹 → MPC/LQR 跟踪该预瞄。分阶段训练：**A 世界模型（teacher forcing）
 → B 规划器 BC（含 rollout 轨迹辅助）→ C PPO RL（KL 锚定 B 快照）**。
 
-> **一句话现状（2026-09-27，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
-> v1.2 IL 在冻结协议（50 条 val、LQR 闭环、配对同场景）下把 **success 0.26 → 0.42、off-road 0.72 → 0.52、rc 0.54 → 0.688**
-> （规则基线 0.82 / 0.06；5k 第 3 轮 = schema v2 + mem-bank + router 软目标）；开环 WM 6 个 horizon 全部胜匀速
-> （ADE **1.449 vs 12.229**），轨迹 3 s 加权 MAE **0.404 m**、动作加权误差 **0.070**。剩余缺口集中在
-> **弯道/环岛/掉头/收费站（成功率 0–25%）**、**速度偏慢**（speed_ratio 0.446 vs 基线 0.734）与 **router 负载集中**
-> （expert 0 占 0.823）。Stage C 仍 EXPERIMENTAL（P0-1/P0-2 未修）。详见 `docs/experiments.md` §10。
+> **一句话现状（2026-09-28，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
+> **去聚类 + MoE 负载均衡**方案在统一评测集（500 条完整 episode、LQR、CI ±0.04）上把 **success 0.274 → 0.420**
+> （G1 primary-only → G3′ +MoE+DAgger 掩码；G2 +MoE 无 DAgger = 0.396），off-road 0.702 → 0.508、rc 0.579 → 0.652；
+> 规则基线 **0.756**。负载均衡使 8 专家各 11–14%（`load_cv≈0.14`，无饿死、无需人工标签）；**DAgger 恢复轮本 pilot
+> 无显著增益**（G3′ vs G2 的 CI 重叠；首个实现因"合成轨迹进 traj-aux"坍缩到 0.040，已定位根因并加逐行掩码修复）。
+> 剩余缺口仍是 **curve / uturn / t_intersection / tollgate** 与速度偏慢（speed_ratio 0.46 vs 基线 0.74）。
+> Stage C 仍 EXPERIMENTAL。详见 `docs/experiments.md` §11（§10 及更早为 50 条旧协议，数字不可直接比较）。
 
 ---
 
@@ -123,6 +124,9 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | **v1.2 IL（新架构；50 条；LQR）** | lqr | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
 | **v1.2 IL 5k（5k 数据；20/20 epochs）** | lqr | **0.30** | 0.04 | 0.64 | 0.550 | 0.439 |
 | **v1.2 IL 5k 第 3 轮**（schema v2 + mem-bank + router；50 条；LQR） | lqr | **0.42** | 0.04 | **0.52** | **0.688** | 0.446 |
+| **v1.2 去聚类+MoE G1**（primary-only；**500 条**；LQR） | lqr | **0.274** | 0.014 | 0.702 | 0.579 | — |
+| **v1.2 去聚类+MoE G2**（+MoE+难例加权；500 条；LQR） | lqr | **0.396** | 0.030 | 0.552 | 0.639 | — |
+| **v1.2 去聚类+MoE G3′**（+DAgger 逐行掩码；500 条；LQR） | lqr | **0.420** | 0.024 | 0.508 | 0.652 | — |
 
 ### 2.2 开环 vs 闭环（v1.2，2026-09-26）
 
