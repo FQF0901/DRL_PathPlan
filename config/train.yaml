@@ -58,7 +58,7 @@ stages:
       ego_next_coef: 0.1        # plan head `ego_next` 监督权重（方案①：A 阶段 plan head/MoE 唯一梯度源）
       presence_coef: 0.1        # presence BCE 权重（id 轴：未来帧同 track id 是否仍在盒内）
       entry_coef: 0.1           # entry BCE 权重（id 轴：新 id 是否出现，"t0 无、t+k 有"）
-      trainable: [encoders, mem_encoder, plan_head, moe, st_gnn]  # policy/value 头不参与
+      trainable: [encoders, mem_encoder, plan_head, st_gnn]  # lane U1+：MoE 在 A 关闭（experts+gate 只在 B-phase2 训）；policy/value 头不参与
   B:
     name: planner_bc            # 阶段名（lane U1：phase 1 MoE 关闭 → 冻结 → phase 2 权重化 specific）
     epochs: &stage_b_epochs 20  # Stage B 总轮数（脚本 --bc-epochs；bc.epochs 与其同源）

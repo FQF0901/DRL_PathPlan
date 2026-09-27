@@ -1265,6 +1265,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         meta = load_checkpoint(args.ckpt, model)
         print(f"[stageA] 载入 {args.ckpt}（missing={len(meta.get('missing_keys', []))}）", flush=True)
 
+    # lane U1+：Stage A 也关闭 MoE（experts+gate 只在 B-phase2 训练；A 输出严格 = primary）
+    model.set_moe(enabled=False)
+    print("[stageA] MoE 已关闭（experts/router 不参与）", flush=True)
+
     dataset = BCDataset.load(args.bc_dir, limit=args.limit_dataset)
     dataset_contract = validate_bc_dataset(
         dataset, str(args.bc_dir), "A", allow_legacy=_allow_legacy_dataset(args)
