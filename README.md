@@ -67,7 +67,7 @@ MetaDrive 场景（spec JSON）
 
 | 阶段 | 训练什么 | 冻结什么 | 监督目标 | 验收证据 |
 | --- | --- | --- | --- | --- |
-| **A：WM teacher forcing** | 编码器 / 时序 / 空间 / MoE / WM | 策略头 / 价值头 | 未来 OD/LD 真值（(episode, step+5k) 查表、t0 对齐、mask+valid）；ego 条件 = **专家 GT 动作序列** + 噪声（p=0.5, σ_ds=0.3, σ_dθ=0.05）| **ADE 1.647 / FDE 2.739 vs 匀速 3.269 / 4.483 ✓**（`runs/train/stage_a_matched`）|
+| **A：WM teacher forcing** | 编码器 / 时序 / 空间 / MoE / WM | 策略头 / 价值头 | 未来 OD/LD 真值（(episode, step+5k) 查表、t0 对齐、mask+valid）；ego 条件 = **专家 GT 动作序列** + 噪声（p=0.5, σ_ds=0.3, σ_dθ=0.05）| **ADE 1.647 / FDE 2.739 vs 匀速 3.269 / 4.483 ✓**（历史产物 `runs/train/stage_a_matched`，已清理、可按命令重生成）|
 | **B：Planner BC** | 主干 / MoE / 策略头 / specific | WM（且 rollout detach） | 专家动作（主损失 1.0）+ **rollout 轨迹小权重辅助 0.3** + router BCE 0.1；先 primary 后 specific | ds **3.499 m**（专家 3.500）、轨迹 MAE **0.633 m**；aux=0 消融 off-road 1.0 → 0.5 |
 | **C：PPO RL** | specific / 策略头 / 价值头（WM 先冻后放） | 编码器 / 时序 / 空间 / MoE(primary) | 规则奖励 + GAE；**KL 锚定 Stage-B 快照**（系数 0.05→0 线性衰减）；primary lr×0.1；可选 critic 预热（value-only） | 50 updates 跑通、44–49 steps/s、无坍塌；300-update 版见 §3 |
 
@@ -91,8 +91,8 @@ env/specs/*.json（11,250 条已验证，0 失败；11 种可采样几何 + 显�
         │  tools/collect_expert.py（专家 = 过滤后的 IDMPolicy；roundtrip + terminal-window 过滤；yield ≈ 0.72）
         ▼
 BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_fingerprint 守卫）
-   ├─ runs/bc_expert_full：200 场景 → 10,777 样本（早期）
-   └─ runs/bc_expert_2k：2,000 场景 → **103,938 样本**（yield 0.718；8 个标签全远超下限；难度×主标签配平）
+   ├─ （历史）200 场景 → 10,777 样本（早期版本，旧观测 scope）
+   └─ 当前约定：`datasets/BTC<北京时间戳>_expert<N>k`（例：2,000 场景 → **103,938 样本**，yield 0.718；8 个标签全远超下限；难度×主标签配平）
         │
         ├─→ Stage A：未来 OD/LD 目标（查表 + 对齐 + mask）
         ├─→ Stage B：动作 + traj6 + 逐步标签
@@ -106,7 +106,7 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 
 ## 2. 性能现状（证据，2026-09-25）
 
-### 2.1 基线对照（50 条 val slice，冻结参考 `runs/baseline_eval/val_reference*.json`）
+### 2.1 基线对照（50 条 val slice；冻结参考 `runs/baseline_eval/val_reference*.json` 为历史产物，已随 `runs/` 清理，可用 `tools/baseline_eval.py` 重生成）
 
 | 对象 | tracker | success | collision | off-road | route_completion | speed_ratio |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -219,7 +219,7 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | `net/` | 编码器 / 时序 / 空间 / MoE / world model / 策略头 / rollout |
 | `pipeline/` | 阶段 A/B/C、trainer、buffer、vector_env、eval_runner、monitoring、gl_runtime |
 | `tools/` | `gene_env.sh`、`train.py`、`test.py`、`collect_expert.py`、`baseline_eval.py`、`visualize.py`、`measure/*`、`diagnostics/*` |
-| `tests/` | 88 项测试（`tools/venv-python -m pytest tests/ -q`）|
+| `tests/` | 205 项测试（`tools/venv-python -m pytest tests/ -q`）|
 | `datasets/`、`runs/` | 专家数据集（不可清）与运行产物（gitignored，可随时清）；命名纪律见 `docs/design-v1.2.md` §3.5 |
 
 ```bash
@@ -230,21 +230,18 @@ python3 -m pip --python .venv/bin/python install "numpy==1.26.4" "opencv-python-
 bash tools/setup_gl_libs.sh
 # ⚠ 所有 MetaDrive 运行统一用 tools/venv-python（自动设置 LD_LIBRARY_PATH）
 
-# 场景 + 专家数据
+# 场景 + 专家数据（数据集放 datasets/，不随 runs/ 清理；命名 BTC<北京时间戳>_expert<N>k）
 bash tools/gene_env.sh
-tools/venv-python tools/collect_expert.py --specs env/specs/scenarios_train.json --limit 2000 \
-    --out runs/bc_expert_2k --workers 6          # 并行采集（输出与单进程逐字节一致）
+tools/venv-python tools/collect_expert.py --specs env/specs/scenarios_train.json --limit 5000 \
+    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"   # --workers 默认 auto（8–10）；输出与单进程逐字节一致
 
-# 分阶段训练
-tools/venv-python -m pipeline.stages --stage A --bc-dir runs/bc_expert_2k --out runs/train/stage_a
-tools/venv-python -m pipeline.stages --stage B --bc-dir runs/bc_expert_2k --ckpt runs/train/stage_a/final.pt \
-    --bc-epochs 20 --traj-aux-weight 0.3 --out runs/train/stage_b
-tools/venv-python -m pipeline.stages --stage C --ckpt runs/train/stage_b/final.pt \
-    --pool local --envs 1 --updates 300 --critic-warmup-updates 10 --out runs/train/stage_c
+# 分阶段训练（零参可跑：数据集/epoch/batch/resume 全在 config/train.yaml；脚本只做 setsid+nohup 分离启动）
+bash tools/train.sh                      # Stage A（默认）；STAGE=B bash tools/train.sh 跑 Stage B（自动用最新 A final、共用同一 run 根）
+# 产物：runs/BTC<北京戳>_train/{logs/stage_a.log, manifest.txt, config/model.snapshot.yaml, stage_a/{final.pt, monitor/}}
+# 续跑：默认 resume: auto 自动从「最新未完成 stage 的周期 ckpt」原地续跑（CKPT_EVERY=5）；显式 RESUME=runs/.../ckpt_epochNNN.pt
 
-# 评测（exact = Stage B 语义；lqr = Stage C 闭环；--policy baseline 为规则基线）
-tools/venv-python tools/test.py --policy ckpt --ckpt runs/train/stage_b/final.pt \
-    --spec env/specs/scenarios_val_slice50.json --limit 50 --workers 2 --tracker lqr --out runs/eval
+# 评测（零参可跑：ckpt 自动取最新 stage_b/final.pt，回退 stage_a final；默认 LIMIT=50 / TRACKER=lqr）
+bash tools/test.sh
 ```
 
 ---

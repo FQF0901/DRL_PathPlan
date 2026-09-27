@@ -107,13 +107,21 @@ rollout（6 步）
 | 目录 | 放什么 | 可清理？ | 命名 |
 | --- | --- | --- | --- |
 | `datasets/` | 专家 BC 数据集（`expert_bc.npz` + meta + report）| **不可**（仅 obs 版本变更或规模调整时重采）| `BTC<YYYYMMDD-HHMM（北京）>_expert<N>k` |
-| `runs/` | 训练/评测/基线产物（stageA/stageB/eval/baseline/…）| 可随时清 | `BTC<ts>_stageA`、`BTC<ts>_stageB`、`BTC<ts>_eval_<tracker><N>`、`BTC<ts>_baseline` |
+| `runs/` | 训练/评测/基线产物（run 根 + stage_a/stage_b + logs/manifest）| 可随时清 | `BTC<北京戳>_<name>/`（内含 `stage_a|b/`、`logs/`、`manifest.txt`、快照、`detach.pid`）、`BTC<北京戳>_eval_<tracker><N>` |
 | `checkpoints/` | 需要长期复用的 ckpt（跨清理保留）| 谨慎 | `BTC<ts>_stageB.pt` |
 | `tools/diagnostics/` | 一次性诊断/侦察脚本（非主流程）| 可清 | 原文件名 |
 | `config/baselines/` | 冻结的 KPI 基线参考 JSON（评测协议依赖）| **不可** | `BTC<ts>_val_reference/` |
 
 - **重采的唯一理由**：`obs_fingerprint` 变更（观测契约变了）或用户明确要求扩规模；同版本内一律 `BC_DIR` 复用。
 - 数据集与 `runs/` 分离后，"清理 runs/" 是安全的日常操作。
+- **后台长任务纪律（2026-09-27 定稿，harness 会话轮换事故驱动）**：训练/评测一律走 `tools/train.sh` / `tools/test.sh`（`setsid+nohup` 脱离 harness 进程组）；run 目录为 `runs/BTC<北京戳>_<name>/`，内含 `logs/stage_{a,b}.log`（唯一日志，含 `[heartbeat]`/`[exit] code|signal` 存活证据）、`manifest.txt`、`config/model.snapshot.yaml`、`detach.pid`、`stage_a|b/`（ckpt/monitor 由训练进程写）；被静默杀掉后用 `run.resume: auto` + `ckpt_every` 从周期 ckpt 原地续跑。
+
+**采集内存模型（2026-09-26 实测 + 修复）**：旧实现的峰值 =
+**父进程累积全部逐帧记录**（≈10–15 KB/行；5k specs ≈5 GB，随数据集线性增长，非泄漏）
++ workers（≈1.1 GB × N，由 `--recycle-every` 界住，4 MB/spec 残余）。
+8 workers 时 ≈14 GB，逼近 16 GB 上限并引发抖动（实测单条 1 s → 2.7–5.1 s，速率掉到 0.5 条/s）。
+**修复**：worker 各自把分片写到磁盘（`_shards/`），父进程只收标量摘要（RSS ≈O(1)），结束后再合并成最终 `expert_bc.npz`
+（峰值 = 最终数据一份）。`--workers` 默认 auto（CPU 取半、上限 10），内存不足只警告不降级。
 
 ## 4. 路由与聚类（替代手工规则标签）
 
@@ -139,7 +147,7 @@ rollout（6 步）
 - **Stage A**：多步直接监督（GT 动作）+ 逐 horizon loss/ADE/FDE + 每 horizon 有效样本数 + presence/entry BCE/AUC；损失按 `train_weight × wm_valid` 加权。
 - **Stage B**：首步动作 + 6 点轨迹辅助 + router 软目标；日志含动作误差均值/中位数/**p95**/分切片、逐 horizon ego 误差、router 指标（top-1 vs 簇、NMI、gate 熵、专家利用率）。
 - **会计**：配平、`_action_mu_stats`、PPO BC 锚全部权重感知。
-- **`tools/train.sh` / `tools/test.sh`**：`bash tools/train.sh`（A→B 串行）+ `bash tools/test.sh`（冻结协议评测）。
+- **`tools/train.sh` / `tools/test.sh`**：零参即可跑（路径/epoch/batch 来自 `config/train.yaml::run|stages`，目录由 `pipeline/run_paths.py` 统一生成）；`setsid+nohup` 后台运行，stdout/stderr 落 `<run>/logs/stage_<x>.log`。
 
 ### 5.1 IL 验收门（交项目主 review 的内容）
 

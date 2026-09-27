@@ -73,6 +73,21 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"[train] ckpt 不存在：{args.ckpt}", file=sys.stderr)
         return 2
 
+    # 运行目录布局（代码默认，见 pipeline/run_paths.py）：logs/ + stage 目录 + manifest + 配置快照。
+    # 非侵入：训练写盘仍由 pipeline.stages 按 --out 决定（monitor/ckpt 保持在 --out 内）。
+    from pipeline import run_paths
+
+    work_dir = run_paths.work_dir_of_out(args.out)
+    run_paths.prepare_layout(work_dir, args.stage)
+    run_paths.write_manifest(
+        work_dir,
+        stage=args.stage,
+        config=args.config,
+        model_config=run_paths.extra_value(argv_list, "--model-config") or "config/model.yaml",
+        out=args.out,
+        argv=["tools/train.py", *argv_list],
+    )
+
     # GL 修复：在 import metadrive/panda3d 之前预载 venv glvnd，并让 spawn worker 继承路径。
     # （即使本入口未经 tools/venv-python 启动也要生效；见 pipeline/gl_runtime.py）
     from pipeline.gl_runtime import ensure_gl_library_path

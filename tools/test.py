@@ -67,6 +67,16 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"[test] ckpt 不存在：{args.ckpt}", file=sys.stderr)
             return 2
 
+    # 运行目录布局（代码默认，见 pipeline/run_paths.py）：logs/ + manifest + 配置快照。
+    from pipeline import run_paths
+
+    name = run_paths.extra_value(argv_list, "--name")
+    work_dir = Path(args.out) / name if name else Path(args.out)
+    run_paths.prepare_layout(work_dir)
+    run_paths.write_manifest(
+        work_dir, stage="eval", config=args.config, out=work_dir, argv=["tools/test.py", *argv_list]
+    )
+
     forward = ["--config", str(args.config), "--policy", args.policy, "--out", str(args.out)]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
