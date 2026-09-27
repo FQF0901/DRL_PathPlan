@@ -190,7 +190,7 @@ def test_presence_entry_targets_v1_fallback_slot_axis() -> None:
 
 # ---------------------------------------------------- 3. Stage A plan head 梯度
 def test_stage_a_ego_next_gradient_and_id_axis_metrics(tmp_path: Path) -> None:
-    """Stage A 小样本：ego_next 监督可用、plan head/MoE 有梯度、policy/value 冻结。"""
+    """Stage A 小样本：ego_next 监督可用、plan head 有梯度、MoE 关闭（experts/router 零梯度）、policy/value 冻结。"""
     dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=6, steps_per_episode=6)
     model_cfg = tmp_path / "model.yaml"
     model_cfg.write_text(TINY_MODEL_YAML, encoding="utf-8")
@@ -212,17 +212,15 @@ def test_stage_a_ego_next_gradient_and_id_axis_metrics(tmp_path: Path) -> None:
     assert any(np.isfinite(item["ego_next_loss"]) for item in per_horizon.values())
 
     grads = metrics["grad_norms_first_batch"]
-    # design-v1.2 §2.3 方案①：plan head/MoE 在 Stage A 必须有梯度
+    # design-v1.2 §2.3 方案①：plan head 在 Stage A 必须有梯度
     assert grads["plan_head"] > 0.0, "plan head 无梯度 = Stage A 冻结失效回归"
-    assert grads["plan_head.moe.experts"] > 0.0, "specific experts 无梯度"
+    # lane U1+：Stage A 关闭 MoE → experts/router 不参与前向，梯度必须为 0
+    assert float(grads.get("plan_head.moe.experts") or 0.0) == 0.0, "Stage A 已关闭 MoE：experts 不应有梯度"
     assert grads["st_gnn"] > 0.0 and grads["encoders"] > 0.0 and grads["mem_encoder"] > 0.0
     # policy/value 不参与 Stage A
     assert grads["policy"] == 0.0 and grads["value"] == 0.0
-    # router：experts 零初始化时首 batch 梯度=0（混合权重不影响零专家输出）；
-    # 训练若干步 experts 非零后 router 必须收到梯度（last batch probe）。
-    assert metrics["grad_norms_last_batch"]["plan_head.moe.router"] > 0.0, "router 始终无梯度"
-    assert metrics["grad_norms_last_batch"]["policy"] == 0.0
-    assert metrics["grad_norms_last_batch"]["value"] == 0.0
+    # lane U1+：MoE 关闭 → router 全程零梯度（不再要求 last batch 出现梯度）
+    assert float(metrics["grad_norms_last_batch"].get("plan_head.moe.router") or 0.0) == 0.0, "Stage A 已关闭 MoE：router 不应有梯度"
 
 
 # ---------------------------------------------------- 4. monitoring router 口径
@@ -280,6 +278,7 @@ def test_config_router_and_stage_a_v2_semantics() -> None:
     assert float(stage_a["ego_next_coef"]) > 0.0
     assert float(stage_a["presence_coef"]) > 0.0 and float(stage_a["entry_coef"]) > 0.0
     trainable = [str(item) for item in stage_a["trainable"]]
-    assert "st_gnn" in trainable and "plan_head" in trainable and "moe" in trainable
+    # lane U1+：Stage A 关闭 MoE（experts+gate 只在 B-phase2 训）→ trainable 不含 moe
+    assert "st_gnn" in trainable and "plan_head" in trainable and "moe" not in trainable
     assert "world_model" not in trainable and "spatial" not in trainable
     assert bool(train_cfg["stages"]["B"]["bc"]["wm_detach"]) is True
