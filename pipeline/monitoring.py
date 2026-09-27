@@ -6,22 +6,19 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
 用户只关心 **OD/EGO 的 loss 与 KPI + router 的 loss 与 KPI**，其余不再记录：
 
 - 训练侧照旧喂 canonical tag（``train/wm_loss`` / ``train/primary_bc_router_soft_ce`` ...），
-  monitor 落盘前按 :func:`_slim_tag` **重命名**为保留清单（``wm/...`` / ``ego/...`` /
-  ``router/...`` / ``stageB/...``）；**未列入的 tag 直接丢弃**（TB/CSV 都不写）：
+  monitor 落盘前按 :func:`_slim_tag` **重命名**为保留清单（``wm/...`` / ``val/...`` /
+  ``ego/...`` / ``router/...`` / ``planner/...``）；**未列入的 tag 直接丢弃**（TB/CSV 都不写）：
   ``slice/*``、``label/*``、``*/n_updates``、计数/权重和、``cv_ade``/``cv_fde`` 独立 tag、
   ``traj_mse_m2`` 曲线、``expert_util_*``/``expert_mix_util_*``、``grad_norm_*``、
   计时/显存、动作误差 median/p95、``kpi/*`` / ``moe/*`` / ``scene_label/*`` 等；
 - ``legacy_tags=True``（CLI ``--monitor-legacy-tags``，默认关）= **旧行为原样落盘**
   （全部 tag + 旧多线分组），供需要时回退/对比；
-- tensorboard 写入只服务成图：多线族 ``add_scalars(main, {sub: value})``（``wm/od/loss``
-  h1..h6、``wm/od/ade_m`` h1..h6+cv_h1..cv_h6、``wm/ego_next/loss`` h1..h6、
-  ``ego/traj/mae_m`` h1..h6、``router/<phase>/expert_mix_weight`` e0..e7、
-  ``stageB/<phase>/loss_terms`` loss/traj/action/router；``val_`` 前缀同族各一图），
-  标量（``wm/loss`` / ``wm/presence_auc`` / ``wm/entry_auc`` / ``ego/action/err_weighted`` /
-  ``router/soft_*`` / ``router/top1_cluster_acc|nmi|entropy``）写单线 ``add_scalar``；
-  **canonical 单 tag 不再额外写一份**（旧行为是单点+分组双写）。注意 torch 的
-  ``add_scalars`` 语义：每个 sub 写成独立 sub-run 事件文件 ``<log_dir>/<main>_<sub>/``，
-  文件内 tag = ``main_tag``，因此 tensorboard 标量面板里同一 tag 的多 run 即多线同图；
+- tensorboard 写入只服务成图：多线族在主 run 内逐 sub 写 ``add_scalar("<main>/<sub>")``
+  （``val/od/loss`` h1..h6、``val/od/ade_m`` h1..h6+cv_h1..cv_h6、``val/ego_next/loss`` h1..h6、
+  ``ego/traj/mae_m`` 与 ``val/ego/traj/mae_m`` h1..h6、``router/<phase>/expert_mix_weight`` e0..e7、
+  ``planner/<phase>/loss_terms`` loss/traj/action/router 及其 ``val/`` 孪生），标量写单线
+  ``add_scalar``；**不再用 torch ``add_scalars``**（那会为每个 sub 建 ``<main>_<sub>/``
+  sub-run 目录）——同一事件文件内 tag 后缀不同，TB 标量面板自动并成一张多线图；
   同族 <2 个 sub 不写（避免单点噪声）；
 - CSV 长表 ``step,tag,value`` 保留**全部**瘦身后 tag（供 ``tools/il_report.py`` /
   ``tools/plot_curves.py`` 读取）。
@@ -46,12 +43,14 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
    ``label/<name>/<m>``、``slice/<name>/<m>`` 的 ``mean``/``n_updates``/``weighted_mean``。
    ``n_updates`` = 该均值由几次 ``update`` 贡献合成（**不是样本数**）。瘦身模式下上述
    tag 经 :func:`_slim_tag` 过滤：Stage A 的 ``horizon/h*/loss|ade|cv_ade|ego_next_loss`` →
-   ``wm/...`` 保留族，Stage B 的 ``horizon/h*/traj_mae_m`` → ``ego/traj/mae_m`` 保留族；
-   slice/label/计数/`fde`/`traj_mse_m2` 等全部丢弃（形参保留仅为 legacy 兼容）；
+   ``val/od/*`` / ``val/ego_next/*`` 保留族（val 子集口径），Stage B 的
+   ``horizon/h*/traj_mae_m`` → ``ego/traj/mae_m`` 保留族；slice/label/计数/`fde`/
+   `traj_mse_m2` 等全部丢弃（形参保留仅为 legacy 兼容）；
 5. **train/val 命名（Stage B）**：``on_train_step`` 写 ``train/<name>``；留出集用
    ``on_val_step`` 写 ``val/<name>``（同族指标同后缀），分组指标用 ``on_val_grouped_step``
-   写 ``val/horizon/...`` / ``val/label/...`` / ``val/slice/...``。瘦身模式下 ``val/`` 族
-   重命名为 ``val_`` 前缀（如 ``val_ego/traj/mae_m``），train/val 各一图；
+   写 ``val/horizon/...`` / ``val/label/...`` / ``val/slice/...``。瘦身模式下 ``val/`` 是
+   **命名空间**（不是可写前缀）：留出族落盘为 ``val/planner/...`` / ``val/ego/...`` /
+   ``val/router/...``，与训练族同族同图各一线；
 6. **PPO 诊断序列**（嵌套 dict，如 ``reward/...``、``advantage/...``、``probe/...``）：
    ``log_scalars`` 递归展平嵌套 Mapping → 标签 ``a/b/c``；瘦身模式下未列入清单的 tag 丢弃；
 7. 输出：``<log_dir>/metrics.csv``（长表 ``step,tag,value``）与 tensorboard event 文件。
@@ -102,8 +101,8 @@ _VAL_PREFIX = "val"
 _HORIZON_PREFIX = "horizon"
 _LABEL_PREFIX = "label"
 _SLICE_PREFIX = "slice"
-#: 瘦身模式下 ``val/`` 前缀族的 canonical main 前缀（``val/ego/...`` → ``val_ego/...``）
-_VAL_TAG_PREFIX = "val_"
+#: 瘦身模式的 ``val`` 命名空间（留出集族前缀：``val_ego/...`` → ``val/ego/...``）
+_VAL_NAMESPACE = f"{_VAL_PREFIX}/"
 
 
 def _as_array(value: Any) -> Optional[np.ndarray]:
@@ -159,33 +158,35 @@ def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, A
 # ``_group_of_tag`` 旧族多线图），仅由 ``TrainingMonitor(legacy_tags=True)`` 启用。
 #
 # 瘦身后的 canonical tag 形如 ``<main>/<sub>``（多线族）或独立标量名；tensorboard 只写
-# 两类：多线族 ``add_scalars(main, {sub: value})`` + 标量 ``add_scalar(tag, value)``。
+# 两类：多线族逐 sub ``add_scalar("<main>/<sub>")``（同一事件文件、TB 自动并图）+ 标量
+# ``add_scalar(tag, value)``。
 
 #: 旧 canonical tag → 瘦身后独立标量（逐 key 直查）
 _SLIM_DIRECT: Dict[str, str] = {
     f"{_TRAIN_PREFIX}/wm_loss": "wm/loss",
-    f"{_TRAIN_PREFIX}/presence_auc": "wm/presence_auc",
-    f"{_TRAIN_PREFIX}/entry_auc": "wm/entry_auc",
+    f"{_TRAIN_PREFIX}/presence_auc": "val/od/presence_auc",   # Stage A 在 val 子集上评估 → val 命名空间
+    f"{_TRAIN_PREFIX}/entry_auc": "val/od/entry_auc",
 }
 
 #: 逐 horizon 分组窗口 tag（Stage A OD/ADE/ego_next + Stage B ego traj MAE）
-#: ``horizon/h{k}/{metric}/mean`` → ``(main, sub)``；``val/`` 旧前缀 → ``val_`` 新 main 前缀。
+#: ``horizon/h{k}/{metric}/mean`` → ``<main>/<sub>``；Stage A 族直接在 ``val/`` 命名空间，
+#: ``val/horizon/...`` 输入（Stage B 留出）经 ``val/`` 前缀加到 base tag 上。
 _HORIZON_RE = re.compile(r"^(?P<val>%s/)?%s/h(?P<k>\d+)/(?P<metric>[^/]+)/mean$" % (_VAL_PREFIX, _HORIZON_PREFIX))
 _HORIZON_RENAMES: Dict[str, Tuple[str, str]] = {
-    "loss": ("wm/od/loss", "h{k}"),                    # Stage A：WM 对 OD 未来位置预测损失
-    "ade": ("wm/od/ade_m", "h{k}"),                    # Stage A：OD ADE（米）
-    "cv_ade": ("wm/od/ade_m", "cv_h{k}"),              # Stage A：匀速基线 ADE（同一族另一组线）
-    "ego_next_loss": ("wm/ego_next/loss", "h{k}"),     # Stage A：plan head 下一时刻 ego 损失
+    "loss": ("val/od/loss", "h{k}"),                   # Stage A：WM 对 OD 未来位置预测损失（val 子集）
+    "ade": ("val/od/ade_m", "h{k}"),                   # Stage A：OD ADE（米）
+    "cv_ade": ("val/od/ade_m", "cv_h{k}"),             # Stage A：匀速基线 ADE（同一族另一组线）
+    "ego_next_loss": ("val/ego_next/loss", "h{k}"),    # Stage A：plan head 下一时刻 ego 损失
     "traj_mae_m": ("ego/traj/mae_m", "h{k}"),          # Stage B：ego 6 点轨迹逐 horizon 加权 MAE
 }
 
-#: Stage B 相位标量（``train|val/<phase>_bc_*``）；``{phase}`` 插值，val 前缀另加 ``val_``
+#: Stage B 相位标量（``train|val/<phase>_bc_*``）；``{phase}`` 插值，val 命名空间加 ``val/`` 前缀
 _BC_RE = re.compile(r"^(?P<phase>primary|specific)_(?P<key>.+)$")
 _BC_SCALAR_RENAMES: Dict[str, str] = {
-    "bc_loss": "stageB/{phase}/loss_terms/loss",
-    "bc_traj_loss": "stageB/{phase}/loss_terms/traj",
-    "bc_action_loss": "stageB/{phase}/loss_terms/action",
-    "bc_router_loss": "stageB/{phase}/loss_terms/router",
+    "bc_loss": "planner/{phase}/loss_terms/loss",
+    "bc_traj_loss": "planner/{phase}/loss_terms/traj",
+    "bc_action_loss": "planner/{phase}/loss_terms/action",
+    "bc_router_loss": "planner/{phase}/loss_terms/router",
     "bc_action_err_weighted_mean": "ego/action/err_weighted",
     "bc_router_soft_ce": "router/soft_ce",
     "bc_router_soft_kl": "router/soft_kl",
@@ -207,12 +208,15 @@ def _slim_tag(tag: str) -> Optional[str]:
         if rename is None:
             return None
         main, sub = rename
-        prefix = _VAL_TAG_PREFIX if match.group("val") else ""
-        return f"{prefix}{main}/{sub.format(k=match.group('k'))}"
+        text = f"{main}/{sub.format(k=match.group('k'))}"
+        # Stage B 留出（``val/horizon/...``）→ 在 base tag 上加 ``val/``（Stage A 族已自带，幂等跳过）
+        if match.group("val") and not text.startswith(_VAL_NAMESPACE):
+            text = f"{_VAL_NAMESPACE}{text}"
+        return text
     if tag.startswith(f"{_TRAIN_PREFIX}/"):
         prefix, name = "", tag[len(_TRAIN_PREFIX) + 1:]
     elif tag.startswith(f"{_VAL_PREFIX}/"):
-        prefix, name = _VAL_TAG_PREFIX, tag[len(_VAL_PREFIX) + 1:]
+        prefix, name = _VAL_NAMESPACE, tag[len(_VAL_PREFIX) + 1:]
     else:
         return None
     match = _BC_RE.match(name)
@@ -227,24 +231,24 @@ def _slim_tag(tag: str) -> Optional[str]:
     return None
 
 
-#: 瘦身模式 tensorboard 多线族：``main`` 前缀 → 合法 sub 正则（``val_`` 前缀自动同族成图）
+#: 瘦身模式 tensorboard 多线族：``main``（不含 ``val/`` 命名空间）→ 合法 sub 正则
 _TB_FAMILIES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
-    ("wm/od/loss", re.compile(r"^h[1-6]$")),
-    ("wm/od/ade_m", re.compile(r"^(cv_)?h[1-6]$")),
-    ("wm/ego_next/loss", re.compile(r"^h[1-6]$")),
+    ("od/loss", re.compile(r"^h[1-6]$")),
+    ("od/ade_m", re.compile(r"^(cv_)?h[1-6]$")),
+    ("ego_next/loss", re.compile(r"^h[1-6]$")),
     ("ego/traj/mae_m", re.compile(r"^h[1-6]$")),
     ("router/primary/expert_mix_weight", re.compile(r"^e[0-7]$")),
     ("router/specific/expert_mix_weight", re.compile(r"^e[0-7]$")),
-    ("stageB/primary/loss_terms", re.compile(r"^(loss|traj|action|router)$")),
-    ("stageB/specific/loss_terms", re.compile(r"^(loss|traj|action|router)$")),
+    ("planner/primary/loss_terms", re.compile(r"^(loss|traj|action|router)$")),
+    ("planner/specific/loss_terms", re.compile(r"^(loss|traj|action|router)$")),
 )
 
 
 def _slim_group_of_tag(tag: str) -> Optional[Tuple[str, str]]:
     """瘦身后 tag → ``(main_tag, sub_tag)``；独立标量 → None（写单线 ``add_scalar``）。"""
     prefix, name = "", tag
-    if tag.startswith(_VAL_TAG_PREFIX):
-        prefix, name = _VAL_TAG_PREFIX, tag[len(_VAL_TAG_PREFIX):]
+    if tag.startswith(_VAL_NAMESPACE):
+        prefix, name = _VAL_NAMESPACE, tag[len(_VAL_NAMESPACE):]
     for main, sub_re in _TB_FAMILIES:
         if name.startswith(f"{main}/"):
             sub = name[len(main) + 1:]
@@ -324,9 +328,9 @@ def _grouped_scalars(
 ) -> Dict[str, Dict[str, float]]:
     """扁平 ``tag → value`` → ``{main_tag: {sub: value}}``（仅保留 ≥``min_subs`` 个 sub 的族）。
 
-    供 :meth:`TrainingMonitor.flush` 用 ``add_scalars`` 多线成图；瘦身模式默认按
-    :func:`_slim_group_of_tag` 归类（``val_`` 前缀同族各一图），legacy 模式传
-    :func:`_group_of_tag`。
+    供 :meth:`TrainingMonitor.flush` 逐 sub 写 ``add_scalar("<main>/<sub>")``（同一事件文件，
+    TB 自动并成一张多线图）；瘦身模式默认按 :func:`_slim_group_of_tag` 归类（``val/`` 命名
+    空间同族各一图），legacy 模式传 :func:`_group_of_tag`。
     """
     groups: Dict[str, Dict[str, float]] = {}
     for raw_tag, raw_value in scalars.items():
@@ -552,9 +556,9 @@ class TrainingMonitor:
 
     命名（**瘦身默认**）：训练侧 ``on_train_step`` → ``train/<name>``、留出 ``on_val_step``
     → ``val/<name>``、分组 ``on_grouped_step`` → ``horizon|label|slice/...``（**喂入侧命名
-    不变**），落盘前统一按 :func:`_slim_tag` 重命名为 Tier-1 tag（``wm/...`` / ``ego/...`` /
-    ``router/...`` / ``stageB/...``）；未列入清单的 tag 丢弃。``legacy_tags=True`` = 回退旧
-    口径（全部 tag 原样落盘 + 旧多线分组）。
+    不变**），落盘前统一按 :func:`_slim_tag` 重命名为 Tier-1 tag（``wm/...`` / ``val/...`` /
+    ``ego/...`` / ``router/...`` / ``planner/...``）；未列入清单的 tag 丢弃。``legacy_tags=True``
+    = 回退旧口径（全部 tag 原样落盘 + 旧多线分组）。
     """
 
     def __init__(
@@ -640,8 +644,9 @@ class TrainingMonitor:
     def flush(self, step: Optional[int] = None) -> None:
         """把场景标签 / MoE / 分组（训练 + 留出）窗口统计写入后端，并重置窗口。
 
-        末尾按模式成图：瘦身模式写多线族 ``add_scalars`` + 标量 ``add_scalar``；
-        legacy 模式写旧分组多线图。CSV 长表在 ``log_scalar`` 时已落盘。
+        末尾按模式成图：瘦身模式对族内每个 sub 写 ``add_scalar("<main>/<sub>")``（同事件文件，
+        TB 自动并图）+ 标量 ``add_scalar``；legacy 模式写旧分组多线图。CSV 长表在
+        ``log_scalar`` 时已落盘。
         """
         self.log_scalars(self.scene_labels.flush(), step=step)
         self.log_scalars(self.moe.flush(), step=step)
@@ -659,7 +664,9 @@ class TrainingMonitor:
             self._writer.flush()
 
     def _write_slim_tensorboard(self, step: Optional[int]) -> None:
-        """瘦身模式：缓存里的 tag 按族写 ``add_scalars`` 多线图，其余（标量）写 ``add_scalar``。
+        """瘦身模式：多线族逐 sub 写 ``add_scalar("<main>/<sub>")``（同一事件文件，TB 自动并成
+        一张多线图；不再产生 torch ``add_scalars`` 的 ``<main>_<sub>/`` sub-run 目录），
+        其余（标量）写单线 ``add_scalar``。
 
         多线族 tag 不写 canonical 单点（族内 <2 个 sub 时整族不写，避免单点噪声；
         数值仍在 CSV）；无 tensorboard writer（或缓存为空）时只清缓存。
@@ -671,7 +678,8 @@ class TrainingMonitor:
         values = {tag: number for tag, (number, _) in pending.items()}
         grouped_tags = {tag for tag in pending if _slim_group_of_tag(tag) is not None}
         for main_tag, subs in _grouped_scalars(values).items():
-            self._writer.add_scalars(main_tag, subs, global_step=global_step)
+            for sub_tag, number in subs.items():
+                self._writer.add_scalar(f"{main_tag}/{sub_tag}", number, global_step=global_step)
         for tag, (number, tag_step) in pending.items():
             if tag in grouped_tags:
                 continue
@@ -734,8 +742,9 @@ class TrainingMonitor:
         分切片 ``slice/<name>/<m>``）；写后端并清空对应窗口。
 
         瘦身模式（默认）落盘前重命名：Stage A ``horizon/h*/loss|ade|cv_ade|ego_next_loss`` →
-        ``wm/...``，Stage B ``horizon/h*/traj_mae_m`` → ``ego/traj/mae_m``；``labels``/``slices``
-        形参仅为 legacy 兼容（瘦身模式丢弃）。``weights`` 用于 weighted_mean 口径（legacy）。
+        ``val/od/*`` / ``val/ego_next/*``，Stage B ``horizon/h*/traj_mae_m`` → ``ego/traj/mae_m``；
+        ``labels``/``slices`` 形参仅为 legacy 兼容（瘦身模式丢弃）。``weights`` 用于
+        weighted_mean 口径（legacy）。
         """
         _ = step  # 窗口在 flush() 时统一落盘；保留形参以便调用方显式传步号
         if horizon:
@@ -756,8 +765,9 @@ class TrainingMonitor:
     ) -> None:
         """hook：留出集分组指标（旧 tag ``val/horizon|val/label|val/slice/...``）。
 
-        与 :meth:`on_grouped_step` 同口径，仅前缀不同；瘦身模式下 ``val/`` 族重命名为
-        ``val_`` 前缀（如 ``val_ego/traj/mae_m``），``labels``/``slices`` 丢弃（legacy 兼容）。
+        与 :meth:`on_grouped_step` 同口径，仅前缀不同；瘦身模式下沿用 ``val/`` 命名空间
+        （如 ``val/ego/traj/mae_m`` / ``val/planner/<phase>/loss_terms/*`` /
+        ``val/router/*``），``labels``/``slices`` 丢弃（legacy 兼容）。
         """
         _ = step
         if horizon:

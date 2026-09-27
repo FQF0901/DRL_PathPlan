@@ -225,3 +225,58 @@ def latest_dataset(root: Path = ROOT) -> Path | None:
     """最新 ``datasets/BTC*_expert*``（须含 ``expert_bc.npz``）。"""
     hits = [d for d in Path(root).glob("datasets/BTC*_expert*") if (d / "expert_bc.npz").is_file()]
     return sorted(hits, key=lambda item: item.name)[-1] if hits else None
+
+
+# ---------------------------------------------------------------- TensorBoard run 名（tools/tb.sh）
+#: ``--logdir_spec`` 的固定 run 名（顺序即展示顺序）
+TB_RUN_ORDER: tuple[str, ...] = ("train_stageA", "train_stageB", "eval_stageB", "eval_stageA")
+
+
+def _monitor_with_events(run_dir: Path) -> Path | None:
+    """``<run_dir>/monitor`` 内有 ``events.out.tfevents*`` 才收。"""
+    monitor = run_dir / "monitor"
+    if monitor.is_dir() and any(monitor.glob("events.out.tfevents*")):
+        return monitor
+    return None
+
+
+def _eval_stage_of(run_dir: Path) -> str:
+    """评测 run 归属：manifest 的 ckpt 路径含 ``stage_b`` → B，含 ``stage_a`` → A，否则 B（planner 语义）。"""
+    manifest = run_dir / "manifest.txt"
+    if manifest.is_file():
+        text = manifest.read_text(encoding="utf-8", errors="ignore")
+        if "stage_b" in text:
+            return "B"
+        if "stage_a" in text:
+            return "A"
+    return "B"
+
+
+def tb_spec(root: Path = ROOT) -> list[tuple[str, str]]:
+    """TensorBoard ``--logdir_spec`` 键值：``[(run_name, monitor_dir)]``。
+
+    run 名固定为 :data:`TB_RUN_ORDER`；每个名字只取**最新一个候选**（避免重名/重复）：
+    ``train_stageA|B`` = 最新 ``runs/*/stage_a|b/monitor``，``eval_stageA|B`` = 最新
+    ``runs/*eval*/monitor``（按 manifest 的 ckpt 判定归属）；无事件文件/无目录 → 跳过。
+    """
+    spec: dict[str, str] = {}
+    for work_dir, out_dir, stage in run_candidates(root):  # 新→旧；同名字首个即最新
+        name = f"train_stage{stage}"
+        if name in spec:
+            continue
+        monitor = _monitor_with_events(out_dir)
+        if monitor is not None:
+            spec[name] = str(monitor)
+    eval_dirs = sorted(
+        (item for item in Path(root).glob("runs/*") if item.is_dir() and "eval" in item.name),
+        key=lambda item: str(item),
+        reverse=True,
+    )
+    for run_dir in eval_dirs:
+        name = f"eval_stage{_eval_stage_of(run_dir)}"
+        if name in spec:
+            continue
+        monitor = _monitor_with_events(run_dir)
+        if monitor is not None:
+            spec[name] = str(monitor)
+    return [(name, spec[name]) for name in TB_RUN_ORDER if name in spec]

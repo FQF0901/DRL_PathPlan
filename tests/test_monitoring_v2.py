@@ -78,16 +78,17 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
     monitor.close()
 
     tags = _read_tags(tmp_path / "metrics.csv")
-    for tag in ("wm/loss", "wm/presence_auc", "wm/entry_auc",
-                "wm/od/loss/h1", "wm/od/ade_m/h1", "wm/od/ade_m/cv_h1", "wm/ego_next/loss/h1",
-                "stageB/primary/loss_terms/loss", "stageB/primary/loss_terms/traj",
-                "stageB/primary/loss_terms/action", "stageB/primary/loss_terms/router",
+    for tag in ("wm/loss", "val/od/presence_auc", "val/od/entry_auc",
+                "val/od/loss/h1", "val/od/ade_m/h1", "val/od/ade_m/cv_h1", "val/ego_next/loss/h1",
+                "planner/primary/loss_terms/loss", "planner/primary/loss_terms/traj",
+                "planner/primary/loss_terms/action", "planner/primary/loss_terms/router",
                 "ego/action/err_weighted", "ego/traj/mae_m/h1",
                 "router/soft_ce", "router/soft_kl", "router/entropy",
                 "router/primary/expert_mix_weight/e0",
-                "val_stageB/primary/loss_terms/loss", "val_ego/traj/mae_m/h1"):
+                "val/planner/primary/loss_terms/loss", "val/ego/traj/mae_m/h1"):
         assert tag in tags, f"保留 tag 缺失：{tag}"
-    # 已移除 tag 一个不留（包括旧命名与 n_updates / 计数 / slice / label / median / grad_norm）
+    # 已移除 tag 一个不留（包括旧命名与 n_updates / 计数 / slice / label / median / grad_norm；
+    # 以及瘦身前一版的名字 wm/od/*、stageB/*、val_*/val/horizon*）
     for tag in ("kpi/success", "train/loss", "train/reward/total", "scene_label/cutin_active/freq",
                 "moe/effective_n", "horizon/h1/loss/mean", "horizon/h1/loss/n_updates",
                 "horizon/h1/valid_samples/mean", "horizon/h1/fde/mean", "horizon/h1/traj_mse_m2/mean",
@@ -95,7 +96,9 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
                 "train/primary_bc_action_err_median", "train/grad_norm_plan_head",
                 "train/cv_ade", "val/primary_bc_loss", "val/horizon/h1/traj_mse_m2/mean",
                 "val/slice/brake/action_err/mean", "val/label/cutin_active/action_err/mean",
-                "train/primary_bc_traj_mse"):
+                "train/primary_bc_traj_mse",
+                "wm/od/loss/h1", "wm/presence_auc", "stageB/primary/loss_terms/loss",
+                "val_stageB/primary/loss_terms/loss", "val_ego/traj/mae_m/h1", "val_router/soft_ce"):
         assert tag not in tags, f"已移除 tag 仍写入：{tag}"
 
 

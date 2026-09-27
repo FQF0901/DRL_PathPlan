@@ -1,13 +1,15 @@
-"""监控瘦身回归（2026-09-27）：Tier-1 tag 重命名 + tensorboard 多线成图。
+"""监控瘦身回归（2026-09-27）：Tier-1 tag 重命名 + tensorboard 同 run 多线。
 
 需求：只保留 OD/EGO loss+KPI 与 router loss+KPI（清单 ``docs/metrics.md``）：
-- 训练侧照旧喂 canonical tag，落盘前重命名（``wm/*`` / ``ego/*`` / ``router/*`` / ``stageB/*``）；
+- 训练侧照旧喂 canonical tag，落盘前重命名（``wm/*`` / ``val/...`` / ``ego/*`` /
+  ``router/*`` / ``planner/*``）；
 - **未列入清单的 tag 直接丢弃**（TB/CSV 都不写）：slice/label/n_updates/计数/fde/traj_mse_m2/
   expert_util/grad_norm/kpi/moe/scene_label/计时/median/p95 ...；
-- tensorboard 只写成图：多线族 ``add_scalars``（main → subs），标量 ``add_scalar``；
-  canonical 单点不再额外写；同族 <2 个 sub 不写；
+- **不再用 torch ``add_scalars``**（会为每个 sub 建 ``<main>_<sub>/`` sub-run 目录）：
+  多线族在主 run 内逐 sub 写 ``add_scalar("<main>/<sub>")``，TB 自动并成一张多线图；
+  标量写单线 ``add_scalar``；同族 <2 个 sub 不写；
 - ``legacy_tags=True`` 回退旧口径（原样落盘 + 旧多线分组）；
-- 真实 event 文件读回，重建 ``main_tag → subs`` 多线记录（EventAccumulator）。
+- 真实 event 文件读回：全部 tag 在主 run 的单个事件文件里（无 sub-run 子目录）。
 """
 
 from __future__ import annotations
@@ -59,23 +61,23 @@ _REMOVED_TAGS = (
 def test_slim_tag_renames_retained_and_drops_removed() -> None:
     expected = {
         "train/wm_loss": "wm/loss",
-        "train/presence_auc": "wm/presence_auc",
-        "train/entry_auc": "wm/entry_auc",
-        "horizon/h1/loss/mean": "wm/od/loss/h1",
-        "horizon/h3/ade/mean": "wm/od/ade_m/h3",
-        "horizon/h2/cv_ade/mean": "wm/od/ade_m/cv_h2",
-        "horizon/h6/ego_next_loss/mean": "wm/ego_next/loss/h6",
+        "train/presence_auc": "val/od/presence_auc",
+        "train/entry_auc": "val/od/entry_auc",
+        "horizon/h1/loss/mean": "val/od/loss/h1",
+        "horizon/h3/ade/mean": "val/od/ade_m/h3",
+        "horizon/h2/cv_ade/mean": "val/od/ade_m/cv_h2",
+        "horizon/h6/ego_next_loss/mean": "val/ego_next/loss/h6",
         "horizon/h4/traj_mae_m/mean": "ego/traj/mae_m/h4",
-        "val/horizon/h2/traj_mae_m/mean": "val_ego/traj/mae_m/h2",
-        "train/primary_bc_loss": "stageB/primary/loss_terms/loss",
-        "train/specific_bc_action_loss": "stageB/specific/loss_terms/action",
-        "val/primary_bc_router_loss": "val_stageB/primary/loss_terms/router",
+        "val/horizon/h2/traj_mae_m/mean": "val/ego/traj/mae_m/h2",
+        "train/primary_bc_loss": "planner/primary/loss_terms/loss",
+        "train/specific_bc_action_loss": "planner/specific/loss_terms/action",
+        "val/primary_bc_router_loss": "val/planner/primary/loss_terms/router",
         "train/primary_bc_action_err_weighted_mean": "ego/action/err_weighted",
-        "val/primary_bc_action_err_weighted_mean": "val_ego/action/err_weighted",
+        "val/primary_bc_action_err_weighted_mean": "val/ego/action/err_weighted",
         "train/primary_bc_router_soft_ce": "router/soft_ce",
-        "val/specific_bc_router_nmi": "val_router/nmi",
+        "val/specific_bc_router_nmi": "val/router/nmi",
         "train/primary_bc_router_expert_mix_weight_3": "router/primary/expert_mix_weight/e3",
-        "val/specific_bc_router_expert_mix_weight_7": "val_router/specific/expert_mix_weight/e7",
+        "val/specific_bc_router_expert_mix_weight_7": "val/router/specific/expert_mix_weight/e7",
     }
     for old, new in expected.items():
         assert _slim_tag(old) == new, old
@@ -85,36 +87,36 @@ def test_slim_tag_renames_retained_and_drops_removed() -> None:
 
 def test_slim_grouped_scalars_families_and_min_two_rule() -> None:
     scalars = {
-        f"wm/od/loss/h{k}": float(k) for k in range(1, 7)
+        f"val/od/loss/h{k}": float(k) for k in range(1, 7)
     }
-    scalars.update({f"wm/od/ade_m/h{k}": float(k) for k in range(1, 7)})
-    scalars.update({f"wm/od/ade_m/cv_h{k}": 1.0 for k in range(1, 7)})
-    scalars.update({f"val_ego/traj/mae_m/h{k}": float(k) for k in range(1, 7)})
+    scalars.update({f"val/od/ade_m/h{k}": float(k) for k in range(1, 7)})
+    scalars.update({f"val/od/ade_m/cv_h{k}": 1.0 for k in range(1, 7)})
+    scalars.update({f"val/ego/traj/mae_m/h{k}": float(k) for k in range(1, 7)})
     scalars.update({f"router/specific/expert_mix_weight/e{i}": 0.125 for i in range(8)})
-    scalars.update({f"stageB/primary/loss_terms/{term}": 1.0
+    scalars.update({f"planner/primary/loss_terms/{term}": 1.0
                     for term in ("loss", "traj", "action", "router")})
     scalars["wm/loss"] = 1.0
     scalars["router/soft_ce"] = 0.5
-    scalars["val_router/soft_ce"] = 0.4
+    scalars["val/router/soft_ce"] = 0.4
 
     groups = _grouped_scalars(scalars)
-    assert groups["wm/od/loss"] == {f"h{k}": float(k) for k in range(1, 7)}
-    assert groups["wm/od/ade_m"] == {**{f"h{k}": float(k) for k in range(1, 7)},
-                                     **{f"cv_h{k}": 1.0 for k in range(1, 7)}}
-    assert groups["val_ego/traj/mae_m"] == {f"h{k}": float(k) for k in range(1, 7)}
+    assert groups["val/od/loss"] == {f"h{k}": float(k) for k in range(1, 7)}
+    assert groups["val/od/ade_m"] == {**{f"h{k}": float(k) for k in range(1, 7)},
+                                      **{f"cv_h{k}": 1.0 for k in range(1, 7)}}
+    assert groups["val/ego/traj/mae_m"] == {f"h{k}": float(k) for k in range(1, 7)}
     assert groups["router/specific/expert_mix_weight"] == {f"e{i}": 0.125 for i in range(8)}
-    assert groups["stageB/primary/loss_terms"] == {"loss": 1.0, "traj": 1.0,
-                                                   "action": 1.0, "router": 1.0}
+    assert groups["planner/primary/loss_terms"] == {"loss": 1.0, "traj": 1.0,
+                                                    "action": 1.0, "router": 1.0}
     # 独立标量不成族（TB 走 add_scalar）
     assert "wm/loss" not in groups and "router/soft_ce" not in groups
     assert _slim_group_of_tag("wm/loss") is None
     assert _slim_group_of_tag("router/soft_ce") is None
 
     # 单 sub / NaN → 不成图（避免单点噪声）
-    assert _grouped_scalars({"wm/od/loss/h1": 1.0}) == {}
-    assert _grouped_scalars({"wm/od/loss/h1": 1.0, "wm/od/loss/h2": float("nan")}) == {}
-    groups = _grouped_scalars({"wm/od/loss/h1": 1.0, "wm/od/loss/h2": 2.0})
-    assert groups == {"wm/od/loss": {"h1": 1.0, "h2": 2.0}}
+    assert _grouped_scalars({"val/od/loss/h1": 1.0}) == {}
+    assert _grouped_scalars({"val/od/loss/h1": 1.0, "val/od/loss/h2": float("nan")}) == {}
+    groups = _grouped_scalars({"val/od/loss/h1": 1.0, "val/od/loss/h2": 2.0})
+    assert groups == {"val/od/loss": {"h1": 1.0, "h2": 2.0}}
 
     # legacy 规则仍可用（回退路径）
     legacy = _grouped_scalars({"horizon/h1/loss/mean": 1.0, "horizon/h2/loss/mean": 2.0},
@@ -152,7 +154,7 @@ def _read_csv_tags(path: Path) -> dict:
     return tags
 
 
-def test_flush_writes_slim_csv_and_grouped_tensorboard(tmp_path: Path) -> None:
+def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
     monitor = TrainingMonitor(str(tmp_path), tensorboard=False, csv=True)
     fake = _RecordingWriter()
     monitor._writer = fake  # 注入假 writer（构造时 tensorboard=False）
@@ -195,45 +197,50 @@ def test_flush_writes_slim_csv_and_grouped_tensorboard(tmp_path: Path) -> None:
     )
     monitor.flush(step=1)
 
-    grouped = {main: subs for main, subs, _ in fake.calls}
-    assert grouped["stageB/primary/loss_terms"] == {
-        "loss": 0.4, "traj": 0.3, "action": 0.2, "router": 0.1,
-    }
-    assert grouped["ego/traj/mae_m"] == {"h1": 0.1, "h2": 0.2}
-    assert grouped["val_ego/traj/mae_m"] == {"h1": 0.7, "h2": 0.8}
-    assert grouped["router/primary/expert_mix_weight"] == {"e0": 0.5, "e1": 0.5}
-    assert "val_stageB/primary/loss_terms" not in grouped  # 单 sub → 不写
+    # 多线族：同一 run 内逐 sub 写 add_scalar("<main>/<sub>")；不再用 add_scalars
+    written = {tag: (value, step) for tag, value, step in fake.scalars}
+    assert fake.calls == [], "不得调用 add_scalars（会建 sub-run 子目录）"
+    assert written["planner/primary/loss_terms/loss"] == (0.4, 1)
+    assert written["planner/primary/loss_terms/traj"] == (0.3, 1)
+    assert written["planner/primary/loss_terms/action"] == (0.2, 1)
+    assert written["planner/primary/loss_terms/router"] == (0.1, 1)
+    assert written["ego/traj/mae_m/h1"] == (0.1, 1)
+    assert written["ego/traj/mae_m/h2"] == (0.2, 1)
+    assert written["val/ego/traj/mae_m/h1"] == (0.7, 1)
+    assert written["val/ego/traj/mae_m/h2"] == (0.8, 1)
+    assert written["router/primary/expert_mix_weight/e0"] == (0.5, 1)
+    assert written["router/primary/expert_mix_weight/e1"] == (0.5, 1)
+    assert "val/planner/primary/loss_terms/loss" not in written  # 单 sub → 不写
     # slice/label/被移除族绝不写
-    assert not any("slice" in main or "label" in main for main in grouped)
-    assert {step for _, _, step in fake.calls} == {1}
+    assert not [tag for tag in written if "slice" in tag or "label" in tag]
     assert fake.flushes == 1
 
     # 标量（非多线族）走 add_scalar
-    scalars = {(tag, step) for tag, _, step in fake.scalars}
-    for tag in ("wm/loss", "wm/presence_auc", "wm/entry_auc", "ego/action/err_weighted",
-                "val_ego/action/err_weighted", "router/soft_ce", "router/soft_kl",
+    for tag in ("wm/loss", "val/od/presence_auc", "val/od/entry_auc", "ego/action/err_weighted",
+                "val/ego/action/err_weighted", "router/soft_ce", "router/soft_kl",
                 "router/top1_cluster_acc", "router/nmi", "router/entropy",
-                "val_router/soft_ce"):
-        assert (tag, 1) in scalars, f"标量缺失：{tag}"
-    # canonical 多线族单点与移除 tag 绝不进 TB
-    assert not [tag for tag, _, _ in fake.scalars
-                if tag.startswith(("ego/traj/", "wm/od/", "stageB/", "router/primary/expert_mix_weight"))]
+                "val/router/soft_ce"):
+        assert (tag, 1) in {(t, s) for t, _, s in fake.scalars}, f"标量缺失：{tag}"
+    # 移除 tag 绝不进 TB
     assert not [tag for tag, _, _ in fake.scalars
                 if "median" in tag or "p95" in tag or "grad_norm" in tag or "expert_util" in tag]
 
     # 二次 flush（无新记录）→ 不重复写
+    count = len(fake.scalars)
     monitor.flush(step=1)
-    assert len(fake.calls) == 4
+    assert len(fake.scalars) == count
 
     # CSV：只有瘦身 tag；移除清单标签一个不留
     tags = _read_csv_tags(tmp_path / "metrics.csv")
-    for tag in ("wm/loss", "wm/presence_auc", "stageB/primary/loss_terms/loss",
-                "ego/traj/mae_m/h1", "val_ego/traj/mae_m/h1", "ego/action/err_weighted",
+    for tag in ("wm/loss", "val/od/presence_auc", "planner/primary/loss_terms/loss",
+                "ego/traj/mae_m/h1", "val/ego/traj/mae_m/h1", "ego/action/err_weighted",
                 "router/soft_ce", "router/primary/expert_mix_weight/e0"):
         assert tag in tags, f"CSV 保留 tag 缺失：{tag}"
     for tag in _REMOVED_TAGS:
         assert tag not in tags, f"CSV 出现已移除 tag：{tag}"
-    assert not [tag for tag in tags if tag.startswith(("slice/", "label/", "horizon/", "train/", "val/", "kpi/", "moe/", "scene_label/"))]
+    assert not [tag for tag in tags
+                if tag.startswith(("slice/", "label/", "horizon/", "train/", "kpi/", "moe/", "scene_label/"))
+                or tag.startswith(("val/horizon/", "val/slice/", "val/label/"))]
     monitor.close()
 
 
@@ -272,14 +279,18 @@ def _read_run(run_dir: Path) -> dict:
     }
 
 
-def test_summary_events_expose_grouped_multiline_tags(tmp_path: Path) -> None:
-    """真实 event 读回：每个保留族 = main_tag 在多个 sub-run 中各有数据点（同图多线）。"""
+def test_summary_events_write_multiline_tags_in_same_run(tmp_path: Path) -> None:
+    """真实 event 读回：所有保留 tag（含多线族逐 sub）都落在主 run 的同一事件文件。"""
     monitor = TrainingMonitor(str(tmp_path), tensorboard=True, csv=True)
     if monitor._writer is None:
         pytest.skip("tensorboard 不可用")
     monitor.on_grouped_step(
         horizon={f"h{k}": {"traj_mae_m": 0.1 * k} for k in range(1, 7)},
         slices={"brake": {"action_err": 0.2}},
+        step=3,
+    )
+    monitor.on_val_grouped_step(
+        horizon={f"h{k}": {"traj_mae_m": 0.2 * k} for k in range(1, 7)},
         step=3,
     )
     monitor.on_train_step(
@@ -294,28 +305,21 @@ def test_summary_events_expose_grouped_multiline_tags(tmp_path: Path) -> None:
     monitor.flush(step=3)
     monitor.close()
 
-    # 主 run：标量 tag 在；多线族 canonical tag 不再写；移除 tag 不在
+    # 同 run 单事件文件：多线族 tag 直接以 "<main>/<sub>" 出现；无 sub-run 子目录
     top = _read_run(tmp_path)
+    assert not any(path.is_dir() for path in tmp_path.iterdir()), "不得再有 sub-run 子目录"
     assert top["wm/loss"][0] == (3, pytest.approx(1.0))
     assert top["router/soft_ce"][0] == (3, pytest.approx(0.3))
-    assert "ego/traj/mae_m/h1" not in top
+    assert [step for step, _ in top["ego/traj/mae_m/h1"]] == [3]
+    assert top["ego/traj/mae_m/h1"][0][1] == pytest.approx(0.1)
+    assert top["val/ego/traj/mae_m/h6"][0][1] == pytest.approx(1.2)
+    assert top["planner/primary/loss_terms/loss"][0] == (3, pytest.approx(0.2))
+    assert top["planner/primary/loss_terms/traj"][0] == (3, pytest.approx(0.1))
+    assert top["planner/primary/loss_terms/action"][0] == (3, pytest.approx(0.05))
+    assert top["planner/primary/loss_terms/router"][0] == (3, pytest.approx(0.05))
+    assert top["router/primary/expert_mix_weight/e0"][0] == (3, pytest.approx(0.5))
+    assert top["router/primary/expert_mix_weight/e1"][0] == (3, pytest.approx(0.5))
+    # 旧 tag / 移除项不在
     assert "horizon/h1/traj_mae_m/mean" not in top
     assert "slice/brake/action_err/mean" not in top
-
-    # 分组：main_tag → {sub: value}（torch add_scalars：每 sub 一个 sub-run，文件内 tag = main；
-    # 目录名 = main 的 "/" 换成 "_" + "_" + sub）
-    grouped: dict[str, dict[str, float]] = {}
-    for directory in sorted(path for path in tmp_path.iterdir() if path.is_dir()):
-        for tag, points in _read_run(directory).items():
-            main_dir = tag.replace("/", "_")
-            sub = directory.name[len(main_dir) + 1:] if directory.name.startswith(f"{main_dir}_") else directory.name
-            assert len(points) == 1 and points[0][0] == 3, (directory, tag, points)
-            grouped.setdefault(tag, {})[sub] = points[0][1]
-
-    assert grouped["ego/traj/mae_m"] == pytest.approx({f"h{k}": 0.1 * k for k in range(1, 7)})
-    assert grouped["stageB/primary/loss_terms"] == {
-        "loss": pytest.approx(0.2), "traj": pytest.approx(0.1),
-        "action": pytest.approx(0.05), "router": pytest.approx(0.05),
-    }
-    assert grouped["router/primary/expert_mix_weight"] == {"e0": pytest.approx(0.5), "e1": pytest.approx(0.5)}
-    assert "slice_action_err" not in grouped and "horizon_loss" not in grouped
+    assert "val_ego/traj/mae_m/h1" not in top

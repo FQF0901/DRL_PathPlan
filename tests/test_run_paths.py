@@ -112,8 +112,33 @@ def test_resolve_train_shares_run_root_and_resume(tmp_path: Path, monkeypatch: p
     assert run_config.resolve(tmp_path, cfg)["RESUME"] == ""
 
 
+def test_tb_spec_takes_latest_candidates_only(tmp_path: Path) -> None:
+    def _monitor(work: str, stage: str) -> Path:
+        monitor = tmp_path / "runs" / work / f"stage_{stage}" / "monitor"
+        monitor.mkdir(parents=True)
+        (monitor / "events.out.tfevents.1").write_bytes(b"")
+        return monitor
+
+    _monitor("BTC20260101-0000_train", "a")          # 旧 run：有事件
+    newer_a = _monitor("BTC20260202-0000_train", "a")
+    newer_b = _monitor("BTC20260202-0000_train", "b")
+    # 无 monitor/事件文件的 run 不入选（只取最新一个候选，避免重名）
+    (tmp_path / "runs/BTC20260303-0000_train/stage_a").mkdir(parents=True)
+
+    spec = run_paths.tb_spec(tmp_path)
+    assert spec == [("train_stageA", str(newer_a)), ("train_stageB", str(newer_b))]
+    assert run_config.resolve_tb(tmp_path)["TB_SPEC"] == f"train_stageA:{newer_a},train_stageB:{newer_b}"
+
+    # eval 目录：按 manifest 的 ckpt 归属命名（eval_stageA/B），无事件文件则跳过
+    eval_dir = tmp_path / "runs/BTC20260202-0000_eval_lqr50"
+    (eval_dir / "monitor").mkdir(parents=True)
+    (eval_dir / "monitor/events.out.tfevents.9").write_bytes(b"")
+    (eval_dir / "manifest.txt").write_text("ckpt: runs/BTC20260202-0000_train/stage_a/final.pt\n", encoding="utf-8")
+    assert ("eval_stageA", str(eval_dir / "monitor")) in run_paths.tb_spec(tmp_path)
+
+
 def test_entry_scripts_thin_and_parse() -> None:
-    for rel in ("tools/train.sh", "tools/test.sh"):
+    for rel in ("tools/train.sh", "tools/test.sh", "tools/tb.sh"):
         path = ROOT / rel
         subprocess.run(["bash", "-n", str(path)], check=True)
         assert len(path.read_text(encoding="utf-8").splitlines()) <= 30, rel

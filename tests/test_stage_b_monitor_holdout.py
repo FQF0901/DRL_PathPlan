@@ -145,18 +145,18 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
 
     series = _csv_series(out_dir)
     # 逐 epoch step 轴：primary 1..2、specific 3..4（全局单调；step 0 = 阶段元数据）
-    assert sorted(series["stageB/primary/loss_terms/loss"]) == [1, 2]
-    assert sorted(series["stageB/specific/loss_terms/loss"]) == [3, 4]
-    assert sorted(series["val_stageB/primary/loss_terms/loss"]) == [1, 2]
-    assert sorted(series["val_stageB/specific/loss_terms/loss"]) == [3, 4]
+    assert sorted(series["planner/primary/loss_terms/loss"]) == [1, 2]
+    assert sorted(series["planner/specific/loss_terms/loss"]) == [3, 4]
+    assert sorted(series["val/planner/primary/loss_terms/loss"]) == [1, 2]
+    assert sorted(series["val/planner/specific/loss_terms/loss"]) == [3, 4]
     # 逐 horizon 族每相位每 epoch 一点（train 4 点 + val 4 点）
     assert sorted(series["ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
-    assert sorted(series["val_ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
+    assert sorted(series["val/ego/traj/mae_m/h1"]) == [1, 2, 3, 4]
     # 真留出：val 与 train 数值不同（同 step 同族指标）
     for train_tag, val_tag in (
-        ("stageB/primary/loss_terms/loss", "val_stageB/primary/loss_terms/loss"),
-        ("ego/traj/mae_m/h1", "val_ego/traj/mae_m/h1"),
-        ("ego/action/err_weighted", "val_ego/action/err_weighted"),
+        ("planner/primary/loss_terms/loss", "val/planner/primary/loss_terms/loss"),
+        ("ego/traj/mae_m/h1", "val/ego/traj/mae_m/h1"),
+        ("ego/action/err_weighted", "val/ego/action/err_weighted"),
     ):
         for step in (1, 2):
             assert series[val_tag][step] != series[train_tag][step], (train_tag, step)
@@ -166,8 +166,9 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
         assert tag in series, f"保留 tag 缺失：{tag}"
     # 瘦身：旧 tag 族 / n_updates / count / slice / label 一个不留
     assert not [tag for tag in series
-                if tag.startswith(("horizon/", "slice/", "label/", "train/", "val/"))]
-    assert not [tag for tag in series if tag.endswith(("/count", "/n_updates"))]
+                if tag.startswith(("horizon/", "slice/", "label/", "train/",
+                                   "val/horizon/", "val/slice/", "val/label/"))]
+    assert not [tag for tag in series if "/bc_" in tag or tag.endswith(("/count", "/n_updates"))]
     # epoch 行打印 val=
     captured = capsys.readouterr().out
     assert "val=" in captured, "epoch 行必须打印 val= 摘要"
@@ -191,4 +192,4 @@ def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> No
                 "horizon/h1/traj_mae_m/mean", "val/horizon/h1/traj_mae_m/mean",
                 "slice/brake/action_err/mean"):
         assert tag in series, f"legacy tag 缺失：{tag}"
-    assert "stageB/primary/loss_terms/loss" not in series
+    assert "planner/primary/loss_terms/loss" not in series and "val/planner/primary/loss_terms/loss" not in series

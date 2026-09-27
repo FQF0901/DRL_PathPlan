@@ -11,7 +11,9 @@
 
 ``--profile train`` 打印 ``BC_DIR WORK_DIR STAGE STAGE_DIR LOG DETACH_PID WM_EPOCHS BC_EPOCHS
 CKPT_EVERY BATCH_SIZE MICRO_BATCH_SIZE TRAJ_AUX_WEIGHT CKPT RESUME``；``--profile eval`` 打印
-``NAME WORK_DIR OUT_ROOT LOG DETACH_PID CKPT``。同名环境变量优先（含显式置空：``RESUME=`` 关闭续跑）。
+``NAME WORK_DIR OUT_ROOT LOG DETACH_PID CKPT``；``--profile tb`` 打印
+``TB_SPEC='name:path,...'``（run 名见 ``pipeline.run_paths.TB_RUN_ORDER``）。
+同名环境变量优先（含显式置空：``RESUME=`` 关闭续跑）。
 """
 
 from __future__ import annotations
@@ -153,6 +155,12 @@ def resolve_eval(root: Path, cfg: Mapping[str, Any], policy: str = "ckpt", limit
     }
 
 
+def resolve_tb(root: Path = ROOT) -> dict[str, str]:
+    """TensorBoard 入口取值：``TB_SPEC='name:path,name:path'``（无候选 → 空串）。"""
+    spec = run_paths.tb_spec(root)
+    return {"TB_SPEC": ",".join(f"{name}:{path}" for name, path in spec)}
+
+
 def emit(values: Mapping[str, str]) -> None:
     for key, value in values.items():
         print(f"{key}={shlex.quote(str(value))}")
@@ -161,7 +169,7 @@ def emit(values: Mapping[str, str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="读 config/train.yaml → 打印脚本用 KEY=value（auto 自动解析）")
     parser.add_argument("--config", default="config/train.yaml", help="配置路径（相对仓库根，默认 config/train.yaml）")
-    parser.add_argument("--profile", choices=("train", "eval"), default="train")
+    parser.add_argument("--profile", choices=("train", "eval", "tb"), default="train")
     parser.add_argument("--stage", default="", help="显式阶段 A|B（默认按 resume auto 推断，否则 A）")
     parser.add_argument("--policy", default="ckpt", help="eval profile：ckpt|baseline（命名用）")
     parser.add_argument("--limit", default="50", help="eval profile：评测条数（命名用）")
@@ -174,7 +182,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run_config] 错误：配置不存在 {path}", file=sys.stderr)
         return 2
     cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if args.profile == "eval":
+    if args.profile == "tb":
+        values = resolve_tb(ROOT)
+        if not values["TB_SPEC"]:
+            print("[run_config] 无可用 monitor 事件目录（先跑 tools/train.sh）", file=sys.stderr)
+        emit(values)
+    elif args.profile == "eval":
         emit(resolve_eval(ROOT, cfg, policy=args.policy, limit=args.limit, tracker=args.tracker))
     else:
         emit(resolve(ROOT, cfg, stage_arg=args.stage))

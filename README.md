@@ -246,6 +246,9 @@ bash tools/train.sh                      # Stage A（默认）；STAGE=B bash to
 
 # 评测（零参可跑：ckpt 自动取最新 stage_b/final.pt，回退 stage_a final；默认 LIMIT=50 / TRACKER=lqr）
 bash tools/test.sh
+
+# 曲线 / TensorBoard（零参：run 名 train_stageA/train_stageB/eval_*，端口占用自动 +1，PORT 可覆盖）
+bash tools/tb.sh
 ```
 
 ---

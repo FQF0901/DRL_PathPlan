@@ -9,8 +9,9 @@
         --out runs/il_report
 
 设计原则：**按 tag 家族模式发现**，缺什么就明确写 "缺失"，绝不编造；判定门只在数据齐备时给 PASS/FAIL。
-tag 口径（2026-09-27 监控瘦身）：新 run 用 `wm/*` / `ego/*` / `router/*` / `stageB/*`
-（见 `docs/metrics.md`），旧 run 的 `horizon/*` / `train/*_bc_*` / `val/*` 序列仍可读（回退）。
+tag 口径（2026-09-27 监控瘦身 v2）：新 run 用 `wm/*` / `val/...` / `ego/*` / `router/*` / `planner/*`
+（见 `docs/metrics.md`）；瘦身 v1 名（`wm/od/*` / `stageB/*` / `val_*`）与更早的
+`horizon/*` / `train/*_bc_*` / `val/*` 序列仍可读（回退）。
 """
 from __future__ import annotations
 
@@ -58,8 +59,16 @@ def series_first(series: Dict[str, Dict[int, float]], *candidates: str) -> Dict[
     return {}
 
 
-#: Stage B 训练标量：瘦身 tag 候选（metrics.json 缺失时回退用）
+#: Stage B 训练标量：瘦身 tag 候选（metrics.json 缺失时回退用；新名在前，v1/旧名回退）
 _SLIM_TRAIN_SCALARS: Dict[str, Tuple[str, ...]] = {
+    "loss": ("planner/primary/loss_terms/loss", "planner/specific/loss_terms/loss",
+             "stageB/primary/loss_terms/loss", "stageB/specific/loss_terms/loss"),
+    "traj_loss": ("planner/primary/loss_terms/traj", "planner/specific/loss_terms/traj",
+                  "stageB/primary/loss_terms/traj", "stageB/specific/loss_terms/traj"),
+    "action_loss": ("planner/primary/loss_terms/action", "planner/specific/loss_terms/action",
+                    "stageB/primary/loss_terms/action", "stageB/specific/loss_terms/action"),
+    "router_loss": ("planner/primary/loss_terms/router", "planner/specific/loss_terms/router",
+                    "stageB/primary/loss_terms/router", "stageB/specific/loss_terms/router"),
     "action_err_weighted_mean": ("ego/action/err_weighted",),
     "router_soft_ce": ("router/soft_ce",),
     "router_soft_kl": ("router/soft_kl",),
@@ -68,26 +77,31 @@ _SLIM_TRAIN_SCALARS: Dict[str, Tuple[str, ...]] = {
     "router_entropy": ("router/entropy",),
 }
 
-#: Stage B 留出标量：瘦身 tag 候选（``val_`` 前缀同族）
+#: Stage B 留出标量：瘦身 tag 候选（新名 `val/...` 在前，瘦身 v1 `val_*` 回退）
 _SLIM_VAL_SCALARS: Dict[str, Tuple[str, ...]] = {
-    "loss": ("val_stageB/primary/loss_terms/loss", "val_stageB/specific/loss_terms/loss"),
-    "action_loss": ("val_stageB/primary/loss_terms/action", "val_stageB/specific/loss_terms/action"),
-    "router_loss": ("val_stageB/primary/loss_terms/router", "val_stageB/specific/loss_terms/router"),
-    "traj_loss": ("val_stageB/primary/loss_terms/traj", "val_stageB/specific/loss_terms/traj"),
-    "action_err_weighted_mean": ("val_ego/action/err_weighted",),
-    "router_soft_ce": ("val_router/soft_ce",),
-    "router_soft_kl": ("val_router/soft_kl",),
-    "router_top1_cluster_acc": ("val_router/top1_cluster_acc",),
-    "router_nmi": ("val_router/nmi",),
-    "router_entropy": ("val_router/entropy",),
+    "loss": ("val/planner/primary/loss_terms/loss", "val/planner/specific/loss_terms/loss",
+             "val_stageB/primary/loss_terms/loss", "val_stageB/specific/loss_terms/loss"),
+    "action_loss": ("val/planner/primary/loss_terms/action", "val/planner/specific/loss_terms/action",
+                    "val_stageB/primary/loss_terms/action", "val_stageB/specific/loss_terms/action"),
+    "router_loss": ("val/planner/primary/loss_terms/router", "val/planner/specific/loss_terms/router",
+                    "val_stageB/primary/loss_terms/router", "val_stageB/specific/loss_terms/router"),
+    "traj_loss": ("val/planner/primary/loss_terms/traj", "val/planner/specific/loss_terms/traj",
+                  "val_stageB/primary/loss_terms/traj", "val_stageB/specific/loss_terms/traj"),
+    "action_err_weighted_mean": ("val/ego/action/err_weighted", "val_ego/action/err_weighted"),
+    "router_soft_ce": ("val/router/soft_ce", "val_router/soft_ce"),
+    "router_soft_kl": ("val/router/soft_kl", "val_router/soft_kl"),
+    "router_top1_cluster_acc": ("val/router/top1_cluster_acc", "val_router/top1_cluster_acc"),
+    "router_nmi": ("val/router/nmi", "val_router/nmi"),
+    "router_entropy": ("val/router/entropy", "val_router/entropy"),
 }
 
 
 def is_slim_run(series: Dict[str, Dict[int, float]]) -> bool:
-    """是否为新（2026-09-27 监控瘦身）tag 口径的 run。"""
+    """是否为新（2026-09-27 监控瘦身）tag 口径的 run（含 v1 名回退识别）。"""
     return any(
-        tag.startswith(("stageB/", "ego/", "router/", "val_ego/", "val_router/", "val_stageB/"))
-        or tag.startswith("wm/")
+        tag.startswith(("planner/", "ego/", "router/", "val/planner/", "val/ego/", "val/router/",
+                        "val/od/", "val/ego_next/", "wm/", "stageB/", "val_ego/", "val_router/",
+                        "val_stageB/"))
         for tag in series
     )
 
@@ -206,19 +220,22 @@ def closed_loop_section(eval_paths: List[str]) -> Tuple[List[str], List[Dict[str
 
 # ---------------------------------------------------------------- 各段落
 def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dict[str, Any]]:
-    """Stage A 段落：**新（瘦身）tag 优先，旧（2026-09-27 前）tag 回退**。
+    """Stage A 段落：**新（瘦身 v2）tag 优先，v1 名与旧 tag 回退**。
 
-    - 新：``wm/od/loss/h{k}``、``wm/od/ade_m/h{k}``（+ ``cv_h{k}`` 匀速基线）、
-      ``wm/ego_next/loss/h{k}``、``wm/loss``、``wm/presence_auc``、``wm/entry_auc``；
-    - 旧：``horizon/h{k}/{loss,ade,cv_ade,fde,ego_next_loss}/mean`` + ``train/<scalar>``
-      （旧 run 有 FDE / presence_loss / entry_loss；新 run 这些已按瘦身清单移除）。
+    - 新：``val/od/loss/h{k}``、``val/od/ade_m/h{k}``（+ ``cv_h{k}`` 匀速基线）、
+      ``val/ego_next/loss/h{k}``、``wm/loss``、``val/od/presence_auc``、``val/od/entry_auc``；
+    - 回退：瘦身 v1 ``wm/od/*`` / ``wm/presence_auc``；更早 ``horizon/h{k}/{loss,ade,cv_ade,fde,
+      ego_next_loss}/mean`` + ``train/<scalar>``（旧 run 有 FDE / presence_loss / entry_loss）。
     """
     per_h: Dict[int, Dict[str, Dict[int, float]]] = {}
     for k in range(1, 7):
         entry = {
-            "loss": series_first(series, f"wm/od/loss/h{k}", f"horizon/h{k}/loss/mean"),
-            "ade": series_first(series, f"wm/od/ade_m/h{k}", f"horizon/h{k}/ade/mean"),
-            "cv_ade": series_first(series, f"wm/od/ade_m/cv_h{k}", f"horizon/h{k}/cv_ade/mean"),
+            "loss": series_first(series, f"val/od/loss/h{k}", f"wm/od/loss/h{k}",
+                                 f"horizon/h{k}/loss/mean"),
+            "ade": series_first(series, f"val/od/ade_m/h{k}", f"wm/od/ade_m/h{k}",
+                                f"horizon/h{k}/ade/mean"),
+            "cv_ade": series_first(series, f"val/od/ade_m/cv_h{k}", f"wm/od/ade_m/cv_h{k}",
+                                   f"horizon/h{k}/cv_ade/mean"),
             "fde": series_first(series, f"horizon/h{k}/fde/mean"),
             "cv_fde": series_first(series, f"horizon/h{k}/cv_fde/mean"),
         }
@@ -226,10 +243,10 @@ def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
             per_h[k] = entry
     lines: List[str] = ["### Stage A（世界模型，teacher forcing）", ""]
     if not per_h:
-        lines.append("> 未发现逐 horizon 序列（新 tag `wm/od/loss|ade_m/h*` 或旧 tag "
+        lines.append("> 未发现逐 horizon 序列（新 tag `val/od/loss|ade_m/h*` 或旧 tag "
                      "`horizon/h*/.../mean`）：Stage A 未跑或未开启 grouped 监控。")
         return lines, {"available": False}
-    slim = "wm/od/ade_m/h1" in series
+    slim = "val/od/ade_m/h1" in series or "wm/od/ade_m/h1" in series
     rows, gates = [], {}
     for k in sorted(per_h):
         m = per_h[k]
@@ -242,15 +259,16 @@ def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
     lines += table(rows, ["horizon", "ADE", "CV ADE", "FDE", "CV FDE", "ADE<CV"])
     if slim:
         lines += ["", "> 监控瘦身（2026-09-27）：FDE / 有效样本计数已从曲线移除；ADE 与匀速基线"
-                      "合并为 `wm/od/ade_m`（`h*` / `cv_h*`）。见 `docs/metrics.md`。"]
-    for label, new_tag, old_tag in (("wm_loss", "wm/loss", "train/wm_loss"),
-                                    ("presence_auc", "wm/presence_auc", "train/presence_auc"),
-                                    ("entry_auc", "wm/entry_auc", "train/entry_auc"),
-                                    ("presence_loss", "", "train/presence_loss"),
-                                    ("entry_loss", "", "train/entry_loss")):
-        found = series_first(series, new_tag, old_tag)
+                      "合并为 `val/od/ade_m`（`h*` / `cv_h*`）。见 `docs/metrics.md`。"]
+    for label, candidates in (("wm_loss", ("wm/loss", "train/wm_loss")),
+                              ("presence_auc", ("val/od/presence_auc", "wm/presence_auc",
+                                                "train/presence_auc")),
+                              ("entry_auc", ("val/od/entry_auc", "wm/entry_auc", "train/entry_auc")),
+                              ("presence_loss", ("train/presence_loss",)),
+                              ("entry_loss", ("train/entry_loss",))):
+        found = series_first(series, *candidates)
         if found:
-            tag = new_tag if new_tag and new_tag in series else old_tag
+            tag = next((candidate for candidate in candidates if candidate in series), candidates[0])
             lines.append(f"- `{tag}` = {num(latest(found))}")
     summary = {"available": True, "gates": gates}
     if gates and all(v is not None for v in gates.values()):
@@ -267,10 +285,12 @@ def stage_b_section(
     """Stage B 段落：**最终值优先读 metrics.json 的 ``primary`` 汇总**（新旧 run 都有），
     CSV 序列作为回退（新 tag 优先、旧 tag 回退）。
 
-    新 tag（2026-09-27 瘦身）：``stageB/<phase>/loss_terms/{loss,traj,action,router}``、
+    新 tag（2026-09-27 瘦身 v2）：``planner/<phase>/loss_terms/{loss,traj,action,router}``、
     ``ego/action/err_weighted``、``ego/traj/mae_m/h*``、``router/{soft_ce,soft_kl,
-    top1_cluster_acc,nmi,entropy}``、``router/<phase>/expert_mix_weight/e*``；留出同族加
-    ``val_`` 前缀。median/p95、全部 slice/label、expert_util 已移除 → 明确写「已移除」。
+    top1_cluster_acc,nmi,entropy}``、``router/<phase>/expert_mix_weight/e*``；留出同族进
+    ``val/`` 命名空间（``val/planner/...`` / ``val/ego/...`` / ``val/router/...``）。瘦身 v1
+    名（``stageB/*`` / ``val_stageB/*`` / ``val_ego/*`` / ``val_router/*``）自动回退。
+    median/p95、全部 slice/label、expert_util 已移除 → 明确写「已移除」。
     旧 run：``train/<phase>_bc_*`` / ``val/<phase>_bc_*`` / ``horizon|slice|label/*``。
     """
     lines: List[str] = ["### Stage B（规划器 BC）", ""]
@@ -302,7 +322,7 @@ def stage_b_section(
     lines += table(rows, ["metric", "value"])
     if slim:
         lines += ["", "> 监控瘦身（2026-09-27）：动作误差 median/p95 与全部 slice/label 切片已移除；"
-                      "主口径 = `ego/action/err_weighted`（留出 `val_ego/action/err_weighted`）。"
+                      "主口径 = `ego/action/err_weighted`（留出 `val/ego/action/err_weighted`）。"
                       "见 `docs/metrics.md`。"]
     slices: Dict[str, Optional[float]] = {}
     labels: Dict[str, Optional[float]] = {}
@@ -321,8 +341,8 @@ def stage_b_section(
     summary["slices"] = slices
     summary["labels"] = labels
 
-    # 轨迹误差（逐 horizon，加权口径）：新 tag `ego/traj/mae_m/h{k}`（留出 `val_ego/...`）；
-    # 旧 tag `train/primary_bc_traj_mae_h{k}_m` / `val/horizon/h{k}/traj_mae_m/mean` 回退；
+    # 轨迹误差（逐 horizon，加权口径）：新 tag `ego/traj/mae_m/h{k}`（留出 `val/ego/...`）；
+    # 瘦身 v1 `val_ego/...` / 旧 `train/primary_bc_traj_mae_h{k}_m` / `val/horizon/h{k}/...` 回退；
     # metrics.json（`bc_traj_mse_h{k}` / val `per_horizon`）为最后回退（MSE 只在此保留）。
     mae_h: Dict[int, Optional[float]] = {}
     mse_h: Dict[int, Optional[float]] = {}
@@ -361,7 +381,7 @@ def stage_b_section(
         lines.append("**轨迹误差（逐 horizon，加权口径）**")
         if slim:
             lines.append("")
-            lines.append("> `ego/traj/mae_m`（留出 `val_ego/traj/mae_m`）为唯一逐 horizon 曲线；"
+            lines.append("> `ego/traj/mae_m`（留出 `val/ego/traj/mae_m`）为唯一逐 horizon 曲线；"
                          "MSE 仅作损失口径保留在 metrics.json（不再是曲线，见 `docs/metrics.md`）。")
         if mae_estimated:
             lines.append("")
@@ -490,11 +510,13 @@ def stage_b_section(
     lines += table([[label, num(train_compare[label]), num(val_compare[label])]
                     for label in compare_names], ["metric", "train", "val"])
 
-    # 逐 horizon（val）：新 tag `val_ego/traj/mae_m/h{k}` → 旧 `val/horizon/*` → metrics.json val 快照
+    # 逐 horizon（val）：新 tag `val/ego/traj/mae_m/h{k}` → 瘦身 v1 `val_ego/...` →
+    # 旧 `val/horizon/*` → metrics.json val 快照
     val_mae_h: Dict[int, Optional[float]] = {}
     val_mse_h: Dict[int, Optional[float]] = {}
     for k in range(1, 7):
-        found = series_first(series, f"val_ego/traj/mae_m/h{k}", f"val/horizon/h{k}/traj_mae_m/mean")
+        found = series_first(series, f"val/ego/traj/mae_m/h{k}", f"val_ego/traj/mae_m/h{k}",
+                             f"val/horizon/h{k}/traj_mae_m/mean")
         if found:
             val_mae_h[k] = latest(found)
         found = series_first(series, f"val/horizon/h{k}/traj_mse_m2/mean")
@@ -620,8 +642,9 @@ def main() -> int:
               "训练/留出曲线分别在 `train/<phase>_*` / `val/<phase>_*`；本报告「留出集」段落"
               "优先读 `val/*` 序列与 metrics.json 的 `primary.val` 快照，旧 run 无 val → 显示缺失；",
               "- 监控瘦身（2026-09-27）：新 run 只记录 OD/EGO loss+KPI 与 router loss+KPI，tag 为 "
-              "`wm/*` / `ego/*` / `router/*` / `stageB/*`（见 `docs/metrics.md`）；本报告对新 tag "
-              "优先读取、旧 tag 自动回退，动作误差 median/p95、slice/label 等已移除项显示为「已移除」；",
+              "`wm/*` / `val/...` / `ego/*` / `router/*` / `planner/*`（见 `docs/metrics.md`）；"
+              "本报告对新 tag 优先读取、旧 tag（含瘦身 v1 名）自动回退，动作误差 median/p95、"
+              "slice/label 等已移除项显示为「已移除」；",
               "- 判定门口径见 `docs/design-v1.2.md` §5.1；缺失项显示为「缺失」而不是默认通过。",
               f"- 生成时间：{__import__('datetime').datetime.now().isoformat(timespec='seconds')}"]
 

@@ -3,7 +3,7 @@
 覆盖交付项：
 
 - Stage A：多步直接监督（LD 移除）、``train_weight × wm_valid`` 加权、逐 horizon
-  loss/ADE + 匀速基线（``wm/od/*``）、presence/entry BCE + AUC、Tier-1 监控落盘；
+  loss/ADE + 匀速基线（``val/od/*``，val 子集口径）、presence/entry BCE + AUC、Tier-1 监控落盘；
 - Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ router 软目标，动作加权误差
   （``ego/action/err_weighted``）+ 逐 horizon ego 轨迹 MAE（``ego/traj/mae_m``）+
   router KPI；median/p95/slice/label 已按监控瘦身移除（``docs/metrics.md``）。
@@ -81,13 +81,14 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["dataset/weight_min"] == 0.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("wm/loss", "wm/od/loss/h1", "wm/od/ade_m/h1", "wm/od/ade_m/cv_h1",
-                "wm/ego_next/loss/h1"):
+    for tag in ("wm/loss", "val/od/loss/h1", "val/od/ade_m/h1", "val/od/ade_m/cv_h1",
+                "val/ego_next/loss/h1"):
         assert tag in tags, f"Stage A 监控序列缺失：{tag}"
     if np.isfinite(metrics["presence_auc"]):
-        assert "wm/presence_auc" in tags
-    # 监控瘦身（docs/metrics.md）：旧族（horizon/train/slice/label）与计数/n_updates 一个不留
-    assert not [tag for tag in tags if tag.startswith(("horizon/", "train/", "slice/", "label/"))]
+        assert "val/od/presence_auc" in tags
+    # 监控瘦身（docs/metrics.md）：旧族（horizon/train/slice/label 与瘦身 v1 名）与计数/n_updates 一个不留
+    assert not [tag for tag in tags
+                if tag.startswith(("horizon/", "train/", "slice/", "label/", "wm/od/", "wm/presence"))]
     assert not [tag for tag in tags if tag.endswith(("/count", "/n_updates"))]
     # val 集常量（cv 基线/AUC）与逐 horizon 曲线只在保留族；本用例 epochs=1 → 恰 1 行
     assert (out_dir / "final.pt").exists() and (out_dir / "metrics.json").exists()
@@ -162,19 +163,22 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     assert metrics["action_mu_abs_err_count"] == 36.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("stageB/primary/loss_terms/loss", "stageB/primary/loss_terms/traj",
-                "stageB/primary/loss_terms/action", "stageB/primary/loss_terms/router",
+    for tag in ("planner/primary/loss_terms/loss", "planner/primary/loss_terms/traj",
+                "planner/primary/loss_terms/action", "planner/primary/loss_terms/router",
                 "ego/traj/mae_m/h1", "ego/action/err_weighted",
                 "router/soft_ce", "router/soft_kl", "router/top1_cluster_acc",
                 "router/entropy", "router/primary/expert_mix_weight/e0",
-                # 留出集（val_ 前缀；同族指标）
-                "val_stageB/primary/loss_terms/loss", "val_ego/traj/mae_m/h1",
-                "val_ego/action/err_weighted", "val_router/soft_ce"):
+                # 留出集（val/ 命名空间；同族指标）
+                "val/planner/primary/loss_terms/loss", "val/ego/traj/mae_m/h1",
+                "val/ego/action/err_weighted", "val/router/soft_ce"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
     # NMI 在极小数据集上可能因簇标签单一而为 NaN（NaN 静默跳过）→ 有值才断言
     if np.isfinite(primary["bc_router_nmi"]):
         assert "router/nmi" in tags
-    # 监控瘦身：旧族（horizon/train/val/slice/label）与计数/n_updates 一个不留
-    assert not [tag for tag in tags if tag.startswith(("horizon/", "train/", "val/", "slice/", "label/"))]
+    # 监控瘦身：旧族（horizon/train/slice/label、val/horizon|slice|label、瘦身 v1 名）与计数/n_updates 一个不留
+    assert not [tag for tag in tags
+                if tag.startswith(("horizon/", "train/", "slice/", "label/",
+                                   "val/horizon/", "val/slice/", "val/label/",
+                                   "stageB/", "val_stageB/", "val_ego/", "val_router/"))]
     assert not [tag for tag in tags if tag.endswith(("/count", "/n_updates"))]
     assert (out_dir / "final.pt").exists()
