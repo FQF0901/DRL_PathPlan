@@ -22,3 +22,4 @@
 
 ## 用途边界
 - 训练从 train spec 按需采样；评测只跑冻结 `scenarios_val.json`；校验失败或改过的 spec 不得用于训练；观测变更后 BC 需重采（`obs_fingerprint` 守卫）。
+> 2026-09-27 追加：`scenarios_eval500.json`（500 条分层评测集：来自 val 1000 条、seed=0、按 labels.geometry 原比例配额，provenance 见文件内；配套 500 episode 数据 `datasets/BTC<戳>_expert500val`）与 `scenarios_smoke16.json`（16 条；**非协议**，仅代码冒烟）。
