@@ -1,7 +1,7 @@
 """schema v2 合成数据（测试共享；不依赖 metadrive/env 运行时）。
 
 生成的小数据集覆盖训练回路需要的关键字段：
-``train_weight/balance_weight/wm_valid/od_id/od_presence/router_soft_targets`` +
+``train_weight/balance_weight/wm_valid/od_id/od_presence`` +
 历史需要的 ``pose/step/episode_id`` 与动作/轨迹目标。
 """
 
@@ -90,8 +90,7 @@ def make_v2_arrays(
     wm_valid[::5, 0] = 0.0  # 部分帧 horizon-1 目标不可用
     frame_usable = np.ones(count, dtype=np.float32)
     frame_usable[::7] = 0.0
-    # 注意：fixture 不写入 ``router_soft_targets``（router 监督唯一来源 = 聚类 lane API，
-    # 见 pipeline.clusters.soft_targets_from_obs）。
+    # 注意：fixture 不写入任何 router 监督标签（lane U1 去聚类：router 只有负载均衡 aux）。
 
     arrays: Dict[str, np.ndarray] = {
         "episode_id": episode_id,
@@ -160,19 +159,3 @@ def write_v2_dataset(
         json.dumps(meta, ensure_ascii=False), encoding="utf-8"
     )
     return directory
-
-
-def annotate_router_sidecar(directory: Path, *, cluster_config: str = "config/clusters/default.yaml") -> Path:
-    """为合成数据集写 router 硬标签 sidecar（真实 annotate 流程；Stage B 只读 sidecar）。"""
-    from pipeline.clusters import annotate_assignments, load as load_clusters
-    from pipeline.trainer import BCDataset
-
-    dataset = BCDataset.load(str(directory))
-    return annotate_assignments(
-        dataset_dir=directory,
-        count=int(dataset.count),
-        obs_batch_fn=dataset.build_obs_batch,
-        spec=load_clusters(cluster_config),
-        dataset_meta=dataset.meta,
-        logger=lambda _: None,
-    )

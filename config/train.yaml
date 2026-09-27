@@ -1,5 +1,6 @@
-# 分阶段训练（v1.2）：A = WM 教师强制（+ plan head ego_next 监督）；B = planner BC
-# （primary→specific，router 硬标签 CE）；C = PPO RL（EXPERIMENTAL）
+# 分阶段训练（v1.3/lane U1）：A = WM 教师强制（+ plan head ego_next 监督）；
+# B = planner BC（phase 1 primary：MoE 关闭 → 冻结 → phase 2 specific：MoE 开 + worst/mild 权重
+# + Switch 式负载均衡 aux；无聚类监督）；C = PPO RL（EXPERIMENTAL）
 runtime:
   python: "3.10"                  # 运行 Python 版本
   seed: null                      # 全局种子（P1 固定）
@@ -59,7 +60,7 @@ stages:
       entry_coef: 0.1           # entry BCE 权重（id 轴：新 id 是否出现，"t0 无、t+k 有"）
       trainable: [encoders, mem_encoder, plan_head, moe, st_gnn]  # policy/value 头不参与
   B:
-    name: planner_bc            # 阶段名
+    name: planner_bc            # 阶段名（lane U1：phase 1 MoE 关闭 → 冻结 → phase 2 权重化 specific）
     epochs: &stage_b_epochs 20  # Stage B 总轮数（脚本 --bc-epochs；bc.epochs 与其同源）
     batch: *stage_b_batch       # 宏 batch（脚本 --batch-size；train.bc.batch_size 同源）
     micro: *stage_b_micro       # micro batch（脚本 --micro-batch-size；train.bc.micro_batch_size 同源）
@@ -69,13 +70,15 @@ stages:
       primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）
       action_weight: 1.0        # 主损失：action_mu vs 专家即时动作
       traj_aux_weight: *stage_b_traj_aux  # 辅助：rollout traj_xy vs 专家 traj6（WM 冻结 + detach）
-      router_coef: 0.1          # router 硬标签 CE 权重（标签 = sidecar 聚类 top-1；lane B B3）
+      load_balance_coef: 0.01   # lane U1：MoE 负载均衡 aux α（Switch 式 α·E·Σ f_i·P_i；phase 2）
+      hard_weight: 1.0          # lane U1：worst-50%（冻结 primary IL 误差）行权重倍率
+      mild_weight: 0.1          # lane U1：其余 50% 行权重倍率（有效质量 = 0.55；全量曝光）
       loss_type: l2
       wm_detach: true           # v2 固定语义：合成帧恒 detach；该键为 no-op（兼容保留）
   C:
     name: ppo_rl                # 阶段名
     tracker: mpc_lqr            # 环境内 MPC/LQR 跟踪器
-    router_supervision: weak    # 弱路由监督
+    router_supervision: none    # lane U1：router 无监督（仅负载均衡 aux；去聚类）
     kl_anchor: true             # KL 锚 = 阶段 B 策略快照（--ckpt）
     kl_anchor_coef: 0.05        # 初始系数（CLI --kl-anchor-coef）
     kl_anchor_final_coef: 0.0   # 末值（线性衰减，CLI --kl-anchor-final-coef）

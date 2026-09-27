@@ -27,7 +27,7 @@ from pipeline.stages import (
     run_stage_b,
 )
 from pipeline.trainer import BCDataset, MaterializedBCDataset, episode_prefix_row_count
-from tests.v2_synthetic import TINY_MODEL_YAML, annotate_router_sidecar, make_v2_arrays, write_v2_dataset
+from tests.v2_synthetic import TINY_MODEL_YAML, make_v2_arrays, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
@@ -35,7 +35,6 @@ pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def _dataset_dir(tmp_path: Path) -> Path:
     # 6 个 episode × 6 行 = 36 行；episode 边界 = [6, 12, 18, 24, 30]
     directory = write_v2_dataset(tmp_path / "bc_v2", episodes=6, steps_per_episode=6)
-    annotate_router_sidecar(directory)  # Stage B 只读 sidecar（lane B ①）
     return directory
 
 

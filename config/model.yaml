@@ -25,9 +25,9 @@ moe:
   router:
     type: top2_softmax           # top-2 softmax 混合（net.moe.top_k_softmax；恰 2 个非零权重、和为 1）
     top_k: 2                     # 每 token 取 top-2 logits 后在被选 logits 上 softmax
-    supervision: hard_cluster_ce # router 监督 = 聚类硬标签 CE（sidecar cluster_v<k>_assignments.npz；
-                                 # 软目标/温度路径已删除，lane B B3）
-    # 数据集标签顺序（仅用于数据契约/切片分析；v1.2 起 router 不再用标签 BCE/手工标签监督）
+    supervision: load_balance    # lane U1：router 无监督标签（去聚类）；训练侧只加 Switch 式
+                                 # 负载均衡 aux α·E·Σ f_i·P_i（α = stages.B.bc.load_balance_coef）
+    # 数据集标签顺序（仅用于数据契约/切片分析；router 不再用标签 BCE/聚类 CE 监督）
     # Gate 3 定案：受监督标签 8 个（固定顺序）；
     # 名义标签 lane_change / zipper_merge / maneuver(turns) 退出监督与 KPI（无脚本、运行期不可核验）；
     # in_intersection 与 near_intersection 语义重叠 → 只保留 near_intersection。

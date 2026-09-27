@@ -4,9 +4,9 @@
 
 - Stage A：多步直接监督（LD 移除）、``train_weight × wm_valid`` 加权、逐 horizon
   loss/ADE + 匀速基线（``val/od/*``，val 子集口径）、presence/entry BCE + AUC、Tier-1 监控落盘；
-- Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ router 软目标，动作加权误差
+- Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ MoE 负载均衡（lane U1），动作加权误差
   （``ego/action/err_weighted``）+ 逐 horizon ego 轨迹 MAE（``ego/traj/mae_m``）+
-  router KPI；median/p95/slice/label 已按监控瘦身移除（``docs/metrics.md``）。
+  MoE 负载 KPI；median/p95/slice/label 已按监控瘦身移除（``docs/metrics.md``）。
 
 用小型 DrivingModel（hidden=16 / 8 experts）与合成 v2 数据集，CPU 数秒内完成。
 """
@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from pipeline.stages import _parse_args, run_stage_a, run_stage_b
-from tests.v2_synthetic import TINY_MODEL_YAML, annotate_router_sidecar, write_v2_dataset
+from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
@@ -98,8 +98,6 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
 
 def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     dataset_dir = _dataset(tmp_path)
-    # lane B ①：Stage B 只读 sidecar → 先生成（真实 annotate 流程）
-    annotate_router_sidecar(dataset_dir)
     stage_a_dir = tmp_path / "stage_a"
     args_a = _parse_args([
         "--stage", "A", "--bc-dir", str(dataset_dir), "--out", str(stage_a_dir),
@@ -114,7 +112,7 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
         "--ckpt", str(stage_a_dir / "final.pt"), "--model-config", str(_model_cfg(tmp_path)),
         "--bc-epochs", "1", "--bc-phase-split", "0.5", "--batch-size", "8",
         "--val-frac", "0.34",  # 与 Stage A 同比例 → 同一批留出 episode
-        "--device", "cpu", "--seed", "0", "--monitor", "--router-coef", "0.1",
+        "--device", "cpu", "--seed", "0", "--monitor", "--load-balance-coef", "0.01",
     ])
     metrics = run_stage_b(args, {})
     primary = metrics["primary"]
@@ -143,21 +141,16 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
         assert primary[f"bc_traj_mae_h{k}_m"] ** 2 <= primary[f"bc_traj_mse_h{k}"] + 1e-9
         assert primary[f"bc_traj_err_h{k}"] == pytest.approx(primary[f"bc_traj_mse_h{k}"], rel=1e-9)
 
-    # router 硬标签（sidecar 载入 → 非占位）+ CE/acc/acc_majority KPI
-    assert primary["bc_router_placeholder"] == 0.0
-    assert primary["bc_router_cluster_version"] == "v2"
-    assert primary["bc_router_cluster_k"] == 8
-    for key in ("bc_router_ce", "bc_router_acc", "bc_router_acc_majority"):
-        assert np.isfinite(primary[key]), f"缺少 router 指标 {key}"
-    assert 0.0 <= primary["bc_router_acc"] <= 1.0
-    assert 0.0 <= primary["bc_router_acc_majority"] <= 1.0
-    # 软目标路径已删除：KL/温度/利用率/专家混合权重不再进 metrics.json
-    for key in ("bc_router_soft_ce", "bc_router_soft_kl", "bc_router_entropy",
-                "bc_router_nmi", "bc_router_top1_cluster_acc", "bc_router_temperature",
-                "bc_router_expert_weight_0", "bc_router_expert_mix_weight_0"):
-        assert key not in primary, f"软目标路径残留：{key}"
-    assert metrics["cluster_version"] == "v2" and metrics["cluster_k"] == 8
-    assert metrics["router_cluster_source"] == "sidecar"
+    # lane U1：phase 1（primary）MoE 关闭 → 无负载指标（占位）；去聚类 → 无 cluster/gate 字段
+    assert primary["bc_moe_placeholder"] == 1.0
+    for key in ("bc_router_placeholder", "bc_router_cluster_version", "bc_router_cluster_k",
+                "bc_router_ce", "bc_router_acc", "bc_router_acc_majority",
+                "bc_gate_ce", "bc_gate_acc", "bc_hard_rate", "bc_router_cluster_loss",
+                "bc_gate_loss", "bc_router_soft_ce", "bc_router_temperature"):
+        assert key not in primary, f"旧 cluster/gate/软目标路径残留：{key}"
+    assert "cluster_version" not in metrics and "cluster_k" not in metrics
+    assert metrics["moe_phase1_enabled"] is False
+    assert metrics["load_balance_coef"] == 0.01
 
     # 权重感知统计（Stage B）
     assert metrics["action_mu_count"] == 36.0
@@ -168,12 +161,11 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
 
     tags = _csv_tags(out_dir)
     for tag in ("loss/planner/primary/total", "loss/planner/primary/traj",
-                "loss/planner/primary/action", "loss/planner/primary/router",
+                "loss/planner/primary/action",
                 "ego/traj/mae_m/h1", "ego/traj/fde_m", "ego/action/err_weighted",
-                "router/cluster/ce", "router/cluster/acc",
                 # 留出集（val/ 命名空间；同族指标）
                 "val/loss/planner/primary/total", "val/ego/traj/mae_m/h1",
-                "val/ego/traj/fde_m", "val/ego/action/err_weighted", "val/router/cluster/ce"):
+                "val/ego/traj/fde_m", "val/ego/action/err_weighted"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
     # lane B：旧族（horizon/train/slice/label、val/horizon|slice|label、软目标/专家混合权重、v1 名）一个不留
     assert not [tag for tag in tags

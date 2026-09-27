@@ -191,7 +191,6 @@ def test_allow_legacy_stage_b_runs_and_marks_metrics(
         "--ckpt", str(tmp_path / "missing.pt"),
         "--model-config", str(_model_cfg(tmp_path)),
         "--bc-epochs", "1", "--batch-size", "8", "--val-frac", "0.34",
-        "--cluster-config", str(tmp_path / "no_such_cluster.yaml"),  # 跳过聚类软目标
         "--allow-legacy-dataset", "--device", "cpu", "--seed", "0",
     ])
     metrics = run_stage_b(args, {})

@@ -36,15 +36,8 @@ from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
 ROOT = Path(__file__).resolve().parents[1]
 
-#: specific 段允许训练的模块前缀（其余全部冻结；lane T 用户定稿：主干可继续训，
-#: 只冻结 primary 的策略头/专家 = ``policy.`` + ``plan_head.moe.primary.``）
+#: specific 段允许训练的模块前缀（其余全部冻结；lane U1 用户定稿：只训 experts + gate(router)）
 _SPECIFIC_TRAINABLE = (
-    "encoders.",
-    "mem_encoder.",
-    "plan_head.fusion.",
-    "plan_head.norm.",
-    "plan_head.ego_next.",
-    "plan_head.gate.",
     "plan_head.moe.experts.",
     "plan_head.moe.router.",
     "plan_head.moe.residual_scale",
@@ -66,14 +59,13 @@ def _backward(model: DrivingModel) -> None:
         + out["od_pred"].pow(2).mean()
         + out["router_logits"].pow(2).mean()
         + out["ego_next"].pow(2).mean()
-        + out["hard_logit"].pow(2).mean()  # lane T 二值门控头
     )
     loss.backward()
 
 
 # ---------------------------------------------------------------------- 1. 冻结
 def test_primary_phase_freeze_prefixes_match_v2_modules() -> None:
-    """primary 段：冻结 ST-GNN/value/specific experts；主干+plan head+router+policy 可训练。"""
+    """primary 段（lane U1）：MoE 关闭 → 冻结 ST-GNN/value/experts/router；主干+plan head+policy 可训练。"""
     model = _tiny_model()
     apply_freeze_prefixes(model, _PRIMARY_PHASE_FREEZE)
     for name, parameter in model.named_parameters():
@@ -83,8 +75,8 @@ def test_primary_phase_freeze_prefixes_match_v2_modules() -> None:
     assert any(n.startswith("encoders.") for n in trainable_names)
     assert any(n.startswith("mem_encoder.") for n in trainable_names)
     assert any(n.startswith("plan_head.moe.primary.") for n in trainable_names)
-    assert any(n.startswith("plan_head.moe.router.") for n in trainable_names)
     assert any(n.startswith("policy.") for n in trainable_names)
+    assert not any(n.startswith("plan_head.moe.router.") for n in trainable_names), "MoE 关闭 → router 冻结"
     assert not any(n.startswith("st_gnn.") for n in trainable_names)
     # 被冻层确实无梯度（requires_grad=False → autograd 不填 .grad）
     _backward(model)
@@ -98,21 +90,20 @@ def test_primary_phase_freeze_prefixes_match_v2_modules() -> None:
         assert any(g is not None for g in grads), f"{prefix} 组内无任何梯度张量"
 
 
-def test_specific_phase_freezes_primary_policy_head_and_experts() -> None:
-    """specific 段（lane T）：冻结 primary 策略头/专家（``policy.`` + ``plan_head.moe.primary.``），
-    主干 + 8 specific experts + router + 二值门控可继续训。"""
+def test_specific_phase_only_experts_router_trainable() -> None:
+    """specific 段（lane U1）：只训 experts + gate(router) + residual_scale；
+    主干/primary 策略头/专家/policy/WM/value 全冻。"""
     model = _tiny_model()
     apply_freeze_prefixes(model, _SPECIFIC_PHASE_FREEZE)
     trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     expected = {name for name, _ in model.named_parameters() if name.startswith(_SPECIFIC_TRAINABLE)}
-    assert trainable == expected and trainable, "specific 段可训练集合必须恰为 主干+experts+router+gate"
-    assert any(n.startswith("encoders.") for n in trainable), "主干可继续训"
+    assert trainable == expected and trainable, "specific 段可训练集合必须恰为 experts+router+residual_scale"
     assert any(n.startswith("plan_head.moe.experts.") for n in trainable)
     assert any(n.startswith("plan_head.moe.router.") for n in trainable)
-    assert any(n.startswith("plan_head.gate.") for n in trainable)
     assert not any(
-        n.startswith(("policy.", "plan_head.moe.primary.", "st_gnn.", "value.")) for n in trainable
-    ), "primary 策略头/专家（+WM/value）必须冻结"
+        n.startswith(("policy.", "plan_head.moe.primary.", "st_gnn.", "value.", "encoders.", "mem_encoder."))
+        for n in trainable
+    ), "主干/primary 策略头/专家（+WM/value）必须冻结"
     _backward(model)
     # 冻结组一律无梯度；可训练组内至少一个参数有梯度张量（zero-init 个别参数可为 None）
     for name, parameter in model.named_parameters():
@@ -274,7 +265,7 @@ def test_config_router_and_stage_a_v2_semantics() -> None:
     model_cfg = yaml.safe_load((ROOT / "config/model.yaml").read_text(encoding="utf-8"))
     router = model_cfg["moe"]["router"]
     assert router["type"] == "top2_softmax"
-    assert router["supervision"] == "hard_cluster_ce"  # lane B B3：软目标/温度路径已删除
+    assert router["supervision"] == "load_balance"  # lane U1：去聚类 → 只加负载均衡 aux
     assert "temperature" not in router
     assert router["top_k"] == 2
     assert router.get("labels") != "per_step_observable"

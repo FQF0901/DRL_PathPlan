@@ -12,14 +12,15 @@
    `val_` 前缀机制已彻底废除。
 3. 家族 = **同一 run 内 tag 后缀**：多线族逐 sub 写 `add_scalar("<main>/<sub>")`
    （TB 自动并成一张多线图）；**不再用 torch `add_scalars`**（会建 `<main>_<sub>/` sub-run 目录）。
-4. router 只保留"选得准不准"：**硬标签**（聚类 top-1，sidecar `cluster_v<k>_assignments.npz`）
-   的 CE/acc；软目标 KL/温度/专家混合权重路径已删除（lane B B3）。
-5. **lane T 双分支**（2026-09-27）：router 家族拆成两套 KPI ——
-   `router/cluster/{ce,acc}` = 8 路 hard 簇标签（**只算难例**，唯一生产监督 =
-   `cluster_hard_<ts>.npz`，全量 `cluster_v2*` 仅历史工件）；
-   `router/gate/{ce,acc,hard_rate}` = 二值难例门控（**全样本** CE；`hard_rate` = batch 难例
-   加权占比，替代无意义的 `acc_majority`）。损失侧新增
-   `loss/planner/specific/router_cluster` 与 `loss/planner/<phase>/gate`（`loss/…` 只放训练目标）。
+4. （**历史**）router 曾只保留"选得准不准"：聚类硬标签的 CE/acc；lane U1 起**取消一切聚类监督**，
+   只保留 MoE 负载 KPI（`router/expert_load/*` / `router/load_cv` / `router/gate_entropy`）。
+5. **lane U1 去聚类 + MoE 负载均衡**（2026-09-27）：**取消一切聚类监督** ——
+   无簇标签、无 router CE/acc（`router/cluster/*`、`router/gate/*`、`acc_majority` 全部删除）；
+   router 家族只保留**负载 KPI**：`router/expert_load/{e0..e7}`（门控权重质量占比，Σ=1，8 线一族）、
+   `router/load_cv`（负载变异系数，0 = 均衡）、`router/gate_entropy`（逐 token 路由分布熵，
+   归一化；1 = 均匀）。损失侧只新增 Switch 式负载均衡 aux
+   `loss/planner/<phase>/load_balance`（`α·E·Σ_i f_i·P_i`，α = `stages.B.bc.load_balance_coef`；
+   phase 1 MoE 关闭 → 无该项）。
 
 回退：`TrainingMonitor(legacy_tags=True)` 或 CLI `--monitor-legacy-tags`（默认关）=
 旧口径（全部 tag 原样落盘 + 旧多线分组），仅供对比/排查旧 run。
@@ -52,24 +53,22 @@ Stage A 的 loss/ADE/FDE/AUC/ego KPI 都在**验证子集**（`--val-frac` 留�
 
 | tag（canonical CSV） | TB 形态 | 物理意义 |
 | --- | --- | --- |
-| `loss/planner/<phase>/total` | `loss/planner/<phase>` → total/traj/action/router/router_cluster/gate | 相位总损失（train） |
+| `loss/planner/<phase>/total` | `loss/planner/<phase>` → total/traj/action/load_balance | 相位总损失（train） |
 | `loss/planner/<phase>/{traj,action,router}` | 同上 | 轨迹辅助 / 动作主 / router CE 分解（`router` 为 legacy alias） |
-| `loss/planner/specific/router_cluster` | 同上 | specific 段 8 路 hard 簇 CE（**只算难例**；lane T） |
-| `loss/planner/<phase>/gate` | 同上 | 二值难例门控 CE（specific 段；**全样本**；lane T） |
+| `loss/planner/<phase>/load_balance` | 同上 | Switch 式 MoE 负载均衡 aux（phase 2；α·E·Σ f_i·P_i） |
 | `val/loss/planner/<phase>/{total,traj,action,router}` | `val/loss/planner/<phase>` → 同族 | 留出集同族损失 |
 | `ego/traj/mae_m/h{k}` | `ego/traj/mae_m` → h1..h6 | 6 点 rollout 逐 horizon 加权 MAE（m，train） |
 | `val/ego/traj/mae_m/h{k}` | `val/ego/traj/mae_m` → h1..h6 | 同上（留出） |
 | `ego/traj/fde_m` / `val/ego/traj/fde_m` | 标量 | 末点 FDE（m，加权，train / 留出） |
 | `ego/action/err_weighted` / `val/ego/action/err_weighted` | 标量 | 首步动作加权误差（L1，train / 留出） |
-| `router/cluster/ce` / `val/router/cluster/ce` | `router/cluster` → ce/acc | 8 路 hard 簇硬标签交叉熵（**只算难例**；train / 留出） |
-| `router/cluster/acc` / `val/router/cluster/acc` | 同上 | 8 路 hard 簇 top-1 准确率（难例口径） |
-| `router/gate/ce` / `val/router/gate/ce` | `router/gate` → ce/acc/hard_rate | 二值难例门控交叉熵（**全样本**；train / 留出） |
-| `router/gate/acc` / `val/router/gate/acc` | 同上 | 门控二值准确率（基线 = `hard_rate`） |
-| `router/gate/hard_rate` / `val/router/gate/hard_rate` | 同上 | batch 难例**加权**占比（替代 `acc_majority`；解释门控 acc 用） |
+| `router/expert_load/e{0..7}` / `val/router/expert_load/e{0..7}` | `router/expert_load` → e0..e7 | 逐 expert 门控权重质量占比（Σ=1；train / 留出） |
+| `router/load_cv` / `val/router/load_cv` | 标量 | 负载变异系数（std/mean；0 = 完全均衡） |
+| `router/gate_entropy` / `val/router/gate_entropy` | 标量 | 逐 token 路由分布归一化熵（1 = 均匀；0 = 单专家） |
 
 `<phase>` = primary | specific；留出集 = 独立 val-dir（`--val-dir` / train-dir 同级
 `*_expert500val`，**train-dir 全部行 + val-dir 全部行**）或 legacy 按 episode 比例切分
-（缺 val-dir 时告警回退）。`acc_majority` 已删除（保留集 = TB 显示集）。
+（缺 val-dir 时告警回退）。phase 1（primary）**MoE 关闭** → 负载族缺省（`bc_moe_placeholder=1`）；
+`acc_majority` 与全部 cluster/gate tag 已删除（保留集 = TB 显示集）。
 
 ### 评测（`tools/test.sh` / `pipeline/eval_runner.py`）
 
@@ -102,7 +101,7 @@ PORT=6007 bash tools/tb.sh       # 指定端口；日志 /tmp/opencode/tb_<port>
 | 已移除 | 原因 / 说明 |
 | --- | --- |
 | val 口径 loss 曲线（`val/od/loss`、`val/ego_next/loss`，原 `wm/od/loss`、`wm/ego_next/loss`） | 命名纪律：val 曲线不得叫 loss；训练损失只走 `loss/*` 标量（lane B B1） |
-| router 软目标路径（`router/soft_ce|soft_kl|entropy|nmi|top1_cluster_acc`、`router/<phase>/expert_mix_weight`、`router_temperature`） | 监督改为硬标签 CE + acc/acc_majority；软分布物化/温度/专家混合权重全删（lane B B3） |
+| router 软目标路径（`router/soft_ce|soft_kl|entropy|nmi|top1_cluster_acc`、`router/<phase>/expert_mix_weight`、`router_temperature`） | 软分布物化/温度/专家混合权重全删（lane B B3）；lane U1 进一步删聚类硬标签 CE/acc（cluster/gate 族） |
 | `horizon/*/fde`、`cv_fde` 独立 tag（旧口径） | FDE 改为 `val/od/fde_m` / `ego/traj/fde_m` 的家族 sub |
 | `horizon/*/traj_mse_m2` 曲线 | 轨迹误差主口径是 MAE/FDE（m）；MSE 只在 metrics.json 作为损失口径字段 |
 | `horizon/*/valid_samples`、`valid_weight_sum`、`slot_count`、`*/n_updates` | 物理计数/贡献次数只是监控记账；训练日志/metrics.json 仍有样本量 |
@@ -118,5 +117,5 @@ PORT=6007 bash tools/tb.sh       # 指定端口；日志 /tmp/opencode/tb_<port>
 - `tools/plot_curves.py`：按上表精简面板（删 slice/label/expert-util/median/p95 面板），
   同样多线同图；旧 run 回退旧 tag，缺失自动跳过。
 - `tools/tb.sh`：TensorBoard 入口（固定 run 名，见上节）。
-- `tools/annotate_clusters.py`：生成 router 硬标签 sidecar（`cluster_v<k>_assignments.npz`）；
-  `tools/collect_expert.py` 收尾自动调用一次。**Stage B 只读 sidecar，禁止在线重算**。
+- （**历史，lane U1 起训练侧不再消费**）`tools/annotate_clusters.py` / `tools/collect_expert.py`
+  的聚类 sidecar 批注路径：由清理 lane 一并移除。

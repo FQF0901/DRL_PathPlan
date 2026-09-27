@@ -7,7 +7,7 @@
   权重 0 的帧不贡献分子/分母，且不做"有效项总数"隐性重加权；
 - ``row_action_weights``：``train_weight × balance_weight``（缺失时的退化链）；
 - ``presence_entry_loss``：权重 0 的 (帧,horizon) 完全剔除；AUC 单类 → nan；
-- ``router_hard_label_loss``：硬标签 CE（F.cross_entropy 同式；权重 0 不出力；标签 <0 忽略）。
+- ``row_scale_from_worst``（lane U1）：worst/mild 行权重倍率（worst=1.0 / 其余=0.1 / 未知=1.0）。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pipeline.trainer import (
     dataset_weight_report,
     presence_entry_loss,
     row_action_weights,
-    router_hard_label_loss,
+    row_scale_from_worst,
     weighted_od_multi_step_loss,
     weighted_stats,
 )
@@ -160,25 +160,13 @@ def test_binary_auc_rank_based() -> None:
     assert np.isnan(binary_auc([0.5, 0.6], [1, 1]))
 
 
-# ------------------------------------------------------------------ router 硬标签 CE（lane B B3）
-def test_router_hard_label_loss_weighting_and_missing_labels() -> None:
-    from pipeline.trainer import router_hard_label_loss, router_hard_label_stats
-
-    logits = torch.tensor([[2.0, -1.0, 0.5, 0.0, 0.1, -0.2, 0.3, 0.4],
-                           [0.0, 1.0, -1.0, 0.5, 0.2, 0.1, -0.3, 0.4]])
-    labels = torch.tensor([0, 2])
-    reference = torch.nn.functional.cross_entropy(logits, labels)
-    assert float(router_hard_label_loss(logits, labels)) == pytest.approx(float(reference), rel=1e-6)
-    # 权重 0 的样本不出力：weight=[0,1] 时等于只对第 2 行求 CE
-    weighted = router_hard_label_loss(logits, labels, sample_weight=torch.tensor([0.0, 2.0]))
-    single = torch.nn.functional.cross_entropy(logits[1:], labels[1:])
-    assert float(weighted) == pytest.approx(float(single), rel=1e-6)
-    # 标签缺失（<0）被忽略；全缺失 → loss=0、stats 为 nan/0（placeholder 语义由调用方记）
-    missing = router_hard_label_loss(logits, torch.tensor([-1, 2]))
-    assert float(missing) == pytest.approx(float(single), rel=1e-6)
-    assert float(router_hard_label_loss(logits, torch.tensor([-1, -1]))) == 0.0
-    stats = router_hard_label_stats(logits, labels)
-    assert stats["ce"] == pytest.approx(float(reference), rel=1e-6)
-    assert stats["acc"] == pytest.approx(0.5)  # 第 1 行 argmax=0=标签；第 2 行 argmax=1 ≠ 标签 2
-    assert stats["count"] == 2.0
-    assert np.isnan(router_hard_label_stats(logits, torch.tensor([-1, -1]))["acc"])
+# ---------------------------------------------------------- lane U1：worst/mild 行权重
+def test_row_scale_from_worst_weighting_rules() -> None:
+    worst = np.asarray([1.0, 0.0, -1.0, 1.0], dtype=np.float32)
+    scale = row_scale_from_worst(worst, hard_weight=1.0, mild_weight=0.1)
+    assert np.allclose(scale, [1.0, 0.1, 1.0, 1.0])
+    assert np.allclose(row_scale_from_worst(None), np.ones(0))
+    # 与 train_weight 相乘是训练侧唯一口径（BCConfig.worst_flags + hard/mild_weight）
+    train_weight = np.asarray([1.0, 1.0, 1.0, 0.0], dtype=np.float32)
+    effective = train_weight * scale
+    assert np.allclose(effective, [1.0, 0.1, 1.0, 0.0])

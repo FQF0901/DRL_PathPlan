@@ -108,7 +108,7 @@ def test_pretrain_bc_action_loss_nonzero_and_immediate_action() -> None:
     torch.manual_seed(0)
     dataset = _synthetic_dataset()
     model = DrivingModel()
-    config = BCConfig(epochs=1, batch_size=BATCH, lr=3e-4, device="cpu", shuffle=False, router_coef=0.0)
+    config = BCConfig(epochs=1, batch_size=BATCH, lr=3e-4, device="cpu", shuffle=False)
     metrics = pretrain_bc(model, dataset, config, logger=lambda _: None)
 
     assert metrics["bc_action_loss"] > 0.0, "BC 动作损失必须实际运行（缺陷 1 回归）"

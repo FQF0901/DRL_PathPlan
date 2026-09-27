@@ -92,7 +92,7 @@ def test_pretrain_bc_materialized_equivalent_to_old_path() -> None:
 
     def _config() -> BCConfig:
         return BCConfig(
-            epochs=2, batch_size=8, lr=1e-3, device="cpu", shuffle=True, seed=3, router_coef=0.1
+            epochs=2, batch_size=8, lr=1e-3, device="cpu", shuffle=True, seed=3
         )
 
     metrics_old = pretrain_bc(model, dataset, _config(), logger=lambda _: None)
@@ -109,7 +109,7 @@ def test_pretrain_bc_materialized_equivalent_to_old_path() -> None:
         model, dataset, _config(), logger=lambda _: None, batch_source=source
     )
 
-    for key in ("bc_loss", "bc_traj_loss", "bc_action_loss", "bc_router_loss", "bc_action_mu_ds_mean"):
+    for key in ("bc_loss", "bc_traj_loss", "bc_action_loss", "bc_load_balance_loss", "bc_action_mu_ds_mean"):
         assert metrics_new[key] == pytest.approx(metrics_old[key], rel=RTOL, abs=ATOL), key
     for name, grad in grads_old.items():
         new_grad = dict(model.named_parameters())[name].grad
@@ -130,7 +130,7 @@ def test_pretrain_bc_gradient_accumulation_matches_single_batch() -> None:
     def _config(micro: int | None) -> BCConfig:
         return BCConfig(
             epochs=2, batch_size=8, micro_batch_size=micro, lr=1e-3, device="cpu",
-            shuffle=True, seed=3, router_coef=0.1,
+            shuffle=True, seed=3,
         )
 
     metrics_ref = pretrain_bc(model, dataset, _config(None), logger=lambda _: None, batch_source=source)
@@ -147,12 +147,13 @@ def test_pretrain_bc_gradient_accumulation_matches_single_batch() -> None:
         if parameter.grad is not None
     }
 
-    for key in ("bc_loss", "bc_traj_loss", "bc_action_loss", "bc_router_loss", "bc_action_mu_ds_mean"):
+    for key in ("bc_loss", "bc_traj_loss", "bc_action_loss", "bc_load_balance_loss", "bc_action_mu_ds_mean"):
         assert metrics_accum[key] == pytest.approx(metrics_ref[key], rel=RTOL, abs=ATOL), key
     assert set(grads_ref) == set(grads_accum)
     for name, grad in grads_ref.items():
-        # 逐元素梯度：fp32 CPU GEMM 在 batch=8 vs 4+4 下归约顺序不同 → 残差 ~1e-5（验收容差 1e-4）
-        assert torch.allclose(grad, grads_accum[name], atol=1e-4, rtol=1e-4), f"梯度不一致：{name}"
+        # 逐元素梯度：fp32 CPU GEMM 在 batch=8 vs 4+4 下归约顺序不同 → 残差 ~1e-5–3e-4
+        # （基线 e8a5fd6 实测最大 2.3e-4；容差放宽到 5e-4，仍足以抓住真实缩放错误 ~1e-1）
+        assert torch.allclose(grad, grads_accum[name], atol=5e-4, rtol=5e-4), f"梯度不一致：{name}"
 
 
 def test_stage_a_gradient_accumulation_matches_single_batch(tmp_path: Path) -> None:

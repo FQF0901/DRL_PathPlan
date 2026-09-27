@@ -1,18 +1,21 @@
-"""难例挖掘（lane T）：冻结 primary 的逐行 IL 误差 → top-50% 难例 sidecar。
+"""worst-50% 权重挖掘（lane U1）：冻结 primary 的逐行 IL 误差 → 行权重 sidecar。
 
 口径（用户定稿，不得改动）
 --------------------------
-- **参照模型**：primary 段训练结束、**已冻结**的 primary 权重（``--ckpt``）；
+- **参照模型**：phase 1 训练结束、**已冻结**的 primary 权重（``--ckpt``）；
 - **IL 误差主口径 = 动作加权误差**：逐行 ``err_l1 = mean|action_mu − 专家首步动作|``（L1），
   加权 ``err_weighted = w · err_l1``（``w = row_action_weights`` = ``train_weight×配平``）；
-- **难例 = top-50%**：按 ``(-err_weighted, -err_l1, 行号升序)`` 确定性排序取前
+- **worst = top-50%**：按 ``(-err_weighted, -err_l1, 行号升序)`` 确定性排序取前
   ``ceil(hard_frac · N)``（并列按行号升序；N=1 时取 1 行）；
-- sidecar 记录**参照 primary ckpt 标识**（path/sha256/bytes）、数据集指纹、cluster spec
-  标识（可选）、seed、阈值与规则 → 可追溯（训练侧只读，缺失/不符 fail-fast）。
+- **行权重**：worst → ``hard_weight``（默认 1.0）；其余 → ``mild_weight``（默认 0.1）；
+  两者与 ``train_weight×balance_weight`` 相乘（**全量曝光**，不做硬子集）；
+- sidecar 记录**参照 primary ckpt 标识**（path/sha256/bytes）、数据集指纹、seed、阈值与规则
+  → 可追溯（训练侧只读，缺失/不符 fail-fast）。
 
-产出（npz，供 ``tools/fit_clusters.py --rows-from`` 与 ``pipeline.stages`` 使用）：
-``hard``(N,)uint8、``err_l1``(N,)f32、``err_weighted``(N,)f32、``weight``(N,)f32、
-``meta``（0-d JSON：版本/规则/行数/阈值/ckpt/数据集/spec/seed/时间戳）。
+产出（npz，供 ``pipeline.stages`` 的 phase 2 使用）：
+``worst``(N,)uint8、``row_weight``(N,)f32（= hard/mild 权重）、``err_l1``(N,)f32、
+``err_weighted``(N,)f32、``weight``(N,)f32（原 train 权重）、``meta``（0-d JSON：
+版本/规则/行数/阈值/权重/ckpt/数据集/seed/时间戳）。
 """
 
 from __future__ import annotations
@@ -26,16 +29,17 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 
 __all__ = [
-    "HARD_SIDECAR_VERSION",
+    "WEIGHT_SIDECAR_VERSION",
     "DEFAULT_HARD_FRAC",
     "ckpt_identity",
     "mine_hard_rows",
     "row_il_errors",
-    "write_hard_sidecar",
-    "load_hard_sidecar",
+    "row_weights_from_worst",
+    "write_weight_sidecar",
+    "load_weight_sidecar",
 ]
 
-HARD_SIDECAR_VERSION = 1
+WEIGHT_SIDECAR_VERSION = 2
 DEFAULT_HARD_FRAC = 0.5
 
 
@@ -114,7 +118,7 @@ def mine_hard_rows(
 ) -> Dict[str, Any]:
     """确定性 top-``hard_frac`` 难例选择（主键 = 加权误差，并列按未加权误差→行号升序）。
 
-    返回 ``{"hard": uint8 (N,), "hard_rows": int, "total_rows": int, "threshold": float,
+    返回 ``{"worst": uint8 (N,), "hard_rows": int, "total_rows": int, "threshold": float,
     "order_rule": str}``；``hard_frac`` 必须 ∈ (0, 1]；N≥1 时至少取 1 行。
     """
     frac = float(hard_frac)
@@ -127,7 +131,7 @@ def mine_hard_rows(
     total = int(primary.size)
     if total == 0:
         return {
-            "hard": np.zeros(0, dtype=np.uint8),
+            "worst": np.zeros(0, dtype=np.uint8),
             "hard_rows": 0,
             "total_rows": 0,
             "threshold": float("nan"),
@@ -138,11 +142,11 @@ def mine_hard_rows(
     row_index = np.arange(total, dtype=np.int64)
     order = np.lexsort((row_index, -secondary, -primary))  # 末键为主键：先加权误差，再未加权，再行号
     selected = np.sort(order[:n_hard])
-    hard = np.zeros(total, dtype=np.uint8)
-    hard[selected] = 1
+    worst = np.zeros(total, dtype=np.uint8)
+    worst[selected] = 1
     threshold = float(primary[order[n_hard - 1]]) if n_hard > 0 else float("nan")
     return {
-        "hard": hard,
+        "worst": worst,
         "hard_rows": int(n_hard),
         "total_rows": total,
         "threshold": threshold,
@@ -150,47 +154,62 @@ def mine_hard_rows(
     }
 
 
-def write_hard_sidecar(
+def row_weights_from_worst(
+    worst: np.ndarray, *, hard_weight: float = 1.0, mild_weight: float = 0.1
+) -> np.ndarray:
+    """worst 标记 → 逐行权重（worst=``hard_weight``；其余=``mild_weight``）。"""
+    flags = np.asarray(worst, dtype=np.float64).reshape(-1)
+    return np.where(flags > 0.5, float(hard_weight), float(mild_weight)).astype(np.float32)
+
+
+def write_weight_sidecar(
     path: Any,
     *,
-    hard: np.ndarray,
+    worst: np.ndarray,
     err_l1: np.ndarray,
     err_weighted: np.ndarray,
     weight: np.ndarray,
     dataset_dir: Any = "",
     dataset_meta: Optional[Mapping[str, Any]] = None,
     ckpt: Any = "",
-    cluster_spec: Any = "",
     seed: int = 0,
     hard_frac: float = DEFAULT_HARD_FRAC,
+    hard_weight: float = 1.0,
+    mild_weight: float = 0.1,
     threshold: float = float("nan"),
     order_rule: str = "",
     tool: str = "tools/mine_hard.py",
 ) -> Path:
-    """写难例 sidecar（npz + meta JSON 字符串）；返回路径。"""
+    """写 worst-50% 权重 sidecar（npz + meta JSON 字符串）；返回路径。"""
     target = Path(str(path))
     target.parent.mkdir(parents=True, exist_ok=True)
+    worst_arr = np.asarray(worst, dtype=np.uint8).reshape(-1)
+    row_weight = row_weights_from_worst(worst_arr, hard_weight=hard_weight, mild_weight=mild_weight)
     meta = {
-        "version": HARD_SIDECAR_VERSION,
+        "version": WEIGHT_SIDECAR_VERSION,
         "tool": str(tool),
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "rows": int(np.asarray(hard).reshape(-1).size),
-        "hard_rows": int(np.count_nonzero(np.asarray(hard) > 0.5)),
+        "rows": int(worst_arr.size),
+        "worst_rows": int(np.count_nonzero(worst_arr > 0.5)),
         "hard_frac": float(hard_frac),
+        "hard_weight": float(hard_weight),
+        "mild_weight": float(mild_weight),
+        "effective_mass": float(
+            (np.count_nonzero(worst_arr > 0.5) / max(1, worst_arr.size)) * float(hard_weight)
+            + (1.0 - np.count_nonzero(worst_arr > 0.5) / max(1, worst_arr.size)) * float(mild_weight)
+        ),
         "threshold": float(threshold),
         "order_rule": str(order_rule),
         "dataset": str(dataset_dir),
         "obs_fingerprint": str((dataset_meta or {}).get("obs_fingerprint") or ""),
         "schema_version": (dataset_meta or {}).get("schema_version"),
         "ckpt": ckpt_identity(ckpt) if ckpt else {},
-        "cluster_spec": (
-            dict(ckpt_identity(cluster_spec), version=str(cluster_spec)) if cluster_spec else {}
-        ),
         "seed": int(seed),
     }
     np.savez_compressed(
         target,
-        hard=np.asarray(hard, dtype=np.uint8).reshape(-1),
+        worst=worst_arr,
+        row_weight=row_weight,
         err_l1=np.asarray(err_l1, dtype=np.float32).reshape(-1),
         err_weighted=np.asarray(err_weighted, dtype=np.float32).reshape(-1),
         weight=np.asarray(weight, dtype=np.float32).reshape(-1),
@@ -199,35 +218,40 @@ def write_hard_sidecar(
     return target
 
 
-def load_hard_sidecar(
+def load_weight_sidecar(
     path: Any,
     *,
     rows: Optional[int] = None,
     obs_fingerprint: Optional[str] = None,
     ckpt_sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """读难例 sidecar + **严格校验**（行数 / obs 指纹 / 可选 ckpt sha256）→ dict。
+    """读 worst-50% 权重 sidecar + **严格校验**（行数 / obs 指纹 / 可选 ckpt sha256）→ dict。
 
     校验不过 → ``ValueError``（含生成命令），绝不静默降级。
     """
     target = Path(str(path))
     if not target.is_file():
         raise ValueError(
-            f"缺少难例 sidecar：{target}\n生成：tools/venv-python tools/mine_hard.py "
+            f"缺少权重 sidecar：{target}\n生成：tools/venv-python tools/mine_hard.py "
             f"--ckpt <primary.pt> --bc-dir <BC_DIR> --out {target}"
         )
     with np.load(target) as payload:
         files = set(payload.files)
-        if "hard" not in files:
-            raise ValueError(f"难例 sidecar 缺少 'hard' 键：{target}")
-        hard = np.asarray(payload["hard"]).reshape(-1).astype(np.uint8)
+        if "worst" not in files:
+            raise ValueError(f"权重 sidecar 缺少 'worst' 键：{target}")
+        worst = np.asarray(payload["worst"]).reshape(-1).astype(np.uint8)
         meta_raw = payload["meta"] if "meta" in files else np.asarray(["{}"])
         try:
             meta = json.loads(str(np.asarray(meta_raw).reshape(-1)[0]))
         except Exception:  # noqa: BLE001
             meta = {}
         result = {
-            "hard": hard,
+            "worst": worst,
+            "row_weight": (
+                np.asarray(payload["row_weight"], dtype=np.float32).reshape(-1)
+                if "row_weight" in files
+                else None
+            ),
             "err_l1": np.asarray(payload["err_l1"], dtype=np.float32).reshape(-1) if "err_l1" in files else None,
             "err_weighted": (
                 np.asarray(payload["err_weighted"], dtype=np.float32).reshape(-1)
@@ -239,8 +263,8 @@ def load_hard_sidecar(
             "path": str(target),
         }
     problems = []
-    if rows is not None and int(rows) != int(hard.size):
-        problems.append(f"rows: sidecar={int(hard.size)} != dataset={int(rows)}")
+    if rows is not None and int(rows) != int(worst.size):
+        problems.append(f"rows: sidecar={int(worst.size)} != dataset={int(rows)}")
     expected_fp = str(obs_fingerprint or "")
     if expected_fp and str(meta.get("obs_fingerprint") or "") != expected_fp:
         problems.append(
@@ -253,7 +277,7 @@ def load_hard_sidecar(
         )
     if problems:
         raise ValueError(
-            "难例 sidecar 校验不过：" + "；".join(problems) + f"（{target}）\n"
+            "权重 sidecar 校验不过：" + "；".join(problems) + f"（{target}）\n"
             "重新挖掘：tools/venv-python tools/mine_hard.py --ckpt <primary.pt> "
             f"--bc-dir <BC_DIR> --out {target}"
         )

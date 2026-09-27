@@ -5,7 +5,7 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
 --------------------------------------------------------------------
 用户只关心 **OD/EGO 的 loss 与 KPI + router 的 loss 与 KPI**，其余不再记录：
 
-- 训练侧照旧喂 canonical tag（``train/wm_loss`` / ``train/primary_bc_router_ce`` ...），
+- 训练侧照旧喂 canonical tag（``train/wm_loss`` / ``train/specific_bc_load_balance_loss`` ...），
   monitor 落盘前按 :func:`_slim_tag` **重命名**为保留清单（``wm/...`` / ``val/...`` /
   ``ego/...`` / ``router/...`` / ``planner/...``）；**未列入的 tag 直接丢弃**（TB/CSV 都不写）：
   ``slice/*``、``label/*``、``*/n_updates``、计数/权重和、``cv_ade``/``cv_fde`` 独立 tag、
@@ -194,18 +194,13 @@ _BC_SCALAR_RENAMES: Dict[str, str] = {
     "bc_loss": "loss/planner/{phase}/total",
     "bc_traj_loss": "loss/planner/{phase}/traj",
     "bc_action_loss": "loss/planner/{phase}/action",
-    "bc_router_loss": "loss/planner/{phase}/router",
-    # lane T：specific 段的 8 路 router CE 项 + 二值门控 CE 项（均为训练目标）
-    "bc_router_cluster_loss": "loss/planner/{phase}/router_cluster",
-    "bc_gate_loss": "loss/planner/{phase}/gate",
+    # lane U1：MoE 负载均衡 aux（唯一 router 相关损失项；无聚类 CE/门控）
+    "bc_load_balance_loss": "loss/planner/{phase}/load_balance",
     "bc_action_err_weighted_mean": "ego/action/err_weighted",
     "bc_traj_fde_m": "ego/traj/fde_m",
-    # lane T：8 路 router KPI（难例口径）与二值门控 KPI（全样本口径；hard_rate 替代 acc_majority）
-    "bc_router_ce": "router/cluster/ce",
-    "bc_router_acc": "router/cluster/acc",
-    "bc_gate_ce": "router/gate/ce",
-    "bc_gate_acc": "router/gate/acc",
-    "bc_hard_rate": "router/gate/hard_rate",
+    # lane U1：MoE 负载 KPI（train + val/ 孪生；expert_load e0..e7 由 _expert_load 家族处理）
+    "bc_load_cv": "router/load_cv",
+    "bc_gate_entropy": "router/gate_entropy",
 }
 
 
@@ -237,6 +232,10 @@ def _slim_tag(tag: str) -> Optional[str]:
     phase, key = match.group("phase"), match.group("key")
     if key in _BC_SCALAR_RENAMES:
         return f"{prefix}{_BC_SCALAR_RENAMES[key].format(phase=phase)}"
+    # lane U1：逐 expert 负载 → router/expert_load/e{i}（8 线一族；val/ 孪生自动分族）
+    load_match = re.match(r"^bc_expert_load_(\d+)$", key)
+    if load_match:
+        return f"{prefix}router/expert_load/e{load_match.group(1)}"
     return None
 
 
@@ -245,11 +244,10 @@ _TB_FAMILIES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("od/ade_m", re.compile(r"^(cv_)?h[1-6]$")),
     ("od/fde_m", re.compile(r"^(cv_)?h[1-6]$")),
     ("ego/traj/mae_m", re.compile(r"^h[1-6]$")),
-    ("loss/planner/primary", re.compile(r"^(total|traj|action|router|router_cluster|gate)$")),
-    ("loss/planner/specific", re.compile(r"^(total|traj|action|router|router_cluster|gate)$")),
-    # lane T：router KPI 家族（同一事件文件内多线并图；val/ 孪生自动分族）
-    ("router/gate", re.compile(r"^(ce|acc|hard_rate)$")),
-    ("router/cluster", re.compile(r"^(ce|acc)$")),
+    ("loss/planner/primary", re.compile(r"^(total|traj|action|load_balance)$")),
+    ("loss/planner/specific", re.compile(r"^(total|traj|action|load_balance)$")),
+    # lane U1：MoE 负载家族（e0..e7 一族多线；val/ 孪生自动分族）
+    ("router/expert_load", re.compile(r"^e[0-7]$")),
 )
 
 

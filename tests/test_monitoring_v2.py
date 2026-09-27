@@ -62,24 +62,23 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
         step=1,
     )
     monitor.on_val_grouped_step(horizon={"h1": {"traj_mae_m": 0.11}, "h2": {"traj_mae_m": 0.22}}, step=1)
-    # Stage B：相位损失分解 + 逐 horizon traj MAE/FDE + 留出族 + 硬标签 router
+    # Stage B：相位损失分解 + 逐 horizon traj MAE/FDE + 留出族 + MoE 负载（lane U1）
     monitor.on_train_step(
         {"primary_bc_loss": 0.4, "primary_bc_traj_loss": 0.3, "primary_bc_action_loss": 0.2,
-         "primary_bc_router_loss": 0.1, "primary_bc_action_err_weighted_mean": 0.05,
+         "primary_bc_action_err_weighted_mean": 0.05,
          "primary_bc_traj_fde_m": 1.3,
-         "primary_bc_action_err_median": 0.01, "primary_bc_router_ce": 0.7,
-         "primary_bc_router_acc": 0.62, "primary_bc_router_acc_majority": 0.31,
-         "primary_bc_router_cluster_loss": 0.09, "primary_bc_gate_loss": 0.07,
-         "primary_bc_gate_ce": 0.66, "primary_bc_gate_acc": 0.71, "primary_bc_hard_rate": 0.52,
+         "primary_bc_action_err_median": 0.01,
+         "primary_bc_load_balance_loss": 0.09,
+         "primary_bc_expert_load_0": 0.2, "primary_bc_expert_load_1": 0.15,
+         "primary_bc_load_cv": 0.12, "primary_bc_gate_entropy": 0.9,
          "primary_bc_router_soft_kl": 0.3, "primary_bc_router_entropy": 1.2,
          "primary_bc_router_expert_mix_weight_0": 0.5},
         step=1,
     )
     monitor.on_grouped_step(horizon={"h1": {"traj_mae_m": 0.1, "traj_mse_m2": 2.0}}, step=1)
     monitor.on_val_step({"primary_bc_loss": 0.7, "primary_bc_traj_fde_m": 1.4,
-                         "primary_bc_router_ce": 0.6, "primary_bc_router_acc": 0.5,
-                         "primary_bc_gate_ce": 0.61, "primary_bc_gate_acc": 0.65,
-                         "primary_bc_hard_rate": 0.5}, step=1)
+                         "primary_bc_load_balance_loss": 0.08, "primary_bc_load_cv": 0.11,
+                         "primary_bc_gate_entropy": 0.88}, step=1)
     monitor.on_val_grouped_step(
         horizon={"h1": {"traj_mse_m2": 1.1, "traj_mae_m": 0.8}},
         labels={"cutin_active": {"action_err": 0.3}},
@@ -94,14 +93,12 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
                 "val/od/presence_auc", "val/od/entry_auc",
                 "val/od/ade_m/h1", "val/od/fde_m/h1", "val/od/ade_m/cv_h1", "val/od/fde_m/cv_h1",
                 "loss/planner/primary/total", "loss/planner/primary/traj",
-                "loss/planner/primary/action", "loss/planner/primary/router",
-                "loss/planner/primary/router_cluster", "loss/planner/primary/gate",
+                "loss/planner/primary/action", "loss/planner/primary/load_balance",
                 "ego/action/err_weighted", "ego/traj/mae_m/h1", "ego/traj/fde_m",
-                "router/cluster/ce", "router/cluster/acc",
-                "router/gate/ce", "router/gate/acc", "router/gate/hard_rate",
+                "router/expert_load/e0", "router/expert_load/e1",
+                "router/load_cv", "router/gate_entropy",
                 "val/loss/planner/primary/total", "val/ego/traj/mae_m/h1",
-                "val/router/cluster/ce", "val/router/cluster/acc",
-                "val/router/gate/ce", "val/router/gate/hard_rate", "val/ego/traj/fde_m"):
+                "val/router/load_cv", "val/router/gate_entropy", "val/ego/traj/fde_m"):
         assert tag in tags, f"保留 tag 缺失：{tag}"
     # 已移除 tag 一个不留（含旧命名、软目标 router、n_updates/计数/slice/label/median/grad_norm）
     for tag in ("kpi/success", "train/loss", "train/reward/total", "scene_label/cutin_active/freq",

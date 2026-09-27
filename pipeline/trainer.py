@@ -57,11 +57,11 @@ PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
 - 阶段 C：``kl_anchor_coef``（冻结参考模型）+ ``bc_anchor_coef``（专家动作，权重感知）+ primary lr ×0.1；
   critic warmup（``train.critic_warmup_updates`` / CLI ``--critic-warmup-updates``）：前 N 个
   update 只拟合 value 头（策略/主干冻结，指标 ``critic_warmup=true``），之后恢复常规 PPO；
-- Stage B router 辅助损失 = **聚类硬标签 CE**（``router_cluster``，int；sidecar
-  ``cluster_v1_assignments.npz`` 优先 / materialize 在线 argmax 回退；标签缺失时跳过并记录
-  ``bc_router_placeholder=1``），KPI = ``router/ce`` + ``router/acc``（+ ``router/acc_majority``
+- Stage B（lane U1，2026-09-27 去聚类）：router **无监督标签**（无簇 CE/acc）；
+  MoE 负载均衡 aux = Switch 式 ``α·E·Σ_i f_i·P_i``（α=``load_balance_coef``），KPI =
+  ``router/expert_load/*`` + ``router/load_cv`` + ``router/gate_entropy``
   多数类基线）；
-  另输出 top-1/簇准确率、NMI、门控熵、专家利用率与聚类版本（``cluster_version``）。
+  另输出 MoE 负载诊断（``bc_expert_load_*``/``bc_load_cv``/``bc_gate_entropy``）。
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ __all__ = [
     "binary_auc",
     "weighted_od_multi_step_loss",
     "presence_entry_loss",
-    "router_hard_label_loss",
-    "router_hard_label_stats",
+    "worst_flags_for_rows",
+    "row_scale_from_worst",
     "ego_kpi_arrays",
     "dataset_weight_report",
 ]
@@ -498,7 +498,6 @@ class PPOConfig:
     action_mode: str = "sigmoid_squashed"  # sigmoid_squashed（net 约定）| clip
     action_low: Tuple[float, float] = DEFAULT_ACTION_LOW
     action_high: Tuple[float, float] = DEFAULT_ACTION_HIGH
-    router_coef: float = 0.0
     kl_anchor_coef: float = 0.0
     bc_anchor_coef: float = 0.0
     primary_lr_scale: float = 1.0
@@ -519,8 +518,6 @@ class BCConfig:
     - ``phase``：仅写入指标，便于区分 primary/specific 两段。
 
     阶段 B（v2）扩展：
-    - ``router_cluster_version/k``：聚类 artifact 版本/K（写入 metrics/monitor）；
-      router 监督 = 聚类**硬标签** CE（软目标温度旋钮已删除，CLI 参数保留但忽略）；
     - ``slice_*``：动作误差分切片阈值（急刹/急转；弯道用 ``on_curve`` 标签）；
     - ``history_stride``：BC harvest 帧间距（env step，默认 5 = 0.5 s）。
 
@@ -543,7 +540,6 @@ class BCConfig:
     loss_type: str = "l2"  # l1 | l2
     traj_weight: float = 1.0
     action_weight: float = 0.5
-    router_coef: float = 0.1
     grad_clip: float = 1.0
     seed: int = 0
     device: str = "auto"  # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
@@ -552,10 +548,6 @@ class BCConfig:
     wm_detach: bool = False
     freeze_prefixes: Tuple[str, ...] = ()
     phase: str = "bc"
-    #: （lane B B3）router 监督 = 聚类硬标签 CE；软目标温度旋钮已删除（CLI 参数保留但忽略）。
-    #: 聚类 artifact 版本/K（写入 metrics/monitor；空 = 未接入聚类 lane）。
-    router_cluster_version: str = ""
-    router_cluster_k: int = 0
     #: 动作误差切片阈值：专家即时 ``ds``（m/0.5 s）低于该值算急刹。
     slice_brake_ds: float = 1.0
     #: 动作误差切片阈值：专家即时 ``|dθ|``（rad/0.5 s）高于该值算急转。
@@ -577,17 +569,20 @@ class BCConfig:
     #: 周期 ckpt 回调 ``(epoch_index, model, optimizer, val_metrics, rng)``（0 基本地 epoch）。
     checkpoint_callback: Optional[Callable[..., None]] = None
 
-    # ---- lane T：双分支（primary + specific 硬切）+ 二值难例门控 ----
-    #: 数据集行空间的难例二值标签（0/1；-1=未知）。来自难例 sidecar（hard_mining），
-    #: 行数必须 == ``dataset.count``。门控 CE 在**全体样本**上算（未知行忽略）。
-    hard_flags: Optional[np.ndarray] = None
-    #: 二值门控 CE 权重（>0 启用门控头损失；0 = 只记录诊断/不训练门控）。
-    gate_coef: float = 0.0
-    #: True 时 forward 按 hard 标签**硬切** specific 分支（难例→8 路专家混合，易例→只走
-    #: primary）；False = 旧行为（specific 分支恒激活）。
-    hard_switch: bool = False
-    #: True 时动作/轨迹（specific 段主损失）只算难例行（易例行只贡献门控 CE）。
-    hard_only_specific: bool = False
+    # ---- lane U1：MoE 负载均衡 + 权重化 specific 训练 ----
+    #: MoE 开关（phase 1 = False：专家不参与、输出严格 = primary；phase 2 = True）。
+    moe_enabled: bool = True
+    #: Switch 式负载均衡 aux 权重 α（``α·E·Σ_i f_i·P_i``；0 = 关闭）。
+    load_balance_coef: float = 0.0
+    #: 数据集行空间的 worst-50% 标记（0/1；-1=未知=不缩放）。来自权重 sidecar
+    #: （``pipeline.hard_mining``），行数必须 == ``dataset.count``。
+    worst_flags: Optional[np.ndarray] = None
+    #: worst 行权重倍率（默认 1.0）；其余行 = ``mild_weight``（默认 0.1）；
+    #: 两者与 ``train_weight×balance_weight`` 相乘（有效质量 0.5·1.0 + 0.5·0.1 = 0.55）。
+    hard_weight: float = 1.0
+    mild_weight: float = 0.1
+    #: 留出集的 worst 标记（None = 留出集不缩放；legacy episode 切分时与 ``worst_flags`` 同源）。
+    val_worst_flags: Optional[np.ndarray] = None
     #: 独立留出数据集（``--val-dir``；None = 用主数据集 + ``val_indices`` 的旧口径）。
     val_dataset: Optional[Any] = None
 
@@ -999,7 +994,7 @@ def stack_history(
 # - ``balance_weight (N,)``：难度/几何配平权重（与 train_weight 相乘）；
 # - ``wm_valid (N,6)``：WM 目标帧可用性（(episode, step+5k) 查表 + 帧可用）；
 # - ``od_id (N,16) / od_presence (N,16)``：OD 槽位对象 id / 占据真值（presence/entry BCE）；
-# - ``router_cluster (N,)``：router 硬标签（聚类分配 top-1，int；-1=缺失）；
+# - （lane U1）router 无监督标签；MoE 负载 aux 由 ``net.moe`` 在线计算；
 #   软分布 ``router_soft_targets (N,8)`` 是历史数据集键，**训练不再读取**（lane B B3）；
 # - mem 历史数组 ``ego_hist/others_hist/od_hist/ld_hist``（+ ``_mask``、``hist_valid``）：
 #   采集时按 env memory 精确入库，训练侧直接复用（禁止按行位置重拼，见
@@ -1015,7 +1010,6 @@ V2_BALANCE_WEIGHT = "balance_weight"
 V2_WM_VALID = "wm_valid"
 V2_OD_PRESENCE = "od_presence"
 V2_OD_ID = "od_id"
-V2_ROUTER_CLUSTER = "router_cluster"
 
 
 def row_train_weights(dataset: Any, indices: np.ndarray) -> np.ndarray:
@@ -1252,196 +1246,65 @@ def presence_entry_loss(
     }
 
 
-def router_hard_label_loss(
-    logits: "torch.Tensor",
-    cluster: "torch.Tensor",
-    *,
-    sample_weight: Optional["torch.Tensor"] = None,
-) -> "torch.Tensor":
-    """router **硬标签** CE（lane B B3）：``F.cross_entropy(logits, cluster, weight=…)``。
-
-    - ``cluster``：``(B,)`` int 标签（= 聚类分配 top-1；``<0`` 表示缺失，该样本被忽略）；
-    - ``sample_weight``：逐样本权重（沿用现有 ``train_weight×配平`` 口径），
-      损失 = ``Σ w·CE / Σ w``；标签全缺失时返回 0（调用方按 placeholder 跳过）。
-    """
-    import torch
-    import torch.nn.functional as F
-
-    labels = cluster.to(dtype=torch.long, device=logits.device).reshape(-1)
-    per_sample = F.cross_entropy(logits, labels.clamp_min(0), reduction="none")
-    valid = (labels >= 0).to(per_sample.dtype)
-    weights = torch.ones_like(per_sample) if sample_weight is None else sample_weight.to(per_sample.dtype)
-    weights = weights.reshape(-1) * valid
-    return (per_sample * weights).sum() / weights.sum().clamp(min=1e-8)
-
-
-def router_hard_label_stats(
-    logits: "torch.Tensor",
-    cluster: "torch.Tensor",
-    *,
-    sample_weight: Optional["torch.Tensor"] = None,
-) -> Dict[str, float]:
-    """router 硬标签诊断：``{"ce", "acc", "count"}``（加权，不参与梯度；标签全缺 → nan/0）。"""
-    import torch
-
-    with torch.no_grad():
-        labels = cluster.to(dtype=torch.long, device=logits.device).reshape(-1)
-        valid = labels >= 0
-        if not bool(valid.any()):
-            return {"ce": float("nan"), "acc": float("nan"), "count": 0.0}
-        ce = router_hard_label_loss(logits, labels, sample_weight=sample_weight)
-        weights = (
-            torch.ones_like(labels, dtype=torch.float32)
-            if sample_weight is None
-            else sample_weight.to(torch.float32).reshape(-1)
-        )
-        weights = weights * valid.to(weights.dtype)
-        correct = (logits.argmax(dim=-1) == labels).to(torch.float32)
-        acc = (correct * weights).sum() / weights.sum().clamp(min=1e-8)
-    return {"ce": float(ce), "acc": float(acc), "count": float(valid.sum())}
-
-
-def _router_summary(
-    *,
-    count: int,
-    ce_num: float,
-    ce_den: float,
-    acc_num: float,
-    acc_den: float,
-    class_weight_sum: Optional[np.ndarray] = None,
-    cluster_version: str,
-    cluster_k: int,
-    used: bool,
-) -> Dict[str, Any]:
-    """router 硬标签标量汇总（``pretrain_bc`` 全阶段累计 / 逐 epoch 增量 / val 评估共用同一公式）。
-
-    ``ce_num/ce_den`` = ``Σ w·CE`` / ``Σ w``；``acc_num/acc_den`` = ``Σ w·1[argmax=标签]`` / ``Σ w``；
-    ``class_weight_sum`` = 各簇权重和（→ ``bc_router_acc_majority`` = 多数类占比基线，解释 acc 用）；
-    ``count`` = 有效标签 token 数。``count<=0`` 时只返回占位/版本元数据（不编造质量指标）。
-    """
-    out: Dict[str, Any] = {
-        "bc_router_placeholder": 0.0 if used else 1.0,
-        "bc_router_cluster_version": str(cluster_version),
-        "bc_router_cluster_k": int(cluster_k),
-    }
-    version_digits = "".join(ch for ch in str(cluster_version) if ch.isdigit())
-    out["bc_router_cluster_version_num"] = float(version_digits) if version_digits else float("nan")
-    if int(count) <= 0:
-        return out
-    out["bc_router_count"] = int(count)
-    out["bc_router_ce"] = float(ce_num) / max(float(ce_den), 1e-12)
-    out["bc_router_acc"] = float(acc_num) / max(float(acc_den), 1e-12)
-    if class_weight_sum is not None:
-        class_weight = np.asarray(class_weight_sum, dtype=np.float64)
-        total = float(class_weight.sum())
-        if total > 0.0:
-            out["bc_router_acc_majority"] = float(class_weight.max()) / total
-    return out
-
-
 # --------------------------------------------------------------------------- #
-# lane T：二值难例门控（p_hard）——全样本 CE + 硬切 specific 分支
+# lane U1：权重化 specific 训练（worst/mild 行权重）+ MoE 负载诊断
 # --------------------------------------------------------------------------- #
 
-def _gate_summary(
-    *,
-    count: int,
-    ce_num: float,
-    ce_den: float,
-    acc_num: float,
-    acc_den: float,
-    hard_num: float,
-    hard_den: float,
-    used: bool,
-) -> Dict[str, Any]:
-    """二值难例门控标量汇总（训练累计 / 逐 epoch 增量 / val 评估共用；``hard_rate`` = 难例占比）。
-
-    ``ce/acc`` 为**加权**口径（``Σ w·x/Σ w``，全样本）；``hard_rate`` 替代无意义的
-    ``acc_majority``（batch 难例占比，直接解释门控 acc 的基线）。``count<=0`` → 只返回占位。
-    """
-    out: Dict[str, Any] = {"bc_gate_placeholder": 0.0 if used else 1.0}
-    if int(count) <= 0:
-        return out
-    out["bc_gate_count"] = int(count)
-    out["bc_gate_ce"] = float(ce_num) / max(float(ce_den), 1e-12)
-    out["bc_gate_acc"] = float(acc_num) / max(float(acc_den), 1e-12)
-    out["bc_hard_rate"] = float(hard_num) / max(float(hard_den), 1e-12)
-    return out
-
-
-def hard_flags_for_rows(
-    hard_flags: Optional[np.ndarray], indices: np.ndarray
+def worst_flags_for_rows(
+    worst_flags: Optional[np.ndarray], indices: np.ndarray
 ) -> Optional[np.ndarray]:
-    """取一个 batch 的难例二值标签（``(B,)`` float32；``-1`` = 未知/不参与）。
+    """取一个 batch 的 worst-50% 标记（``(B,)`` float32；``-1`` = 未知/不缩放）。
 
-    ``hard_flags`` 是**数据集行空间**的 0/1（-1=未知）数组（难例 sidecar 载入，见
-    :func:`pipeline.hard_mining.load_hard_sidecar`）；``None`` → ``None``（不启用门控）。
+    ``worst_flags`` 是**数据集行空间**的 0/1（-1=未知）数组（权重 sidecar 载入，见
+    :func:`pipeline.hard_mining.load_weight_sidecar`）；``None`` → ``None``（不启用加权）。
     """
-    if hard_flags is None:
+    if worst_flags is None:
         return None
-    flags = np.asarray(hard_flags, dtype=np.float32).reshape(-1)
+    flags = np.asarray(worst_flags, dtype=np.float32).reshape(-1)
     idx = np.asarray(indices, dtype=np.int64).reshape(-1)
     if idx.size and (idx.min() < 0 or idx.max() >= flags.size):
         raise ValueError(
-            f"hard_flags 行数 {flags.size} 覆盖不了 batch 索引 [{int(idx.min())}, {int(idx.max())}]"
+            f"worst_flags 行数 {flags.size} 覆盖不了 batch 索引 [{int(idx.min())}, {int(idx.max())}]"
         )
     return flags[idx]
 
 
-def gate_binary_loss(
-    logits: "torch.Tensor",
-    targets: "torch.Tensor",
-    *,
-    sample_weight: Optional["torch.Tensor"] = None,
-) -> "torch.Tensor":
-    """二值难例门控 CE（``F.binary_cross_entropy_with_logits``，**全样本**口径）。
+def row_scale_from_worst(
+    worst: Optional[np.ndarray], *, hard_weight: float = 1.0, mild_weight: float = 0.1
+) -> np.ndarray:
+    """worst-50% 标记 → 逐行权重倍率（worst=``hard_weight``；其余=``mild_weight``；未知=1.0）。"""
+    if worst is None:
+        return np.ones(0, dtype=np.float64)
+    flags = np.asarray(worst, dtype=np.float64).reshape(-1)
+    scale = np.where(flags > 0.5, float(hard_weight), float(mild_weight))
+    return np.where(flags < 0.0, 1.0, scale)
 
-    - ``logits``：``(B,1)`` 或 ``(B,)``；``targets``：``(B,)`` 0/1（``<0`` 忽略）；
-    - 损失 = ``Σ w·BCE / Σ w``（w 默认 1；未知标签的权重置 0）；全未知 → 0。
+
+def _load_summary(
+    *,
+    count: int,
+    expert_load_sum: Optional[np.ndarray],
+    load_cv_num: float,
+    load_cv_den: float,
+    entropy_num: float,
+    entropy_den: float,
+    num_experts: int,
+) -> Dict[str, Any]:
+    """MoE 负载汇总（训练累计 / 逐 epoch 增量 / val 评估共用同一公式）。
+
+    ``expert_load_sum`` = 逐 expert 负载 × 行数（→ 行数加权均值，Σ=1）；
+    ``load_cv`` / ``gate_entropy`` = 行数加权均值。``count<=0``（MoE 关闭/无样本）→ 只返回占位。
     """
-    import torch
-    import torch.nn.functional as F
-
-    flat = logits.reshape(-1)
-    label = targets.to(dtype=torch.float32, device=flat.device).reshape(-1)
-    valid = (label >= 0).to(flat.dtype)
-    weights = torch.ones_like(flat) if sample_weight is None else sample_weight.to(flat.dtype).reshape(-1)
-    weights = weights * valid
-    per_sample = F.binary_cross_entropy_with_logits(flat, label.clamp(min=0.0), reduction="none")
-    return (per_sample * weights).sum() / weights.sum().clamp(min=1e-8)
-
-
-def gate_binary_stats(
-    logits: "torch.Tensor",
-    targets: "torch.Tensor",
-    *,
-    sample_weight: Optional["torch.Tensor"] = None,
-) -> Dict[str, float]:
-    """门控诊断：``{"ce","acc","count","hard_rate"}``（加权；全未知 → nan/0，不参与梯度）。"""
-    import torch
-
-    with torch.no_grad():
-        flat = logits.reshape(-1)
-        label = targets.to(dtype=torch.float32, device=flat.device).reshape(-1)
-        valid = label >= 0
-        if not bool(valid.any()):
-            return {"ce": float("nan"), "acc": float("nan"), "count": 0.0, "hard_rate": float("nan")}
-        weights = (
-            torch.ones_like(flat)
-            if sample_weight is None
-            else sample_weight.to(torch.float32).reshape(-1)
-        )
-        weights = weights * valid.to(weights.dtype)
-        ce = gate_binary_loss(flat, label, sample_weight=sample_weight)
-        predicted = (torch.sigmoid(flat) > 0.5).to(torch.float32)
-        acc = ((predicted == label.clamp(min=0.0)).to(torch.float32) * weights).sum() / weights.sum().clamp(min=1e-8)
-        hard_rate = (label.clamp(min=0.0) * weights).sum() / weights.sum().clamp(min=1e-8)
-    return {
-        "ce": float(ce),
-        "acc": float(acc),
-        "count": float(valid.sum()),
-        "hard_rate": float(hard_rate),
-    }
+    out: Dict[str, Any] = {"bc_moe_placeholder": 0.0 if int(count) > 0 else 1.0}
+    if int(count) <= 0 or expert_load_sum is None:
+        return out
+    load = np.asarray(expert_load_sum, dtype=np.float64) / max(float(count), 1e-12)
+    out["bc_load_count"] = int(count)
+    for index in range(int(num_experts)):
+        out[f"bc_expert_load_{index}"] = float(load[index]) if index < load.size else float("nan")
+    out["bc_load_cv"] = float(load_cv_num) / max(float(load_cv_den), 1e-12)
+    out["bc_gate_entropy"] = float(entropy_num) / max(float(entropy_den), 1e-12)
+    return out
 
 
 def ego_kpi_arrays(
@@ -1638,7 +1501,7 @@ class BCDataset:
     - ``train_weight/balance_weight``：动作/轨迹目标权重（见 :func:`row_action_weights`）；
     - ``wm_valid (N,6)``：WM 目标帧可用性；
     - ``od_id/od_presence (N,16)``：OD 槽位对象 id / 占据真值；
-    - ``router_cluster (N,)``：router 硬标签（聚类分配 top-1，int；-1=缺失；sidecar 优先）；
+    - （lane U1）去聚类：无 ``router_cluster`` 读取；MoE 负载 aux 在线计算；
     - **mem 历史数组**（``ego_hist/others_hist/od_hist/ld_hist`` + masks + ``hist_valid``）：
       采集时按 env memory 精确入库。存在时训练侧**直接复用**（``build_obs_batch``），
       否则按 ``(episode_id, step−5j)`` **精确查表**重拼（禁止按行位置取窗口）。
@@ -1864,8 +1727,6 @@ class BCDataset:
             # v2 权重（train_weight/balance_weight 的合成分；缺失时 = sample_weight/1）
             "train_weight": row_action_weights(self, idx).astype(np.float32),
         }
-        if V2_ROUTER_CLUSTER in self.arrays:  # 硬标签（int；-1=缺失）——lane B B3
-            out["router_cluster"] = self.arrays[V2_ROUTER_CLUSTER][idx].astype(np.int64)
         if V2_WM_VALID in self.arrays:
             out["wm_valid"] = self.arrays[V2_WM_VALID][idx].astype(np.float32)
         return out
@@ -1900,8 +1761,6 @@ class MaterializedBCDataset:
         *,
         chunk_size: int = 2048,
         include_targets: bool = True,
-        router_cluster_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
-        router_cluster_labels: Optional[np.ndarray] = None,
         logger: Callable[[str], None] = print,
     ):
         started = time.perf_counter()
@@ -1909,16 +1768,6 @@ class MaterializedBCDataset:
         self.count = int(dataset.count)
         chunk = max(1, int(chunk_size))
         self.arrays: Dict[str, np.ndarray] = {}
-        labels_source = None
-        if include_targets and router_cluster_labels is not None:
-            labels_source = np.asarray(router_cluster_labels).reshape(-1).astype(np.int64)
-            if labels_source.size < self.count:
-                labels_source = None  # 行数不足 → 回退在线/数据集
-        cluster_labels = (
-            np.empty(self.count, dtype=np.int64)
-            if (include_targets and labels_source is None and router_cluster_fn is not None)
-            else None
-        )
         for start in range(0, self.count, chunk):
             stop = min(start + chunk, self.count)
             batch = dataset.build_obs_batch(np.arange(start, stop, dtype=np.int64))
@@ -1931,20 +1780,12 @@ class MaterializedBCDataset:
                 }
             for key, value in batch.items():
                 self.arrays[key][start:stop] = value
-            if cluster_labels is not None:  # lane B B3：materialize 阶段取硬标签（软目标 argmax）
-                cluster_labels[start:stop] = np.asarray(router_cluster_fn(batch), dtype=np.int64).reshape(-1)
         self.targets: Dict[str, np.ndarray] = {}
         if include_targets:
             source = dataset.arrays
             for key in self.TARGET_SOURCE_KEYS:
                 if key in source:
                     self.targets[key] = np.asarray(source[key], dtype=np.float32)
-            if labels_source is not None:
-                self.targets["router_cluster"] = labels_source[: self.count]
-            elif cluster_labels is not None:
-                self.targets["router_cluster"] = cluster_labels
-            elif V2_ROUTER_CLUSTER in source:
-                self.targets["router_cluster"] = np.asarray(source[V2_ROUTER_CLUSTER], dtype=np.int64)
             if V2_WM_VALID in source:
                 self.targets["wm_valid"] = np.asarray(source[V2_WM_VALID], dtype=np.float32)
             self.targets["train_weight"] = row_action_weights(
@@ -2129,7 +1970,6 @@ def pretrain_bc(
     config: BCConfig,
     *,
     logger: Callable[[str], None] = print,
-    router_cluster_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     batch_source: Optional[MaterializedBCDataset] = None,
 ) -> Dict[str, Any]:
     """BC 预热循环：轨迹 L1/L2 + **首步**动作回归 + router **硬标签 CE**（权重感知）。
@@ -2141,10 +1981,9 @@ def pretrain_bc(
     - **权重感知**：动作/轨迹/router 损失与所有误差统计都用
       ``targets["train_weight"]``（= ``train_weight × 配平权重``）；显式 ``Σ w·x / Σ w``，
       权重 0 的帧不参与（不再按有效项均摊）；
-    - **router 硬标签**（lane B B3）：标签 = 聚类分配 top-1（``router_cluster``，int；
-      sidecar ``cluster_v1_assignments.npz`` 优先 / materialize 在线 argmax 回退），
-      损失 = ``F.cross_entropy(logits, cluster, weight=…)/Σw``；标签缺失（<0）的样本跳过，
-      全缺时跳过 router 损失并记 ``bc_router_placeholder=1``（不再使用 (N,8) 软分布/温度）。
+    - **MoE（lane U1）**：无聚类监督标签；``moe_enabled=False``（phase 1）时专家不参与、
+      输出 = primary；``moe_enabled=True``（phase 2）时输出 = ``primary + Σ_{i∈top2} g_i·expert_i``，
+      并加 Switch 式负载均衡 aux（``load_balance_coef``）。
 
     阶段 B（v1.1）：``config.wm_detach`` 时 rollout 内 WM 输出 detach；
     ``config.freeze_prefixes`` 在优化器构建前生效（primary→specific 分段训练）。
@@ -2178,8 +2017,9 @@ def pretrain_bc(
       ``bc_traj_err_h{k}``（legacy alias：loss_type 口径的加权误差——l2→MSE(m²) / l1→MAE(m)）；
     - 动作侧统计是显式 L1（米/弧度），不受 ``loss_type`` 影响：``bc_action_err_{mean,weighted_mean,
       median,p95}``、``bc_action_err_slice_{brake,turn,curve}_*``、``bc_action_err_label_<name>``；
-    - 另有 ``bc_loss``、``bc_action_loss``、``bc_router_loss``、``bc_action_mu_ds_mean``、
-      ``bc_router_{ce,acc,acc_majority,count,cluster_version,k,placeholder}``（硬标签口径）。
+    - 另有 ``bc_loss``、``bc_action_loss``、``bc_load_balance_loss``、``bc_action_mu_ds_mean``、
+      ``bc_expert_load_{0..7}``/``bc_load_cv``/``bc_gate_entropy``/``bc_load_count``
+      （lane U1：MoE 负载诊断；phase 1 MoE 关闭 → 缺省）。
     """
     _require_torch()
     order_config = load_supervised_labels()
@@ -2243,77 +2083,45 @@ def pretrain_bc(
     traj_fde_values: List[np.ndarray] = []
     weight_values: List[np.ndarray] = []
     mu_ds_sum, mu_ds_weight = 0.0, 0.0
-    router_ce_num, router_ce_den = 0.0, 0.0
-    router_acc_num, router_acc_den = 0.0, 0.0
-    router_count = 0
-    router_class_weight_sum: Optional[np.ndarray] = None  # (K,) 权重和 → acc_majority 基线
-    router_used = False
-    router_warned = False
-    # lane T：二值门控累计（加权口径；gate_ce_den/acc_den = 全样本权重和）
-    gate_ce_num, gate_ce_den = 0.0, 0.0
-    gate_acc_num, gate_acc_den = 0.0, 0.0
-    gate_hard_num, gate_hard_den = 0.0, 0.0
-    gate_count = 0
+    # lane U1：MoE 负载累计（行数加权；expert_load Σ=1）
+    num_experts_cfg = int(getattr(model.plan_head.moe, "num_experts", 0) or 0)
+    expert_load_sum: Optional[np.ndarray] = None
+    load_cv_num, load_cv_den = 0.0, 0.0
+    gate_entropy_num, gate_entropy_den = 0.0, 0.0
+    load_count = 0
 
-    def _router_snapshot() -> Dict[str, Any]:
-        """router 累计状态的 epoch 起点快照（用于增量统计；数组复制、计数记长度）。"""
+    def _load_snapshot() -> Dict[str, Any]:
+        """MoE 负载累计状态的 epoch 起点快照（用于增量统计）。"""
         return {
-            "class_weight": None if router_class_weight_sum is None else router_class_weight_sum.copy(),
-            "ce_num": float(router_ce_num),
-            "ce_den": float(router_ce_den),
-            "acc_num": float(router_acc_num),
-            "acc_den": float(router_acc_den),
-            "count": int(router_count),
+            "load_sum": None if expert_load_sum is None else expert_load_sum.copy(),
+            "cv_num": float(load_cv_num),
+            "cv_den": float(load_cv_den),
+            "entropy_num": float(gate_entropy_num),
+            "entropy_den": float(gate_entropy_den),
+            "count": int(load_count),
         }
 
-    def _gate_snapshot() -> Dict[str, Any]:
-        """门控累计状态的 epoch 起点快照（用于增量统计）。"""
-        return {
-            "ce_num": float(gate_ce_num),
-            "ce_den": float(gate_ce_den),
-            "acc_num": float(gate_acc_num),
-            "acc_den": float(gate_acc_den),
-            "hard_num": float(gate_hard_num),
-            "hard_den": float(gate_hard_den),
-            "count": int(gate_count),
-        }
-
-    def _gate_epoch_metrics(start: Mapping[str, Any]) -> Dict[str, Any]:
-        """epoch 增量门控指标（与全阶段累计块同一 :func:`_gate_summary` 公式）。"""
-        return _gate_summary(
-            count=int(gate_count) - int(start["count"]),
-            ce_num=float(gate_ce_num) - float(start["ce_num"]),
-            ce_den=float(gate_ce_den) - float(start["ce_den"]),
-            acc_num=float(gate_acc_num) - float(start["acc_num"]),
-            acc_den=float(gate_acc_den) - float(start["acc_den"]),
-            hard_num=float(gate_hard_num) - float(start["hard_num"]),
-            hard_den=float(gate_hard_den) - float(start["hard_den"]),
-            used=bool(gate_used),
-        )
-
-    def _router_epoch_metrics(start: Mapping[str, Any]) -> Dict[str, Any]:
-        """epoch 增量 router 指标（与全阶段累计块同一 :func:`_router_summary` 公式）。"""
-        class_weight = None
-        if router_class_weight_sum is not None:
-            class_weight = np.asarray(router_class_weight_sum)
-            if start["class_weight"] is not None:
-                class_weight = class_weight - np.asarray(start["class_weight"])
-        return _router_summary(
-            count=int(router_count) - int(start["count"]),
-            ce_num=float(router_ce_num) - float(start["ce_num"]),
-            ce_den=float(router_ce_den) - float(start["ce_den"]),
-            acc_num=float(router_acc_num) - float(start["acc_num"]),
-            acc_den=float(router_acc_den) - float(start["acc_den"]),
-            class_weight_sum=class_weight,
-            cluster_version=str(config.router_cluster_version or ""),
-            cluster_k=int(config.router_cluster_k or 0),
-            used=bool(router_used),
+    def _load_epoch_metrics(start: Mapping[str, Any]) -> Dict[str, Any]:
+        """epoch 增量负载指标（与全阶段累计块同一 :func:`_load_summary` 公式）。"""
+        load_sum = None
+        if expert_load_sum is not None:
+            load_sum = np.asarray(expert_load_sum)
+            if start["load_sum"] is not None:
+                load_sum = load_sum - np.asarray(start["load_sum"])
+        return _load_summary(
+            count=int(load_count) - int(start["count"]),
+            expert_load_sum=load_sum,
+            load_cv_num=float(load_cv_num) - float(start["cv_num"]),
+            load_cv_den=float(load_cv_den) - float(start["cv_den"]),
+            entropy_num=float(gate_entropy_num) - float(start["entropy_num"]),
+            entropy_den=float(gate_entropy_den) - float(start["entropy_den"]),
+            num_experts=num_experts_cfg,
         )
 
     def _epoch_stats(mark: Mapping[str, Any]) -> Dict[str, Any]:
-        """epoch 增量统计：动作误差（count/weighted 双口径）、分切片/标签、逐 horizon 轨迹、router。
+        """epoch 增量统计：动作误差（count/weighted 双口径）、分切片/标签、逐 horizon 轨迹、MoE 负载。
 
-        与末尾全阶段累计块同公式（同一 :func:`weighted_stats` / :func:`_router_summary`），
+        与末尾全阶段累计块同公式（同一 :func:`weighted_stats` / :func:`_load_summary`），
         只是对 epoch 起点快照后的缓冲切片计算；对齐异常时跳过并记
         ``bc_action_err_alignment_warning=1``（正常数据不应出现）。
         """
@@ -2379,37 +2187,29 @@ def pretrain_bc(
             epoch_fde = np.concatenate(traj_fde_values[mark["traj_fde"]:])
             if epoch_weights is not None and epoch_weights.shape[0] == epoch_fde.shape[0]:
                 out["bc_traj_fde_m"] = weighted_stats(epoch_fde, epoch_weights, prefix="")["weighted_mean"]
-        router_epoch = _router_epoch_metrics(mark["router"])
-        # 版本/温度/簇 K 等阶段常量不进逐 epoch 载荷（阶段末汇总补记一次，避免逐 epoch 重复）
-        for constant_key in (
-            "bc_router_cluster_version",
-            "bc_router_cluster_version_num",
-            "bc_router_cluster_k",
-        ):
-            router_epoch.pop(constant_key, None)
-        out.update(router_epoch)
-        out.update(_gate_epoch_metrics(mark["gate"]))
+        out.update(_load_epoch_metrics(mark["load"]))
         return out
 
-    # lane T：难例标签（行空间 0/1/-1）——门控 CE 全样本、specific 分支只吃难例
-    hard_all = (
+    # lane U1：worst-50% 行权重（权重化 specific；全量曝光，不做硬子集）
+    worst_all = (
         None
-        if config.hard_flags is None
-        else np.asarray(config.hard_flags, dtype=np.float32).reshape(-1)
+        if config.worst_flags is None
+        else np.asarray(config.worst_flags, dtype=np.float32).reshape(-1)
     )
-    if hard_all is not None:
-        if hard_all.size != int(dataset.count):
+    if worst_all is not None:
+        if worst_all.size != int(dataset.count):
             raise ValueError(
-                f"hard_flags 行数 {hard_all.size} != 数据集行数 {int(dataset.count)}"
-                "（难例 sidecar 必须与训练集逐行对齐）"
+                f"worst_flags 行数 {worst_all.size} != 数据集行数 {int(dataset.count)}"
+                "（权重 sidecar 必须与训练集逐行对齐）"
             )
-        hard_rows = int(np.count_nonzero(hard_all > 0.5))
+        worst_rows = int(np.count_nonzero(worst_all > 0.5))
         logger(
-            f"[bc] 难例标签：hard={hard_rows}/{hard_all.size}"
-            f"（{hard_rows / max(1, hard_all.size):.1%}；gate_coef={config.gate_coef} · "
-            f"hard_switch={config.hard_switch} · hard_only_specific={config.hard_only_specific}）"
+            f"[bc] 权重化 specific：worst={worst_rows}/{worst_all.size}"
+            f"（{worst_rows / max(1, worst_all.size):.1%}；hard_weight={config.hard_weight} · "
+            f"mild_weight={config.mild_weight} · moe_enabled={config.moe_enabled} · "
+            f"load_balance_coef={config.load_balance_coef}）"
         )
-    gate_used = False
+    model.set_moe(enabled=bool(config.moe_enabled), load_balance_coef=float(config.load_balance_coef))
 
     macro_size = max(1, int(config.batch_size))
     micro_size = (
@@ -2438,15 +2238,13 @@ def pretrain_bc(
                 name: (len(parts["err"]), len(parts["weight"]))
                 for name, parts in slice_err_values.items()
             },
-            "router": _router_snapshot(),
-            "gate": _gate_snapshot(),
+            "load": _load_snapshot(),
         }
         totals = {
             "loss": 0.0,
             "traj": 0.0,
             "action": 0.0,
-            "router": 0.0,
-            "gate": 0.0,
+            "load_balance": 0.0,
             "mu_ds": 0.0,
             # 轨迹度量（2026-09-26 单位修正）：加权 MSE(m²)/MAE(m) + 未加权诊断
             "traj_mse": 0.0,
@@ -2469,15 +2267,17 @@ def pretrain_bc(
                 obs_macro = dataset.build_obs_batch(batch_indices)
                 targets_macro = dataset.targets(batch_indices)
             weight_macro_np = np.asarray(targets_macro["train_weight"], dtype=np.float64).reshape(-1)
-            weight_macro_total = max(float(weight_macro_np.sum()), 1e-12)
-            # lane T：specific 段主损失（动作/轨迹/router）只算难例 → 权重按难例掩码；门控 CE 仍全样本
-            hard_macro_np = hard_flags_for_rows(hard_all, batch_indices)
-            specific_macro_np = (
-                weight_macro_np * np.clip(hard_macro_np.astype(np.float64), 0.0, 1.0)
-                if (hard_macro_np is not None and bool(config.hard_only_specific))
-                else weight_macro_np
+            # lane U1：worst/mild 行权重倍率（与 train_weight×balance_weight 相乘；全量曝光）
+            worst_macro_np = worst_flags_for_rows(worst_all, batch_indices)
+            scale_macro_np = (
+                np.ones_like(weight_macro_np)
+                if worst_macro_np is None
+                else row_scale_from_worst(
+                    worst_macro_np, hard_weight=config.hard_weight, mild_weight=config.mild_weight
+                )
             )
-            specific_macro_total = max(float(specific_macro_np.sum()), 1e-12)
+            weighted_macro_np = weight_macro_np * scale_macro_np
+            weight_macro_total = max(float(weighted_macro_np.sum()), 1e-12)
             data_seconds += time.perf_counter() - data_started
             # 梯度累积（micro-batch，可选）：每 micro 前向/反向，按宏 batch 口径精确缩放
             # （Σ_m s_m·L_m = L_macro），optimizer 每宏 batch 一次；micro == macro 时退化旧行为。
@@ -2486,8 +2286,7 @@ def pretrain_bc(
                 "loss": 0.0,
                 "traj": 0.0,
                 "action": 0.0,
-                "router": 0.0,
-                "gate": 0.0,
+                "load_balance": 0.0,
                 "traj_mse": 0.0,
                 "traj_mae": 0.0,
                 "traj_mae_all": 0.0,
@@ -2506,34 +2305,35 @@ def pretrain_bc(
                 obs = _to_device_obs(obs_np, device, pin=batch_source is not None)
                 targets = to_device_tensors(targets_np, device, pin=batch_source is not None)
                 frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
-                hard_np = hard_flags_for_rows(hard_all, micro_indices)
-                hard_t = (
-                    None
-                    if hard_np is None
-                    else torch.as_tensor(hard_np, dtype=torch.float32, device=device)
-                )
-                # specific 主损失权重（难例掩码；门控 CE 仍用 frame_weight 全样本）
-                specific_weight = frame_weight
-                if hard_t is not None and bool(config.hard_only_specific):
-                    specific_weight = frame_weight * hard_t.clamp(min=0.0)
+                # lane U1：行权重倍率（worst=hard_weight / 其余=mild_weight；未知=1.0）
+                worst_np = worst_flags_for_rows(worst_all, micro_indices)
+                if worst_np is None:
+                    row_scale_t = torch.ones_like(frame_weight)
+                else:
+                    row_scale_t = torch.as_tensor(
+                        row_scale_from_worst(
+                            worst_np, hard_weight=config.hard_weight, mild_weight=config.mild_weight
+                        ),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                specific_weight = frame_weight * row_scale_t
                 weight_sum = specific_weight.sum().clamp(min=1e-8)
-                # 精确缩放因子：加权项（traj/action/加权轨迹度量）= W_m/W_macro；逐行均值项（router）与
-                # 未加权诊断口径（traj_*_all）= n_m/n_macro；门控 CE = 全样本权重比
-                scale_weight = float(specific_macro_np[m_lo:m_hi].sum()) / specific_macro_total
-                scale_gate = float(weight_macro_np[m_lo:m_hi].sum()) / weight_macro_total
+                # 精确缩放因子：加权项（traj/action/加权轨迹度量）= W_m/W_macro；
+                # 逐行均值项（负载 aux / 未加权诊断口径）= n_m/n_macro
+                scale_weight = float(weighted_macro_np[m_lo:m_hi].sum()) / weight_macro_total
                 scale_rows = float(m_hi - m_lo) / float(max(1, n_macro))
                 weight_values.append(specific_weight.detach().double().cpu().numpy())
                 data_seconds += time.perf_counter() - data_started
                 forward_started = time.perf_counter()
                 # 阶段 B 只需要 traj_xy（B1 rollout）；WM 直接多步预测不参与损失（world_model=False），
                 # 且 ``wm_detach`` 时 rollout 内 WM 预测不回传梯度（因果链：WM 冻结 + 输出 detach）。
-                # lane T：hard_switch 时按难例标签硬切 specific 分支（难例→8 路，易例→只走 primary）。
+                # lane U1：MoE 输出 = primary + Σ_{i∈top2} g_i·expert_i（全场景；phase 1 已 set_moe 关闭）。
                 out = model(
                     obs,
                     rollout=True,
                     world_model=False,
                     wm_detach=config.wm_detach,
-                    hard_mask=(hard_t if (config.hard_switch and hard_t is not None) else None),
                 )
                 traj_pred = out.get("traj_xy")
                 if traj_pred is None:
@@ -2583,98 +2383,31 @@ def pretrain_bc(
                             slice_err_values[name]["weight"].append(sample_weight[mask])
                     mu_ds_sum += float((action_pred[:, 0] * frame_weight).sum())
                     mu_ds_weight += float(weight_sum)
-                router_loss = torch.zeros((), device=device)
-                if config.router_coef > 0.0 and out.get("router_logits") is not None:
-                    logits = out["router_logits"]
-                    labels_np = None
-                    if router_cluster_fn is not None:
-                        try:
-                            labels_np = router_cluster_fn(obs_np)
-                        except Exception as exc:  # noqa: BLE001 - 聚类 artifact/特征口径不匹配 → 回退
-                            if not router_warned:
-                                logger(
-                                    f"[bc] router 在线分配不可用（{type(exc).__name__}: {exc}）→ "
-                                    "回退数据集 router_cluster / 跳过 router 损失"
-                                )
-                                router_warned = True
-                            labels_np = None
-                    if labels_np is None:
-                        labels_np = targets.get("router_cluster")
-                    if labels_np is None:
-                        if not router_warned:
-                            logger(
-                                "[bc] 无 router 硬标签（sidecar/在线分配/数据集 router_cluster 均缺失）→ "
-                                "跳过 router 损失（bc_router_placeholder=1）"
-                            )
-                            router_warned = True
-                    else:
-                        if hasattr(labels_np, "detach"):
-                            labels_np = labels_np.detach().cpu().numpy()
-                        labels_np = np.asarray(labels_np).reshape(-1).astype(np.int64)
-                        if labels_np.shape[0] != int(logits.shape[0]):
-                            if not router_warned:
-                                logger(
-                                    f"[bc] router 硬标签行数 {labels_np.shape[0]} != logits "
-                                    f"{int(logits.shape[0])} → 跳过 router 损失"
-                                )
-                                router_warned = True
-                        else:
-                            labels_t = torch.as_tensor(labels_np, dtype=torch.long, device=device)
-                            valid = labels_t >= 0
-                            # lane T：hard_only_specific 时 8 路 CE 只算难例（count/acc 也只数难例）
-                            if hard_t is not None and bool(config.hard_only_specific):
-                                valid = valid & (hard_t > 0.5)
-                            if bool(valid.any()):
-                                router_used = True
-                                # lane T：hard_switch 时 8 路 CE **只算难例**（specific 段主口径）
-                                router_loss = config.router_coef * router_hard_label_loss(
-                                    logits, labels_t, sample_weight=specific_weight
-                                )
-                                router_term = router_loss
-                                with torch.no_grad():
-                                    weights_cpu = specific_weight.detach().double().cpu().numpy()
-                                    valid_np = valid.detach().cpu().numpy()
-                                    labels_valid = labels_np[valid_np]
-                                    w_valid = weights_cpu[valid_np]
-                                    router_ce_num += float(router_hard_label_loss(
-                                        logits, labels_t, sample_weight=specific_weight
-                                    ).detach()) * float(w_valid.sum())
-                                    router_ce_den += float(w_valid.sum())
-                                    correct = (
-                                        logits.argmax(dim=-1) == labels_t
-                                    ).detach().double().cpu().numpy()
-                                    router_acc_num += float((correct * weights_cpu).sum())
-                                    router_acc_den += float(weights_cpu.sum())
-                                    router_count += int(labels_valid.size)
-                                    if router_class_weight_sum is None:
-                                        router_class_weight_sum = np.zeros(int(logits.shape[1]), dtype=np.float64)
-                                    np.add.at(router_class_weight_sum, labels_valid, w_valid)
-                # lane T：二值难例门控 CE（**全体样本**；hard<0 的行忽略）——train/val 孪生口径
-                if config.gate_coef > 0.0 and hard_t is not None and out.get("hard_logit") is not None:
-                    gate_logit = out["hard_logit"]
-                    gate_term = config.gate_coef * gate_binary_loss(
-                        gate_logit, hard_t, sample_weight=frame_weight
-                    )
-                    with torch.no_grad():
-                        stats = gate_binary_stats(gate_logit, hard_t, sample_weight=frame_weight)
-                        if float(stats["count"]) > 0.0:
-                            gate_used = True
-                            w_all = float(frame_weight.sum())
-                            gate_ce_num += float(stats["ce"]) * w_all
-                            gate_ce_den += w_all
-                            gate_acc_num += float(stats["acc"]) * w_all
-                            gate_acc_den += w_all
-                            gate_hard_num += float(stats["hard_rate"]) * w_all
-                            gate_hard_den += w_all
-                            gate_count += int(stats["count"])
+                load_term = torch.zeros((), device=device)
+                # lane U1：MoE 负载统计（行数加权）+ Switch 式 aux（α 已在 MoEBlock 内乘好）
+                if out.get("expert_weights") is not None and config.moe_enabled:
+                    logits = out.get("router_logits")
+                    if logits is not None and hasattr(model, "plan_head"):
+                        stats = model.plan_head.moe.load_stats(logits)
+                        n_rows = int(logits.shape[0])
+                        load = stats["expert_load"].detach().double().cpu().numpy()
+                        if expert_load_sum is None or expert_load_sum.size != load.size:
+                            expert_load_sum = np.zeros(load.size, dtype=np.float64)
+                        expert_load_sum += load * n_rows
+                        load_cv_num += float(stats["load_cv"]) * n_rows
+                        load_cv_den += n_rows
+                        gate_entropy_num += float(stats["gate_entropy"]) * n_rows
+                        gate_entropy_den += n_rows
+                        load_count += n_rows
+                if out.get("load_balance_loss") is not None:
+                    load_term = out["load_balance_loss"]
                 forward_seconds += time.perf_counter() - forward_started
                 # 组合缩放后的宏 batch 损失：Σ_m s_m·L_m = L_macro（micro == macro 时 s=1）
                 # router CE 现为**加权均值**（Σw·ce/Σw）→ 与 traj/action 同用权重比缩放
                 loss = (
                     traj_term * scale_weight
                     + action_term * scale_weight
-                    + router_term * scale_weight
-                    + gate_term * scale_gate
+                    + load_term * scale_rows
                 )
                 backward_started = time.perf_counter()
                 loss.backward()
@@ -2682,8 +2415,7 @@ def pretrain_bc(
                 totals_micro["loss"] += float(loss.detach())
                 totals_micro["traj"] += float(traj_term.detach()) * scale_weight
                 totals_micro["action"] += float(action_term.detach()) * scale_weight
-                totals_micro["router"] += float(router_term.detach()) * scale_weight
-                totals_micro["gate"] += float(gate_term.detach()) * scale_gate
+                totals_micro["load_balance"] += float(load_term.detach()) * scale_rows
                 # 轨迹度量：加权口径按 W_m/W_macro、未加权诊断口径按 n_m/n_macro 缩放
                 totals_micro["traj_mse"] += traj_metrics["traj_mse_weighted"] * scale_weight
                 totals_micro["traj_mae"] += traj_metrics["traj_mae_weighted_m"] * scale_weight
@@ -2707,10 +2439,8 @@ def pretrain_bc(
             "bc_loss": totals["loss"] / divisor,
             "bc_traj_loss": totals["traj"] / divisor,
             "bc_action_loss": totals["action"] / divisor,
-            "bc_router_loss": totals["router"] / divisor,
-            "bc_gate_loss": totals["gate"] / divisor,
-            # lane T：8 路 router 项在 specific 段改名 router_cluster（同值；loss/planner/specific/router_cluster）
-            "bc_router_cluster_loss": totals["router"] / divisor,
+            # lane U1：MoE 负载均衡 aux（Switch 式；phase 2）
+            "bc_load_balance_loss": totals["load_balance"] / divisor,
             # 轨迹度量（单位见 docstring）：bc_traj_loss 是加权损失项（含 traj_weight）；
             # bc_traj_mse 加权 MSE(m²)；bc_traj_mae_m 加权 MAE(m)；
             # bc_traj_mae_all_m 未加权 MAE(m，含被过滤帧)；bc_traj_mse_unweighted 旧口径 alias(m²)。
@@ -2746,7 +2476,6 @@ def pretrain_bc(
                     config,
                     val_indices,
                     batch_source=val_batch_source,
-                    router_cluster_fn=router_cluster_fn,
                 )
             finally:
                 model.train()
@@ -2757,7 +2486,8 @@ def pretrain_bc(
             config.checkpoint_callback(epoch, model, optimizer, dict(val_metrics), rng)
         val_text = (
             f" val={val_metrics['bc_loss']:.4f}(traj={val_metrics['bc_traj_loss']:.4f}"
-            f"/action={val_metrics['bc_action_loss']:.4f}/router={val_metrics['bc_router_loss']:.4f})"
+            f"/action={val_metrics['bc_action_loss']:.4f}"
+            f"/load={val_metrics.get('bc_load_balance_loss', 0.0):.4f})"
             if val_metrics
             else ""
         )
@@ -2765,7 +2495,8 @@ def pretrain_bc(
             f"[bc] phase={config.phase} epoch {epoch + 1}/{config.epochs} loss={metrics['bc_loss']:.4f} "
             f"traj={metrics['bc_traj_loss']:.4f} traj_mse_m2={metrics['bc_traj_mse']:.4f} "
             f"traj_mae_m={metrics['bc_traj_mae_m']:.3f}m "
-            f"action={metrics['bc_action_loss']:.4f} router={metrics['bc_router_loss']:.4f} "
+            f"action={metrics['bc_action_loss']:.4f} "
+            f"load_balance={metrics['bc_load_balance_loss']:.4f} "
             f"mu_ds={metrics['bc_action_mu_ds_mean']:.3f}m "
             f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s "
             f"it/s={batches / max(data_seconds + forward_seconds + backward_seconds, 1e-9):.2f}"
@@ -2826,34 +2557,19 @@ def pretrain_bc(
             stats = weighted_stats(err_all[mask], w_all[mask], prefix="")
             metrics[f"bc_action_err_label_{label_name}"] = stats["weighted_mean"]
             metrics[f"bc_action_err_label_{label_name}_count"] = stats["count"]
-    # router 指标（硬标签 CE / acc / acc_majority 多数类基线）
-    metrics.update(
-        _router_summary(
-            count=int(router_count),
-            ce_num=float(router_ce_num),
-            ce_den=float(router_ce_den),
-            acc_num=float(router_acc_num),
-            acc_den=float(router_acc_den),
-            class_weight_sum=router_class_weight_sum,
-            cluster_version=str(config.router_cluster_version or ""),
-            cluster_k=int(config.router_cluster_k or 0),
-            used=bool(router_used),
-        )
-    )
     metrics["bc_action_mu_ds_weighted_mean"] = (
         mu_ds_sum / mu_ds_weight if mu_ds_weight > 0 else float("nan")
     )
-    # lane T：二值门控全阶段汇总（含 hard_rate；替代 acc_majority 的解释基线）
+    # lane U1：MoE 负载全阶段汇总（expert_load Σ=1 / load_cv / gate_entropy；phase 1 MoE 关闭 → 占位）
     metrics.update(
-        _gate_summary(
-            count=int(gate_count),
-            ce_num=float(gate_ce_num),
-            ce_den=float(gate_ce_den),
-            acc_num=float(gate_acc_num),
-            acc_den=float(gate_acc_den),
-            hard_num=float(gate_hard_num),
-            hard_den=float(gate_hard_den),
-            used=bool(gate_used),
+        _load_summary(
+            count=int(load_count),
+            expert_load_sum=expert_load_sum,
+            load_cv_num=float(load_cv_num),
+            load_cv_den=float(load_cv_den),
+            entropy_num=float(gate_entropy_num),
+            entropy_den=float(gate_entropy_den),
+            num_experts=num_experts_cfg,
         )
     )
     return metrics
@@ -2868,18 +2584,19 @@ def evaluate_bc(
     indices: np.ndarray,
     *,
     batch_source: Optional[MaterializedBCDataset] = None,
-    router_cluster_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """**留出集**确定性前向（Stage B 每 epoch 末调用；不参与梯度/优化器）。
 
-    指标口径与 :func:`pretrain_bc` 的训练统计同族（`loss/action/traj/router` + 关键切分）：
-    权重 = ``train_weight×配平``，动作误差为显式 L1（m/rad），轨迹为加权 MSE(m²)/MAE(m)；
-    全局与逐 horizon 统计都在**整个留出子集**上按权重合成（非 batch 均值），
-    ``bc_traj_loss``/``bc_action_loss``/``bc_router_loss`` 仍然按 batch 求平均
-    （与训练侧逐 epoch 口径一致）。router = **硬标签 CE + acc/acc_majority**（lane B B3）。
+    指标口径与 :func:`pretrain_bc` 的训练统计同族（`loss/action/traj/load` + 关键切分）：
+    权重 = ``train_weight×配平×worst/mild 行倍率``（``val_worst_flags``；None = 不缩放），
+    动作误差为显式 L1（m/rad），轨迹为加权 MSE(m²)/MAE(m)；全局与逐 horizon 统计都在
+    **整个留出子集**上按权重合成（非 batch 均值），``bc_traj_loss``/``bc_action_loss``/
+    ``bc_load_balance_loss`` 仍然按 batch 求平均（与训练侧逐 epoch 口径一致）。
+    lane U1：MoE 负载诊断（``bc_expert_load_*``/``bc_load_cv``/``bc_gate_entropy``）为
+    val 孪生（行数加权；phase 1 MoE 关闭 → 缺省）。
     返回：
 
-    - 扁平标量：``bc_loss``/``bc_traj_*``/``bc_action_*``/``bc_action_mu_*``/``bc_router_*``；
+    - 扁平标量：``bc_loss``/``bc_traj_*``/``bc_action_*``/``bc_action_mu_*``/``bc_load_*``；
     - ``per_horizon``：``h{k} -> {traj_mse_m2, traj_mae_m, traj_err}``（加权口径）；
     - ``slices`` / ``labels``：``{name: weighted_stats(...)}``（含 ``count``/``weight``）。
 
@@ -2910,23 +2627,18 @@ def evaluate_bc(
     mu_ds_num, mu_ds_den = 0.0, 0.0
     mu_ds_batch_sum = 0.0
     batch_count = 0
-    batch_traj_loss = batch_action_loss = batch_router_loss = batch_gate_loss = 0.0
-    router_ce_num, router_ce_den = 0.0, 0.0
-    router_acc_num, router_acc_den = 0.0, 0.0
-    router_count = 0
-    router_class_weight_sum: Optional[np.ndarray] = None
-    router_used = False
-    # lane T：二值门控 val 孪生累计
-    hard_all = (
+    batch_traj_loss = batch_action_loss = batch_load_loss = 0.0
+    # lane U1：MoE 负载 val 孪生累计（行数加权）
+    worst_all = (
         None
-        if config.hard_flags is None
-        else np.asarray(config.hard_flags, dtype=np.float32).reshape(-1)
+        if config.val_worst_flags is None
+        else np.asarray(config.val_worst_flags, dtype=np.float32).reshape(-1)
     )
-    gate_ce_num, gate_ce_den = 0.0, 0.0
-    gate_acc_num, gate_acc_den = 0.0, 0.0
-    gate_hard_num, gate_hard_den = 0.0, 0.0
-    gate_count = 0
-    gate_used = False
+    num_experts_cfg = int(getattr(model.plan_head.moe, "num_experts", 0) or 0)
+    expert_load_sum: Optional[np.ndarray] = None
+    load_cv_num, load_cv_den = 0.0, 0.0
+    gate_entropy_num, gate_entropy_den = 0.0, 0.0
+    load_count = 0
 
     for start in range(0, idx.size, macro_size):
         batch_indices = idx[start : start + macro_size]
@@ -2939,20 +2651,20 @@ def evaluate_bc(
         obs = _to_device_obs(obs_np, device, pin=batch_source is not None)
         targets = to_device_tensors(targets_np, device, pin=batch_source is not None)
         frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
-        hard_np = hard_flags_for_rows(hard_all, batch_indices)
-        hard_t = (
-            None if hard_np is None else torch.as_tensor(hard_np, dtype=torch.float32, device=device)
-        )
-        specific_weight = frame_weight
-        if hard_t is not None and bool(config.hard_only_specific):
-            specific_weight = frame_weight * hard_t.clamp(min=0.0)
-        out = model(
-            obs,
-            rollout=True,
-            world_model=False,
-            wm_detach=config.wm_detach,
-            hard_mask=(hard_t if (config.hard_switch and hard_t is not None) else None),
-        )
+        # lane U1：worst/mild 行权重（留出集不缩放时 worst_all=None → 倍率 1.0）
+        worst_np = worst_flags_for_rows(worst_all, batch_indices)
+        if worst_np is None:
+            row_scale_t = torch.ones_like(frame_weight)
+        else:
+            row_scale_t = torch.as_tensor(
+                row_scale_from_worst(
+                    worst_np, hard_weight=config.hard_weight, mild_weight=config.mild_weight
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+        specific_weight = frame_weight * row_scale_t
+        out = model(obs, rollout=True, world_model=False, wm_detach=config.wm_detach)
         traj_pred = out.get("traj_xy")
         if traj_pred is None:
             raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
@@ -3003,63 +2715,23 @@ def evaluate_bc(
                 if bool(np.any(mask)):
                     slice_err_values[name]["err"].append(sample_error[mask])
                     slice_err_values[name]["weight"].append(sample_weight[mask])
-        logits = out.get("router_logits")
-        if config.router_coef > 0.0 and logits is not None:
-            labels_np = None
-            if router_cluster_fn is not None:
-                try:
-                    labels_np = router_cluster_fn(obs_np)
-                except Exception:  # noqa: BLE001 - 与训练侧同口径：不可用即回退
-                    labels_np = None
-            if labels_np is None:
-                labels_np = targets.get("router_cluster")
-            if labels_np is not None:
-                if hasattr(labels_np, "detach"):
-                    labels_np = labels_np.detach().cpu().numpy()
-                labels_np = np.asarray(labels_np).reshape(-1).astype(np.int64)
-                if labels_np.shape[0] == int(logits.shape[0]):
-                    labels_t = torch.as_tensor(labels_np, dtype=torch.long, device=device)
-                    valid = labels_t >= 0
-                    # lane T：hard_only_specific 时 8 路 CE 只算难例（count/acc 也只数难例）
-                    if hard_t is not None and bool(config.hard_only_specific):
-                        valid = valid & (hard_t > 0.5)
-                    if bool(valid.any()):
-                        router_used = True
-                        router_loss = config.router_coef * router_hard_label_loss(
-                            logits, labels_t, sample_weight=specific_weight
-                        )
-                        batch_router_loss += float(router_loss.detach())
-                        with torch.no_grad():
-                            weights_cpu = specific_weight.detach().double().cpu().numpy()
-                            valid_np = valid.detach().cpu().numpy()
-                            labels_valid = labels_np[valid_np]
-                            w_valid = weights_cpu[valid_np]
-                            ce = router_hard_label_loss(logits, labels_t, sample_weight=specific_weight)
-                            router_ce_num += float(ce.detach()) * float(w_valid.sum())
-                            router_ce_den += float(w_valid.sum())
-                            correct = (logits.argmax(dim=-1) == labels_t).detach().double().cpu().numpy()
-                            router_acc_num += float((correct * weights_cpu).sum())
-                            router_acc_den += float(weights_cpu.sum())
-                            router_count += int(labels_valid.size)
-                            if router_class_weight_sum is None:
-                                router_class_weight_sum = np.zeros(int(logits.shape[1]), dtype=np.float64)
-                            np.add.at(router_class_weight_sum, labels_valid, w_valid)
-        # lane T：二值门控 val 孪生（全样本口径，与训练侧同公式）
-        if config.gate_coef > 0.0 and hard_t is not None and out.get("hard_logit") is not None:
-            batch_gate_loss += config.gate_coef * float(
-                gate_binary_loss(out["hard_logit"], hard_t, sample_weight=frame_weight)
-            )
-            stats = gate_binary_stats(out["hard_logit"], hard_t, sample_weight=frame_weight)
-            if float(stats["count"]) > 0.0:
-                gate_used = True
-                w_all = float(frame_weight.sum())
-                gate_ce_num += float(stats["ce"]) * w_all
-                gate_ce_den += w_all
-                gate_acc_num += float(stats["acc"]) * w_all
-                gate_acc_den += w_all
-                gate_hard_num += float(stats["hard_rate"]) * w_all
-                gate_hard_den += w_all
-                gate_count += int(stats["count"])
+        # lane U1：MoE 负载 val 孪生（行数加权；与训练侧同公式）
+        if out.get("expert_weights") is not None and config.moe_enabled:
+            logits = out.get("router_logits")
+            if logits is not None:
+                stats = model.plan_head.moe.load_stats(logits)
+                n_rows = int(logits.shape[0])
+                load = stats["expert_load"].detach().double().cpu().numpy()
+                if expert_load_sum is None or expert_load_sum.size != load.size:
+                    expert_load_sum = np.zeros(load.size, dtype=np.float64)
+                expert_load_sum += load * n_rows
+                load_cv_num += float(stats["load_cv"]) * n_rows
+                load_cv_den += n_rows
+                gate_entropy_num += float(stats["gate_entropy"]) * n_rows
+                gate_entropy_den += n_rows
+                load_count += n_rows
+        if out.get("load_balance_loss") is not None:
+            batch_load_loss += float(out["load_balance_loss"])
 
     # ---------------------------------------------------------------- 汇总（全留出子集）
     mse_matrix = np.concatenate(traj_mse_values) if traj_mse_values else np.zeros((0, 6))
@@ -3075,15 +2747,12 @@ def evaluate_bc(
     weighted_fde = weighted_stats(fde_sample, all_weights, prefix="")
     result: Dict[str, Any] = {
         "bc_loss": (
-            batch_traj_loss / divisor + batch_action_loss / divisor
-            + batch_router_loss / divisor + batch_gate_loss / divisor
+            batch_traj_loss / divisor + batch_action_loss / divisor + batch_load_loss / divisor
         ),
         "bc_traj_loss": batch_traj_loss / divisor,
         "bc_action_loss": batch_action_loss / divisor,
-        "bc_router_loss": batch_router_loss / divisor,
-        # lane T：specific 段 8 路 router_cluster（同值 alias）+ 二值门控 loss（val/ 孪生）
-        "bc_router_cluster_loss": batch_router_loss / divisor,
-        "bc_gate_loss": batch_gate_loss / divisor,
+        # lane U1：MoE 负载均衡 aux（val/ 孪生；phase 1 MoE 关闭 → 0）
+        "bc_load_balance_loss": batch_load_loss / divisor,
         "bc_traj_mse": weighted["weighted_mean"],
         "bc_traj_mae_m": weighted_mae["weighted_mean"],
         "bc_traj_fde_m": weighted_fde["weighted_mean"],
@@ -3122,28 +2791,14 @@ def evaluate_bc(
     result["slices"] = slices
     result["labels"] = labels
     result.update(
-        _router_summary(
-            count=int(router_count),
-            ce_num=float(router_ce_num),
-            ce_den=float(router_ce_den),
-            acc_num=float(router_acc_num),
-            acc_den=float(router_acc_den),
-            class_weight_sum=router_class_weight_sum,
-            cluster_version=str(config.router_cluster_version or ""),
-            cluster_k=int(config.router_cluster_k or 0),
-            used=bool(router_used),
-        )
-    )
-    result.update(
-        _gate_summary(
-            count=int(gate_count),
-            ce_num=float(gate_ce_num),
-            ce_den=float(gate_ce_den),
-            acc_num=float(gate_acc_num),
-            acc_den=float(gate_acc_den),
-            hard_num=float(gate_hard_num),
-            hard_den=float(gate_hard_den),
-            used=bool(gate_used),
+        _load_summary(
+            count=int(load_count),
+            expert_load_sum=expert_load_sum,
+            load_cv_num=float(load_cv_num),
+            load_cv_den=float(load_cv_den),
+            entropy_num=float(gate_entropy_num),
+            entropy_den=float(gate_entropy_den),
+            num_experts=num_experts_cfg,
         )
     )
     return result
@@ -4031,8 +3686,6 @@ class PPOTrainer:
         old_logprobs_t = torch.as_tensor(buffer.logprob[valid_indices], dtype=torch.float32, device=self.device)
         actions_t = torch.as_tensor(buffer.action[valid_indices], dtype=torch.float32, device=self.device)
         assert self._router_labels is not None and self._has_router_labels is not None
-        labels_t = torch.as_tensor(self._router_labels[valid_indices], dtype=torch.float32, device=self.device)
-        has_labels_t = torch.as_tensor(self._has_router_labels[valid_indices], dtype=torch.bool, device=self.device)
         # critic warmup：前 N 个 update 只拟合 value 头（策略/主干冻结，value 梯度不回流共享主干）
         warmup = self._updates_done < max(0, int(self.config.critic_warmup_updates))
         saved_requires: Optional[List[Tuple["torch.Tensor", bool]]] = None
@@ -4085,13 +3738,6 @@ class PPOTrainer:
                         value_loss = F.mse_loss(value, returns_t[selection])
                         entropy = gaussian_entropy(logstd).mean()
                         loss = policy_loss + self.config.vf_coef * value_loss - self.config.ent_coef * entropy
-                        router_loss = torch.zeros((), device=self.device)
-                        if self.config.router_coef > 0.0 and out.get("router_logits") is not None and bool(has_labels_t[selection].any()):
-                            mask = has_labels_t[selection]
-                            router_loss = self.config.router_coef * F.binary_cross_entropy_with_logits(
-                                out["router_logits"][mask], labels_t[selection][mask]
-                            )
-                            loss = loss + router_loss
                         kl_anchor = torch.zeros((), device=self.device)
                         if self.ref_model is not None and self.config.kl_anchor_coef > 0.0:
                             with torch.no_grad():
@@ -4147,7 +3793,6 @@ class PPOTrainer:
                             "value_loss": value_loss,
                             "entropy": entropy,
                             "total_loss": loss,
-                            "router_loss": router_loss,
                             "kl_anchor": kl_anchor,
                             "bc_anchor": bc_anchor,
                         }.items():
@@ -4701,7 +4346,7 @@ def smoke_main(argv: Optional[Sequence[str]] = None) -> int:
             lr=float(args.lr),
             epochs=int(args.epochs),
             minibatch_size=int(minibatch_size),
-            router_coef=float(args.router_coef),
+            load_balance_coef=0.0,
             seed=int(args.seed),
             device=str(device),
         )
@@ -4745,7 +4390,6 @@ def smoke_main(argv: Optional[Sequence[str]] = None) -> int:
                 f"loss={metrics.get('total_loss', float('nan')):+.4f} pi={metrics.get('policy_loss', float('nan')):+.4f} "
                 f"v={metrics.get('value_loss', float('nan')):.4f} ent={metrics.get('entropy', float('nan')):.3f} "
                 f"kl={metrics.get('approx_kl', float('nan')):+.4f} clip={metrics.get('clipfrac', float('nan')):.3f} "
-                f"router={metrics.get('router_loss', 0.0):.4f} "
                 f"rss={current_rss:.0f}MB peak={peak_rss:.0f}MB{workers}{vram} "
                 f"collect={t_collect:.2f}s(policy={collect_timing.get('policy_s', 0.0):.2f} env={collect_timing.get('env_step_s', 0.0):.2f}) "
                 f"update={t_update:.2f}s(data={update_timing.get('data_s', 0.0):.2f} fwd={update_timing.get('forward_s', 0.0):.2f} bwd={update_timing.get('backward_s', 0.0):.2f})",

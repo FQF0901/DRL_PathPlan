@@ -50,6 +50,16 @@ _REMOVED_TAGS = (
     "train/primary_bc_router_expert_util_0",
     "train/primary_bc_router_expert_mix_util_0",
     "train/primary_bc_router_temperature",
+    # lane U1：去聚类 → cluster/gate 旧 tag 一律丢弃
+    "train/primary_bc_router_ce",
+    "train/primary_bc_router_acc",
+    "train/primary_bc_router_acc_majority",
+    "val/specific_bc_router_ce",
+    "train/specific_bc_router_cluster_loss",
+    "train/specific_bc_gate_loss",
+    "train/specific_bc_gate_ce",
+    "train/specific_bc_gate_acc",
+    "train/specific_bc_hard_rate",
     "train/primary_bc_traj_mse_h1",
     "train/grad_norm_router",
     "train/cluster_version_num",
@@ -80,21 +90,19 @@ def test_slim_tag_renames_retained_and_drops_removed() -> None:
         "val/horizon/h2/traj_mae_m/mean": "val/ego/traj/mae_m/h2",
         "train/primary_bc_loss": "loss/planner/primary/total",
         "train/specific_bc_action_loss": "loss/planner/specific/action",
-        "val/primary_bc_router_loss": "val/loss/planner/primary/router",
+        "val/primary_bc_load_balance_loss": "val/loss/planner/primary/load_balance",
         "train/primary_bc_action_err_weighted_mean": "ego/action/err_weighted",
         "val/primary_bc_action_err_weighted_mean": "val/ego/action/err_weighted",
         "train/primary_bc_traj_fde_m": "ego/traj/fde_m",
         "val/specific_bc_traj_fde_m": "val/ego/traj/fde_m",
-        "train/primary_bc_router_ce": "router/cluster/ce",
-        "val/specific_bc_router_ce": "val/router/cluster/ce",
-        "train/primary_bc_router_acc": "router/cluster/acc",
-        "val/specific_bc_router_acc": "val/router/cluster/acc",
-        "train/specific_bc_router_cluster_loss": "loss/planner/specific/router_cluster",
-        "train/specific_bc_gate_loss": "loss/planner/specific/gate",
-        "train/specific_bc_gate_ce": "router/gate/ce",
-        "val/specific_bc_gate_ce": "val/router/gate/ce",
-        "train/specific_bc_gate_acc": "router/gate/acc",
-        "train/specific_bc_hard_rate": "router/gate/hard_rate",
+        "train/specific_bc_load_balance_loss": "loss/planner/specific/load_balance",
+        "val/primary_bc_load_balance_loss": "val/loss/planner/primary/load_balance",
+        "train/specific_bc_expert_load_0": "router/expert_load/e0",
+        "val/specific_bc_expert_load_7": "val/router/expert_load/e7",
+        "train/specific_bc_load_cv": "router/load_cv",
+        "val/specific_bc_load_cv": "val/router/load_cv",
+        "train/specific_bc_gate_entropy": "router/gate_entropy",
+        "val/specific_bc_gate_entropy": "val/router/gate_entropy",
         # Stage A 的 ego KPI（val 子集口径；canonical 直喂）
         "train/ego_action_err_weighted": "val/ego/action/err_weighted",
         "train/ego_traj_fde_m": "val/ego/traj/fde_m",
@@ -112,16 +120,13 @@ def test_slim_grouped_scalars_families_and_min_two_rule() -> None:
     scalars.update({f"val/od/fde_m/cv_h{k}": 2.0 for k in range(1, 7)})
     scalars.update({f"val/ego/traj/mae_m/h{k}": float(k) for k in range(1, 7)})
     scalars.update({f"loss/planner/primary/{term}": 1.0
-                    for term in ("total", "traj", "action", "router")})
+                    for term in ("total", "traj", "action", "load_balance")})
     scalars.update({f"val/loss/planner/specific/{term}": 0.5
-                    for term in ("total", "traj", "action", "router")})
+                    for term in ("total", "traj", "action", "load_balance")})
     scalars["loss/wm"] = 1.0
-    scalars["router/cluster/ce"] = 0.5
-    scalars["router/cluster/acc"] = 0.6
-    scalars["router/gate/ce"] = 0.3
-    scalars["router/gate/acc"] = 0.7
-    scalars["router/gate/hard_rate"] = 0.5
-    scalars["val/router/cluster/ce"] = 0.4
+    scalars.update({f"router/expert_load/e{i}": 0.125 for i in range(8)})
+    scalars["router/load_cv"] = 0.1
+    scalars["val/router/expert_load/e0"] = 0.2
 
     groups = _grouped_scalars(scalars)
     assert groups["val/od/ade_m"] == {**{f"h{k}": float(k) for k in range(1, 7)},
@@ -130,16 +135,15 @@ def test_slim_grouped_scalars_families_and_min_two_rule() -> None:
                                       **{f"cv_h{k}": 2.0 for k in range(1, 7)}}
     assert groups["val/ego/traj/mae_m"] == {f"h{k}": float(k) for k in range(1, 7)}
     assert groups["loss/planner/primary"] == {"total": 1.0, "traj": 1.0,
-                                              "action": 1.0, "router": 1.0}
+                                              "action": 1.0, "load_balance": 1.0}
     assert groups["val/loss/planner/specific"] == {"total": 0.5, "traj": 0.5,
-                                                   "action": 0.5, "router": 0.5}
-    assert groups["router/cluster"] == {"ce": 0.5, "acc": 0.6}
-    assert groups["router/gate"] == {"ce": 0.3, "acc": 0.7, "hard_rate": 0.5}
-    # 独立标量不成族（TB 走 add_scalar）；val/router/cluster 只有 1 个 sub → 不成图
+                                                   "action": 0.5, "load_balance": 0.5}
+    assert groups["router/expert_load"] == {f"e{i}": 0.125 for i in range(8)}
+    # 独立标量不成族（TB 走 add_scalar）；val/router/expert_load 只有 1 个 sub → 不成图
     assert "loss/wm" not in groups
     assert _slim_group_of_tag("loss/wm") is None
-    assert "val/router/cluster" not in groups
-    assert _slim_group_of_tag("val/router/cluster/ce") == ("val/router/cluster", "ce")
+    assert "val/router/expert_load" not in groups
+    assert _slim_group_of_tag("val/router/expert_load/e0") == ("val/router/expert_load", "e0")
 
     # 单 sub / NaN → 不成图（避免单点噪声）
     assert _grouped_scalars({"val/od/ade_m/h1": 1.0}) == {}
@@ -195,14 +199,13 @@ def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
             "presence_auc": 0.9, "entry_auc": 0.8,
             "grad_norm_router": 2.0, "cluster_k": 8.0, "update_timing_s": {"data_s": 0.1},
             "primary_bc_loss": 0.4, "primary_bc_traj_loss": 0.3,
-            "primary_bc_action_loss": 0.2, "primary_bc_router_loss": 0.1,
+            "primary_bc_action_loss": 0.2,
             "primary_bc_action_err_weighted_mean": 0.05,
             "primary_bc_traj_fde_m": 1.2,
             "primary_bc_action_err_median": 0.01, "primary_bc_action_err_p95": 0.2,
-            "primary_bc_router_ce": 0.7, "primary_bc_router_acc": 0.6,
-            "primary_bc_router_acc_majority": 0.25,
-            "primary_bc_router_cluster_loss": 0.09, "primary_bc_gate_loss": 0.08,
-            "primary_bc_gate_ce": 0.65, "primary_bc_gate_acc": 0.7, "primary_bc_hard_rate": 0.5,
+            "primary_bc_load_balance_loss": 0.09,
+            "primary_bc_expert_load_0": 0.2, "primary_bc_expert_load_1": 0.15,
+            "primary_bc_load_cv": 0.12, "primary_bc_gate_entropy": 0.9,
             "primary_bc_router_soft_ce": 0.7, "primary_bc_router_soft_kl": 0.3,
             "primary_bc_router_expert_mix_weight_0": 0.5,
             "primary_bc_traj_mse_h1": 2.0,
@@ -219,8 +222,8 @@ def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
     )
     monitor.on_val_step(
         {"primary_bc_loss": 0.5, "primary_bc_action_err_weighted_mean": 0.06,
-         "primary_bc_router_ce": 0.6, "primary_bc_router_acc": 0.5,
-         "primary_bc_gate_ce": 0.6, "primary_bc_gate_acc": 0.62, "primary_bc_hard_rate": 0.5,
+         "primary_bc_load_balance_loss": 0.08, "primary_bc_load_cv": 0.11,
+         "primary_bc_gate_entropy": 0.88,
          "primary_bc_traj_fde_m": 1.3},
         step=1,
     )
@@ -237,12 +240,14 @@ def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
     assert written["loss/planner/primary/total"] == (0.4, 1)
     assert written["loss/planner/primary/traj"] == (0.3, 1)
     assert written["loss/planner/primary/action"] == (0.2, 1)
-    assert written["loss/planner/primary/router"] == (0.1, 1)
+    assert written["loss/planner/primary/load_balance"] == (0.09, 1)
     assert written["ego/traj/mae_m/h1"] == (0.1, 1)
     assert written["ego/traj/mae_m/h2"] == (0.2, 1)
     assert written["val/ego/traj/mae_m/h1"] == (0.7, 1)
     assert written["val/ego/traj/mae_m/h2"] == (0.8, 1)
-    assert "val/loss/planner/primary/total" not in written  # 单 sub → 不写
+    # lane U1：val 侧 load_balance 与 total/traj/action 同族（≥2 sub → 写）
+    assert written["val/loss/planner/primary/total"] == (0.5, 1)
+    assert written["val/loss/planner/primary/load_balance"] == (0.08, 1)
     # slice/label/被移除族绝不写
     assert not [tag for tag in written if "slice" in tag or "label" in tag]
     assert fake.flushes == 1
@@ -252,9 +257,8 @@ def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
                 "val/od/presence_auc", "val/od/entry_auc",
                 "ego/action/err_weighted", "val/ego/action/err_weighted",
                 "ego/traj/fde_m", "val/ego/traj/fde_m",
-                "router/cluster/ce", "router/cluster/acc",
-                "router/gate/ce", "router/gate/acc", "router/gate/hard_rate",
-                "val/router/cluster/ce"):
+                "router/load_cv", "router/gate_entropy", "val/router/load_cv",
+                "val/router/gate_entropy"):
         assert (tag, 1) in {(t, s) for t, _, s in fake.scalars}, f"标量缺失：{tag}"
     # 移除 tag 绝不进 TB
     assert not [tag for tag, _, _ in fake.scalars
@@ -271,7 +275,7 @@ def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
     for tag in ("loss/wm", "loss/od", "val/od/presence_auc",
                 "loss/planner/primary/total", "ego/traj/mae_m/h1", "val/ego/traj/mae_m/h1",
                 "ego/action/err_weighted", "ego/traj/fde_m",
-                "router/cluster/ce", "router/cluster/acc"):
+                "router/load_cv", "router/gate_entropy"):
         assert tag in tags, f"CSV 保留 tag 缺失：{tag}"
     for tag in _REMOVED_TAGS:
         assert tag not in tags, f"CSV 出现已移除 tag：{tag}"
@@ -334,12 +338,11 @@ def test_summary_events_write_multiline_tags_in_same_run(tmp_path: Path) -> None
     monitor.on_train_step(
         {"wm_loss": 1.0, "wm_loss_od": 0.5,
          "primary_bc_loss": 0.2, "primary_bc_traj_loss": 0.1,
-         "primary_bc_action_loss": 0.05, "primary_bc_router_loss": 0.05,
+         "primary_bc_action_loss": 0.05,
          "primary_bc_traj_fde_m": 0.9,
-         "primary_bc_router_ce": 0.3, "primary_bc_router_acc": 0.7,
-         "primary_bc_router_acc_majority": 0.4,
-         "primary_bc_gate_ce": 0.25, "primary_bc_gate_acc": 0.75,
-         "primary_bc_hard_rate": 0.5},
+         "primary_bc_load_balance_loss": 0.09, "primary_bc_load_cv": 0.12,
+         "primary_bc_gate_entropy": 0.9,
+         "primary_bc_expert_load_0": 0.2, "primary_bc_expert_load_1": 0.15},
         step=3,
     )
     monitor.flush(step=3)
@@ -349,9 +352,10 @@ def test_summary_events_write_multiline_tags_in_same_run(tmp_path: Path) -> None
     top = _read_run(tmp_path)
     assert not any(path.is_dir() for path in tmp_path.iterdir()), "不得再有 sub-run 子目录"
     assert top["loss/wm"][0] == (3, pytest.approx(1.0))
-    assert top["router/cluster/ce"][0] == (3, pytest.approx(0.3))
-    assert top["router/gate/ce"][0] == (3, pytest.approx(0.25))
-    assert top["router/gate/hard_rate"][0] == (3, pytest.approx(0.5))
+    assert top["router/load_cv"][0] == (3, pytest.approx(0.12))
+    assert top["router/gate_entropy"][0] == (3, pytest.approx(0.9))
+    assert top["router/expert_load/e0"][0] == (3, pytest.approx(0.2))
+    assert top["router/expert_load/e1"][0] == (3, pytest.approx(0.15))
     assert top["ego/traj/fde_m"][0] == (3, pytest.approx(0.9))
     assert [step for step, _ in top["ego/traj/mae_m/h1"]] == [3]
     assert top["ego/traj/mae_m/h1"][0][1] == pytest.approx(0.1)
@@ -359,7 +363,7 @@ def test_summary_events_write_multiline_tags_in_same_run(tmp_path: Path) -> None
     assert top["loss/planner/primary/total"][0] == (3, pytest.approx(0.2))
     assert top["loss/planner/primary/traj"][0] == (3, pytest.approx(0.1))
     assert top["loss/planner/primary/action"][0] == (3, pytest.approx(0.05))
-    assert top["loss/planner/primary/router"][0] == (3, pytest.approx(0.05))
+    assert top["loss/planner/primary/load_balance"][0] == (3, pytest.approx(0.09))
     # 旧 tag / 移除项不在
     assert "horizon/h1/traj_mae_m/mean" not in top
     assert "slice/brake/action_err/mean" not in top

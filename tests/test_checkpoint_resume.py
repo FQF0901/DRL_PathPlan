@@ -33,7 +33,7 @@ from pipeline.trainer import (
     restore_rng_state,
     save_checkpoint,
 )
-from tests.v2_synthetic import TINY_MODEL_YAML, annotate_router_sidecar, write_v2_dataset
+from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
@@ -42,7 +42,6 @@ _CKPT_KEYS = {"model", "meta", "optimizer", "epoch", "val_metrics", "rng_state",
 
 def _dataset(tmp_path: Path) -> Path:
     directory = write_v2_dataset(tmp_path / "bc_v2", episodes=6, steps_per_episode=6)
-    annotate_router_sidecar(directory)  # Stage B 只读 sidecar（lane B ①）
     return directory
 
 

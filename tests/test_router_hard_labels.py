@@ -2,7 +2,8 @@
 
 - Stage B 只读 `<ds>/cluster_v<k>_assignments.npz`（annotate 生成）：缺失/行数不符 → fail-fast
   并打印生成命令；训练侧**禁止在线重算**；
-- router 训练 = 硬标签 CE（标签缺失 → placeholder）；KPI = ce/acc/acc_majority；
+- （lane U1 去聚类：训练侧不再消费 router 硬标签——`pipeline.trainer` 的 router CE/placeholder
+  已删除，本文件只保留聚类 artifact 侧的 sidecar 契约测试）；
 - `eval_runner.write_eval_tensorboard`：overall/by_primary/by_difficulty 全量 KPI 单点写 TB。
 """
 
@@ -14,9 +15,8 @@ import torch
 from dataclasses import replace
 
 from pipeline.clusters import annotate_assignments, assignments_path, load as load_clusters, load_assignments
-from pipeline.trainer import BCConfig, BCDataset, pretrain_bc
-from net.model import DrivingModel
-from tests.v2_synthetic import make_v2_arrays, write_v2_dataset
+from pipeline.trainer import BCDataset
+from tests.v2_synthetic import write_v2_dataset
 
 _MODEL_CFG = "config/clusters/default.yaml"
 
@@ -68,34 +68,6 @@ def test_sidecar_roundtrip_and_strict_validation(tmp_path) -> None:
     np.savez_compressed(path, **payload)
     with pytest.raises(RuntimeError, match="校验不过"):
         load_assignments(dataset_dir, spec=spec, dataset_meta=dataset.meta)
-
-
-def test_pretrain_bc_router_hard_label_and_placeholder(tmp_path) -> None:
-    arrays, _ = make_v2_arrays(episodes=4, steps_per_episode=6)
-    dataset = BCDataset(arrays, {"schema_version": 2, "label_names": [], "history_stride": 5})
-    model = DrivingModel(hidden=16, num_experts=8, expert_hidden=16, wm_steps=6)
-    config = BCConfig(epochs=1, batch_size=8, lr=1e-3, device="cpu", router_coef=0.1)
-
-    # 无标签 → 跳过 router 损失并记 placeholder（不编造 CE/acc）
-    metrics = pretrain_bc(model, dataset, config, logger=lambda _: None)
-    assert metrics["bc_router_placeholder"] == 1.0
-    assert "bc_router_ce" not in metrics and "bc_router_acc" not in metrics
-
-    # 有硬标签（stub 分配）→ CE/acc/acc_majority 齐备
-    def labels_fn(obs_batch):  # noqa: ANN001
-        n = int(obs_batch["ego"].shape[0])
-        return np.arange(n, dtype=np.int64) % 8
-
-    model.load_state_dict({key: value for key, value in model.state_dict().items()})
-    metrics = pretrain_bc(model, dataset, config, logger=lambda _: None, router_cluster_fn=labels_fn)
-    assert metrics["bc_router_placeholder"] == 0.0
-    assert np.isfinite(metrics["bc_router_ce"]) and 0.0 <= metrics["bc_router_acc"] <= 1.0
-    assert 0.0 <= metrics["bc_router_acc_majority"] <= 1.0
-    assert metrics["bc_router_count"] == float(dataset.count)
-    # 软目标统计键一个不留
-    for key in ("bc_router_soft_ce", "bc_router_soft_kl", "bc_router_entropy",
-                "bc_router_nmi", "bc_router_temperature", "bc_router_expert_mix_weight_0"):
-        assert key not in metrics
 
 
 def test_assignments_path_version_priority(tmp_path) -> None:

@@ -23,14 +23,13 @@ import torch
 from net.model import DrivingModel
 from pipeline.stages import _episode_split, _parse_args, run_stage_b
 from pipeline.trainer import BCConfig, BCDataset, evaluate_bc, pretrain_bc
-from tests.v2_synthetic import TINY_MODEL_YAML, annotate_router_sidecar, write_v2_dataset
+from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
 
 def _dataset(tmp_path: Path, *, episodes: int = 6, steps_per_episode: int = 6) -> BCDataset:
     directory = write_v2_dataset(tmp_path / "bc_v2", episodes=episodes, steps_per_episode=steps_per_episode)
-    annotate_router_sidecar(directory)  # Stage B 只读 sidecar（lane B ①）
     return BCDataset.load(str(directory))
 
 
@@ -70,35 +69,31 @@ def test_pretrain_bc_epoch_callback_train_increment_and_val_holdout(tmp_path: Pa
     train_idx, val_idx, val_episodes = _episode_split(dataset.arrays["episode_id"], 0.34, seed=0)
     assert val_idx.size > 0 and train_idx.size > 0
 
-    def cluster_labels(obs_batch):  # noqa: ANN001 - 聚类 lane 的 stub（全 0 类硬标签）
-        return np.zeros(obs_batch["ego"].shape[0], dtype=np.int64)
-
     calls: list = []
     config = BCConfig(
-        epochs=2, batch_size=8, lr=1e-3, device="cpu", shuffle=False, router_coef=0.1,
+        epochs=2, batch_size=8, lr=1e-3, device="cpu", shuffle=False,
+        moe_enabled=True, load_balance_coef=0.01,
         train_indices=train_idx, val_indices=val_idx,
         epoch_callback=lambda epoch, train_metrics, val_metrics: calls.append(
             (epoch, dict(train_metrics), dict(val_metrics))
         ),
     )
-    metrics = pretrain_bc(
-        model, dataset, config, logger=lambda _: None, router_cluster_fn=cluster_labels
-    )
+    metrics = pretrain_bc(model, dataset, config, logger=lambda _: None)
 
     assert [call[0] for call in calls] == [0, 1], "每 epoch 必须回调一次"
     train_metrics, val_metrics = calls[0][1], calls[0][2]
-    # 训练增量：与全阶段汇总同族（动作/轨迹/router + 关键切分）
+    # 训练增量：与全阶段汇总同族（动作/轨迹/MoE 负载 + 关键切分）
     for key in (
-        "bc_loss", "bc_traj_loss", "bc_action_loss", "bc_router_loss",
+        "bc_loss", "bc_traj_loss", "bc_action_loss", "bc_load_balance_loss",
         "bc_action_err_weighted_mean", "bc_action_err_slice_brake_weighted_mean",
         "bc_action_err_label_on_curve", "bc_traj_mse_h1", "bc_traj_mae_h1_m",
-        "bc_traj_err_h6", "bc_traj_fde_m", "bc_router_ce", "bc_router_acc",
-        "bc_router_acc_majority",
+        "bc_traj_err_h6", "bc_traj_fde_m", "bc_expert_load_0", "bc_load_cv",
+        "bc_gate_entropy",
     ):
         assert key in train_metrics, f"训练 epoch 增量缺少 {key}"
     # val：同族标量 + 分组（per_horizon/slices/labels）
     for key in ("bc_loss", "bc_traj_mse", "bc_traj_mae_m", "bc_traj_fde_m",
-                "bc_action_err_weighted_mean", "bc_router_ce", "bc_router_acc",
+                "bc_action_err_weighted_mean", "bc_load_cv", "bc_gate_entropy",
                 "bc_action_err_count"):
         assert key in val_metrics, f"val 指标缺少 {key}"
     assert set(val_metrics["per_horizon"]) == {f"h{k}" for k in range(1, 7)}
@@ -116,7 +111,7 @@ def test_evaluate_bc_deterministic_and_side_effect_free(tmp_path: Path) -> None:
     torch.manual_seed(0)
     dataset = _dataset(tmp_path)
     model = DrivingModel(hidden=16, num_experts=8, expert_hidden=16, wm_steps=6)
-    config = BCConfig(epochs=1, batch_size=8, device="cpu", shuffle=False, router_coef=0.1)
+    config = BCConfig(epochs=1, batch_size=8, device="cpu", shuffle=False)
     before = {name: value.detach().clone() for name, value in model.state_dict().items()}
     indices = np.arange(8, dtype=np.int64)
     first = evaluate_bc(model, dataset, config, indices)
@@ -133,14 +128,14 @@ def test_evaluate_bc_deterministic_and_side_effect_free(tmp_path: Path) -> None:
 def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     """BC_EPOCHS=4（2 primary + 2 specific）→ monitor step 1..4 单调，val 与 train 同族。"""
     dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=6, steps_per_episode=6)
-    annotate_router_sidecar(dataset_dir)
     out_dir = tmp_path / "stage_b"
     args = _parse_args([
         "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
         "--ckpt", str(tmp_path / "missing_stage_a.pt"),  # 不读仓库既有 ckpt，保持测试自洽
         "--model-config", str(_model_cfg(tmp_path)),
         "--bc-epochs", "4", "--bc-phase-split", "0.5", "--val-frac", "0.34",
-        "--batch-size", "8", "--device", "cpu", "--seed", "0", "--monitor", "--router-coef", "0.1",
+        "--batch-size", "8", "--device", "cpu", "--seed", "0", "--monitor",
+        "--load-balance-coef", "0.01",
     ])
     metrics = run_stage_b(args, {})
     assert metrics["primary_epochs"] == 2 and metrics["specific_epochs"] == 2
@@ -165,10 +160,13 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
     ):
         for step in (1, 2):
             assert series[val_tag][step] != series[train_tag][step], (train_tag, step)
-    # Tier-1 保留：router 硬标签 KPI + 动作误差主口径 + 末点 FDE
-    for tag in ("router/cluster/ce", "router/cluster/acc",
+    # Tier-1 保留：MoE 负载 KPI + 动作误差主口径 + 末点 FDE
+    for tag in ("router/expert_load/e0", "router/load_cv", "router/gate_entropy",
+                "loss/planner/specific/load_balance",
                 "ego/action/err_weighted", "ego/traj/fde_m"):
         assert tag in series, f"保留 tag 缺失：{tag}"
+    # 去聚类：旧 cluster/gate tag 一个不留
+    assert not [tag for tag in series if tag.startswith(("router/cluster/", "router/gate/"))]
     # 瘦身：旧 tag 族 / 软目标 router / n_updates / count / slice / label 一个不留
     assert not [tag for tag in series
                 if tag.startswith(("horizon/", "slice/", "label/", "train/",
@@ -184,7 +182,6 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
 def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> None:
     """``--monitor-legacy-tags``（回退）：旧 canonical tag 全量落 CSV。"""
     dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=4, steps_per_episode=6)
-    annotate_router_sidecar(dataset_dir)
     out_dir = tmp_path / "stage_b_legacy"
     args = _parse_args([
         "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
@@ -192,7 +189,7 @@ def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> No
         "--model-config", str(_model_cfg(tmp_path)),
         "--bc-epochs", "1", "--val-frac", "0.34",
         "--batch-size", "8", "--device", "cpu", "--seed", "0",
-        "--monitor", "--monitor-legacy-tags", "--router-coef", "0.1",
+        "--monitor", "--monitor-legacy-tags",
     ])
     run_stage_b(args, {})
     series = _csv_series(out_dir)

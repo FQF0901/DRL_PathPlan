@@ -123,9 +123,13 @@ rollout（6 步）
 **修复**：worker 各自把分片写到磁盘（`_shards/`），父进程只收标量摘要（RSS ≈O(1)），结束后再合并成最终 `expert_bc.npz`
 （峰值 = 最终数据一份）。`--workers` 默认 auto（CPU 取半、上限 10），内存不足只警告不降级。
 
-## 4. 路由与聚类（替代手工规则标签）
+## 4. 路由与聚类（**历史**：lane U1 起已废止）
 
-- **监督**（lane B B3）：router 只吃**硬标签**（聚类 top-1）CE（`F.cross_entropy(logits, cluster, weight=…)`）；
+> **lane U1（2026-09-27）起：聚类监督全部取消** —— 无簇标签、无 router CE/acc、无 sidecar 读取；
+> 本章 §4 / §4.1 仅作历史记录（`pipeline/clusters.py` 等 artifact 由清理 lane 删除），
+> 现行方案见 §4.2。**训练侧不得再引用本章的任何监督口径。**
+
+- **（历史）监督**（lane B B3）：router 只吃**硬标签**（聚类 top-1）CE（`F.cross_entropy(logits, cluster, weight=…)`）；
   标签由 sidecar `datasets/<ds>/cluster_v<version>_assignments.npz` 提供，**训练侧只读**（缺失/行数/指纹/
   spec 哈希不符 → 直接报错并打印生成命令）；KPI = `router/ce` + `router/acc` + `router/acc_majority`（多数类基线）。
 - **特征契约 v2**（lane D，合计 **47 维**；`pipeline/clusters.py::FEATURE_CONTRACT_V2`，机器可读、编码由契约驱动）：
@@ -152,7 +156,7 @@ rollout（6 步）
 - **体检门**：簇规模/熵/半径；每簇难度/几何/规则标签占比；稀有结构富集（cut-in 等）≥3× 全局，否则 FLAG
   并给两段式退路命令；规则标签只用于体检，绝不进入监督。
 
-### 4.1 实测口径与冻结产物（lane D，2026-09-27）
+### 4.1 实测口径与冻结产物（lane D，2026-09-27；**历史**，lane U1 起不参与训练）
 
 - **v1 历史**：`cluster_v1.npz`（292 维 `ego+od+ld+others`、PCA 48、cap 25%/floor 2%）在 5k 全量上
   c0=84.7%（train 86.8%）、`capacity_ok=False` → router 退化为多数类预测器（`acc 0.654 < acc_majority 0.952`）；
@@ -163,46 +167,46 @@ rollout（6 步）
 - **调用契约**：`pipeline.clusters.load(path) → ClusterSpec`；`assign_hard/soft_targets_from_obs(obs_batch)`；
   `od_top6_indices(od, presence)`（契约 v2 的确定性 top6 选择；紧迫度与 `env/obs/od.py` 槽位分配同公式、同参数）。
 
-### 4.2 双分支 Stage B 与 hard 簇（lane T，2026-09-27 定稿）
+### 4.2 去聚类 + MoE 负载均衡 + 权重化 specific（lane U1，2026-09-27 定稿）
 
-- **唯一生产监督 = hard 簇**：`cluster_hard_<北京戳>.npz` 必须由
-  `tools/fit_clusters.py --bc-dir <BC_DIR> --rows-from <BC_DIR>/hard_sidecar.npz`（**只在难例
-  top-50% 行上拟合**，spec 的 `data_fingerprint.rows_from` 即 provenance）产出；
-  全量 `cluster_v2*` 仅历史工件，**不参与任何训练损失/标签**——双分支下 `--cluster-config`
-  整段跳过；specific 段拿到无 `rows_from` 的 spec 直接 fail-fast。
-- **流程（四条命令，顺序固定）**：
-  1. `tools/mine_hard.py --ckpt <primary.pt> --bc-dir <BC_DIR> --out <BC_DIR>/hard_sidecar.npz`
-     （冻结 primary 逐行 IL 误差；主口径 = **动作加权误差** `w·mean|μ−专家首步动作|`，
-     `w = train_weight×配平`；难例 = top-50%，排序键 `(-err_weighted, -err_l1, 行号升序)`；
-     sidecar 记录参照 ckpt sha256 / 数据集指纹 / seed / 阈值，训练侧只读 + 严格校验）；
-     Stage B 侧对应 `--two-branch --mine-only`（primary + 挖掘后停止，落 `primary.pt` + sidecar）。
-  2. `tools/fit_clusters.py --rows-from <sidecar> --cluster-version hard_<ts> --out config/clusters/cluster_hard_<ts>.npz`
-     （k=8 固定，沿用容量约束/体检口径）。
-  3. `tools/annotate_clusters.py --dataset <BC_DIR> --cluster-config config/clusters/cluster_hard_<ts>.npz`
-     （sidecar = `cluster_vhard_<ts>_assignments.npz`，严格校验）。
-  4. `tools/diagnostics/cluster_survey.py --spec config/clusters/cluster_hard_<ts>.npz
-     --out runs/BTC<戳>_cluster_survey_hard`（**用户先审阅聚类结果才放行 Stage A/B**）。
-- **训练（双分支，`--two-branch`）**：primary 段（**全部训练行**，`router_coef=0`）→ 冻结
-  primary 的「策略头/专家」（`policy.` + `plan_head.moe.primary.`；**主干可继续训**）→
-  specific 段（数据口径 = 难例行做动作/轨迹/8 路 CE；二值门控 `p_hard` CE 在**全体样本**上；
-  **hard 帧走 specific 8 路、easy 帧只走 primary（硬切，不做软混合/掺样）**）。
-- **val 口径**：训练 = train-dir **全部行** + val-dir **全部行**（`--val-dir` 或 train-dir 同级
-  `*_expert500val` 自动探测）；缺 val-dir → 告警回退 legacy 按 episode 比例切分。
-- **TB（保留集 = 显示集）**：`router/cluster/{ce,acc}`（8 路，只算难例）、
-  `router/gate/{ce,acc,hard_rate}`（二值，全样本）、`loss/planner/specific/router_cluster`、
-  `loss/planner/<phase>/gate`（train + `val/` 孪生；`acc_majority` 删除）。
-- **DAgger-lite**：`tools/dagger_collect.py`（失败场景池 = `--from-eval episodes.csv` 的
-  `success=False`；复用 `collect_expert` 采集/过滤/写出流水线，多核 `--workers`；冻结 primary
-  做 shadow 查询 → 逐行 IL 误差 + 病态过滤 stuck/yaw_outlier 写进 `dagger.json`）。
-  **未做（需用户决定）**：MetaDrive 单 engine 限制下，策略访问状态上的专家实测标签需要影子 env
-  或解析动作映射；当前为"专家 roll-out 标签 + 策略 shadow 查询"近似，执行式 DAgger roll-in 待后续。
+- **取消一切聚类监督**（无簇标签、无 router CE/acc、无二值门控/硬切）：
+  `pipeline/trainer.py` / `pipeline/stages.py` / `net/*` 不再读取任何 cluster sidecar；
+  `cluster_*` 相关文件由清理 lane 删除（本 lane 只摘除引用）。
+- **输出口径（推理与训练一致、全场景生效）**：
+  ``out = primary + residual_scale · Σ_{i∈top2} g_i · expert_i`` —— 无 hard_mask、无二值门。
+- **Stage B 两相位**：
+  - **phase 1（primary）**：**MoE 关闭**（专家/router 不参与，输出严格 = primary；
+    `_PRIMARY_PHASE_FREEZE` 冻结 experts+router）；训练后落 `primary.pt`；
+  - **phase 2（specific）**：**只训 experts + gate(router) + residual_scale**
+    （`_SPECIFIC_PHASE_FREEZE` 冻结主干/primary 策略头/policy）；
+    **数据用样本权重（不是硬子集）**：worst-50%（冻结 primary 的 IL 误差，沿用
+    `pipeline/hard_mining.py` 口径）权重 **1.0**、其余 50% 权重 **0.1**（有效质量 = 0.55），
+    **全量曝光**；权重与 `train_weight×balance_weight` 相乘。
+- **负载均衡**：Switch 式 aux ``α · E · Σ_i f_i · P_i``（`f_i` = 门控权重质量占比 detach，
+  `P_i` = 全专家 softmax 概率 batch 均值可微；α = `stages.B.bc.load_balance_coef` 默认 0.01），
+  进 phase 2 总损失；TB：`router/expert_load/e0..e7`（8 线一族）、`router/load_cv`、
+  `router/gate_entropy`（train + `val/` 孪生）；**删除** `router/cluster/*`、`router/gate/*`。
+- **流程（三条命令）**：
+  1. `tools/venv-python tools/train.py --stage B ... --mine-only`
+     （phase 1 + worst 权重挖掘后停止，落 `primary.pt` + `weight_sidecar.npz`）；
+  2. （可选审阅）`tools/venv-python tools/mine_hard.py --ckpt <primary.pt> --bc-dir <BC_DIR>
+     --out <BC_DIR>/weight_sidecar.npz --hard-weight 1.0 --mild-weight 0.1`
+     （sidecar 记录参照 ckpt sha256 / 数据集指纹 / seed / 阈值 / 权重，训练侧只读 + 严格校验）；
+  3. 带 `--weight-sidecar <sidecar>` 重跑 phase 2（MoE 开 + 权重 + 负载均衡 aux）。
+- **DAgger 行接入**：phase 2 可加 `--dagger-dir <DATASETS>`（另一 lane 产出的同 schema 数据）→
+  其行与主集行**合并**训练（`episode_id` 偏移防冲突），行权重 **1.0**（与 worst 行同权）。
+- **val 口径**（不变）：训练 = train-dir **全部行** + val-dir **全部行**（`--val-dir` 或 train-dir
+  同级 `*_expert500val` 自动探测）；缺 val-dir → 告警回退 legacy 按 episode 比例切分。
 
 ---
 
 ## 5. 训练与 IL 度量
 
 - **Stage A**：多步直接监督（GT 动作）+ 逐 horizon loss/ADE/FDE + 每 horizon 有效样本数 + presence/entry BCE/AUC；损失按 `train_weight × wm_valid` 加权。
-- **Stage B**：首步动作 + 6 点轨迹辅助 + router 软目标；日志含动作误差均值/中位数/**p95**/分切片、逐 horizon ego 误差、router 指标（top-1 vs 簇、NMI、gate 熵、专家利用率）。
+- **Stage B（lane U1）**：phase 1（MoE 关闭）→ 冻结 → phase 2（MoE 开 + worst/mild 权重 +
+  Switch 式负载均衡 aux）；损失 = 首步动作 + 6 点轨迹辅助 + `loss/planner/<phase>/load_balance`；
+  日志含动作误差加权均值/分切片、逐 horizon ego 误差、MoE 负载（`router/expert_load/*`/
+  `router/load_cv`/`router/gate_entropy`）。
 - **会计**：配平、`_action_mu_stats`、PPO BC 锚全部权重感知。
 - **`tools/train.sh` / `tools/test.sh`**：零参即可跑（路径/epoch/batch 来自 `config/train.yaml::run|stages`，目录由 `pipeline/run_paths.py` 统一生成）；`setsid+nohup` 后台运行，stdout/stderr 落 `<run>/logs/stage_<x>.log`。
 
@@ -212,7 +216,8 @@ rollout（6 步）
 2. presence/entry AUC；目标在盒内比例 vs horizon；
 3. ego 逐 horizon ADE/FDE + 平滑度（jerk/曲率）；
 4. 动作误差分布（含 p95 与急刹/急转/弯道切片）；
-5. router：软目标 CE/KL、vs 簇 top-1、gate 熵、专家利用率、与规则标签 NMI；
+5. router：**MoE 负载**（`router/expert_load/*`、`router/load_cv`、`router/gate_entropy`）；
+   （去聚类后不再有簇 CE/acc、软目标 KL、NMI 等指标）；
 6. 闭环 50 条 LQR slice（集成测试，单独列）。
 
 所有曲线标注：`obs_fingerprint` + `cluster_version` + git hash + 种子。**IL 未过门不启动 RL。**
@@ -222,13 +227,14 @@ rollout（6 步）
 ### 5.2 监控口径（2026-09-26 定稿，fix-1/fix-2）
 
 **写盘节奏（逐 epoch）**：Stage A 每 epoch 一个 `step`（1..N）；Stage B `step = phase_offset + epoch`（primary 1..P、specific P+1..P+S，全局单调）；
-`step 0` 仅写元数据（`cluster_version/k/soft_targets`）。
+`step 0` 仅写元数据（`load_balance_coef`/`hard_weight`/`mild_weight`/`worst_flags_available`）。
 
 **tag 约定（CSV 长表 `step,tag,value` 保持不变）**
 - 分组统计：`*/mean` 为均值，**`*/n_updates` = 该均值由几次 update 贡献合成**（与物理样本数无关）；
 - 物理计数：`valid_samples`（有效样本数）、`valid_weight_sum`（有效权重和）、`slot_count`；
 - **val 常量只记一次**（`cv_ade/cv_fde`、`valid_samples/valid_weight_sum`、`train/cv_ade|cv_fde` 仅在首个 epoch）；
-- Stage B 同时写 `train/<phase>_*` 与 `val/<phase>_*`（val = 与 Stage A **同 seed/val_frac** 的 episode 留出，`--val-frac` 对 B 生效）；
+- Stage B 同时写 `train/<phase>_*` 与 `val/<phase>_*`（val = 独立 val-dir 全部行，缺省回退
+  legacy 按 episode 比例切分；`--val-frac` 仅 legacy 口径生效）；
 - 已删除 `train/per_horizon/*`（与 `horizon/*` 逐位重复）。
 
 **TensorBoard 分组多线（`add_scalars`）**：`flush()` 末尾把同族 canonical tag 归到一张图（≥2 sub 才写）。
