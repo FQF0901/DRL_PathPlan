@@ -1,0 +1,807 @@
+{
+  "alignment": {},
+  "cluster_version": "hard_20260927-1752",
+  "clusters": [
+    {
+      "difficulty": {
+        "easy": 0.12045896247570638,
+        "hard": 0.5257512333682165,
+        "medium": 0.35378980415607714
+      },
+      "geometry_top3": [
+        [
+          "uturn",
+          0.1684855733293467
+        ],
+        [
+          "intersection",
+          0.13750186873972192
+        ],
+        [
+          "ramp_in",
+          0.11092838989385559
+        ]
+      ],
+      "id": 0,
+      "radius_max": 24.61966896057129,
+      "radius_mean": 5.671660206593781,
+      "radius_p95": 9.626306533813477,
+      "rare_enrichment": {
+        "cutin_active": 0.7869529235062944,
+        "cutout_active": 0.6271624874197693,
+        "roundabout_near": 0.03736759879704067
+      },
+      "rule_label_rates": {
+        "car_following": 0.08398116379976273,
+        "crowded": 0.16613095998764038,
+        "cutin_active": 0.017865151166915894,
+        "cutout_active": 0.023882493376731873,
+        "merging": 0.05449245125055313,
+        "near_intersection": 0.26539841294288635,
+        "on_curve": 0.08734489232301712,
+        "roundabout_near": 0.0007848707027733326
+      },
+      "share": 0.1484374566576607,
+      "size": 26756,
+      "soft_entropy_norm_mean": 0.3688250482082367,
+      "soft_top1_mean": 0.6255385279655457,
+      "soft_top2_mass_mean": 0.9453551769256592,
+      "weight_share": 0.18815051620646966
+    },
+    {
+      "difficulty": {
+        "easy": 0.14891623207301175,
+        "hard": 0.27974250325945244,
+        "medium": 0.5713412646675359
+      },
+      "geometry_top3": [
+        [
+          "curve",
+          0.2296284224250326
+        ],
+        [
+          "roundabout",
+          0.11982561929595828
+        ],
+        [
+          "uturn",
+          0.11648468057366362
+        ]
+      ],
+      "id": 1,
+      "radius_max": 21.313249588012695,
+      "radius_mean": 5.178727114866967,
+      "radius_p95": 8.923213529586786,
+      "rare_enrichment": {
+        "cutin_active": 2.4282562726105357,
+        "cutout_active": 1.2528872054818114,
+        "roundabout_near": 1.169685297687447
+      },
+      "rule_label_rates": {
+        "car_following": 0.1045469343662262,
+        "crowded": 0.11008800566196442,
+        "cutin_active": 0.055125489830970764,
+        "cutout_active": 0.04771023616194725,
+        "merging": 0.003952085971832275,
+        "near_intersection": 0.06930410861968994,
+        "on_curve": 0.39366036653518677,
+        "roundabout_near": 0.024568121880292892
+      },
+      "share": 0.13616568007944477,
+      "size": 24544,
+      "soft_entropy_norm_mean": 0.29642874002456665,
+      "soft_top1_mean": 0.7296773791313171,
+      "soft_top2_mass_mean": 0.9778661131858826,
+      "weight_share": 0.14364459647214894
+    },
+    {
+      "difficulty": {
+        "easy": 0.16082303810683835,
+        "hard": 0.5965721245867409,
+        "medium": 0.24260483730642074
+      },
+      "geometry_top3": [
+        [
+          "ramp_out",
+          0.30581172785801286
+        ],
+        [
+          "split",
+          0.19488428745432398
+        ],
+        [
+          "merge",
+          0.1646076213676701
+        ]
+      ],
+      "id": 2,
+      "radius_max": 16.261653900146484,
+      "radius_mean": 6.1976510833424445,
+      "radius_p95": 8.586084938049314,
+      "rare_enrichment": {
+        "cutin_active": 1.0251670641353936,
+        "cutout_active": 0.25474407654261055,
+        "roundabout_near": 0.26923978167396123
+      },
+      "rule_label_rates": {
+        "car_following": 0.20488950610160828,
+        "crowded": 0.41882720589637756,
+        "cutin_active": 0.023273011669516563,
+        "cutout_active": 0.00970071367919445,
+        "merging": 0.6146685481071472,
+        "near_intersection": 0.026318078860640526,
+        "on_curve": 0.06673046946525574,
+        "roundabout_near": 0.005655124317854643
+      },
+      "share": 0.12753327304702886,
+      "size": 22988,
+      "soft_entropy_norm_mean": 0.28925469517707825,
+      "soft_top1_mean": 0.7387615442276001,
+      "soft_top2_mass_mean": 0.9684469103813171,
+      "weight_share": 0.13923661488256403
+    },
+    {
+      "difficulty": {
+        "easy": 0.22631598554557986,
+        "hard": 0.4991617926461275,
+        "medium": 0.27452222180829267
+      },
+      "geometry_top3": [
+        [
+          "ramp_in",
+          0.30939164772938943
+        ],
+        [
+          "merge",
+          0.10580039488879782
+        ],
+        [
+          "split",
+          0.10088291174607905
+        ]
+      ],
+      "id": 3,
+      "radius_max": 15.315923690795898,
+      "radius_mean": 4.982158312493605,
+      "radius_p95": 7.146853733062743,
+      "rare_enrichment": {
+        "cutin_active": 0.8828629546440074,
+        "cutout_active": 0.7748087905059701,
+        "roundabout_near": 0.06030383518201703
+      },
+      "rule_label_rates": {
+        "car_following": 0.13143090903759003,
+        "crowded": 0.2111164927482605,
+        "cutin_active": 0.02004246972501278,
+        "cutout_active": 0.029504898935556412,
+        "merging": 0.29434117674827576,
+        "near_intersection": 0.01002123486250639,
+        "on_curve": 0.030026450753211975,
+        "roundabout_near": 0.0012666244292631745
+      },
+      "share": 0.1489201169480336,
+      "size": 26843,
+      "soft_entropy_norm_mean": 0.3513660728931427,
+      "soft_top1_mean": 0.6418395042419434,
+      "soft_top2_mass_mean": 0.9490178823471069,
+      "weight_share": 0.1543404439288626
+    },
+    {
+      "difficulty": {
+        "easy": 0.21446298083551635,
+        "hard": 0.4501585550806563,
+        "medium": 0.3353784640838274
+      },
+      "geometry_top3": [
+        [
+          "straight",
+          0.227974631187095
+        ],
+        [
+          "merge",
+          0.21591065765889977
+        ],
+        [
+          "tollgate",
+          0.17289397490693506
+        ]
+      ],
+      "id": 4,
+      "radius_max": 3.47448992729187,
+      "radius_mean": 2.8801875673013604,
+      "radius_p95": 3.380974054336548,
+      "rare_enrichment": {
+        "cutin_active": 0.8229314822454155,
+        "cutout_active": 0.7730019672663604,
+        "roundabout_near": 0.3150798528759243
+      },
+      "rule_label_rates": {
+        "car_following": 0.14766304194927216,
+        "crowded": 0.258169025182724,
+        "cutin_active": 0.018681924790143967,
+        "cutout_active": 0.02943609468638897,
+        "merging": 0.22983592748641968,
+        "near_intersection": 0.049841444939374924,
+        "on_curve": 0.0,
+        "roundabout_near": 0.0066179512068629265
+      },
+      "share": 0.08047666864538892,
+      "size": 14506,
+      "soft_entropy_norm_mean": 0.27902209758758545,
+      "soft_top1_mean": 0.7345585823059082,
+      "soft_top2_mass_mean": 0.9940521717071533,
+      "weight_share": 0.060689087666602595
+    },
+    {
+      "difficulty": {
+        "easy": 0.1521805428484294,
+        "hard": 0.2991765782250686,
+        "medium": 0.548642878926502
+      },
+      "geometry_top3": [
+        [
+          "curve",
+          0.19727813357731017
+        ],
+        [
+          "uturn",
+          0.11916742909423604
+        ],
+        [
+          "straight",
+          0.10349954254345838
+        ]
+      ],
+      "id": 5,
+      "radius_max": 21.228614807128906,
+      "radius_mean": 5.233303327718934,
+      "radius_p95": 9.20320153236389,
+      "rare_enrichment": {
+        "cutin_active": 0.9689167927721204,
+        "cutout_active": 1.3764856739250817,
+        "roundabout_near": 0.17060569522547406
+      },
+      "rule_label_rates": {
+        "car_following": 0.11611771583557129,
+        "crowded": 0.1307944506406784,
+        "cutin_active": 0.021996036171913147,
+        "cutout_active": 0.05241689458489418,
+        "merging": 0.04913845658302307,
+        "near_intersection": 0.10361390560865402,
+        "on_curve": 0.08924214541912079,
+        "roundabout_near": 0.0035834095906466246
+      },
+      "share": 0.14553039927656436,
+      "size": 26232,
+      "soft_entropy_norm_mean": 0.2792348265647888,
+      "soft_top1_mean": 0.7510496973991394,
+      "soft_top2_mass_mean": 0.979138195514679,
+      "weight_share": 0.16622536611803485
+    },
+    {
+      "difficulty": {
+        "easy": 0.5967958987504005,
+        "hard": 0.12143543735982057,
+        "medium": 0.2817686638897789
+      },
+      "geometry_top3": [
+        [
+          "straight",
+          0.10599166933675104
+        ],
+        [
+          "curve",
+          0.10528676706183915
+        ],
+        [
+          "intersection",
+          0.10522268503684716
+        ]
+      ],
+      "id": 6,
+      "radius_max": 4.091414451599121,
+      "radius_mean": 2.8104916636052324,
+      "radius_p95": 3.846317434310913,
+      "rare_enrichment": {
+        "cutin_active": 0.4572916726264484,
+        "cutout_active": 1.6895473562919106,
+        "roundabout_near": 0.009152812495506596
+      },
+      "rule_label_rates": {
+        "car_following": 0.08689522743225098,
+        "crowded": 0.07010573893785477,
+        "cutin_active": 0.010381287895143032,
+        "cutout_active": 0.06433835625648499,
+        "merging": 0.02063441276550293,
+        "near_intersection": 0.008202498778700829,
+        "on_curve": 0.04094841331243515,
+        "roundabout_near": 0.0001922460796777159
+      },
+      "share": 0.08657372219848988,
+      "size": 15605,
+      "soft_entropy_norm_mean": 0.309293270111084,
+      "soft_top1_mean": 0.6841644048690796,
+      "soft_top2_mass_mean": 0.9875789880752563,
+      "weight_share": 0.040073689348611614
+    },
+    {
+      "difficulty": {
+        "easy": 0.4021161698204329,
+        "hard": 0.27365324669622865,
+        "medium": 0.32423058348333844
+      },
+      "geometry_top3": [
+        [
+          "t_intersection",
+          0.21763182157439523
+        ],
+        [
+          "tollgate",
+          0.14347806998287746
+        ],
+        [
+          "roundabout",
+          0.13496070597532597
+        ]
+      ],
+      "id": 7,
+      "radius_max": 15.411323547363281,
+      "radius_mean": 5.739079441027514,
+      "radius_p95": 10.156425857543946,
+      "rare_enrichment": {
+        "cutin_active": 0.344243331150018,
+        "cutout_active": 1.4215658134802531,
+        "roundabout_near": 5.863182714534653
+      },
+      "rule_label_rates": {
+        "car_following": 0.08390042930841446,
+        "crowded": 0.17833779752254486,
+        "cutin_active": 0.007814900949597359,
+        "cutout_active": 0.05413355678319931,
+        "merging": 0.09158361703157425,
+        "near_intersection": 0.23940818011760712,
+        "on_curve": 0.10932080447673798,
+        "roundabout_near": 0.1231505498290062
+      },
+      "share": 0.1263626831473889,
+      "size": 22777,
+      "soft_entropy_norm_mean": 0.23500055074691772,
+      "soft_top1_mean": 0.8097005486488342,
+      "soft_top2_mass_mean": 0.9907734990119934,
+      "weight_share": 0.10763968537670582
+    }
+  ],
+  "data": {
+    "fitted_at": "2026-09-27T10:09:25+00:00",
+    "git_hash": "4389b58",
+    "history_storage": "per_frame_v2",
+    "obs_fingerprint": "v2-6a4d5de3f669",
+    "obs_fingerprint_current": "v2-6a4d5de3f669",
+    "rows": 180251,
+    "rows_from": "datasets/BTC20260926-2343_expert5k/hard_sidecar.npz",
+    "rows_from_ckpt": {
+      "bytes": 9109350,
+      "mtime": "2026-09-27T03:47:09+00:00",
+      "path": "runs/BTC20260927-1100_stageB/stage_b/final.pt",
+      "sha256": "af97b3a01b03462ae1162a4e9a8e7fd9c612fa3727367f58cfebf3a9c6c2ec24"
+    },
+    "rows_from_hard": 180251,
+    "rows_from_total": 360501,
+    "rows_total": 180251,
+    "schema_version": 2,
+    "seed": 0,
+    "source": "datasets/BTC20260926-2343_expert5k"
+  },
+  "fallback": {
+    "activity_stats": [
+      "od_present_count",
+      "od_interaction",
+      "ego_maneuver"
+    ],
+    "p_active": null,
+    "two_stage_available": true,
+    "two_stage_command": "tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> --two-stage --out config/clusters/cluster_v1.npz --report config/clusters/cluster_v1.report.json"
+  },
+  "feature_contract": {
+    "dims_total": 47,
+    "dropped": [
+      "ld（全部）",
+      "od cos_theta/sin_theta/length/width/type_id",
+      "others speed_limit/signal",
+      "nav checkpoints/reserved/route_completion"
+    ],
+    "ego": {
+      "dims": 8,
+      "keep": "all"
+    },
+    "frame": "current-frame obs only（禁用 latent/历史）",
+    "name": "clusters.feature.v2",
+    "nav": {
+      "cmd_one_hot": 3,
+      "labels": [
+        "forward",
+        "left",
+        "right"
+      ],
+      "source_slice": "nav[..., 4:7]（checkpoints 0:4 / reserved 7:10 / route_completion 10 丢弃）"
+    },
+    "od": {
+      "dims": 9,
+      "feature_dims": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "pick": {
+        "distance": "sqrt(dx^2 + dy^2)",
+        "distance_top": 3,
+        "pad": "不足 6 个 → 零填充",
+        "presence_rule": "od_presence == 1",
+        "slot_order": "TTC-3（urgency 升序）→ 距离-3（dist 升序）；并列按槽位下标升序",
+        "ttc_cap_s": 5.0,
+        "ttc_formula": "min(TTC, 5.0)；TTC = dx / (-vx) 当 dx>0 且 vx<-1e-3，否则 inf（与 env/obs/od.py 槽位分配同公式、同参数；本模块内置向量化实现）",
+        "ttc_top": 3
+      },
+      "slots": 16,
+      "source": "od + od_presence（fresh 观测；presence=0 的陈旧槽不参与）"
+    },
+    "order": [
+      "ego",
+      "od_top6",
+      "nav_cmd",
+      "road_class"
+    ],
+    "road_class": {
+      "one_hot": 12,
+      "source_slice": "others[..., 16:28]"
+    }
+  },
+  "fit_params": {
+    "activity_clamped": null,
+    "alpha": 0.75,
+    "balanced_split": false,
+    "cap_ratio": 0.15,
+    "density_k": 16,
+    "feature_contract": "clusters.feature.v2",
+    "iterations": 7,
+    "max_iters": 12,
+    "max_rows": 0,
+    "max_share": 0.15,
+    "min_share": 0.08,
+    "natural": false,
+    "objective": 7478486.676078633,
+    "p_active": null,
+    "pca_dim": 32,
+    "pca_dim_actual": 32,
+    "postprocess_log": [
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 8554
+      },
+      {
+        "cluster": 6,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "split",
+        "size_before": 28665
+      },
+      {
+        "cluster": 8,
+        "op": "merge_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "merge_tiny",
+        "size_before": 11616
+      },
+      {
+        "cluster": 6,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 3,
+        "op": "split",
+        "size_before": 29455
+      },
+      {
+        "cluster": 6,
+        "op": "merge_to_k"
+      },
+      {
+        "cluster": 5,
+        "op": "split",
+        "size_before": 31921
+      },
+      {
+        "cluster": 5,
+        "op": "merge_to_k"
+      },
+      {
+        "cluster": 3,
+        "op": "merge_tiny",
+        "size_before": 10215
+      },
+      {
+        "cluster": 5,
+        "op": "split_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "split",
+        "size_before": 28535
+      },
+      {
+        "cluster": 0,
+        "op": "merge_to_k"
+      },
+      {
+        "cluster": 0,
+        "op": "split",
+        "size_before": 33242
+      },
+      {
+        "cluster": 6,
+        "op": "merge_to_k"
+      }
+    ],
+    "restarts": 2,
+    "rows_from": "datasets/BTC20260926-2343_expert5k/hard_sidecar.npz",
+    "seed": 0,
+    "two_stage": false,
+    "two_stage_max_bucket": 0.65
+  },
+  "flag": false,
+  "flag_reason": "稀有富集达标：roundabout_near 5.86× @ cluster 7",
+  "generated_at": "2026-09-27T10:09:26+00:00",
+  "k": 8,
+  "mode": "flat",
+  "objective": {
+    "iterations": 7,
+    "value": 7478486.676078633
+  },
+  "postprocess_log": [
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 8554
+    },
+    {
+      "cluster": 6,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "split",
+      "size_before": 28665
+    },
+    {
+      "cluster": 8,
+      "op": "merge_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "merge_tiny",
+      "size_before": 11616
+    },
+    {
+      "cluster": 6,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 3,
+      "op": "split",
+      "size_before": 29455
+    },
+    {
+      "cluster": 6,
+      "op": "merge_to_k"
+    },
+    {
+      "cluster": 5,
+      "op": "split",
+      "size_before": 31921
+    },
+    {
+      "cluster": 5,
+      "op": "merge_to_k"
+    },
+    {
+      "cluster": 3,
+      "op": "merge_tiny",
+      "size_before": 10215
+    },
+    {
+      "cluster": 5,
+      "op": "split_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "split",
+      "size_before": 28535
+    },
+    {
+      "cluster": 0,
+      "op": "merge_to_k"
+    },
+    {
+      "cluster": 0,
+      "op": "split",
+      "size_before": 33242
+    },
+    {
+      "cluster": 6,
+      "op": "merge_to_k"
+    }
+  ],
+  "rare": {
+    "details": {
+      "cutin_active": {
+        "cluster_rates": [
+          0.017865151166915894,
+          0.055125489830970764,
+          0.023273011669516563,
+          0.02004246972501278,
+          0.018681924790143967,
+          0.021996036171913147,
+          0.010381287895143032,
+          0.007814900949597359
+        ],
+        "global_rate": 0.02270167710581356,
+        "max_cluster": 1,
+        "max_enrichment": 2.4282562726105357,
+        "max_rate": 0.055125489830970764
+      },
+      "cutout_active": {
+        "cluster_rates": [
+          0.023882493376731873,
+          0.04771023616194725,
+          0.00970071367919445,
+          0.029504898935556412,
+          0.02943609468638897,
+          0.05241689458489418,
+          0.06433835625648499,
+          0.05413355678319931
+        ],
+        "global_rate": 0.03808023256459049,
+        "max_cluster": 6,
+        "max_enrichment": 1.6895473562919106,
+        "max_rate": 0.06433835625648499
+      },
+      "roundabout_near": {
+        "cluster_rates": [
+          0.0007848707027733326,
+          0.024568121880292892,
+          0.005655124317854643,
+          0.0012666244292631745,
+          0.0066179512068629265,
+          0.0035834095906466246,
+          0.0001922460796777159,
+          0.1231505498290062
+        ],
+        "global_rate": 0.021004044360364158,
+        "max_cluster": 7,
+        "max_enrichment": 5.863182714534653,
+        "max_rate": 0.1231505498290062
+      }
+    },
+    "enrichment_min": 3.0,
+    "global_rates": {
+      "car_following": 0.11931140465240138,
+      "crowded": 0.19291987284397868,
+      "cutin_active": 0.02270167710581356,
+      "cutout_active": 0.03808023256459049,
+      "merging": 0.16985758747524285,
+      "near_intersection": 0.10373312769415981,
+      "on_curve": 0.10989675508041565,
+      "roundabout_near": 0.021004044360364158
+    },
+    "labels": [
+      "cutin_active",
+      "cutout_active",
+      "roundabout_near"
+    ],
+    "max_enrichment": 5.863182714534653,
+    "max_enrichment_cluster": 7,
+    "max_enrichment_label": "roundabout_near"
+  },
+  "size": {
+    "capacity_bounds": {
+      "max_share": 0.15,
+      "min_share": 0.08
+    },
+    "capacity_ok": true,
+    "capacity_weighted_shares": [
+      0.18815051620646966,
+      0.14364459647214894,
+      0.13923661488256403,
+      0.1543404439288626,
+      0.060689087666602595,
+      0.16622536611803485,
+      0.040073689348611614,
+      0.10763968537670582
+    ],
+    "counts": [
+      26756,
+      24544,
+      22988,
+      26843,
+      14506,
+      26232,
+      15605,
+      22777
+    ],
+    "max_share": 0.1489201169480336,
+    "min_share": 0.08047666864538892,
+    "share_entropy_norm": 0.9893929785537482,
+    "shares": [
+      0.1484374566576607,
+      0.13616568007944477,
+      0.12753327304702886,
+      0.1489201169480336,
+      0.08047666864538892,
+      0.14553039927656436,
+      0.08657372219848988,
+      0.1263626831473889
+    ]
+  },
+  "soft_target": {
+    "examples": [
+      {
+        "assigned": 2,
+        "kind": "face",
+        "row": 24998,
+        "top1_hard_match": true,
+        "top3": [
+          [
+            2,
+            0.9917546510696411
+          ],
+          [
+            6,
+            0.008245349861681461
+          ],
+          [
+            7,
+            0.0
+          ]
+        ]
+      },
+      {
+        "assigned": 3,
+        "kind": "boundary",
+        "row": 18303,
+        "top1_hard_match": true,
+        "top3": [
+          [
+            3,
+            0.4281105399131775
+          ],
+          [
+            6,
+            0.42810821533203125
+          ],
+          [
+            0,
+            0.14378124475479126
+          ]
+        ]
+      }
+    ],
+    "gap_p05": 0.0064434972813153905,
+    "gap_p50": 0.05624593075779822,
+    "top1_mean": 0.7119718194007874,
+    "top2_mass_mean": 0.9715026021003723
+  },
+  "weight": {
+    "clip_high_frac": 0.0,
+    "clip_low_frac": 0.10321163266777993,
+    "max": 6.43192184268301,
+    "mean": 1.0295846905388972,
+    "min": 0.1,
+    "p50": 1.0
+  }
+}

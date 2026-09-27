@@ -163,6 +163,40 @@ rollout（6 步）
 - **调用契约**：`pipeline.clusters.load(path) → ClusterSpec`；`assign_hard/soft_targets_from_obs(obs_batch)`；
   `od_top6_indices(od, presence)`（契约 v2 的确定性 top6 选择；紧迫度与 `env/obs/od.py` 槽位分配同公式、同参数）。
 
+### 4.2 双分支 Stage B 与 hard 簇（lane T，2026-09-27 定稿）
+
+- **唯一生产监督 = hard 簇**：`cluster_hard_<北京戳>.npz` 必须由
+  `tools/fit_clusters.py --bc-dir <BC_DIR> --rows-from <BC_DIR>/hard_sidecar.npz`（**只在难例
+  top-50% 行上拟合**，spec 的 `data_fingerprint.rows_from` 即 provenance）产出；
+  全量 `cluster_v2*` 仅历史工件，**不参与任何训练损失/标签**——双分支下 `--cluster-config`
+  整段跳过；specific 段拿到无 `rows_from` 的 spec 直接 fail-fast。
+- **流程（四条命令，顺序固定）**：
+  1. `tools/mine_hard.py --ckpt <primary.pt> --bc-dir <BC_DIR> --out <BC_DIR>/hard_sidecar.npz`
+     （冻结 primary 逐行 IL 误差；主口径 = **动作加权误差** `w·mean|μ−专家首步动作|`，
+     `w = train_weight×配平`；难例 = top-50%，排序键 `(-err_weighted, -err_l1, 行号升序)`；
+     sidecar 记录参照 ckpt sha256 / 数据集指纹 / seed / 阈值，训练侧只读 + 严格校验）；
+     Stage B 侧对应 `--two-branch --mine-only`（primary + 挖掘后停止，落 `primary.pt` + sidecar）。
+  2. `tools/fit_clusters.py --rows-from <sidecar> --cluster-version hard_<ts> --out config/clusters/cluster_hard_<ts>.npz`
+     （k=8 固定，沿用容量约束/体检口径）。
+  3. `tools/annotate_clusters.py --dataset <BC_DIR> --cluster-config config/clusters/cluster_hard_<ts>.npz`
+     （sidecar = `cluster_vhard_<ts>_assignments.npz`，严格校验）。
+  4. `tools/diagnostics/cluster_survey.py --spec config/clusters/cluster_hard_<ts>.npz
+     --out runs/BTC<戳>_cluster_survey_hard`（**用户先审阅聚类结果才放行 Stage A/B**）。
+- **训练（双分支，`--two-branch`）**：primary 段（**全部训练行**，`router_coef=0`）→ 冻结
+  primary 的「策略头/专家」（`policy.` + `plan_head.moe.primary.`；**主干可继续训**）→
+  specific 段（数据口径 = 难例行做动作/轨迹/8 路 CE；二值门控 `p_hard` CE 在**全体样本**上；
+  **hard 帧走 specific 8 路、easy 帧只走 primary（硬切，不做软混合/掺样）**）。
+- **val 口径**：训练 = train-dir **全部行** + val-dir **全部行**（`--val-dir` 或 train-dir 同级
+  `*_expert500val` 自动探测）；缺 val-dir → 告警回退 legacy 按 episode 比例切分。
+- **TB（保留集 = 显示集）**：`router/cluster/{ce,acc}`（8 路，只算难例）、
+  `router/gate/{ce,acc,hard_rate}`（二值，全样本）、`loss/planner/specific/router_cluster`、
+  `loss/planner/<phase>/gate`（train + `val/` 孪生；`acc_majority` 删除）。
+- **DAgger-lite**：`tools/dagger_collect.py`（失败场景池 = `--from-eval episodes.csv` 的
+  `success=False`；复用 `collect_expert` 采集/过滤/写出流水线，多核 `--workers`；冻结 primary
+  做 shadow 查询 → 逐行 IL 误差 + 病态过滤 stuck/yaw_outlier 写进 `dagger.json`）。
+  **未做（需用户决定）**：MetaDrive 单 engine 限制下，策略访问状态上的专家实测标签需要影子 env
+  或解析动作映射；当前为"专家 roll-out 标签 + 策略 shadow 查询"近似，执行式 DAgger roll-in 待后续。
+
 ---
 
 ## 5. 训练与 IL 度量

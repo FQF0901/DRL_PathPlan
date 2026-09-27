@@ -13,7 +13,13 @@
 3. 家族 = **同一 run 内 tag 后缀**：多线族逐 sub 写 `add_scalar("<main>/<sub>")`
    （TB 自动并成一张多线图）；**不再用 torch `add_scalars`**（会建 `<main>_<sub>/` sub-run 目录）。
 4. router 只保留"选得准不准"：**硬标签**（聚类 top-1，sidecar `cluster_v<k>_assignments.npz`）
-   的 CE/acc/acc_majority；软目标 KL/温度/专家混合权重路径已删除（lane B B3）。
+   的 CE/acc；软目标 KL/温度/专家混合权重路径已删除（lane B B3）。
+5. **lane T 双分支**（2026-09-27）：router 家族拆成两套 KPI ——
+   `router/cluster/{ce,acc}` = 8 路 hard 簇标签（**只算难例**，唯一生产监督 =
+   `cluster_hard_<ts>.npz`，全量 `cluster_v2*` 仅历史工件）；
+   `router/gate/{ce,acc,hard_rate}` = 二值难例门控（**全样本** CE；`hard_rate` = batch 难例
+   加权占比，替代无意义的 `acc_majority`）。损失侧新增
+   `loss/planner/specific/router_cluster` 与 `loss/planner/<phase>/gate`（`loss/…` 只放训练目标）。
 
 回退：`TrainingMonitor(legacy_tags=True)` 或 CLI `--monitor-legacy-tags`（默认关）=
 旧口径（全部 tag 原样落盘 + 旧多线分组），仅供对比/排查旧 run。
@@ -46,18 +52,24 @@ Stage A 的 loss/ADE/FDE/AUC/ego KPI 都在**验证子集**（`--val-frac` 留�
 
 | tag（canonical CSV） | TB 形态 | 物理意义 |
 | --- | --- | --- |
-| `loss/planner/<phase>/total` | `loss/planner/<phase>` → total/traj/action/router | 相位总损失（train） |
-| `loss/planner/<phase>/{traj,action,router}` | 同上 | 轨迹辅助 / 动作主 / router CE 分解 |
-| `val/loss/planner/<phase>/{total,traj,action,router}` | `val/loss/planner/<phase>` → 4 项 | 留出集同族损失 |
+| `loss/planner/<phase>/total` | `loss/planner/<phase>` → total/traj/action/router/router_cluster/gate | 相位总损失（train） |
+| `loss/planner/<phase>/{traj,action,router}` | 同上 | 轨迹辅助 / 动作主 / router CE 分解（`router` 为 legacy alias） |
+| `loss/planner/specific/router_cluster` | 同上 | specific 段 8 路 hard 簇 CE（**只算难例**；lane T） |
+| `loss/planner/<phase>/gate` | 同上 | 二值难例门控 CE（specific 段；**全样本**；lane T） |
+| `val/loss/planner/<phase>/{total,traj,action,router}` | `val/loss/planner/<phase>` → 同族 | 留出集同族损失 |
 | `ego/traj/mae_m/h{k}` | `ego/traj/mae_m` → h1..h6 | 6 点 rollout 逐 horizon 加权 MAE（m，train） |
 | `val/ego/traj/mae_m/h{k}` | `val/ego/traj/mae_m` → h1..h6 | 同上（留出） |
 | `ego/traj/fde_m` / `val/ego/traj/fde_m` | 标量 | 末点 FDE（m，加权，train / 留出） |
 | `ego/action/err_weighted` / `val/ego/action/err_weighted` | 标量 | 首步动作加权误差（L1，train / 留出） |
-| `router/ce` / `val/router/ce` | 标量 | 硬标签交叉熵（聚类 top-1；train / 留出） |
-| `router/acc` / `val/router/acc` | 标量 | 硬标签 top-1 准确率 |
-| `router/acc_majority` / `val/router/acc_majority` | 标量 | **多数类占比基线**（"无脑选大类"；解释 acc 用） |
+| `router/cluster/ce` / `val/router/cluster/ce` | `router/cluster` → ce/acc | 8 路 hard 簇硬标签交叉熵（**只算难例**；train / 留出） |
+| `router/cluster/acc` / `val/router/cluster/acc` | 同上 | 8 路 hard 簇 top-1 准确率（难例口径） |
+| `router/gate/ce` / `val/router/gate/ce` | `router/gate` → ce/acc/hard_rate | 二值难例门控交叉熵（**全样本**；train / 留出） |
+| `router/gate/acc` / `val/router/gate/acc` | 同上 | 门控二值准确率（基线 = `hard_rate`） |
+| `router/gate/hard_rate` / `val/router/gate/hard_rate` | 同上 | batch 难例**加权**占比（替代 `acc_majority`；解释门控 acc 用） |
 
-`<phase>` = primary | specific；留出集 = 按 episode 留出（与 Stage A 同 `--seed/--val-frac`）。
+`<phase>` = primary | specific；留出集 = 独立 val-dir（`--val-dir` / train-dir 同级
+`*_expert500val`，**train-dir 全部行 + val-dir 全部行**）或 legacy 按 episode 比例切分
+（缺 val-dir 时告警回退）。`acc_majority` 已删除（保留集 = TB 显示集）。
 
 ### 评测（`tools/test.sh` / `pipeline/eval_runner.py`）
 

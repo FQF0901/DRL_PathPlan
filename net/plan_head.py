@@ -55,6 +55,13 @@ class PlanHead(nn.Module):
             nn.GELU(),
             nn.Linear(max(8, hidden // 2), self.ego_next_dim),
         )
+        #: 二值难例门控头（lane T）：``hard_logit`` → ``p_hard = sigmoid``；训练侧对
+        #: **全体样本**做二值 CE，推理侧 ``p_hard > 0.5`` 硬切 specific 分支（见 MoEBlock.hard_mask）。
+        self.gate = nn.Sequential(
+            nn.Linear(hidden, max(8, hidden // 2)),
+            nn.GELU(),
+            nn.Linear(max(8, hidden // 2), 1),
+        )
 
     def forward(
         self,
@@ -64,10 +71,23 @@ class PlanHead(nn.Module):
         others_ctx: Tensor,
         nav_token: Tensor,
         signal_token: Tensor,
+        hard_mask: Tensor | None = None,
+        hard_switch: bool = False,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-        """返回 ``(latent (B,H), ego_next (B,EGO_NEXT_DIM), moe_aux)``。"""
+        """返回 ``(latent (B,H), ego_next (B,EGO_NEXT_DIM), moe_aux)``。
+
+        ``hard_mask (B,)``（可选，lane T）：1 = 该样本走 specific 8 路混合，0 = 只走 primary。
+        ``hard_switch=True`` 且未显式传 ``hard_mask`` 时，用门控预测 ``sigmoid(hard_logit)>0.5``
+        硬切（推理侧，单遍前向）；训练侧按 hard 标签显式传入。
+        ``moe_aux["hard_logit"] (B,1)`` = 二值难例门控 logits（全体样本都有）。
+        """
         pooled = torch.cat([ego_ctx, od_pool, ld_pool, others_ctx, nav_token, signal_token], dim=-1)
         fused = self.fusion(pooled)
-        moe_out, moe_aux = self.moe(fused)
+        hard_logit = self.gate(fused)
+        if hard_mask is None and hard_switch:
+            hard_mask = (torch.sigmoid(hard_logit.reshape(-1)) > 0.5).to(dtype=fused.dtype)
+        moe_out, moe_aux = self.moe(fused, hard_mask=hard_mask)
+        moe_aux["hard_logit"] = hard_logit
+        moe_aux["hard_mask"] = hard_mask  # 实际生效的硬切掩码（显式或门控预测；None = 未启用）
         latent = self.norm(fused + moe_out)
         return latent, self.ego_next(latent), moe_aux

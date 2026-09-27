@@ -724,6 +724,12 @@ def _load_ckpt_model(ckpt: str, config: Mapping[str, Any], device: str = "cpu") 
         raise ValueError(f"ckpt {ckpt!r} 不含可识别的 state_dict（顶层键 {list(payload)[:5]}）")
     filtered, missing, unexpected, shape_mismatch = _filter_checkpoint_state(model, state)
     model.load_state_dict(filtered, strict=False)
+    # lane T：双分支 ckpt（meta.two_branch=true，如 stage_b/bc.pt）→ 推理侧启用门控硬切
+    # （hard 帧走 specific 8 路 / easy 帧只走 primary）；旧 ckpt 无标记 → 保持旧行为。
+    meta = dict(payload.get("meta") or {}) if isinstance(payload, Mapping) else {}
+    if bool(meta.get("two_branch", False)) and hasattr(model, "set_hard_switch"):
+        model.set_hard_switch(True)
+        print("[eval_runner] lane T 双分支：启用门控硬切（p_hard>0.5 → specific 8 路）", flush=True)
     print(
         f"[eval_runner] ckpt 载入 {ckpt}: loaded={len(filtered)}/{len(model.state_dict())} "
         f"ckpt_keys={len(state)} missing={len(missing)} shape_mismatch={len(shape_mismatch)} "

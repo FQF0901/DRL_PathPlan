@@ -36,8 +36,19 @@ from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
 ROOT = Path(__file__).resolve().parents[1]
 
-#: specific 段允许训练的唯一前缀集合（其余全部冻结）
-_SPECIFIC_TRAINABLE = ("plan_head.moe.experts.", "plan_head.moe.router.", "policy.")
+#: specific 段允许训练的模块前缀（其余全部冻结；lane T 用户定稿：主干可继续训，
+#: 只冻结 primary 的策略头/专家 = ``policy.`` + ``plan_head.moe.primary.``）
+_SPECIFIC_TRAINABLE = (
+    "encoders.",
+    "mem_encoder.",
+    "plan_head.fusion.",
+    "plan_head.norm.",
+    "plan_head.ego_next.",
+    "plan_head.gate.",
+    "plan_head.moe.experts.",
+    "plan_head.moe.router.",
+    "plan_head.moe.residual_scale",
+)
 
 
 def _tiny_model() -> DrivingModel:
@@ -55,6 +66,7 @@ def _backward(model: DrivingModel) -> None:
         + out["od_pred"].pow(2).mean()
         + out["router_logits"].pow(2).mean()
         + out["ego_next"].pow(2).mean()
+        + out["hard_logit"].pow(2).mean()  # lane T 二值门控头
     )
     loss.backward()
 
@@ -86,18 +98,23 @@ def test_primary_phase_freeze_prefixes_match_v2_modules() -> None:
         assert any(g is not None for g in grads), f"{prefix} 组内无任何梯度张量"
 
 
-def test_specific_phase_only_experts_router_policy_trainable() -> None:
-    """specific 段：只训 specific experts + router + policy（primary 主干全冻）。"""
+def test_specific_phase_freezes_primary_policy_head_and_experts() -> None:
+    """specific 段（lane T）：冻结 primary 策略头/专家（``policy.`` + ``plan_head.moe.primary.``），
+    主干 + 8 specific experts + router + 二值门控可继续训。"""
     model = _tiny_model()
     apply_freeze_prefixes(model, _SPECIFIC_PHASE_FREEZE)
     trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     expected = {name for name, _ in model.named_parameters() if name.startswith(_SPECIFIC_TRAINABLE)}
-    assert trainable == expected and trainable, "specific 段可训练集合必须恰为 experts+router+policy"
+    assert trainable == expected and trainable, "specific 段可训练集合必须恰为 主干+experts+router+gate"
+    assert any(n.startswith("encoders.") for n in trainable), "主干可继续训"
     assert any(n.startswith("plan_head.moe.experts.") for n in trainable)
     assert any(n.startswith("plan_head.moe.router.") for n in trainable)
-    assert any(n.startswith("policy.") for n in trainable)
+    assert any(n.startswith("plan_head.gate.") for n in trainable)
+    assert not any(
+        n.startswith(("policy.", "plan_head.moe.primary.", "st_gnn.", "value.")) for n in trainable
+    ), "primary 策略头/专家（+WM/value）必须冻结"
     _backward(model)
-    # 训练段冻结组一律无梯度；可训练组内至少一个参数有梯度张量（zero-init 个别参数可为 None）
+    # 冻结组一律无梯度；可训练组内至少一个参数有梯度张量（zero-init 个别参数可为 None）
     for name, parameter in model.named_parameters():
         if name not in trainable:
             assert parameter.grad is None, f"specific 段冻结层 {name} 不应有梯度"

@@ -13,6 +13,27 @@
 | `cluster_v2.report.json` | 体检报告：簇规模/熵/半径、`capacity_ok`（cap 15% / floor 8%）、难度/几何/规则标签占比、稀有富集、soft gap，**含与 v1 的对照** |
 | `cluster_v1.npz` / `cluster_v1.report.json` | **历史 v1**（292 维特征、cap 25%/floor 2%）：全量 c0=84.7%、`capacity_ok=False` → router 退化；保留仅供旧 run 复现，不再使用 |
 | `cluster_v1_two_stage.*` | 历史两段式对照产物 |
+| `cluster_hard_<北京戳>.npz` + `.report.json` | **lane T 生产监督（唯一）**：在**难例 top-50%** 行上拟合（`fit_clusters --rows-from <BC_DIR>/hard_sidecar.npz`，spec 的 `data_fingerprint.rows_from` 即 provenance）；specific 段 8 路 CE 只读它 |
+
+**生产纪律（lane T 定稿，2026-09-27）**：全量 `cluster_v2*` 仅**历史工件**，**不参与任何训练
+损失/标签**；双分支 Stage B 下 `--cluster-config` 整段跳过，specific 的 8 路标签只来自
+`cluster_hard_*`（无 `rows_from` 的 spec → fail-fast）。流程：
+
+```bash
+# 1) 冻结 primary 难例挖掘（Stage B 侧等价：--two-branch --mine-only）
+tools/venv-python tools/mine_hard.py --ckpt <primary.pt> \
+    --bc-dir <BC_DIR> --out <BC_DIR>/hard_sidecar.npz
+# 2) 只在难例子集上拟合（k=8）
+tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> \
+    --rows-from <BC_DIR>/hard_sidecar.npz --cluster-version hard_<ts> \
+    --out config/clusters/cluster_hard_<ts>.npz
+# 3) 数据集 sidecar（cluster_vhard_<ts>_assignments.npz；严格校验）
+tools/venv-python tools/annotate_clusters.py --dataset <BC_DIR> \
+    --cluster-config config/clusters/cluster_hard_<ts>.npz
+# 4) 排查图（用户先审阅聚类结果才放行 Stage A/B）
+tools/venv-python tools/diagnostics/cluster_survey.py \
+    --spec config/clusters/cluster_hard_<ts>.npz --out runs/BTC<戳>_cluster_survey_hard --workers 8
+```
 
 ## 特征契约 v2（`pipeline/clusters.py::FEATURE_CONTRACT_V2`，47 维）
 

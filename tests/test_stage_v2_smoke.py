@@ -170,10 +170,10 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
     for tag in ("loss/planner/primary/total", "loss/planner/primary/traj",
                 "loss/planner/primary/action", "loss/planner/primary/router",
                 "ego/traj/mae_m/h1", "ego/traj/fde_m", "ego/action/err_weighted",
-                "router/ce", "router/acc", "router/acc_majority",
+                "router/cluster/ce", "router/cluster/acc",
                 # 留出集（val/ 命名空间；同族指标）
                 "val/loss/planner/primary/total", "val/ego/traj/mae_m/h1",
-                "val/ego/traj/fde_m", "val/ego/action/err_weighted", "val/router/ce"):
+                "val/ego/traj/fde_m", "val/ego/action/err_weighted", "val/router/cluster/ce"):
         assert tag in tags, f"Stage B 监控序列缺失：{tag}"
     # lane B：旧族（horizon/train/slice/label、val/horizon|slice|label、软目标/专家混合权重、v1 名）一个不留
     assert not [tag for tag in tags

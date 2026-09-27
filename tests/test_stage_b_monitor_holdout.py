@@ -166,7 +166,7 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
         for step in (1, 2):
             assert series[val_tag][step] != series[train_tag][step], (train_tag, step)
     # Tier-1 保留：router 硬标签 KPI + 动作误差主口径 + 末点 FDE
-    for tag in ("router/ce", "router/acc", "router/acc_majority",
+    for tag in ("router/cluster/ce", "router/cluster/acc",
                 "ego/action/err_weighted", "ego/traj/fde_m"):
         assert tag in series, f"保留 tag 缺失：{tag}"
     # 瘦身：旧 tag 族 / 软目标 router / n_updates / count / slice / label 一个不留

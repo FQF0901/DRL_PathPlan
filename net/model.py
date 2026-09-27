@@ -254,6 +254,19 @@ class DrivingModel(nn.Module):
         )
         self.policy = PolicyHead(hidden, action_low, action_high, log_std_init=log_std_init)
         self.value = ValueHead(hidden)
+        #: 推理侧硬切开关（lane T）：True 时 ``forward(hard_mask=None)`` 用二值门控
+        #: ``sigmoid(hard_logit) > 0.5`` 作为 hard_mask（specific 分支只对难例帧激活）。
+        #: 训练侧由 ``pipeline.trainer`` 按 hard 标签显式传入 hard_mask，不受此开关影响。
+        self.hard_switch_enabled = False
+
+    def set_hard_switch(self, enabled: bool = True) -> "DrivingModel":
+        """推理侧开关：启用后 ``forward`` 自动用门控预测硬切 specific 分支（可链式调用）。"""
+        self.hard_switch_enabled = bool(enabled)
+        return self
+
+    def hard_switch_mask(self, hard_logit: Tensor) -> Tensor:
+        """``hard_logit (B,1)`` → ``(B,)`` 二值硬切（0.5 阈值，与训练侧标签口径一致）。"""
+        return (torch.sigmoid(hard_logit.reshape(-1)) > 0.5).to(dtype=torch.float32)
 
     # ---------------------------------------------------------------- 输入解析
     def _mem_from_obs(self, obs: Mapping[str, Tensor]) -> MemBank:
@@ -315,20 +328,26 @@ class DrivingModel(nn.Module):
 
     # ---------------------------------------------------------------- 编码/规划
     def _plan(
-        self, encoded: EncodedMem, nav_token: Tensor, signal_token: Tensor
+        self,
+        encoded: EncodedMem,
+        nav_token: Tensor,
+        signal_token: Tensor,
+        hard_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
         ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
         return self.plan_head(
-            encoded.ego_ctx, od_pool, ld_pool, encoded.others_ctx, nav_token, signal_token
+            encoded.ego_ctx, od_pool, ld_pool, encoded.others_ctx, nav_token, signal_token,
+            hard_mask=hard_mask,
+            hard_switch=(hard_mask is None and self.hard_switch_enabled),
         )
 
-    def encode(self, obs: Mapping[str, Tensor]) -> dict[str, object]:
+    def encode(self, obs: Mapping[str, Tensor], hard_mask: Tensor | None = None) -> dict[str, object]:
         """观测 → mem/编码 mem/plan-head latent（不跑递归 rollout）。"""
         mem = self._mem_from_obs(obs)
         nav_token, signal_token = self._context_tokens(obs, mem.batch)
         encoded = self.mem_encoder.encode(self.encoders, mem)
-        latent, ego_next, moe_aux = self._plan(encoded, nav_token, signal_token)
+        latent, ego_next, moe_aux = self._plan(encoded, nav_token, signal_token, hard_mask=hard_mask)
         return {
             "mem": mem,
             "encoded": encoded,
@@ -341,7 +360,11 @@ class DrivingModel(nn.Module):
         }
 
     def plan_step(
-        self, encoded_mem: EncodedMem, nav_token: Tensor, signal_token: Tensor
+        self,
+        encoded_mem: EncodedMem,
+        nav_token: Tensor,
+        signal_token: Tensor,
+        hard_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         """**公开单步 plan head 入口**（rollout / Stage A 教师强制共用）。
 
@@ -349,10 +372,12 @@ class DrivingModel(nn.Module):
         返回 ``(latent, ego_next, moe_aux)``；Stage A 用 ``ego_next`` 监督"下一 ego 特征"，
         让 plan head/MoE 在教师强制路径中保持梯度（design-v1.2 §2.3 方案①）。
         """
-        return self._plan(encoded_mem, nav_token, signal_token)
+        return self._plan(encoded_mem, nav_token, signal_token, hard_mask=hard_mask)
 
     # ---------------------------------------------------------------- rollout
-    def _rollout(self, encoded: dict[str, object], action0: Tensor) -> dict[str, Tensor]:
+    def _rollout(
+        self, encoded: dict[str, object], action0: Tensor, hard_mask: Tensor | None = None
+    ) -> dict[str, Tensor]:
         """6 步递归 rollout（拷贝隔离 + 合成帧 detach + action/pose 链可微）。
 
         ``action0`` = 传入的 ``action_mu``（第 1 个计划动作；与 cheap path 同一计算）。
@@ -425,7 +450,7 @@ class DrivingModel(nn.Module):
             # (e) 下一轮 plan head（最后一步之后不需要）
             if k < self.rollout_steps:
                 enc = self.mem_encoder.encode(self.encoders, mem)
-                latent, ego_next, _ = self._plan(enc, nav_token, signal_token)
+                latent, ego_next, _ = self._plan(enc, nav_token, signal_token, hard_mask=hard_mask)
                 action, _ = self.policy(latent)
 
         return {
@@ -446,6 +471,7 @@ class DrivingModel(nn.Module):
         rollout: bool = True,
         world_model: bool = True,
         wm_detach: bool | None = None,
+        hard_mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """完整前向：策略/价值/路由 + （可选）递归 rollout 与 t0 帧 OD/LD 预测。
 
@@ -457,10 +483,15 @@ class DrivingModel(nn.Module):
         但**不返回** ``od_pred/ld_pred/od_presence_pred/od_entry_pred``。
 
         ``wm_detach``：仅为兼容旧签名保留，**no-op**（v2 的合成帧 detach 固定生效）。
+
+        ``hard_mask (B,)``（lane T 双分支）：1 = 该样本走 specific 8 路专家混合，0 = 只走
+        primary（硬切）。``None`` 且 :attr:`hard_switch_enabled` 为 True 时，自动用二值门控
+        ``sigmoid(hard_logit) > 0.5`` 硬切（推理侧）；训练侧按 hard 标签显式传入。
         """
-        encoded = self.encode(obs)
-        latent: Tensor = encoded["latent"]
+        # 硬切掩码：显式优先；推理开关打开且未显式传入 → plan head 内部用门控预测（单遍前向）
+        encoded = self.encode(obs, hard_mask=hard_mask)
         moe_aux: dict[str, Tensor] = encoded["moe_aux"]
+        latent: Tensor = encoded["latent"]
         action_mu, action_logstd = self.policy(latent)
         out: dict[str, Tensor] = {
             "action_mu": action_mu,
@@ -468,14 +499,18 @@ class DrivingModel(nn.Module):
             "value": self.value(latent),
             "router_logits": moe_aux["router_logits"],
             "expert_weights": moe_aux["expert_weights"],
+            "hard_logit": moe_aux["hard_logit"],
             "latent": latent,
             "ego_next": encoded["ego_next"],
         }
+        effective_mask = moe_aux.get("hard_mask")
+        if effective_mask is not None:
+            out["hard_mask"] = effective_mask
         if not rollout:
             if world_model:
                 raise ValueError("world_model=True 需要 rollout=True（多步预测是 rollout 的产物）")
             return out
-        rolled = self._rollout(encoded, action_mu)
+        rolled = self._rollout(encoded, action_mu, hard_mask=hard_mask)
         out["traj_xy"] = rolled["traj_xy"]
         out["traj_theta"] = rolled["traj_theta"]
         out["plan"] = rolled["plan"]

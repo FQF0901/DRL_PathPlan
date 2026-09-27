@@ -86,6 +86,7 @@ class MoEBlock(nn.Module):
         x: Tensor,
         router_input: Tensor | None = None,
         gates: Tensor | None = None,
+        hard_mask: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """``x (B,H)`` -> ``(out (B,H), aux)``。
 
@@ -93,12 +94,18 @@ class MoEBlock(nn.Module):
             x: MoE 输入（也是默认的 router 输入）。
             router_input: 覆盖 router 输入（默认等于 ``x``）。
             gates: 显式门控 ``(B,E)``，覆盖 top-2 softmax（测试/消融用）。
+            hard_mask: 可选 ``(B,)`` 二值硬切（lane T 双分支）：**1 = 该样本走 specific
+                8 路专家混合，0 = 只走 primary（specific 分支输出严格置 0，不做软混合）**。
+                ``None``（默认）= 旧行为（specific 分支恒激活）。
         """
         logits = self.router(x if router_input is None else router_input)
         weights = top_k_softmax(logits, self.top_k) if gates is None else gates
         primary_out = self.primary(x)
         expert_stack = torch.stack([expert(x) for expert in self.experts], dim=1)
         mixed = (weights.unsqueeze(-1) * expert_stack).sum(dim=1)
+        if hard_mask is not None:
+            mask = hard_mask.to(dtype=mixed.dtype).reshape(-1, 1)
+            mixed = mixed * mask
         out = primary_out + self.residual_scale * mixed
         aux = {
             "router_logits": logits,

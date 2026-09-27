@@ -195,11 +195,17 @@ _BC_SCALAR_RENAMES: Dict[str, str] = {
     "bc_traj_loss": "loss/planner/{phase}/traj",
     "bc_action_loss": "loss/planner/{phase}/action",
     "bc_router_loss": "loss/planner/{phase}/router",
+    # lane T：specific 段的 8 路 router CE 项 + 二值门控 CE 项（均为训练目标）
+    "bc_router_cluster_loss": "loss/planner/{phase}/router_cluster",
+    "bc_gate_loss": "loss/planner/{phase}/gate",
     "bc_action_err_weighted_mean": "ego/action/err_weighted",
     "bc_traj_fde_m": "ego/traj/fde_m",
-    "bc_router_ce": "router/ce",
-    "bc_router_acc": "router/acc",
-    "bc_router_acc_majority": "router/acc_majority",
+    # lane T：8 路 router KPI（难例口径）与二值门控 KPI（全样本口径；hard_rate 替代 acc_majority）
+    "bc_router_ce": "router/cluster/ce",
+    "bc_router_acc": "router/cluster/acc",
+    "bc_gate_ce": "router/gate/ce",
+    "bc_gate_acc": "router/gate/acc",
+    "bc_hard_rate": "router/gate/hard_rate",
 }
 
 
@@ -239,8 +245,11 @@ _TB_FAMILIES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("od/ade_m", re.compile(r"^(cv_)?h[1-6]$")),
     ("od/fde_m", re.compile(r"^(cv_)?h[1-6]$")),
     ("ego/traj/mae_m", re.compile(r"^h[1-6]$")),
-    ("loss/planner/primary", re.compile(r"^(total|traj|action|router)$")),
-    ("loss/planner/specific", re.compile(r"^(total|traj|action|router)$")),
+    ("loss/planner/primary", re.compile(r"^(total|traj|action|router|router_cluster|gate)$")),
+    ("loss/planner/specific", re.compile(r"^(total|traj|action|router|router_cluster|gate)$")),
+    # lane T：router KPI 家族（同一事件文件内多线并图；val/ 孪生自动分族）
+    ("router/gate", re.compile(r"^(ce|acc|hard_rate)$")),
+    ("router/cluster", re.compile(r"^(ce|acc)$")),
 )
 
 

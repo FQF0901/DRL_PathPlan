@@ -893,13 +893,46 @@ def run_fit(
     out: str | Path = DEFAULT_SPEC,
     report_path: str | Path | None = None,
     dump_targets: str | Path | None = None,
+    rows_from: str | Path | None = None,
     **kwargs: Any,
 ) -> Path:
-    """端到端：读数据集 → 拟合 → 落盘 npz + report.json；返回 report 路径。"""
+    """端到端：读数据集 →（可选难例子集）→ 拟合 → 落盘 npz + report.json；返回 report 路径。
+
+    ``rows_from``（lane T）：难例 sidecar 路径（``tools/mine_hard.py`` 产物）→ **只在该
+    子集行上拟合**（k=8 固定；行数/obs 指纹严格校验），并把 ``rows_from`` 元数据写进
+    report 与 spec.data_fingerprint（可追溯）。**显式参数，不做任何隐式推断**。
+    """
     arrays, meta = load_bc_dataset(bc_dir)
+    row_filter: Dict[str, Any] = {}
+    if rows_from:
+        from pipeline.hard_mining import load_hard_sidecar
+
+        total_rows = int(np.asarray(arrays["ego"]).shape[0])
+        sidecar = load_hard_sidecar(
+            rows_from, rows=total_rows, obs_fingerprint=str(meta.get("obs_fingerprint") or "")
+        )
+        hard = np.asarray(sidecar["hard"]) > 0.5
+        keep = np.flatnonzero(hard)
+        if keep.size < 2:
+            raise ValueError(f"--rows-from 难例行不足（{keep.size}）→ 无法拟合 k=8")
+        arrays = {key: np.asarray(value)[keep] for key, value in arrays.items()}
+        row_filter = {
+            "rows_from": str(rows_from),
+            "rows_from_hard": int(keep.size),
+            "rows_from_total": int(total_rows),
+            "rows_from_ckpt": dict((sidecar.get("meta") or {}).get("ckpt") or {}),
+        }
+        print(
+            f"[cluster] --rows-from {rows_from}：难例行 {keep.size}/{total_rows}"
+            f"（{keep.size / max(1, total_rows):.1%}）→ 只在该子集拟合"
+        )
     result = fit_cluster_spec_from_dataset(
         arrays, meta, dataset_path=str(bc_dir), **kwargs
     )
+    if row_filter:
+        result["report"].setdefault("data", {}).update(row_filter)
+        result["report"].setdefault("fit_params", {})["rows_from"] = str(rows_from)
+        result["spec"].data_fingerprint.update(row_filter)
     spec: ClusterSpec = result["spec"]
     out_path = Path(out)
     spec.save(out_path)
@@ -949,6 +982,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--natural", action="store_true",
                         help="对照审阅：不加容量/份额约束的自然版（cap/floor 1.0/0.0）")
     parser.add_argument("--align-to", type=str, default=None, help="把新簇编号 Hungarian 对齐到旧 spec npz")
+    parser.add_argument("--rows-from", type=str, default=None,
+                        help="lane T：难例 sidecar（mine_hard 产物）→ 只在该子集行上拟合（显式参数）")
     parser.add_argument("--dump-targets", type=Path, default=None,
                         help="可选：把 soft_targets/cluster 物化到该 npz（trainer 也可在线调用）")
     return parser
@@ -984,6 +1019,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             natural=args.natural,
             align_to=args.align_to,
             dump_targets=args.dump_targets,
+            rows_from=args.rows_from,
         )
     except Exception as exc:  # noqa: BLE001 - CLI 失败给出可读原因
         print(f"[cluster] 拟合失败：{exc}", file=sys.stderr)

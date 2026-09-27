@@ -63,6 +63,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from pipeline.hard_mining import ckpt_identity  # noqa: E402
 from pipeline.trainer import (  # noqa: E402
     BCConfig,
     BCDataset,
@@ -219,6 +220,29 @@ def _resolve_specs(args: argparse.Namespace, config: Mapping[str, Any]) -> List[
     if args.limit is not None:
         specs = specs[: max(1, int(args.limit))]
     return specs
+
+
+def _resolve_val_dir(args: argparse.Namespace, bc_dir: Any = None) -> Optional[Path]:
+    """独立留出目录（lane T）：``--val-dir`` 显式优先；否则在 **train-dir 同级**探测
+    ``*_expert500val``（同一数据集族，多个取 mtime 最新）；都没有 → ``None``（调用方告警并
+    回退 legacy 比例切分）。
+
+    只在 train-dir 的同级目录探测（**不扫仓库 datasets/**）：避免测试/临时数据集误用无关的
+    真实 val 集，也避免跨数据集族串用。
+    """
+    explicit = getattr(args, "val_dir", None)
+    if explicit:
+        path = Path(str(explicit))
+        if not path.exists():
+            raise SystemExit(f"[val] --val-dir 不存在：{path}")
+        return path
+    if not bc_dir:
+        return None
+    root = Path(str(bc_dir)).resolve().parent
+    candidates = [item for item in root.glob("*_expert500val") if item.is_dir()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.stat().st_mtime)
 
 
 def _stage_section(config: Mapping[str, Any], stage: str) -> Dict[str, Any]:
@@ -1201,7 +1225,31 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         keys=_bc_channel_keys(),
         step_stride=_BC_STEP_STRIDE,
     )
-    train_idx, val_idx, val_episodes = _episode_split(arrays["episode_id"], float(args.val_frac), int(args.seed))
+    # lane T：与 Stage B 同一 val 口径（train-dir 全部行 + val-dir 全部行；缺 val-dir → legacy 切分）
+    val_dataset = None
+    val_dir = _resolve_val_dir(args, args.bc_dir)
+    if val_dir is not None:
+        val_dataset = BCDataset.load(str(val_dir))
+        validate_bc_dataset(val_dataset, str(val_dir), "A", allow_legacy=_allow_legacy_dataset(args))
+        train_idx = np.arange(dataset.count, dtype=np.int64)
+        val_idx = np.arange(val_dataset.count, dtype=np.int64)
+        val_episodes = np.unique(val_dataset.arrays["episode_id"])
+        val_source = f"dir:{val_dir}"
+        print(
+            f"[stageA] val-dir={val_dir}：train={train_idx.size} 行（train-dir 全部行）· "
+            f"val={val_idx.size} 行（val-dir 全部行 · {val_episodes.size} episodes）",
+            flush=True,
+        )
+    else:
+        train_idx, val_idx, val_episodes = _episode_split(
+            arrays["episode_id"], float(args.val_frac), int(args.seed)
+        )
+        val_source = "episode_split(legacy)"
+        print(
+            "[stageA] 警告：未找到独立 val-dir（--val-dir 或 train-dir 同级 *_expert500val）→ 回退 "
+            "legacy 按 episode 比例切分",
+            flush=True,
+        )
     if train_idx.size < 2:
         raise SystemExit(f"[stageA] 训练帧不足（{train_idx.size}）")
     if val_idx.size == 0:
@@ -1288,15 +1336,22 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     def _frame_weight(batch_indices: np.ndarray) -> "torch.Tensor":
         return _tensor(train_weight_all[batch_indices], dtype=torch.float32)
 
-    def _future_targets(batch_indices: np.ndarray, obs_np: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def _future_targets(
+        batch_indices: np.ndarray,
+        obs_np: Mapping[str, np.ndarray],
+        view: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
         """未来目标（精确查表 + ``wm_valid`` 门控 + 身份匹配）。
 
         键契约（lane A 与本地等价实现一致）：``od_fut/ld_fut/od_mask/ld_mask/valid/wm_valid/
         od_mask_raw/od_presence_fut/od_presence_t0/od_id_fut/od_id_t0/ego_fut``。
         仅当数据集没有 ``od_id`` 时回退 v1 的最近邻槽位匹配。
         """
-        wm_valid = wm_valid_all[batch_indices] if wm_valid_all is not None else None
-        future = windows.build_future(batch_indices, wm_valid=wm_valid)
+        view = view or {}
+        wm_valid_all_local = view.get("wm_valid_all", wm_valid_all)
+        windows_local = view.get("windows", windows)
+        wm_valid = wm_valid_all_local[batch_indices] if wm_valid_all_local is not None else None
+        future = windows_local.build_future(batch_indices, wm_valid=wm_valid)
         has_identity = "od_id_fut" in future and bool(np.any(np.asarray(future["od_id_fut"]) >= 0))
         if not has_identity and bool(args.match_future_slots):
             future = match_future_od_slots(
@@ -1321,6 +1376,33 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         future_source = _materialize_future_targets(
             _future_targets, obs_source, dataset.count, batch_size=batch_size
         )
+
+    def _build_val_view() -> Optional[Dict[str, Any]]:
+        """Stage A 的独立 val 视图（lane T）：val-dir 的全部行按同一窗口/权重口径评估。"""
+        if val_dataset is None:
+            return None
+        val_arrays = val_dataset.arrays
+        return {
+            "dataset": val_dataset,
+            "windows": FrameWindows(
+                val_arrays,
+                val_dataset.alignments,
+                episode_key="episode_id",
+                step_key="step",
+                keys=_bc_channel_keys(),
+                step_stride=_BC_STEP_STRIDE,
+            ),
+            "train_weight_all": row_action_weights(
+                val_dataset, np.arange(val_dataset.count, dtype=np.int64)
+            ),
+            "wm_valid_all": (
+                np.asarray(val_arrays["wm_valid"], dtype=np.float32) if "wm_valid" in val_arrays else None
+            ),
+            "action_all": np.asarray(val_arrays["action"], dtype=np.float32),
+            "traj6_all": np.asarray(val_arrays["traj6"], dtype=np.float32),
+            "obs_source": None,
+            "future_source": None,
+        }
 
     def _wm_predictions(
         obs: Mapping[str, "torch.Tensor"],
@@ -1439,7 +1521,9 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         }
 
     def _prepare_inputs(
-        batch_indices: np.ndarray, timing: Optional[Dict[str, float]] = None
+        batch_indices: np.ndarray,
+        timing: Optional[Dict[str, float]] = None,
+        view: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[
         Dict[str, "torch.Tensor"], Dict[str, np.ndarray], np.ndarray, "torch.Tensor", "torch.Tensor"
     ]:
@@ -1449,18 +1533,24 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         用同一宏 batch 的输入，微批时再切张量/数组（GPU 切片廉价）。
         """
         data_started = time.perf_counter()
-        if obs_source is not None:
-            obs_np = obs_source.obs_batch(batch_indices)
+        view = view or {}
+        obs_source_local = view.get("obs_source", obs_source)
+        future_source_local = view.get("future_source", future_source)
+        dataset_local = view.get("dataset", dataset)
+        weight_all_local = view.get("train_weight_all", train_weight_all)
+        action_all_local = view.get("action_all", action_all)
+        if obs_source_local is not None:
+            obs_np = obs_source_local.obs_batch(batch_indices)
         else:
-            obs_np = dataset.build_obs_batch(batch_indices)
-        if future_source is not None:
-            future = future_source.batch(batch_indices)
+            obs_np = dataset_local.build_obs_batch(batch_indices)
+        if future_source_local is not None:
+            future = future_source_local.batch(batch_indices)
         else:
-            future = _future_targets(batch_indices, obs_np)
-        frame_weight_np = np.asarray(train_weight_all[batch_indices], dtype=np.float32)
+            future = _future_targets(batch_indices, obs_np, view=view)
+        frame_weight_np = np.asarray(weight_all_local[batch_indices], dtype=np.float32)
         obs = _to_tensor(obs_np)
         frame_weight = _tensor(frame_weight_np, dtype=torch.float32)
-        plan = _tensor(action_all[batch_indices], dtype=torch.float32)
+        plan = _tensor(action_all_local[batch_indices], dtype=torch.float32)
         if timing is not None:
             timing["data"] = timing.get("data", 0.0) + time.perf_counter() - data_started
         return obs, future, frame_weight_np, frame_weight, plan
@@ -1582,10 +1672,15 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         return terms
 
     @torch.no_grad()
-    def _evaluate(indices: np.ndarray, limit: int) -> Dict[str, Any]:
+    def _evaluate(
+        indices: np.ndarray, limit: int, view: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
         model.eval()
+        view = view or {}
+        traj6_all_local = view.get("traj6_all", traj6_all)
+        action_all_local = view.get("action_all", action_all)
         eval_idx = np.asarray(indices, dtype=np.int64)[: max(1, int(limit))]
-        obs_eval, future_eval, _, frame_weight_eval, plan_eval = _prepare_inputs(eval_idx)
+        obs_eval, future_eval, _, frame_weight_eval, plan_eval = _prepare_inputs(eval_idx, view=view)
         terms = _forward_terms(obs_eval, future_eval, frame_weight_eval, plan_eval, noise=False)
         od_pred = terms["od_pred"]
         future = terms["future"]
@@ -1606,8 +1701,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         ego = ego_kpi_arrays(
             model(obs, rollout=True, world_model=True, wm_detach=True),
             {
-                "traj6": _tensor(traj6_all[eval_idx], dtype=torch.float32),
-                "action": _tensor(action_all[eval_idx], dtype=torch.float32),
+                "traj6": _tensor(traj6_all_local[eval_idx], dtype=torch.float32),
+                "action": _tensor(action_all_local[eval_idx], dtype=torch.float32),
             },
         )
         w_eval_sum = frame_weight.sum().clamp(min=1e-8)
@@ -1687,6 +1782,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "train_frames": int(train_idx.size),
         "val_frames": int(val_idx.size),
         "val_episodes": int(val_episodes.size),
+        "val_source": str(val_source),
+        "val_dir": (str(val_dir) if val_dir is not None else ""),
         "device": device,
         "epochs": epochs,
         "batch_size": batch_size,
@@ -1717,6 +1814,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         enabled=_monitor_enabled(args, config),
         legacy_tags=_monitor_legacy_tags(args),
     )
+    val_view = _build_val_view()
     rng = np.random.default_rng(int(args.seed))
     if start_epoch:
         if resume_info.get("rng_state"):
@@ -1823,7 +1921,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 break
         train_loss = totals["total"] / max(1, batches)
         loss_curve.append(train_loss)
-        eval_metrics = _evaluate(val_idx, eval_frames)
+        eval_metrics = _evaluate(val_idx, eval_frames, view=val_view)
         last_val = eval_metrics
         counts = {
             "valid_samples": int(sum(item["valid_samples"] for item in eval_metrics["per_horizon"].values())),
@@ -1960,18 +2058,14 @@ _VAL_CONSTANT_KEYS = frozenset(
 #: primary 段冻结：WM（ST-GNN）、value 头、8 个 specific experts
 #: （可训练 = encoders/mem_encoder/plan head（含 primary + router）/policy）
 _PRIMARY_PHASE_FREEZE: Tuple[str, ...] = ("st_gnn.", "value.", "plan_head.moe.experts.")
-#: specific 段冻结：primary 主干（编码器/时序/空间/融合/primary expert/残差尺度）冻结，
-#: 只训练 8 个 specific experts + router + policy head（v1.2 前缀）
+#: specific 段冻结（lane T 用户定稿）：**冻结 primary 的「策略头/专家」**（``policy.`` +
+#: ``plan_head.moe.primary.``），**主干可继续训**（encoders/mem_encoder/fusion/norm/ego_next
+#: 不冻）；可训练 = specific 8 experts + router + 二值门控 + 主干 + residual_scale。
 _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
     "st_gnn.",
     "value.",
-    "encoders.",
-    "mem_encoder.",
-    "plan_head.fusion.",
-    "plan_head.norm.",
-    "plan_head.ego_next.",
     "plan_head.moe.primary.",
-    "plan_head.moe.residual_scale",
+    "policy.",
 )
 
 
@@ -2144,10 +2238,32 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     dataset_contract = validate_bc_dataset(
         dataset, str(args.bc_dir), "B", allow_legacy=_allow_legacy_dataset(args)
     )
-    # 按 episode 留出（与 Stage A 同 seed/val_frac → 同一批留出 episode；val 不参与梯度）。
-    train_idx, val_idx, val_episodes = _episode_split(
-        dataset.arrays["episode_id"], float(args.val_frac), int(args.seed)
-    )
+    # lane T：训练侧 val 口径 = train-dir **全部行** + val-dir **全部行**（默认探测
+    # ``datasets/*_expert500val``）；缺 val-dir → 告警回退 legacy「按 episode 比例切分」。
+    val_dataset = None
+    val_dir = _resolve_val_dir(args, args.bc_dir)
+    if val_dir is not None:
+        val_dataset = BCDataset.load(str(val_dir))
+        validate_bc_dataset(val_dataset, str(val_dir), "B", allow_legacy=_allow_legacy_dataset(args))
+        train_idx = np.arange(dataset.count, dtype=np.int64)
+        val_idx = np.arange(val_dataset.count, dtype=np.int64)
+        val_episodes = np.unique(val_dataset.arrays["episode_id"])
+        val_source = f"dir:{val_dir}"
+        print(
+            f"[stageB] val-dir={val_dir}：train={train_idx.size} 行（train-dir 全部行）· "
+            f"val={val_idx.size} 行（val-dir 全部行 · {val_episodes.size} episodes）",
+            flush=True,
+        )
+    else:
+        train_idx, val_idx, val_episodes = _episode_split(
+            dataset.arrays["episode_id"], float(args.val_frac), int(args.seed)
+        )
+        val_source = "episode_split(legacy)"
+        print(
+            "[stageB] 警告：未找到独立 val-dir（--val-dir 或 datasets/*_expert500val）→ 回退 "
+            "legacy 按 episode 比例切分（默认口径已改为 val-dir 全部行）",
+            flush=True,
+        )
     if val_idx.size == 0:
         print("[stageB] 警告：留出集为空（episode 数过少/val_frac=0）→ 用训练帧自评", flush=True)
         val_idx = train_idx
@@ -2182,6 +2298,8 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     traj_weight = float(args.traj_aux_weight if args.traj_aux_weight is not None else bc_cfg.get("traj_aux_weight", 0.1))
     loss_type = str(args.loss_type if args.loss_type is not None else bc_cfg.get("loss_type", "l2"))
     router_coef = float(args.router_coef if args.router_coef is not None else bc_cfg.get("router_coef", 0.1))
+    # lane T：二值难例门控 CE 权重（specific 段；全样本口径）
+    gate_coef = float(args.gate_coef if args.gate_coef is not None else bc_cfg.get("gate_coef", 0.1))
     # CLI ``--router-temperature`` 保留但忽略（lane B B3：router 监督 = 硬标签 CE，无温度）。
     batch_size = int(
         args.batch_size or (train_cfg.get("bc", {}) or {}).get("batch_size") or DEFAULT_STAGE_BATCH_SIZE
@@ -2203,10 +2321,17 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     history_stride = int(args.history_stride if args.history_stride is not None else dataset.history_stride)
     use_materialized = bool(getattr(args, "materialize", False))
 
+    # ---- lane T：双分支判定（提前：双分支下**绝不加载全量 cluster_v2*** 历史工件）----
+    hard_sidecar_arg = str(getattr(args, "hard_sidecar", "") or "")
+    two_branch = bool(getattr(args, "two_branch", False)) or bool(hard_sidecar_arg)
+    mine_only = bool(getattr(args, "mine_only", False))
+
     # 聚类 lane：router **硬标签**（lane B B3）——sidecar 优先，缺失时在线 argmax 回退；
     # 无 spec/标签 → 跳过 router 损失并记 placeholder（不再使用 (N,8) 软分布/温度）。
+    # lane T 口径（用户定稿）：双分支下**唯一生产监督 = hard 簇**（难例 top-50% 拟合），
+    # 全量 ``cluster_v2*`` 仅历史工件、**不参与任何训练损失/标签** → 这里整段跳过。
     cluster_spec = None
-    cluster_spec_path = str(getattr(args, "cluster_config", "") or "")
+    cluster_spec_path = "" if two_branch else str(getattr(args, "cluster_config", "") or "")
     if cluster_spec_path:
         try:
             from pipeline.clusters import load as load_clusters
@@ -2241,6 +2366,82 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             )
             # 非物化路径同样可用：注入数据集 arrays（BCDataset.targets 直接取）
             dataset.arrays[V2_ROUTER_CLUSTER] = router_cluster_labels.astype(np.int16)
+
+    # ---- lane T：双分支 Stage B（primary 全量 → 冻结 primary 策略头/专家 → 难例 → specific）----
+    hard_flags: Optional[np.ndarray] = None
+    hard_meta: Dict[str, Any] = {}
+    hard_spec = None
+    hard_spec_path = ""
+    hard_labels = None
+    if two_branch:
+        # 难例簇 spec（specific 段 8 路标签）：显式 --hard-cluster-config 优先，否则探测最新
+        hard_spec_path = str(getattr(args, "hard_cluster_config", "") or "")
+        if not hard_spec_path and not (mine_only and not str(getattr(args, "hard_cluster_config", "") or "")):
+            # --mine-only 且未显式给 spec：本步只产出难例 sidecar，**不要求** hard 簇已存在
+            # （否则仓库里已有的 cluster_hard_* 会强制校验 sidecar，把"先挖掘再拟合"的流程卡死）
+            candidates = sorted(Path("config/clusters").glob("cluster_hard_*.npz"))
+            hard_spec_path = str(candidates[-1]) if candidates else ""
+        if hard_spec_path and Path(hard_spec_path).is_file():
+            from pipeline.clusters import assignments_path as _hard_assignments_path
+            from pipeline.clusters import load as _load_hard_spec
+            from pipeline.clusters import load_assignments as _load_hard_labels
+
+            hard_spec = _load_hard_spec(hard_spec_path)
+            if int(getattr(hard_spec, "k", 0)) != 8:
+                raise SystemExit(
+                    f"[stageB] hard cluster spec k={getattr(hard_spec, 'k', 0)} != 8（router 宽度）"
+                )
+            # 生产纪律（用户定稿）：hard 簇必须由 ``fit_clusters --rows-from <难例 sidecar>`` 拟合；
+            # 未带 rows_from 的 spec（如全量 cluster_v2*）不得作为 specific 的 8 路监督 → fail-fast。
+            if not str((getattr(hard_spec, "data_fingerprint", {}) or {}).get("rows_from") or ""):
+                raise SystemExit(
+                    f"[stageB] hard cluster spec 不是难例拟合产物（缺 data_fingerprint.rows_from）："
+                    f"{hard_spec_path}\n全量 cluster_v2* 仅历史工件、不得参与训练损失。正确流程：\n"
+                    "  1) tools/venv-python tools/mine_hard.py --ckpt <primary.pt> --bc-dir <BC_DIR> "
+                    "--out <BC_DIR>/hard_sidecar.npz\n"
+                    "  2) tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> "
+                    "--rows-from <BC_DIR>/hard_sidecar.npz --cluster-version hard_<ts> "
+                    "--out config/clusters/cluster_hard_<ts>.npz\n"
+                    "  3) tools/venv-python tools/annotate_clusters.py --dataset <BC_DIR> "
+                    "--cluster-config config/clusters/cluster_hard_<ts>.npz\n"
+                    "  4) tools/venv-python tools/diagnostics/cluster_survey.py --spec "
+                    "config/clusters/cluster_hard_<ts>.npz --out runs/BTC<ts>_cluster_survey_hard"
+                )
+            hard_labels = _load_hard_labels(args.bc_dir, spec=hard_spec, dataset_meta=dataset.meta)
+            dataset.arrays[V2_ROUTER_CLUSTER] = hard_labels.astype(np.int16)
+            print(
+                f"[stageB] hard 簇标签（唯一生产监督）：sidecar "
+                f"{_hard_assignments_path(args.bc_dir, spec=hard_spec)} 载入 {int(hard_labels.size)} 行"
+                f"（specific 段 8 路 CE 只算难例；禁止在线重算）",
+                flush=True,
+            )
+        elif mine_only:
+            print(
+                "[stageB] --mine-only：未提供 hard 簇 spec → 只跑 primary + 难例挖掘（不进入 specific）",
+                flush=True,
+            )
+        else:
+            raise SystemExit(
+                "[stageB] 双分支需要 hard 簇 spec（--hard-cluster-config 或 "
+                "config/clusters/cluster_hard_*.npz）——全量 cluster_v2* 不得用于 specific 监督。\n"
+                "先跑 --mine-only 产出难例 sidecar，再 fit_clusters --rows-from + annotate_clusters + "
+                "cluster_survey，然后带 --hard-cluster-config 重跑（命令见 pipeline/stages.py 提示）。"
+            )
+        if hard_sidecar_arg:
+            from pipeline.hard_mining import load_hard_sidecar
+
+            side = load_hard_sidecar(
+                hard_sidecar_arg,
+                rows=int(dataset.count),
+                obs_fingerprint=str(dataset.meta.get("obs_fingerprint") or ""),
+            )
+            hard_flags = (np.asarray(side["hard"]) > 0.5).astype(np.float32)
+            hard_meta = dict(side.get("meta") or {})
+            print(
+                f"[stageB] 难例 sidecar={hard_sidecar_arg}：hard={int(hard_flags.sum())}/{hard_flags.size}"
+                f"（ckpt={(hard_meta.get('ckpt') or {}).get('sha256', '')[:12]}）",
+                flush=True,
+            )
 
     obs_source: Optional[MaterializedBCDataset] = None
     if use_materialized:
@@ -2282,8 +2483,16 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "wm_detach": True,
         "history_stride": history_stride,
         "materialize": bool(obs_source is not None),
-        # 按 episode 留出（与 Stage A 同 seed/val_frac → 同一批留出 episode）
+        # lane T：留出口径 = 独立 val-dir（全部行）或 legacy 比例切分
         "val_frac": float(args.val_frac),
+        "val_source": str(val_source),
+        "val_dir": (str(val_dir) if val_dir is not None else ""),
+        "two_branch": bool(two_branch),
+        "hard_sidecar": (hard_sidecar_arg or (str(out_dir / "hard_sidecar.npz") if two_branch else "")),
+        "hard_spec": str(hard_spec_path or ""),
+        "hard_rows": (int(np.count_nonzero(hard_flags > 0.5)) if hard_flags is not None else None),
+        "hard_frac": float(args.hard_frac),
+        "gate_coef": float(gate_coef),
         "train_frames": int(train_idx.size),
         "val_frames": int(val_idx.size),
         "val_episodes": int(val_episodes.size),
@@ -2324,6 +2533,13 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         start_epoch: int = 0,
         optimizer_state: Optional[Mapping[str, Any]] = None,
         rng_state: Optional[Mapping[str, Any]] = None,
+        router_coef_override: Optional[float] = None,
+        hard_flags: Optional[np.ndarray] = None,
+        gate_coef: float = 0.0,
+        hard_switch: bool = False,
+        hard_only_specific: bool = False,
+        cluster_spec_override: Any = None,
+        val_dataset: Any = None,
     ) -> Dict[str, Any]:
         """跑一个 BC 相位：逐 epoch 落盘（step = ``phase_offset + epoch``，全局单调 1..2N）。
 
@@ -2409,6 +2625,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             )
             monitor.flush(step=step)
 
+        phase_spec = cluster_spec if cluster_spec_override is None else cluster_spec_override
         cfg = BCConfig(
             epochs=phase_epochs,
             batch_size=batch_size,
@@ -2417,7 +2634,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             loss_type=loss_type,
             traj_weight=traj_weight,
             action_weight=action_weight,
-            router_coef=router_coef,
+            router_coef=(router_coef if router_coef_override is None else float(router_coef_override)),
             seed=int(args.seed),
             device=device,
             max_batches=args.max_batches,
@@ -2425,10 +2642,15 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             freeze_prefixes=tuple(freeze_prefixes),
             phase=phase,
             history_stride=history_stride,
-            router_cluster_version=(str(cluster_spec.cluster_version) if cluster_spec is not None else ""),
-            router_cluster_k=(int(getattr(cluster_spec, "k", 0)) if cluster_spec is not None else 0),
+            router_cluster_version=(str(phase_spec.cluster_version) if phase_spec is not None else ""),
+            router_cluster_k=(int(getattr(phase_spec, "k", 0)) if phase_spec is not None else 0),
             train_indices=train_idx,
             val_indices=val_idx,
+            val_dataset=val_dataset,
+            hard_flags=hard_flags,
+            gate_coef=float(gate_coef),
+            hard_switch=bool(hard_switch),
+            hard_only_specific=bool(hard_only_specific),
             epoch_callback=_on_epoch,
             start_epoch=int(start_epoch),
             optimizer_state=optimizer_state,
@@ -2466,8 +2688,100 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             start_epoch=min(resume_epoch, primary_epochs),
             optimizer_state=(resume_info.get("optimizer") if mid_primary else None),
             rng_state=(resume_info.get("rng_state") if mid_primary else None),
+            # lane T：双分支下 primary 段不碰 specific 的 8 路 router（标签/门控留给 specific）
+            router_coef_override=(0.0 if two_branch else None),
+            val_dataset=val_dataset,
         )
     )
+
+    # ---- lane T：primary 冻结（总是落 primary.pt，供挖掘/追溯）→ 难例挖掘 ----
+    if two_branch:
+        tail_primary = phase_state.get("primary") or {}
+        save_checkpoint(
+            out_dir / "primary.pt",
+            model,
+            meta={"stage": "B", "phase": "primary", "epoch": primary_epochs},
+            optimizer=tail_primary.get("optimizer"),
+            epoch=primary_epochs,
+            val_metrics=tail_primary.get("val_metrics"),
+            rng_state=capture_rng_state(tail_primary.get("rng")),
+            config_hash=config_hash,
+        )
+        print(f"[stageB] 冻结 primary → {out_dir / 'primary.pt'}（难例挖掘/追溯参照）", flush=True)
+    if two_branch and hard_flags is None:
+        do_mine = True if getattr(args, "mine_hard", None) is None else bool(args.mine_hard)
+        if do_mine:
+            from pipeline.hard_mining import mine_hard_rows, row_il_errors, write_hard_sidecar
+
+            primary_ckpt = out_dir / "primary.pt"
+            errors = row_il_errors(
+                model,
+                dataset,
+                device=device,
+                batch_size=batch_size,
+                logger=print,
+                obs_source=obs_source,
+            )
+            mined = mine_hard_rows(
+                errors["err_l1"], errors["err_weighted"], hard_frac=float(args.hard_frac)
+            )
+            sidecar_path = out_dir / "hard_sidecar.npz"
+            write_hard_sidecar(
+                sidecar_path,
+                hard=mined["hard"],
+                err_l1=errors["err_l1"],
+                err_weighted=errors["err_weighted"],
+                weight=errors["weight"],
+                dataset_dir=str(args.bc_dir),
+                dataset_meta=dataset.meta,
+                ckpt=str(primary_ckpt),
+                cluster_spec=str(hard_spec_path or ""),
+                seed=int(args.seed),
+                hard_frac=float(args.hard_frac),
+                threshold=float(mined["threshold"]),
+                order_rule=str(mined["order_rule"]),
+                tool="pipeline.stages.run_stage_b",
+            )
+            hard_flags = mined["hard"].astype(np.float32)
+            hard_meta = {
+                "ckpt": ckpt_identity(str(primary_ckpt)),
+                "hard_rows": int(mined["hard_rows"]),
+                "total_rows": int(mined["total_rows"]),
+                "threshold": float(mined["threshold"]),
+            }
+            print(
+                f"[stageB] 难例挖掘 → {sidecar_path}（hard={mined['hard_rows']}/{mined['total_rows']}"
+                f" = {mined['hard_rows'] / max(1, mined['total_rows']):.1%}；主口径=动作加权 IL 误差）",
+                flush=True,
+            )
+            metrics["hard_sidecar"] = str(sidecar_path)
+            metrics["hard_rows"] = int(mined["hard_rows"])
+        else:
+            print(
+                "[stageB] 警告：双分支但 --no-mine-hard 且未给 --hard-sidecar → specific 段无难例标签"
+                "（门控/8 路 router 均跳过，仅动作/轨迹）",
+                flush=True,
+            )
+
+    if two_branch and mine_only:
+        # --mine-only：产出 primary.pt + hard_sidecar.npz 后停止（供 fit_clusters/annotate/survey 审阅）
+        metrics["mine_only"] = True
+        if hard_flags is None:
+            raise SystemExit("[stageB] --mine-only 但难例挖掘未执行（检查 --no-mine-hard/异常日志）")
+        metrics["hard_meta"] = dict(hard_meta)
+        metrics["hard_rows"] = int(np.count_nonzero(hard_flags > 0.5))
+        metrics["checkpoint"] = str(out_dir / "primary.pt")
+        _write_json(out_dir / "metrics.json", metrics)
+        print(
+            f"[stageB] --mine-only DONE → {out_dir / 'primary.pt'} + {out_dir / 'hard_sidecar.npz'}"
+            f"（hard={metrics['hard_rows']}/{hard_flags.size}）；"
+            "下一步 fit_clusters --rows-from → annotate_clusters → cluster_survey → 重跑 specific",
+            flush=True,
+        )
+        if monitor is not None:
+            monitor.close()
+        return metrics
+
     metrics["specific"] = _slim_phase_result(
         _run_phase(
             "specific",
@@ -2477,6 +2791,15 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             start_epoch=max(0, resume_epoch - primary_epochs),
             optimizer_state=(resume_info.get("optimizer") if mid_specific else None),
             rng_state=(resume_info.get("rng_state") if mid_specific else None),
+            # lane T：specific = 难例行（动作/轨迹/8 路 CE）+ 全样本二值门控 + 硬切
+            # （8 路监督只来自 hard 簇 spec；two_branch 下 hard_spec 必存在）
+            router_coef_override=(router_coef if two_branch else None),
+            hard_flags=hard_flags,
+            gate_coef=(gate_coef if two_branch else 0.0),
+            hard_switch=two_branch,
+            hard_only_specific=two_branch,
+            cluster_spec_override=(hard_spec if two_branch else None),
+            val_dataset=val_dataset,
         )
     )
     metrics.update(_action_mu_stats(model, dataset, device, batch_size=batch_size, obs_source=obs_source))
@@ -2496,6 +2819,10 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         rng_state=capture_rng_state(tail.get("rng")), config_hash=config_hash,
     )
     metrics["checkpoint"] = str(out_dir / "final.pt")
+    if two_branch:
+        metrics["hard_meta"] = dict(hard_meta)
+        metrics["hard_flags_available"] = bool(hard_flags is not None)
+        metrics["specific_data"] = "hard rows (动作/轨迹/8 路) + 全样本门控 CE"
     _write_json(out_dir / "metrics.json", metrics)
     print(
         f"[stageB] DONE → {out_dir} action_mu_ds={metrics['action_mu_ds_mean']:.3f}m "
@@ -2755,6 +3082,29 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="聚类 lane 冻结 spec（router 软目标；加载失败 → 数据集软目标/跳过）")
     parser.add_argument("--history-stride", type=int, default=None,
                         help="历史/未来查表步距（env step；BC 默认 5 = 0.5 s）")
+    # ---- lane T：训练侧 val 口径 + 双分支 Stage B ----
+    parser.add_argument("--val-dir", type=str, default=None,
+                        help="独立留出数据集目录（默认探测 datasets/*_expert500val）：训练读 train-dir "
+                             "**全部行** + val-dir **全部行**；缺省回退 legacy 按 episode 比例切分并告警")
+    parser.add_argument("--two-branch", action=argparse.BooleanOptionalAction, default=None,
+                        help="lane T 双分支 Stage B：primary（全量）→ 冻结 primary 策略头/专家 → 难例挖掘 "
+                             "→ specific（难例行 + 二值门控 + 8 路 hard 簇）")
+    parser.add_argument("--hard-sidecar", type=str, default=None,
+                        help="难例 sidecar（tools/mine_hard.py 产物）；给了即启用双分支并跳过在线挖掘")
+    parser.add_argument("--hard-frac", type=float, default=0.5, help="难例占比（默认 top-50%）")
+    parser.add_argument("--mine-hard", action=argparse.BooleanOptionalAction, default=None,
+                        help="双分支下 primary 结束后在线挖掘难例（默认开；--hard-sidecar 给出则跳过）")
+    parser.add_argument("--gate-coef", type=float, default=None,
+                        help="二值门控 CE 权重（默认取 config stages.B.bc.gate_coef=0.1）")
+    parser.add_argument("--mine-only", action="store_true",
+                        help="lane T：只跑 primary + 难例挖掘（产出 primary.pt + hard_sidecar.npz）后停止，"
+                             "供 fit_clusters --rows-from → annotate_clusters → cluster_survey 审阅后再跑 specific")
+    parser.add_argument("--hard-cluster-config", type=str, default=None,
+                        help="难例子集重拟合的 cluster spec（specific 段 8 路标签）；默认探测 "
+                             "config/clusters/cluster_hard_*.npz 最新")
+    parser.add_argument("--dagger-dir", type=str, default=None,
+                        help="DAgger-lite 数据集目录（可选；specific 段与难例行合并训练，需先跑 "
+                             "tools/annotate_clusters.py 生成 hard 簇 sidecar）")
     # ---- 阶段 C ----
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
     parser.add_argument("--envs", type=int, default=1)
