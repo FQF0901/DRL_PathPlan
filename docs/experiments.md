@@ -83,6 +83,26 @@ tools/venv-python -m pipeline.stages --stage B --bc-dir runs/bc_expert_2k \
 
 ## 4. 评测（冻结协议：primary 分组 + Wilson CI + 弱类 floor）
 
+**统一评测协议（2026-09-27 起）**：`env/specs/scenarios_eval500.json`（**500 条完整 episode**；按 `labels.geometry`
+分层、seed=0；配套数据集 `datasets/BTC20260927-1734_expert500val`，与训练池 seed 交集 = 0）。
+数据口径：**只允许两个子集** —— train = 5k 完整 episode（全部用于训练）、eval = 这 500 条；
+另允许一个 16 条的代码冒烟集（`scenarios_smoke16.json`，非协议）。
+命令：`bash tools/test.sh`（默认已是 500 集；可用 `SPEC=`/`LIMIT=`/`WORKERS=` 覆盖）。
+
+| 对象 | 样本 | success [95% CI] | collision | off-road | rc | speed_ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| 规则基线（PurePursuitIDM） | 500 | **0.756** [0.716, 0.792] | 0.144 | 0.068 | 0.882 | 0.740 |
+| v1.2 IL 5k 第 3 轮（`1100_stageB/final.pt`） | 500 | **0.326** [0.286, 0.368] | 0.066 | 0.604 | 0.666 | 0.457 |
+
+分几何（n≈45/类；格式 = 基线 / IL）：split 0.82/0.80、straight 0.76/0.58、ramp_out 0.57/0.61、
+ramp_in 0.61/0.50、merge 0.87/0.28、intersection 0.70/0.30、t_intersection 0.87/0.16、
+curve 0.74/0.11、uturn 0.87/0.16、roundabout 0.76/0.07、tollgate 0.78/0.02。
+难度（基线 / IL）：easy 0.98/0.49、medium 0.67/0.20、hard 0.58/0.26。
+
+> **口径变更说明**：2026-09-27 之前的所有数字（本节下表与 §8/§9/§10）用的是 **50 条 slice**，
+> 两套数字**不可直接比较**；n=500 显示 50-slice 对 ckpt / 基线分别高估约 **+0.09 / +0.06**。
+> 早期"uturn/tollgate 专家也常失败"的判断（基于 n=4）在 n=45 上被推翻：基线在这两类是 **0.87 / 0.78**。
+
 基线参考（历史产物，已清理；可由 `tools/baseline_eval.py` 重生成）：`runs/baseline_eval/val_reference.json` / `val_reference_by_primary.json`。
 
 | 对象 | tracker | 样本 | success | collision | off-road | rc | speed_ratio |

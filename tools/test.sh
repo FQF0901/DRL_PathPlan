@@ -15,7 +15,7 @@ setsid nohup bash -c "
     trap 'echo \"[exit] \$(date -Iseconds) signal=HUP\"; exit 129' HUP
     echo \"[detach] \$(date -Iseconds) pid=\$\$ policy='$POLICY' work_dir='$WORK_DIR'\"
     CUDA_VISIBLE_DEVICES='$GPUS' tools/venv-python tools/test.py --policy '$POLICY' --config '$CONFIG' \
-        --spec '${SPEC:-env/specs/scenarios_val_slice50.json}' --out '$OUT_ROOT' --name '$NAME' \
+        --spec '${SPEC:-env/specs/scenarios_eval500.json}' --out '$OUT_ROOT' --name '$NAME' \
         --limit '$LIMIT' --workers '${WORKERS:-2}' --tracker '$TRACKER' \
         ${CKPT:+--ckpt '$CKPT'} ${DEVICE:+--device '$DEVICE'} ${EXTRA}
     rc=\$?; echo \"[exit] \$(date -Iseconds) code=\$rc\"; exit \$rc
