@@ -250,13 +250,16 @@ def _merge_dagger_rows(
     dagger_dir: str,
     *,
     logger: Any = print,
-) -> "tuple[Any, np.ndarray, np.ndarray, Dict[str, Any]]":
+) -> "tuple[Any, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]":
     """lane U1：把 DAgger 数据集行并入 phase 2 训练集（其行权重 = 1.0，与 worst 行同权）。
 
     - 同 schema 契约：DAgger 数据集必须覆盖主集的全部数组键（缺键 → ``SystemExit``）；
     - ``episode_id`` 偏移（``max(train)+1``）避免与主集历史查表冲突（``(episode_id, step)``）；
-    - 返回 ``(merged_dataset, merged_train_idx, merged_worst_flags, info)``：merged 行 =
-      ``[主集全部行, DAgger 全部行]``；DAgger 行 ``worst=1``（→ hard_weight）。
+    - 返回 ``(merged_dataset, merged_train_idx, merged_worst_flags, traj_aux_valid, info)``：
+      merged 行 = ``[主集全部行, DAgger 全部行]``；DAgger 行 ``worst=1``（→ hard_weight）；
+    - **lane U4**：``traj_aux_valid``（长度 = merged 行数）主集行 = 1.0、DAgger 行 = **0.0**
+      —— DAgger 行的 ``traj6/traj30`` 是"常量动作外推"合成值，**不得进 traj-aux 损失**
+      （否则把 plan 教成过度转向）；action/负载损失与监控统计不受掩码影响。
     """
     from pipeline.trainer import BCDataset
 
@@ -286,18 +289,25 @@ def _merge_dagger_rows(
         else np.full(n_train, -1.0, dtype=np.float32)
     )
     merged_worst = np.concatenate([base_worst, np.ones(n_dagger, dtype=np.float32)])
+    # lane U4：traj-aux 逐行掩码（主集 1 / DAgger 0）——DAgger 行只有首步动作标签，
+    # traj6/traj30 是常量外推合成值，进 traj 损失会教坏 plan（证据：G2 0.396 → 0.040 坍缩）。
+    traj_aux_valid = np.concatenate(
+        [np.ones(n_train, dtype=np.float32), np.zeros(n_dagger, dtype=np.float32)]
+    )
     info = {
         "dagger_dir": str(dagger_dir),
         "dagger_rows": int(n_dagger),
         "train_rows": int(n_train),
         "episode_id_offset": int(offset),
         "dagger_weight": 1.0,
+        "traj_aux_masked_rows": int(n_dagger),
     }
     logger(
         f"[stageB] DAgger 行合并：主集 {n_train} + DAgger {n_dagger} = {n_train + n_dagger} 行"
-        f"（DAgger 行权重 = 1.0，与 worst 行同权；episode_id 偏移 +{offset}）"
+        f"（DAgger 行权重 = 1.0，与 worst 行同权；episode_id 偏移 +{offset}；"
+        f"traj-aux 掩码：DAgger {n_dagger} 行 = 0）"
     )
-    return merged, merged_train_idx, merged_worst, info
+    return merged, merged_train_idx, merged_worst, traj_aux_valid, info
 
 
 def _stage_section(config: Mapping[str, Any], stage: str) -> Dict[str, Any]:
@@ -2496,6 +2506,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         moe_enabled: bool = True,
         worst_flags: Optional[np.ndarray] = None,
         val_worst_flags: Optional[np.ndarray] = None,
+        traj_aux_valid: Optional[np.ndarray] = None,
         val_dataset: Any = None,
         dataset_override: Any = None,
         train_idx_override: Optional[np.ndarray] = None,
@@ -2613,6 +2624,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             hard_weight=float(hard_weight),
             mild_weight=float(mild_weight),
             val_worst_flags=val_worst_flags,
+            traj_aux_valid=traj_aux_valid,
             epoch_callback=_on_epoch,
             start_epoch=int(start_epoch),
             optimizer_state=optimizer_state,
@@ -2741,13 +2753,18 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     specific_train_idx = train_idx
     specific_batch_source = obs_source
     specific_worst = worst_flags
+    specific_traj_valid: Optional[np.ndarray] = None  # lane U4：无 --dagger-dir → 全 1（None）
     val_worst = worst_flags if val_dataset is None else None  # legacy 切分：留出行与训练行同源
     dagger_info: Dict[str, Any] = {}
     dagger_dir = str(getattr(args, "dagger_dir", "") or "")
     if dagger_dir:
-        specific_dataset, specific_train_idx, specific_worst, dagger_info = _merge_dagger_rows(
-            dataset, train_idx, worst_flags, dagger_dir, logger=print
-        )
+        (
+            specific_dataset,
+            specific_train_idx,
+            specific_worst,
+            specific_traj_valid,
+            dagger_info,
+        ) = _merge_dagger_rows(dataset, train_idx, worst_flags, dagger_dir, logger=print)
         val_worst = (
             np.concatenate(
                 [val_worst, np.ones(int(dagger_info["dagger_rows"]), dtype=np.float32)]
@@ -2772,6 +2789,8 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             moe_enabled=True,
             worst_flags=specific_worst,
             val_worst_flags=val_worst,
+            # lane U4：DAgger 行 traj-aux 掩码（无 --dagger-dir → None = 全 1）
+            traj_aux_valid=specific_traj_valid,
             val_dataset=val_dataset,
             dataset_override=specific_dataset,
             train_idx_override=specific_train_idx,

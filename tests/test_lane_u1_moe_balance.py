@@ -8,7 +8,9 @@
 ⑤ 无残留 cluster/gate 旧 tag（monitoring 映射为 None；新负载 tag 映射正确）；
 ⑥ worst-50% 权重 sidecar 往返 + 严格校验（rows/指纹/ckpt sha256）；
 ⑦ ``--val-dir``：train 行数 = train-dir 全部行、val 行数 = val-dir 全部行；
-⑧ 端到端：phase 1 → 冻结 → phase 2（MoE 开 + 权重 + 负载指标）+ ``--dagger-dir`` 行合并（权重 1.0）。
+⑧ 端到端：phase 1 → 冻结 → phase 2（MoE 开 + 权重 + 负载指标）+ ``--dagger-dir`` 行合并（权重 1.0）；
+⑨ **lane U4**：DAgger 行 traj-aux 逐行掩码（掩码行对 traj 损失贡献 = 0、非掩码行照旧、
+   `_merge_dagger_rows` 掩码与 merged 行序对齐、掩码全 1 ≡ 无掩码）。
 """
 
 from __future__ import annotations
@@ -28,13 +30,20 @@ from pipeline.hard_mining import (
     write_weight_sidecar,
 )
 from pipeline.monitoring import _slim_tag
-from pipeline.stages import _PRIMARY_PHASE_FREEZE, _SPECIFIC_PHASE_FREEZE, _parse_args, run_stage_b
+from pipeline.stages import (
+    _PRIMARY_PHASE_FREEZE,
+    _SPECIFIC_PHASE_FREEZE,
+    _merge_dagger_rows,
+    _parse_args,
+    run_stage_b,
+)
 from pipeline.trainer import (
     BCConfig,
     BCDataset,
     apply_freeze_prefixes,
     pretrain_bc,
     row_scale_from_worst,
+    traj_valid_for_rows,
 )
 from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
@@ -373,6 +382,8 @@ def test_stage_b_two_phase_end_to_end_with_dagger(tmp_path: Path) -> None:
     assert metrics["load_balance_coef"] == 0.01
     assert metrics["worst_rows"] == n_worst
     assert metrics["dagger"]["dagger_rows"] == int(BCDataset.load(str(dagger_dir)).count)
+    # lane U4：DAgger 行全部被 traj-aux 掩码（合成 traj6 不进 traj 损失）
+    assert metrics["dagger"]["traj_aux_masked_rows"] == metrics["dagger"]["dagger_rows"]
     primary_phase = metrics["primary"]
     specific_phase = metrics["specific"]
     # phase 1：MoE 关闭 → 无负载指标（占位）
@@ -406,3 +417,113 @@ def test_stage_b_two_phase_end_to_end_with_dagger(tmp_path: Path) -> None:
     assert any(
         not torch.equal(primary_ckpt[n], final_ckpt[n]) for n in expert_names if n in primary_ckpt
     ), "phase 2 必须更新 experts"
+
+
+# ------------------------------------------------- lane U4：DAgger 行 traj-aux 逐行掩码
+def test_traj_valid_for_rows_alignment_and_bounds() -> None:
+    flags = np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    assert traj_valid_for_rows(None, np.asarray([0, 1])) is None, "None = 全 1（旧行为）"
+    assert traj_valid_for_rows(flags, np.asarray([3, 0])).tolist() == [0.0, 1.0], "行索引对齐"
+    with pytest.raises(ValueError, match="traj_aux_valid"):
+        traj_valid_for_rows(flags, np.asarray([4]))
+
+
+def test_traj_aux_mask_excludes_rows_from_traj_loss(tmp_path: Path) -> None:
+    """① 掩码行对 traj 损失贡献 = 0（破坏其 traj6 也不变）；② 非掩码行仍出力。"""
+    from tests.v2_synthetic import make_v2_arrays
+
+    base, _ = make_v2_arrays(episodes=4, steps_per_episode=6)
+    n = int(base["episode_id"].size)
+    mask = np.ones(n, dtype=np.float32)
+    mask[: n // 2] = 0.0  # 前一半 = DAgger 行（掩 0）
+
+    def _write(directory: Path, arrays) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(directory / "expert_bc.npz", **arrays)
+        (directory / "expert_bc.meta.json").write_text(
+            json.dumps({"schema_version": 2, "label_names": None}, ensure_ascii=False), encoding="utf-8"
+        )
+        return directory
+
+    def _corrupt(source, rows) -> dict:
+        arrays = {k: np.array(v) for k, v in source.items()}
+        arrays["traj6"] = np.asarray(arrays["traj6"], dtype=np.float32).copy()
+        arrays["traj6"][rows] += 100.0  # 100 m 级垃圾：若进 traj 损失必然可见
+        return arrays
+
+    clean = _write(tmp_path / "clean", {k: np.array(v) for k, v in base.items()})
+    corrupt_masked = _write(tmp_path / "corrupt_masked", _corrupt(base, slice(0, n // 2)))
+    corrupt_unmasked = _write(tmp_path / "corrupt_unmasked", _corrupt(base, slice(n // 2, n)))
+
+    def _run(directory: Path) -> dict:
+        dataset = BCDataset.load(str(directory))
+        model = _tiny_model()
+        cfg = BCConfig(
+            epochs=1, batch_size=32, device="cpu", shuffle=False,
+            moe_enabled=True, load_balance_coef=0.0, traj_aux_valid=mask, seed=0,
+        )
+        return pretrain_bc(model, dataset, cfg, logger=lambda _: None)
+
+    metrics_clean = _run(clean)
+    metrics_masked = _run(corrupt_masked)
+    metrics_unmasked = _run(corrupt_unmasked)
+
+    # ① 被掩码行的 traj6 是垃圾 → traj 项与总损失逐位不变（贡献 = 0）
+    assert float(metrics_masked["bc_traj_loss"]) == pytest.approx(
+        float(metrics_clean["bc_traj_loss"]), rel=1e-6
+    ), "掩码行必须不吃 traj 损失"
+    assert float(metrics_masked["bc_loss"]) == pytest.approx(
+        float(metrics_clean["bc_loss"]), rel=1e-6
+    ), "掩码行不应影响总损失"
+    # ② 非掩码行照旧出力：破坏它们 → traj 项显著变化
+    assert float(metrics_unmasked["bc_traj_loss"]) != pytest.approx(
+        float(metrics_clean["bc_traj_loss"]), rel=1e-3
+    ), "非掩码行必须仍吃 traj 损失"
+    # 监控统计保持全量口径（报告照旧）：被掩码行的 traj6 仍进 traj_mse 统计
+    assert float(metrics_masked["bc_traj_mse"]) != pytest.approx(
+        float(metrics_clean["bc_traj_mse"]), rel=1e-3
+    ), "bc_traj_mse 应保持全量口径（含被掩码行）"
+
+
+def test_traj_aux_mask_all_ones_equals_none(tmp_path: Path) -> None:
+    """掩码全 1 ≡ 无掩码（None）：旧行为逐位不变。"""
+    ds_dir = tmp_path / "ds"
+    write_v2_dataset(ds_dir, episodes=4, steps_per_episode=6)
+    dataset = BCDataset.load(str(ds_dir))
+    n = int(dataset.count)
+
+    def _run(traj_aux_valid) -> dict:
+        model = _tiny_model()
+        cfg = BCConfig(
+            epochs=1, batch_size=32, device="cpu", shuffle=False,
+            moe_enabled=True, load_balance_coef=0.0, traj_aux_valid=traj_aux_valid, seed=0,
+        )
+        return pretrain_bc(model, dataset, cfg, logger=lambda _: None)
+
+    metrics_none = _run(None)
+    metrics_ones = _run(np.ones(n, dtype=np.float32))
+    for key in ("bc_loss", "bc_traj_loss", "bc_action_loss", "bc_traj_mse", "bc_traj_mae_m"):
+        assert float(metrics_ones[key]) == pytest.approx(float(metrics_none[key]), rel=1e-9), key
+
+
+def test_merge_dagger_rows_traj_mask_alignment(tmp_path: Path) -> None:
+    """③ `_merge_dagger_rows` 返回掩码：长度 = merged 行数；主集 = 1.0 / DAgger = 0.0。"""
+    main_dir = tmp_path / "main"
+    write_v2_dataset(main_dir, episodes=4, steps_per_episode=6)
+    dagger_dir = tmp_path / "dagger"
+    write_v2_dataset(dagger_dir, episodes=1, steps_per_episode=6)
+    main = BCDataset.load(str(main_dir))
+    n_main = int(main.count)
+    n_dagger = int(BCDataset.load(str(dagger_dir)).count)
+    worst = np.zeros(n_main, dtype=np.float32)
+    worst[: n_main // 2] = 1.0
+
+    merged, merged_idx, merged_worst, traj_valid, info = _merge_dagger_rows(
+        main, np.arange(n_main, dtype=np.int64), worst, str(dagger_dir), logger=lambda _: None
+    )
+    assert merged.count == n_main + n_dagger
+    assert len(traj_valid) == merged.count and merged_idx.size == merged.count, "长度对齐 merged 行序"
+    assert np.allclose(traj_valid[:n_main], 1.0), "主集行 traj-aux = 1"
+    assert np.allclose(traj_valid[n_main:], 0.0), "DAgger 行 traj-aux = 0"
+    assert info["traj_aux_masked_rows"] == n_dagger and info["dagger_rows"] == n_dagger
+    assert np.allclose(merged_worst[n_main:], 1.0), "DAgger 行权重 = worst（1.0）"

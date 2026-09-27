@@ -114,7 +114,7 @@ rollout（6 步）
 
 - **重采的唯一理由**：`obs_fingerprint` 变更（观测契约变了）或用户明确要求扩规模；同版本内一律 `BC_DIR` 复用。
 - 数据集与 `runs/` 分离后，"清理 runs/" 是安全的日常操作。
-- **后台长任务纪律（2026-09-27 定稿，harness 会话轮换事故驱动）**：训练/评测一律走 `tools/train.sh` / `tools/test.sh`（`setsid+nohup` 脱离 harness 进程组）；run 目录为 `runs/BTC<北京戳>_<name>/`，内含 `logs/stage_{a,b}.log`（唯一日志，含 `[heartbeat]`/`[exit] code|signal` 存活证据）、`manifest.txt`、`config/model.snapshot.yaml`、`detach.pid`、`stage_a|b/`（ckpt/monitor 由训练进程写）；被静默杀掉后用 `run.resume: auto` + `ckpt_every` 从周期 ckpt 原地续跑。
+- **后台长任务纪律（2026-09-27 定稿，harness 会话轮换事故驱动）**：训练/评测一律走 `tools/train.sh` / `tools/test.sh`（`setsid+nohup` 脱离 harness 进程组）；run 目录为 `runs/BTC<北京戳>_<name>/`，内含 `logs/stage_{a,b}.log`（唯一日志，含 `[heartbeat]`/`[exit] code|signal` 存活证据）、`manifest.txt`、`config/model.snapshot.yaml`、`detach.pid`、`stage_a|b/`（ckpt/monitor 由训练进程写）；被静默杀掉后用 `run.resume: auto` + `ckpt_every` 从周期 ckpt 原地续跑。**2026-09-27 追加（用户纪律）**：**所有长任务**（训练/评测/采集/长链作业）一律 `setsid` 脱离会话；编排侧**每 10 分钟轮询一次进展**（快照脚本 `/tmp/opencode/progress_snapshot.sh`：关键进程/日志尾/关键产物/资源），不把"完成通知"当作唯一机制。
 
 **采集内存模型（2026-09-26 实测 + 修复）**：旧实现的峰值 =
 **父进程累积全部逐帧记录**（≈10–15 KB/行；5k specs ≈5 GB，随数据集线性增长，非泄漏）
@@ -178,7 +178,10 @@ rollout（6 步）
      （sidecar 记录参照 ckpt sha256 / 数据集指纹 / seed / 阈值 / 权重，训练侧只读 + 严格校验）；
   3. 带 `--weight-sidecar <sidecar>` 重跑 phase 2（MoE 开 + 权重 + 负载均衡 aux）。
 - **DAgger 行接入**：phase 2 可加 `--dagger-dir <DATASETS>`（另一 lane 产出的同 schema 数据）→
-  其行与主集行**合并**训练（`episode_id` 偏移防冲突），行权重 **1.0**（与 worst 行同权）。
+  其行与主集行**合并**训练（`episode_id` 偏移防冲突），行权重 **1.0**（与 worst 行同权）；
+  **traj-aux 逐行掩码（lane U4）**：DAgger 行的 `traj6/traj30` 是"常量动作外推"合成值 →
+  `traj_aux_valid=0`（不吃 traj 损失；证据：无掩码时 G2 0.396 → ep20 0.040 渐进坍缩）；
+  action/负载损失与 `bc_traj_*` 监控统计仍为全量口径。
 - **val 口径**（不变）：训练 = train-dir **全部行** + val-dir **全部行**（`--val-dir` 或 train-dir
   同级 `*_expert500val` 自动探测）；缺 val-dir → 告警回退 legacy 按 episode 比例切分。
 

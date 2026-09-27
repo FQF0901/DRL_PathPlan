@@ -145,6 +145,7 @@ __all__ = [
     "presence_entry_loss",
     "worst_flags_for_rows",
     "row_scale_from_worst",
+    "traj_valid_for_rows",
     "ego_kpi_arrays",
     "dataset_weight_report",
 ]
@@ -583,6 +584,10 @@ class BCConfig:
     mild_weight: float = 0.1
     #: 留出集的 worst 标记（None = 留出集不缩放；legacy episode 切分时与 ``worst_flags`` 同源）。
     val_worst_flags: Optional[np.ndarray] = None
+    #: traj-aux 逐行掩码（lane U4；0/1，数据集行空间；None = 全 1 = 旧行为）。
+    #: DAgger 行的 ``traj6`` 是"常量动作外推"合成值 → 掩 0（不吃 traj 损失）；
+    #: **只作用于 traj 损失项**，action/load 项与全部监控统计仍为全量口径。
+    traj_aux_valid: Optional[np.ndarray] = None
     #: 独立留出数据集（``--val-dir``；None = 用主数据集 + ``val_indices`` 的旧口径）。
     val_dataset: Optional[Any] = None
 
@@ -1269,6 +1274,26 @@ def worst_flags_for_rows(
     return flags[idx]
 
 
+def traj_valid_for_rows(
+    traj_valid: Optional[np.ndarray], indices: np.ndarray
+) -> Optional[np.ndarray]:
+    """取一个 batch 的 traj-aux 逐行掩码（``(B,)`` float32；``None`` → ``None``（全 1））。
+
+    ``traj_valid`` 是**数据集行空间**的 0/1 数组（lane U4：DAgger 行 = 0、主集行 = 1，
+    由 ``pipeline.stages._merge_dagger_rows`` 生成）；``None`` = 不启用掩码（旧行为）。
+    行数覆盖不了 batch 索引 → ``ValueError``（与 :func:`worst_flags_for_rows` 同模式）。
+    """
+    if traj_valid is None:
+        return None
+    flags = np.asarray(traj_valid, dtype=np.float32).reshape(-1)
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if idx.size and (idx.min() < 0 or idx.max() >= flags.size):
+        raise ValueError(
+            f"traj_aux_valid 行数 {flags.size} 覆盖不了 batch 索引 [{int(idx.min())}, {int(idx.max())}]"
+        )
+    return flags[idx]
+
+
 def row_scale_from_worst(
     worst: Optional[np.ndarray], *, hard_weight: float = 1.0, mild_weight: float = 0.1
 ) -> np.ndarray:
@@ -1912,6 +1937,7 @@ def bc_trajectory_loss(
     *,
     loss_type: str = "l2",
     weights: Optional["torch.Tensor"] = None,
+    metric_weights: Optional["torch.Tensor"] = None,
 ) -> Tuple["torch.Tensor", Dict[str, float]]:
     """轨迹 L1/L2：模型 ``(B,K,2)`` vs 密集插值目标 ``(B,D,2)``（K≠D 时按时间对齐取点）。
 
@@ -1926,6 +1952,9 @@ def bc_trajectory_loss(
       ``traj_mse_weighted`` = 加权 MSE（m²，与 ``loss_type`` 无关）、
       ``traj_mae_weighted_m`` = 加权 MAE（m，与 ``loss_type`` 无关）、
       ``traj_mae_all_m`` = **未加权** MAE（m，**含 w=0 的被过滤帧**，仅诊断）。
+    - ``metric_weights``（lane U4）：**诊断指标的权重**（缺省 = ``weights``）——
+      traj 损失可被逐行掩码（DAgger 行不吃 traj-aux），但 ``traj_mse/mae`` 监控统计
+      保持全量口径（报告照旧）。
 
     .. warning::
         旧接口返回的第二个元素是**未加权 MSE（m²）**却被命名为 ``mae``：因为
@@ -1949,10 +1978,15 @@ def bc_trajectory_loss(
         weight = weights.reshape(-1)
         denom = weight.sum().clamp(min=1e-8)
         loss = (per_sample * weight).sum() / denom
-        mse_weighted = (mse_sample * weight).sum() / denom
-        mae_weighted = (mae_sample * weight).sum() / denom
     else:
         loss = per_sample.mean()
+    metric_weight = weights if metric_weights is None else metric_weights
+    if metric_weight is not None:
+        weight_m = metric_weight.reshape(-1)
+        denom_m = weight_m.sum().clamp(min=1e-8)
+        mse_weighted = (mse_sample * weight_m).sum() / denom_m
+        mae_weighted = (mae_sample * weight_m).sum() / denom_m
+    else:
         mse_weighted = mse_sample.mean()
         mae_weighted = mae_sample.mean()
     metrics = {
@@ -1984,6 +2018,9 @@ def pretrain_bc(
     - **MoE（lane U1）**：无聚类监督标签；``moe_enabled=False``（phase 1）时专家不参与、
       输出 = primary；``moe_enabled=True``（phase 2）时输出 = ``primary + Σ_{i∈top2} g_i·expert_i``，
       并加 Switch 式负载均衡 aux（``load_balance_coef``）。
+    - **traj-aux 逐行掩码（lane U4）**：``traj_aux_valid``（0/1，数据集行空间；None = 全 1）只作用于
+      **traj 损失项**（``specific_weight × traj_valid``）——DAgger 行的 traj6/traj30 是常量外推
+      合成值、不吃 traj 损失；action/负载项与 ``bc_traj_*`` 监控统计保持全量口径。
 
     阶段 B（v1.1）：``config.wm_detach`` 时 rollout 内 WM 输出 detach；
     ``config.freeze_prefixes`` 在优化器构建前生效（primary→specific 分段训练）。
@@ -2210,6 +2247,24 @@ def pretrain_bc(
             f"load_balance_coef={config.load_balance_coef}）"
         )
     model.set_moe(enabled=bool(config.moe_enabled), load_balance_coef=float(config.load_balance_coef))
+    # lane U4：traj-aux 逐行掩码（DAgger 行 = 0：其 traj6 是合成常量外推，不得进 traj 损失）
+    traj_valid_all = (
+        None
+        if config.traj_aux_valid is None
+        else np.asarray(config.traj_aux_valid, dtype=np.float32).reshape(-1)
+    )
+    if traj_valid_all is not None:
+        if traj_valid_all.size != int(dataset.count):
+            raise ValueError(
+                f"traj_aux_valid 行数 {traj_valid_all.size} != 数据集行数 {int(dataset.count)}"
+                "（掩码必须与训练集逐行对齐）"
+            )
+        masked_rows = int(np.count_nonzero(traj_valid_all <= 0.5))
+        logger(
+            f"[bc] traj-aux 掩码：masked={masked_rows}/{traj_valid_all.size}"
+            f"（{masked_rows / max(1, traj_valid_all.size):.1%}；DAgger 行不吃 traj 损失，"
+            "action/负载与监控统计仍全量口径）"
+        )
 
     macro_size = max(1, int(config.batch_size))
     micro_size = (
@@ -2278,6 +2333,14 @@ def pretrain_bc(
             )
             weighted_macro_np = weight_macro_np * scale_macro_np
             weight_macro_total = max(float(weighted_macro_np.sum()), 1e-12)
+            # lane U4：traj 项专用宏权重（乘逐行掩码；None = 全 1 → 与 weight_macro 逐位相同）
+            traj_valid_macro_np = traj_valid_for_rows(traj_valid_all, batch_indices)
+            traj_macro_np = (
+                weighted_macro_np
+                if traj_valid_macro_np is None
+                else weighted_macro_np * traj_valid_macro_np.astype(np.float64)
+            )
+            traj_macro_total = max(float(traj_macro_np.sum()), 1e-12)
             data_seconds += time.perf_counter() - data_started
             # 梯度累积（micro-batch，可选）：每 micro 前向/反向，按宏 batch 口径精确缩放
             # （Σ_m s_m·L_m = L_macro），optimizer 每宏 batch 一次；micro == macro 时退化旧行为。
@@ -2319,9 +2382,18 @@ def pretrain_bc(
                     )
                 specific_weight = frame_weight * row_scale_t
                 weight_sum = specific_weight.sum().clamp(min=1e-8)
+                # lane U4：traj 项权重 = specific_weight × traj 掩码（仅 traj 损失；action/负载不变）
+                traj_valid_np = traj_valid_for_rows(traj_valid_all, micro_indices)
+                if traj_valid_np is None:
+                    traj_weight_t = specific_weight
+                else:
+                    traj_weight_t = specific_weight * torch.as_tensor(
+                        traj_valid_np, dtype=torch.float32, device=device
+                    )
                 # 精确缩放因子：加权项（traj/action/加权轨迹度量）= W_m/W_macro；
                 # 逐行均值项（负载 aux / 未加权诊断口径）= n_m/n_macro
                 scale_weight = float(weighted_macro_np[m_lo:m_hi].sum()) / weight_macro_total
+                scale_traj = float(traj_macro_np[m_lo:m_hi].sum()) / traj_macro_total
                 scale_rows = float(m_hi - m_lo) / float(max(1, n_macro))
                 weight_values.append(specific_weight.detach().double().cpu().numpy())
                 data_seconds += time.perf_counter() - data_started
@@ -2339,7 +2411,9 @@ def pretrain_bc(
                 if traj_pred is None:
                     raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
                 traj_loss, traj_metrics = bc_trajectory_loss(
-                    traj_pred, targets["traj6"], loss_type=config.loss_type, weights=specific_weight
+                    traj_pred, targets["traj6"], loss_type=config.loss_type,
+                    weights=traj_weight_t,          # lane U4：DAgger 行掩 0（不吃 traj 损失）
+                    metric_weights=specific_weight,  # 监控统计保持全量口径（报告照旧）
                 )
                 traj_term = config.traj_weight * traj_loss
                 action_term = torch.zeros((), device=device)
@@ -2405,7 +2479,7 @@ def pretrain_bc(
                 # 组合缩放后的宏 batch 损失：Σ_m s_m·L_m = L_macro（micro == macro 时 s=1）
                 # router CE 现为**加权均值**（Σw·ce/Σw）→ 与 traj/action 同用权重比缩放
                 loss = (
-                    traj_term * scale_weight
+                    traj_term * scale_traj      # lane U4：traj 项按掩码后的宏权重缩放
                     + action_term * scale_weight
                     + load_term * scale_rows
                 )
@@ -2413,7 +2487,7 @@ def pretrain_bc(
                 loss.backward()
                 backward_seconds += time.perf_counter() - backward_started
                 totals_micro["loss"] += float(loss.detach())
-                totals_micro["traj"] += float(traj_term.detach()) * scale_weight
+                totals_micro["traj"] += float(traj_term.detach()) * scale_traj
                 totals_micro["action"] += float(action_term.detach()) * scale_weight
                 totals_micro["load_balance"] += float(load_term.detach()) * scale_rows
                 # 轨迹度量：加权口径按 W_m/W_macro、未加权诊断口径按 n_m/n_macro 缩放
