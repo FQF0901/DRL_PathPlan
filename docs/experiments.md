@@ -273,6 +273,65 @@ Stage B 逐 epoch：primary `traj MAE 0.772→0.406`、val `2.600→2.108`；spe
 （失败仍集中在同一批几何，机制为"直道爬行段起漂 + 大转角转向通道塌缩"）。
 → 下一步应是 **E2b 扰动增广**（让监督目标包含"从偏移位姿回车道"）与/或 **E3 DAgger-lite**（治 crawl/OOD），而不是继续堆数据或加 epoch。
 
+## 10. v1.2 IL 第三轮：5k × schema v2（mem-bank + router 软目标 + per-epoch val 切分）（2026-09-27）
+
+数据：`datasets/BTC20260926-2343_expert5k`（**360,501 行入库 / 259,583 trainable**；40 分片并行采集、输出与单进程逐字节一致；
+obs fingerprint `v2-6a4d5de3f669`）。相对 §9 的变化：**schema v2 观测**（mem-bank 编码）、**router 软目标**（聚类 CE/KL）、
+**per-epoch 独立 val 切分**、以及周期 ckpt/resume 基础设施（见 10.3 第 4 条）。
+
+命令（当前零参入口；本轮 Stage A 实际分两块执行：前 10 个 epoch 被 harness 会话轮换静默杀掉 → 用 `RESUME` 原地续跑）：
+
+```bash
+bash tools/train.sh                                                                # Stage A（20 epochs；data/epochs/batch 全在 config/train.yaml）
+RESUME=runs/BTC20260927-0920_stageA/stage_a/ckpt_epoch010.pt bash tools/train.sh   # 被杀后从 epoch 10 续跑 11–20
+STAGE=B bash tools/train.sh                                                        # Stage B（primary 10 + specific 10）
+bash tools/test.sh    # 评测（50 条 val slice + lqr）；POLICY=baseline bash tools/test.sh 复现冻结基线
+```
+
+### 10.1 开环
+
+| 指标 | §9 5k 第 2 轮 | **§10 5k 第 3 轮（本轮）** |
+| --- | --- | --- |
+| Stage A 末轮 | loss 0.580 / ADE 1.433 | loss **0.5933** / ADE **1.449**（匀速 12.229；6/6 horizon 胜）；FDE **3.023** vs 21.443 |
+| Stage B primary 末轮 | MAE 0.406 m / val 2.108 | **0.404 m / 1.9729**（traj 1.8771 / action 0.0140 / router 0.0818）|
+| Stage B specific 末轮 | MAE 0.373 m / val 1.922 | **0.365 m / 1.8461**（traj 1.7545 / action 0.0119 / router 0.0797）|
+| 动作加权误差（首步） | 0.0710 | **0.0699**（mean 0.2330；median/p95 已按监控瘦身移除）|
+| 逐 horizon 加权 MAE（h1→h6） | 0.057 → 0.822 m | **0.047 → 0.736 m** |
+| router：CE / top-1 簇准确率 / NMI | 0.0018 / 0.856 / 0.155 | **0.0018 / 0.849 / 0.146** |
+
+> **跨版本不可直接比较**：schema v2 改变了观测 scope，val 切分也改为 per-epoch 独立段。Stage B 末值 `action_mu_ds` = **3.461 m**
+> （加权 3.524；专家 3.197 m）。router 负载仍集中（expert 0 占 **0.823**、expert 5 占 0.090，其余 ≤0.03）。
+
+### 10.2 闭环（50 条 val，LQR，配对同场景）
+
+| 策略 | success | collision | off-road | rc | speed_ratio |
+| --- | --- | --- | --- | --- | --- |
+| 规则基线（冻结；本轮复现） | **0.82** | 0.10 | **0.06** | 0.925 | 0.734 |
+| v1.2 IL 2k（§8） | 0.38 | 0.04 | **0.52** | 0.648 | 0.407 |
+| v1.2 IL 5k 第 2 轮（§9） | 0.30 | 0.04 | 0.64 | 0.550 | 0.439 |
+| **v1.2 IL 5k 第 3 轮（本轮）** | **0.42** | 0.04 | **0.52** | **0.688** | 0.446 |
+
+95% CI [0.294, 0.558]；n=50、errors=0；min-TTC 7.30 s；真均速 **4.49 m/s**；crawl 5.5% 步（3.11 s/episode）。
+分主标签：split **1.00**、ramp_out 0.80、merge 0.60、straight 0.60、t_intersection 0.50、ramp_in 0.40、
+intersection 0.25、roundabout 0.25；curve / uturn / tollgate 仍 **0.00**（tollgate 伴 50% 碰撞）。
+难度：easy 0.722 / medium 0.278 / **hard 0.214**（§9：0.667 / 0.167 / **0.000**）；compound（22 条）0.273。
+
+### 10.3 结论与下一步
+
+1. **IL 目前最好一轮**：success **0.30 → 0.42**（亦高于 2k 的 0.38），rc **0.688** 新高，off-road 回到最优 **0.52**，
+   collision 保持 0.04；**hard 难度 0.000 → 0.214**，split **0.60 → 1.00**。
+2. 开环与 §9 基本持平（ADE 1.449 vs 1.433、val 0.5933 vs 0.580，且跨版本不可比），**闭环却明显变好** —— 再次说明
+   瓶颈不在拟合质量，而在闭环执行/规划行为。
+3. 剩余失败仍集中在 **curve / roundabout / uturn / tollgate（0–25%）**，与 `docs/forensics-2026-09-26.md` 机制取证一致
+   （直道爬行段起漂 + 大转角转向通道塌缩；缺"车道绝对锚点 + 横向偏差回收"）→ 下一杠杆仍是 **E2b 扰动增广** 与/或
+   **E3 DAgger-lite**（判据见 README §3.1），不是继续堆数据/epoch。
+4. **基础设施首次全链路生效**：`ckpt_every=5` + `RESUME=` 在真实被中断（harness 会话轮换静默杀）后从 `ckpt_epoch010.pt`
+   原地续跑 11–20（模型/优化器/RNG/val 状态恢复；含 Adam 设备迁移修复 `move_optimizer_state_to_device`）；
+   后台长任务改为 `setsid` 分离 + 每阶段单日志（`[detach]`/`[exit]` 证据行）。
+5. 产物：`runs/BTC20260927-0920_stageA`（A 1–10）+ `runs/BTC20260927-1019_stageA_p4`（A 11–20）、
+   `runs/BTC20260927-1100_stageB`（B）、`runs/BTC20260927-1147_eval_lqr50`、`runs/BTC20260927-1149_eval_baseline50`、
+   报告 `runs/BTC20260927-1150_ilreport_5k`（`il_report.md/json` + 11 张 PNG）。
+
 ## 7. 口径与注意事项
 
 1. **tracker 语义**：`exact` = Stage B 语义（运动学精确执行预瞄，不引入动力学）；`lqr` = Stage C 闭环

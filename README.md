@@ -4,12 +4,12 @@ MetaDrive 城市/高速驾驶规划 RL：观测 → 策略输出 `(ds, dθ)`（�
 world model rollout 产生 3 s / 6 点自车轨迹 → MPC/LQR 跟踪该预瞄。分阶段训练：**A 世界模型（teacher forcing）
 → B 规划器 BC（含 rollout 轨迹辅助）→ C PPO RL（KL 锚定 B 快照）**。
 
-> **一句话现状（2026-09-26，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
-> v1.2 IL 在同一冻结协议（50 条 val、LQR 闭环）下把 **success 0.26 → 0.38、off-road 0.72 → 0.52、rc 0.54 → 0.65**
-> （规则基线 0.82 / 0.06）；开环 WM 6 个 horizon 全部胜匀速（ADE **1.447 vs 6.987**）、presence AUC **0.970**、
-> 轨迹 3 s 加权 MAE **1.24 m**（动作加权误差 0.120、p95 0.401）。剩余缺口集中在
-> **弯道/环岛/掉头/收费站（成功率 0%）**、**速度偏慢**（speed_ratio 0.407 vs 基线 0.734）与 **router 负载集中**
-> （8 专家中 2 个占 53%）。Stage C 仍 EXPERIMENTAL（P0-1/P0-2 未修）。详见 `docs/experiments.md` §8。
+> **一句话现状（2026-09-27，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
+> v1.2 IL 在冻结协议（50 条 val、LQR 闭环、配对同场景）下把 **success 0.26 → 0.42、off-road 0.72 → 0.52、rc 0.54 → 0.688**
+> （规则基线 0.82 / 0.06；5k 第 3 轮 = schema v2 + mem-bank + router 软目标）；开环 WM 6 个 horizon 全部胜匀速
+> （ADE **1.449 vs 12.229**），轨迹 3 s 加权 MAE **0.404 m**、动作加权误差 **0.070**。剩余缺口集中在
+> **弯道/环岛/掉头/收费站（成功率 0–25%）**、**速度偏慢**（speed_ratio 0.446 vs 基线 0.734）与 **router 负载集中**
+> （expert 0 占 0.823）。Stage C 仍 EXPERIMENTAL（P0-1/P0-2 未修）。详见 `docs/experiments.md` §10。
 
 ---
 
@@ -104,7 +104,7 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 
 ---
 
-## 2. 性能现状（证据，2026-09-25）
+## 2. 性能现状（证据，2026-09-27）
 
 ### 2.1 基线对照（50 条 val slice；冻结参考 `runs/baseline_eval/val_reference*.json` 为历史产物，已随 `runs/` 清理，可用 `tools/baseline_eval.py` 重生成）
 
@@ -122,6 +122,7 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | **Stage C v2**（同上，exact 口径） | exact | **0.10** | 0.50 | 0.40 | 0.398 | **1.093（超速）** |
 | **v1.2 IL（新架构；50 条；LQR）** | lqr | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
 | **v1.2 IL 5k（5k 数据；20/20 epochs）** | lqr | **0.30** | 0.04 | 0.64 | 0.550 | 0.439 |
+| **v1.2 IL 5k 第 3 轮**（schema v2 + mem-bank + router；50 条；LQR） | lqr | **0.42** | 0.04 | **0.52** | **0.688** | 0.446 |
 
 ### 2.2 开环 vs 闭环（v1.2，2026-09-26）
 
@@ -131,8 +132,8 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | Stage B 动作克隆 `mu_ds` | 3.522 m（加权 3.564；专家 3.218） | 动作加权误差 0.120、median 0.065、p95 0.401 |
 | Stage B 轨迹加权 MAE | 3 s：**1.240 m**（primary）/ 0.942 m（specific）| 逐 horizon：0.125 → 1.240 m（0.5→3.0 s）；口径已修正为米 |
 | router（聚类软目标） | CE 0.0038 / KL 0.0022（非占位）；top-1 簇 0.265、NMI 0.081 | 负载集中：expert2 0.297 + expert6 0.232 |
-| **闭环 off-road** | **0.52**（基线 0.06；v1 为 0.72）| 失败集中在 curve/roundabout/uturn/tollgate（0%）|
-| 闭环 success | **0.38** [0.259, 0.518]（v1 0.26）| 难度 easy 0.72 / medium 0.28 / hard 0.07 |
+| **闭环 off-road** | **0.52**（基线 0.06；v1 为 0.72）| 失败集中在 curve/roundabout/uturn/tollgate（0–25%）|
+| 闭环 success | **0.42** [0.294, 0.558]（v1 0.26；5k 第 2 轮 0.30）| 难度 easy 0.722 / medium 0.278 / hard **0.214** |
 
 **失败模式取证**（2k-BC LQR，50 条）：终止原因 `out_of_road 39 / arrive_dest 10 / max_step 1`，失败发生在
 途中（rc 0.16–0.94），**不是终点行为**；成功的 10 条 rc≈0.98。
@@ -155,6 +156,9 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
   **5k 轮的反证（2026-09-26，见 `docs/experiments.md` §9）**：数据 2.5×、epochs 2× 后**开环全线变好**（动作加权误差 0.120 → **0.071**、
   逐 horizon MAE h6 1.24 → **0.82 m**、router top-1 簇 0.265 → **0.856**），**闭环反而变差**（success 0.38 → **0.30**、off-road 0.52 → **0.64**）
   → **排除"数据量 / 训练时长 / 开环质量"三个假设**，坐实"plan 无车道锚点与回收能力"是主因。修法：**E2b 扰动增广 / E3 DAgger-lite（待你批）**。
+  **第 3 轮（2026-09-27，schema v2 + router 软目标，见 `docs/experiments.md` §10）**：开环与 §9 持平（ADE 1.449 / val 0.5933），
+  **闭环回到最好**（success **0.42**、rc **0.688**、hard 0.000 → **0.214**、split 0.60 → **1.00**），但 curve/roundabout/uturn/tollgate 仍停在 0–25%
+  → 与"瓶颈在 plan 的车道锚点/偏差回收"一致；**E2b / E3 仍是唯一待批的下一杠杆**。
 - **P2 闭环执行链**：LQR 跟踪比 exact 执行差约 0.12 off-road（0.60 → 0.72）；跟踪器参考已修为 6 点预瞄（见 3.3），
   但增益未做干净标定（此前的扫描指标被"冲过终点后继续开"污染）。
 - **P3 critic 几乎无解释力**：`value/explained_var ≈ 0`（value_loss 6–33）→ 优势噪声大。已实现 critic 预热
@@ -255,7 +259,7 @@ bash tools/test.sh
 3. **router 负载与软目标（P11）**：降 τ / 减小边界平滑 / 稀有簇重加权的单变量对照（**先给方案，经你确认再执行**）。
 4. **P0-1 / P0-2 修复**（`docs/db44fefe-system-review.md`）→ 之后才谈 Stage C（当前 EXPERIMENTAL）。
 5. 事件脚本确定性修复（P5）与观测消融（P6）。
-6. **Gate 4 薄切片验收**：按冻结协议出正式结论（当前 v1.2：success 0.38 / off-road 0.52 → 未过）。
+6. **Gate 4 薄切片验收**：按冻结协议出正式结论（当前最好：success 0.42 / off-road 0.52，基线 0.82 → 未过）。
 
 ---
 
@@ -265,7 +269,7 @@ bash tools/test.sh
 
 | 内容 | 路径 |
 | --- | --- |
-| v1.2 IL 结果表（§8 2k / §9 5k：开环 + 闭环 + 失败模式） | `docs/experiments.md` |
+| v1.2 IL 结果表（§8 2k / §9 5k 第 2 轮 / §10 5k 第 3 轮：开环 + 闭环 + 失败模式） | `docs/experiments.md` |
 | 场景级失败取证（只读，2026-09-26） | `docs/forensics-2026-09-26.md`（脚本：`tools/diagnostics/forensics_*.py`）|
 | 数据/产物目录纪律与命名 | `docs/design-v1.2.md` §3.5 |
 | P0 实测 / 数据集统计 / 可行性分析 | `docs/p0-measurements.md`、`docs/dataset_stats.md`、`docs/feasibility-analysis.md` |
