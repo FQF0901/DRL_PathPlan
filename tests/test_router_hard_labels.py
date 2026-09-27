@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+from dataclasses import replace
 
 from pipeline.clusters import annotate_assignments, assignments_path, load as load_clusters, load_assignments
 from pipeline.trainer import BCConfig, BCDataset, pretrain_bc
@@ -95,6 +96,20 @@ def test_pretrain_bc_router_hard_label_and_placeholder(tmp_path) -> None:
     for key in ("bc_router_soft_ce", "bc_router_soft_kl", "bc_router_entropy",
                 "bc_router_nmi", "bc_router_temperature", "bc_router_expert_mix_weight_0"):
         assert key not in metrics
+
+
+def test_assignments_path_version_priority(tmp_path) -> None:
+    """sidecar 路径只认版本对应文件（绝不回退到其它版本 → 不覆盖旧 sidecar）。"""
+    from pipeline.clusters import assignments_path
+
+    (tmp_path / "cluster_v1_assignments.npz").write_bytes(b"")
+    spec_v2 = load_clusters(_MODEL_CFG)
+    spec_v2 = replace(spec_v2, cluster_version="v2")
+    assert assignments_path(tmp_path, spec=spec_v2).name == "cluster_v2_assignments.npz"
+    spec_v1 = replace(spec_v2, cluster_version="v1")
+    assert assignments_path(tmp_path, spec=spec_v1).name == "cluster_v1_assignments.npz"
+    spec_nat = replace(spec_v2, cluster_version="v2_natural")
+    assert assignments_path(tmp_path, spec=spec_nat).name == "cluster_v2_natural_assignments.npz"
 
 
 def test_collect_expert_annotate_hook(tmp_path) -> None:

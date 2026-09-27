@@ -12,12 +12,15 @@ import numpy as np
 import pytest
 
 from pipeline.clusters import (
+    FEATURE_CONTRACT_V1,
+    FEATURE_CONTRACT_V2,
     ClusterSpec,
     activity_statistics,
     align_clusters,
     clear_cache,
     density_weights,
     encode_obs,
+    od_top6_indices,
     enforce_size_bounds,
     fit_capacity_kmeans,
     fit_feature_pipeline,
@@ -127,7 +130,9 @@ def make_fixture_arrays(n: int = 720, seed: int = 0, *, enrich: bool = True) -> 
 
 
 def fit_small_spec(arrays: dict, meta: dict, **kwargs) -> ClusterSpec:
-    params = dict(k=6, pca_dim=10, density_k=6, cap_ratio=0.3, seed=0, max_iters=12)
+    # 本文件的历史用例都基于 v1 特征契约（v2 契约由 test_feature_contract_v2_* 单独覆盖）
+    params = dict(k=6, pca_dim=10, density_k=6, cap_ratio=0.3, seed=0, max_iters=12,
+                  feature_contract=FEATURE_CONTRACT_V1, restarts=1)
     params.update(kwargs)
     return fit_cluster_spec_from_dataset(arrays, meta, **params)["spec"]
 
@@ -139,13 +144,13 @@ def fit_small_spec(arrays: dict, meta: dict, **kwargs) -> ClusterSpec:
 
 def test_encode_layout_and_determinism() -> None:
     obs = make_obs(n=32, seed=1)
-    raw = encode_obs(obs)
+    raw = encode_obs(obs, contract=FEATURE_CONTRACT_V1)
     assert raw.shape == (32, 8 + 16 * 9 + 16 * 7 + 16)
     assert raw.dtype == np.float32
     assert np.allclose(raw[:, :8], obs["ego"])
     od = raw[:, 8 : 8 + 16 * 9].reshape(32, 16, 9)
     assert np.allclose(od[:2, 2:], 0.0)  # 无效槽位清零
-    assert np.allclose(raw, encode_obs(obs))  # 确定性
+    assert np.allclose(raw, encode_obs(obs, contract=FEATURE_CONTRACT_V1))  # 确定性
     assert not np.allclose(obs["od"][:, 2], 0.0)  # 输入未被就地清零
 
 
@@ -155,26 +160,26 @@ def test_encode_v2_od_presence_precedence() -> None:
     obs["od"][:, 3, :] = stale  # 出盒槽位保留陈旧特征
     obs["od_mask"][:, 3] = 1.0
     obs["od_presence"][:, 3] = 0.0
-    raw = encode_obs(obs)
+    raw = encode_obs(obs, contract=FEATURE_CONTRACT_V1)
     assert np.allclose(raw[:, 8 : 8 + 16 * 9].reshape(8, 16, 9)[:, 3], 0.0)
     # presence=1 / mask=0 → 以 presence 为准（保留特征）
     obs["od_presence"][:, 3] = 1.0
-    raw = encode_obs(obs)
+    raw = encode_obs(obs, contract=FEATURE_CONTRACT_V1)
     assert np.allclose(raw[:, 8 : 8 + 16 * 9].reshape(8, 16, 9)[:, 3], stale)
 
 
 def test_encode_others_source_raw_and_fallback_speed_limit() -> None:
     obs = make_obs(n=6, seed=3, with_others=True, others_dim=20)
-    raw = encode_obs(obs)
+    raw = encode_obs(obs, contract=FEATURE_CONTRACT_V1)
     assert raw.shape[1] == 8 + 16 * 9 + 16 * 7 + 20  # raw others（含 road_class）
     assert np.allclose(raw[:, -20:], obs["others"][:, 0])
-    fallback = encode_obs(make_obs(n=6, seed=3, with_others=False))
+    fallback = encode_obs(make_obs(n=6, seed=3, with_others=False), contract=FEATURE_CONTRACT_V1)
     assert fallback.shape[1] == 8 + 16 * 9 + 16 * 7 + 16
     # speed_limit 在 ld 槽0 第4维，槽0 无效时置 0
     obs = make_obs(n=2, seed=4)
     obs["ld"][1, 0, 4] = 3.3
     obs["ld_mask"][1, 0] = 0.0
-    raw = encode_obs(obs)
+    raw = encode_obs(obs, contract=FEATURE_CONTRACT_V1)
     others = raw[:, -16:]
     assert others[0, 11] == pytest.approx(13.9)
     assert others[1, 11] == pytest.approx(0.0)
@@ -277,7 +282,7 @@ def test_top2_soft_targets_row_sum_and_boundary_smoothing() -> None:
 def test_spec_assign_soft_rows_and_shapes() -> None:
     arrays, meta = make_fixture_arrays(seed=9)
     spec = fit_small_spec(arrays, meta)
-    raw = encode_obs(arrays)
+    raw = encode_obs(arrays, contract=FEATURE_CONTRACT_V1)
     soft = spec.assign_soft(raw)
     assert soft.shape == (raw.shape[0], 6)
     assert np.allclose(soft.sum(axis=1), 1.0, atol=1e-6)
@@ -295,7 +300,7 @@ def test_save_load_roundtrip_and_validation(tmp_path: Path) -> None:
     spec = fit_small_spec(arrays, meta)
     path = spec.save(tmp_path / "cluster_test.npz")
     loaded = ClusterSpec.load(path)
-    raw = encode_obs(arrays)
+    raw = encode_obs(arrays, contract=FEATURE_CONTRACT_V1)
     assert np.allclose(loaded.assign_soft(raw), spec.assign_soft(raw), atol=1e-6)
     assert loaded.data_fingerprint.get("fitted_at")
     clear_cache()
@@ -362,14 +367,15 @@ def test_two_stage_gate_and_soft_targets() -> None:
     arrays["labels"] = labels
     meta = {"label_names": [f"label_{i}" for i in range(8)], "obs_fingerprint": "fixture", "schema_version": 2}
     result = fit_cluster_spec_from_dataset(
-        arrays, meta, k=8, pca_dim=8, density_k=6, cap_ratio=0.25, seed=0, max_iters=12, two_stage=True
+        arrays, meta, k=8, pca_dim=8, density_k=6, cap_ratio=0.25, max_share=0.30, min_share=0.02,
+        seed=0, max_iters=12, two_stage=True, feature_contract=FEATURE_CONTRACT_V1, restarts=1,
     )
     spec = result["spec"]
     assert spec.mode == "two_stage" and spec.centroids.shape[0] == 7
     soft = spec.assign_soft(result["arrays"]["raw"])
     assert soft.shape == (n, 8) and np.allclose(soft.sum(axis=1), 1.0)
     assert soft[:calm, 1:].sum(axis=1).mean() < soft[calm:, 1:].sum(axis=1).mean()
-    assert activity_statistics(result["arrays"]["raw"]).shape == (n, 3)
+    assert activity_statistics(result["arrays"]["raw"], contract=FEATURE_CONTRACT_V1).shape == (n, 3)
 
 
 # --------------------------------------------------------------------------- #
@@ -379,11 +385,15 @@ def test_two_stage_gate_and_soft_targets() -> None:
 
 def test_report_flag_and_enrichment() -> None:
     good = fit_cluster_spec_from_dataset(*make_fixture_arrays(seed=13, enrich=True), k=6, pca_dim=10,
-                                         density_k=6, cap_ratio=0.3, seed=0, max_iters=12, enrichment_min=3.0)
+                                         feature_contract=FEATURE_CONTRACT_V1, restarts=1,
+                                         density_k=6, cap_ratio=0.3, max_share=0.30, min_share=0.02,
+                                         seed=0, max_iters=12, enrichment_min=3.0)
     assert good["report"]["flag"] is False
     assert good["report"]["rare"]["max_enrichment"] >= 3.0
     bad = fit_cluster_spec_from_dataset(*make_fixture_arrays(seed=13, enrich=False), k=6, pca_dim=10,
-                                        density_k=6, cap_ratio=0.3, seed=0, max_iters=12, enrichment_min=3.0)
+                                        feature_contract=FEATURE_CONTRACT_V1, restarts=1,
+                                        density_k=6, cap_ratio=0.3, max_share=0.30, min_share=0.02,
+                                        seed=0, max_iters=12, enrichment_min=3.0)
     assert bad["report"]["flag"] is True
     assert "two-stage" in bad["report"]["fallback"]["two_stage_command"]
     for report in (good["report"], bad["report"]):
@@ -402,7 +412,8 @@ def test_run_fit_end_to_end(tmp_path: Path) -> None:
     targets = tmp_path / "router_targets.npz"
     report_path = run_fit(
         bc_dir, out=out, dump_targets=targets,
-        k=6, pca_dim=10, density_k=6, cap_ratio=0.3, seed=0, max_iters=12,
+        k=6, pca_dim=10, density_k=6, cap_ratio=0.3, max_share=0.30, min_share=0.02,
+        seed=0, max_iters=12, feature_contract=FEATURE_CONTRACT_V1, restarts=1,
     )
     assert out.is_file() and report_path.is_file() and targets.is_file()
     dumped = np.load(targets)
@@ -417,28 +428,26 @@ def test_run_fit_end_to_end(tmp_path: Path) -> None:
 
 
 def test_default_config_loads_frozen_artifact() -> None:
-    artifact = Path("config/clusters/cluster_v1.npz")
+    artifact = Path("config/clusters/cluster_v2.npz")
     if not artifact.is_file():
-        pytest.skip("cluster_v1.npz 尚未拟合（先运行 tools/fit_clusters.py）")
+        pytest.skip("cluster_v2.npz 尚未拟合（先运行 tools/fit_clusters.py）")
     clear_cache()
-    spec = load()  # config/clusters/default.yaml → spec
+    spec = load()  # config/clusters/default.yaml → spec（lane D：v2 契约 47 维）
     arrays, _ = make_fixture_arrays(n=60, seed=15)
     batch = {key: value for key, value in arrays.items() if key not in ("labels", "difficulty", "geometry")}
-    if spec.others_source == "raw" and "others" not in batch:
-        batch["others"] = np.zeros((60, spec.raw_dim - (8 + 16 * 9 + 16 * 7)), np.float32)
-    if spec.others_source == "fallback":
-        batch.pop("others", None)
     soft = soft_targets_from_obs(batch)
     assert soft.shape == (60, spec.k)
     assert np.allclose(soft.sum(axis=1), 1.0, atol=1e-5)
-    assert spec.cluster_version == "v1"
+    assert spec.cluster_version == "v2"
+    assert (spec.feature_contract or {}).get("name") == "clusters.feature.v2"
+    assert int(spec.raw_dim) == 47
 
 
 def test_torch_passthrough_matches_numpy() -> None:
     torch = pytest.importorskip("torch")
     arrays, meta = make_fixture_arrays(seed=16)
     spec = fit_small_spec(arrays, meta)
-    raw = encode_obs(arrays)
+    raw = encode_obs(arrays, contract=FEATURE_CONTRACT_V1)
     numpy_soft = spec.assign_soft(raw)
     obs_keys = ("ego", "od", "od_mask", "od_presence", "od_id", "ld", "ld_mask", "nav", "signal", "others")
     torch_batch = {key: torch.as_tensor(arrays[key]) for key in obs_keys if key in arrays}
@@ -446,3 +455,65 @@ def test_torch_passthrough_matches_numpy() -> None:
     assert isinstance(torch_soft, torch.Tensor)
     assert torch_soft.shape == numpy_soft.shape
     assert np.allclose(torch_soft.detach().cpu().numpy(), numpy_soft, atol=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# 8. 特征契约 v2（lane D）：top6 选择 / 维度顺序 / TTC 同源
+# --------------------------------------------------------------------------- #
+
+
+def test_feature_contract_v2_dims_slices_and_determinism() -> None:
+    obs = make_obs(n=16, seed=11, with_presence=True, with_others=True, others_dim=28)
+    obs["nav"] = obs["nav"].reshape(16, 1, 11)  # 真实 obs 形状
+    raw = encode_obs(obs, contract=FEATURE_CONTRACT_V2)
+    assert raw.shape == (16, 47) and raw.dtype == np.float32
+    assert FEATURE_CONTRACT_V2["dims_total"] == 47
+    assert np.allclose(raw[:, :8], obs["ego"])                      # ego 8
+    indices, ok = od_top6_indices(obs["od"], obs["od_presence"])
+    top6 = raw[:, 8:32].reshape(16, 6, 4)
+    for row in range(16):
+        for j in range(6):
+            if ok[row, j]:
+                assert np.allclose(top6[row, j], obs["od"][row, indices[row, j], :4])
+            else:
+                assert np.allclose(top6[row, j], 0.0)               # 零填充
+    assert np.allclose(raw[:, 32:35], obs["nav"][:, 0, 4:7])        # 命令 one-hot(3)
+    assert np.allclose(raw[:, 35:47], obs["others"][:, 0, 16:28])   # road_class one-hot(12)
+    assert np.allclose(raw, encode_obs(obs, contract=FEATURE_CONTRACT_V2))  # 确定性
+
+
+def test_od_top6_ttc_distance_tiebreak_and_pad() -> None:
+    # 紧迫度公式（min(TTC, 5s)，与 env/obs/od.py 槽位分配同公式、同参数）由下方选择顺序断言覆盖：
+    # env/obs/od.py 保持只读（不改观测指纹），本模块内置同公式的向量化实现。
+
+    od = np.zeros((3, OD_SLOTS, OD_DIM), np.float32)
+    presence = np.zeros((3, OD_SLOTS), np.float32)
+    # 行 0：slot2 最紧迫（TTC=2）→ 先；slot0/slot1 urgency 并列 5 → 槽位升序 → slot0 先
+    #       距离-3 从剩余 {slot1, slot3, slot4} 取最近（slot3 近、slot1 中、slot4 远）
+    od[0, 0, :4] = [100.0, 5.0, 0.0, 0.0]     # urgency=5, dist≈100
+    od[0, 1, :4] = [50.0, 0.0, -10.0, 0.0]    # TTC=5 → urgency=5, dist=50
+    od[0, 2, :4] = [20.0, 0.0, -10.0, 0.0]    # TTC=2 → 最紧迫, dist=20
+    od[0, 3, :4] = [10.0, 0.0, 0.0, 0.0]      # urgency=5, dist=10（非候选的 TTC 阶段之外）
+    od[0, 4, :4] = [80.0, 0.0, 0.0, 0.0]      # dist=80
+    presence[0, [0, 1, 2, 3, 4]] = 1.0
+    # 行 1：只有 1 个候选 → 其余零填充；行 2：无候选 → 全零
+    od[1, 5, :4] = [30.0, 1.0, -3.0, 2.0]
+    presence[1, 5] = 1.0
+
+    indices, ok = od_top6_indices(od, presence)
+    assert list(indices[0]) == [2, 0, 1, 3, 4, -1]
+    assert list(ok[0]) == [True, True, True, True, True, False]
+    assert list(indices[1][ok[1]]) == [5] and int(ok[1].sum()) == 1
+    assert not ok[2].any()
+    # 非候选（presence=0）不参与，即使几何更近/更紧迫
+    od2 = od.copy()
+    od2[0, 6, :4] = [1.0, 0.0, -50.0, 0.0]  # 极近且 TTC 小，但 presence=0
+    indices2, ok2 = od_top6_indices(od2, presence)
+    assert list(indices2[0]) == list(indices[0]) and not ok2[0, 5]
+
+
+def test_feature_contract_v1_still_encodes_legacy_spec() -> None:
+    obs = make_obs(n=4, seed=12)
+    assert encode_obs(obs, contract=FEATURE_CONTRACT_V1).shape[1] == 8 + 16 * 9 + 16 * 7 + 16
+    with pytest.raises(ValueError, match="others"):
+        encode_obs(obs, contract=FEATURE_CONTRACT_V2)  # v2 需要 others/od_presence 全键

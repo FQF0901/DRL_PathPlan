@@ -145,7 +145,7 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
 
     # router 硬标签（sidecar 载入 → 非占位）+ CE/acc/acc_majority KPI
     assert primary["bc_router_placeholder"] == 0.0
-    assert primary["bc_router_cluster_version"] == "v1"
+    assert primary["bc_router_cluster_version"] == "v2"
     assert primary["bc_router_cluster_k"] == 8
     for key in ("bc_router_ce", "bc_router_acc", "bc_router_acc_majority"):
         assert np.isfinite(primary[key]), f"缺少 router 指标 {key}"
@@ -156,7 +156,7 @@ def test_stage_b_v2_smoke_slices_horizon_and_router(tmp_path: Path) -> None:
                 "bc_router_nmi", "bc_router_top1_cluster_acc", "bc_router_temperature",
                 "bc_router_expert_weight_0", "bc_router_expert_mix_weight_0"):
         assert key not in primary, f"软目标路径残留：{key}"
-    assert metrics["cluster_version"] == "v1" and metrics["cluster_k"] == 8
+    assert metrics["cluster_version"] == "v2" and metrics["cluster_k"] == 8
     assert metrics["router_cluster_source"] == "sidecar"
 
     # 权重感知统计（Stage B）

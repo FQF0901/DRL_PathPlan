@@ -125,20 +125,43 @@ rollout（6 步）
 
 ## 4. 路由与聚类（替代手工规则标签）
 
-- **监督**：无监督聚类（8 簇）→ top-2 softmax（τ 默认 0.5）软目标（形如 0.65/0.35）+ 边界平滑；**不再用 BCE/手工标签**（规则标签仅用于体检）。
-- **特征**：只用当前帧 `ego+od+ld+others`（禁学习表征）→ 去常数维 → 标准化 + PCA/白化到 ~48 维；与 router 输入口径一致且可复现。
-- **防"容量被平淡那团吃掉"**：① 稀有度加权 `w_i = clip((ρ_median/ρ_i)^α, 0.1, 10)`（α=0.75，rule-free）；② 每簇容量上限 ≤25% + 迭代重分配；③ 体检后处理（>30% 二分、<2% 并入）。
-- **冻结与版本**：`config/clusters/cluster_v1.npz`（质心/PCA 参数/数据指纹/git hash）+ `pipeline/clusters.py`（加载与软目标）；重聚类走 Hungarian 对齐。
-- **体检门**：簇规模/熵/半径；每簇难度/几何/规则标签占比；稀有结构富集（cut-in 等）≥3× 全局，否则 FLAG 并启用两段式退路（先 2-means 分"活跃 vs 平稳"，7 簇只花在活跃子集）。
+- **监督**（lane B B3）：router 只吃**硬标签**（聚类 top-1）CE（`F.cross_entropy(logits, cluster, weight=…)`）；
+  标签由 sidecar `datasets/<ds>/cluster_v<version>_assignments.npz` 提供，**训练侧只读**（缺失/行数/指纹/
+  spec 哈希不符 → 直接报错并打印生成命令）；KPI = `router/ce` + `router/acc` + `router/acc_majority`（多数类基线）。
+- **特征契约 v2**（lane D，合计 **47 维**；`pipeline/clusters.py::FEATURE_CONTRACT_V2`，机器可读、编码由契约驱动）：
+  - `ego(8)`：全保留；
+  - `od`：每帧 **6 个对象 × (dx, dy, vx, vy)**。选取规则（确定性）：
+    1. 候选 = `od_presence == 1`（fresh 观测；陈旧槽不参与）；
+    2. 先取 **TTC 最小的 3 个**：urgency = `min(TTC, 5 s)`，其中 `TTC = dx/(-vx)` 当 `dx>0` 且 `vx<-1e-3`，
+       否则 `inf`（即 urgency=cap）——与 `env/obs/od.py` 槽位分配**同公式、同参数**（本模块内置向量化实现）；
+    3. 再从**其余候选**中取距离（`√(dx²+dy²)`）最近的 3 个；
+    4. 不足 6 个 → 零填充；一切并列按**槽位下标升序** tie-break；
+    5. 槽位顺序 = TTC-3（urgency 升序）→ 距离-3（距离升序）；
+  - `nav`：命令 one-hot(3)（forward/left/right；checkpoints(4)/reserved(3)/route_completion(1) 丢弃）；
+  - `road_class`：one-hot(12)（类别特征的正确编码）；
+  - **丢弃**：ld 全部、od 的 cos/sin/length/width/type_id、others 的 speed_limit/signal。
+- **预处理**：去常数/近零方差 → 标准化 → **PCA 白化 `min(32, 去常量后维数, N-1)`**（显式 32，报告记 `pca_dim_actual`）
+  → 稀有度密度权重 `w = clip((ρ_med/ρ)^α, 0.1, 10)`（α=0.75，rule-free）→ 容量约束加权 k-means。
+- **强制均衡（lane D）**：k=8 不变（router 头 8 路）；目标每簇 ≈12.5%，约束 **cap≈15% / floor≈8%**，
+  `capacity_ok=True` 为验收门；flat 模式多次 restart（默认 8）取「满足约束且 objective 最低」；
+  15/8 达不到才放宽 20/5 并写进报告。两个变体：
+  (a) **flat + 严格容量**（默认）；(b) **活跃度分桶 + 两桶都做容量约束 k-means**（`--balanced-split`，
+  仍是 flat spec——soft/argmax 与 8 质心一致，杜绝"平稳桶"变巨簇）。
+- **冻结与版本**：`config/clusters/cluster_v2.npz`（质心/PCA/特征契约/数据指纹/git hash）+ `cluster_v2.report.json`
+  （shares/entropy/`capacity_ok`/稀有富集/soft gap，**含与 v1 对照**）；`cluster_v1.*` 保留；`default.yaml` 指向 v2。
+- **体检门**：簇规模/熵/半径；每簇难度/几何/规则标签占比；稀有结构富集（cut-in 等）≥3× 全局，否则 FLAG
+  并给两段式退路命令；规则标签只用于体检，绝不进入监督。
 
-### 4.1 实测口径与冻结产物（fix-4，2026-09-26）
+### 4.1 实测口径与冻结产物（lane D，2026-09-27）
 
-- **特征（292 维）**：`ego(8) + od(16×9) + ld(16×7) + others(28)` 展平；**od 有效性以 `od_presence` 优先（否则 `od_mask`），无效槽全部清零**（v2 固定槽位下 presence=0 的槽会保留陈旧特征，不清零则簇不是当前帧的函数）；槽位顺序原样保留（=track id 语义，禁止重排）。去常数/近零方差维 → 标准化 → **PCA 白化 48 维**。旧数据 fallback（v1 obs）已实现并校验 `raw_dim`。
-- **两类 artifact**：`config/clusters/cluster_v1.npz` + `cluster_v1.report.json`（含 `flag/flag_reason`、簇构成、富集倍数、软目标样例），以及两段式对照 `cluster_v1_two_stage.*`。
-- **实测体检（128-spec dev 切片，9509 行，`obs_fingerprint=v2-…`）**：**flag=false**；簇规模 2.4%–20.2%；`cutout_active` 富集 **4.49×** @ 簇 5（≥3× 门通过）、cutin 1.66×；软目标 top1 均值 0.578 / top2 质量 0.915。
-- **调用契约**：`pipeline.clusters.load(path) → ClusterSpec`；`soft_targets_from_obs(obs_batch) → (B,8)`（行和=1，torch/numpy 同型）。
-- ⚠️ 当前 artifact 是 **128-spec dev 切片占位**；全量 v2 重采后必须重拟合：
-  `tools/venv-python tools/fit_clusters.py --bc-dir <V2_BC_DIR> --out config/clusters/cluster_v1.npz --report config/clusters/cluster_v1.report.json`（FLAG 则加 `--two-stage`；换簇编号用 `--align-to`）。
+- **v1 历史**：`cluster_v1.npz`（292 维 `ego+od+ld+others`、PCA 48、cap 25%/floor 2%）在 5k 全量上
+  c0=84.7%（train 86.8%）、`capacity_ok=False` → router 退化为多数类预测器（`acc 0.654 < acc_majority 0.952`）；
+  且拟合指纹 `v2-e2adf9319719` ≠ 当前数据集 `v2-6a4d5de3f669`。**v1 保留但不再使用。**
+- **v2 产物**（全量 360,501 行，`obs_fingerprint=v2-6a4d5de3f669`）：见 `cluster_v2.report.json`；
+  sidecar = `datasets/BTC20260926-2343_expert5k/cluster_v2_assignments.npz`（`rows/cluster_k/spec_hash/
+  obs_fingerprint_dataset` 严格校验）。
+- **调用契约**：`pipeline.clusters.load(path) → ClusterSpec`；`assign_hard/soft_targets_from_obs(obs_batch)`；
+  `od_top6_indices(od, presence)`（契约 v2 的确定性 top6 选择；紧迫度与 `env/obs/od.py` 槽位分配同公式、同参数）。
 
 ---
 

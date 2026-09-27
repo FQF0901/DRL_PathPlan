@@ -5,15 +5,15 @@
 # temperature/boundary_margin/smooth_strength：assign_soft（软目标形状）参数，仅 annotate 的
 #   argmax 硬标签与 survey 诊断使用；训练侧 router 只用硬标签 CE（无温度旋钮，lane B B3）。
 #
-# 拟合/重拟合（v2 数据就绪后执行；见 config/clusters/README.md）：
-#   tools/venv-python tools/fit_clusters.py --bc-dir <BC_DIR> \
-#       --out config/clusters/cluster_v1.npz --report config/clusters/cluster_v1.report.json
-cluster_version: v1
-spec: config/clusters/cluster_v1.npz
+# lane D（2026-09-27）：v2 契约 47 维（ego8 + od top6×4 + nav cmd3 + road_class12），
+# 强制均衡 cap 15% / floor 8%（count shares），capacity_ok=True；v1 保留但不再使用。
+# 重拟合命令见 config/clusters/README.md。
+cluster_version: v2
+spec: config/clusters/cluster_v2.npz
 
 k: 8
-pca_dim: 48
+pca_dim: 32
 temperature: 0.5          # top-2 softmax 温度 τ（距离空间；0.5 → 典型 0.65/0.35）
 boundary_margin: 0.05     # top-2 相对间隔低于该值 = 边界样本 → 向 top-3/均匀平滑
 smooth_strength: 0.5      # 边界平滑强度上限
-two_stage: false          # 体检 FLAG 时改 true（活跃 2-means + 7 簇活跃子集）
+two_stage: false          # 历史两段式退路；lane D 变体（b）用 --balanced-split（仍是 flat spec）

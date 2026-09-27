@@ -59,6 +59,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,12 +126,14 @@ DEFAULT_SPEC = "config/clusters/cluster_v1.npz"
 DEFAULT_CONFIG = "config/clusters/default.yaml"
 
 DEFAULT_K = 8
-DEFAULT_PCA_DIM = 48
+#: PCA 白化维度上限（v2 特征 47 维；显式 32，实际取 ``min(32, 去常量后维数, N-1)``）
+DEFAULT_PCA_DIM = 32
 DEFAULT_ALPHA = 0.75
 DEFAULT_DENSITY_K = 16
-DEFAULT_CAP_RATIO = 0.25
-DEFAULT_MAX_SHARE = 0.30
-DEFAULT_MIN_SHARE = 0.02
+#: lane D 均衡约束：每簇 ≈12.5% → cap 15% / floor 8%（达不到才放宽 20%/5% 并记录）
+DEFAULT_CAP_RATIO = 0.15
+DEFAULT_MAX_SHARE = 0.15
+DEFAULT_MIN_SHARE = 0.08
 DEFAULT_TEMPERATURE = 0.5
 DEFAULT_BOUNDARY_MARGIN = 0.05
 DEFAULT_SMOOTH_STRENGTH = 0.5
@@ -142,8 +145,9 @@ LD_DIM = 7
 EGO_DIM = 8
 FALLBACK_OTHERS_DIM = 16  # nav(11) + speed_limit(1) + signal(4)
 
-#: 特征口径（原样写入冻结 npz 的 ``meta.feature_contract``，加载时校验；**机器可读字段**驱动 encode）
-FEATURE_CONTRACT: Dict[str, Any] = {
+#: 特征口径 v1（历史；旧 spec 自带该契约，编码仍可复现）——原样写入冻结 npz 的
+#: ``meta.feature_contract``，**机器可读字段**驱动 encode（禁止硬编码）。
+FEATURE_CONTRACT_V1: Dict[str, Any] = {
     "name": "clusters.feature.v1",
     "frame": "current-frame obs only（禁用 latent/历史）",
     "order": ["ego", "od", "ld", "others"],
@@ -168,6 +172,43 @@ FEATURE_CONTRACT: Dict[str, Any] = {
         "fallback": "nav(11)+speed_limit(ld slot0 dim4, 原始 m/s)+signal(4)（v2 前的旧数据；v2 数据集必须用 raw）",
     },
 }
+
+#: 特征口径 v2（lane D 定稿；合计 47 维 = ego(8) + od top6×4(24) + nav 命令 one-hot(3) + road_class(12)）
+FEATURE_CONTRACT_V2: Dict[str, Any] = {
+    "name": "clusters.feature.v2",
+    "frame": "current-frame obs only（禁用 latent/历史）",
+    "order": ["ego", "od_top6", "nav_cmd", "road_class"],
+    "dims_total": 47,
+    "ego": {"dims": EGO_DIM, "keep": "all"},
+    "od": {
+        "source": "od + od_presence（fresh 观测；presence=0 的陈旧槽不参与）",
+        "slots": OD_SLOTS,
+        "dims": OD_DIM,
+        "feature_dims": [0, 1, 2, 3],  # dx, dy, vx, vy（丢弃 cos/sin/length/width/type_id）
+        "pick": {
+            "presence_rule": "od_presence == 1",
+            "ttc_top": 3,
+            "distance_top": 3,
+            "ttc_cap_s": 5.0,
+            "ttc_formula": "min(TTC, 5.0)；TTC = dx / (-vx) 当 dx>0 且 vx<-1e-3，否则 inf"
+                           "（与 env/obs/od.py 槽位分配同公式、同参数；本模块内置向量化实现）",
+            "distance": "sqrt(dx^2 + dy^2)",
+            "slot_order": "TTC-3（urgency 升序）→ 距离-3（dist 升序）；并列按槽位下标升序",
+            "pad": "不足 6 个 → 零填充",
+        },
+    },
+    "nav": {
+        "cmd_one_hot": 3,
+        "labels": ["forward", "left", "right"],
+        "source_slice": "nav[..., 4:7]（checkpoints 0:4 / reserved 7:10 / route_completion 10 丢弃）",
+    },
+    "road_class": {"one_hot": 12, "source_slice": "others[..., 16:28]"},
+    "dropped": ["ld（全部）", "od cos_theta/sin_theta/length/width/type_id",
+                "others speed_limit/signal", "nav checkpoints/reserved/route_completion"],
+}
+
+#: 当前默认契约（新拟合/新 spec 用 v2；旧 spec 自带 v1 契约仍按 v1 编码）
+FEATURE_CONTRACT: Dict[str, Any] = FEATURE_CONTRACT_V2
 
 #: 两段式退路的连续活跃度统计量（无规则标签）
 ACTIVITY_STATS: Tuple[str, ...] = ("od_present_count", "od_interaction", "ego_maneuver")
@@ -218,13 +259,13 @@ def _mask_channel(array: np.ndarray, name: str, slots: int) -> np.ndarray:
     return array
 
 
-def encode_obs(
+def _encode_obs_v1(
     obs: Mapping[str, Any],
     *,
     others_source: str = "auto",
     contract: Optional[Mapping[str, Any]] = None,
 ) -> np.ndarray:
-    """当前帧 obs → 原始特征 ``(N, ego+od+ld+others)``（float32）。
+    """特征契约 **v1**：obs → ``(N, ego+od+ld+others)``（历史口径；旧 spec 复现用）。
 
     ``contract``：特征口径（默认 :data:`FEATURE_CONTRACT`）；**所有维数/槽位/有效性键都从
     contract 读**（禁止硬编码，便于后续裁剪特征）。``others_source``：``"auto"``
@@ -296,6 +337,125 @@ def encode_obs(
         )
     raw = np.concatenate([ego, od.reshape(n, -1), ld.reshape(n, -1), others], axis=1)
     return raw.astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# 特征契约 v2：od top6 选择 + ego/nav_cmd/road_class 拼接（lane D）
+# --------------------------------------------------------------------------- #
+
+
+def od_top6_indices(
+    od: np.ndarray,
+    presence: np.ndarray,
+    *,
+    n_ttc: int = 3,
+    n_distance: int = 3,
+    ttc_cap_s: float = 5.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """``(N, slots, dims)`` od + ``(N, slots)`` presence → 选中的槽下标与有效掩码。
+
+    规则（确定性，写进契约）：
+    1. 候选 = ``presence == 1``；
+    2. TTC-3：urgency = ``min(TTC, cap)``（与 ``env/obs/od.py`` 槽位分配的紧迫度同公式、同参数），
+       urgency 升序；并列按槽位下标升序（stable argsort）；
+    3. 距离-3：在**其余候选**中按 ``sqrt(dx²+dy²)`` 升序；并列按槽位下标升序；
+    4. 不足 → 下标 ``-1`` + 有效掩码 0（调用方零填充）。
+
+    返回 ``(indices (N, n_ttc+n_distance) int64, valid (N, n_ttc+n_distance) bool)``；
+    顺序 = TTC-3 → 距离-3。
+    """
+    od = np.asarray(od, dtype=np.float64)
+    presence = np.asarray(presence, dtype=np.float64)
+    if od.ndim != 3 or presence.ndim != 2 or od.shape[:2] != presence.shape:
+        raise ValueError(f"od/presence 形状不匹配：od={tuple(od.shape)} presence={tuple(presence.shape)}")
+    n, slots = od.shape[0], od.shape[1]
+    dx, dy, vx = od[..., 0], od[..., 1], od[..., 2]
+    valid = presence > 0.0
+    urgency = np.full((n, slots), np.inf, dtype=np.float64)
+    approaching = valid & (dx > 0.0) & (vx < -1e-3)
+    urgency[approaching] = np.minimum(dx[approaching] / (-vx[approaching]), float(ttc_cap_s))
+    urgency[valid & ~approaching] = float(ttc_cap_s)
+    dist = np.hypot(dx, dy)
+
+    def _pick(score: np.ndarray, mask: np.ndarray, count: int) -> Tuple[np.ndarray, np.ndarray]:
+        order = np.argsort(np.where(mask, score, np.inf), axis=1, kind="stable")[:, :count]
+        ok = np.take_along_axis(mask, order, axis=1)
+        return order.astype(np.int64), ok
+
+    first, ok_first = _pick(urgency, valid, int(n_ttc))
+    selected = np.zeros_like(valid)
+    np.put_along_axis(selected, first, ok_first, axis=1)
+    second, ok_second = _pick(dist, valid & ~selected, int(n_distance))
+    ok = np.concatenate([ok_first, ok_second], axis=1)
+    indices = np.concatenate([first, second], axis=1)
+    indices = np.where(ok, indices, -1)  # 不足 → -1 + 有效掩码 0（调用方零填充）
+    return indices.astype(np.int64), ok
+
+
+def _encode_obs_v2(obs: Mapping[str, Any], *, contract: Mapping[str, Any]) -> np.ndarray:
+    """特征契约 **v2**：``(N, 47) = ego(8) + od top6×4(24) + nav 命令 one-hot(3) + road_class(12)``。"""
+    od_cfg = dict(contract.get("od") or {})
+    nav_cfg = dict(contract.get("nav") or {})
+    road_cfg = dict(contract.get("road_class") or {})
+    pick = dict(od_cfg.get("pick") or {})
+    if not isinstance(obs, Mapping):
+        raise TypeError(f"obs 必须是映射（dict），收到 {type(obs).__name__}")
+    for key in ("ego", "od", "od_presence", "nav", "others"):
+        if key not in obs:
+            raise ValueError(f"特征契约 v2 需要 obs[{key!r}]（v2 数据集必须含 others/od_presence）")
+    ego = _squeeze_single_slot(_to_numpy(obs["ego"]).astype(np.float64, copy=False), "ego")
+    ego_dims = int((contract.get("ego") or {}).get("dims", EGO_DIM))
+    if ego.ndim != 2 or ego.shape[1] != ego_dims:
+        raise ValueError(f"obs['ego'] 形状应为 (B,{ego_dims})，收到 {tuple(ego.shape)}")
+    n = int(ego.shape[0])
+
+    od = _channel(_to_numpy(obs["od"]), "od", int(od_cfg.get("slots", OD_SLOTS)), int(od_cfg.get("dims", OD_DIM)))
+    presence = _mask_channel(_to_numpy(obs["od_presence"]), "od_presence", int(od_cfg.get("slots", OD_SLOTS)))
+    feat_dims = [int(i) for i in (od_cfg.get("feature_dims") or [0, 1, 2, 3])]
+    indices, ok = od_top6_indices(
+        od,
+        presence,
+        n_ttc=int(pick.get("ttc_top", 3)),
+        n_distance=int(pick.get("distance_top", 3)),
+        ttc_cap_s=float(pick.get("ttc_cap_s", 5.0)),
+    )
+    rows = np.arange(n)[:, None]
+    top6 = np.zeros((n, indices.shape[1], len(feat_dims)), dtype=np.float64)
+    top6[:, :, :] = np.where(ok[..., None], od[rows, np.clip(indices, 0, od.shape[1] - 1)][..., feat_dims], 0.0)
+
+    nav = _squeeze_single_slot(_to_numpy(obs["nav"]).astype(np.float64, copy=False), "nav")
+    nav_dims = 2 * 2 + 6 + 1
+    if nav.ndim != 2 or nav.shape[1] != nav_dims:
+        raise ValueError(f"obs['nav'] 形状应为 (B,{nav_dims})（或 (B,1,{nav_dims})），收到 {tuple(np.asarray(obs['nav']).shape)}")
+    cmd = nav[:, 4 : 4 + int(nav_cfg.get("cmd_one_hot", 3))]
+
+    others = _squeeze_single_slot(_to_numpy(obs["others"]).astype(np.float64, copy=False), "others")
+    road = others[:, 16 : 16 + int(road_cfg.get("one_hot", 12))]
+    if road.shape[1] != int(road_cfg.get("one_hot", 12)):
+        raise ValueError(f"obs['others'] 宽度不足以取 road_class one-hot：{tuple(others.shape)}")
+
+    raw = np.concatenate([ego, top6.reshape(n, -1), cmd, road], axis=1)
+    expected = int(contract.get("dims_total") or raw.shape[1])
+    if raw.shape[1] != expected:
+        raise ValueError(f"特征契约 v2 维度不符：{raw.shape[1]} != {expected}")
+    return raw.astype(np.float32)
+
+
+def encode_obs(
+    obs: Mapping[str, Any],
+    *,
+    others_source: str = "auto",
+    contract: Optional[Mapping[str, Any]] = None,
+) -> np.ndarray:
+    """当前帧 obs → 原始特征（按 ``contract["name"]`` 分派 v1/v2；默认 v2）。
+
+    v2 = ``ego(8) + od top6×4(24) + nav 命令 one-hot(3) + road_class(12)``（合计 47 维）；
+    v1 = 历史口径（旧 spec 自带契约时仍可复现）。
+    """
+    contract = dict(contract or FEATURE_CONTRACT)
+    if str(contract.get("name") or "").endswith(".v1"):
+        return _encode_obs_v1(obs, others_source=others_source, contract=contract)
+    return _encode_obs_v2(obs, contract=contract)
 
 
 # --------------------------------------------------------------------------- #
@@ -734,40 +894,43 @@ def enforce_size_bounds(
         return np.bincount(assign, minlength=centers.shape[0]).astype(np.float64) / max(n, 1)
 
     def _size_pass(label: str) -> bool:
-        """二分过大簇 / 并入过小簇 / 保持 K=target；返回是否有改动。"""
+        """二分过大簇 / 并入过小簇 / 保持 K=target；**交替**直到两界都满足（守卫耗尽为止）。
+
+        lane D：cap 15% / floor 8% 同时成立才算达标——合并小簇可能把接收簇推过 cap，
+        因此不能只跑「先 split 后 merge」两段，必须循环复查。
+        """
         nonlocal centers, assign
-        shares = _shares()
         changed = False
         guard = 0
-        while shares.max() > max_share + 1e-12 and centers.shape[0] < 2 * target and guard < 2 * target:
-            j = int(np.argmax(shares))
-            before = int(np.sum(assign == j))
-            centers, assign = _split_cluster(x, w, centers, assign, j)
-            log.append({"op": "split" + label, "cluster": j, "size_before": before})
+        while guard < 8 * max(target, 1):
             shares = _shares()
+            n_clusters = centers.shape[0]
+            over = float(shares.max()) > max_share + 1e-12
+            under = float(shares.min()) < min_share - 1e-12
+            if n_clusters == target and not over and not under:
+                break
+            if n_clusters > target:
+                j = int(np.argmin(shares))
+                centers, assign = _merge_cluster(x, w, centers, assign, j)
+                log.append({"op": "merge_to_k" + label, "cluster": j})
+            elif n_clusters < target:
+                j = int(np.argmax(shares))
+                centers, assign = _split_cluster(x, w, centers, assign, j)
+                log.append({"op": "split_to_k" + label, "cluster": j})
+            elif over:
+                j = int(np.argmax(shares))
+                before = int(np.sum(assign == j))
+                centers, assign = _split_cluster(x, w, centers, assign, j)
+                log.append({"op": "split" + label, "cluster": j, "size_before": before})
+            elif under:
+                j = int(np.argmin(shares))
+                before = int(np.sum(assign == j))
+                centers, assign = _merge_cluster(x, w, centers, assign, j)
+                log.append({"op": "merge_tiny" + label, "cluster": j, "size_before": before})
+            else:  # pragma: no cover - 理论上不可达
+                break
             changed = True
             guard += 1
-        guard = 0
-        while shares.min() < min_share - 1e-12 and centers.shape[0] > 1 and guard < 2 * target:
-            j = int(np.argmin(shares))
-            before = int(np.sum(assign == j))
-            centers, assign = _merge_cluster(x, w, centers, assign, j)
-            log.append({"op": "merge_tiny" + label, "cluster": j, "size_before": before})
-            shares = _shares()
-            changed = True
-            guard += 1
-        while centers.shape[0] > target:
-            j = int(np.argmin(shares))
-            centers, assign = _merge_cluster(x, w, centers, assign, j)
-            log.append({"op": "merge_to_k" + label, "cluster": j})
-            shares = _shares()
-            changed = True
-        while centers.shape[0] < target:
-            j = int(np.argmax(shares))
-            centers, assign = _split_cluster(x, w, centers, assign, j)
-            log.append({"op": "split_to_k" + label, "cluster": j})
-            shares = _shares()
-            changed = True
         return changed
 
     #: 精修用的硬容量：min(cap_ratio, max_share) —— refine 后必然 ≤ 该上限（且无空簇）
@@ -1006,7 +1169,7 @@ class ClusterSpec:
 
     def activity(self, raw: np.ndarray) -> np.ndarray:
         """两段式活跃度得分（标准化的 3 统计量加权平均）。"""
-        stats = activity_statistics(np.asarray(raw, dtype=np.float64))
+        stats = activity_statistics(np.asarray(raw, dtype=np.float64), contract=self.feature_contract)
         z = (stats - self.activity_mean) / np.maximum(self.activity_std, 1e-8)
         return z @ self.activity_weights
 
@@ -1172,21 +1335,26 @@ def cluster_labels_from_obs(obs_batch: Mapping[str, Any], *, spec: Any = None) -
 
 
 def _version_digits(spec: Any) -> str:
-    return "".join(ch for ch in str(getattr(spec, "cluster_version", "")) if ch.isdigit())
+    """spec.cluster_version → sidecar 文件名 token（``v2`` → ``2``；``v2_natural`` → ``2_natural``）。"""
+    raw = str(getattr(spec, "cluster_version", "") or "").strip().lstrip("vV")
+    token = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_")
+    return token
 
 
 def assignments_path(dataset_dir: Any, *, spec: Any) -> Path:
-    """sidecar 路径：优先 ``cluster_v<version>_assignments.npz``，兼容其它 ``cluster_v*_assignments.npz``。"""
+    """sidecar 路径：``cluster_v<version>_assignments.npz``（version = spec.cluster_version 数字）。
+
+    ⚠️ 已知版本时**只认版本对应文件**（绝不回退到其它版本的同名文件——否则会覆盖旧 sidecar）；
+    仅当 spec 无版本号时才回退到任意 ``cluster_v*_assignments.npz``。
+    """
     base = Path(str(dataset_dir))
     version = _version_digits(spec)
     if version:
-        primary = base / ASSIGNMENTS_FILENAME_TEMPLATE.format(version=version)
-        if primary.is_file():
-            return primary
+        return base / ASSIGNMENTS_FILENAME_TEMPLATE.format(version=version)
     existing = sorted(item for item in base.glob("cluster_v*_assignments.npz") if item.is_file())
     if existing:
         return existing[0]
-    return base / ASSIGNMENTS_FILENAME_TEMPLATE.format(version=version or "1")
+    return base / ASSIGNMENTS_FILENAME_TEMPLATE.format(version="1")
 
 
 def spec_file_hash(spec: Any) -> str:
@@ -1360,35 +1528,47 @@ def load_assignments(
     return cluster
 
 
-def activity_statistics(raw: np.ndarray) -> np.ndarray:
+def activity_statistics(raw: np.ndarray, *, contract: Optional[Mapping[str, Any]] = None) -> np.ndarray:
     """连续活跃度统计量 ``(N,3)``：od 在场数 / OD 交互强度 / 自车机动强度。
 
-    只用当前帧特征（od 无效槽位已清零）：
+    只用当前帧特征（按 ``contract`` 分派布局；无效槽位已清零）：
     - ``od_present_count``：od 行非零槽位数；
     - ``od_interaction``：``Σ presence · max(0,-vx_rel)/max(|dx|,1)``（接近速度/距离）；
     - ``ego_maneuver``：``|a_lat| + |v·yaw_rate| + |curvature|·v²``。
     """
+    contract = dict(contract or FEATURE_CONTRACT)
     x = np.asarray(raw, dtype=np.float64)
-    edp = EGO_DIM
-    od = x[:, edp : edp + OD_SLOTS * OD_DIM].reshape(-1, OD_SLOTS, OD_DIM)
+    ego_dims = int((contract.get("ego") or {}).get("dims", EGO_DIM))
+    if str(contract.get("name") or "").endswith(".v2"):
+        od_cfg = dict(contract.get("od") or {})
+        n_slots = int(od_cfg.get("ttc_top", 3)) + int(od_cfg.get("distance_top", 3))
+        n_feat = len(od_cfg.get("feature_dims") or [0, 1, 2, 3])
+        od = x[:, ego_dims : ego_dims + n_slots * n_feat].reshape(-1, n_slots, n_feat)
+    else:
+        od = x[:, ego_dims : ego_dims + OD_SLOTS * OD_DIM].reshape(-1, OD_SLOTS, OD_DIM)
     present = (np.abs(od).sum(axis=-1) > 0.0).astype(np.float64)
     count = present.sum(axis=1)
     dx = od[..., 0]
     vx = od[..., 2]
     closing = np.clip(-vx, 0.0, None)
     interaction = (present * closing / np.clip(np.abs(dx), 1.0, None)).sum(axis=1)
-    ego = x[:, :EGO_DIM]
+    ego = x[:, :ego_dims]
     v, a_lat, yaw_rate, curvature = ego[:, 0], ego[:, 2], ego[:, 3], ego[:, 5]
     maneuver = np.abs(a_lat) + np.abs(v * yaw_rate) + np.abs(curvature) * v * v
     return np.stack([count, interaction, maneuver], axis=1)
 
 
-def activity_score(raw: np.ndarray, params: Mapping[str, Any]) -> np.ndarray:
+def activity_score(
+    raw: np.ndarray,
+    params: Mapping[str, Any],
+    *,
+    contract: Optional[Mapping[str, Any]] = None,
+) -> np.ndarray:
     """按冻结参数（mean/std/weights）计算标量活跃度得分。"""
     mean = np.asarray(params["activity_mean"], dtype=np.float64)
     std = np.asarray(params["activity_std"], dtype=np.float64)
     weights = np.asarray(params["activity_weights"], dtype=np.float64)
-    stats = activity_statistics(raw)
+    stats = activity_statistics(raw, contract=contract)
     return ((stats - mean) / np.maximum(std, 1e-8)) @ weights
 
 

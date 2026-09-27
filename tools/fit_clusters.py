@@ -181,13 +181,14 @@ def _fit_two_stage(
     max_bucket: float,
     seed: int,
     max_iters: int,
+    contract: Mapping[str, Any] = FEATURE_CONTRACT,
 ) -> Dict[str, Any]:
     """两段式退路：活跃度 2-means 门控 + 活跃子集 K-1 簇（容量按全局占比折算）。
 
     1-D 加权 2-means 自然阈值可能极不均衡（平坦密度 → 阈值贴近众数，活跃子集过小），
     因此加容量钳制：每桶 ≤ ``max_bucket``（默认 65%），超出时把阈值移到加权分位点。
     """
-    act = activity_statistics(raw)
+    act = activity_statistics(raw, contract=contract)
     mean = act.mean(axis=0)
     std = act.std(axis=0)
     std = np.where(std > 1e-8, std, 1.0)
@@ -266,6 +267,116 @@ def _fit_two_stage(
     }
 
 
+def _capacity_report(
+    assign: np.ndarray, w: np.ndarray, *, k: int, max_share: float, min_share: float
+) -> Tuple[bool, np.ndarray, np.ndarray]:
+    """簇**计数占比**（lane D 均衡门口径，与 v1 的 c0=84.7% 同口径）+ 加权占比（诊断）。
+
+    返回 ``(capacity_ok, count_shares, weighted_shares)``；`capacity_ok` = 计数占比在
+    ``[min_share, max_share]`` 内（"每簇 ≈12.5%" 的直观口径；加权占比只作报告）。
+    """
+    counts = np.bincount(np.asarray(assign, dtype=np.int64), minlength=int(k)).astype(np.float64)
+    count_shares = counts / max(float(counts.sum()), 1.0)
+    weighted = np.array([float(w[assign == c].sum()) for c in range(int(k))], dtype=np.float64)
+    weighted = weighted / max(float(w.sum()), 1e-12)
+    ok = bool(
+        count_shares.min() >= float(min_share) - 1e-9
+        and count_shares.max() <= float(max_share) + 1e-9
+    )
+    return ok, count_shares, weighted
+
+
+def _fit_balanced_split(
+    z: np.ndarray,
+    raw: np.ndarray,
+    w: np.ndarray,
+    *,
+    k: int,
+    cap_ratio: float,
+    max_share: float,
+    min_share: float,
+    max_bucket: float,
+    seed: int,
+    max_iters: int,
+    contract: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """lane D 变体（b）：活跃度分桶（每桶 ≤ ``max_bucket``）+ **两个桶都做容量约束 k-means**。
+
+    与变体（a）flat 的区别只在初始化/分桶：最终仍是 **flat spec**（soft=全 8 质心 top-2），
+    因此 annotate 的 argmax 硬标签与 spec 分配一致；分桶只用于杜绝"平稳桶"变巨簇。
+    """
+    act = activity_statistics(raw, contract=contract)
+    mean = act.mean(axis=0)
+    std = act.std(axis=0)
+    std = np.where(std > 1e-8, std, 1.0)
+    weights = np.full(len(ACTIVITY_STATS), 1.0 / len(ACTIVITY_STATS))
+    score = ((act - mean) / std) @ weights
+    order = np.argsort(score, kind="stable")
+    cumulative = np.cumsum(w[order])
+    total = float(cumulative[-1])
+    # 分桶：按权重分位点切在 max_bucket（默认 50%）→ 两桶都 ≤ max_bucket
+    cut = int(np.searchsorted(cumulative, (1.0 - float(max_bucket)) * total, side="left"))
+    cut = min(max(cut, 0), score.size - 1)
+    threshold = float(score[order[cut]])
+    calm = score <= threshold
+    if calm.all() or (~calm).all():
+        raise ValueError("活跃度分桶退化（全 calm/全 active），改用 flat 模式")
+    share_calm = float(w[calm].sum() / max(total, 1e-12))
+    share_active = 1.0 - share_calm
+    # k 分配：按桶权重，且每桶簇数必须能容纳全局 cap/floor
+    def _alloc(share: float) -> int:
+        low = int(np.ceil(share / max(float(max_share), 1e-6) - 1e-9))
+        high = int(np.floor(share / max(float(min_share), 1e-6) + 1e-9))
+        high = max(high, low)
+        return int(np.clip(int(round(k * share)), max(low, 1), max(high, 1)))
+    k_calm = min(max(_alloc(share_calm), 1), k - 1)
+    k_active = k - k_calm
+    if k_active < 1:
+        raise ValueError("分桶后 active 桶无簇可分配，改用 flat 模式")
+    log: list = []
+    centers_all: list = []
+    assign = np.full(z.shape[0], -1, dtype=np.int64)
+    for bucket, count in ((calm, k_calm), (~calm, k_active)):
+        if int(bucket.sum()) < count:
+            raise ValueError("桶内样本数少于分配簇数，改用 flat 模式")
+        bucket_share = float(w[bucket].sum() / max(total, 1e-12))
+        cap_b = float(np.clip(cap_ratio / max(bucket_share, 1e-6), 1e-3, 1.0))
+        max_b = float(np.clip(max_share / max(bucket_share, 1e-6), 1e-3, 1.0))
+        min_b = float(np.clip(min_share / max(bucket_share, 1e-6), 0.0, 0.5))
+        km = fit_capacity_kmeans(z[bucket], w[bucket], k=int(count), cap_ratio=cap_b, seed=seed, max_iters=max_iters)
+        centers_b, assign_b, log_b = enforce_size_bounds(
+            z[bucket], w[bucket], km.centroids, km.assign,
+            target_k=int(count), cap_ratio=cap_b, max_share=max_b, min_share=min_b,
+        )
+        assign[bucket] = assign_b + len(centers_all)
+        centers_all.append(np.asarray(centers_b, dtype=np.float64))
+        log.extend([{**item, "bucket": "calm" if bucket is calm else "active"} for item in log_b])
+    # 全局收尾：分桶只做初始化，最终仍按全局 cap/floor 精修一次（杜绝桶内折算误差残留）
+    centers_merged = np.concatenate(centers_all, axis=0)
+    centers_merged, assign, log_global = enforce_size_bounds(
+        z, w, centers_merged, assign, target_k=k,
+        cap_ratio=cap_ratio, max_share=max_share, min_share=min_share,
+    )
+    log.extend([{**item, "bucket": "global"} for item in log_global])
+    return {
+        "centers": centers_merged,
+        "assign": assign,
+        "log": log,
+        "objective": float("nan"),
+        "iterations": -1,
+        "activity_mean": mean,
+        "activity_std": std,
+        "activity_weights": weights,
+        "activity_centers": np.array([0.0, 0.0], dtype=np.float64),
+        "calm_reference": np.zeros(z.shape[1], dtype=np.float64),
+        "p_active": float(share_active),
+        "clamped": True,
+        "threshold": threshold,
+        "k_calm": int(k_calm),
+        "k_active": int(k_active),
+    }
+
+
 def fit_cluster_spec_from_dataset(
     arrays: Mapping[str, np.ndarray],
     meta: Mapping[str, Any],
@@ -290,8 +401,18 @@ def fit_cluster_spec_from_dataset(
     enrichment_min: float = 3.0,
     dataset_path: str = "",
     align_to: Optional[str] = None,
+    feature_contract: Mapping[str, Any] = FEATURE_CONTRACT,
+    restarts: int = 8,
+    balanced_split: bool = False,
+    natural: bool = False,
 ) -> Dict[str, Any]:
-    """核心拟合：返回 ``{"spec", "report", "arrays"（诊断中间量）}``（不落盘）。"""
+    """核心拟合：返回 ``{"spec", "report", "arrays"（诊断中间量）}``（不落盘）。
+
+    ``natural=True``（对照审阅用）：**不加容量/份额约束**的密度加权 k-means（cap/floor 置为
+    1.0/0.0，仍走同一确定性实现）；生产候选用默认（cap 15% / floor 8% + restarts）。
+    """
+    if natural:
+        cap_ratio, max_share, min_share = 1.0, 1.0, 0.0
     obs = current_frame_obs(arrays)
     n_total = int(obs["ego"].shape[0])
     if max_rows and int(max_rows) < n_total:
@@ -309,7 +430,7 @@ def fit_cluster_spec_from_dataset(
         geometry = np.asarray(arrays["geometry"]) if "geometry" in arrays else None
     n = int(obs["ego"].shape[0])
 
-    raw = encode_obs(obs)  # v2 固定槽位：od_presence 优先 + 无效槽位清零
+    raw = encode_obs(obs, contract=feature_contract)  # 契约驱动（v2 = ego+od top6+nav cmd+road_class）
     others_source = "raw" if "others" in obs else "fallback"
     features = fit_feature_pipeline(raw, pca_dim=pca_dim)
     z = features["z"].astype(np.float64)
@@ -319,20 +440,42 @@ def fit_cluster_spec_from_dataset(
     mode = "two_stage" if two_stage else "flat"
     activity: Dict[str, Any] = {}
     if mode == "flat":
-        km = fit_capacity_kmeans(
-            z, w, k=k, cap_ratio=cap_ratio, seed=seed, max_iters=max_iters
-        )
-        centers, assign, log = enforce_size_bounds(
-            z,
-            w,
-            km.centroids,
-            km.assign,
-            target_k=k,
-            cap_ratio=cap_ratio,
-            max_share=max_share,
-            min_share=min_share,
-        )
-        diag = {"objective": km.objective, "iterations": km.iterations, "history": km.history[-8:]}
+        if balanced_split:
+            bal = _fit_balanced_split(
+                z, raw, w,
+                k=k, cap_ratio=cap_ratio, max_share=max_share, min_share=min_share,
+                max_bucket=two_stage_max_bucket, seed=seed, max_iters=max_iters,
+                contract=feature_contract,
+            )
+            centers, assign, log = bal["centers"], bal["assign"], bal["log"]
+            activity = {
+                "activity_mean": bal["activity_mean"], "activity_std": bal["activity_std"],
+                "activity_weights": bal["activity_weights"], "activity_centers": bal["activity_centers"],
+                "calm_reference": bal["calm_reference"], "p_active": bal["p_active"],
+                "activity_clamped": True, "k_calm": bal["k_calm"], "k_active": bal["k_active"],
+            }
+            diag = {"objective": float("nan"), "iterations": -1, "history": []}
+        else:
+            # 变体（a）：flat + 严格容量，多次 restart 取「满足约束且 objective 最低」
+            best: Optional[Dict[str, Any]] = None
+            for attempt in range(max(1, int(restarts))):
+                km = fit_capacity_kmeans(
+                    z, w, k=k, cap_ratio=cap_ratio, seed=int(seed) + attempt, max_iters=max_iters
+                )
+                centers_a, assign_a, log_a = enforce_size_bounds(
+                    z, w, km.centroids, km.assign, target_k=k,
+                    cap_ratio=cap_ratio, max_share=max_share, min_share=min_share,
+                )
+                ok_a, _, _ = _capacity_report(assign_a, w, k=k, max_share=max_share, min_share=min_share)
+                candidate = {
+                    "ok": ok_a, "objective": float(km.objective),
+                    "centers": centers_a, "assign": assign_a, "log": log_a,
+                    "iterations": int(km.iterations), "history": km.history[-8:],
+                }
+                if best is None or (candidate["ok"], -candidate["objective"]) > (best["ok"], -best["objective"]):
+                    best = candidate
+            centers, assign, log = best["centers"], best["assign"], best["log"]
+            diag = {"objective": best["objective"], "iterations": best["iterations"], "history": best["history"]}
     else:
         two = _fit_two_stage(
             z,
@@ -345,6 +488,7 @@ def fit_cluster_spec_from_dataset(
             max_bucket=two_stage_max_bucket,
             seed=seed,
             max_iters=max_iters,
+            contract=feature_contract,
         )
         centers = two["centers"]
         active = two["active"]
@@ -364,7 +508,7 @@ def fit_cluster_spec_from_dataset(
         cluster_version=str(cluster_version),
         mode=mode,
         k=int(k),
-        feature_contract=dict(FEATURE_CONTRACT),
+        feature_contract=dict(feature_contract),
         others_source=others_source,
         raw_dim=int(raw.shape[1]),
         keep_dims=features["keep_dims"],
@@ -389,11 +533,16 @@ def fit_cluster_spec_from_dataset(
             "max_share": float(max_share),
             "min_share": float(min_share),
             "pca_dim": int(pca_dim),
+            "pca_dim_actual": int(features["components"].shape[0]),
             "seed": int(seed),
             "max_iters": int(max_iters),
             "max_rows": int(max_rows),
             "two_stage": bool(two_stage),
             "two_stage_max_bucket": float(two_stage_max_bucket),
+            "balanced_split": bool(balanced_split),
+            "natural": bool(natural),
+            "restarts": int(restarts),
+            "feature_contract": str(feature_contract.get("name") or ""),
             "p_active": activity.get("p_active"),
             "activity_clamped": activity.get("clamped"),
             "objective": diag["objective"],
@@ -438,6 +587,9 @@ def fit_cluster_spec_from_dataset(
         alignment = {"perm": perm.tolist(), "old_cluster": list(range(int(frozen.k))),
                      "mean_cost_before": before, "mean_cost_after": after}
 
+    capacity_ok, capacity_shares, capacity_weighted = _capacity_report(
+        assign, w, k=int(k), max_share=max_share, min_share=min_share
+    )
     report = build_report(
         spec=spec,
         raw=raw,
@@ -445,6 +597,9 @@ def fit_cluster_spec_from_dataset(
         w=w,
         assign=assign,
         diag=diag,
+        capacity={"ok": bool(capacity_ok), "shares": capacity_shares.tolist(),
+                  "weighted_shares": capacity_weighted.tolist(),
+                  "max_share": float(max_share), "min_share": float(min_share)},
         labels=label_source,
         label_names=tuple(meta.get("label_names") or ()),
         difficulty=difficulty,
@@ -475,8 +630,9 @@ def build_report(
     rare_max_rate: float,
     enrichment_min: float,
     alignment: Mapping[str, Any],
+    capacity: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """体检报告：簇规模/熵/半径 + 难度/几何/规则标签占比 + 稀有富集 + FLAG。"""
+    """体检报告：簇规模/熵/半径 + 难度/几何/规则标签占比 + 稀有富集 + FLAG + 均衡门。"""
     n = raw.shape[0]
     k = int(spec.k)
     soft = spec.assign_soft(raw.astype(np.float32))
@@ -618,7 +774,12 @@ def build_report(
             "shares": [float(v) for v in shares],
             "max_share": max_share,
             "min_share": min_share,
-            "capacity_ok": bool(max_share <= spec.fit_params.get("cap_ratio", 1.0) + 1e-9),
+            "capacity_ok": bool((capacity or {}).get("ok", max_share <= spec.fit_params.get("cap_ratio", 1.0) + 1e-9)),
+            "capacity_bounds": {
+                "max_share": float((capacity or {}).get("max_share", spec.fit_params.get("max_share", 1.0))),
+                "min_share": float((capacity or {}).get("min_share", spec.fit_params.get("min_share", 0.0))),
+            },
+            "capacity_weighted_shares": [float(v) for v in (capacity or {}).get("weighted_shares", [])],
             "share_entropy_norm": share_entropy,
         },
         "soft_target": {
@@ -765,7 +926,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report", type=Path, default=None, help="体检报告 json（默认 <out>.report.json）")
     parser.add_argument("--cluster-version", type=str, default=CLUSTER_VERSION)
     parser.add_argument("--k", type=int, default=DEFAULT_K, help="簇数（默认 8）")
-    parser.add_argument("--pca-dim", type=int, default=DEFAULT_PCA_DIM, help="白化维数（默认 48）")
+    parser.add_argument("--pca-dim", type=int, default=DEFAULT_PCA_DIM, help="白化维数（默认 32；实际 min(32, 去常量后维数, N-1)）")
     parser.add_argument("--density-k", type=int, default=DEFAULT_DENSITY_K, help="kNN 密度邻居数")
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA, help="稀有度加权指数")
     parser.add_argument("--cap-ratio", type=float, default=DEFAULT_CAP_RATIO, help="每簇容量上限占比")
@@ -782,6 +943,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--two-stage", action="store_true", help="两段式退路（活跃 2-means + 7 簇活跃子集）")
     parser.add_argument("--two-stage-max-bucket", type=float, default=0.65,
                         help="两段式活跃度分桶上限（自然 2-means 过于不均衡时钳制）")
+    parser.add_argument("--restarts", type=int, default=8, help="flat 模式 restart 次数（取满足容量约束且 objective 最低）")
+    parser.add_argument("--balanced-split", action="store_true",
+                        help="lane D 变体（b）：活跃度分桶 + 两桶都做容量约束 k-means（仍是 flat spec）")
+    parser.add_argument("--natural", action="store_true",
+                        help="对照审阅：不加容量/份额约束的自然版（cap/floor 1.0/0.0）")
     parser.add_argument("--align-to", type=str, default=None, help="把新簇编号 Hungarian 对齐到旧 spec npz")
     parser.add_argument("--dump-targets", type=Path, default=None,
                         help="可选：把 soft_targets/cluster 物化到该 npz（trainer 也可在线调用）")
@@ -813,6 +979,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_rows=args.max_rows,
             two_stage=args.two_stage,
             two_stage_max_bucket=args.two_stage_max_bucket,
+            restarts=args.restarts,
+            balanced_split=args.balanced_split,
+            natural=args.natural,
             align_to=args.align_to,
             dump_targets=args.dump_targets,
         )

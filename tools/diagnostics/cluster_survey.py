@@ -643,6 +643,30 @@ def cluster_stats(
 # 出图
 # --------------------------------------------------------------------------- #
 
+#: 帧渲染 worker 的共享上下文（fork 继承，避免 pickle 大数组；--workers>1 时启用）
+_WORKER_CTX: Dict[str, Any] = {}
+
+
+def _worker_init(ctx: Mapping[str, Any]) -> None:
+    global _WORKER_CTX
+    _WORKER_CTX = dict(ctx)
+
+
+def _render_worker(task: Mapping[str, Any]) -> str:
+    """帧级 worker：渲染单张 5 联面板（matplotlib Agg；每个子进程独立画布）。"""
+    plot_frame(
+        row=int(task["row"]),
+        arrays=_WORKER_CTX["arrays"],
+        cluster=int(task["cluster"]),
+        out_path=Path(_WORKER_CTX["out_dir"]) / str(task["png"]),
+        dpi=int(_WORKER_CTX["dpi"]),
+        top1_prob=float(task["top1_prob"]),
+        margin=float(task["margin"]),
+        view=tuple(_WORKER_CTX["view"]),
+    )
+    return str(task["png"])
+
+
 def plot_frame(
     *,
     row: int,
@@ -904,6 +928,7 @@ def survey(args: argparse.Namespace) -> int:
     if len(view_window) != 4:
         raise SystemExit(f"[survey] --view-window 需要 4 个数（xmin,xmax,ymin,ymax），收到 {args.view_window!r}")
     sample_records: List[List[Dict[str, Any]]] = []
+    tasks: List[Dict[str, Any]] = []
     for cluster in range(num_clusters):
         pool = np.flatnonzero((hard == cluster) & train_mask)
         pool_kind = "train_weight>0"
@@ -933,12 +958,31 @@ def survey(args: argparse.Namespace) -> int:
                 f"_step{record['step']:04d}_row{record['row']:06d}.png"
             )
             records.append(record)
-            plot_frame(
-                row=int(row), arrays=arrays, cluster=cluster,
-                out_path=out_dir / record["png"], dpi=int(args.dpi),
-                top1_prob=record["top1_prob"], margin=record["margin"], view=view_window,
-            )
+            tasks.append({"row": int(row), "cluster": cluster, "png": record["png"],
+                          "top1_prob": record["top1_prob"], "margin": record["margin"]})
         sample_records.append(records)
+
+    # 帧渲染：--workers>1 用 fork 进程池（帧级并行；matplotlib Agg 每进程独立画布）
+    workers = max(1, int(getattr(args, "workers", 1)))
+    if workers > 1 and tasks:
+        from concurrent.futures import ProcessPoolExecutor
+        import multiprocessing as mp
+
+        ctx = mp.get_context("fork")  # fork 继承 arrays，避免 pickle 大数组
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=ctx,
+            initializer=_worker_init,
+            initargs=({"arrays": arrays, "out_dir": out_dir, "dpi": int(args.dpi),
+                       "view": view_window},),
+        ) as pool_exec:
+            list(pool_exec.map(_render_worker, tasks, chunksize=max(1, len(tasks) // (workers * 8))))
+    else:
+        for task in tasks:
+            _worker_init({"arrays": arrays, "out_dir": out_dir, "dpi": int(args.dpi), "view": view_window})
+            _render_worker(task)
+
+    for cluster in range(num_clusters):
+        records = sample_records[cluster]
         cluster_dir = out_dir / f"cluster_{cluster:02d}"
         if not args.no_contact_sheet:
             contact_sheet(
@@ -978,6 +1022,7 @@ def survey(args: argparse.Namespace) -> int:
         "shares_train": shares_train.tolist(),
         "sampling": {
             "seed": int(args.seed),
+            "render_workers": int(max(1, int(getattr(args, "workers", 1)))),
             "per_cluster": per_cluster,
             "pool": "train_weight>0（为空退回 all，见样本 pool 字段）",
             "deterministic": "同一 seed + 同一数据/顺序 → 同抽样",
@@ -1185,6 +1230,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"面板 ①–③ 固定视窗 xmin,xmax,ymin,ymax（m；默认 {DEFAULT_VIEW_WINDOW}）",
     )
     parser.add_argument("--no-contact-sheet", action="store_true", help="不生成每簇 25 图拼版")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="帧级并行进程数（默认 1 = 串行保持兼容；matplotlib Agg 安全，建议 8–12）")
     parser.add_argument("--force", action="store_true", help="输出目录非空时允许覆盖/续写")
     return parser
 
