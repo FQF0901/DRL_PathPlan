@@ -48,6 +48,9 @@ def test_dataset_and_run_discovery(tmp_path: Path) -> None:
     _dataset(tmp_path, "BTC20260101-0000_expert5k")
     _dataset(tmp_path, "BTC20260202-0000_expert5k")
     assert run_paths.latest_dataset(tmp_path).name == "BTC20260202-0000_expert5k"
+    # 评测集（名字含 val）不参与"最新训练集"选择：即使它更新
+    _dataset(tmp_path, "BTC20260303-0000_expert500val")
+    assert run_paths.latest_dataset(tmp_path).name == "BTC20260202-0000_expert5k"
 
     finished = _run(tmp_path, "20260101-0000") / "stage_a"
     finished.mkdir()

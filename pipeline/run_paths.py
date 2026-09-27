@@ -222,8 +222,15 @@ def find_unfinished(root: Path = ROOT) -> tuple[Path, Path, str, Path] | None:
 
 
 def latest_dataset(root: Path = ROOT) -> Path | None:
-    """最新 ``datasets/BTC*_expert*``（须含 ``expert_bc.npz``）。"""
-    hits = [d for d in Path(root).glob("datasets/BTC*_expert*") if (d / "expert_bc.npz").is_file()]
+    """最新**训练用** ``datasets/BTC*_expert*``（须含 ``expert_bc.npz``）。
+
+    排除评测集（名字含 ``val``，如 ``*_expert500val``）——否则零参跑会把评测集当训练数据。
+    """
+    hits = [
+        d
+        for d in Path(root).glob("datasets/BTC*_expert*")
+        if (d / "expert_bc.npz").is_file() and "val" not in d.name.lower()
+    ]
     return sorted(hits, key=lambda item: item.name)[-1] if hits else None
 
 
