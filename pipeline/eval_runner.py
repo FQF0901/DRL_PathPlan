@@ -782,6 +782,10 @@ class _CkptController:
         self.spec = spec
         self.device = torch.device(str(task.get("device") or "cpu"))
         self.model = _load_ckpt_model(str(task["ckpt"]), task.get("model_config") or {}, str(self.device))
+        if bool(task.get("moe_off")):
+            # A/B：primary-only 臂 —— 专家分支不参与（评测侧关闭 MoE）
+            self.model.set_moe(enabled=False)
+            print("[eval_runner] MoE 已关闭（primary-only 臂）", flush=True)
         self.obs_config = dict(task.get("obs_config") or {})
         self.tracker_config = dict(task.get("tracker_config") or {})
         #: "exact"（阶段 A/B 精确/运动学执行，默认）| "lqr"（阶段 C 闭环）
@@ -1532,6 +1536,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="冻结基线 JSON（默认 runs/baseline_eval/val_reference.json；"
                              "同目录 *_by_primary.json 用于分组判定）")
     parser.add_argument("--seed", type=int, default=0, help="评测种子（确定性；默认 0）")
+    parser.add_argument("--moe-off", action="store_true",
+                        help="评测时关闭 MoE（专家分支不参与；用于 A/B 的 primary-only 臂）")
     parser.add_argument("--tracker", choices=("lqr", "exact"), default="exact",
                         help="ckpt 动作执行器：exact=阶段 A/B 精确/运动学执行（默认，衡量规划轨迹本身）；"
                              "lqr=阶段 C 闭环跟踪（含控制器跟踪误差）")
@@ -1639,6 +1645,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "torch_threads": torch_threads,
             "omp_num_threads": int(omp_num_threads),
             "tracker": str(args.tracker),
+            "moe_off": bool(getattr(args, "moe_off", False)),
         }
         for spec in specs
     ]
