@@ -9,7 +9,10 @@
 ④ 状态文件字段（``phase3_status.json``：schema/status/rounds/逐轮 collect/train/eval/guard）；
 ⑤ 配置决议顺序 CLI > 环境变量 ``PHASE3_ROUNDS`` > config；保留键不得透传覆盖；
 ⑥ ``tools/train.py --phase3-loop`` 入口分派；``tools/train.sh`` 的 ``PHASE3_ONLY=1``（跳过 A/B）
-   与 ``PHASE3=1``（A→B→循环）链路（fake venv-python 骨架，不启动真实采集/训练/评测）。
+   与 ``PHASE3=1``（A→B→循环）链路（fake venv-python 骨架，不启动真实采集/训练/评测）；
+⑦ **lane P3-G 全链起点**：``PHASE3=1`` 下 phase3 ``init_ckpt`` 自动 = 本次链 B ``final.pt``
+   （``init_ckpt_source="chain-B"``，覆盖 config）；``PHASE3_ONLY``/独立 loop 不变；
+   ``init_ckpt: auto`` = 最新 ``runs/BTC*_stageB*/stage_b/final.pt``（缺失报错）。
 
 全部桩化：不启动真实采集/训练/评测；shell 测试只跑 fake 骨架，产物落 tmp_path。
 """
@@ -476,63 +479,77 @@ def _chain_config(tmp_path: Path) -> Path:
     return cfg_path
 
 
-def _stub_chain(monkeypatch, stage_results=None):
-    """桩掉 A/B 阶段与循环执行；返回记录列表。"""
+def _stub_chain(monkeypatch, tmp_path: Path, stage_results=None):
+    """桩掉 A/B 阶段与循环执行（lane P3-G：``_stage_final_ckpt`` 返回 fake B final）。
+
+    返回 ``(calls, fake_b_final)``；loop 调用记录 = ``("loop", rounds, init_ckpt, source)``。
+    """
     calls: list = []
     results = dict(stage_results or {})
+    fake_b = tmp_path / "fake_run" / "stage_b" / "final.pt"
+    fake_b.parent.mkdir(parents=True, exist_ok=True)
+    fake_b.write_bytes(b"fake-chain-b-final")
 
     def _fake_stage(stage, **kwargs):
         calls.append(("stage", stage))
         return int(results.get(stage, 0))
 
     def _fake_run(self):
-        calls.append(("loop", int(self.cfg.rounds)))
+        calls.append(("loop", int(self.cfg.rounds), str(self.cfg.init_ckpt), str(self.cfg.init_ckpt_source)))
         return 0
 
     monkeypatch.setattr(phase3_loop, "_run_train_stage", _fake_stage)
+    monkeypatch.setattr(
+        phase3_loop, "_stage_final_ckpt", lambda stage, *, config: fake_b if stage == "B" else None
+    )
     monkeypatch.setattr(phase3_loop.Phase3Loop, "run", _fake_run)
-    return calls
+    return calls, fake_b
 
 
 def test_phase3_chain_orders_ab_then_loop(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("PHASE3_ONLY", raising=False)
-    calls = _stub_chain(monkeypatch)
+    calls, fake_b = _stub_chain(monkeypatch, tmp_path)
     cfg_path = _chain_config(tmp_path)
     rc = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path), "--phase3-rounds", "2"])
     assert rc == 0
-    assert calls == [("stage", "A"), ("stage", "B"), ("loop", 2)], "全链必须 A→B→循环"
+    assert calls == [
+        ("stage", "A"), ("stage", "B"), ("loop", 2, str(fake_b), "chain-B"),
+    ], "全链必须 A→B→循环，且 phase3 起点 = 本次链 B final（chain-B）"
 
 
 def test_phase3_chain_only_skips_ab(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PHASE3_ONLY", "1")
-    calls = _stub_chain(monkeypatch)
+    calls, _ = _stub_chain(monkeypatch, tmp_path)
     cfg_path = _chain_config(tmp_path)
+    init_ckpt, _, _ = _write_pool_and_ckpt(tmp_path)
     rc = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path)])
     assert rc == 0
-    assert calls == [("loop", 5)], "PHASE3_ONLY=1 必须跳过 A/B（轮数取 config）"
+    assert calls == [("loop", 5, str(init_ckpt), "config")], (
+        "PHASE3_ONLY=1 必须跳过 A/B（轮数取 config；起点仍用 config init_ckpt，不被 chain-B 覆盖）"
+    )
 
     monkeypatch.delenv("PHASE3_ONLY", raising=False)
-    calls_flag = _stub_chain(monkeypatch)
+    calls_flag, _ = _stub_chain(monkeypatch, tmp_path)
     rc_flag = phase3_loop.run_chain(["--phase3-chain", "--phase3-only", "--config", str(cfg_path)])
-    assert rc_flag == 0 and calls_flag == [("loop", 5)], "--phase3-only 等价"
+    assert rc_flag == 0 and calls_flag == [("loop", 5, str(init_ckpt), "config")], "--phase3-only 等价"
 
 
 def test_phase3_chain_stops_on_stage_failure(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("PHASE3_ONLY", raising=False)
     cfg_path = _chain_config(tmp_path)
 
-    calls_a = _stub_chain(monkeypatch, {"A": 3})
+    calls_a, _ = _stub_chain(monkeypatch, tmp_path, {"A": 3})
     rc_a = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path)])
     assert rc_a == 3 and calls_a == [("stage", "A")], "A 失败不得进入 B/循环"
 
-    calls_b = _stub_chain(monkeypatch, {"B": 4})
+    calls_b, _ = _stub_chain(monkeypatch, tmp_path, {"B": 4})
     rc_b = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path)])
     assert rc_b == 4 and calls_b == [("stage", "A"), ("stage", "B")], "B 失败不得进入循环"
 
 
 def test_phase3_chain_validates_init_ckpt_before_ab(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("PHASE3_ONLY", raising=False)
-    calls = _stub_chain(monkeypatch)
+    calls, _ = _stub_chain(monkeypatch, tmp_path)
     cfg_path = _chain_config(tmp_path)
     missing = tmp_path / "missing_init.pt"
     rc = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path), "--ckpt", str(missing)])
@@ -1020,3 +1037,125 @@ def test_phase3_loop_gpu_config_and_status_section(tmp_path: Path) -> None:
     assert cfg.gpu_min_free_mib == 4096.0, "config gpu.min_free_mib 必须生效"
     assert Phase3LoopConfig().gpu_min_free_mib == phase3_loop.GPU_MIN_FREE_MIB
 
+
+# ---------------------------------------- ⑦ lane P3-G：全链起点 = 本次链 B final
+def test_phase3_chain_init_ckpt_overridden_and_logged(tmp_path: Path, monkeypatch, capsys) -> None:
+    """全链：phase3 起点覆盖为链内 B final（source=chain-B）；日志留痕；config 值不再是起点。"""
+    monkeypatch.delenv("PHASE3_ONLY", raising=False)
+    calls, fake_b = _stub_chain(monkeypatch, tmp_path)
+    cfg_path = _chain_config(tmp_path)
+    init_ckpt, _, _ = _write_pool_and_ckpt(tmp_path)
+    rc = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path), "--phase3-rounds", "1"])
+    assert rc == 0
+    assert calls[-1] == ("loop", 1, str(fake_b), "chain-B")
+    assert str(fake_b) != str(init_ckpt), "覆盖必须真的换掉 config 的旧 phase-2 路径"
+    out = capsys.readouterr().out
+    assert "chain-B" in out and str(fake_b) in out, "日志必须记录新起点与来源"
+
+
+def test_phase3_chain_init_ckpt_flows_to_collect_student_and_train_ckpt(tmp_path: Path, monkeypatch) -> None:
+    """一致断言：链内 B final 同时进 采集 student（r1）与 训练 --ckpt（每轮起点）。"""
+    monkeypatch.delenv("PHASE3_ONLY", raising=False)
+    cfg_path = _chain_config(tmp_path)
+    fake_b = tmp_path / "fake_run" / "stage_b" / "final.pt"
+    fake_b.parent.mkdir(parents=True, exist_ok=True)
+    fake_b.write_bytes(b"fake-chain-b-final")
+    stubs = _Stubs()
+
+    # 只桩 A/B 与 B final 解析；**真跑** Phase3Loop.run（步函数用桩，不启动真实子进程）
+    monkeypatch.setattr(phase3_loop, "_run_train_stage", lambda stage, **kwargs: 0)
+    monkeypatch.setattr(phase3_loop, "_stage_final_ckpt", lambda stage, *, config: fake_b)
+    real_loop = phase3_loop.Phase3Loop
+
+    def _loop_with_stubs(cfg):
+        return real_loop(
+            cfg, collect_fn=stubs.collect, train_fn=stubs.train, eval_fn=stubs.eval, logger=lambda _: None
+        )
+
+    monkeypatch.setattr(phase3_loop, "Phase3Loop", _loop_with_stubs)
+    rc = phase3_loop.run_chain([
+        "--phase3-chain", "--config", str(cfg_path), "--phase3-rounds", "2",
+        "--phase3-runs-root", str(tmp_path / "runs"),
+        "--phase3-datasets-root", str(tmp_path / "datasets"),
+        "--phase3-stamp", "TEST",
+    ])
+    assert rc == 0
+    assert stubs.collect_calls[0]["student"] == str(fake_b), "r1 采集 student = 链内 B final"
+    assert [call["ckpt"] for call in stubs.train_calls] == [str(fake_b), str(fake_b)], (
+        "训练每轮起点恒为 init_ckpt（= 链内 B final）"
+    )
+    assert stubs.collect_calls[1]["student"] == str(stubs.train_calls[0]["out"] / "final.pt"), (
+        "r2 采集 student = r1 训练产物（既有轮转语义）"
+    )
+    status = json.loads((tmp_path / "runs" / "BTCTEST_phase3_loop" / "phase3_status.json").read_text(encoding="utf-8"))
+    assert status["init_ckpt"] == str(fake_b) and status["init_ckpt_source"] == "chain-B", (
+        "status 文件必须记录覆盖后的起点与来源"
+    )
+
+
+def test_phase3_chain_b_final_missing_stops(tmp_path: Path, monkeypatch, capsys) -> None:
+    """B 成功但 final.pt 缺失（run_config 解析不到）→ rc=2，不进入 phase3。"""
+    monkeypatch.delenv("PHASE3_ONLY", raising=False)
+    calls: list = []
+
+    def _fake_stage(stage, **kwargs):
+        calls.append(("stage", stage))
+        return 0
+
+    monkeypatch.setattr(phase3_loop, "_run_train_stage", _fake_stage)
+    monkeypatch.setattr(phase3_loop, "_stage_final_ckpt", lambda stage, *, config: tmp_path / "nope" / "final.pt")
+    monkeypatch.setattr(phase3_loop.Phase3Loop, "run", lambda self: calls.append(("loop",)) or 0)
+    cfg_path = _chain_config(tmp_path)
+    rc = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path)])
+    assert rc == 2 and calls == [("stage", "A"), ("stage", "B")], "缺 B final 不得进入 phase3"
+    assert "B 产物 final.pt 不存在" in capsys.readouterr().err
+
+
+def test_phase3_init_ckpt_auto_resolution(tmp_path: Path, monkeypatch) -> None:
+    """``init_ckpt: auto``：最新 ``runs/BTC*_stageB*/stage_b/final.pt``（mtime）；缺失报错；CLI 优先。"""
+    from pipeline.stages import load_config
+
+    runs = tmp_path / "runs"
+    older = runs / "BTC20260928-0100_stageB_x" / "stage_b" / "final.pt"
+    newer = runs / "BTC20260928-0200_stageB_y" / "stage_b" / "final.pt"
+    for path, mtime in ((older, 1_000_000), (newer, 2_000_000)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"ckpt")
+        os.utime(path, (mtime, mtime))
+    cfg_path = tmp_path / "auto.yaml"
+    cfg_path.write_text(
+        "stages:\n  B:\n    phase3:\n      rounds: 1\n      init_ckpt: auto\n",
+        encoding="utf-8",
+    )
+    config = load_config(str(cfg_path))
+    args, extra = _parse_args([
+        "--phase3-loop", "--config", str(cfg_path),
+        "--phase3-runs-root", str(runs),
+    ])
+    cfg = Phase3LoopConfig.from_config(config, args, extra=extra)
+    assert cfg.init_ckpt == str(newer) and cfg.init_ckpt_source == "auto", "auto = 最新 B final"
+
+    # 空 runs 根 → 显式报错（from_config 抛 ValueError，run_chain 转 rc=2）
+    empty_args, empty_extra = _parse_args([
+        "--phase3-loop", "--config", str(cfg_path), "--phase3-runs-root", str(tmp_path / "empty_runs"),
+    ])
+    with pytest.raises(ValueError, match="init_ckpt: auto"):
+        Phase3LoopConfig.from_config(config, empty_args, extra=empty_extra)
+
+    # CLI --ckpt 优先于 auto/config
+    cli_args, cli_extra = _parse_args([
+        "--phase3-loop", "--config", str(cfg_path), "--ckpt", str(newer),
+        "--phase3-runs-root", str(runs),
+    ])
+    cfg_cli = Phase3LoopConfig.from_config(config, cli_args, extra=cli_extra)
+    assert cfg_cli.init_ckpt == str(newer) and cfg_cli.init_ckpt_source == "cli"
+
+    # 独立 loop（PHASE3_ONLY 语义）：config 路径 → source=config（行为不变）
+    plain = tmp_path / "plain.yaml"
+    plain.write_text(
+        "stages:\n  B:\n    phase3:\n      rounds: 1\n      init_ckpt: runs/init.pt\n",
+        encoding="utf-8",
+    )
+    plain_args, plain_extra = _parse_args(["--phase3-loop", "--config", str(plain)])
+    cfg_plain = Phase3LoopConfig.from_config(load_config(str(plain)), plain_args, extra=plain_extra)
+    assert cfg_plain.init_ckpt == "runs/init.pt" and cfg_plain.init_ckpt_source == "config"

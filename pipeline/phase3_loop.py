@@ -61,7 +61,7 @@ import subprocess
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -121,6 +121,37 @@ def _latest_path(paths: Sequence[Path]) -> Optional[Path]:
     if not items:
         return None
     return max(items, key=lambda item: (item.stat().st_mtime, str(item)))
+
+
+def _resolve_auto_init_ckpt(runs_root: str = "runs") -> Optional[Path]:
+    """``init_ckpt: auto``：最新 ``<runs_root>/BTC*_stageB*/stage_b/final.pt``（按 mtime；无 → None）。
+
+    lane P3-G：覆盖口径 = 该 glob（含 phase3 每轮 ``BTC*_stageB_phase3_r{k}/stage_b/final.pt``），
+    取最新者；调用方负责存在性校验与报错。
+    """
+    candidates = [
+        path for path in Path(str(runs_root)).glob("BTC*_stageB*/stage_b/final.pt") if path.is_file()
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _stage_final_ckpt(stage: str, *, config: str) -> Optional[Path]:
+    """``run_config`` 解析该阶段输出目录 → ``<STAGE_DIR>/final.pt``（解析失败 → None）。
+
+    全链模式（lane P3-G）用它取**本次链**刚训完的 B phase-2 产物；不依赖 ``_run_train_stage``
+    的内部实现（测试可单独桩掉）。
+    """
+    from tools import run_config
+
+    from pipeline.stages import load_config  # 延迟导入（合并 includes）
+
+    try:
+        resolved = run_config.resolve(run_config.ROOT, load_config(str(config)), stage_arg=stage)
+    except SystemExit:
+        return None
+    return Path(str(resolved["STAGE_DIR"])) / "final.pt"
 
 
 def _report_stored_rows(report: Optional[Mapping[str, Any]]) -> Optional[int]:
@@ -259,6 +290,9 @@ class Phase3LoopConfig:
     collect_workers: int = 16
     collect_window_s: float = 10.0
     init_ckpt: str = ""
+    #: ``init_ckpt`` 来源（lane P3-G）：``cli``（--ckpt）/ ``config`` / ``auto``（最新 B final）
+    #: / ``chain-B``（全链模式：**本次链刚训完的 B phase-2 final.pt**，覆盖 config 值）
+    init_ckpt_source: str = "config"
     eval_spec: str = "env/specs/scenarios_eval500.json"
     eval_workers: int = 16
     stop_on_overall_drop: float = 0.05
@@ -300,7 +334,22 @@ class Phase3LoopConfig:
             rounds = int(p3.get("rounds", 5))
         if rounds < 1:
             raise ValueError(f"phase3 rounds 必须 ≥1，收到 {rounds}")
-        init_ckpt = str(getattr(args, "ckpt", None) or p3.get("init_ckpt") or "")
+        runs_root = str(getattr(args, "phase3_runs_root", None) or cls.runs_root)
+        explicit_ckpt = getattr(args, "ckpt", None)
+        init_ckpt = str(explicit_ckpt or p3.get("init_ckpt") or "")
+        if explicit_ckpt:
+            init_ckpt_source = "cli"
+        elif init_ckpt.strip().lower() == "auto":
+            # lane P3-G：``init_ckpt: auto`` = 最新 ``runs/BTC*_stageB*/stage_b/final.pt``（缺失报错）
+            auto = _resolve_auto_init_ckpt(runs_root)
+            if auto is None:
+                raise ValueError(
+                    f"init_ckpt: auto 但未找到 {runs_root}/BTC*_stageB*/stage_b/final.pt"
+                    "（先跑一次 Stage B 或显式给 --ckpt）"
+                )
+            init_ckpt, init_ckpt_source = str(auto), "auto"
+        else:
+            init_ckpt_source = "config" if init_ckpt else ""
         micro_raw = p3.get("micro", bc_cfg.get("micro_batch_size"))
         resume = bool(getattr(args, "phase3_resume", False)) or str(
             os.environ.get("PHASE3_RESUME", "")
@@ -313,6 +362,7 @@ class Phase3LoopConfig:
             collect_workers=int(collect.get("workers", cls.collect_workers)),
             collect_window_s=float(collect.get("window_s", cls.collect_window_s)),
             init_ckpt=init_ckpt,
+            init_ckpt_source=init_ckpt_source,
             eval_spec=str(eval_cfg.get("spec") or cls.eval_spec),
             eval_workers=int(eval_cfg.get("workers", cls.eval_workers)),
             stop_on_overall_drop=float(guard.get("stop_on_overall_drop", cls.stop_on_overall_drop)),
@@ -321,7 +371,7 @@ class Phase3LoopConfig:
             model_config=str(getattr(args, "model_config", None) or cls.model_config),
             device=(str(args.device) if getattr(args, "device", None) else None),
             limit=(int(args.limit_dataset) if getattr(args, "limit_dataset", None) else None),
-            runs_root=str(getattr(args, "phase3_runs_root", None) or cls.runs_root),
+            runs_root=runs_root,
             datasets_root=str(getattr(args, "phase3_datasets_root", None) or cls.datasets_root),
             stamp=(str(args.phase3_stamp) if getattr(args, "phase3_stamp", None) else None),
             micro=(int(micro_raw) if micro_raw else None),
@@ -633,6 +683,7 @@ class Phase3Loop:
             "runs_root": str(runs_root),
             "datasets_root": str(datasets_root),
             "init_ckpt": str(_abs(cfg.init_ckpt)),
+            "init_ckpt_source": str(cfg.init_ckpt_source or ""),
             "config": {
                 "spec_pool": str(cfg.spec_pool),
                 "fail_target": int(cfg.fail_target),
@@ -672,6 +723,9 @@ class Phase3Loop:
                 f"status={status_path}"
             )
             self._log(
+                f"cfg init_ckpt={cfg.init_ckpt} (source={cfg.init_ckpt_source or 'unknown'})"
+            )
+            self._log(
                 f"cfg spec_pool={cfg.spec_pool} fail_target={cfg.fail_target} "
                 f"collect=({cfg.collect_workers}w/{cfg.collect_window_s}s) "
                 f"eval=({cfg.eval_spec} · {cfg.eval_workers}w · lqr) "
@@ -682,7 +736,11 @@ class Phase3Loop:
 
             init_ckpt = _abs(cfg.init_ckpt)
             if not cfg.init_ckpt or not init_ckpt.is_file():
-                return _finish(1, "failed", f"起点权重不存在：{cfg.init_ckpt!r}（--ckpt 或 config stages.B.phase3.init_ckpt）")
+                return _finish(
+                    1, "failed",
+                    f"起点权重不存在：{cfg.init_ckpt!r}（source={cfg.init_ckpt_source or 'unknown'}；"
+                    "--ckpt / config stages.B.phase3.init_ckpt / chain-B / auto）",
+                )
             if not _abs(cfg.spec_pool).is_file():
                 return _finish(1, "failed", f"采集池不存在：{cfg.spec_pool!r}")
             if not _abs(cfg.eval_spec).is_file():
@@ -1176,6 +1234,10 @@ def run_chain(argv: Optional[Sequence[str]] = None) -> int:
 
     编排自包含：A/B 走 ``run_config`` + ``tools/train.py``（与 shell 旧口径一致），
     phase 3 循环复用 :class:`Phase3Loop`；任一步失败立即停止（非零返回）。
+
+    **lane P3-G（全链起点语义）**：B 成功后，phase 3 的 ``init_ckpt`` 自动覆盖为**本次链**刚训完的
+    B ``<run>/stage_b/final.pt``（``init_ckpt_source="chain-B"``），不再用 config 的固定旧路径；
+    ``PHASE3_ONLY`` / 独立 loop 模式行为不变（仍用 config / ``--ckpt``）。
     """
     argv_list = list(sys.argv[1:] if argv is None else argv)
     args, extra = _parse_chain_args(argv_list)
@@ -1213,6 +1275,22 @@ def run_chain(argv: Optional[Sequence[str]] = None) -> int:
             if rc != 0:
                 print(f"[chain] B 失败（rc={rc}）→ 停止，不进入 phase3", file=sys.stderr)
                 return rc
+            # lane P3-G：phase 3 起点 = **本次链**刚训完的 B phase-2 final.pt（覆盖 config 值）
+            b_final = _stage_final_ckpt("B", config=args.config)
+            if b_final is None or not b_final.is_file():
+                print(
+                    f"[chain] B 产物 final.pt 不存在：{b_final} → 停止，不进入 phase3"
+                    "（检查 run_config 的 STAGE_DIR / B 是否真的写出 final.pt）",
+                    file=sys.stderr,
+                )
+                return 2
+            previous = cfg.init_ckpt
+            cfg = replace(cfg, init_ckpt=str(b_final), init_ckpt_source="chain-B")
+            print(
+                f"[chain] phase3 init_ckpt ← 本次链 B final：{b_final}"
+                f"（覆盖 {previous or '<空>'}；source=chain-B）",
+                flush=True,
+            )
         return int(Phase3Loop(cfg).run())
     except KeyboardInterrupt:  # pragma: no cover - 交互中断
         print("[phase3] interrupted", file=sys.stderr)
