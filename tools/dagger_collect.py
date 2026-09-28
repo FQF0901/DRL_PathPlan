@@ -96,6 +96,7 @@ from tools.collect_expert import (  # noqa: E402 - 复用共享实现（不改�
     SHARD_DIRNAME,
     STEPS_PER_POLICY,
     WINDOW_POLICIES,
+    WINDOW_STEPS,
     _concat_shards,
     _ego_pose,
     _events_summary,
@@ -119,6 +120,9 @@ __all__ = ["main", "expert_action_to_ds_dtheta"]
 #: 病态过滤阈值（沿用 lane T；写死并记录进 report/meta）
 STUCK_SPEED_MPS = 0.5
 YAW_OUTLIER_RAD = 0.35
+#: ``traj30`` 的 env-step 跨度（30 个 0.1 s 点）；episode 末帧附近该字段是补齐值（无观测）
+#: → ``distance_to_end < TRAJ30_SPAN`` 的行跳过 ``stuck`` 判决（lane U6；实测边界 25，保守取 30）。
+TRAJ30_SPAN = int(WINDOW_STEPS)
 #: 默认 labeler / 每 worker 一个任务的 spec 数（分片粒度）
 DEFAULT_LABELER = "pure_pursuit"
 CHUNK_SPECS = 10
@@ -364,21 +368,53 @@ def _relabel_rows_with_expert(
 # 病态过滤（沿用 lane T 规则；行级：只改 train_weight，不删行）
 # --------------------------------------------------------------------------- #
 
+def future_truncation_mask(
+    rows: Sequence[Dict[str, Any]], episode: Mapping[str, Any], *, span: int = TRAJ30_SPAN
+) -> np.ndarray:
+    """逐行 ``future_truncated`` 掩码（lane U6）：``distance_to_end < span`` 为 True。
+
+    - ``distance_to_end`` = episode **末帧 env step**（``len(poses)-1``，回退 ``episode["steps"]``）
+      − 本行 ``step``（单位 env step）；
+    - episode 末 ``span`` 个 env step 内的行，``traj30_measured`` 是补齐值（首末点距 0）→
+      ``stuck`` 规则**无观测不判决**（由 :func:`_apply_pathological_filters` 跳过）；
+    - 掩码**由 episode 侧显式计算并传入**（过滤器不猜）；返回与 ``rows`` 等长的 bool 数组。
+    """
+    poses = episode.get("poses") or []
+    last_step = int(len(poses) - 1) if poses else int(episode.get("steps") or 0)
+    return np.asarray(
+        [int(row.get("step", 0)) > (last_step - int(span)) for row in rows], dtype=bool
+    )
+
+
 def _apply_pathological_filters(
     samples: Sequence[Dict[str, Any]],
     *,
     stuck_speed: float = STUCK_SPEED_MPS,
     yaw_outlier: float = YAW_OUTLIER_RAD,
     filter_counter: Optional[Counter] = None,
+    future_truncated: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """病态行过滤（写死阈值，记录进 report/meta）：卡死 / 大转向离群 → ``train_weight=0``。
 
     速度 = ``traj30_measured``（缺失回退 ``traj30``）首末点距离 / 2.5 s（0.5 s × 5 段）；
     dθ = ``action[0, 1]``（专家首步标签）。只作用于 ``train_weight>0`` 的行；命中行保留
     （不删行），``filter_reason`` 首个原因 + ``filter_counter`` 同步累加。
+
+    ``future_truncated``（lane U6；bool 数组，与 ``samples`` 等长；None = 无截断信息）：
+    **为 True 的行跳过 ``stuck`` 判决**（末帧附近的 ``traj30_measured`` 是补齐值 → 无观测不判决；
+    保持 ``train_weight``/``filter_reason`` 不变），单独计数 ``stuck_skipped_truncated``；
+    ``yaw_outlier`` 规则与未来轨迹无关 → 不变。窗口/整段两种模式都生效。
+    ``stuck_skipped_truncated`` = **本会命中 stuck 但被跳过**的截断行数（yaw 仍可能另行命中该行）。
     """
-    stuck = yaw = 0
-    for sample in samples:
+    flags = None
+    if future_truncated is not None:
+        flags = np.asarray(future_truncated, dtype=bool).reshape(-1)
+        if flags.size != len(samples):
+            raise ValueError(
+                f"future_truncated 长度 {flags.size} != 行数 {len(samples)}（掩码必须逐行对齐）"
+            )
+    stuck = yaw = skipped = 0
+    for index, sample in enumerate(samples):
         if float(sample.get("train_weight", 1.0)) <= 0.0:
             continue
         measured = np.asarray(
@@ -386,10 +422,14 @@ def _apply_pathological_filters(
         )
         speed = float(np.linalg.norm(measured[-1, :2] - measured[0, :2]) / 2.5) if measured.size else 0.0
         dtheta = abs(float(np.asarray(sample["action"], dtype=np.float64)[0, 1]))
+        truncated = bool(flags[index]) if flags is not None else False
         reason = ""
         if speed < float(stuck_speed):
-            reason, stuck = "stuck", stuck + 1
-        elif dtheta > float(yaw_outlier):
+            if truncated:
+                skipped += 1  # 无观测不判决：末帧附近 traj30 是补齐值
+            else:
+                reason, stuck = "stuck", stuck + 1
+        if not reason and dtheta > float(yaw_outlier):
             reason, yaw = "yaw_outlier", yaw + 1
         if not reason:
             continue
@@ -403,7 +443,10 @@ def _apply_pathological_filters(
         "rows": int(len(samples)),
         "stuck": int(stuck),
         "yaw_outlier": int(yaw),
+        "stuck_skipped_truncated": int(skipped),
+        "future_truncated_rows": int(np.count_nonzero(flags)) if flags is not None else 0,
         "trainable_after": int(active),
+        "traj30_span_steps": int(TRAJ30_SPAN),
         "thresholds": {"stuck_speed_mps": float(stuck_speed), "yaw_outlier_rad": float(yaw_outlier)},
     }
 
@@ -597,11 +640,16 @@ def _dagger_one_spec(
                 on_lane_margin=float(config["on_lane_margin"]),
                 filter_counter=filter_counter,
             )
+        # lane U6：future_truncated 掩码（episode 侧显式计算；末帧附近 traj30 是补齐值）
+        truncated_mask = future_truncation_mask(rows, episode)
+        for row, truncated in zip(rows, truncated_mask.tolist()):
+            row["future_truncated"] = bool(truncated)  # 逐行留痕（诊断；不进 schema）
         pathological = _apply_pathological_filters(
             rows,
             stuck_speed=float(config["stuck_speed"]),
             yaw_outlier=_effective_yaw_threshold(config),  # 窗口模式默认松弛 yaw_outlier
             filter_counter=filter_counter,
+            future_truncated=truncated_mask,
         )
         timing["extract_s"] += time.perf_counter() - _t
         candidates = len(episode["frames"])
@@ -1158,7 +1206,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     pathological_total = {
         key: int(sum(int((entry["report"].get("pathological") or {}).get(key, 0)) for entry in entries))
-        for key in ("stuck", "yaw_outlier")
+        for key in ("stuck", "yaw_outlier", "stuck_skipped_truncated", "future_truncated_rows")
     }
     labeler_params = next(
         (entry["report"].get("expert_params") for entry in entries if entry["report"].get("expert_params")),
@@ -1220,7 +1268,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flush=True,
     )
     print(f"[dagger] filter counts (rows): {dict(filter_counter)}", flush=True)
-    print(f"[dagger] pathological: {pathological_total}（阈值 {STUCK_SPEED_MPS} m/s / {YAW_OUTLIER_RAD} rad）", flush=True)
+    print(
+        f"[dagger] pathological: {pathological_total}"
+        f"（stuck 阈值 {STUCK_SPEED_MPS} m/s / yaw {YAW_OUTLIER_RAD} rad；"
+        f"末帧 {TRAJ30_SPAN} env steps 内 future_truncated → stuck 跳过 "
+        f"{pathological_total.get('stuck_skipped_truncated', 0)} 行）",
+        flush=True,
+    )
     print(f"[dagger] DONE → {out}（rows={stored_rows}，episodes={dagger['episodes']}，"
           f"elapsed={dagger['elapsed_s']:.1f}s）", flush=True)
     return 0

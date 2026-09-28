@@ -11,7 +11,9 @@
 6. **lane U5 场景池**：``--specs`` 必填、``--from-eval`` 已删除、隔离守卫（池与 eval500/val 交集 → SystemExit）；
 7. **lane U5 窗口模式**：失败 episode 尾部窗口行（不足全取）/成功与 max_step 零行/过滤松弛语义；
 8. **lane U5 吞吐剖分**：``timing`` 键齐备且不改 episode 结果；report 聚合段正确；
-9. 任务分块在 specs < chunk_size 时也按 worker 数铺开。
+9. **lane U6 窗口 × stuck 交互**：末帧附近 ``future_truncated`` 行跳过 ``stuck``（无观测不判决）、
+   完整未来的真 stuck 行仍被清零、计数分开（``stuck`` / ``stuck_skipped_truncated``）；
+10. 任务分块在 specs < chunk_size 时也按 worker 数铺开。
 """
 
 from __future__ import annotations
@@ -506,3 +508,85 @@ def test_chunk_tasks_spreads_small_pools_across_workers() -> None:
     assert sorted(index for chunk in chunks for index, _ in chunk) == [0, 1, 2, 3, 4]
     assert len(dg._chunk_tasks(specs, 10, workers=5)) == 5
     assert len(dg._chunk_tasks(range(25), 10, workers=2)) == 3  # 大批量仍按 chunk_size=10
+
+
+# ------------------------------------------- 9. lane U6：窗口 × stuck 交互
+def test_future_truncation_mask_boundary_and_alignment() -> None:
+    """掩码 = ``last_step - step < span``（末帧附近为 True）；无 poses 回退 episode["steps"]。"""
+    rows = [{"step": step} for step in (0, 5, 70, 75, 80, 100)]
+    episode = {"poses": [None] * 106, "steps": 105}  # last_state = 105
+    mask = dg.future_truncation_mask(rows, episode, span=30)
+    assert mask.tolist() == [False, False, False, False, True, True], "step > last-30 → truncated"
+    assert dg.future_truncation_mask([{"step": 80}], {"steps": 105}, span=30).tolist() == [True]
+    assert dg.future_truncation_mask([{"step": 80}], {"steps": 105}, span=25).tolist() == [False]
+    assert dg.TRAJ30_SPAN == 30, "保守跨度 = traj30 的 env-step 跨度（30）"
+
+
+def test_truncated_rows_skip_stuck_but_yaw_still_applies() -> None:
+    """① 截断行（measured 补齐=0）不被 stuck 清零；② 完整未来的真 stuck 行仍清零；
+    ③ yaw 与未来轨迹无关（截断行仍生效）；④ 计数分开。"""
+    truncated_measured = np.zeros((30, 2), dtype=np.float32)      # 补齐值：首末距 0.0
+    real_stuck = _moving_measured(0.5)                            # 0.5 m / 2.5 s = 0.2 m/s < 0.5 → 真 stuck
+    normal = _moving_measured(7.5)                                # 7.5 m / 2.5 s = 3 m/s → 正常
+    rows = [
+        {"step": 100, "train_weight": 1.0, "action": np.array([[2.5, 0.0]]), "traj30_measured": truncated_measured},
+        {"step": 50, "train_weight": 1.0, "action": np.array([[2.5, 0.0]]), "traj30_measured": real_stuck},
+        {"step": 30, "train_weight": 1.0, "action": np.array([[2.5, 0.0]]), "traj30_measured": normal},
+        {"step": 100, "train_weight": 1.0, "action": np.array([[2.5, 0.9]]), "traj30_measured": truncated_measured},
+    ]
+    episode = {"poses": [None] * 126}  # last_state = 125 → truncated ⟺ step > 95
+    mask = dg.future_truncation_mask(rows, episode, span=30)
+    assert mask.tolist() == [True, False, False, True]
+    counter: Counter = Counter()
+    stats = dg._apply_pathological_filters(rows, filter_counter=counter, future_truncated=mask)
+    assert rows[0]["train_weight"] == 1.0, "截断行不得因 stuck 被清零（无观测不判决）"
+    assert rows[1]["train_weight"] == 0.0 and rows[1]["filter_reason"] == "stuck", "完整未来的真 stuck 仍清零"
+    assert rows[2]["train_weight"] == 1.0
+    assert rows[3]["train_weight"] == 0.0 and rows[3]["filter_reason"] == "yaw_outlier", "yaw 规则不受截断影响"
+    # 截断行中"本会命中 stuck"的共 2 行：第 0 行被救回（权重保持 1.0），第 3 行另被 yaw 命中
+    assert stats["stuck"] == 1 and stats["stuck_skipped_truncated"] == 2, "计数必须分开"
+    assert stats["yaw_outlier"] == 1 and stats["future_truncated_rows"] == 2
+    assert stats["trainable_after"] == 2, "可训练 = 截断低速行 + 正常行"
+    assert dict(counter) == {"stuck": 1, "yaw_outlier": 1}, "计数器不含被跳过的 stuck"
+    assert stats["traj30_span_steps"] == 30
+
+
+def test_stuck_without_mask_keeps_full_episode_behavior() -> None:
+    """整段模式（不传掩码）行为不变：同样的补齐行仍按 stuck 清零；新计数为 0。"""
+    rows = [
+        {"step": 100, "train_weight": 1.0, "action": np.array([[2.5, 0.0]]),
+         "traj30_measured": np.zeros((30, 2), dtype=np.float32)},
+    ]
+    stats = dg._apply_pathological_filters(rows)
+    assert rows[0]["train_weight"] == 0.0 and rows[0]["filter_reason"] == "stuck"
+    assert stats["stuck"] == 1 and stats["stuck_skipped_truncated"] == 0
+    assert stats["future_truncated_rows"] == 0
+    with pytest.raises(ValueError, match="future_truncated 长度"):
+        dg._apply_pathological_filters(rows, future_truncated=np.asarray([True, False]))
+
+
+def test_window_tail_rows_flagged_truncated_from_real_episode() -> None:
+    """integration：真实 episode 的窗口尾行被标 future_truncated（r1 bug 的直接回归）。"""
+    from tools.collect_expert import extract_samples, resolve_interpolate
+
+    interpolate_fn, _ = resolve_interpolate()
+    label_order = ("cutin_active", "cutout_active", "crowded", "car_following",
+                   "on_curve", "merging", "roundabout_near", "near_intersection")
+    episode = _synthetic_episode(total_steps=40)  # poses 41 → last_state 40
+    rows = extract_samples(
+        episode, None, episode_id=0, label_order=label_order, interpolate_fn=interpolate_fn,
+        on_lane_frac=0.5, on_lane_margin=0.3, roundtrip_key_mean=float("inf"),
+        roundtrip_key_max=float("inf"), filter_counter=Counter(),
+    )
+    assert [row["step"] for row in rows] == [0, 5, 10, 15]
+    mask = dg.future_truncation_mask(rows, episode, span=30)
+    # distance = 40 - step → 40/35/30/25；truncated ⟺ distance < 30 → 仅 step 15（distance=30 仍完整）
+    assert mask.tolist() == [False, False, False, True]
+    for row, truncated in zip(rows, mask.tolist()):
+        row["future_truncated"] = bool(truncated)
+    stats = dg._apply_pathological_filters(rows, future_truncated=mask)
+    assert stats["future_truncated_rows"] == 1
+    assert stats["stuck"] == 0, "尾行 traj30_measured 为补齐值 → 不得被判 stuck"
+    assert stats["stuck_skipped_truncated"] >= 0
+    assert rows[3]["filter_reason"] == "terminal_window", "截断行的既有原因不得被 stuck 覆盖"
+    assert rows[3]["train_weight"] == 0.0, "该行仍由 terminal_window 过滤（非 stuck）"
