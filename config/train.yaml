@@ -92,6 +92,8 @@ stages:
         entry: 0.1              # ③ entry BCE
         traj_aux: 0.0           # traj 仅监控不进损失（fail-window traj6 是常量外推合成值）
         load_balance: 0.01      # MoE Switch 式负载均衡 aux α（沿用阶段 B 口径）
+      gpu:                      # lane P3-E：GPU 子步骤前显存守卫
+        min_free_mib: 6144      # 空闲显存下限（低于 → 释放+等待重试 ≤3 次；仍不足 failed）
       eval:                     # 编排 lane：每轮闭环评测
         spec: env/specs/scenarios_eval500.json
         workers: 16

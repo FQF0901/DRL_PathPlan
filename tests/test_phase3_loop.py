@@ -33,6 +33,17 @@ from pipeline.phase3_loop import Phase3Loop, Phase3LoopConfig, _parse_args, guar
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _stub_gpu_probes(monkeypatch):
+    """默认不打真实 GPU：显存查询 → None（不限制）、等待 → no-op（测试确定性/零等待）。
+
+    lane P3-E 的 GPU 守卫测试在各自用例内再次 monkeypatch 覆盖这三个探针。
+    """
+    monkeypatch.setattr(phase3_loop, "_gpu_free_mib", lambda: None)
+    monkeypatch.setattr(phase3_loop, "_gpu_reserved_mib", lambda: None)
+    monkeypatch.setattr(phase3_loop, "_gpu_wait", lambda seconds: None)
+
+
 def _arg(argv, key: str) -> str:
     items = [str(item) for item in argv]
     return items[items.index(key) + 1]
@@ -65,6 +76,8 @@ class _Stubs:
         train_missing: bool = False,
         eval_missing: bool = False,
         train_plan: "list[str] | None" = None,
+        collect_plan: "list[str] | None" = None,
+        eval_plan: "list[str] | None" = None,
     ):
         self.overall = list(overall)
         self.easy = list(easy)
@@ -75,15 +88,38 @@ class _Stubs:
         self.collect_missing = bool(collect_missing)
         self.train_missing = bool(train_missing)
         self.eval_missing = bool(eval_missing)
-        #: 逐次训练尝试的行为计划（"ok"/"oom"/"oom_log"/"rc1"/"exc:<Type>:<msg>"；不足则重复末项）
+        #: 逐次尝试的行为计划（"ok"/"oom"/"oom_log"/"rc1"/"exc:<Type>:<msg>"；不足则重复末项）
         self.train_plan = list(train_plan) if train_plan else None
+        self.collect_plan = list(collect_plan) if collect_plan else None
+        self.eval_plan = list(eval_plan) if eval_plan else None
         self.collect_calls: list = []
         self.train_calls: list = []
         self.eval_calls: list = []
 
+    @staticmethod
+    def _write_oom(log_path, message: str = "RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB") -> None:
+        if log_path is None:
+            return
+        path = Path(log_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+
+    @staticmethod
+    def _action(plan, index: int) -> str:
+        if not plan:
+            return "ok"
+        return plan[min(index, len(plan) - 1)]
+
+    @staticmethod
+    def _raise_action(action: str) -> None:
+        _, name, message = action.split(":", 2)
+        raise {"RuntimeError": RuntimeError, "ValueError": ValueError}[name](message)
+
     # ---- 步函数 ----
     def collect(self, argv, log_path) -> int:
         out = Path(_arg(argv, "--out"))
+        device = _arg(argv, "--device") if "--device" in [str(x) for x in argv] else None
         self.collect_calls.append(
             {
                 "student": _arg(argv, "--ckpt"),
@@ -93,9 +129,20 @@ class _Stubs:
                 "target_fails": int(_arg(argv, "--target-fails")),
                 "window": float(_arg(argv, "--window-fail-before")),
                 "workers": int(_arg(argv, "--workers")),
+                "device": device,
                 "log": Path(log_path) if log_path else None,
             }
         )
+        action = self._action(self.collect_plan, len(self.collect_calls) - 1)
+        if action == "oom_log":
+            self._write_oom(log_path)
+            return 1
+        if action == "oom":
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+        if action == "rc1":
+            return 1
+        if action.startswith("exc:"):
+            self._raise_action(action)
         if self.collect_rc == 0 and not self.collect_missing:
             out.mkdir(parents=True, exist_ok=True)
             np.savez(out / "expert_bc.npz", dummy=np.zeros(1))
@@ -122,22 +169,21 @@ class _Stubs:
         if action == "oom":
             raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
         if action == "oom_log":
-            if log_path is not None:
-                path = Path(log_path)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as handle:
-                    handle.write("RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB\n")
+            self._write_oom(log_path)
             return 1
         if action == "oom_log_alt":
+            self._write_oom(log_path, "RuntimeError: CUDA error: out of memory (GPU memory exhausted)")
+            return 1
+        if action == "oom_log_big":
             if log_path is not None:
                 path = Path(log_path)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("a", encoding="utf-8") as handle:
-                    handle.write("RuntimeError: CUDA error: out of memory (GPU memory exhausted)\n")
+                    handle.write("x" * 300_000 + "\n")  # 长日志：OOM 在末尾（尾窗检测）
+                    handle.write("RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB\n")
             return 1
         if action.startswith("exc:"):
-            _, name, message = action.split(":", 2)
-            raise {"RuntimeError": RuntimeError, "ValueError": ValueError}[name](message)
+            self._raise_action(action)
         if action == "rc1":
             return 1
         if self.train_rc == 0 and not self.train_missing:
@@ -161,6 +207,16 @@ class _Stubs:
                 "log": Path(log_path) if log_path else None,
             }
         )
+        action = self._action(self.eval_plan, index)
+        if action == "oom_log":
+            self._write_oom(log_path)
+            return 1
+        if action == "oom":
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+        if action == "rc1":
+            return 1
+        if action.startswith("exc:"):
+            self._raise_action(action)
         if self.eval_rc == 0 and not self.eval_missing:
             run_dir.mkdir(parents=True, exist_ok=True)
             overall = self.overall[min(index, len(self.overall) - 1)]
@@ -633,7 +689,7 @@ def test_phase3_loop_oom_halves_micro_and_retries(tmp_path: Path, monkeypatch) -
     rc = _loop(tmp_path, stubs, rounds=1, micro=512).run()
     assert rc == 0
     assert [item["micro"] for item in stubs.train_calls] == [512, 256], "OOM 后 micro 必须减半重试"
-    assert len(freed) == 1, "重试前必须 empty_cache+gc（经 _free_cuda_memory）"
+    assert len(freed) >= 1, "重试前后必须 empty_cache+gc（经 _free_cuda_memory）"
     status = _status(tmp_path)
     assert status["status"] == "completed"
     train = status["rounds"][0]["train"]
@@ -675,6 +731,12 @@ def test_phase3_loop_oom_detected_from_log_and_rc(tmp_path: Path, monkeypatch) -
     stubs2 = _Stubs(train_plan=["oom_log_alt", "ok"])
     rc2 = _loop(second, stubs2, rounds=1, micro=256).run()
     assert rc2 == 0 and [item["micro"] for item in stubs2.train_calls] == [256, 128]
+
+    # 长日志（300 KB 填充）末尾的 OOM 也必须检出（尾窗扫描，非从 start 读固定窗口）
+    third = tmp_path / "third"
+    stubs3 = _Stubs(train_plan=["oom_log_big", "ok"])
+    rc3 = _loop(third, stubs3, rounds=1, micro=256).run()
+    assert rc3 == 0 and [item["micro"] for item in stubs3.train_calls] == [256, 128]
 
 
 def test_phase3_loop_resume_reuses_collect(tmp_path: Path) -> None:
@@ -809,4 +871,152 @@ def test_phase3_loop_config_micro_and_resume(tmp_path: Path, monkeypatch) -> Non
     # 仓库配置回归：phase3 micro = 256（P3-D 防 OOM 定案；stage A 标定上限）
     repo_cfg = load_config("config/default.yaml")
     assert repo_cfg["stages"]["B"]["phase3"]["micro"] == 256
+
+
+# ---------------------- ⑧ lane P3-E：GPU 显存守卫（释放/前置检查/OOM 重试）
+def test_phase3_loop_releases_gpu_after_training_and_records_reserved(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs()
+    freed: list = []
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: freed.append(True))
+    reserved = iter([10000.0, 120.0])
+    monkeypatch.setattr(phase3_loop, "_gpu_reserved_mib", lambda: next(reserved))
+    monkeypatch.setattr(phase3_loop, "_gpu_free_mib", lambda: 9000.0)
+
+    rc = _loop(tmp_path, stubs, rounds=1, micro=256).run()
+    assert rc == 0
+    assert len(freed) == 1, "训练步结束后必须强制释放（成功路径，无重试）"
+    status = _status(tmp_path)
+    assert status["rounds"][0]["train"]["reserved_mib"] == {"before": 10000.0, "after": 120.0}
+    # GPU 段：三步（collect/train/eval）前各一条 free MiB 快照
+    checks = status["gpu"]["checks"]
+    assert status["gpu"]["threshold_mib"] == 6144.0
+    assert [item["step"] for item in checks] == ["collect", "train", "eval"]
+    assert all(item["free_mib"] == 9000.0 and item["ok"] is True and item["waits"] == 0 for item in checks)
+    log_text = (tmp_path / "runs" / "BTCTEST_phase3_loop" / "logs" / "phase3_loop.log").read_text(encoding="utf-8")
+    assert "仍高位" not in log_text, "reserved 已回落（120 MiB）不应告警"
+
+    # 训练后 reserved 仍高位 → 告警
+    second = tmp_path / "second"
+    stubs2 = _Stubs()
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: None)
+    reserved2 = iter([10000.0, 9000.0])
+    monkeypatch.setattr(phase3_loop, "_gpu_reserved_mib", lambda: next(reserved2))
+    assert _loop(second, stubs2, rounds=1).run() == 0
+    log2 = (second / "runs" / "BTCTEST_phase3_loop" / "logs" / "phase3_loop.log").read_text(encoding="utf-8")
+    assert "仍高位" in log2, "训练后 reserved 高位必须告警"
+
+
+def test_phase3_loop_gpu_precheck_waits_then_fails(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs()
+    waits: list = []
+    freed: list = []
+    monkeypatch.setattr(phase3_loop, "_gpu_wait", lambda seconds: waits.append(seconds))
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: freed.append(True))
+    monkeypatch.setattr(phase3_loop, "_gpu_free_mib", lambda: 1000.0)  # 始终低于 6144
+
+    rc = _loop(tmp_path, stubs, rounds=1).run()
+    assert rc == 1 and len(stubs.collect_calls) == 0 and len(stubs.train_calls) == 0, "低显存绝不带病启动"
+    status = _status(tmp_path)
+    assert status["status"] == "failed" and "GPU 空闲不足" in str(status["stop_reason"])
+    assert status["current_step"] == "collect"
+    assert len(waits) == phase3_loop.GPU_WAIT_RETRIES == 3
+    assert len(freed) == 3, "每次等待前先释放"
+    check = status["gpu"]["checks"][-1]
+    assert check["step"] == "collect" and check["ok"] is False and check["waits"] == 3
+    assert check["free_mib"] == 1000.0
+
+
+def test_phase3_loop_gpu_precheck_recovers_after_wait(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs()
+    waits: list = []
+    free_seq = [1000.0, 9000.0]
+    monkeypatch.setattr(phase3_loop, "_gpu_wait", lambda seconds: waits.append(seconds))
+    monkeypatch.setattr(phase3_loop, "_gpu_free_mib", lambda: free_seq.pop(0) if free_seq else 9000.0)
+
+    rc = _loop(tmp_path, stubs, rounds=1).run()
+    assert rc == 0 and len(stubs.collect_calls) == 1
+    assert len(waits) == 1, "一次等待后显存恢复 → 继续"
+    check = _status(tmp_path)["gpu"]["checks"][0]
+    assert check["ok"] is True and check["waits"] == 1
+
+
+def test_phase3_loop_collect_oom_retries_then_cpu_fallback(tmp_path: Path, monkeypatch) -> None:
+    # ① 一次 OOM → 同设备重试成功
+    stubs = _Stubs(collect_plan=["oom_log", "ok"])
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: None)
+    assert _loop(tmp_path, stubs, rounds=1).run() == 0
+    assert [item["device"] for item in stubs.collect_calls] == [None, None]
+    attempts = _status(tmp_path)["rounds"][0]["collect"]["attempts"]
+    assert [item["oom"] for item in attempts] == [True, False]
+
+    # ② 连续 OOM → 第 2 次重试退 --device cpu 后成功
+    second = tmp_path / "second"
+    stubs2 = _Stubs(collect_plan=["oom_log", "oom_log", "ok"])
+    assert _loop(second, stubs2, rounds=1).run() == 0
+    assert [item["device"] for item in stubs2.collect_calls] == [None, None, "cpu"], "第 2 次重试必须退 cpu"
+    attempts2 = _status(second)["rounds"][0]["collect"]["attempts"]
+    assert [item["device"] for item in attempts2] == ["auto", "auto", "cpu"]
+    assert [item["oom"] for item in attempts2] == [True, True, False]
+
+    # ③ 重试耗尽（2 次）→ failed
+    third = tmp_path / "third"
+    stubs3 = _Stubs(collect_plan=["oom_log"])
+    rc3 = _loop(third, stubs3, rounds=1).run()
+    assert rc3 == 1 and len(stubs3.collect_calls) == 3
+    status3 = _status(third)
+    assert status3["status"] == "failed" and status3["current_step"] == "collect"
+
+
+def test_phase3_loop_eval_oom_retries_after_release(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs(eval_plan=["oom_log", "ok"])
+    freed: list = []
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: freed.append(True))
+    rc = _loop(tmp_path, stubs, rounds=1).run()
+    assert rc == 0 and len(stubs.eval_calls) == 2, "评测 OOM 必须释放后重试"
+    assert len(freed) >= 1
+    attempts = _status(tmp_path)["rounds"][0]["eval"]["attempts"]
+    assert [item["oom"] for item in attempts] == [True, False]
+
+    # 重试耗尽（2 次）→ failed
+    second = tmp_path / "second"
+    stubs2 = _Stubs(eval_plan=["oom_log"])
+    rc2 = _loop(second, stubs2, rounds=1).run()
+    assert rc2 == 1 and len(stubs2.eval_calls) == 3
+    status2 = _status(second)
+    assert status2["status"] == "failed" and status2["current_step"] == "eval"
+
+
+def test_phase3_loop_default_train_runs_in_subprocess(tmp_path: Path, monkeypatch) -> None:
+    """lane P3-E：每轮训练默认走独立子进程（进程退出释放显存）。"""
+    stubs = _Stubs()
+    captured: dict = {}
+
+    def _fake_run_subprocess(argv, log_path=None):
+        captured["argv"] = [str(item) for item in argv]
+        return stubs.train(argv, log_path)  # 借用桩写产物（collect/eval 用桩注入，不走这里）
+
+    monkeypatch.setattr(phase3_loop, "run_subprocess", _fake_run_subprocess)
+    loop = _loop(tmp_path, stubs, rounds=1)
+    loop._train_fn = phase3_loop.train_subprocess  # 默认实现：包一层子进程 argv
+    assert loop.run() == 0
+    argv = captured["argv"]
+    assert argv[:2] == [phase3_loop.VENV_PY, "tools/train.py"], argv[:2]
+    assert argv[argv.index("--phase3") + 1] == str(tmp_path / "datasets" / "BTCTEST_phase3_dagger_r1")
+    assert argv[argv.index("--phase3-round") + 1] == "1"
+
+
+def test_phase3_loop_gpu_config_and_status_section(tmp_path: Path) -> None:
+    from pipeline.stages import load_config
+
+    repo_cfg = load_config("config/default.yaml")
+    assert repo_cfg["stages"]["B"]["phase3"]["gpu"]["min_free_mib"] == 6144
+    cfg_path = tmp_path / "train.yaml"
+    cfg_path.write_text(
+        "stages:\n  B:\n    phase3:\n      rounds: 1\n      gpu: {min_free_mib: 4096}\n",
+        encoding="utf-8",
+    )
+    args, extra = _parse_args(["--phase3-loop", "--config", str(cfg_path)])
+    cfg = Phase3LoopConfig.from_config(load_config(str(cfg_path)), args, extra=extra)
+    assert cfg.gpu_min_free_mib == 4096.0, "config gpu.min_free_mib 必须生效"
+    assert Phase3LoopConfig().gpu_min_free_mib == phase3_loop.GPU_MIN_FREE_MIB
 

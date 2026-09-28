@@ -12,8 +12,8 @@
    在 ``spec_pool`` 上攒 ``fail_target`` 个失败窗口（``--window-fail-before <collect.window_s>``、
    ``--shuffle-seed <shuffle_seed_base+k>``、``--workers <collect.workers>``）→
    ``<datasets_root>/BTC<stamp>_phase3_dagger_r{k}``；
-2. **训练**（in-process ``tools/train.py --phase3 <dir> --phase3-round k``，**每轮起点恒为
-   ``init_ckpt``**）→ ``<runs_root>/BTC<stamp>_stageB_phase3_r{k}/stage_b``；
+2. **训练**（**独立子进程** ``tools/train.py --phase3 <dir> --phase3-round k``，**每轮起点恒为
+   ``init_ckpt``**；进程退出天然释放显存）→ ``<runs_root>/BTC<stamp>_stageB_phase3_r{k}/stage_b``；
 3. **评测**（subprocess ``tools/test.py``，LQR，``eval.spec``/``eval.workers``）→
    ``<runs_root>/BTC<stamp>_eval500_phase3_r{k}``；
 4. **护栏**：与**上一轮**比较 ``overall_success`` / ``easy`` 组 ``success_rate``，
@@ -27,6 +27,12 @@
 **OOM 自愈（lane P3-D）**：训练步捕获 ``torch.cuda.OutOfMemoryError``（或非零 rc 且日志含
 ``CUDA out of memory``）→ ``gc.collect()`` + ``torch.cuda.empty_cache()`` → **micro 减半整步重试**
 （≤3 次；下限 64）→ 重试耗尽才失败；每次重试 ``current_step="train_retry_micro{M}"`` 落盘。
+
+**GPU 显存守卫（lane P3-E）**：每轮训练 = **独立子进程**（进程退出天然释放显存）；训练步结束后
+**无论成功/失败/重试**强制释放并记录 ``memory_reserved`` 前后对比（仍高位告警）；任何 GPU 子步骤
+（采集/训练/评测）启动前查 ``torch.cuda.mem_get_info``：空闲 < ``gpu.min_free_mib``（默认 6144 MiB）
+→ 释放+等待重试 ≤3 次 → 仍不足 failed（绝不带病启动）；采集/评测因 GPU OOM 失败 → 释放后重试 ≤2
+（采集第 2 次重试退 ``--device cpu``）；状态文件含 ``gpu.checks`` 逐步快照（free MiB）。
 
 **断点复用（lane P3-D）**：``PHASE3_RESUME=1`` / ``--phase3-resume`` 时每步前查最新可用产物
 （采集：``BTC*_phase3_dagger_r{k}`` 且 ``report.json.counts.stored_rows>0``；训练：
@@ -49,7 +55,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import subprocess
@@ -72,6 +77,14 @@ SCHEMA_VERSION = 1
 OOM_MAX_RETRIES = 3
 OOM_MICRO_FLOOR = 64
 OOM_MICRO_FALLBACK = 512
+#: GPU 显存守卫（lane P3-E）：子步骤前空闲下限 / 等待重试次数与间隔 / 训练后 reserved 告警线
+GPU_MIN_FREE_MIB = 6144.0
+GPU_WAIT_RETRIES = 3
+GPU_WAIT_SECONDS = 20.0
+GPU_RESERVED_WARN_MIB = 1024.0
+#: 采集/评测 GPU OOM 重试次数（采集第 2 次重试退 ``--device cpu``）
+COLLECT_OOM_RETRIES = 2
+EVAL_OOM_RETRIES = 2
 #: 编排层自身接管的参数：禁止经透传 EXTRA 覆盖（避免把轮次/路径/起点接错）
 _RESERVED_EXTRA_ARGS = frozenset(
     {
@@ -173,11 +186,18 @@ def _is_cuda_oom(exc: BaseException) -> bool:
 
 
 def _log_has_oom(log_path: Path, *, start: int = 0, tail_bytes: int = 200_000) -> bool:
-    """日志 ``start`` 之后是否出现 CUDA/GPU out of memory（只查本次尝试新增的内容）。"""
+    """日志 ``start`` 之后是否出现 CUDA/GPU out of memory。
+
+    只看**本次尝试新增区域的尾部** ``tail_bytes`` 字节（子进程训练日志可达数百 KB，
+    OOM traceback 在末尾；从 ``start`` 起读固定窗口会漏检长日志）。
+    """
     try:
         with Path(log_path).open("rb") as handle:
-            handle.seek(max(0, int(start)))
-            data = handle.read(int(tail_bytes)).lower()
+            handle.seek(0, os.SEEK_END)
+            size = int(handle.tell())
+            begin = max(int(start), size - int(tail_bytes))
+            handle.seek(begin)
+            data = handle.read().lower()
     except OSError:
         return False
     return b"out of memory" in data and (b"cuda" in data or b"gpu" in data)
@@ -254,6 +274,8 @@ class Phase3LoopConfig:
     micro: Optional[int] = None
     #: 断点复用（``PHASE3_RESUME=1`` / ``--phase3-resume``）：已有可用产物则跳过该步
     resume: bool = False
+    #: GPU 子步骤前空闲显存下限 MiB（低于 → 释放+等待重试 ≤GPU_WAIT_RETRIES；仍不足 failed）
+    gpu_min_free_mib: float = GPU_MIN_FREE_MIB
     #: 透传的 phase-3 训练参数（如 ``--phase3-epochs/--batch-size``；不得含保留键）
     extra_train_args: List[str] = field(default_factory=list)
 
@@ -267,6 +289,7 @@ class Phase3LoopConfig:
         collect = dict(p3.get("collect", {}) or {})
         eval_cfg = dict(p3.get("eval", {}) or {})
         guard = dict(p3.get("guard", {}) or {})
+        gpu_cfg = dict(p3.get("gpu", {}) or {})
         bc_cfg = dict((config.get("train", {}) or {}).get("bc", {}) or {})
         env_rounds = os.environ.get("PHASE3_ROUNDS", "").strip()
         if getattr(args, "phase3_rounds", None) is not None:
@@ -303,27 +326,48 @@ class Phase3LoopConfig:
             stamp=(str(args.phase3_stamp) if getattr(args, "phase3_stamp", None) else None),
             micro=(int(micro_raw) if micro_raw else None),
             resume=resume,
+            gpu_min_free_mib=float(gpu_cfg.get("min_free_mib", cls.gpu_min_free_mib)),
             extra_train_args=[str(item) for item in extra],
         )
 
 
-class _Tee:
-    """stdout 双写（控制台 + 日志文件）；用于 in-process 训练的输出落盘。"""
+def train_subprocess(argv: Sequence[Any], log_path: Optional[Path] = None) -> int:
+    """每轮训练 = **独立子进程**（``tools/venv-python tools/train.py ...``）。
 
-    def __init__(self, *streams: Any):
-        self._streams = streams
+    lane P3-E：进程退出天然释放 CUDA 显存 —— 修复 in-process 训练结束后链进程仍持
+    ~10.75 GiB、饿死后续评测/采集的问题；``argv`` = :meth:`Phase3Loop._train_argv` 输出。
+    """
+    return run_subprocess([VENV_PY, "tools/train.py", *[str(item) for item in argv]], log_path)
 
-    def write(self, data: str) -> int:
-        for stream in self._streams:
-            stream.write(data)
-        return len(data)
 
-    def flush(self) -> None:
-        for stream in self._streams:
-            try:
-                stream.flush()
-            except Exception:  # noqa: BLE001 - 关闭后的 flush 不应影响训练
-                pass
+def _gpu_free_mib() -> Optional[float]:
+    """GPU 空闲显存 MiB（``torch.cuda.mem_get_info``）；无 CUDA / 查询失败 → None（不限制）。"""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        free, _total = torch.cuda.mem_get_info()
+        return float(free) / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001 - 查询失败不应打断链
+        return None
+
+
+def _gpu_reserved_mib() -> Optional[float]:
+    """当前进程 CUDA 缓存分配器 ``memory_reserved`` MiB；无 CUDA / 查询失败 → None。"""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        return float(torch.cuda.memory_reserved()) / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gpu_wait(seconds: float) -> None:
+    """显存不足时的等待（独立函数便于测试注入；默认 ``time.sleep``）。"""
+    time.sleep(max(0.0, float(seconds)))
 
 
 def run_subprocess(argv: Sequence[Any], log_path: Optional[Path] = None) -> int:
@@ -349,31 +393,6 @@ def run_subprocess(argv: Sequence[Any], log_path: Optional[Path] = None) -> int:
                 handle.write(line)
                 handle.flush()
         return int(proc.wait())
-    finally:
-        if handle is not None:
-            handle.close()
-
-
-def default_train(argv: Sequence[Any], log_path: Optional[Path] = None) -> int:
-    """in-process 调用 ``tools/train.py`` 的 phase-3 训练（输出 tee 到逐轮日志）。"""
-    from tools.train import main as train_main
-
-    handle = None
-    stream: Any = sys.stdout
-    if log_path is not None:
-        path = Path(log_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("a", encoding="utf-8")
-        stream = _Tee(sys.stdout, handle)
-    try:
-        with contextlib.redirect_stdout(stream):
-            try:
-                return int(train_main([str(item) for item in argv]) or 0)
-            except SystemExit as exc:  # stages 的 SystemExit（数据契约/缺文件）→ 记 rc
-                code = exc.code
-                if code is None:
-                    return 0
-                return int(code) if isinstance(code, int) else 1
     finally:
         if handle is not None:
             handle.close()
@@ -412,10 +431,13 @@ class Phase3Loop:
     ):
         self.cfg = config
         self._collect_fn = collect_fn or run_subprocess
-        self._train_fn = train_fn or default_train
+        self._train_fn = train_fn or train_subprocess
         self._eval_fn = eval_fn or run_subprocess
         self._logger = logger or print
         self._log_handle: Optional[Any] = None
+        #: run() 期间的状态引用（GPU 检查/复用记录用；结束后清空）
+        self._status: Optional[Dict[str, Any]] = None
+        self._status_path: Optional[Path] = None
 
     # ------------------------------------------------------------------ 日志/状态
     def _log(self, message: str) -> None:
@@ -431,7 +453,9 @@ class Phase3Loop:
         self._log(traceback.format_exc().rstrip())
 
     # ------------------------------------------------------------------ 命令构造
-    def _collect_argv(self, *, student: str, dagger_dir: Path, round_index: int) -> List[str]:
+    def _collect_argv(
+        self, *, student: str, dagger_dir: Path, round_index: int, device: Optional[str] = None
+    ) -> List[str]:
         cfg = self.cfg
         argv = [
             VENV_PY, "tools/dagger_collect.py",
@@ -445,8 +469,9 @@ class Phase3Loop:
             "--config", str(_abs(cfg.config)),
             "--model-config", str(_abs(cfg.model_config)),
         ]
-        if cfg.device:
-            argv += ["--device", str(cfg.device)]
+        effective_device = device if device is not None else cfg.device
+        if effective_device:
+            argv += ["--device", str(effective_device)]
         if cfg.limit:
             argv += ["--limit", str(int(cfg.limit))]
         return argv
@@ -521,6 +546,65 @@ class Phase3Loop:
             [item for item in root.glob(f"BTC*_eval500_phase3_r{round_index}/metrics.json") if item.is_file()]
         )
 
+    # ------------------------------------------------------------------ GPU 显存守卫（lane P3-E）
+    def _record_gpu_check(
+        self, *, round_index: int, step: str, free_mib: Optional[float], ok: bool, waits: int
+    ) -> None:
+        """把一次子步骤前的显存快照写进 ``status["gpu"]["checks"]`` 并落盘。"""
+        if self._status is None:
+            return
+        gpu = self._status.setdefault("gpu", {})
+        gpu.setdefault("threshold_mib", float(self.cfg.gpu_min_free_mib))
+        gpu.setdefault("checks", []).append(
+            {
+                "round": int(round_index),
+                "step": str(step),
+                "free_mib": (None if free_mib is None else round(float(free_mib), 1)),
+                "ok": bool(ok),
+                "waits": int(waits),
+            }
+        )
+        if self._status_path is not None:
+            _write_status(self._status_path, self._status)
+
+    def _gpu_check(self, *, round_index: int, step: str) -> "tuple[Optional[float], bool]":
+        """GPU 子步骤前置检查：free < ``gpu_min_free_mib`` → 释放+等待重试 ≤3；返回 (free, ok)。
+
+        ``free_mib=None``（无 CUDA / 查询失败）→ 不限制（``ok=True``，不阻塞非 GPU 环境/测试）。
+        仍不足 → ``ok=False``，调用方必须 failed（绝不带病启动）。
+        """
+        threshold = float(self.cfg.gpu_min_free_mib)
+        free = _gpu_free_mib()
+        waits = 0
+        while free is not None and free < threshold and waits < GPU_WAIT_RETRIES:
+            waits += 1
+            self._log(
+                f"r{round_index} {step} GPU 空闲不足：free={free:.0f} MiB < {threshold:.0f} MiB → "
+                f"释放+等待 {GPU_WAIT_SECONDS:.0f}s（第 {waits}/{GPU_WAIT_RETRIES} 次）"
+            )
+            _free_cuda_memory()
+            _gpu_wait(GPU_WAIT_SECONDS)
+            free = _gpu_free_mib()
+        ok = free is None or free >= threshold
+        self._record_gpu_check(round_index=round_index, step=step, free_mib=free, ok=ok, waits=waits)
+        if not ok:
+            self._log(
+                f"r{round_index} {step} GPU 空闲仍不足：free={free:.0f} MiB < {threshold:.0f} MiB"
+                f"（已等待 {waits}/{GPU_WAIT_RETRIES} 次）"
+            )
+        return free, ok
+
+    def _release_after_training(self, round_index: int, before: Optional[float]) -> Optional[float]:
+        """训练步结束后强制释放 + 回落校验：返回释放后的 reserved MiB；仍高位则告警。"""
+        _free_cuda_memory()
+        after = _gpu_reserved_mib()
+        if after is not None and after > GPU_RESERVED_WARN_MIB:
+            self._log(
+                f"警告：r{round_index} 训练后 CUDA reserved={after:.0f} MiB 仍高位"
+                f"（>{GPU_RESERVED_WARN_MIB:.0f} MiB；before={before}）→ 后继 GPU 子步骤可能受挤"
+            )
+        return after
+
     # ------------------------------------------------------------------ 主循环
     def run(self) -> int:
         cfg = self.cfg
@@ -561,9 +645,13 @@ class Phase3Loop:
                 },
                 "micro": cfg.micro,
                 "resume": bool(cfg.resume),
+                "gpu": {"min_free_mib": float(cfg.gpu_min_free_mib)},
             },
+            "gpu": {"threshold_mib": float(cfg.gpu_min_free_mib), "checks": []},
             "rounds": [],
         }
+        self._status = status
+        self._status_path = status_path
 
         def _finish(code: int, state: str, reason: Optional[str] = None) -> int:
             """落盘终态（failed 保留 current_step = 失败所在步，便于审计）；句柄由 finally 关闭。"""
@@ -588,7 +676,8 @@ class Phase3Loop:
                 f"collect=({cfg.collect_workers}w/{cfg.collect_window_s}s) "
                 f"eval=({cfg.eval_spec} · {cfg.eval_workers}w · lqr) "
                 f"guard=(overall-{cfg.stop_on_overall_drop}/easy-{cfg.stop_on_easy_drop}) "
-                f"micro={cfg.micro} resume={bool(cfg.resume)}"
+                f"micro={cfg.micro} resume={bool(cfg.resume)} "
+                f"gpu_min_free={cfg.gpu_min_free_mib:.0f}MiB"
             )
 
             init_ckpt = _abs(cfg.init_ckpt)
@@ -631,31 +720,85 @@ class Phase3Loop:
                     _write_status(status_path, status)
                     self._log(f"r{round_index} collect reuse={reused} rows={rows}")
                 else:
-                    self._log(f"r{round_index} collect start student={student} out={dagger_dir}")
-                    started = time.perf_counter()
-                    try:
-                        rc = int(
-                            self._collect_fn(
-                                self._collect_argv(
-                                    student=student, dagger_dir=dagger_dir, round_index=round_index
-                                ),
-                                collect_log,
-                            )
+                    free_mib, gpu_ok = self._gpu_check(round_index=round_index, step="collect")
+                    if not gpu_ok:
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 采集前 GPU 空闲不足：free={free_mib:.0f} MiB < "
+                            f"{cfg.gpu_min_free_mib:.0f} MiB（释放+等待 {GPU_WAIT_RETRIES} 次后仍不足）",
                         )
-                    except Exception as exc:  # noqa: BLE001 - 采集异常 → failed 落盘
-                        round_entry["collect"] = {"error": f"{type(exc).__name__}: {exc}", "log": str(collect_log)}
+                    self._log(
+                        f"r{round_index} collect start student={student} out={dagger_dir} "
+                        f"free={free_mib if free_mib is not None else 'n/a'}"
+                    )
+                    started = time.perf_counter()
+                    attempts: List[Dict[str, Any]] = []
+                    device_override: Optional[str] = None
+                    rc, oom = 1, False
+                    while True:
+                        attempt: Dict[str, Any] = {"device": device_override or cfg.device or "auto"}
+                        log_start = collect_log.stat().st_size if collect_log.exists() else 0
+                        try:
+                            rc = int(
+                                self._collect_fn(
+                                    self._collect_argv(
+                                        student=student, dagger_dir=dagger_dir,
+                                        round_index=round_index, device=device_override,
+                                    ),
+                                    collect_log,
+                                )
+                            )
+                            oom = rc != 0 and _log_has_oom(collect_log, start=log_start)
+                        except Exception as exc:  # noqa: BLE001 - 采集异常（含 CUDA OOM）
+                            rc = 1
+                            oom = _is_cuda_oom(exc)
+                            attempt["error"] = f"{type(exc).__name__}: {exc}"
+                            if not oom:
+                                attempts.append({**attempt, "rc": rc, "oom": False})
+                                round_entry["collect"] = {
+                                    "rc": rc, "duration_s": round(time.perf_counter() - started, 1),
+                                    "out": str(dagger_dir), "rows": None, "attempts": attempts,
+                                    "log": str(collect_log),
+                                }
+                                _write_status(status_path, status)
+                                self._log_exception(exc)
+                                return _finish(
+                                    1, "failed", f"r{round_index} 采集异常 {type(exc).__name__}: {exc}"
+                                )
+                        attempt.update({"rc": rc, "oom": bool(oom)})
+                        attempts.append(attempt)
+                        if not oom or len(attempts) > COLLECT_OOM_RETRIES:
+                            break
+                        _free_cuda_memory()
+                        if len(attempts) >= 2 and (device_override or cfg.device) != "cpu":
+                            device_override = "cpu"  # 采集允许退 cpu 重试一次
+                            status["current_step"] = "collect_retry_cpu"
+                        else:
+                            status["current_step"] = f"collect_retry{len(attempts)}"
+                        round_entry["collect"] = {
+                            "rc": None, "duration_s": None, "out": str(dagger_dir),
+                            "rows": None, "attempts": attempts, "log": str(collect_log),
+                        }
                         _write_status(status_path, status)
-                        self._log_exception(exc)
-                        return _finish(1, "failed", f"r{round_index} 采集异常 {type(exc).__name__}: {exc}")
+                        self._log(
+                            f"r{round_index} collect OOM（device={attempts[-1]['device']}）→ 释放 → "
+                            f"重试 device={device_override or cfg.device or 'auto'}"
+                            f"（第 {len(attempts)}/{COLLECT_OOM_RETRIES} 次）"
+                        )
                     duration = time.perf_counter() - started
                     rows = _dagger_rows(dagger_dir)
                     round_entry["collect"] = {
                         "rc": rc, "duration_s": round(duration, 1), "out": str(dagger_dir),
-                        "rows": rows, "log": str(collect_log),
+                        "rows": rows, "attempts": attempts, "log": str(collect_log),
                     }
+                    status["current_step"] = "collect"  # 失败归因到采集步（重试标记只留在 attempts）
                     if rc != 0:
                         _write_status(status_path, status)
-                        return _finish(1, "failed", f"r{round_index} 采集失败 rc={rc}（log={collect_log}）")
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 采集失败 rc={rc}（尝试 {[item.get('device') for item in attempts]}；"
+                            f"log={collect_log}）",
+                        )
                     if not (dagger_dir / "expert_bc.npz").is_file():
                         _write_status(status_path, status)
                         return _finish(1, "failed", f"r{round_index} 采集产物缺失：{dagger_dir / 'expert_bc.npz'}")
@@ -687,10 +830,19 @@ class Phase3Loop:
                     _write_status(status_path, status)
                     self._log(f"r{round_index} train reuse={reused}")
                 else:
+                    free_mib, gpu_ok = self._gpu_check(round_index=round_index, step="train")
+                    if not gpu_ok:
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 训练前 GPU 空闲不足：free={free_mib:.0f} MiB < "
+                            f"{cfg.gpu_min_free_mib:.0f} MiB（释放+等待 {GPU_WAIT_RETRIES} 次后仍不足）",
+                        )
                     self._log(
-                        f"r{round_index} train start out={train_out} ckpt={init_ckpt} micro={cfg.micro}"
+                        f"r{round_index} train start out={train_out} ckpt={init_ckpt} micro={cfg.micro} "
+                        f"free={free_mib if free_mib is not None else 'n/a'}"
                     )
                     started = time.perf_counter()
+                    reserved_before = _gpu_reserved_mib()
                     micro = cfg.micro
                     attempts: List[Dict[str, Any]] = []
                     retries = 0
@@ -716,10 +868,12 @@ class Phase3Loop:
                             attempt["error"] = f"{type(exc).__name__}: {exc}"
                             if not oom:
                                 attempts.append({**attempt, "rc": rc, "oom": False})
+                                reserved_after = self._release_after_training(round_index, reserved_before)
                                 round_entry["train"] = {
                                     "rc": rc, "duration_s": round(time.perf_counter() - started, 1),
                                     "out": str(train_out), "final": None, "metrics": None,
                                     "losses": None, "micro": micro, "attempts": attempts,
+                                    "reserved_mib": {"before": reserved_before, "after": reserved_after},
                                     "log": str(train_log),
                                 }
                                 status["current_step"] = "train"
@@ -754,6 +908,8 @@ class Phase3Loop:
                         )
                         _free_cuda_memory()
                     duration = time.perf_counter() - started
+                    # lane P3-E：训练步结束后**无论成功/失败/重试**强制释放 + reserved 回落校验
+                    reserved_after = self._release_after_training(round_index, reserved_before)
                     final_ckpt = train_out / "final.pt"
                     train_metrics = _read_json(train_out / "metrics.json")
                     round_entry["train"] = {
@@ -761,7 +917,9 @@ class Phase3Loop:
                         "final": (str(final_ckpt) if final_ckpt.is_file() else None),
                         "metrics": (str(train_out / "metrics.json") if train_metrics is not None else None),
                         "losses": _loss_subset(train_metrics), "micro": attempts[-1]["micro"],
-                        "attempts": attempts, "log": str(train_log),
+                        "attempts": attempts,
+                        "reserved_mib": {"before": reserved_before, "after": reserved_after},
+                        "log": str(train_log),
                     }
                     status["current_step"] = "train"  # 失败归因到训练步（重试标记只留在 attempts）
                     if exhausted:
@@ -804,19 +962,60 @@ class Phase3Loop:
                         f"easy={summary.get('easy_success')}"
                     )
                 else:
-                    self._log(f"r{round_index} eval start ckpt={final_ckpt} dir={eval_dir}")
-                    started = time.perf_counter()
-                    try:
-                        rc = int(
-                            self._eval_fn(
-                                self._eval_argv(final_ckpt=final_ckpt, eval_dir=eval_dir), eval_log
-                            )
+                    free_mib, gpu_ok = self._gpu_check(round_index=round_index, step="eval")
+                    if not gpu_ok:
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 评测前 GPU 空闲不足：free={free_mib:.0f} MiB < "
+                            f"{cfg.gpu_min_free_mib:.0f} MiB（释放+等待 {GPU_WAIT_RETRIES} 次后仍不足）",
                         )
-                    except Exception as exc:  # noqa: BLE001 - 评测异常 → failed 落盘
-                        round_entry["eval"] = {"error": f"{type(exc).__name__}: {exc}", "log": str(eval_log)}
+                    self._log(
+                        f"r{round_index} eval start ckpt={final_ckpt} dir={eval_dir} "
+                        f"free={free_mib if free_mib is not None else 'n/a'}"
+                    )
+                    started = time.perf_counter()
+                    attempts = []
+                    rc, oom = 1, False
+                    while True:
+                        attempt: Dict[str, Any] = {}
+                        log_start = eval_log.stat().st_size if eval_log.exists() else 0
+                        try:
+                            rc = int(
+                                self._eval_fn(
+                                    self._eval_argv(final_ckpt=final_ckpt, eval_dir=eval_dir), eval_log
+                                )
+                            )
+                            oom = rc != 0 and _log_has_oom(eval_log, start=log_start)
+                        except Exception as exc:  # noqa: BLE001 - 评测异常（含 CUDA OOM）
+                            rc = 1
+                            oom = _is_cuda_oom(exc)
+                            attempt["error"] = f"{type(exc).__name__}: {exc}"
+                            if not oom:
+                                attempts.append({**attempt, "rc": rc, "oom": False})
+                                round_entry["eval"] = {
+                                    "rc": rc, "duration_s": round(time.perf_counter() - started, 1),
+                                    "dir": str(eval_dir), "metrics": None, "attempts": attempts,
+                                    "log": str(eval_log),
+                                }
+                                _write_status(status_path, status)
+                                self._log_exception(exc)
+                                return _finish(
+                                    1, "failed", f"r{round_index} 评测异常 {type(exc).__name__}: {exc}"
+                                )
+                        attempt.update({"rc": rc, "oom": bool(oom)})
+                        attempts.append(attempt)
+                        if not oom or len(attempts) > EVAL_OOM_RETRIES:
+                            break
+                        _free_cuda_memory()
+                        status["current_step"] = f"eval_retry{len(attempts)}"
+                        round_entry["eval"] = {
+                            "rc": None, "duration_s": None, "dir": str(eval_dir),
+                            "metrics": None, "attempts": attempts, "log": str(eval_log),
+                        }
                         _write_status(status_path, status)
-                        self._log_exception(exc)
-                        return _finish(1, "failed", f"r{round_index} 评测异常 {type(exc).__name__}: {exc}")
+                        self._log(
+                            f"r{round_index} eval OOM → 释放 → 重试（第 {len(attempts)}/{EVAL_OOM_RETRIES} 次）"
+                        )
                     duration = time.perf_counter() - started
                     eval_metrics_path = eval_dir / "metrics.json"
                     summary = _eval_summary(eval_metrics_path)
@@ -825,8 +1024,10 @@ class Phase3Loop:
                         "metrics": (str(eval_metrics_path) if eval_metrics_path.is_file() else None),
                         "overall_success": summary.get("overall_success"),
                         "easy_success": summary.get("easy_success"),
+                        "attempts": attempts,
                         "log": str(eval_log),
                     }
+                    status["current_step"] = "eval"  # 失败归因到评测步（重试标记只留在 attempts）
                     if rc != 0:
                         _write_status(status_path, status)
                         return _finish(1, "failed", f"r{round_index} 评测失败 rc={rc}（log={eval_log}）")
@@ -869,6 +1070,8 @@ class Phase3Loop:
             self._log(traceback.format_exc().rstrip())
             return _finish(1, "failed", detail)
         finally:
+            self._status = None
+            self._status_path = None
             if self._log_handle is not None:
                 self._log_handle.close()
                 self._log_handle = None
