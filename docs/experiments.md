@@ -354,7 +354,7 @@ intersection 0.25、roundabout 0.25；curve / uturn / tollgate 仍 **0.00**（to
    `runs/BTC20260927-1100_stageB`（B）、`runs/BTC20260927-1147_eval_lqr50`、`runs/BTC20260927-1149_eval_baseline50`、
    报告 `runs/BTC20260927-1150_ilreport_5k`（`il_report.md/json` + 11 张 PNG）。
 
-## 11. 去聚类 + MoE 负载均衡 + DAgger 恢复轮（2026-09-27/28；含 2026-09-28 事故更正）
+## 11. 去聚类 + MoE 负载均衡 + DAgger v2 迭代（2026-09-27/28；含事故更正与 v2 三轮结果）
 
 > **⚠️ 事故更正（2026-09-28）**：本节原 DAgger v1 的采集池**取自 eval500 的失败 spec**（`datasets/BTC20260927-2218_dagger1/report.json` 自证：`specs=env/specs/scenarios_eval500.json`、`provenance.from_eval=/tmp/opencode/dagger_pool80.csv`、`failed_ids=162`），且学生驱动模型错配（用 phase 1 `primary.pt` 而非 phase 2）→ **三个 DAgger 臂（0.040 / 0.330 / 0.420）的 500 集分数全部作废（train-on-test，不入任何结论）**；污染数据集/权重/采集池已于 2026-09-28 删除，作废评测目录保留并改名加 `_void` 后缀。**干净证据仅剩：阶段 B phase 1 = 0.274 → phase 2 = 0.396（CI 不重叠）**。
 > 教训与措施：**训练数据生成只允许 train spec**；`tools/dagger_collect.py` 硬断言采集池 ∩ eval/val = ∅（命中即 `SystemExit`）；采集池生成器 `tools/make_dagger_pools.py` 分层固定种子并与 eval/val 校验；v2 协议见下。
@@ -409,16 +409,61 @@ RESUME=<run>/stage_b/primary.pt EXTRA="--dagger-dir datasets/BTC<ts>_dagger_r{k}
 3. **工程发现保留**：DAgger 行只有首步动作标签时，其"常量动作外推"合成 `traj6` 进 traj-aux 会把 experts 教成过度转向（渐进劣化 0.396→0.304→0.040；val（专家分布）指标不变 → 坏在 plan/rollout 侧）；修复 = **逐行掩码**（DAgger 行不吃 traj-aux），已实现并被 v2 沿用（v2 行同样只有首步动作标签）。
 4. 附带修复：val "动作误差"口径 bug（误用轨迹误差、与 `traj_mae` 雷同）已修复并加回归断言（`e011b6b`）。
 
-**v2 迭代协议（2026-09-28 起，进行中）**：3 轮（r1/r2/r3）；每轮 =
+**v2 迭代协议（2026-09-28，已完成 3 轮）**：每轮 =
 ① 用当前模型在 **train 切片 500**（`env/specs/scenarios_train_dagger_r{1,2,3}.json`：从 5k 覆盖的 5000 条 train spec 里按 `labels.geometry` 分层随机抽、固定种子、三轮互不重叠）闭环采集，
 仅保留**失败 episode 的"终止前 10 s"窗口行**（策略帧 0.5 s ⇒ 20 帧；`collision`/`out_of_road`/`terminal` 计失败，`max_step`/timeout 不计）；
-② 从冻结 `primary.pt` 重训 specific（多轮数据累积：`--dagger-dir` 可重复）→ 每轮独立 run 目录；
+② 从冻结 `primary.pt` 重训 specific（多轮数据累积：`--dagger-dir` 可重复；traj-aux 掩码覆盖全部 DAgger 行）→ 每轮独立 run 目录；
 ③ 评 `eval500`（**每轮都评**；轮数固定 3、不做早停，终模型 = r3）。
-采集吞吐实测：12 specs / 12 workers / **10.2 s**（≈0.85 s/spec 墙钟；瓶颈=仿真步进；须按 worker 限制 OMP 线程数——v1 的 92 s/spec 初步归因于线程超订：6 worker × `torch_threads=14` > 20 核）。
+采集吞吐实测：500 specs / 16 workers / ~7–8 min（≈0.85 s/spec 墙钟；瓶颈=仿真步进；须按 worker 限制 OMP 线程数——v1 的 92 s/spec 归因于线程超订 6 worker × `torch_threads=14` > 20 核）。
 
-产物（干净）：`runs/BTC20260927-2202_eval500_phase1`、`runs/BTC20260927-2209_eval500_phase2`；
-训练目录 `runs/BTC20260927-1019_stageA_p4/stage_b`（`primary.pt` + `final.phase2.pt` + `metrics.phase2.json`）。
-作废留档：`runs/BTC20260928-*_eval500_phase2b_v1*_void`（仅供事故追溯）。
+v2 期间修复（均带回归测试，先复现后修复）：
+- `9270f0e`：`balance_from_specs` 对"整组 0 可训练行"的 (difficulty, geometry) 组 KeyError（默认权重 1，与内存版 `apply_balance` 逐行一致）；
+- `2d40c0e`：episode 末 25 env steps 内 `traj30_measured` 常量补齐 → 首末距=0 → 误判 stuck（窗口 ~30% 临末帧被清零、整组清零还会引爆上面的 KeyError）→ `future_truncated` 行**跳过 stuck 判决**（无观测不判决，行保留）；
+- `1b5afb0`：窗口模式报告口径（`bc_retained_step_yield` 分母=窗口行数、`filter_counts` 只计最终置零行；整段模式逐位不变）。
+
+**v2 结果（500 集，LQR；n=500）**：
+
+| 臂 | success [95% CI] | coll | off-road | rc | speed |
+| --- | --- | --- | --- | --- | --- |
+| 阶段 B phase 1 | 0.274 [0.237, 0.315] | 0.014 | 0.702 | 0.579 | 0.467 |
+| 阶段 B phase 2 | 0.396 [0.354, 0.440] | 0.030 | 0.552 | 0.639 | 0.443 |
+| phase 2b r1 | 0.450 [0.407, 0.494] | 0.052 | 0.478 | 0.669 | 0.435 |
+| phase 2b r2 | 0.476 [0.433, 0.520] | 0.048 | 0.462 | 0.695 | 0.455 |
+| **phase 2b r3（终版）** | **0.492 [0.448, 0.536]** | 0.056 | **0.438** | **0.692** | 0.456 |
+
+显著性（两比例 z 检验）：phase 2 → r1 +0.054（p=0.083）· phase 2 → r2 **+0.080（p=0.010）** · phase 2 → r3 **+0.096（p=0.002）**；
+单轮边际 r1→r2 +0.026（p=0.41）、r2→r3 +0.016（p=0.61）→ **累计增益显著、单轮不可分离（收益递减，趋向 ~0.49 饱和）**；phase 1 → r3 = +0.218（p<1e-4）。
+⚠️ 副作用：collision 0.030 → 0.056（Δ=+0.026，p=0.042，15→28 条）——恢复训练让车更敢动：off-road 大幅下降、撞车率上升，需后续平衡。
+
+**分几何（success；n≈45/类）**：
+
+| 几何 | phase 1 | phase 2 | r1 | r2 | r3 |
+| --- | --- | --- | --- | --- | --- |
+| split | 0.44 | 0.69 | 0.87 | 0.82 | **0.91** |
+| merge | 0.22 | 0.39 | 0.54 | 0.59 | **0.65** |
+| uturn | 0.33 | 0.60 | 0.53 | 0.60 | **0.64** |
+| straight | 0.40 | 0.51 | 0.60 | 0.60 | 0.58 |
+| ramp_out | 0.22 | 0.54 | 0.63 | **0.65** | 0.59 |
+| ramp_in | 0.28 | 0.50 | 0.59 | 0.54 | 0.57 |
+| t_intersection | 0.33 | 0.42 | 0.47 | 0.53 | 0.53 |
+| intersection | 0.39 | 0.46 | 0.46 | 0.46 | **0.52** |
+| roundabout | 0.29 | 0.18 | 0.22 | **0.33** | 0.29 |
+| curve | 0.02 | 0.02 | 0.02 | **0.09** | 0.09 |
+| tollgate | 0.09 | 0.04 | 0.02 | 0.02 | 0.04 |
+
+**分难度（success）**：easy 0.55 → 0.68 → **0.74**；medium 0.14 → 0.15 → **0.24**；hard 0.08 → 0.33 → **0.47**（phase 1 → phase 2 → r3）。
+
+**结论**：
+1. **v2（train 侧窗口 DAgger）整体有效**：phase 2 → r3 = **+0.096（p=0.002）**；off-road 0.552→0.438、rc 0.639→0.692；phase 1 → r3 = +0.218。
+2. **收益递减**：三轮边际不显著（p=0.41 / 0.61）→ 3 轮近饱和；继续提升需换杠杆（curve/tollgate 基础能力、速度、collision 平衡）。
+3. **未解决**：tollgate（0.04）、curve（0.09）偏低；速度偏慢（0.456 vs 基线 0.73）；collision 上升（0.030→0.056）⚠。
+4. 采集成本极低（~7 min/轮）→ 该机制可常态化复用；**唯一纪律 = 只允许 train spec 生成训练数据（硬隔离守卫）**。
+
+产物（v2）：采集 `datasets/BTC20260928-1006_dagger_r1`（5935 行）/ `BTC20260928-1109_dagger_r2`（5355）/ `BTC20260928-1154_dagger_r3`（4957）；
+训练 `runs/BTC20260928-1033_stageB_phase2b_r1` / `BTC20260928-1117_stageB_phase2b_r2` / `BTC20260928-1202_stageB_phase2b_r3`；
+评测 `runs/BTC20260928-1102_eval500_phase2b_r1` / `BTC20260928-1147_eval500_phase2b_r2` / `BTC20260928-1232_eval500_phase2b_r3`。
+干净基线：`runs/BTC20260927-2202_eval500_phase1`、`runs/BTC20260927-2209_eval500_phase2`、`runs/BTC20260927-1019_stageA_p4/stage_b`（`primary.pt` / `final.phase2.pt` / `metrics.phase2.json`）。
+作废留档：`runs/BTC20260928-*_eval500_phase2b_v1*_void`（仅事故追溯）。
 
 ## 7. 口径与注意事项
 

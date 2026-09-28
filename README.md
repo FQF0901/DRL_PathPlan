@@ -5,12 +5,12 @@ world model rollout 产生 3 s / 6 点自车轨迹 → MPC/LQR 跟踪该预瞄�
 → B 规划器 BC（含 rollout 轨迹辅助）→ C PPO RL（KL 锚定 B 快照）**。
 
 > **一句话现状（2026-09-28，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
-> **去聚类 + MoE 负载均衡**在统一评测集（500 条完整 episode、LQR、CI ±0.04）上的**干净结果**：阶段 B **phase 1（primary）= 0.274**
-> → **phase 2（MoE+难例加权）= 0.396**（CI 不重叠；off-road 0.702 → 0.552、rc 0.579 → 0.639）；规则基线 **0.756**。
-> 负载均衡使 8 专家各 11–14%（`load_cv≈0.14`，无饿死、无需人工标签）。**DAgger v1 轮因采集池取自 eval500（train-on-test）
-> 已作废并清理**（数据/权重删除、评测目录加 `_void` 留档）；v2（train 侧池 + 失败前 10 s 窗口 + 3 轮迭代、每轮评测）进行中。
-> 剩余缺口仍是 **curve / uturn / t_intersection / tollgate** 与速度偏慢（speed_ratio 0.42–0.47 vs 基线 0.73）。
-> Stage C 仍 EXPERIMENTAL。详见 `docs/experiments.md` §11（含 2026-09-28 更正）。
+> 在统一评测集（500 条完整 episode、LQR、CI ±0.04）上：阶段 B **phase 1（primary）= 0.274** → **phase 2（MoE+难例加权）= 0.396**
+> → **phase 2b（train 侧 DAgger 迭代 3 轮）r1/r2/r3 = 0.450 / 0.476 / 0.492**；**phase 2 → r3 = +0.096（p=0.002）**、
+> off-road 0.552 → 0.438、rc 0.639 → 0.692（规则基线 0.756）。负载均衡使 8 专家各 11–14%（`load_cv≈0.14`，无需人工标签）。
+> ⚠️ **DAgger v1 轮因采集池取自 eval500（train-on-test）已作废并清理**（数据/权重删除、评测目录加 `_void` 留档）；v2 全部在 train 侧切片采集
+> （窗口=失败前 10 s、三轮互不重叠、硬隔离守卫）。剩余缺口：tollgate（0.04）/ curve（0.09）、速度偏慢（0.456 vs 0.73）与 collision 0.030→0.056 的副作用 ⚠。
+> Stage C 仍 EXPERIMENTAL。详见 `docs/experiments.md` §11。
 
 ---
 
@@ -126,8 +126,9 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | **v1.2 IL 5k 第 3 轮**（schema v2 + mem-bank + router；50 条；LQR） | lqr | **0.42** | 0.04 | **0.52** | **0.688** | 0.446 |
 | **v1.2 去聚类 phase 1**（primary；**500 条**；LQR） | lqr | **0.274** | 0.014 | 0.702 | 0.579 | — |
 | **v1.2 去聚类 phase 2**（+MoE+难例加权；500 条；LQR） | lqr | **0.396** | 0.030 | 0.552 | 0.639 | — |
+| **v1.2 phase 2b r3**（train 侧 DAgger 迭代 3 轮，终版；500 条；LQR） | lqr | **0.492** | 0.056 | 0.438 | 0.692 | 0.456 |
 
-> ⚠️ **DAgger v1 轮作废（2026-09-28）**：采集池取自 eval500 失败 spec（train-on-test）→ 三个臂（0.040 / 0.330 / 0.420）不入结论；数据/权重已删除、评测目录加 `_void` 留档。v2（train 侧池 + 失败前 10 s 窗口 + 3 轮迭代、每轮评测）进行中。
+> ⚠️ **DAgger v1 轮作废（2026-09-28）**：采集池取自 eval500 失败 spec（train-on-test）→ 三个臂（0.040 / 0.330 / 0.420）不入结论；数据/权重已删除、评测目录加 `_void` 留档。**v2 已在 train 侧池完成 3 轮**（r1/r2/r3 = 0.450/0.476/0.492；phase 2→r3 p=0.002；副作用：collision 0.030→0.056 ⚠）。
 
 ### 2.2 开环 vs 闭环（v1.2，2026-09-26）
 
