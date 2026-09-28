@@ -10,6 +10,7 @@
 | `collect_expert.py` | BC 采集：`--specs`、`--workers N`（峰值 ≈1.3GB/worker）、`--recycle-every 150`、过滤（终末截断/on_lane/round-trip）与 `--balance weights|cap|none` |
 | `baseline_eval.py` | 规则基线批量评测：`--specs`、`--workers`、`--out`、`--render`（调试，强制单进程） |
 | `visualize.py` | 场景俯视图抽检：`--specs` + `--random N`/`--ids`/`--all-in-file`、`--policy baseline|idle`、`--frames/--steps` |
+| `debug_rollout_viz.py` | 失败场景回灌可视化（GT vs 模型推演）：`--ckpt`、`--spec-id`（eval500 episodes.csv 的 id）、`--out`；逐决策帧 PNG + ADE/FDE，`--device auto|cpu|cuda` |
 | `measure/smoke_env.py` | headless 冒烟：reset 耗时 / FPS / RSS（≥150 FPS 口径） |
 | `measure/check_determinism.py` | 同种子跨进程/重复建图的确定性（稀疏指纹对比） |
 | `measure/obs_smoke.py` | 观测通道 shape/mask + 单步耗时分解（obs/physics/traffic/reward） |
