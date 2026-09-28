@@ -1231,7 +1231,7 @@ def balance_from_specs(
             rows = int(entry["rows"])
             if rows <= 0:
                 continue
-            weights[entry["start"]:entry["start"] + rows] = group_weight[_entry_group(entry)]
+            weights[entry["start"]:entry["start"] + rows] = group_weight.get(_entry_group(entry), 1.0)  # 0 可训练行组：保持 1（下游由 train_weight 置零；与 apply_balance 一致）
         weights[train_weight <= 0.0] = 1.0  # 过滤行保持 1（下游先乘 train_weight）
         stats["weight_range"] = [min(group_weight.values()), max(group_weight.values())]
         after = dict(trainable_counts)

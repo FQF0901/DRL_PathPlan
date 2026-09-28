@@ -310,6 +310,45 @@ def test_balance_from_specs_matches_apply_balance():
         assert got["stats"] == reference_stats
 
 
+def test_balance_from_specs_zero_trainable_group_keeps_weight_one():
+    """回归：整组 0 可训练行（如 easy/merge）时不得 KeyError；该组行权重保持 1（与 apply_balance 一致）。"""
+    samples, entries = [], []
+    start = 0
+    plan = [("easy", "merge", 3, 0.0), ("easy", "straight", 2, 1.0), ("hard", "curve", 5, 1.0)]
+    for spec_index, (difficulty, geometry, n_rows, tw) in enumerate(plan):
+        for step in range(n_rows):
+            samples.append(
+                {
+                    "difficulty": difficulty,
+                    "geometry": geometry,
+                    "spec_id": spec_index,
+                    "step": step,
+                    "labels": np.zeros(len(SUPERVISED_LABELS), dtype=np.float32),
+                    "train_weight": tw,
+                }
+            )
+        entries.append(
+            {
+                "spec_index": spec_index,
+                "start": start,
+                "rows": n_rows,
+                "trainable": int(round(tw * n_rows)),
+                "report": {"id": spec_index, "difficulty": difficulty, "geometry": geometry},
+            }
+        )
+        start += n_rows
+    train_weight = np.array([row["train_weight"] for row in samples], dtype=np.float32)
+    reference = apply_balance(samples, mode="weights", ratio=3.0, seed=0)
+    got = balance_from_specs(entries, train_weight, mode="weights", ratio=3.0)
+    np.testing.assert_allclose(got["sample_weight"], reference["sample_weight"])
+    np.testing.assert_array_equal(got["balance_group"], reference["balance_group"])
+    # easy/merge（0 可训练行）→ 1.0；两个可训练组 2/5 行 → 7/(2*2)=1.75 / 7/(2*5)=0.7（不归一化 dead 组）
+    assert got["sample_weight"][:3].tolist() == [1.0, 1.0, 1.0]
+    assert got["sample_weight"][3] == pytest.approx(1.75)
+    assert got["sample_weight"][5] == pytest.approx(0.7)
+    assert "easy/merge" not in got["stats"]["group_trainable_before"]
+
+
 def test_shard_roundtrip_merge_matches_direct_arrays(tmp_path):
     """分片乱序落盘 → 按 spec 序逐键拼接 == 直接对全量行建数组（键/值/dtype 一致）。"""
     rows_a, counter_a = _extract(_episode(30))
