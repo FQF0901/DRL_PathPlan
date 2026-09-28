@@ -15,11 +15,8 @@ ckpt sha256 / 数据集指纹 / seed，训练侧只读 + 严格校验（见 ``pi
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
-
-import numpy as np
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:

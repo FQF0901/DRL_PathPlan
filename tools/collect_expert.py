@@ -110,7 +110,7 @@ from contextlib import ExitStack
 from multiprocessing import get_context
 from pathlib import Path
 from queue import Empty
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 

@@ -22,19 +22,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _BJ = timezone(timedelta(hours=8))
-_STAMP_RE = re.compile(r"BTC(\d{8}-\d{4})")
 _LEGACY_STAGE_RE = re.compile(r"_stage([AB])$")
 
 
 def beijing_stamp(now: datetime | None = None) -> str:
     """北京戳 ``YYYYMMDD-HHMM``（datasets/ 与 runs/ 命名统一用它）。"""
     return (now or datetime.now(_BJ)).strftime("%Y%m%d-%H%M")
-
-
-def stamp_of(path: str | Path) -> str | None:
-    """路径中第一个 ``BTC<北京戳>``；没有则 None。"""
-    match = _STAMP_RE.search(str(path))
-    return match.group(1) if match else None
 
 
 def new_work_dir(name: str, root: Path = ROOT, stamp: str | None = None) -> Path:

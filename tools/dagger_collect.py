@@ -1271,7 +1271,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "tracker": str(args.tracker),
     }
     label_order = tuple(load_supervised_labels(str(args.model_config)))  # 8 维监督顺序（与训练/BC 一致）
-    interpolate_fn, kinematics_source = resolve_interpolate()
+    _, kinematics_source = resolve_interpolate()
     driver = ckpt_identity(str(args.ckpt))
     if not driver.get("sha256"):
         print(f"[dagger] 警告：ckpt 不存在/不可读：{args.ckpt}", file=sys.stderr)

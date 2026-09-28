@@ -1134,8 +1134,6 @@ V2_HISTORY_KEYS: Tuple[str, ...] = ("ego_hist", "others_hist", "od_hist", "ld_hi
 V2_TRAIN_WEIGHT = "train_weight"
 V2_BALANCE_WEIGHT = "balance_weight"
 V2_WM_VALID = "wm_valid"
-V2_OD_PRESENCE = "od_presence"
-V2_OD_ID = "od_id"
 
 
 def row_train_weights(dataset: Any, indices: np.ndarray) -> np.ndarray:
@@ -1445,7 +1443,6 @@ def presence_entry_loss(
     import torch
     import torch.nn.functional as F
 
-    leading = pred_presence.shape[:-1]
     num_slots = int(pred_presence.shape[-1])
     logits_p = pred_presence.reshape(-1, num_slots)
     logits_e = pred_entry.reshape(-1, num_slots)
@@ -1885,25 +1882,6 @@ class BCDataset:
             if mask_key in self.arrays:
                 obs[mask_key] = self.arrays[mask_key][item]
         return obs
-
-    def history_valid(self, index: int) -> np.ndarray:
-        """训练侧使用的历史有效性（``(6,)``，旧→新）。
-
-        有 ``step`` 时按 ``(episode_id, step − 5j)`` 精确查表（缺帧 = 0，修复"头部假
-        valid=1/行位置时间不均匀"）；无 ``step`` 时退化为数据集 ``hist_valid``（兼容旧 schema）。
-        """
-        if not self._step_lookup:
-            return np.asarray(
-                self.arrays.get("hist_valid", np.ones((self.count, 6), dtype=np.float32))[index],
-                dtype=np.float32,
-            )
-        episode = int(self.arrays["episode_id"][index])
-        step = int(self.arrays["step"][index])
-        valid = np.zeros(6, dtype=np.float32)
-        for j in range(6):
-            if (episode, step - self.history_stride * j) in self._step_lookup:
-                valid[5 - j] = 1.0
-        return valid
 
     def _entries(self, index: int) -> Tuple[List[Dict[str, Any]], np.ndarray]:
         """6 帧历史 entries（旧→新）+ valid；优先精确查表，无 step 时按行位置（兼容）。"""
@@ -2743,8 +2721,6 @@ def pretrain_bc(
                 )
                 traj_term = config.traj_weight * traj_loss
                 action_term = torch.zeros((), device=device)
-                router_term = torch.zeros((), device=device)
-                gate_term = torch.zeros((), device=device)
                 traj_diff = traj_pred - targets["traj6"]
                 # 逐 horizon 矩阵：MSE 与 L1 分开累计（口径与 loss_type 解耦）
                 traj_mse_point = (traj_diff ** 2).mean(dim=-1)
@@ -5404,7 +5380,6 @@ def _parse_smoke_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespac
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None, help="默认取 config/train.yaml train.device（auto=cuda 可用则 cuda）")
-    parser.add_argument("--router-coef", type=float, default=0.1)
     parser.add_argument("--reward-config", default="{}", help="奖励配置 JSON（terms/aggregation 覆盖）")
     parser.add_argument("--model", default="net.model:DrivingModel")
     parser.add_argument("--mem-floor-mb", type=float, default=None, help="创建子进程池前要求的最小 MemAvailable")

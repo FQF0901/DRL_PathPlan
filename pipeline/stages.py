@@ -109,7 +109,6 @@ __all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_b_phase3", "run_stag
            "build_model", "FrameWindows", "validate_bc_dataset"]
 
 _DEFAULT_MODEL_CFG = "config/model.yaml"
-_DEFAULT_TRAIN_CFG = "config/train.yaml"
 
 
 # --------------------------------------------------------------------------- #
@@ -1506,8 +1505,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     # 权重/目标可用性（v2；v1 退化到 sample_weight/查表存在性）
     train_weight_all = row_action_weights(dataset, np.arange(dataset.count, dtype=np.int64))
     wm_valid_all = np.asarray(arrays["wm_valid"], dtype=np.float32) if "wm_valid" in arrays else None
-    presence_all = np.asarray(arrays["od_presence"], dtype=np.float32) if "od_presence" in arrays else None
-    od_id_all = np.asarray(arrays["od_id"]) if "od_id" in arrays else None
     presence_coef = float(
         args.wm_presence_coef
         if args.wm_presence_coef is not None
@@ -1533,9 +1530,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
     def _to_tensor(batch: Mapping[str, np.ndarray]) -> Dict[str, "torch.Tensor"]:
         return to_device_tensors(batch, device, dtype=torch.float32, pin=use_pin)
-
-    def _frame_weight(batch_indices: np.ndarray) -> "torch.Tensor":
-        return _tensor(train_weight_all[batch_indices], dtype=torch.float32)
 
     def _future_targets(
         batch_indices: np.ndarray,
