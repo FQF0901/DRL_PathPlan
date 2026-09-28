@@ -86,8 +86,8 @@ stages:
         action: 1.0             # ① 首步动作（action_mu vs 专家即时动作）
         action_chain: 0.2       # ①b 多步动作链（rollout plan 第 2..6 步 vs 未来专家首步标签）
         ego_next: 0.1           # ② plan head ego_next（未来 ego 特征；wm_valid 尾部 mask）
-        od: 1.0                 # ③ WM OD 直接多步（Huber + angle，与阶段 A 同构）
-        ld: 1.0                 # ③ WM LD 恢复监督（smooth_l1 + angle；目标 = ld_fut/ld_mask）
+        od: 0.005               # ③ WM OD 直接多步（Huber + angle，与阶段 A 同构；方案1 量级归一，防 WM 主宰）
+        ld: 0.002               # ③ WM LD 恢复监督（目标 = ld_fut/ld_mask；方案1：ld 原始量级≈4×od，按比例再降）
         presence: 0.1           # ③ presence BCE（id 轴目标）
         entry: 0.1              # ③ entry BCE
         traj_aux: 0.0           # traj 仅监控不进损失（fail-window traj6 是常量外推合成值）
