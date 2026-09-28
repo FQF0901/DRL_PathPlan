@@ -188,8 +188,9 @@ _HORIZON_RENAMES: Dict[str, Tuple[str, str]] = {
     "traj_mae_m": ("ego/traj/mae_m", "h{k}"),          # Stage B：ego 6 点轨迹逐 horizon 加权 MAE
 }
 
-#: Stage B 相位标量（``train|val/<phase>_bc_*``）；``{phase}`` 插值，val 命名空间加 ``val/`` 前缀
-_BC_RE = re.compile(r"^(?P<phase>primary|specific)_(?P<key>.+)$")
+#: Stage B 相位标量（``train|val/<phase>_bc_*``）；``{phase}`` 插值，val 命名空间加 ``val/`` 前缀。
+#: phase3（lane P3-B）走 :data:`_PHASE3_SCALAR_RENAMES`（上游监督命名，不做 ``{phase}`` 插值）。
+_BC_RE = re.compile(r"^(?P<phase>primary|specific|phase3)_(?P<key>.+)$")
 _BC_SCALAR_RENAMES: Dict[str, str] = {
     "bc_loss": "loss/planner/{phase}/total",
     "bc_traj_loss": "loss/planner/{phase}/traj",
@@ -199,6 +200,27 @@ _BC_SCALAR_RENAMES: Dict[str, str] = {
     "bc_action_err_weighted_mean": "ego/action/err_weighted",
     "bc_traj_fde_m": "ego/traj/fde_m",
     # lane U1：MoE 负载 KPI（train + val/ 孪生；expert_load e0..e7 由 _expert_load 家族处理）
+    "bc_load_cv": "router/load_cv",
+    "bc_gate_entropy": "router/gate_entropy",
+}
+
+#: phase 3（lane P3-B）标量 → 上游监督命名：``loss/action|action_chain|ego_next|od|ld|presence|entry``；
+#: ``traj`` 只做监控（不进损失）→ 放 ``ego/traj/...`` 命名空间（loss/ 只放训练目标，见命名纪律）。
+_PHASE3_SCALAR_RENAMES: Dict[str, str] = {
+    "bc_loss": "loss/total",
+    "bc_action_loss": "loss/action",
+    "bc_action_chain_loss": "loss/action_chain",
+    "bc_ego_next_loss": "loss/ego_next",
+    "bc_od_loss": "loss/od",
+    "bc_ld_loss": "loss/ld",
+    "bc_presence_loss": "loss/presence",
+    "bc_entry_loss": "loss/entry",
+    "bc_load_balance_loss": "loss/load_balance",
+    "bc_traj_loss": "ego/traj/err",
+    "bc_traj_mse": "ego/traj/mse_m2",
+    "bc_traj_mae_m": "ego/traj/mae_m",
+    "bc_traj_fde_m": "ego/traj/fde_m",
+    "bc_action_err_weighted_mean": "ego/action/err_weighted",
     "bc_load_cv": "router/load_cv",
     "bc_gate_entropy": "router/gate_entropy",
 }
@@ -230,7 +252,12 @@ def _slim_tag(tag: str) -> Optional[str]:
     if match is None:
         return None
     phase, key = match.group("phase"), match.group("key")
-    if key in _BC_SCALAR_RENAMES:
+    if phase == "phase3":
+        # lane P3-B：上游监督命名（不做 {phase} 插值）；traj 只做监控 → ego/traj/
+        rename = _PHASE3_SCALAR_RENAMES.get(key)
+        if rename is not None:
+            return f"{prefix}{rename}"
+    elif key in _BC_SCALAR_RENAMES:
         return f"{prefix}{_BC_SCALAR_RENAMES[key].format(phase=phase)}"
     # lane U1：逐 expert 负载 → router/expert_load/e{i}（8 线一族；val/ 孪生自动分族）
     load_match = re.match(r"^bc_expert_load_(\d+)$", key)

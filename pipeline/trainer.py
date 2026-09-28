@@ -464,6 +464,51 @@ def build_optimizer(model: "nn.Module", lr: float, primary_lr_scale: float = 1.0
     return torch.optim.Adam(groups, lr=float(lr))
 
 
+#: phase 3（lane P3-B）specific 组参数名前缀：experts/gate(router)/residual_scale
+#: （与 ``_SPECIFIC_PHASE_FREEZE`` 的可训练集合同一口径）；其余 = base 主干
+#: （encoders/mem_encoder/plan_head 其余/WM(st_gnn)/policy/value）。
+_PHASE3_SPECIFIC_PREFIXES: Tuple[str, ...] = (
+    "plan_head.moe.experts.",
+    "plan_head.moe.router.",
+    "plan_head.moe.residual_scale",
+)
+
+
+def build_phase3_optimizer(
+    model: "nn.Module",
+    lr: float,
+    *,
+    base_scale: float = 0.25,
+    specific_scale: float = 0.5,
+) -> "torch.optim.Optimizer":
+    """phase 3（lane P3-B）LR 分组优化器：base 主干 × ``base_scale`` / specific × ``specific_scale``。
+
+    组序固定 ``[base, specific]``（与 :data:`_PHASE3_SPECIFIC_PREFIXES` 同一划分口径）：
+
+    - **base**：encoders / mem_encoder / plan_head（不含 MoE specific）/ WM(st_gnn) / policy / value；
+    - **specific**：``plan_head.moe.experts.*`` / ``plan_head.moe.router.*`` / ``residual_scale``。
+
+    全参数解冻（``requires_grad=True``）时两组都非空；缺一组（模型无 MoE / 未解冻）→ ``ValueError``
+    （拒绝静默退化：phase 3 契约要求全参数可训 + 两组齐全）。
+    """
+    base: List["torch.Tensor"] = []
+    specific: List["torch.Tensor"] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        (specific if name.startswith(_PHASE3_SPECIFIC_PREFIXES) else base).append(parameter)
+    if not base or not specific:
+        raise ValueError(
+            f"phase 3 LR 分组为空：base={len(base)} · specific={len(specific)}"
+            "（要求全参数解冻且模型含 MoE experts/router/residual_scale）"
+        )
+    groups: List[Dict[str, Any]] = [
+        {"name": "base", "params": base, "lr": float(lr) * float(base_scale)},
+        {"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)},
+    ]
+    return torch.optim.Adam(groups, lr=float(lr))
+
+
 def _value_parameter_names(model: "nn.Module") -> Tuple[str, ...]:
     """critic warmup 的可训练参数名：价值头（真实模型 ``value.*``；smoke stub ``head_value.*``）。
 
@@ -590,6 +635,67 @@ class BCConfig:
     traj_aux_valid: Optional[np.ndarray] = None
     #: 独立留出数据集（``--val-dir``；None = 用主数据集 + ``val_indices`` 的旧口径）。
     val_dataset: Optional[Any] = None
+
+
+@dataclass
+class Phase3Config:
+    """stage B phase 3（迭代恢复训练；lane P3-B）超参。
+
+    与 :class:`BCConfig` 的差异（用户定案）：
+
+    - **数据**：单一 dagger 目录（无 5k / 无 worst/mild 权重 / 无 mining）；
+    - **全参数解冻**（含 WM）；LR 分组：base × ``lr_base_scale`` / specific × ``lr_specific_scale``；
+    - **损失组合**（上游三层监督 + 监控）：首步动作 + 多步动作链 + plan head ``ego_next`` +
+      WM OD/LD + presence/entry BCE + MoE 负载均衡；``traj`` **只做监控**（不进损失，
+      ``traj_aux_weight`` 默认 0 —— dagger 的 ``traj6`` 是常量外推合成值）。
+    """
+
+    epochs: int = 5
+    batch_size: int = 1024
+    micro_batch_size: Optional[int] = 512
+    lr: float = 3e-4
+    loss_type: str = "l2"
+    grad_clip: float = 1.0
+    seed: int = 0
+    device: str = "auto"
+    shuffle: bool = True
+    max_batches: Optional[int] = None
+    phase: str = "phase3"
+    #: 为兼容 ``apply_freeze_prefixes`` 保留（phase 3 固定传空 = 全参数可训）。
+    freeze_prefixes: Tuple[str, ...] = ()
+    #: 训练行索引子集（None = 全部行）。
+    train_indices: Optional[np.ndarray] = None
+    #: 留出行索引（非空时每 epoch 末跑确定性评估，见 :func:`evaluate_bc_phase3`）。
+    val_indices: Optional[np.ndarray] = None
+    #: 留出数据集（None = 与训练同源）。
+    val_dataset: Optional[Any] = None
+    epoch_callback: Optional[Callable[[int, Mapping[str, Any], Mapping[str, Any]], None]] = None
+    start_epoch: int = 0
+    optimizer_state: Optional[Mapping[str, Any]] = None
+    rng_state: Optional[Mapping[str, Any]] = None
+    checkpoint_callback: Optional[Callable[..., None]] = None
+
+    # ---- 损失权重（config stages.B.phase3.losses.*）----
+    action_weight: float = 1.0
+    #: 多步动作链（rollout plan 第 2..6 步 vs 未来专家首步动作）。
+    action_chain_weight: float = 0.2
+    #: plan head ``ego_next``（未来 ego 特征；``ego_fut`` + wm_valid 尾部 mask）。
+    ego_next_weight: float = 0.1
+    #: WM OD 直接多步（Huber + angle；与 stage A 同构）。
+    od_weight: float = 1.0
+    #: WM LD 恢复监督（smooth_l1 + angle，4 维预测空间）。
+    ld_weight: float = 1.0
+    #: presence/entry BCE（id 轴目标；stage A 同系数口径）。
+    presence_weight: float = 0.1
+    entry_weight: float = 0.1
+    #: 轨迹辅助（监控口径保留；0 = 不进损失，见类 docstring）。
+    traj_aux_weight: float = 0.0
+    load_balance_coef: float = 0.01
+    moe_enabled: bool = True
+
+    # ---- LR 分组（config stages.B.phase3.lr_scale.*）----
+    lr_base_scale: float = 0.25
+    lr_specific_scale: float = 0.5
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -1174,6 +1280,128 @@ def weighted_od_multi_step_loss(
                 "weight": float(den_k.detach()),
                 "count": float(wk.gt(0).sum().detach()),
                 "frames": float(frame_has.sum().detach()),
+            }
+        )
+    return total, per_horizon
+
+
+def weighted_ld_multi_step_loss(
+    ld_pred: "torch.Tensor",
+    ld_target: "torch.Tensor",
+    ld_mask: "torch.Tensor",
+    *,
+    frame_weight: Optional["torch.Tensor"] = None,
+    valid: Optional["torch.Tensor"] = None,
+    beta: float = 1.0,
+) -> Tuple["torch.Tensor", List[Dict[str, float]]]:
+    """v2 加权直接多步 **LD** 损失（lane P3-B：LD 恢复监督）。
+
+    与 :func:`weighted_od_multi_step_loss` 同构，维度按 LD 预测空间 4 维
+    ``[dx, dy, heading, curvature]``（``net.st_gnn.ld_state_from_features``）：
+
+    - ``smooth_l1`` 作用于非角度维 ``[0, 1, 3]``（位置 + 曲率）；
+    - 角度维 ``2`` 用 ``1 - cos(Δheading)``；
+    - 权重 = ``ld_mask × valid × frame_weight``（分子/分母同口径）；``ld_mask`` 由
+      ``pipeline.frames.build_future`` 产出（目标帧 ld mask × wm_valid，**已在 t0 自车系**）。
+
+    Args:
+        ld_pred/ld_target: ``(B,K,16,4)``；``ld_mask``: ``(B,K,16)``。
+        frame_weight: ``(B,)`` 权重，默认全 1。
+        valid: ``(B,K)`` 未来步有效性，默认全 1。
+
+    返回 ``(total, per_horizon)``：``per_horizon[k]`` 含 ``loss/weight/count/frames``。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if valid is None:
+        valid = torch.ones(ld_mask.shape[:2], dtype=ld_mask.dtype, device=ld_mask.device)
+    if frame_weight is None:
+        frame_weight = torch.ones(ld_mask.shape[0], dtype=ld_mask.dtype, device=ld_mask.device)
+    frame_weight = frame_weight.to(dtype=ld_mask.dtype, device=ld_mask.device).reshape(-1)
+    valid = valid.to(dtype=ld_mask.dtype, device=ld_mask.device)
+
+    # 非角度维 0/1/3（位置 + 曲率）走 smooth_l1；角度维 2 走 1-cos
+    smooth = (
+        F.smooth_l1_loss(
+            ld_pred[..., [0, 1, 3]], ld_target[..., [0, 1, 3]], beta=beta, reduction="none"
+        ).sum(dim=-1)
+        / 3.0
+    )
+    angle = 1.0 - torch.cos(ld_pred[..., 2] - ld_target[..., 2])
+    err = smooth + angle  # (B,K,16)
+
+    weight = ld_mask * valid.unsqueeze(-1) * frame_weight.reshape(-1, 1, 1)  # (B,K,16)
+    numerator = (err * weight).sum()
+    denominator = weight.sum().clamp(min=1e-8)
+    total = numerator / denominator
+
+    per_horizon: List[Dict[str, float]] = []
+    for k in range(int(ld_mask.shape[1])):
+        wk = weight[:, k, :]
+        num_k = (err[:, k, :] * wk).sum()
+        den_k = wk.sum().clamp(min=1e-8)
+        frame_has = (wk > 0).any(dim=1)
+        per_horizon.append(
+            {
+                "loss": num_k / den_k,
+                "weight": float(den_k.detach()),
+                "count": float(wk.gt(0).sum().detach()),
+                "frames": float(frame_has.sum().detach()),
+            }
+        )
+    return total, per_horizon
+
+
+def weighted_action_chain_loss(
+    plan: "torch.Tensor",
+    action_target: "torch.Tensor",
+    chain_valid: "torch.Tensor",
+    *,
+    frame_weight: Optional["torch.Tensor"] = None,
+    loss_type: str = "l2",
+) -> Tuple["torch.Tensor", List[Dict[str, float]]]:
+    """多步动作链监督（lane P3-B）：rollout ``plan`` 第 2..K 步 vs 未来专家首步动作。
+
+    - ``plan/action_target``: ``(B,K,2)``（``plan[:, k]`` = 第 k+1 个计划动作，k=0 已由
+      ``action_mu`` 首步损失监督 → 本项只监督 ``k=1..K-1``，即未来的 t+1..t+K-1 策略步）；
+    - ``chain_valid``: ``(B,K)`` 逐帧 mask（同 episode 未来帧缺失 → 0；``[:,0]`` 不参与）；
+    - ``frame_weight``: ``(B,)``（``train_weight×balance``），缺省全 1；
+    - 损失 = ``Σ w·valid·err / Σ w·valid``（``loss_type``：l2→MSE / l1→MAE）。
+
+    返回 ``(total, per_step)``：``per_step[k]``（k=1..K-1）含 ``loss/weight/frames``。
+    """
+    import torch
+
+    if chain_valid.ndim != 2:
+        raise ValueError(f"chain_valid 形状应为 (B,K)，收到 {tuple(chain_valid.shape)}")
+    batch, steps, _ = plan.shape
+    if tuple(action_target.shape) != tuple(plan.shape):
+        raise ValueError(f"action_target 形状 {tuple(action_target.shape)} != plan {tuple(plan.shape)}")
+    if tuple(chain_valid.shape) != (batch, steps):
+        raise ValueError(f"chain_valid 形状 {tuple(chain_valid.shape)} != (B,K)={(batch, steps)}")
+    device = plan.device
+    if frame_weight is None:
+        frame_weight_t = torch.ones(batch, dtype=plan.dtype, device=device)
+    else:
+        frame_weight_t = frame_weight.to(dtype=plan.dtype, device=device).reshape(-1)
+    valid = chain_valid.to(dtype=plan.dtype, device=device)
+
+    diff = plan[:, 1:] - action_target[:, 1:]  # (B,K-1,2)，k=0 不参与
+    per_step = (diff ** 2).mean(dim=-1) if loss_type == "l2" else diff.abs().mean(dim=-1)  # (B,K-1)
+    weight = frame_weight_t.reshape(-1, 1) * valid[:, 1:]  # (B,K-1)
+    denominator = weight.sum().clamp(min=1e-8)
+    total = (per_step * weight).sum() / denominator
+
+    per_horizon: List[Dict[str, float]] = []
+    for k in range(steps - 1):
+        wk = weight[:, k]
+        den_k = wk.sum().clamp(min=1e-8)
+        per_horizon.append(
+            {
+                "loss": (per_step[:, k] * wk).sum() / den_k,
+                "weight": float(den_k.detach()),
+                "frames": float(wk.gt(0).sum().detach()),
             }
         )
     return total, per_horizon
@@ -1995,6 +2223,89 @@ def bc_trajectory_loss(
         "traj_mae_all_m": float(mae_sample.mean().detach()),  # m，未加权，含被过滤帧（诊断）
     }
     return loss, metrics
+
+
+def wm_teacher_forcing_predictions(
+    model: "nn.Module",
+    obs: Mapping[str, "torch.Tensor"],
+    future: Mapping[str, Any],
+    actions: "torch.Tensor",
+) -> Dict[str, "torch.Tensor"]:
+    """WM 教师强制多步前向（stage A ``_wm_predictions`` 的 trainer 版；lane P3-B）。
+
+    与 stage A 同一机制，但 action 条件来自调用方（phase 3 = rollout ``plan`` 的动作链，
+    **已在调用方 detach**）：
+
+    - 每步先用当前编码 mem 跑 plan head 得 ``ego_next_pred``（第 k 帧 ego 特征预测）；
+    - 再把**目标帧真实 ego**（``future["ego_fut"][:, k-1]``，无则解析运动学兜底）挤入 mem
+      副本（``reserved`` 两维写第 k 个动作），合成帧一律 ``detach``；
+    - ST-GNN 单步推演得 t0 帧的 ``od_pred/ld_pred/presence/entry``。
+
+    返回逐键堆叠 ``(B,K,...)``：``od_pred (B,K,16,5)`` / ``ld_pred (B,K,16,4)`` /
+    ``presence_pred|entry_pred (B,K,16)`` / ``ego_next_pred (B,K,H6)``（ego 前 6 维）。
+    """
+    import torch
+
+    encoded = model.encode(obs)
+    mem = encoded["mem"].clone()
+    enc = encoded["encoded"]
+    nav_token = encoded["nav_token"]
+    signal_token = encoded["signal_token"]
+    anchor_od = model.st_gnn.od_state_from_features(enc.od_now, enc.od_live)
+    anchor_ld = model.st_gnn.ld_state_from_features(enc.ld_now, enc.ld_live)
+    ego_fut = future.get("ego_fut")
+    ego_now = obs["ego"]
+    if ego_now.ndim == 3:
+        ego_now = ego_now[:, 0]
+    horizon = int(actions.shape[1])
+    predictions: Dict[str, List["torch.Tensor"]] = {
+        "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": []
+    }
+    analytic_ego = None
+    if ego_fut is None:
+        try:
+            from net.model import ego_next_features  # type: ignore
+
+            analytic_ego = ego_next_features
+        except Exception:  # noqa: BLE001
+            analytic_ego = None
+    for k in range(1, horizon + 1):
+        _, ego_next_pred, _ = model.plan_step(enc, nav_token, signal_token)
+        predictions["ego_next_pred"].append(ego_next_pred)
+        raw_action = actions[:, k - 1]
+        if ego_fut is not None:
+            ego_frame = ego_fut[:, k - 1]
+            if not torch.is_tensor(ego_frame):
+                ego_frame = torch.as_tensor(
+                    np.asarray(ego_frame), dtype=torch.float32, device=raw_action.device
+                )
+        elif analytic_ego is not None:
+            ego_frame = analytic_ego(
+                ego_now, raw_action[:, 0], raw_action[:, 1], dt=float(model.dt), prev_speed=ego_now[:, 0]
+            )
+        else:  # 兜底：复制当前帧 + 动作条件
+            ego_frame = torch.cat([ego_now[:, :6], raw_action], dim=-1)
+        if ego_frame.ndim == 3 and ego_frame.shape[1] == 1:
+            ego_frame = ego_frame[:, 0, :]
+        ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步动作
+        mem.shift_ego(ego_frame.detach())
+        enc_k = model.mem_encoder.encode(model.encoders, mem)
+        od_pred, ld_pred, presence, entry = model.st_gnn(
+            ego_ctx=enc_k.ego_ctx,
+            od_ctx=enc_k.od_ctx,
+            ld_ctx=enc_k.ld_ctx,
+            node_mask=enc_k.frame.node_mask,
+            pose=enc_k.frame.pose,
+            step_index=k,
+            od_anchor=anchor_od,
+            ld_anchor=anchor_ld,
+        )
+        predictions["od_pred"].append(od_pred)
+        predictions["ld_pred"].append(ld_pred)
+        predictions["presence_pred"].append(presence)
+        predictions["entry_pred"].append(entry)
+        enc = enc_k  # 下一轮 plan head 看到 ≤ k 帧
+    return {key: torch.stack(values, dim=1) for key, values in predictions.items()}
 
 
 @_with_safe_od_pose
@@ -2884,6 +3195,695 @@ def evaluate_bc(
         )
     )
     return result
+
+
+# --------------------------------------------------------------------------- #
+# stage B phase 3（迭代恢复训练；lane P3-B）
+# --------------------------------------------------------------------------- #
+
+#: phase 3 损失/监控所需的目标键（future_fn/物化源必须全部提供）。
+PHASE3_FUTURE_KEYS: Tuple[str, ...] = (
+    "od_fut",
+    "ld_fut",
+    "od_mask",
+    "ld_mask",
+    "wm_valid",
+    "ego_fut",
+    "presence_target",
+    "entry_target",
+    "action_chain",
+    "action_chain_valid",
+)
+
+
+def _phase3_term_denominators(
+    future: Mapping[str, np.ndarray], frame_weight_np: np.ndarray
+) -> Dict[str, float]:
+    """phase 3 各损失项的**宏/micro 权重分母**（纯数据计算，无前向）。
+
+    与训练损失函数的分母口径一一对应：
+
+    - ``action``：``Σ w``（首步动作）；
+    - ``action_chain``：``Σ w·chain_valid[:,1:]``（第 2..6 步；第 1 步由 action 项监督）；
+    - ``step``：``Σ w·wm_valid``（ego_next / 逐帧项）；
+    - ``od``/``ld``：``Σ w·wm_valid·mask``（槽位级）；
+    - ``presence``：``Σ w·wm_valid × slots``（BCE 分母 = 帧权重和 × 槽位数）。
+    """
+    valid = np.asarray(future["wm_valid"], dtype=np.float64)
+    weight = np.asarray(frame_weight_np, dtype=np.float64).reshape(-1, 1)
+    step_weight = weight * valid
+    od_mask = np.asarray(future["od_mask"], dtype=np.float64)
+    ld_mask = np.asarray(future["ld_mask"], dtype=np.float64)
+    chain_valid = np.asarray(future["action_chain_valid"], dtype=np.float64)
+    slots = int(od_mask.shape[-1]) if od_mask.ndim >= 2 else 0
+    return {
+        "action": float(weight.sum()),
+        "action_chain": float((weight * chain_valid[:, 1:]).sum()),
+        "step": float(step_weight.sum()),
+        "od": float((step_weight[:, :, None] * od_mask).sum()),
+        "ld": float((step_weight[:, :, None] * ld_mask).sum()),
+        "presence": float(step_weight.sum()) * float(slots),
+    }
+
+
+def _phase3_scale_factors(
+    micro: Mapping[str, float], macro: Mapping[str, float]
+) -> Dict[str, float]:
+    """micro → 宏口径精确缩放因子（``Σ_m s_m·L_m = L_macro``；宏分母 0 → 该项恒 0）。"""
+    return {
+        key: (float(micro[key]) / float(macro[key]) if float(macro[key]) > 0.0 else 0.0)
+        for key in macro
+    }
+
+
+def _phase3_future_tensors(
+    future_np: Mapping[str, np.ndarray], device: Any, *, pin: bool = False
+) -> Dict[str, "torch.Tensor"]:
+    """future 目标 numpy → device 张量（只转损失所需键；float32）。"""
+    _require_torch()
+    return {
+        key: to_device_tensor(np.asarray(future_np[key]), device, dtype=torch.float32, pin=pin)
+        for key in PHASE3_FUTURE_KEYS
+        if key in future_np
+    }
+
+
+def _phase3_loss_terms(
+    model: "nn.Module",
+    obs: Mapping[str, "torch.Tensor"],
+    future_t: Mapping[str, "torch.Tensor"],
+    targets: Mapping[str, "torch.Tensor"],
+    frame_weight: "torch.Tensor",
+    config: Phase3Config,
+) -> Dict[str, Any]:
+    """一次前向 + phase 3 全部损失项（train 侧按 micro 调用；eval 侧也可复用）。
+
+    返回 dict：各损失项标量（含权重，**未做梯度累积缩放**）、``total``、``out``（rollout
+    原始输出，供 traj 监控/负载统计）、``od_per_horizon``/``action_chain_per_step``。
+    第三层 WM 监督走教师强制（``wm_teacher_forcing_predictions``），action 条件 =
+    rollout ``plan`` 的 **detach** 动作链（policy 只由 ①/①b 直接监督）。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    out = model(obs, rollout=True, world_model=False)
+    plan = out.get("plan")
+    if plan is None:
+        raise KeyError("phase 3 需要模型 forward(rollout=True) 输出 'plan'")
+    action_pred = out.get("action_mu")
+    target_action = targets["action"][:, 0, :]
+    device = frame_weight.device
+    if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
+        diff = action_pred - target_action
+        per_sample = (diff ** 2).mean(dim=-1) if config.loss_type == "l2" else diff.abs().mean(dim=-1)
+        action_loss = (per_sample * frame_weight).sum() / frame_weight.sum().clamp(min=1e-8)
+        action_err = diff.abs().mean(dim=-1).detach()
+    else:
+        action_loss = torch.zeros((), device=device)
+        action_err = torch.zeros_like(frame_weight)
+    chain_loss, _ = weighted_action_chain_loss(
+        plan,
+        future_t["action_chain"],
+        future_t["action_chain_valid"],
+        frame_weight=frame_weight,
+        loss_type=config.loss_type,
+    )
+    predictions = wm_teacher_forcing_predictions(model, obs, future_t, plan.detach())
+    od_target = model.st_gnn.od_state_from_features(future_t["od_fut"])
+    od_loss, _ = weighted_od_multi_step_loss(
+        predictions["od_pred"],
+        od_target,
+        future_t["od_mask"],
+        frame_weight=frame_weight,
+        valid=future_t["wm_valid"],
+    )
+    ld_loss, _ = weighted_ld_multi_step_loss(
+        predictions["ld_pred"],
+        future_t["ld_fut"][..., :4],
+        future_t["ld_mask"],
+        frame_weight=frame_weight,
+        valid=future_t["wm_valid"],
+    )
+    # ② plan head ego_next：目标 = 未来 ego 特征前 H6 维；尾部按 wm_valid mask
+    ego_next_pred = predictions["ego_next_pred"]
+    ego_target = future_t["ego_fut"][..., : int(ego_next_pred.shape[-1])]
+    horizon = min(int(ego_target.shape[1]), int(ego_next_pred.shape[1]))
+    error = F.smooth_l1_loss(
+        ego_next_pred[:, :horizon] - ego_target[:, :horizon],
+        torch.zeros_like(ego_target[:, :horizon]),
+        beta=1.0,
+        reduction="none",
+    ).mean(dim=-1)
+    step_weight = frame_weight.reshape(-1, 1) * future_t["wm_valid"][:, :horizon]
+    ego_loss = (error * step_weight).sum() / step_weight.sum().clamp(min=1e-8)
+    # ③ presence/entry BCE（id 轴目标；帧权重 = w×wm_valid）；AUC 不进 phase 3 口径
+    presence_terms = presence_entry_loss(
+        predictions["presence_pred"],
+        predictions["entry_pred"],
+        future_t["presence_target"],
+        future_t["entry_target"],
+        frame_weight=step_weight,
+        collect={},
+    )
+    load_loss = out.get("load_balance_loss")
+    if load_loss is None:
+        load_loss = torch.zeros((), device=device)
+    terms: Dict[str, Any] = {
+        "action": config.action_weight * action_loss,
+        "action_chain": config.action_chain_weight * chain_loss,
+        "ego_next": config.ego_next_weight * ego_loss,
+        "od": config.od_weight * od_loss,
+        "ld": config.ld_weight * ld_loss,
+        "presence": config.presence_weight * presence_terms["presence"],
+        "entry": config.entry_weight * presence_terms["entry"],
+        "load_balance": load_loss,
+        # 监控口径（不进梯度）：逐样本首步动作 L1
+        "action_err": action_err,
+        "out": out,
+    }
+    return terms
+
+
+def _phase3_traj_metrics(
+    out: Mapping[str, Any], targets: Mapping[str, "torch.Tensor"], frame_weight: "torch.Tensor"
+) -> Dict[str, "torch.Tensor"]:
+    """traj 监控（gate 丢失：不进损失）：加权 MSE/MAE（m/m²）与末点 FDE（m）。"""
+    import torch
+
+    diff = out["traj_xy"] - targets["traj6"]
+    weight = frame_weight.reshape(-1)
+    denominator = weight.sum().clamp(min=1e-8)
+    mse_point = (diff ** 2).mean(dim=-1)
+    mae_point = diff.abs().mean(dim=-1)
+    return {
+        "traj_mse": (mse_point.mean(dim=-1) * weight).sum() / denominator,
+        "traj_mae": (mae_point.mean(dim=-1) * weight).sum() / denominator,
+        "traj_fde": (torch.linalg.norm(diff[:, -1, :], dim=-1) * weight).sum() / denominator,
+    }
+
+
+@_with_safe_od_pose
+def pretrain_bc_phase3(
+    model: "nn.Module",
+    dataset: BCDataset,
+    config: Phase3Config,
+    *,
+    logger: Callable[[str], None] = print,
+    batch_source: Optional[MaterializedBCDataset] = None,
+    future_source: Optional[Any] = None,
+    future_fn: Optional[Callable[[np.ndarray, Mapping[str, np.ndarray]], Mapping[str, np.ndarray]]] = None,
+    val_future_fn: Optional[Callable[[np.ndarray, Mapping[str, np.ndarray]], Mapping[str, np.ndarray]]] = None,
+) -> Dict[str, Any]:
+    """stage B phase 3 训练循环（迭代恢复训练；lane P3-B）。
+
+    与 :func:`pretrain_bc` 的差异：
+
+    - **全参数可训**（``freeze_prefixes`` 为空）+ LR 分组（base/specific，见
+      :func:`build_phase3_optimizer`）；
+    - 数据 = 单一 dagger 目录；无 worst/mild 权重、无 mining（权重 = ``train_weight``）；
+    - 损失 = 首步动作 + **动作链多步** + plan head ``ego_next`` + WM ``od``/``ld``
+      （教师强制）+ ``presence``/``entry`` BCE + MoE 负载均衡；``traj`` 只监控；
+    - ``future_source``（物化）/``future_fn``（逐 batch）必须提供
+      :data:`PHASE3_FUTURE_KEYS` 全部键。
+
+    ``batch_source``/``future_source`` 为物化快路径（只做切片 + H2D），语义与逐 batch
+    路径一致；``micro_batch_size`` 时按宏 batch 口径精确缩放各损失项。
+    ``epoch_callback``/``checkpoint_callback``/resume 语义同 :func:`pretrain_bc`。
+    """
+    _require_torch()
+    order_config = load_supervised_labels()
+    if tuple(dataset.label_names) != order_config:
+        raise ValueError(
+            f"数据集标签顺序 {tuple(dataset.label_names)} 与 config/model.yaml 的 {order_config} 不一致（固定顺序契约）"
+        )
+    if future_source is None and future_fn is None:
+        raise ValueError("pretrain_bc_phase3 需要 future_source 或 future_fn（未来目标/动作链）")
+    device = torch.device(resolve_device(config.device))
+    model.to(device).train()
+    frozen = apply_freeze_prefixes(model, config.freeze_prefixes)
+    optimizer = build_phase3_optimizer(
+        model,
+        config.lr,
+        base_scale=config.lr_base_scale,
+        specific_scale=config.lr_specific_scale,
+    )
+    if config.optimizer_state:
+        load_optimizer_state(optimizer, config.optimizer_state, logger=logger)
+        move_optimizer_state_to_device(optimizer)
+    if config.train_indices is not None:
+        indices = np.asarray(config.train_indices, dtype=np.int64).reshape(-1)
+        if indices.size == 0:
+            raise ValueError("config.train_indices 为空 → 无训练样本")
+    else:
+        indices = dataset.sample_indices()
+    val_indices = (
+        None if config.val_indices is None else np.asarray(config.val_indices, dtype=np.int64).reshape(-1)
+    )
+    if val_indices is not None and val_indices.size == 0:
+        val_indices = None
+    start_epoch = max(0, min(int(config.start_epoch or 0), int(config.epochs)))
+    if start_epoch:
+        logger(f"[bc3] resume：跳过已完成 {start_epoch}/{int(config.epochs)} 个 epoch（phase={config.phase}）")
+    rng = np.random.default_rng(config.seed)
+    if start_epoch:
+        if config.rng_state:
+            restore_rng_state(config.rng_state, numpy_generator=rng)
+        elif config.shuffle:
+            for _ in range(start_epoch):
+                rng.shuffle(indices.copy())
+    model.set_moe(enabled=bool(config.moe_enabled), load_balance_coef=float(config.load_balance_coef))
+    num_experts_cfg = int(getattr(model.plan_head.moe, "num_experts", 0) or 0)
+    metrics: Dict[str, Any] = {
+        "epochs": int(config.epochs),
+        "batches": 0,
+        "phase": str(config.phase),
+        "frozen_params": len(frozen),
+        "trainable_params": sum(1 for parameter in model.parameters() if parameter.requires_grad),
+    }
+    logger(
+        f"[bc3] phase={config.phase} 全参数训练：frozen={len(frozen)} · 可训={metrics['trainable_params']} · "
+        f"lr={float(config.lr):.2e}（base×{config.lr_base_scale} · specific×{config.lr_specific_scale}）· "
+        f"moe={config.moe_enabled} · load_balance_coef={config.load_balance_coef}"
+    )
+    loss_keys = ("action", "action_chain", "ego_next", "od", "ld", "presence", "entry", "load_balance")
+    macro_size = max(1, int(config.batch_size))
+    micro_size = (
+        macro_size
+        if config.micro_batch_size is None
+        else max(1, min(macro_size, int(config.micro_batch_size)))
+    )
+    if micro_size < macro_size:
+        logger(f"[bc3] 梯度累积：宏 batch={macro_size} · micro batch={micro_size}（损失按宏口径精确缩放）")
+    weight_values: List[np.ndarray] = []
+    action_err_values: List[np.ndarray] = []
+    traj_mse_values: List[np.ndarray] = []
+    traj_mae_values: List[np.ndarray] = []
+    traj_fde_values: List[np.ndarray] = []
+
+    def _future_batch(batch_indices: np.ndarray, obs_np: Mapping[str, np.ndarray]) -> Mapping[str, np.ndarray]:
+        if future_source is not None:
+            return future_source.batch(batch_indices)
+        return future_fn(batch_indices, obs_np)  # type: ignore[misc]
+
+    for epoch in range(start_epoch, int(config.epochs)):
+        order = indices.copy()
+        if config.shuffle:
+            rng.shuffle(order)
+        weight_values.clear()
+        action_err_values.clear()
+        traj_mse_values.clear()
+        traj_mae_values.clear()
+        traj_fde_values.clear()
+        totals: Dict[str, float] = {key: 0.0 for key in loss_keys}
+        totals.update({"total": 0.0, "traj_mse": 0.0, "traj_mae": 0.0, "traj_fde": 0.0, "mu_ds_num": 0.0, "mu_ds_den": 0.0})
+        expert_load_sum: Optional[np.ndarray] = None
+        load_cv_num, load_cv_den = 0.0, 0.0
+        gate_entropy_num, gate_entropy_den = 0.0, 0.0
+        load_count = 0
+        batches = 0
+        data_seconds = forward_seconds = backward_seconds = 0.0
+        for start in range(0, len(order), macro_size):
+            if config.max_batches is not None and batches >= int(config.max_batches):
+                break
+            batch_indices = order[start : start + macro_size]
+            n_macro = int(batch_indices.shape[0])
+            data_started = time.perf_counter()
+            if batch_source is not None:
+                obs_np = batch_source.obs_batch(batch_indices)
+                targets_np = batch_source.targets_batch(batch_indices)
+            else:
+                obs_np = dataset.build_obs_batch(batch_indices)
+                targets_np = dataset.targets(batch_indices)
+            future_np = _future_batch(batch_indices, obs_np)
+            frame_weight_np = np.asarray(targets_np["train_weight"], dtype=np.float64).reshape(-1)
+            macro_den = _phase3_term_denominators(future_np, frame_weight_np)
+            macro_den["rows"] = float(n_macro)
+            data_seconds += time.perf_counter() - data_started
+            optimizer.zero_grad(set_to_none=True)
+            macro_totals = {key: 0.0 for key in list(totals)}
+            for m_start in range(0, n_macro, micro_size):
+                m_lo, m_hi = m_start, min(m_start + micro_size, n_macro)
+                data_started = time.perf_counter()
+                if micro_size >= n_macro:
+                    obs = _to_device_obs(obs_np, device, pin=batch_source is not None)
+                    targets = to_device_tensors(
+                        {key: targets_np[key] for key in ("action", "traj6", "train_weight")},
+                        device,
+                        dtype=torch.float32,
+                        pin=batch_source is not None,
+                    )
+                    future_t = _phase3_future_tensors(
+                        future_np, device, pin=batch_source is not None
+                    )
+                    den_micro = dict(macro_den)
+                    den_macro = dict(macro_den)
+                else:
+                    obs = _to_device_obs({key: value[m_lo:m_hi] for key, value in obs_np.items()}, device)
+                    targets = to_device_tensors(
+                        {key: targets_np[key][m_lo:m_hi] for key in ("action", "traj6", "train_weight")},
+                        device,
+                        dtype=torch.float32,
+                    )
+                    future_t = _phase3_future_tensors(
+                        {key: value[m_lo:m_hi] for key, value in future_np.items()}, device
+                    )
+                    den_micro = _phase3_term_denominators(
+                        {key: value[m_lo:m_hi] for key, value in future_np.items()},
+                        frame_weight_np[m_lo:m_hi],
+                    )
+                    den_micro["rows"] = float(m_hi - m_lo)
+                    den_macro = dict(macro_den)
+                frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
+                data_seconds += time.perf_counter() - data_started
+                forward_started = time.perf_counter()
+                terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, config)
+                components = {key: terms[key] for key in loss_keys}
+                if micro_size < n_macro:
+                    scales = _phase3_scale_factors(den_micro, den_macro)
+                    for key in loss_keys:
+                        # 负载均衡 aux 是逐行均值项 → 按 n_micro/n_macro 缩放（BC 同口径）；
+                        # ego_next/entry 分别用 step/presence 分母（见 _term_key）
+                        scale_key = "rows" if key == "load_balance" else _term_key(key)
+                        components[key] = components[key] * scales[scale_key]
+                total = (
+                    components["action"]
+                    + components["action_chain"]
+                    + components["ego_next"]
+                    + components["od"]
+                    + components["ld"]
+                    + components["presence"]
+                    + components["entry"]
+                    + components["load_balance"]
+                )
+                traj_metrics = _phase3_traj_metrics(terms["out"], targets, frame_weight)
+                forward_seconds += time.perf_counter() - forward_started
+                backward_started = time.perf_counter()
+                total.backward()
+                backward_seconds += time.perf_counter() - backward_started
+                macro_totals["total"] += float(total.detach())
+                for key in loss_keys:
+                    macro_totals[key] += float(components[key].detach())
+                weight_micro = float(den_micro["action"])
+                macro_totals["traj_mse"] += float(traj_metrics["traj_mse"]) * weight_micro
+                macro_totals["traj_mae"] += float(traj_metrics["traj_mae"]) * weight_micro
+                macro_totals["traj_fde"] += float(traj_metrics["traj_fde"]) * weight_micro
+                macro_totals["mu_ds_num"] += float(
+                    (terms["out"]["action_mu"][:, 0] * frame_weight).sum()
+                )
+                macro_totals["mu_ds_den"] += weight_micro
+                with torch.no_grad():
+                    diff = terms["out"]["traj_xy"] - targets["traj6"]
+                    traj_mse_values.append((diff ** 2).mean(dim=-1).detach().double().cpu().numpy())
+                    traj_mae_values.append(diff.abs().mean(dim=-1).detach().double().cpu().numpy())
+                    traj_fde_values.append(
+                        torch.linalg.norm(diff[:, -1, :], dim=-1).detach().double().cpu().numpy()
+                    )
+                    action_err_values.append(terms["action_err"].double().cpu().numpy())
+                    weight_values.append(frame_weight.detach().double().cpu().numpy())
+                    if terms["out"].get("expert_weights") is not None and config.moe_enabled:
+                        logits = terms["out"].get("router_logits")
+                        if logits is not None:
+                            stats = model.plan_head.moe.load_stats(logits)
+                            load = stats["expert_load"].detach().double().cpu().numpy()
+                            if expert_load_sum is None or expert_load_sum.size != load.size:
+                                expert_load_sum = np.zeros(load.size, dtype=np.float64)
+                            n_rows = int(logits.shape[0])
+                            expert_load_sum += load * n_rows
+                            load_cv_num += float(stats["load_cv"]) * n_rows
+                            load_cv_den += n_rows
+                            gate_entropy_num += float(stats["gate_entropy"]) * n_rows
+                            gate_entropy_den += n_rows
+                            load_count += n_rows
+            for key, value in macro_totals.items():
+                totals[key] += value
+            torch.nn.utils.clip_grad_norm_(
+                [parameter for parameter in model.parameters() if parameter.requires_grad],
+                float(config.grad_clip),
+            )
+            optimizer.step()
+            batches += 1
+        metrics["batches"] += batches
+        divisor = max(1, batches)
+        weight_total = sum(float(np.sum(item)) for item in weight_values)
+        weight_denominator = max(weight_total, 1e-12)
+        error_matrix = np.concatenate(action_err_values) if action_err_values else np.zeros(0)
+        weight_matrix = np.concatenate(weight_values) if weight_values else np.zeros(0)
+        epoch_update: Dict[str, Any] = {
+            "bc_loss": totals["total"] / divisor,
+            "bc_action_loss": totals["action"] / divisor,
+            "bc_action_chain_loss": totals["action_chain"] / divisor,
+            "bc_ego_next_loss": totals["ego_next"] / divisor,
+            "bc_od_loss": totals["od"] / divisor,
+            "bc_ld_loss": totals["ld"] / divisor,
+            "bc_presence_loss": totals["presence"] / divisor,
+            "bc_entry_loss": totals["entry"] / divisor,
+            "bc_load_balance_loss": totals["load_balance"] / divisor,
+            # traj 监控（不进损失；loss_type 口径的加权误差 + MSE/MAE/FDE）
+            "bc_traj_loss": (
+                totals["traj_mse" if config.loss_type == "l2" else "traj_mae"] / weight_denominator
+            ),
+            "bc_traj_mse": totals["traj_mse"] / weight_denominator,
+            "bc_traj_mae_m": totals["traj_mae"] / weight_denominator,
+            "bc_traj_fde_m": totals["traj_fde"] / weight_denominator,
+            "bc_action_err_weighted_mean": (
+                float((error_matrix * weight_matrix).sum() / max(weight_total, 1e-12))
+                if error_matrix.size
+                else float("nan")
+            ),
+            "bc_action_err_count": float(error_matrix.size),
+            "bc_action_err_weight": float(weight_total),
+            "bc_action_mu_ds_weighted_mean": (
+                totals["mu_ds_num"] / max(totals["mu_ds_den"], 1e-12)
+            ),
+            "bc_batches_count": int(batches),
+            "last_epoch": epoch + 1,
+            "epoch_data_seconds": data_seconds,
+            "epoch_forward_seconds": forward_seconds,
+            "epoch_backward_seconds": backward_seconds,
+        }
+        if traj_mse_values and weight_values and len(traj_mse_values[0]) == len(weight_values[0]):
+            mse_matrix = np.concatenate(traj_mse_values)
+            mae_matrix = np.concatenate(traj_mae_values)
+            weights_all = np.concatenate(weight_values)
+            legacy_matrix = mse_matrix if config.loss_type == "l2" else mae_matrix
+            for k in range(mse_matrix.shape[1]):
+                epoch_update[f"bc_traj_mse_h{k + 1}"] = weighted_stats(
+                    mse_matrix[:, k], weights_all, prefix=""
+                )["weighted_mean"]
+                epoch_update[f"bc_traj_mae_h{k + 1}_m"] = weighted_stats(
+                    mae_matrix[:, k], weights_all, prefix=""
+                )["weighted_mean"]
+                epoch_update[f"bc_traj_err_h{k + 1}"] = weighted_stats(
+                    legacy_matrix[:, k], weights_all, prefix=""
+                )["weighted_mean"]
+        epoch_update.update(
+            _load_summary(
+                count=int(load_count),
+                expert_load_sum=expert_load_sum,
+                load_cv_num=float(load_cv_num),
+                load_cv_den=float(load_cv_den),
+                entropy_num=float(gate_entropy_num),
+                entropy_den=float(gate_entropy_den),
+                num_experts=num_experts_cfg,
+            )
+        )
+        if epoch == start_epoch:
+            epoch_update.update(
+                {
+                    "epochs": int(config.epochs),
+                    "frozen_params": int(metrics["frozen_params"]),
+                    "trainable_params": int(metrics["trainable_params"]),
+                }
+            )
+        metrics.update(epoch_update)
+        val_metrics: Dict[str, Any] = {}
+        if val_indices is not None:
+            val_dataset = config.val_dataset if config.val_dataset is not None else dataset
+            val_batch_source = batch_source if val_dataset is dataset else None
+            val_future_source = future_source if val_dataset is dataset else None
+            val_fn = future_fn if val_dataset is dataset else (val_future_fn or future_fn)
+            model.eval()
+            try:
+                val_metrics = evaluate_bc_phase3(
+                    model,
+                    val_dataset,
+                    config,
+                    val_indices,
+                    batch_source=val_batch_source,
+                    future_source=val_future_source,
+                    future_fn=val_fn,
+                )
+            finally:
+                model.train()
+            metrics["val"] = val_metrics
+        if config.epoch_callback is not None:
+            config.epoch_callback(epoch, dict(epoch_update), dict(val_metrics))
+        if config.checkpoint_callback is not None:
+            config.checkpoint_callback(epoch, model, optimizer, dict(val_metrics), rng)
+        val_text = (
+            f" val={val_metrics['bc_loss']:.4f}(od={val_metrics.get('bc_od_loss', float('nan')):.4f}"
+            f"/ld={val_metrics.get('bc_ld_loss', float('nan')):.4f})"
+            if val_metrics
+            else ""
+        )
+        logger(
+            f"[bc3] phase={config.phase} epoch {epoch + 1}/{config.epochs} "
+            f"loss={metrics['bc_loss']:.4f} action={metrics['bc_action_loss']:.4f} "
+            f"chain={metrics['bc_action_chain_loss']:.4f} ego_next={metrics['bc_ego_next_loss']:.4f} "
+            f"od={metrics['bc_od_loss']:.4f} ld={metrics['bc_ld_loss']:.4f} "
+            f"presence={metrics['bc_presence_loss']:.4f} entry={metrics['bc_entry_loss']:.4f} "
+            f"traj(monitor)={metrics['bc_traj_mae_m']:.3f}m "
+            f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s"
+            f"{val_text}"
+        )
+    return metrics
+
+
+@torch.no_grad()
+@_with_safe_od_pose
+def evaluate_bc_phase3(
+    model: "nn.Module",
+    dataset: BCDataset,
+    config: Phase3Config,
+    indices: np.ndarray,
+    *,
+    batch_source: Optional[MaterializedBCDataset] = None,
+    future_source: Optional[Any] = None,
+    future_fn: Optional[Callable[[np.ndarray, Mapping[str, np.ndarray]], Mapping[str, np.ndarray]]] = None,
+) -> Dict[str, Any]:
+    """phase 3 留出集确定性前向（不参与梯度/优化器；口径与训练侧同族）。
+
+    损失项在**整个留出子集**上按权重合成（``Σnum/Σden``，非 batch 均值）；``traj`` 只做
+    监控（``bc_traj_mse/mae_m/fde_m`` + 逐 horizon）；动作误差为显式 L1（m/rad）。
+    空 ``indices`` 返回 ``{}``；调用方负责 train/eval 模式切换。
+    """
+    import torch
+
+    _require_torch()
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if idx.size == 0:
+        return {}
+    if future_source is None and future_fn is None:
+        raise ValueError("evaluate_bc_phase3 需要 future_source 或 future_fn（未来目标/动作链）")
+    device = torch.device(resolve_device(config.device))
+    model.to(device).eval()
+    macro_size = max(1, int(config.batch_size))
+    loss_keys = ("action", "action_chain", "ego_next", "od", "ld", "presence", "entry")
+    numerator = {key: 0.0 for key in loss_keys}
+    denominator = {key: 0.0 for key in loss_keys}
+    load_sum, load_count = 0.0, 0
+    action_err_values: List[np.ndarray] = []
+    weight_values: List[np.ndarray] = []
+    traj_mse_values: List[np.ndarray] = []
+    traj_mae_values: List[np.ndarray] = []
+    traj_fde_values: List[np.ndarray] = []
+    for start in range(0, idx.size, macro_size):
+        batch_indices = idx[start : start + macro_size]
+        if batch_source is not None:
+            obs_np = batch_source.obs_batch(batch_indices)
+            targets_np = batch_source.targets_batch(batch_indices)
+        else:
+            obs_np = dataset.build_obs_batch(batch_indices)
+            targets_np = dataset.targets(batch_indices)
+        if future_source is not None:
+            future_np = future_source.batch(batch_indices)
+        else:
+            future_np = future_fn(batch_indices, obs_np)  # type: ignore[misc]
+        obs = _to_device_obs(obs_np, device)
+        targets = to_device_tensors(
+            {key: targets_np[key] for key in ("action", "traj6", "train_weight")},
+            device,
+            dtype=torch.float32,
+        )
+        future_t = _phase3_future_tensors(future_np, device)
+        frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
+        den = _phase3_term_denominators(future_np, np.asarray(targets_np["train_weight"], dtype=np.float64))
+        terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, config)
+        for key in loss_keys:
+            denominator[key] += float(den[_term_key(key)])
+            numerator[key] += float(terms[key].detach()) * float(den[_term_key(key)])
+        if terms["out"].get("load_balance_loss") is not None:
+            load_sum += float(terms["out"]["load_balance_loss"].detach())
+            load_count += 1
+        traj_mse_values.append(
+            (terms["out"]["traj_xy"] - targets["traj6"]).pow(2).mean(dim=-1).double().cpu().numpy()
+        )
+        traj_mae_values.append(
+            (terms["out"]["traj_xy"] - targets["traj6"]).abs().mean(dim=-1).double().cpu().numpy()
+        )
+        traj_fde_values.append(
+            torch.linalg.norm(
+                (terms["out"]["traj_xy"] - targets["traj6"])[:, -1, :], dim=-1
+            ).double().cpu().numpy()
+        )
+        action_err_values.append(terms["action_err"].double().cpu().numpy())
+        weight_values.append(frame_weight.detach().double().cpu().numpy())
+    # 总损失 = 各加权损失项和（含权重系数）；逐项 = Σnum/Σden
+    result: Dict[str, Any] = {
+        "bc_load_balance_loss": load_sum / max(load_count, 1),
+        "bc_loss": 0.0,
+    }
+    result["bc_loss"] = sum(
+        numerator[key] / max(denominator[key], 1e-12) for key in loss_keys
+    ) + result["bc_load_balance_loss"]
+    result.update(
+        {
+            "bc_action_loss": numerator["action"] / max(denominator["action"], 1e-12),
+            "bc_action_chain_loss": numerator["action_chain"] / max(denominator["action_chain"], 1e-12),
+            "bc_ego_next_loss": numerator["ego_next"] / max(denominator["ego_next"], 1e-12),
+            "bc_od_loss": numerator["od"] / max(denominator["od"], 1e-12),
+            "bc_ld_loss": numerator["ld"] / max(denominator["ld"], 1e-12),
+            "bc_presence_loss": numerator["presence"] / max(denominator["presence"], 1e-12),
+            "bc_entry_loss": numerator["entry"] / max(denominator["entry"], 1e-12),
+        }
+    )
+    error_matrix = np.concatenate(action_err_values) if action_err_values else np.zeros(0)
+    all_weights = np.concatenate(weight_values) if weight_values else np.zeros(0)
+    weight_total = max(float(all_weights.sum()) if all_weights.size else 0.0, 1e-12)
+    mse_matrix = np.concatenate(traj_mse_values) if traj_mse_values else np.zeros((0, 6))
+    mae_matrix = np.concatenate(traj_mae_values) if traj_mae_values else np.zeros((0, 6))
+    fde_values = np.concatenate(traj_fde_values) if traj_fde_values else np.zeros(0)
+    mse_sample = mse_matrix.mean(axis=1) if mse_matrix.size else np.zeros(0)
+    mae_sample = mae_matrix.mean(axis=1) if mae_matrix.size else np.zeros(0)
+    legacy_sample = mse_sample if config.loss_type == "l2" else mae_sample
+    result.update(
+        {
+            "bc_traj_loss": (
+                float((legacy_sample * all_weights).sum() / weight_total) if mse_sample.size else float("nan")
+            ),
+            "bc_traj_mse": float((mse_sample * all_weights).sum() / weight_total) if mse_sample.size else float("nan"),
+            "bc_traj_mae_m": float((mae_sample * all_weights).sum() / weight_total) if mae_sample.size else float("nan"),
+            "bc_traj_fde_m": float((fde_values * all_weights).sum() / weight_total) if fde_values.size else float("nan"),
+            "bc_action_err_weighted_mean": (
+                float((error_matrix * all_weights).sum() / weight_total) if error_matrix.size else float("nan")
+            ),
+            "bc_action_err_count": float(error_matrix.size),
+            "bc_action_err_weight": float(all_weights.sum()) if all_weights.size else 0.0,
+        }
+    )
+    per_horizon: Dict[str, Dict[str, float]] = {}
+    if mse_matrix.size:
+        for k in range(int(mse_matrix.shape[1])):
+            per_horizon[f"h{k + 1}"] = {
+                "traj_mse_m2": weighted_stats(mse_matrix[:, k], all_weights, prefix="")["weighted_mean"],
+                "traj_mae_m": weighted_stats(mae_matrix[:, k], all_weights, prefix="")["weighted_mean"],
+                "traj_err": weighted_stats(
+                    (mse_matrix if config.loss_type == "l2" else mae_matrix)[:, k],
+                    all_weights,
+                    prefix="",
+                )["weighted_mean"],
+            }
+    result["per_horizon"] = per_horizon
+    return result
+
+
+def _term_key(loss_key: str) -> str:
+    """损失项键 → :func:`_phase3_term_denominators` 的分母键。
+
+    ``entry`` 与 ``presence`` 共用 BCE 分母（帧权重和 × 槽位数）；``ego_next`` 的分母是
+    ``step``（``Σ w·wm_valid``）。
+    """
+    return {"entry": "presence", "ego_next": "step"}.get(loss_key, loss_key)
 
 
 # --------------------------------------------------------------------------- #

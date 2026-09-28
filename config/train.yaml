@@ -65,6 +65,34 @@ stages:
     batch: *stage_b_batch       # 宏 batch（脚本 --batch-size；train.bc.batch_size 同源）
     micro: *stage_b_micro       # micro batch（脚本 --micro-batch-size；train.bc.micro_batch_size 同源）
     traj_aux_weight: &stage_b_traj_aux 0.1  # 轨迹辅助权重（脚本 --traj-aux-weight；bc.traj_aux_weight 同源）
+    phase3:                     # lane P3-B：迭代恢复训练（每轮独立；数据 = 当轮 DAgger 失败窗口目录）
+      rounds: 5                 # 迭代轮数（编排 lane：采集 → 训练 → 闭环评测；harness 用）
+      spec_pool: env/specs/scenarios_train_5k.json  # 采集池（5k 覆盖整池；lane P3-A 产物）
+      fail_target: 1000         # 每轮目标失败窗口数（采集侧语义；编排 lane 用）
+      shuffle_seed_base: 20260928  # 轮内数据 shuffle 种子 = base + round（跨轮顺序不相关）
+      init_ckpt: runs/BTC20260927-1019_stageA_p4/stage_b/final.phase2.pt  # 起点权重（CLI --ckpt 优先）
+      epochs: 5                 # 每轮 epoch 数（CLI --phase3-epochs）
+      batch: *stage_b_batch     # 宏 batch（CLI --batch-size；缺省复用阶段 B 锚点）
+      micro: *stage_b_micro     # micro batch（CLI --micro-batch-size）
+      lr_scale:                 # LR 分组缩放（全参数解冻；CLI --phase3-lr-{base,specific}-scale）
+        base: 0.25              # encoders/mem_encoder/plan_head/st_gnn/WM/policy/value
+        specific: 0.5           # experts/gate(router)/residual_scale
+      losses:                   # 损失权重（CLI --phase3-*-weight / --load-balance-coef）
+        action: 1.0             # ① 首步动作（action_mu vs 专家即时动作）
+        action_chain: 0.2       # ①b 多步动作链（rollout plan 第 2..6 步 vs 未来专家首步标签）
+        ego_next: 0.1           # ② plan head ego_next（未来 ego 特征；wm_valid 尾部 mask）
+        od: 1.0                 # ③ WM OD 直接多步（Huber + angle，与阶段 A 同构）
+        ld: 1.0                 # ③ WM LD 恢复监督（smooth_l1 + angle；目标 = ld_fut/ld_mask）
+        presence: 0.1           # ③ presence BCE（id 轴目标）
+        entry: 0.1              # ③ entry BCE
+        traj_aux: 0.0           # traj 仅监控不进损失（fail-window traj6 是常量外推合成值）
+        load_balance: 0.01      # MoE Switch 式负载均衡 aux α（沿用阶段 B 口径）
+      eval:                     # 编排 lane：每轮闭环评测
+        spec: env/specs/scenarios_eval500.json
+        workers: 16
+      guard:                    # 编排 lane：早停守卫（相对 phase2 基线的 success 绝对下降阈值）
+        stop_on_overall_drop: 0.05
+        stop_on_easy_drop: 0.10
     bc:
       epochs: *stage_b_epochs   # 总轮数（CLI --bc-epochs 优先）
       primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）

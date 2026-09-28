@@ -69,6 +69,7 @@ from pipeline.trainer import (  # noqa: E402
     DEFAULT_PROBE_BATCH,
     DEFAULT_STAGE_BATCH_SIZE,
     MaterializedBCDataset,
+    Phase3Config,
     PPOConfig,
     PPOTrainer,
     apply_freeze_prefixes,
@@ -79,12 +80,14 @@ from pipeline.trainer import (  # noqa: E402
     config_snapshot_hash,
     dataset_weight_report,
     ego_kpi_arrays,
+    evaluate_bc_phase3,
     load_checkpoint,
     load_optimizer_state,
     load_training_checkpoint,
     move_optimizer_state_to_device,
     presence_entry_loss,
     pretrain_bc,
+    pretrain_bc_phase3,
     resolve_device,
     restore_rng_state,
     row_action_weights,
@@ -98,8 +101,8 @@ from pipeline.trainer import (  # noqa: E402
     weighted_od_multi_step_loss,
 )
 
-__all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_c", "load_config", "build_model", "FrameWindows",
-           "validate_bc_dataset"]
+__all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_b_phase3", "run_stage_c", "load_config",
+           "build_model", "FrameWindows", "validate_bc_dataset"]
 
 _DEFAULT_MODEL_CFG = "config/model.yaml"
 _DEFAULT_TRAIN_CFG = "config/train.yaml"
@@ -1081,6 +1084,17 @@ _MATERIALIZED_FUTURE_KEYS: Tuple[str, ...] = (
     "od_id_t0",
 )
 
+#: stage B phase 3（lane P3-B）未来目标物化键：A 的键 + LD 恢复监督 + presence/entry 目标
+#: + 多步动作链（见 :func:`phase3_action_chain_targets`）。
+_PHASE3_FUTURE_KEYS: Tuple[str, ...] = _MATERIALIZED_FUTURE_KEYS + (
+    "ld_fut",
+    "ld_mask",
+    "presence_target",
+    "entry_target",
+    "action_chain",
+    "action_chain_valid",
+)
+
 
 class _ArrayBatchSource:
     """连续数组上的只读 batch 视图（``arr[idx]`` 切片；训练循环唯一的数据操作）。"""
@@ -1101,15 +1115,20 @@ def _materialize_future_targets(
     *,
     batch_size: int = 1024,
     logger: Any = print,
+    keys: Optional[Sequence[str]] = None,
 ) -> _ArrayBatchSource:
     """阶段 A 未来目标一次性物化（分块调用 ``future_fn``，与逐 batch 完全同路径）。
 
     ``future_fn(indices, obs_np) -> dict`` = ``run_stage_a`` 内的 ``_future_targets``
     （含 ``wm_valid`` 门控 / 身份匹配 / v1 最近邻回退），因此物化结果与旧逐 batch 路径
     逐值一致（等价性测试见 ``tests/test_fast_data_path.py``）。
+
+    ``keys``：物化的键集（缺省 = Stage A 的 :data:`_MATERIALIZED_FUTURE_KEYS`；phase 3 传
+    :data:`_PHASE3_FUTURE_KEYS` 以带上 LD/presence/动作链目标）。
     """
     started = time.perf_counter()
     chunk = max(1, int(batch_size))
+    key_set = tuple(keys) if keys is not None else _MATERIALIZED_FUTURE_KEYS
     arrays: Dict[str, np.ndarray] = {}
     for start in range(0, int(count), chunk):
         stop = min(start + chunk, int(count))
@@ -1118,9 +1137,9 @@ def _materialize_future_targets(
         if not arrays:
             arrays = {
                 key: np.empty((int(count), ) + tuple(np.asarray(future[key]).shape[1:]), dtype=np.asarray(future[key]).dtype)
-                for key in _MATERIALIZED_FUTURE_KEYS
+                for key in key_set
             }
-        for key in _MATERIALIZED_FUTURE_KEYS:
+        for key in key_set:
             arrays[key][start:stop] = future[key]
     source = _ArrayBatchSource(arrays)
     logger(
@@ -1294,6 +1313,45 @@ def presence_entry_targets(future: Mapping[str, np.ndarray]) -> Tuple[np.ndarray
     ).any(axis=-1)  # (B,K,S)
     entry_target = (observed_fut & ~known_at_t0).astype(np.float32)
     return presence_target, entry_target
+
+
+def phase3_action_chain_targets(
+    arrays: Mapping[str, np.ndarray],
+    indices: np.ndarray,
+    *,
+    future: int = 6,
+    stride: int = _BC_STEP_STRIDE,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """phase 3 多步动作链目标（lane P3-B）：``(action_chain (B,K,2), valid (B,K))``。
+
+    - ``action_chain[:, k]`` = 同 episode ``(episode_id, step + stride·k)`` 帧的**专家首步
+      动作标签**（``arrays["action"][row, 0, :]``；``k=0`` = 当前帧）——与 rollout
+      ``plan[:, k]`` 时间对齐（``plan[:,0] = action_mu`` 已由首步动作损失监督，本项只吃 ``k≥1``）；
+    - ``valid``：目标帧存在（精确查表）→ 1；窗口末端/缺帧 → 0（逐帧 mask）；
+    - 动作 ``(ds, dθ)`` 是车体量，与 SE(2) 对齐无关（无需 t0 系重建）。
+
+    未来 LD/OD 目标由 :func:`build_future`（t0 自车系对齐）提供，本函数只补动作链标签。
+    """
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    episode = np.asarray(arrays["episode_id"], dtype=np.int64)
+    step = np.asarray(arrays["step"], dtype=np.int64)
+    action = np.asarray(arrays["action"], dtype=np.float32)
+    if action.ndim == 2:  # 旧 schema：单步动作 (N,2) → (N,1,2)
+        action = action[:, None, :]
+    lookup = {(int(episode[i]), int(step[i])): i for i in range(len(episode))}
+    horizon = max(1, int(future))
+    chain = np.zeros((idx.size, horizon, action.shape[-1]), dtype=np.float32)
+    valid = np.zeros((idx.size, horizon), dtype=np.float32)
+    for i, row in enumerate(idx):
+        ep, st = int(episode[row]), int(step[row])
+        chain[i, 0] = action[row, 0]
+        valid[i, 0] = 1.0
+        for k in range(1, horizon):
+            target = lookup.get((ep, st + int(stride) * k))
+            if target is not None:
+                chain[i, k] = action[target, 0]
+                valid[i, k] = 1.0
+    return chain, valid
 
 
 def _grad_norms(model: Any, prefixes: Sequence[str]) -> Dict[str, float]:
@@ -2897,6 +2955,442 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
 
 # --------------------------------------------------------------------------- #
+# 阶段 B phase 3：迭代恢复训练（lane P3-B）
+# --------------------------------------------------------------------------- #
+
+def _phase3_future_fn(
+    dataset: BCDataset,
+    windows: FrameWindows,
+    wm_valid_all: Optional[np.ndarray],
+    *,
+    match_future_slots: bool = True,
+    match_gate_m: float = 8.0,
+) -> Any:
+    """构造 phase 3 未来目标闭包：t0 系对齐 + id 匹配 + presence/entry + 多步动作链。
+
+    未来 OD/LD **必须**走 :meth:`FrameWindows.build_future`（内部 = lane A
+    ``pipeline.frames.build_future`` 或本地等价实现；两者都把目标帧特征 SE(2) 对齐到
+    **t0 自车系**，与 WM/rollout 的 t0 系预测语义一致），禁止直接取未来帧原始通道。
+    """
+    arrays = dataset.arrays
+
+    def _future_targets(
+        batch_indices: np.ndarray,
+        obs_np: Mapping[str, np.ndarray],
+        view: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
+        idx = np.asarray(batch_indices, dtype=np.int64).reshape(-1)
+        wm_valid = wm_valid_all[idx] if wm_valid_all is not None else None
+        future = windows.build_future(idx, wm_valid=wm_valid)
+        has_identity = "od_id_fut" in future and bool(np.any(np.asarray(future["od_id_fut"]) >= 0))
+        if not has_identity and match_future_slots:
+            future = match_future_od_slots(
+                future, obs_np["od"], obs_np["od_mask"], gate_m=float(match_gate_m)
+            )
+        future.setdefault("wm_valid", future["valid"])
+        future["wm_valid"] = np.asarray(future["wm_valid"], dtype=np.float32) * np.asarray(
+            future["valid"], dtype=np.float32
+        )
+        presence_target, entry_target = presence_entry_targets(future)
+        future["presence_target"] = presence_target
+        future["entry_target"] = entry_target
+        chain, chain_valid = phase3_action_chain_targets(arrays, idx)
+        future["action_chain"] = chain
+        future["action_chain_valid"] = chain_valid
+        return future
+
+    return _future_targets
+
+
+def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
+    """阶段 B phase 3：**迭代恢复训练**（单轮；lane P3-B，用户定案）。
+
+    - 数据 = ``--phase3 <dagger_dir>`` **单独使用**（无 5k、无 worst/mild 权重、无 mining；
+      当轮采集的失败窗口行）；
+    - 起点 = ``--ckpt``（缺省读 config ``stages.B.phase3.init_ckpt``）→ **全参数解冻（含 WM）**；
+    - 损失 = 首步动作 + **多步动作链**（rollout ``plan`` 第 2..6 步 vs 未来专家首步标签）
+      + plan head ``ego_next``（``ego_fut`` + ``wm_valid`` 尾部 mask）+ WM **OD/LD 教师强制**
+      + presence/entry BCE + MoE 负载均衡 aux；``traj_*`` 只做监控（不进损失）；
+    - LR 分组：base 主干 × ``lr_scale.base`` / experts+router+residual_scale × ``lr_scale.specific``；
+    - 产出 ``<out>/final.pt`` + ``metrics.json`` + ``monitor/``（TB/CSV）+ 周期 ``ckpt_epoch{N}.pt``。
+
+    ``spec_pool``/``fail_target``/``rounds``/``eval``/``guard`` 段为**编排 lane 的轮次协议**
+    （采集/闭环评测/早停）；训练侧原样读取并写入 metrics.json（保证每轮口径可追溯）。
+    """
+    import torch
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    apply_thread_limits(workers=1, config=config)
+    device = resolve_device(args.device, config)
+    if torch.device(device).type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    stage_cfg = _stage_section(config, "B")
+    p3_cfg = dict(stage_cfg.get("phase3", {}) or {})
+    losses_cfg = dict(p3_cfg.get("losses", {}) or {})
+    lr_scale_cfg = dict(p3_cfg.get("lr_scale", {}) or {})
+    train_cfg = dict(config.get("train", {}) or {})
+    dagger_dir = str(getattr(args, "phase3", "") or "")
+    if not dagger_dir or not Path(dagger_dir).exists():
+        raise SystemExit(f"[stageB3] --phase3 dagger 目录不存在：{dagger_dir!r}")
+    round_index = max(1, int(getattr(args, "phase3_round", None) or 1))
+
+    # ---- 起点权重：--ckpt 优先，否则 config stages.B.phase3.init_ckpt；缺失 = 拒绝静默随机初始化 ----
+    model = build_model(_load_yaml(args.model_config))
+    resume_path = _resume_path(args)
+    resume_info: Dict[str, Any] = {}
+    init_ckpt = ""
+    if resume_path:
+        if not Path(resume_path).exists():
+            raise SystemExit(f"[stageB3] --resume 文件不存在：{resume_path}")
+        resume_info = load_training_checkpoint(resume_path, model)
+        print(
+            f"[stageB3] resume {resume_path}：模型已载入（missing={len(resume_info['missing_keys'])}）",
+            flush=True,
+        )
+    else:
+        ckpt = str(args.ckpt or p3_cfg.get("init_ckpt") or "")
+        if ckpt and Path(ckpt).exists():
+            meta = load_checkpoint(ckpt, model)
+            init_ckpt = ckpt
+            print(
+                f"[stageB3] 起点权重 {ckpt}（missing={len(meta.get('missing_keys', []))}）",
+                flush=True,
+            )
+        else:
+            raise SystemExit(
+                f"[stageB3] 起点权重缺失：--ckpt 未给且 config stages.B.phase3.init_ckpt="
+                f"{ckpt!r} 不存在（phase 3 固定从阶段 B phase 2 final 恢复，拒绝随机初始化）"
+            )
+
+    # ---- 数据：单个 dagger 目录（train 行 = 该轮采集行；val = episode 切分或显式 --val-dir）----
+    dataset = BCDataset.load(dagger_dir, limit=args.limit_dataset)
+    dataset_contract = validate_bc_dataset(
+        dataset, dagger_dir, "B", allow_legacy=_allow_legacy_dataset(args)
+    )
+    arrays = dataset.arrays
+    if "step" not in arrays:
+        raise SystemExit("[stageB3] dagger 数据集缺少 'step'（未来目标/动作链需要精确查表）")
+    windows = FrameWindows(
+        arrays,
+        dataset.alignments,
+        episode_key="episode_id",
+        step_key="step",
+        keys=_bc_channel_keys(),
+        step_stride=_BC_STEP_STRIDE,
+    )
+    wm_valid_all = np.asarray(arrays["wm_valid"], dtype=np.float32) if "wm_valid" in arrays else None
+    val_dir_explicit = getattr(args, "val_dir", None)
+    val_dataset = None
+    if val_dir_explicit:
+        val_path = Path(str(val_dir_explicit))
+        if not val_path.exists():
+            raise SystemExit(f"[stageB3] --val-dir 不存在：{val_path}")
+        val_dataset = BCDataset.load(str(val_path))
+        validate_bc_dataset(val_dataset, str(val_path), "B", allow_legacy=_allow_legacy_dataset(args))
+        train_idx = np.arange(dataset.count, dtype=np.int64)
+        val_idx = np.arange(val_dataset.count, dtype=np.int64)
+        val_episodes = np.unique(val_dataset.arrays["episode_id"])
+        val_source = f"dir:{val_path}"
+    else:
+        train_idx, val_idx, val_episodes = _episode_split(
+            arrays["episode_id"], float(args.val_frac), int(args.seed)
+        )
+        val_source = "episode_split"
+        if val_idx.size == 0:
+            print("[stageB3] 警告：留出集为空（episode 过少/val_frac=0）→ 用训练帧自评", flush=True)
+            val_idx = train_idx
+    if train_idx.size == 0:
+        raise SystemExit("[stageB3] 训练帧为空（留出比例过高）")
+
+    # ---- 超参：CLI 优先 → config stages.B.phase3.* → stage B 锚点 ----
+    epochs = int(args.phase3_epochs if args.phase3_epochs is not None else p3_cfg.get("epochs", 5))
+    bc_train_cfg = dict(train_cfg.get("bc", {}) or {})
+    batch_size = int(args.batch_size or p3_cfg.get("batch") or bc_train_cfg.get("batch_size") or DEFAULT_STAGE_BATCH_SIZE)
+    micro_cfg = args.micro_batch_size if args.micro_batch_size is not None else (
+        p3_cfg.get("micro") or bc_train_cfg.get("micro_batch_size")
+    )
+    micro_batch_size = max(1, min(batch_size, int(micro_cfg))) if micro_cfg else None
+    batch_size, micro_batch_size = _apply_smoke_batch_caps(args, device, batch_size, micro_batch_size, dataset.count)
+    if _smoke_cpu_guard(args, device):
+        print(
+            f"[stageB3] 冒烟内存保护（--limit-dataset + CPU）：上限 macro≤{_SMOKE_CPU_BATCH_CAP} · "
+            f"micro≤{_SMOKE_CPU_MICRO_CAP} → 实际 macro={batch_size} micro={micro_batch_size}",
+            flush=True,
+        )
+
+    def _loss_weight(key: str, default: float) -> float:
+        cli = getattr(args, f"phase3_{key}_weight", None)
+        return float(cli if cli is not None else losses_cfg.get(key, default))
+
+    loss_weights = {
+        "action": _loss_weight("action", 1.0),
+        "action_chain": _loss_weight("action_chain", 0.2),
+        "ego_next": _loss_weight("ego_next", 0.1),
+        "od": _loss_weight("od", 1.0),
+        "ld": _loss_weight("ld", 1.0),
+        "presence": _loss_weight("presence", 0.1),
+        "entry": _loss_weight("entry", 0.1),
+        "traj_aux": _loss_weight("traj_aux", 0.0),
+        "load_balance": float(
+            args.load_balance_coef if args.load_balance_coef is not None else losses_cfg.get("load_balance", 0.01)
+        ),
+    }
+    if loss_weights["traj_aux"] != 0.0:
+        raise SystemExit(
+            f"[stageB3] traj_aux={loss_weights['traj_aux']} 不支持：phase 3 的 traj 只做监控"
+            "（失败窗口的 traj6 是常量外推合成值，不进损失；见设计定案）"
+        )
+    lr = float(args.lr)
+    lr_base_scale = float(
+        args.phase3_lr_base_scale if args.phase3_lr_base_scale is not None else lr_scale_cfg.get("base", 0.25)
+    )
+    lr_specific_scale = float(
+        args.phase3_lr_specific_scale if args.phase3_lr_specific_scale is not None else lr_scale_cfg.get("specific", 0.5)
+    )
+    shuffle_seed_base_raw = p3_cfg.get("shuffle_seed_base")
+    shuffle_seed = (
+        int(shuffle_seed_base_raw) + round_index if shuffle_seed_base_raw is not None else int(args.seed)
+    )
+    history_stride = int(args.history_stride if args.history_stride is not None else dataset.history_stride)
+    use_materialized = bool(getattr(args, "materialize", False))
+    if history_stride != _BC_STEP_STRIDE:
+        raise SystemExit(
+            f"[stageB3] history_stride={history_stride} != {_BC_STEP_STRIDE}：动作链/未来目标按 0.5 s 策略步"
+            "（step+5k）查表，禁止其他步距"
+        )
+    ckpt_every = _resolve_ckpt_every(args, config)
+    config_hash = config_snapshot_hash(config)
+    resume_epoch = _resume_epoch_of(resume_info, epochs)
+    if resume_info.get("config_hash") and resume_info["config_hash"] != config_hash:
+        print(
+            f"[stageB3] 警告：resume ckpt 配置哈希 {resume_info['config_hash']} != 当前 {config_hash}"
+            "（配置快照已变，续跑结果可能不可比）",
+            flush=True,
+        )
+    print(
+        f"[stageB3] round={round_index} · dagger={dagger_dir}（rows={dataset.count}）· "
+        f"起点={init_ckpt or resume_path} · epochs={epochs} · 全参数解冻（含 WM）· "
+        f"lr={lr:.2e}（base×{lr_base_scale} · specific×{lr_specific_scale}）· "
+        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）",
+        flush=True,
+    )
+
+    # ---- 快路径：obs + 未来目标（含 LD/presence/动作链）一次性物化 ----
+    obs_source: Optional[MaterializedBCDataset] = None
+    future_source: Optional[_ArrayBatchSource] = None
+    future_fn = _phase3_future_fn(
+        dataset,
+        windows,
+        wm_valid_all,
+        match_future_slots=bool(args.match_future_slots),
+        match_gate_m=float(args.match_gate_m),
+    )
+    if use_materialized:
+        obs_source = MaterializedBCDataset(dataset, include_targets=True)
+        future_source = _materialize_future_targets(
+            future_fn, obs_source, dataset.count, batch_size=batch_size, keys=_PHASE3_FUTURE_KEYS
+        )
+    val_future_fn = future_fn
+    if val_dataset is not None:
+        val_windows = FrameWindows(
+            val_dataset.arrays,
+            val_dataset.alignments,
+            episode_key="episode_id",
+            step_key="step",
+            keys=_bc_channel_keys(),
+            step_stride=_BC_STEP_STRIDE,
+        )
+        val_wm_valid = (
+            np.asarray(val_dataset.arrays["wm_valid"], dtype=np.float32)
+            if "wm_valid" in val_dataset.arrays
+            else None
+        )
+        val_future_fn = _phase3_future_fn(
+            val_dataset,
+            val_windows,
+            val_wm_valid,
+            match_future_slots=bool(args.match_future_slots),
+            match_gate_m=float(args.match_gate_m),
+        )
+
+    metrics: Dict[str, Any] = {
+        "stage": "B",
+        "kind": "planner_bc_phase3",
+        "phase3": True,
+        "phase3_dir": dagger_dir,
+        "phase3_round": round_index,
+        "phase3_rounds": int(p3_cfg.get("rounds", 5)),
+        "spec_pool": str(p3_cfg.get("spec_pool", "")),
+        "fail_target": (int(p3_cfg.get("fail_target", 0)) if p3_cfg.get("fail_target") is not None else None),
+        "eval": dict(p3_cfg.get("eval", {}) or {}),
+        "guard": dict(p3_cfg.get("guard", {}) or {}),
+        "init_ckpt": init_ckpt,
+        "resumed_from": (resume_path or ""),
+        "dataset_schema": int(dataset.schema_version),
+        "samples": int(dataset.count),
+        "limit_dataset": (int(args.limit_dataset) if args.limit_dataset is not None else None),
+        "train_frames": int(train_idx.size),
+        "val_frames": int(val_idx.size),
+        "val_episodes": int(val_episodes.size),
+        "val_source": str(val_source),
+        "val_dir": (str(val_dir_explicit) if val_dir_explicit else ""),
+        "history_stride": history_stride,
+        "device": device,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "micro_batch_size": micro_batch_size,
+        "grad_accum": bool(micro_batch_size is not None and micro_batch_size < batch_size),
+        "lr": lr,
+        "lr_scale": {"base": lr_base_scale, "specific": lr_specific_scale},
+        "losses": dict(loss_weights),
+        "loss_type": str(args.loss_type if args.loss_type is not None else "l2"),
+        "traj_monitor_only": True,
+        "wm_condition": "rollout_plan_detached",
+        "materialize": bool(obs_source is not None),
+        "shuffle_seed": int(shuffle_seed),
+        "seed": int(args.seed),
+        "ckpt_every": ckpt_every,
+        "resume_epoch": resume_epoch,
+        "config_hash": config_hash,
+    }
+    metrics.update(dataset_contract)
+    metrics.update(dataset_weight_report(dataset, prefix="dataset"))
+    monitor = _make_monitor(
+        out_dir / "monitor",
+        enabled=_monitor_enabled(args, config),
+        legacy_tags=_monitor_legacy_tags(args),
+    )
+    if monitor is not None:
+        monitor.on_train_step(
+            {
+                "phase3_round": float(round_index),
+                "phase3_rows": float(dataset.count),
+                "phase3_lr_base": lr * lr_base_scale,
+                "phase3_lr_specific": lr * lr_specific_scale,
+            },
+            step=0,
+        )
+
+    state: Dict[str, Any] = {}
+
+    def _on_checkpoint(
+        epoch_index: int,
+        ckpt_model: Any,
+        ckpt_optimizer: Any,
+        ckpt_val_metrics: Mapping[str, Any],
+        ckpt_rng: Any,
+    ) -> None:
+        state["optimizer"] = ckpt_optimizer
+        state["val_metrics"] = dict(ckpt_val_metrics or {})
+        state["rng"] = ckpt_rng
+        global_epoch = epoch_index + 1
+        if ckpt_every <= 0 or global_epoch % ckpt_every != 0:
+            return
+        ckpt_path = _periodic_ckpt_path(out_dir, global_epoch)
+        save_checkpoint(
+            ckpt_path,
+            ckpt_model,
+            meta={"stage": "B", "phase": "phase3", "round": round_index, "epoch": global_epoch, "epochs": epochs},
+            optimizer=ckpt_optimizer,
+            epoch=global_epoch,
+            val_metrics=ckpt_val_metrics,
+            rng_state=capture_rng_state(ckpt_rng),
+            config_hash=config_hash,
+        )
+        print(f"[stageB3] ckpt → {ckpt_path}（round={round_index} · epoch {global_epoch}/{epochs}）", flush=True)
+
+    def _on_epoch(epoch_index: int, train_metrics: Mapping[str, Any], val_metrics: Mapping[str, Any]) -> None:
+        if monitor is None:
+            return
+        step = epoch_index + 1
+        monitor.on_train_step(
+            {f"phase3_{key}": value for key, value in train_metrics.items() if isinstance(value, (int, float))},
+            step=step,
+        )
+        if val_metrics:
+            monitor.on_val_step(
+                {f"phase3_{key}": value for key, value in val_metrics.items() if isinstance(value, (int, float))},
+                step=step,
+            )
+            val_horizon, val_slices, val_labels = _val_grouped_groups(val_metrics)
+            monitor.on_val_grouped_step(horizon=val_horizon, slices=val_slices, labels=val_labels, step=step)
+        horizon_groups, slice_groups, label_groups = _train_grouped_groups(
+            train_metrics, dataset.label_names
+        )
+        monitor.on_grouped_step(horizon=horizon_groups, slices=slice_groups, labels=label_groups, step=step)
+        monitor.flush(step=step)
+
+    cfg = Phase3Config(
+        epochs=epochs,
+        batch_size=batch_size,
+        micro_batch_size=micro_batch_size,
+        lr=lr,
+        loss_type=metrics["loss_type"],
+        seed=int(shuffle_seed),
+        device=device,
+        max_batches=args.max_batches,
+        freeze_prefixes=(),
+        train_indices=train_idx,
+        val_indices=val_idx,
+        val_dataset=val_dataset,
+        epoch_callback=_on_epoch,
+        start_epoch=resume_epoch,
+        optimizer_state=(resume_info.get("optimizer") if resume_info else None),
+        rng_state=(resume_info.get("rng_state") if resume_info else None),
+        checkpoint_callback=_on_checkpoint,
+        action_weight=loss_weights["action"],
+        action_chain_weight=loss_weights["action_chain"],
+        ego_next_weight=loss_weights["ego_next"],
+        od_weight=loss_weights["od"],
+        ld_weight=loss_weights["ld"],
+        presence_weight=loss_weights["presence"],
+        entry_weight=loss_weights["entry"],
+        traj_aux_weight=loss_weights["traj_aux"],
+        load_balance_coef=loss_weights["load_balance"],
+        moe_enabled=True,
+        lr_base_scale=lr_base_scale,
+        lr_specific_scale=lr_specific_scale,
+    )
+    result = pretrain_bc_phase3(
+        model,
+        dataset,
+        cfg,
+        logger=print,
+        batch_source=obs_source,
+        future_source=future_source,
+        future_fn=future_fn,
+        val_future_fn=val_future_fn,
+    )
+    metrics.update(result)
+    if monitor is not None:
+        monitor.close()
+    if torch.device(device).type == "cuda":
+        metrics["vram_peak_mb"] = float(torch.cuda.max_memory_allocated(device) / 1e6)
+    tail = {k: state.get(k) for k in ("optimizer", "val_metrics", "rng")}
+    save_checkpoint(
+        out_dir / "final.pt",
+        model,
+        meta=metrics,
+        optimizer=tail.get("optimizer"),
+        epoch=epochs,
+        val_metrics=tail.get("val_metrics"),
+        rng_state=capture_rng_state(tail.get("rng")),
+        config_hash=config_hash,
+    )
+    metrics["checkpoint"] = str(out_dir / "final.pt")
+    _write_json(out_dir / "metrics.json", metrics)
+    print(
+        f"[stageB3] DONE round={round_index} → {out_dir / 'final.pt'}（rows={dataset.count} · "
+        f"loss={metrics.get('bc_loss', float('nan')):.4f} · "
+        f"od={metrics.get('bc_od_loss', float('nan')):.4f} · ld={metrics.get('bc_ld_loss', float('nan')):.4f}）",
+        flush=True,
+    )
+    return metrics
+
+
+# --------------------------------------------------------------------------- #
 # 阶段 C：PPO RL（Stage-B 快照 KL 锚 + 衰减）
 # --------------------------------------------------------------------------- #
 
@@ -3082,9 +3576,10 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pipeline.stages", description="阶段 A/B/C 编排（v1.1）")
-    parser.add_argument("--stage", choices=("A", "B", "C"), required=True,
+    parser.add_argument("--stage", choices=("A", "B", "C"), default=None,
                         help="A=WM 教师强制训练；B=planner BC（primary→specific）；"
-                             "C=PPO RL（EXPERIMENTAL：P0-1/P0-2 未修，不得用于 RL 结论）")
+                             "C=PPO RL（EXPERIMENTAL：P0-1/P0-2 未修，不得用于 RL 结论）；"
+                             "--phase3 模式下可省略")
     parser.add_argument("--config", default="config/default.yaml", help="主配置（includes 合并）")
     parser.add_argument("--model-config", default=_DEFAULT_MODEL_CFG)
     parser.add_argument("--spec", default=None, help="阶段 C 训练 spec（默认取 config data.spec）")
@@ -3162,6 +3657,34 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dagger-dir", type=str, action="append", default=None,
                         help="DAgger 数据集目录（**可重复**：`--dagger-dir A --dagger-dir B`；phase 2 与主集行"
                              "合并训练，行权重 = 1.0；各份 episode_id 累积偏移；traj-aux 掩码 0）")
+    # ---- lane P3-B：stage B phase 3（迭代恢复训练）----
+    parser.add_argument("--phase3", type=str, default=None,
+                        help="stage B phase 3 迭代恢复训练：当轮 DAgger 数据集目录（**单独使用**：无 5k、"
+                             "无 worst/mild 权重、无 mining）；给出即启用本模式（--stage 可省），"
+                             "起点权重走 --ckpt 或 config stages.B.phase3.init_ckpt")
+    parser.add_argument("--phase3-round", type=int, default=1, help="迭代轮次编号（默认 1；写入 metrics/日志）")
+    parser.add_argument("--phase3-epochs", type=int, default=None,
+                        help="phase 3 轮数（默认取 config stages.B.phase3.epochs=5）")
+    parser.add_argument("--phase3-action-weight", type=float, default=None, help="首步动作损失权重（默认 1.0）")
+    parser.add_argument("--phase3-action-chain-weight", type=float, default=None,
+                        help="多步动作链权重（默认取 config stages.B.phase3.losses.action_chain=0.2）")
+    parser.add_argument("--phase3-ego-next-weight", type=float, default=None,
+                        help="plan head ego_next 权重（默认取 config …losses.ego_next=0.1）")
+    parser.add_argument("--phase3-od-weight", type=float, default=None,
+                        help="WM OD 直接多步损失权重（默认 1.0）")
+    parser.add_argument("--phase3-ld-weight", type=float, default=None,
+                        help="WM LD 恢复监督权重（默认 1.0）")
+    parser.add_argument("--phase3-presence-weight", type=float, default=None,
+                        help="presence BCE 权重（默认 0.1）")
+    parser.add_argument("--phase3-entry-weight", type=float, default=None,
+                        help="entry BCE 权重（默认 0.1）")
+    parser.add_argument("--phase3-traj-aux-weight", type=float, default=None,
+                        help="轨迹辅助权重（默认 0.0：traj 只做监控，不进损失）")
+    parser.add_argument("--phase3-lr-base-scale", type=float, default=None,
+                        help="base 主干（encoders/mem_encoder/plan_head/st_gnn/WM/policy/value）LR 缩放"
+                             "（默认取 config stages.B.phase3.lr_scale.base=0.25）")
+    parser.add_argument("--phase3-lr-specific-scale", type=float, default=None,
+                        help="experts/gate/residual_scale LR 缩放（默认取 config …lr_scale.specific=0.5）")
     # ---- 阶段 C ----
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
     parser.add_argument("--envs", type=int, default=1)
@@ -3204,13 +3727,18 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="监控回退：按旧 tag 名/旧写入行为记录全部指标（默认关）。"
                              "默认只记 Tier-1（OD/EGO loss+KPI、router loss+KPI），其余丢弃；"
                              "清单见 docs/metrics.md")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.phase3 is None and args.stage is None:
+        parser.error("必须给 --stage {A,B,C} 或 --phase3 <dagger_dir>（stage B phase 3 迭代恢复训练）")
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     config = load_config(args.config)
-    if args.stage == "A":
+    if args.phase3:
+        run_stage_b_phase3(args, config)
+    elif args.stage == "A":
         run_stage_a(args, config)
     elif args.stage == "B":
         run_stage_b(args, config)

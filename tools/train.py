@@ -23,6 +23,8 @@
         --bc-dir runs/bc_expert_full --bc-epochs 10 --out runs/train/stage_b
     tools/venv-python tools/train.py --stage C --ckpt runs/train/stage_b/final.pt \\
         --spec env/specs/scenarios_train_slice200.json --envs 2 --updates 20 --out runs/train/stage_c
+    tools/venv-python tools/train.py --phase3 datasets/BTC<ts>_dagger_r1 --phase3-round 1 \\
+        --ckpt runs/<run>/stage_b/final.phase2.pt --out runs/<run>/stage_b   # 迭代恢复训练
 
 import 时只有 stdlib（``pipeline.stages`` 延迟到 ``main()`` 内导入），``--help`` 无副作用。
 """
@@ -48,12 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, default=Path("config/default.yaml"),
                         help="主配置路径（默认 config/default.yaml，includes 自动合并）")
-    parser.add_argument("--stage", choices=("A", "B", "C"), required=True,
-                        help="训练阶段：A=WM 教师强制；B=planner BC；C=PPO RL")
+    parser.add_argument("--stage", choices=("A", "B", "C"), default=None,
+                        help="训练阶段：A=WM 教师强制；B=planner BC；C=PPO RL"
+                             "（--phase3 模式固定属于阶段 B，可省略）")
     parser.add_argument("--spec", type=Path, default=None,
                         help="训练场景 spec（阶段 C；默认取 train.yaml::data.spec）")
     parser.add_argument("--ckpt", type=Path, default=None,
-                        help="初始化权重：B=阶段 A 产物；C=阶段 B 策略快照")
+                        help="初始化权重：B=阶段 A 产物；C=阶段 B 策略快照；"
+                             "phase3=阶段 B phase 2 final（缺省读 config stages.B.phase3.init_ckpt）")
+    parser.add_argument("--phase3", type=Path, default=None,
+                        help="stage B phase 3 迭代恢复训练（lane P3-B）：当轮 dagger 数据集目录"
+                             "（单独使用：无 5k/无 worst-mild 权重/无 mining）；给出即启用本模式")
     parser.add_argument("--out", type=Path, default=Path("runs/train"),
                         help="输出目录（默认 runs/train）")
     return parser
@@ -63,6 +70,17 @@ def main(argv: "list[str] | None" = None) -> int:
     argv_list = list(sys.argv[1:] if argv is None else argv)
     args, _extra = build_parser().parse_known_args(argv_list)
 
+    if args.stage is None and args.phase3 is None:
+        print("[train] 必须给 --stage {A,B,C} 或 --phase3 <dagger_dir>（stage B phase 3 迭代恢复训练）",
+              file=sys.stderr)
+        return 2
+    if args.phase3 is not None and args.stage not in (None, "B"):
+        print(f"[train] --phase3 固定属于阶段 B（可省略 --stage），收到 --stage {args.stage}", file=sys.stderr)
+        return 2
+    stage = args.stage if args.stage is not None else "B"
+    if args.phase3 is not None and not args.phase3.is_dir():
+        print(f"[train] --phase3 dagger 目录不存在：{args.phase3}", file=sys.stderr)
+        return 2
     if not args.config.is_file():
         print(f"[train] 配置不存在：{args.config}", file=sys.stderr)
         return 2
@@ -78,10 +96,10 @@ def main(argv: "list[str] | None" = None) -> int:
     from pipeline import run_paths
 
     work_dir = run_paths.work_dir_of_out(args.out)
-    run_paths.prepare_layout(work_dir, args.stage)
+    run_paths.prepare_layout(work_dir, stage)
     run_paths.write_manifest(
         work_dir,
-        stage=args.stage,
+        stage=stage,
         config=args.config,
         model_config=run_paths.extra_value(argv_list, "--model-config") or "config/model.yaml",
         out=args.out,
