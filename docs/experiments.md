@@ -354,54 +354,71 @@ intersection 0.25、roundabout 0.25；curve / uturn / tollgate 仍 **0.00**（to
    `runs/BTC20260927-1100_stageB`（B）、`runs/BTC20260927-1147_eval_lqr50`、`runs/BTC20260927-1149_eval_baseline50`、
    报告 `runs/BTC20260927-1150_ilreport_5k`（`il_report.md/json` + 11 张 PNG）。
 
-## 11. 去聚类 + MoE 负载均衡 + DAgger 恢复轮（2026-09-27/28）
+## 11. 去聚类 + MoE 负载均衡 + DAgger 恢复轮（2026-09-27/28；含 2026-09-28 事故更正）
+
+> **⚠️ 事故更正（2026-09-28）**：本节原 DAgger v1 的采集池**取自 eval500 的失败 spec**（`datasets/BTC20260927-2218_dagger1/report.json` 自证：`specs=env/specs/scenarios_eval500.json`、`provenance.from_eval=/tmp/opencode/dagger_pool80.csv`、`failed_ids=162`），且学生驱动模型错配（用 phase 1 `primary.pt` 而非 phase 2）→ **三个 DAgger 臂（0.040 / 0.330 / 0.420）的 500 集分数全部作废（train-on-test，不入任何结论）**；污染数据集/权重/采集池已于 2026-09-28 删除，作废评测目录保留并改名加 `_void` 后缀。**干净证据仅剩：阶段 B phase 1 = 0.274 → phase 2 = 0.396（CI 不重叠）**。
+> 教训与措施：**训练数据生成只允许 train spec**；`tools/dagger_collect.py` 硬断言采集池 ∩ eval/val = ∅（命中即 `SystemExit`）；采集池生成器 `tools/make_dagger_pools.py` 分层固定种子并与 eval/val 校验；v2 协议见下。
 
 **方案变更（去聚类）**：取消聚类监督（簇 CE/acc、二值门、hard 切全部删除），输出统一为
 `primary + Σ_{i∈top2} g_i·expert_i`（残差 MoE，**全场景生效**）；路由**不再有监督标签**，只有
 **Switch 式负载均衡 aux**（`α·E·Σ f_i·P_i`，α=0.01）；**Stage A 与 Stage B-phase1 都关闭 MoE**
 （experts+gate 只在 B-phase2 训练）；phase2 数据 = 全量曝光 + 行权重（**worst-50% × 1.0 / 其余 × 0.1**，
-有效质量 0.55），可叠加 DAgger 恢复行（权重 1.0）。
+有效质量 0.55），可叠加 DAgger 恢复行（权重 1.0；其 traj-aux 掩码为 0）。
 
 命令（统一评测/训练口径：train=`datasets/BTC20260926-2343_expert5k` 全部 360,501 行；
 val=`datasets/BTC20260927-1734_expert500val` 36,122 行；评测=`env/specs/scenarios_eval500.json`）：
 ```bash
 STAGE=B bash tools/train.sh                                        # phase1 primary（MoE 关）→ primary.pt
 RESUME=<primary.pt> bash tools/train.sh                            # phase2 specific（MoE 开 + 权重）→ final.pt
-RESUME=<primary.pt> EXTRA="--dagger-dir datasets/BTC20260927-2218_dagger1" bash tools/train.sh   # DAgger 轮（掩码）
+# phase 2b r{k}（v2 迭代轮；每轮独立新 run 目录）：
+RESUME=<run>/stage_b/primary.pt EXTRA="--dagger-dir datasets/BTC<ts>_dagger_r{k}" bash tools/train.sh
 ```
 
-**负载均衡实测**（G2/G3' 同口径）：train `load_cv ≈ 0.14`（8 专家各 11–14% ✓，无饿死）；
-`gate_entropy ≈ 0.70`；val `load_cv ≈ 0.31`。对比旧"聚类 CE"路由（acc 0.65 < 多数类 0.95 的坍缩）✓。
+**负载均衡实测**（phase 2）：train `load_cv ≈ 0.14`（8 专家各 11–14% ✓，无饿死）；`gate_entropy ≈ 0.70`；val `load_cv ≈ 0.31`。
+对比旧"聚类 CE"路由（acc 0.65 < 多数类 0.95 的坍缩）✓。
 
-**500 集闭环五组对照**（LQR，CI ±0.04）：
+**500 集闭环对照**（LQR，CI ±0.04；✓=干净证据，✗=已作废）：
 
-| 组 | 配置 | success [95% CI] | coll | off-road | rc |
-| --- | --- | --- | --- | --- | --- |
-| G1 | primary-only（MoE off） | 0.274 [0.237, 0.315] | 0.014 | 0.702 | 0.579 |
-| **G2** | +MoE（难例加权，无 DAgger） | 0.396 [0.354, 0.440] | 0.030 | 0.552 | 0.639 |
-| G3 | +DAgger（合成轨迹进 traj-aux ✗） | **0.040** [0.026, 0.061] | 0.006 | 0.948 | 0.405 |
-| G3c | +DAgger（全局关 traj-aux ✗） | 0.330 [0.290, 0.372] | 0.070 | 0.596 | 0.611 |
-| **G3′** | **+DAgger（逐行掩码 ✓）** | **0.420** [0.378, 0.464] | 0.024 | 0.508 | 0.652 |
+| 臂 | 配置 | success [95% CI] | coll | off-road | rc | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **阶段 B phase 1** | primary（评测关 MoE） | 0.274 [0.237, 0.315] | 0.014 | 0.702 | 0.579 | ✓ 干净 |
+| **阶段 B phase 2** | +MoE（难例加权，无 DAgger） | **0.396** [0.354, 0.440] | 0.030 | 0.552 | 0.639 | ✓ 干净 |
+| phase 2 + DAgger v1 | 合成轨迹进 traj-aux | 0.040 [0.026, 0.061] | 0.006 | 0.948 | 0.405 | ✗ 泄漏 |
+| phase 2 + DAgger v1（no-traj） | 全局关 traj-aux | 0.330 [0.290, 0.372] | 0.070 | 0.596 | 0.611 | ✗ 泄漏 |
+| phase 2 + DAgger v1（masked） | 逐行掩码 | 0.420 [0.378, 0.464] | 0.024 | 0.508 | 0.652 | ✗ 泄漏 |
 
-分几何（n≈45/类；格式 G2 / G3′）：split 0.69/0.82、merge 0.39/0.50、ramp_out 0.54/0.63、
-ramp_in 0.50/0.57、roundabout 0.18/0.24、straight 0.51/0.53、curve 0.02/0.04、tollgate 0.04/0.07、
-intersection 0.46/0.39、uturn 0.60/0.53、t_intersection 0.42/0.29。
+分几何（仅干净两臂；n≈45/类，每格 95% CI ≈ ±0.14，方向性参考；按 Δ 排序）：
 
-**结论**：
-1. **MoE 专家分支有真增益**：G2−G1 = **+0.122**（CI 不重叠）；off-road 0.702→0.552；负载均衡下 8 专家均衡使用
-   （无需任何人工标签）。
-2. **DAgger 轮首个实现是灾难（0.040）**，根因已定位：DAgger 行**只有首步动作标签**，其 `traj6` 由"常量动作外推"
-   **合成** → 喂进 traj-aux 把 experts 教成过度转向（渐进劣化：0.396 → ep15 0.304 → ep20 0.040；**val 不受影响**
-   → 坏在 plan/rollout 侧）。**修复 = 逐行掩码**（DAgger 行不吃 traj-aux）；反证：全局关 traj-aux 亦不可
-   （plan MAE 0.486→0.692，总分 0.330）。
-3. **掩码后（G3′）与 G2 无可分离差异**（0.420 vs 0.396，CI 重叠）：本 pilot 规模（80 specs / 4,321 行）下
-   **恢复数据的边际价值未获证明**；G3′ 为最佳点估计且无损。
-4. **生产建议**：当前采用 **G2**（无 DAgger）为基线配置；G3′ 为等价可选（掩码机制保留）。若要继续验证恢复数据，
-   需扩大 pilot（337 条失败场景全采 ≈2 h）或重设计标注（学生与专家动作在同一状态对齐后再打标）。
-5. 附带修复：val "动作误差"口径 bug（此前误用轨迹误差、与 `traj_mae` 雷同）已修复并加回归断言（`e011b6b`）。
+| 几何 | n | phase 1 | phase 2 | Δ |
+| --- | --- | --- | --- | --- |
+| ramp_out | 46 | 0.22 | 0.54 | +0.32 |
+| uturn | 45 | 0.33 | 0.60 | +0.27 |
+| split | 45 | 0.44 | 0.69 | +0.25 |
+| ramp_in | 46 | 0.28 | 0.50 | +0.22 |
+| merge | 46 | 0.22 | 0.39 | +0.17 |
+| straight | 45 | 0.40 | 0.51 | +0.11 |
+| t_intersection | 45 | 0.33 | 0.42 | +0.09 |
+| intersection | 46 | 0.39 | 0.46 | +0.07 |
+| curve | 46 | 0.02 | 0.02 | 0.00 |
+| tollgate | 45 | 0.09 | 0.04 | −0.05 |
+| roundabout | 45 | 0.29 | 0.18 | −0.11 |
 
-产物：G1/G2/G3/G3c/G3′ 评测目录 `runs/BTC20260928-0*_eval500_*`；训练目录
-`runs/BTC20260927-1019_stageA_p4/stage_b`（含 `primary.pt`/`final.pt`/`weight_sidecar.npz`/`metrics.json`/`monitor`）。
+**结论（更正后）**：
+1. **MoE 专家分支有真增益（干净）**：phase 2 − phase 1 = **+0.122**（CI 不重叠）；off-road 0.702→0.552；8 专家均衡负载（无需任何人工标签）。
+2. **DAgger v1 三个臂全部作废**（采集池泄漏 + 驱动模型错配）；教训与守卫见顶部更正块。
+3. **工程发现保留**：DAgger 行只有首步动作标签时，其"常量动作外推"合成 `traj6` 进 traj-aux 会把 experts 教成过度转向（渐进劣化 0.396→0.304→0.040；val（专家分布）指标不变 → 坏在 plan/rollout 侧）；修复 = **逐行掩码**（DAgger 行不吃 traj-aux），已实现并被 v2 沿用（v2 行同样只有首步动作标签）。
+4. 附带修复：val "动作误差"口径 bug（误用轨迹误差、与 `traj_mae` 雷同）已修复并加回归断言（`e011b6b`）。
+
+**v2 迭代协议（2026-09-28 起，进行中）**：3 轮（r1/r2/r3）；每轮 =
+① 用当前模型在 **train 切片 500**（`env/specs/scenarios_train_dagger_r{1,2,3}.json`：从 5k 覆盖的 5000 条 train spec 里按 `labels.geometry` 分层随机抽、固定种子、三轮互不重叠）闭环采集，
+仅保留**失败 episode 的"终止前 10 s"窗口行**（策略帧 0.5 s ⇒ 20 帧；`collision`/`out_of_road`/`terminal` 计失败，`max_step`/timeout 不计）；
+② 从冻结 `primary.pt` 重训 specific（多轮数据累积：`--dagger-dir` 可重复）→ 每轮独立 run 目录；
+③ 评 `eval500`（**每轮都评**；轮数固定 3、不做早停，终模型 = r3）。
+采集吞吐实测：12 specs / 12 workers / **10.2 s**（≈0.85 s/spec 墙钟；瓶颈=仿真步进；须按 worker 限制 OMP 线程数——v1 的 92 s/spec 初步归因于线程超订：6 worker × `torch_threads=14` > 20 核）。
+
+产物（干净）：`runs/BTC20260927-2202_eval500_phase1`、`runs/BTC20260927-2209_eval500_phase2`；
+训练目录 `runs/BTC20260927-1019_stageA_p4/stage_b`（`primary.pt` + `final.phase2.pt` + `metrics.phase2.json`）。
+作废留档：`runs/BTC20260928-*_eval500_phase2b_v1*_void`（仅供事故追溯）。
 
 ## 7. 口径与注意事项
 

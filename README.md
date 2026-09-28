@@ -5,12 +5,12 @@ world model rollout 产生 3 s / 6 点自车轨迹 → MPC/LQR 跟踪该预瞄�
 → B 规划器 BC（含 rollout 轨迹辅助）→ C PPO RL（KL 锚定 B 快照）**。
 
 > **一句话现状（2026-09-28，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
-> **去聚类 + MoE 负载均衡**方案在统一评测集（500 条完整 episode、LQR、CI ±0.04）上把 **success 0.274 → 0.420**
-> （G1 primary-only → G3′ +MoE+DAgger 掩码；G2 +MoE 无 DAgger = 0.396），off-road 0.702 → 0.508、rc 0.579 → 0.652；
-> 规则基线 **0.756**。负载均衡使 8 专家各 11–14%（`load_cv≈0.14`，无饿死、无需人工标签）；**DAgger 恢复轮本 pilot
-> 无显著增益**（G3′ vs G2 的 CI 重叠；首个实现因"合成轨迹进 traj-aux"坍缩到 0.040，已定位根因并加逐行掩码修复）。
-> 剩余缺口仍是 **curve / uturn / t_intersection / tollgate** 与速度偏慢（speed_ratio 0.46 vs 基线 0.74）。
-> Stage C 仍 EXPERIMENTAL。详见 `docs/experiments.md` §11（§10 及更早为 50 条旧协议，数字不可直接比较）。
+> **去聚类 + MoE 负载均衡**在统一评测集（500 条完整 episode、LQR、CI ±0.04）上的**干净结果**：阶段 B **phase 1（primary）= 0.274**
+> → **phase 2（MoE+难例加权）= 0.396**（CI 不重叠；off-road 0.702 → 0.552、rc 0.579 → 0.639）；规则基线 **0.756**。
+> 负载均衡使 8 专家各 11–14%（`load_cv≈0.14`，无饿死、无需人工标签）。**DAgger v1 轮因采集池取自 eval500（train-on-test）
+> 已作废并清理**（数据/权重删除、评测目录加 `_void` 留档）；v2（train 侧池 + 失败前 10 s 窗口 + 3 轮迭代、每轮评测）进行中。
+> 剩余缺口仍是 **curve / uturn / t_intersection / tollgate** 与速度偏慢（speed_ratio 0.42–0.47 vs 基线 0.73）。
+> Stage C 仍 EXPERIMENTAL。详见 `docs/experiments.md` §11（含 2026-09-28 更正）。
 
 ---
 
@@ -124,9 +124,10 @@ BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_finger
 | **v1.2 IL（新架构；50 条；LQR）** | lqr | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
 | **v1.2 IL 5k（5k 数据；20/20 epochs）** | lqr | **0.30** | 0.04 | 0.64 | 0.550 | 0.439 |
 | **v1.2 IL 5k 第 3 轮**（schema v2 + mem-bank + router；50 条；LQR） | lqr | **0.42** | 0.04 | **0.52** | **0.688** | 0.446 |
-| **v1.2 去聚类+MoE G1**（primary-only；**500 条**；LQR） | lqr | **0.274** | 0.014 | 0.702 | 0.579 | — |
-| **v1.2 去聚类+MoE G2**（+MoE+难例加权；500 条；LQR） | lqr | **0.396** | 0.030 | 0.552 | 0.639 | — |
-| **v1.2 去聚类+MoE G3′**（+DAgger 逐行掩码；500 条；LQR） | lqr | **0.420** | 0.024 | 0.508 | 0.652 | — |
+| **v1.2 去聚类 phase 1**（primary；**500 条**；LQR） | lqr | **0.274** | 0.014 | 0.702 | 0.579 | — |
+| **v1.2 去聚类 phase 2**（+MoE+难例加权；500 条；LQR） | lqr | **0.396** | 0.030 | 0.552 | 0.639 | — |
+
+> ⚠️ **DAgger v1 轮作废（2026-09-28）**：采集池取自 eval500 失败 spec（train-on-test）→ 三个臂（0.040 / 0.330 / 0.420）不入结论；数据/权重已删除、评测目录加 `_void` 留档。v2（train 侧池 + 失败前 10 s 窗口 + 3 轮迭代、每轮评测）进行中。
 
 ### 2.2 开环 vs 闭环（v1.2，2026-09-26）
 
