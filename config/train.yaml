@@ -70,6 +70,9 @@ stages:
       spec_pool: env/specs/scenarios_train_5k.json  # 采集池（5k 覆盖整池；lane P3-A 产物）
       fail_target: 1000         # 每轮目标失败窗口数（采集侧语义；编排 lane 用）
       shuffle_seed_base: 20260928  # 轮内数据 shuffle 种子 = base + round（跨轮顺序不相关）
+      collect:                  # 采集侧（编排 lane：tools/dagger_collect.py）
+        workers: 16             # spawn worker 数（实测 16 workers ≈ 0.85 s/spec）
+        window_s: 10            # 失败窗口 = 终止前 N 秒（--window-fail-before）
       init_ckpt: runs/BTC20260927-1019_stageA_p4/stage_b/final.phase2.pt  # 起点权重（CLI --ckpt 优先）
       epochs: 5                 # 每轮 epoch 数（CLI --phase3-epochs）
       batch: *stage_b_batch     # 宏 batch（CLI --batch-size；缺省复用阶段 B 锚点）

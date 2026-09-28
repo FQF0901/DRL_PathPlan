@@ -25,6 +25,8 @@
         --spec env/specs/scenarios_train_slice200.json --envs 2 --updates 20 --out runs/train/stage_c
     tools/venv-python tools/train.py --phase3 datasets/BTC<ts>_dagger_r1 --phase3-round 1 \\
         --ckpt runs/<run>/stage_b/final.phase2.pt --out runs/<run>/stage_b   # 迭代恢复训练
+    tools/venv-python tools/train.py --phase3-loop [--phase3-rounds N]       # 全自动循环（采集→训练→评测×N）
+    tools/venv-python tools/train.py --phase3-chain [--phase3-only]          # A→B→循环全链（PHASE3=1 用）
 
 import 时只有 stdlib（``pipeline.stages`` 延迟到 ``main()`` 内导入），``--help`` 无副作用。
 """
@@ -61,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase3", type=Path, default=None,
                         help="stage B phase 3 迭代恢复训练（lane P3-B）：当轮 dagger 数据集目录"
                              "（单独使用：无 5k/无 worst-mild 权重/无 mining）；给出即启用本模式")
+    parser.add_argument("--phase3-loop", action="store_true",
+                        help="phase 3 全自动循环（lane P3-C）：采集→训练→评测 ×N + 护栏；"
+                             "由 tools/train.sh 的 PHASE3=1/PHASE3_ONLY=1 调用（也可直接使用）")
+    parser.add_argument("--phase3-chain", action="store_true",
+                        help="phase 3 全链（lane P3-C）：A→B→循环；PHASE3_ONLY=1/--phase3-only 跳过 A/B")
     parser.add_argument("--out", type=Path, default=Path("runs/train"),
                         help="输出目录（默认 runs/train）")
     return parser
@@ -70,6 +77,16 @@ def main(argv: "list[str] | None" = None) -> int:
     argv_list = list(sys.argv[1:] if argv is None else argv)
     args, _extra = build_parser().parse_known_args(argv_list)
 
+    if args.phase3_chain:
+        # lane P3-C：A→B→phase3 全链（run_config 解析 + 循环编排都在 pipeline.phase3_loop）
+        from pipeline.phase3_loop import run_chain
+
+        return int(run_chain(argv_list) or 0)
+    if args.phase3_loop:
+        # lane P3-C：仅循环编排（采集/训练/评测的路径与状态由 pipeline.phase3_loop 自解析）
+        from pipeline import phase3_loop
+
+        return int(phase3_loop.main(argv_list) or 0)
     if args.stage is None and args.phase3 is None:
         print("[train] 必须给 --stage {A,B,C} 或 --phase3 <dagger_dir>（stage B phase 3 迭代恢复训练）",
               file=sys.stderr)
