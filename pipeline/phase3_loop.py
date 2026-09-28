@@ -24,8 +24,18 @@
 （tmp + ``os.replace``），含 loop 级状态 + 逐轮 collect/train/eval/guard 结果，供 10 分钟轮询审计；
 日志 ``<runs_root>/BTC<stamp>_phase3_loop/logs/phase3_loop.log`` + 逐轮 ``round{k}_*.log``。
 
-**错误语义**：任一步非零退出或产物缺失（``expert_bc.npz`` / ``final.pt`` / ``metrics.json``）
-→ 记录清晰原因并把状态置 ``failed`` 后立即返回非零，绝不带缺产物进入下一轮。
+**OOM 自愈（lane P3-D）**：训练步捕获 ``torch.cuda.OutOfMemoryError``（或非零 rc 且日志含
+``CUDA out of memory``）→ ``gc.collect()`` + ``torch.cuda.empty_cache()`` → **micro 减半整步重试**
+（≤3 次；下限 64）→ 重试耗尽才失败；每次重试 ``current_step="train_retry_micro{M}"`` 落盘。
+
+**断点复用（lane P3-D）**：``PHASE3_RESUME=1`` / ``--phase3-resume`` 时每步前查最新可用产物
+（采集：``BTC*_phase3_dagger_r{k}`` 且 ``report.json.counts.stored_rows>0``；训练：
+``BTC*_stageB_phase3_r{k}/stage_b/final.pt``+``metrics.json``；评测：
+``BTC*_eval500_phase3_r{k}/metrics.json``）→ 跳过并在日志/状态标 ``reused=<path>``。
+
+**错误语义**：任一步异常/非零退出/产物缺失（``expert_bc.npz`` / ``final.pt`` / ``metrics.json``）
+→ 写 ``status="failed"`` + ``stop_reason``（异常类型+摘要，含 traceback 落日志）后立即返回非零，
+绝不带缺产物进入下一轮；``stopped_guard`` 语义不变。
 
 用法::
 
@@ -45,6 +55,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -57,6 +68,10 @@ if str(ROOT) not in sys.path:
 VENV_PY = "tools/venv-python"
 STATUS_FILENAME = "phase3_status.json"
 SCHEMA_VERSION = 1
+#: OOM 自愈（lane P3-D）：micro 减半重试上限 / 下限 / 起点兜底（cfg.micro 缺失时按 stage B 锚点 512 起）
+OOM_MAX_RETRIES = 3
+OOM_MICRO_FLOOR = 64
+OOM_MICRO_FALLBACK = 512
 #: 编排层自身接管的参数：禁止经透传 EXTRA 覆盖（避免把轮次/路径/起点接错）
 _RESERVED_EXTRA_ARGS = frozenset(
     {
@@ -85,6 +100,87 @@ def _abs(path: Any) -> Path:
     """仓库根相对路径 → 绝对路径（``--phase3-loop`` 可能在任意 cwd 启动）。"""
     value = Path(str(path))
     return value if value.is_absolute() else ROOT / value
+
+
+def _latest_path(paths: Sequence[Path]) -> Optional[Path]:
+    """按 mtime 取最新（同 mtime 回退字典序最大，确定性）；空 → None。"""
+    items = [Path(item) for item in paths if Path(item).exists()]
+    if not items:
+        return None
+    return max(items, key=lambda item: (item.stat().st_mtime, str(item)))
+
+
+def _report_stored_rows(report: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """dagger ``report.json`` → ``counts.stored_rows``（缺键/非法 → None）。"""
+    if not isinstance(report, Mapping):
+        return None
+    counts = report.get("counts")
+    if not isinstance(counts, Mapping):
+        return None
+    try:
+        return int(counts.get("stored_rows"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dagger_rows(directory: Path) -> Optional[int]:
+    """dagger 目录行数：meta ``count`` 优先，回退 report ``counts.stored_rows``。"""
+    meta = _read_json(Path(directory) / "expert_bc.meta.json")
+    if isinstance(meta, Mapping) and meta.get("count") is not None:
+        try:
+            return int(meta["count"])
+        except (TypeError, ValueError):
+            pass
+    return _report_stored_rows(_read_json(Path(directory) / "report.json"))
+
+
+def _loss_subset(metrics: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """训练 metrics.json → 状态文件里的损失摘要（缺失键跳过）。"""
+    if not isinstance(metrics, Mapping):
+        return None
+    return {
+        key: metrics.get(key)
+        for key in ("bc_loss", "bc_od_loss", "bc_ld_loss", "bc_action_chain_loss")
+        if metrics.get(key) is not None
+    }
+
+
+def _free_cuda_memory() -> None:
+    """OOM 自愈：``gc.collect()`` + ``torch.cuda.empty_cache()``（无 CUDA 环境安全 no-op）。"""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 - 清理失败不应打断重试
+        pass
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """异常是否 CUDA OOM（``torch.cuda.OutOfMemoryError`` 或消息含 CUDA/GPU out of memory）。"""
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:  # noqa: BLE001 - torch 缺失/属性差异 → 退化为字符串判定
+        pass
+    text = str(exc).lower()
+    return "out of memory" in text and ("cuda" in text or "gpu" in text)
+
+
+def _log_has_oom(log_path: Path, *, start: int = 0, tail_bytes: int = 200_000) -> bool:
+    """日志 ``start`` 之后是否出现 CUDA/GPU out of memory（只查本次尝试新增的内容）。"""
+    try:
+        with Path(log_path).open("rb") as handle:
+            handle.seek(max(0, int(start)))
+            data = handle.read(int(tail_bytes)).lower()
+    except OSError:
+        return False
+    return b"out of memory" in data and (b"cuda" in data or b"gpu" in data)
 
 
 def guard_decision(
@@ -154,6 +250,10 @@ class Phase3LoopConfig:
     runs_root: str = "runs"
     datasets_root: str = "datasets"
     stamp: Optional[str] = None
+    #: 训练起始 micro batch（OOM 自愈减半的起点；None = 不显式传 --micro-batch-size）
+    micro: Optional[int] = None
+    #: 断点复用（``PHASE3_RESUME=1`` / ``--phase3-resume``）：已有可用产物则跳过该步
+    resume: bool = False
     #: 透传的 phase-3 训练参数（如 ``--phase3-epochs/--batch-size``；不得含保留键）
     extra_train_args: List[str] = field(default_factory=list)
 
@@ -167,6 +267,7 @@ class Phase3LoopConfig:
         collect = dict(p3.get("collect", {}) or {})
         eval_cfg = dict(p3.get("eval", {}) or {})
         guard = dict(p3.get("guard", {}) or {})
+        bc_cfg = dict((config.get("train", {}) or {}).get("bc", {}) or {})
         env_rounds = os.environ.get("PHASE3_ROUNDS", "").strip()
         if getattr(args, "phase3_rounds", None) is not None:
             rounds = int(args.phase3_rounds)
@@ -177,6 +278,10 @@ class Phase3LoopConfig:
         if rounds < 1:
             raise ValueError(f"phase3 rounds 必须 ≥1，收到 {rounds}")
         init_ckpt = str(getattr(args, "ckpt", None) or p3.get("init_ckpt") or "")
+        micro_raw = p3.get("micro", bc_cfg.get("micro_batch_size"))
+        resume = bool(getattr(args, "phase3_resume", False)) or str(
+            os.environ.get("PHASE3_RESUME", "")
+        ).strip().lower() in ("1", "true", "yes", "on")
         return cls(
             rounds=rounds,
             spec_pool=str(getattr(args, "phase3_spec_pool", None) or p3.get("spec_pool") or cls.spec_pool),
@@ -196,6 +301,8 @@ class Phase3LoopConfig:
             runs_root=str(getattr(args, "phase3_runs_root", None) or cls.runs_root),
             datasets_root=str(getattr(args, "phase3_datasets_root", None) or cls.datasets_root),
             stamp=(str(args.phase3_stamp) if getattr(args, "phase3_stamp", None) else None),
+            micro=(int(micro_raw) if micro_raw else None),
+            resume=resume,
             extra_train_args=[str(item) for item in extra],
         )
 
@@ -318,6 +425,11 @@ class Phase3Loop:
             self._log_handle.write(line + "\n")
             self._log_handle.flush()
 
+    def _log_exception(self, exc: BaseException) -> None:
+        """异常详情 + traceback 落日志（审计；每步异常与未捕获异常共用）。"""
+        self._log(f"异常详情：{type(exc).__name__}: {exc}")
+        self._log(traceback.format_exc().rstrip())
+
     # ------------------------------------------------------------------ 命令构造
     def _collect_argv(self, *, student: str, dagger_dir: Path, round_index: int) -> List[str]:
         cfg = self.cfg
@@ -339,7 +451,9 @@ class Phase3Loop:
             argv += ["--limit", str(int(cfg.limit))]
         return argv
 
-    def _train_argv(self, *, dagger_dir: Path, train_out: Path, round_index: int) -> List[str]:
+    def _train_argv(
+        self, *, dagger_dir: Path, train_out: Path, round_index: int, micro: Optional[int] = None
+    ) -> List[str]:
         cfg = self.cfg
         argv = [
             "--phase3", str(dagger_dir),
@@ -349,6 +463,8 @@ class Phase3Loop:
             "--config", str(_abs(cfg.config)),
             "--model-config", str(_abs(cfg.model_config)),
         ]
+        if micro is not None:
+            argv += ["--micro-batch-size", str(int(micro))]
         if cfg.device:
             argv += ["--device", str(cfg.device)]
         if cfg.limit:
@@ -374,6 +490,36 @@ class Phase3Loop:
         if cfg.limit:
             argv += ["--limit", str(int(cfg.limit))]
         return argv
+
+    # ------------------------------------------------------------------ 断点复用
+    def _reuse_collect(self, round_index: int) -> Optional[Path]:
+        """可复用采集目录（最新）：``BTC*_phase3_dagger_r{k}`` 且 ``report.json.counts.stored_rows>0``。"""
+        root = _abs(self.cfg.datasets_root)
+        candidates: List[Path] = []
+        for directory in root.glob(f"BTC*_phase3_dagger_r{round_index}"):
+            if not directory.is_dir():
+                continue
+            rows = _report_stored_rows(_read_json(directory / "report.json"))
+            if rows is not None and rows > 0:
+                candidates.append(directory)
+        return _latest_path(candidates)
+
+    def _reuse_train(self, round_index: int) -> Optional[Path]:
+        """可复用训练产物（最新）：``BTC*_stageB_phase3_r{k}/stage_b/final.pt`` + ``metrics.json``。"""
+        root = _abs(self.cfg.runs_root)
+        candidates = [
+            final
+            for final in root.glob(f"BTC*_stageB_phase3_r{round_index}/stage_b/final.pt")
+            if (final.parent / "metrics.json").is_file()
+        ]
+        return _latest_path(candidates)
+
+    def _reuse_eval(self, round_index: int) -> Optional[Path]:
+        """可复用评测产物（最新）：``BTC*_eval500_phase3_r{k}/metrics.json``。"""
+        root = _abs(self.cfg.runs_root)
+        return _latest_path(
+            [item for item in root.glob(f"BTC*_eval500_phase3_r{round_index}/metrics.json") if item.is_file()]
+        )
 
     # ------------------------------------------------------------------ 主循环
     def run(self) -> int:
@@ -413,173 +559,319 @@ class Phase3Loop:
                     "stop_on_overall_drop": float(cfg.stop_on_overall_drop),
                     "stop_on_easy_drop": float(cfg.stop_on_easy_drop),
                 },
+                "micro": cfg.micro,
+                "resume": bool(cfg.resume),
             },
             "rounds": [],
         }
-        _write_status(status_path, status)
-        self._log(
-            f"start stamp={stamp} rounds={cfg.rounds} runs_root={runs_root} "
-            f"status={status_path}"
-        )
-        self._log(
-            f"cfg spec_pool={cfg.spec_pool} fail_target={cfg.fail_target} "
-            f"collect=({cfg.collect_workers}w/{cfg.collect_window_s}s) "
-            f"eval=({cfg.eval_spec} · {cfg.eval_workers}w · lqr) "
-            f"guard=(overall-{cfg.stop_on_overall_drop}/easy-{cfg.stop_on_easy_drop})"
-        )
 
         def _finish(code: int, state: str, reason: Optional[str] = None) -> int:
+            """落盘终态（failed 保留 current_step = 失败所在步，便于审计）；句柄由 finally 关闭。"""
             status["status"] = state
             status["stop_reason"] = reason
-            status["current_step"] = "done"
+            if state in ("completed", "stopped_guard"):
+                status["current_step"] = "done"
             _write_status(status_path, status)
             if reason:
                 self._log(f"{state}: {reason}")
             self._log(f"exit code={code} status={state} status_file={status_path}")
+            return int(code)
+
+        try:
+            _write_status(status_path, status)
+            self._log(
+                f"start stamp={stamp} rounds={cfg.rounds} runs_root={runs_root} "
+                f"status={status_path}"
+            )
+            self._log(
+                f"cfg spec_pool={cfg.spec_pool} fail_target={cfg.fail_target} "
+                f"collect=({cfg.collect_workers}w/{cfg.collect_window_s}s) "
+                f"eval=({cfg.eval_spec} · {cfg.eval_workers}w · lqr) "
+                f"guard=(overall-{cfg.stop_on_overall_drop}/easy-{cfg.stop_on_easy_drop}) "
+                f"micro={cfg.micro} resume={bool(cfg.resume)}"
+            )
+
+            init_ckpt = _abs(cfg.init_ckpt)
+            if not cfg.init_ckpt or not init_ckpt.is_file():
+                return _finish(1, "failed", f"起点权重不存在：{cfg.init_ckpt!r}（--ckpt 或 config stages.B.phase3.init_ckpt）")
+            if not _abs(cfg.spec_pool).is_file():
+                return _finish(1, "failed", f"采集池不存在：{cfg.spec_pool!r}")
+            if not _abs(cfg.eval_spec).is_file():
+                return _finish(1, "failed", f"评测 spec 不存在：{cfg.eval_spec!r}")
+
+            student = str(init_ckpt)
+            previous_eval: Optional[Dict[str, Any]] = None
+            for round_index in range(1, int(cfg.rounds) + 1):
+                status["current_round"] = round_index
+                round_entry: Dict[str, Any] = {
+                    "round": round_index,
+                    "student_in": student,
+                    "student_out": None,
+                    "collect": {},
+                    "train": {},
+                    "eval": {},
+                    "guard": {},
+                }
+                status["rounds"].append(round_entry)
+
+                # ---- ① 采集（断点复用：最新可用 dagger 目录）----
+                status["current_step"] = "collect"
+                _write_status(status_path, status)
+                dagger_dir = datasets_root / f"BTC{stamp}_phase3_dagger_r{round_index}"
+                collect_log = log_dir / f"round{round_index}_collect.log"
+                reused = self._reuse_collect(round_index) if cfg.resume else None
+                if reused is not None:
+                    status["current_step"] = "collect_reuse"
+                    rows = _dagger_rows(reused)
+                    dagger_dir = reused
+                    round_entry["collect"] = {
+                        "rc": None, "reused": str(reused), "duration_s": 0.0,
+                        "out": str(reused), "rows": rows, "log": None,
+                    }
+                    _write_status(status_path, status)
+                    self._log(f"r{round_index} collect reuse={reused} rows={rows}")
+                else:
+                    self._log(f"r{round_index} collect start student={student} out={dagger_dir}")
+                    started = time.perf_counter()
+                    try:
+                        rc = int(
+                            self._collect_fn(
+                                self._collect_argv(
+                                    student=student, dagger_dir=dagger_dir, round_index=round_index
+                                ),
+                                collect_log,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 采集异常 → failed 落盘
+                        round_entry["collect"] = {"error": f"{type(exc).__name__}: {exc}", "log": str(collect_log)}
+                        _write_status(status_path, status)
+                        self._log_exception(exc)
+                        return _finish(1, "failed", f"r{round_index} 采集异常 {type(exc).__name__}: {exc}")
+                    duration = time.perf_counter() - started
+                    rows = _dagger_rows(dagger_dir)
+                    round_entry["collect"] = {
+                        "rc": rc, "duration_s": round(duration, 1), "out": str(dagger_dir),
+                        "rows": rows, "log": str(collect_log),
+                    }
+                    if rc != 0:
+                        _write_status(status_path, status)
+                        return _finish(1, "failed", f"r{round_index} 采集失败 rc={rc}（log={collect_log}）")
+                    if not (dagger_dir / "expert_bc.npz").is_file():
+                        _write_status(status_path, status)
+                        return _finish(1, "failed", f"r{round_index} 采集产物缺失：{dagger_dir / 'expert_bc.npz'}")
+                    if not rows or int(rows) <= 0:
+                        _write_status(status_path, status)
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 采集 0 行（rows={rows}）：该轮无失败窗口 → 停止（不静默训练空数据）",
+                        )
+                    self._log(f"r{round_index} collect ok rows={rows} ({duration:.0f}s)")
+
+                # ---- ② 训练（每轮起点恒为 init_ckpt；OOM 自愈：micro 减半整步重试）----
+                status["current_step"] = "train"
+                _write_status(status_path, status)
+                train_out = runs_root / f"BTC{stamp}_stageB_phase3_r{round_index}" / "stage_b"
+                train_log = log_dir / f"round{round_index}_train.log"
+                reused = self._reuse_train(round_index) if cfg.resume else None
+                if reused is not None:
+                    status["current_step"] = "train_reuse"
+                    final_ckpt = reused
+                    train_metrics = _read_json(reused.parent / "metrics.json")
+                    round_entry["train"] = {
+                        "rc": None, "reused": str(reused), "duration_s": 0.0,
+                        "out": str(reused.parent), "final": str(reused),
+                        "metrics": (str(reused.parent / "metrics.json") if train_metrics is not None else None),
+                        "losses": _loss_subset(train_metrics), "micro": cfg.micro,
+                        "attempts": [], "log": None,
+                    }
+                    _write_status(status_path, status)
+                    self._log(f"r{round_index} train reuse={reused}")
+                else:
+                    self._log(
+                        f"r{round_index} train start out={train_out} ckpt={init_ckpt} micro={cfg.micro}"
+                    )
+                    started = time.perf_counter()
+                    micro = cfg.micro
+                    attempts: List[Dict[str, Any]] = []
+                    retries = 0
+                    exhausted = False
+                    rc, oom = 1, False
+                    while True:
+                        attempt: Dict[str, Any] = {"micro": micro}
+                        log_start = train_log.stat().st_size if train_log.exists() else 0
+                        try:
+                            rc = int(
+                                self._train_fn(
+                                    self._train_argv(
+                                        dagger_dir=dagger_dir, train_out=train_out,
+                                        round_index=round_index, micro=micro,
+                                    ),
+                                    train_log,
+                                )
+                            )
+                            oom = rc != 0 and _log_has_oom(train_log, start=log_start)
+                        except Exception as exc:  # noqa: BLE001 - 训练异常（含 CUDA OOM）
+                            rc = 1
+                            oom = _is_cuda_oom(exc)
+                            attempt["error"] = f"{type(exc).__name__}: {exc}"
+                            if not oom:
+                                attempts.append({**attempt, "rc": rc, "oom": False})
+                                round_entry["train"] = {
+                                    "rc": rc, "duration_s": round(time.perf_counter() - started, 1),
+                                    "out": str(train_out), "final": None, "metrics": None,
+                                    "losses": None, "micro": micro, "attempts": attempts,
+                                    "log": str(train_log),
+                                }
+                                status["current_step"] = "train"
+                                _write_status(status_path, status)
+                                self._log_exception(exc)
+                                return _finish(
+                                    1, "failed",
+                                    f"r{round_index} 训练异常 {type(exc).__name__}: {exc}（log={train_log}）",
+                                )
+                        attempt.update({"rc": rc, "oom": bool(oom)})
+                        attempts.append(attempt)
+                        if not oom:
+                            break
+                        if retries >= OOM_MAX_RETRIES or (micro is not None and micro <= OOM_MICRO_FLOOR):
+                            exhausted = True
+                            break
+                        retries += 1
+                        micro = max(
+                            OOM_MICRO_FLOOR,
+                            (micro if micro is not None else OOM_MICRO_FALLBACK) // 2,
+                        )
+                        status["current_step"] = f"train_retry_micro{micro}"
+                        round_entry["train"] = {
+                            "rc": None, "duration_s": None, "out": str(train_out),
+                            "final": None, "metrics": None, "losses": None,
+                            "micro": micro, "attempts": attempts, "log": str(train_log),
+                        }
+                        _write_status(status_path, status)
+                        self._log(
+                            f"r{round_index} train OOM（micro={attempts[-1]['micro']}）→ "
+                            f"empty_cache+gc → 重试 micro={micro}（第 {retries}/{OOM_MAX_RETRIES} 次）"
+                        )
+                        _free_cuda_memory()
+                    duration = time.perf_counter() - started
+                    final_ckpt = train_out / "final.pt"
+                    train_metrics = _read_json(train_out / "metrics.json")
+                    round_entry["train"] = {
+                        "rc": rc, "duration_s": round(duration, 1), "out": str(train_out),
+                        "final": (str(final_ckpt) if final_ckpt.is_file() else None),
+                        "metrics": (str(train_out / "metrics.json") if train_metrics is not None else None),
+                        "losses": _loss_subset(train_metrics), "micro": attempts[-1]["micro"],
+                        "attempts": attempts, "log": str(train_log),
+                    }
+                    status["current_step"] = "train"  # 失败归因到训练步（重试标记只留在 attempts）
+                    if exhausted:
+                        _write_status(status_path, status)
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 训练 OOM 重试耗尽（尝试 micro={[item['micro'] for item in attempts]}；"
+                            f"log={train_log}）",
+                        )
+                    if rc != 0:
+                        _write_status(status_path, status)
+                        return _finish(1, "failed", f"r{round_index} 训练失败 rc={rc}（log={train_log}）")
+                    if not final_ckpt.is_file():
+                        _write_status(status_path, status)
+                        return _finish(1, "failed", f"r{round_index} 训练产物缺失：{final_ckpt}")
+                    self._log(
+                        f"r{round_index} train ok final={final_ckpt} micro={attempts[-1]['micro']} ({duration:.0f}s)"
+                    )
+                round_entry["student_out"] = str(final_ckpt)
+
+                # ---- ③ 评测（断点复用：最新可用 metrics.json）----
+                status["current_step"] = "eval"
+                _write_status(status_path, status)
+                eval_dir = runs_root / f"BTC{stamp}_eval500_phase3_r{round_index}"
+                eval_log = log_dir / f"round{round_index}_eval.log"
+                reused = self._reuse_eval(round_index) if cfg.resume else None
+                if reused is not None:
+                    status["current_step"] = "eval_reuse"
+                    eval_metrics_path = reused
+                    eval_dir = reused.parent
+                    summary = _eval_summary(reused)
+                    round_entry["eval"] = {
+                        "rc": None, "reused": str(reused), "duration_s": 0.0, "dir": str(eval_dir),
+                        "metrics": str(reused), "overall_success": summary.get("overall_success"),
+                        "easy_success": summary.get("easy_success"), "log": None,
+                    }
+                    _write_status(status_path, status)
+                    self._log(
+                        f"r{round_index} eval reuse={reused} overall={summary.get('overall_success')} "
+                        f"easy={summary.get('easy_success')}"
+                    )
+                else:
+                    self._log(f"r{round_index} eval start ckpt={final_ckpt} dir={eval_dir}")
+                    started = time.perf_counter()
+                    try:
+                        rc = int(
+                            self._eval_fn(
+                                self._eval_argv(final_ckpt=final_ckpt, eval_dir=eval_dir), eval_log
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 评测异常 → failed 落盘
+                        round_entry["eval"] = {"error": f"{type(exc).__name__}: {exc}", "log": str(eval_log)}
+                        _write_status(status_path, status)
+                        self._log_exception(exc)
+                        return _finish(1, "failed", f"r{round_index} 评测异常 {type(exc).__name__}: {exc}")
+                    duration = time.perf_counter() - started
+                    eval_metrics_path = eval_dir / "metrics.json"
+                    summary = _eval_summary(eval_metrics_path)
+                    round_entry["eval"] = {
+                        "rc": rc, "duration_s": round(duration, 1), "dir": str(eval_dir),
+                        "metrics": (str(eval_metrics_path) if eval_metrics_path.is_file() else None),
+                        "overall_success": summary.get("overall_success"),
+                        "easy_success": summary.get("easy_success"),
+                        "log": str(eval_log),
+                    }
+                    if rc != 0:
+                        _write_status(status_path, status)
+                        return _finish(1, "failed", f"r{round_index} 评测失败 rc={rc}（log={eval_log}）")
+                    if not eval_metrics_path.is_file():
+                        _write_status(status_path, status)
+                        return _finish(1, "failed", f"r{round_index} 评测产物缺失：{eval_metrics_path}")
+                    self._log(
+                        f"r{round_index} eval ok overall={summary.get('overall_success')} "
+                        f"easy={summary.get('easy_success')} ({duration:.0f}s)"
+                    )
+
+                # ---- ④ 护栏（与上一轮比较）----
+                status["current_step"] = "guard"
+                decision = guard_decision(
+                    previous_eval,
+                    summary,
+                    stop_on_overall_drop=cfg.stop_on_overall_drop,
+                    stop_on_easy_drop=cfg.stop_on_easy_drop,
+                )
+                round_entry["guard"] = decision
+                if decision["checked"]:
+                    self._log(
+                        f"r{round_index} guard overall_delta={decision['overall_delta']} "
+                        f"easy_delta={decision['easy_delta']} stopped={decision['stopped']}"
+                    )
+                else:
+                    self._log(f"r{round_index} guard 基线（无上一轮，不判定）")
+                previous_eval = dict(summary)
+                student = str(final_ckpt)
+                _write_status(status_path, status)
+                if decision["stopped"]:
+                    return _finish(0, "stopped_guard", str(decision["reason"]))
+
+            return _finish(0, "completed")
+        except KeyboardInterrupt:
+            return _finish(130, "failed", "KeyboardInterrupt: 用户中断")
+        except BaseException as exc:  # noqa: BLE001 - 任何未捕获异常 → failed 落盘后非零退出
+            detail = f"{type(exc).__name__}: {exc}"
+            self._log(f"异常未捕获：{detail}")
+            self._log(traceback.format_exc().rstrip())
+            return _finish(1, "failed", detail)
+        finally:
             if self._log_handle is not None:
                 self._log_handle.close()
                 self._log_handle = None
-            return int(code)
-
-        init_ckpt = _abs(cfg.init_ckpt)
-        if not cfg.init_ckpt or not init_ckpt.is_file():
-            return _finish(1, "failed", f"起点权重不存在：{cfg.init_ckpt!r}（--ckpt 或 config stages.B.phase3.init_ckpt）")
-        if not _abs(cfg.spec_pool).is_file():
-            return _finish(1, "failed", f"采集池不存在：{cfg.spec_pool!r}")
-        if not _abs(cfg.eval_spec).is_file():
-            return _finish(1, "failed", f"评测 spec 不存在：{cfg.eval_spec!r}")
-
-        student = str(init_ckpt)
-        previous_eval: Optional[Dict[str, Any]] = None
-        for round_index in range(1, int(cfg.rounds) + 1):
-            status["current_round"] = round_index
-            round_entry: Dict[str, Any] = {
-                "round": round_index,
-                "student_in": student,
-                "student_out": None,
-                "collect": {},
-                "train": {},
-                "eval": {},
-                "guard": {},
-            }
-            status["rounds"].append(round_entry)
-
-            # ---- ① 采集 ----
-            status["current_step"] = "collect"
-            _write_status(status_path, status)
-            dagger_dir = datasets_root / f"BTC{stamp}_phase3_dagger_r{round_index}"
-            collect_log = log_dir / f"round{round_index}_collect.log"
-            self._log(f"r{round_index} collect start student={student} out={dagger_dir}")
-            started = time.perf_counter()
-            rc = int(self._collect_fn(self._collect_argv(student=student, dagger_dir=dagger_dir, round_index=round_index), collect_log))
-            duration = time.perf_counter() - started
-            rows = None
-            meta = _read_json(dagger_dir / "expert_bc.meta.json")
-            if meta is not None:
-                rows = meta.get("count")
-            round_entry["collect"] = {
-                "rc": rc, "duration_s": round(duration, 1), "out": str(dagger_dir),
-                "rows": rows, "log": str(collect_log),
-            }
-            if rc != 0:
-                _write_status(status_path, status)
-                return _finish(1, "failed", f"r{round_index} 采集失败 rc={rc}（log={collect_log}）")
-            if not (dagger_dir / "expert_bc.npz").is_file():
-                _write_status(status_path, status)
-                return _finish(1, "failed", f"r{round_index} 采集产物缺失：{dagger_dir / 'expert_bc.npz'}")
-            if not rows or int(rows) <= 0:
-                _write_status(status_path, status)
-                return _finish(
-                    1, "failed",
-                    f"r{round_index} 采集 0 行（rows={rows}）：该轮无失败窗口 → 停止（不静默训练空数据）",
-                )
-            self._log(f"r{round_index} collect ok rows={rows} ({duration:.0f}s)")
-
-            # ---- ② 训练（每轮起点恒为 init_ckpt）----
-            status["current_step"] = "train"
-            _write_status(status_path, status)
-            train_out = runs_root / f"BTC{stamp}_stageB_phase3_r{round_index}" / "stage_b"
-            train_log = log_dir / f"round{round_index}_train.log"
-            self._log(f"r{round_index} train start out={train_out} ckpt={init_ckpt}")
-            started = time.perf_counter()
-            rc = int(self._train_fn(self._train_argv(dagger_dir=dagger_dir, train_out=train_out, round_index=round_index), train_log))
-            duration = time.perf_counter() - started
-            final_ckpt = train_out / "final.pt"
-            train_metrics = _read_json(train_out / "metrics.json")
-            losses = None
-            if train_metrics is not None:
-                losses = {
-                    key: train_metrics.get(key)
-                    for key in ("bc_loss", "bc_od_loss", "bc_ld_loss", "bc_action_chain_loss")
-                    if train_metrics.get(key) is not None
-                }
-            round_entry["train"] = {
-                "rc": rc, "duration_s": round(duration, 1), "out": str(train_out),
-                "final": (str(final_ckpt) if final_ckpt.is_file() else None),
-                "metrics": (str(train_out / "metrics.json") if train_metrics is not None else None),
-                "losses": losses, "log": str(train_log),
-            }
-            if rc != 0:
-                _write_status(status_path, status)
-                return _finish(1, "failed", f"r{round_index} 训练失败 rc={rc}（log={train_log}）")
-            if not final_ckpt.is_file():
-                _write_status(status_path, status)
-                return _finish(1, "failed", f"r{round_index} 训练产物缺失：{final_ckpt}")
-            round_entry["student_out"] = str(final_ckpt)
-            self._log(f"r{round_index} train ok final={final_ckpt} ({duration:.0f}s)")
-
-            # ---- ③ 评测 ----
-            status["current_step"] = "eval"
-            _write_status(status_path, status)
-            eval_dir = runs_root / f"BTC{stamp}_eval500_phase3_r{round_index}"
-            eval_log = log_dir / f"round{round_index}_eval.log"
-            self._log(f"r{round_index} eval start ckpt={final_ckpt} dir={eval_dir}")
-            started = time.perf_counter()
-            rc = int(self._eval_fn(self._eval_argv(final_ckpt=final_ckpt, eval_dir=eval_dir), eval_log))
-            duration = time.perf_counter() - started
-            eval_metrics_path = eval_dir / "metrics.json"
-            summary = _eval_summary(eval_metrics_path)
-            round_entry["eval"] = {
-                "rc": rc, "duration_s": round(duration, 1), "dir": str(eval_dir),
-                "metrics": (str(eval_metrics_path) if eval_metrics_path.is_file() else None),
-                "overall_success": summary.get("overall_success"),
-                "easy_success": summary.get("easy_success"),
-                "log": str(eval_log),
-            }
-            if rc != 0:
-                _write_status(status_path, status)
-                return _finish(1, "failed", f"r{round_index} 评测失败 rc={rc}（log={eval_log}）")
-            if not eval_metrics_path.is_file():
-                _write_status(status_path, status)
-                return _finish(1, "failed", f"r{round_index} 评测产物缺失：{eval_metrics_path}")
-            self._log(
-                f"r{round_index} eval ok overall={summary.get('overall_success')} "
-                f"easy={summary.get('easy_success')} ({duration:.0f}s)"
-            )
-
-            # ---- ④ 护栏（与上一轮比较）----
-            status["current_step"] = "guard"
-            decision = guard_decision(
-                previous_eval,
-                summary,
-                stop_on_overall_drop=cfg.stop_on_overall_drop,
-                stop_on_easy_drop=cfg.stop_on_easy_drop,
-            )
-            round_entry["guard"] = decision
-            if decision["checked"]:
-                self._log(
-                    f"r{round_index} guard overall_delta={decision['overall_delta']} "
-                    f"easy_delta={decision['easy_delta']} stopped={decision['stopped']}"
-                )
-            else:
-                self._log(f"r{round_index} guard 基线（无上一轮，不判定）")
-            previous_eval = dict(summary)
-            student = str(final_ckpt)
-            _write_status(status_path, status)
-            if decision["stopped"]:
-                return _finish(0, "stopped_guard", str(decision["reason"]))
-
-        return _finish(0, "completed")
 
 
 def _eval_summary(metrics_path: Path) -> Dict[str, Any]:
@@ -736,6 +1028,9 @@ def _add_loop_flags(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--phase3-runs-root", default=None, help="runs 根（默认 runs；测试/冒烟可指到 /tmp）")
     parser.add_argument("--phase3-datasets-root", default=None, help="datasets 根（默认 datasets）")
     parser.add_argument("--phase3-stamp", default=None, help="北京戳覆盖（默认当前；测试/复现用）")
+    parser.add_argument("--phase3-resume", action="store_true",
+                        help="断点复用（等价环境变量 PHASE3_RESUME=1）：每步前若已有可用产物则跳过"
+                             "（采集 report.counts.stored_rows>0 / 训练 final.pt+metrics.json / 评测 metrics.json）")
     parser.add_argument("--device", default=None, help="设备（透传采集/训练/评测；默认按 config）")
     parser.add_argument("--limit-dataset", type=int, default=None,
                         help="冒烟：采集/评测 --limit + 训练 --limit-dataset 同值")

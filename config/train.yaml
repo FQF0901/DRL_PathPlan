@@ -76,7 +76,9 @@ stages:
       init_ckpt: runs/BTC20260927-1019_stageA_p4/stage_b/final.phase2.pt  # 起点权重（CLI --ckpt 优先）
       epochs: 5                 # 每轮 epoch 数（CLI --phase3-epochs）
       batch: *stage_b_batch     # 宏 batch（CLI --batch-size；缺省复用阶段 B 锚点）
-      micro: *stage_b_micro     # micro batch（CLI --micro-batch-size）
+      micro: 256                # micro batch：phase3 混合路径（rollout + WM 教师强制 + 多损失）实测
+                                # micro 512 OOM（11.6 GiB 卡）→ 取 stage A 标定上限 256（384 已 OOM）；
+                                # 仍 OOM 由链的 OOM 自愈再减半重试（256→128→64，下限 64）
       lr_scale:                 # LR 分组缩放（全参数解冻；CLI --phase3-lr-{base,specific}-scale）
         base: 0.25              # encoders/mem_encoder/plan_head/st_gnn/WM/policy/value
         specific: 0.5           # experts/gate(router)/residual_scale

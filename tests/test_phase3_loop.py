@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from pipeline import phase3_loop
 from pipeline.phase3_loop import Phase3Loop, Phase3LoopConfig, _parse_args, guard_decision
@@ -63,6 +64,7 @@ class _Stubs:
         collect_missing: bool = False,
         train_missing: bool = False,
         eval_missing: bool = False,
+        train_plan: "list[str] | None" = None,
     ):
         self.overall = list(overall)
         self.easy = list(easy)
@@ -73,6 +75,8 @@ class _Stubs:
         self.collect_missing = bool(collect_missing)
         self.train_missing = bool(train_missing)
         self.eval_missing = bool(eval_missing)
+        #: 逐次训练尝试的行为计划（"ok"/"oom"/"oom_log"/"rc1"/"exc:<Type>:<msg>"；不足则重复末项）
+        self.train_plan = list(train_plan) if train_plan else None
         self.collect_calls: list = []
         self.train_calls: list = []
         self.eval_calls: list = []
@@ -102,15 +106,40 @@ class _Stubs:
 
     def train(self, argv, log_path) -> int:
         out = Path(_arg(argv, "--out"))
+        micro = int(_arg(argv, "--micro-batch-size")) if "--micro-batch-size" in [str(x) for x in argv] else None
         self.train_calls.append(
             {
                 "dagger": _arg(argv, "--phase3"),
                 "round": int(_arg(argv, "--phase3-round")),
                 "ckpt": _arg(argv, "--ckpt"),
                 "out": out,
+                "micro": micro,
                 "log": Path(log_path) if log_path else None,
             }
         )
+        index = len(self.train_calls) - 1
+        action = "ok" if not self.train_plan else self.train_plan[min(index, len(self.train_plan) - 1)]
+        if action == "oom":
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+        if action == "oom_log":
+            if log_path is not None:
+                path = Path(log_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write("RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB\n")
+            return 1
+        if action == "oom_log_alt":
+            if log_path is not None:
+                path = Path(log_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write("RuntimeError: CUDA error: out of memory (GPU memory exhausted)\n")
+            return 1
+        if action.startswith("exc:"):
+            _, name, message = action.split(":", 2)
+            raise {"RuntimeError": RuntimeError, "ValueError": ValueError}[name](message)
+        if action == "rc1":
+            return 1
         if self.train_rc == 0 and not self.train_missing:
             out.mkdir(parents=True, exist_ok=True)
             (out / "final.pt").write_bytes(b"final")
@@ -580,4 +609,204 @@ def test_train_sh_full_chain_dispatches_chain_with_rounds(tmp_path: Path) -> Non
     assert "--phase3-rounds 2" in lines[0], "PHASE3_ROUNDS 必须透传给全链"
     chain = chain_log.read_text(encoding="utf-8")
     assert "[detach]" in chain and "only=0" in chain and "[exit]" in chain
+
+
+# ---------------------- ⑦ lane P3-D：OOM 自愈 + 断点复用 + 失败落盘
+def _record_status_writes(monkeypatch) -> list:
+    """记录每次 `_write_status` 的快照（用于观察重试中的 current_step 等瞬态）。"""
+    snapshots: list = []
+    real_write = phase3_loop._write_status
+
+    def _record(path, payload):
+        snapshots.append(json.loads(json.dumps(payload, default=str)))
+        return real_write(path, payload)
+
+    monkeypatch.setattr(phase3_loop, "_write_status", _record)
+    return snapshots
+
+
+def test_phase3_loop_oom_halves_micro_and_retries(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs(train_plan=["oom", "ok"])
+    freed: list = []
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: freed.append(True))
+    snapshots = _record_status_writes(monkeypatch)
+    rc = _loop(tmp_path, stubs, rounds=1, micro=512).run()
+    assert rc == 0
+    assert [item["micro"] for item in stubs.train_calls] == [512, 256], "OOM 后 micro 必须减半重试"
+    assert len(freed) == 1, "重试前必须 empty_cache+gc（经 _free_cuda_memory）"
+    status = _status(tmp_path)
+    assert status["status"] == "completed"
+    train = status["rounds"][0]["train"]
+    assert train["rc"] == 0 and train["micro"] == 256 and train["final"]
+    assert [item["micro"] for item in train["attempts"]] == [512, 256]
+    assert [item["oom"] for item in train["attempts"]] == [True, False]
+    retry_steps = [snap.get("current_step") for snap in snapshots if str(snap.get("current_step", "")).startswith("train_retry")]
+    assert retry_steps == ["train_retry_micro256"], "重试期间 current_step 必须标记 train_retry_micro{M}"
+    assert any(
+        snap.get("status") == "running" and snap.get("current_step") == "train_retry_micro256"
+        for snap in snapshots
+    ), "重试必须落盘（running 状态可审计）"
+
+
+def test_phase3_loop_oom_retries_exhausted_fails(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs(train_plan=["oom"])
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: None)
+    rc = _loop(tmp_path, stubs, rounds=1, micro=512).run()
+    assert rc == 1 and len(stubs.eval_calls) == 0
+    assert [item["micro"] for item in stubs.train_calls] == [512, 256, 128, 64], "512→256→128→64 后耗尽"
+    status = _status(tmp_path)
+    assert status["status"] == "failed"
+    assert "OOM 重试耗尽" in str(status["stop_reason"])
+    assert status["current_step"] == "train", "失败状态保留失败所在步（不再停在 running）"
+    assert [item["micro"] for item in status["rounds"][0]["train"]["attempts"]] == [512, 256, 128, 64]
+
+
+def test_phase3_loop_oom_detected_from_log_and_rc(tmp_path: Path, monkeypatch) -> None:
+    stubs = _Stubs(train_plan=["oom_log", "ok"])
+    monkeypatch.setattr(phase3_loop, "_free_cuda_memory", lambda: None)
+    rc = _loop(tmp_path, stubs, rounds=1, micro=256).run()
+    assert rc == 0
+    assert [item["micro"] for item in stubs.train_calls] == [256, 128], "非零 rc + 日志含 OOM 也必须触发减半重试"
+    status = _status(tmp_path)
+    assert status["status"] == "completed" and status["rounds"][0]["train"]["micro"] == 128
+
+    # 变体消息（"CUDA error: out of memory"）同样识别
+    second = tmp_path / "second"
+    stubs2 = _Stubs(train_plan=["oom_log_alt", "ok"])
+    rc2 = _loop(second, stubs2, rounds=1, micro=256).run()
+    assert rc2 == 0 and [item["micro"] for item in stubs2.train_calls] == [256, 128]
+
+
+def test_phase3_loop_resume_reuses_collect(tmp_path: Path) -> None:
+    stubs = _Stubs()
+    reused = tmp_path / "datasets" / "BTC20260901-0000_phase3_dagger_r1"
+    reused.mkdir(parents=True)
+    (reused / "expert_bc.npz").write_bytes(b"npz")
+    (reused / "expert_bc.meta.json").write_text(json.dumps({"count": 321}), encoding="utf-8")
+    (reused / "report.json").write_text(
+        json.dumps({"counts": {"stored_rows": 321}}), encoding="utf-8"
+    )
+    rc = _loop(tmp_path, stubs, rounds=1, resume=True).run()
+    assert rc == 0
+    assert len(stubs.collect_calls) == 0, "resume 下已有可用采集产物必须跳过"
+    assert Path(stubs.train_calls[0]["dagger"]) == reused, "训练必须吃复用目录"
+    status = _status(tmp_path)
+    collect = status["rounds"][0]["collect"]
+    assert collect["reused"] == str(reused) and collect["rows"] == 321 and collect["rc"] is None
+    assert "collect reuse=" in (tmp_path / "runs" / "BTCTEST_phase3_loop" / "logs" / "phase3_loop.log").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_phase3_loop_resume_reuses_train_and_eval(tmp_path: Path) -> None:
+    stubs = _Stubs()
+    runs = tmp_path / "runs"
+    train_dir = runs / "BTC20260901-0000_stageB_phase3_r1" / "stage_b"
+    train_dir.mkdir(parents=True)
+    final = train_dir / "final.pt"
+    final.write_bytes(b"reused-final")
+    (train_dir / "metrics.json").write_text(json.dumps({"bc_loss": 0.9}), encoding="utf-8")
+    eval_dir = runs / "BTC20260901-0000_eval500_phase3_r1"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "metrics.json").write_text(
+        json.dumps({"overall": {"success_rate": 0.61}, "by_difficulty": {"easy": {"success_rate": 0.7}}}),
+        encoding="utf-8",
+    )
+    rc = _loop(tmp_path, stubs, rounds=1, resume=True).run()
+    assert rc == 0
+    assert len(stubs.collect_calls) == 1, "采集无产物 → 照常跑"
+    assert len(stubs.train_calls) == 0 and len(stubs.eval_calls) == 0, "训练/评测已有产物必须跳过"
+    entry = _status(tmp_path)["rounds"][0]
+    assert entry["train"]["reused"] == str(final)
+    assert entry["train"]["final"] == str(final) and entry["train"]["losses"] == {"bc_loss": 0.9}
+    assert entry["student_out"] == str(final)
+    assert entry["eval"]["reused"] == str(eval_dir / "metrics.json")
+    assert entry["eval"]["overall_success"] == 0.61 and entry["eval"]["easy_success"] == 0.7
+
+
+def test_phase3_loop_resume_invalid_artifacts_not_reused(tmp_path: Path) -> None:
+    stubs = _Stubs()
+    datasets = tmp_path / "datasets"
+    # 采集：rows=0 与缺 report.json 都不可复用
+    zero_dir = datasets / "BTC20260901-0000_phase3_dagger_r1"
+    zero_dir.mkdir(parents=True)
+    (zero_dir / "expert_bc.npz").write_bytes(b"npz")
+    (zero_dir / "report.json").write_text(json.dumps({"counts": {"stored_rows": 0}}), encoding="utf-8")
+    no_report = datasets / "BTC20260902-0000_phase3_dagger_r1"
+    no_report.mkdir(parents=True)
+    (no_report / "expert_bc.npz").write_bytes(b"npz")
+    # 训练：有 final.pt 但缺 metrics.json
+    train_dir = tmp_path / "runs" / "BTC20260901-0000_stageB_phase3_r1" / "stage_b"
+    train_dir.mkdir(parents=True)
+    (train_dir / "final.pt").write_bytes(b"stale")
+    # 评测：目录在但缺 metrics.json
+    (tmp_path / "runs" / "BTC20260901-0000_eval500_phase3_r1").mkdir(parents=True)
+
+    rc = _loop(tmp_path, stubs, rounds=1, resume=True).run()
+    assert rc == 0
+    assert len(stubs.collect_calls) == 1, "rows=0/缺 report 不得复用"
+    assert len(stubs.train_calls) == 1, "缺 metrics.json 的训练产物不得复用"
+    assert len(stubs.eval_calls) == 1, "缺 metrics.json 的评测产物不得复用"
+    entry = _status(tmp_path)["rounds"][0]
+    for step in ("collect", "train", "eval"):
+        assert "reused" not in entry[step], f"{step} 不得标记复用"
+
+
+def test_phase3_loop_exception_persists_failed_status(tmp_path: Path) -> None:
+    def _cfg(root: Path) -> Phase3LoopConfig:
+        init_ckpt, pool, eval_spec = _write_pool_and_ckpt(root)
+        return Phase3LoopConfig(
+            rounds=1, spec_pool=str(pool), eval_spec=str(eval_spec), init_ckpt=str(init_ckpt),
+            runs_root=str(root / "runs"), datasets_root=str(root / "datasets"), stamp="TEST",
+        )
+
+    def _boom_collect(argv, log_path):
+        raise RuntimeError("boom-collect")
+
+    loop = Phase3Loop(
+        _cfg(tmp_path), collect_fn=_boom_collect,
+        train_fn=lambda argv, log: 0, eval_fn=lambda argv, log: 0, logger=lambda _: None,
+    )
+    assert loop.run() == 1
+    status = _status(tmp_path)
+    assert status["status"] == "failed"
+    assert "RuntimeError" in str(status["stop_reason"]) and "boom-collect" in str(status["stop_reason"])
+    assert status["current_step"] == "collect"
+
+    def _boom_train(argv, log_path):
+        raise ValueError("boom-train")
+
+    second = tmp_path / "second"
+    stubs2 = _Stubs()
+    loop2 = Phase3Loop(
+        _cfg(second),
+        collect_fn=stubs2.collect, train_fn=_boom_train, eval_fn=stubs2.eval, logger=lambda _: None,
+    )
+    assert loop2.run() == 1
+    status2 = _status(second)
+    assert status2["status"] == "failed" and status2["current_step"] == "train"
+    assert "ValueError: boom-train" in str(status2["stop_reason"])
+    log_text = (second / "runs" / "BTCTEST_phase3_loop" / "logs" / "phase3_loop.log").read_text(encoding="utf-8")
+    assert "Traceback" in log_text, "异常必须带 traceback 落日志（便于审计）"
+
+
+def test_phase3_loop_config_micro_and_resume(tmp_path: Path, monkeypatch) -> None:
+    from pipeline.stages import load_config
+
+    cfg_path = tmp_path / "train.yaml"
+    cfg_path.write_text(
+        "stages:\n  B:\n    phase3:\n      rounds: 1\n      micro: 256\n", encoding="utf-8"
+    )
+    config = load_config(str(cfg_path))
+    monkeypatch.delenv("PHASE3_RESUME", raising=False)
+    args, extra = _parse_args(["--phase3-loop", "--config", str(cfg_path)])
+    cfg = Phase3LoopConfig.from_config(config, args, extra=extra)
+    assert cfg.micro == 256 and cfg.resume is False, "micro 取 config；resume 默认关"
+    monkeypatch.setenv("PHASE3_RESUME", "1")
+    assert Phase3LoopConfig.from_config(config, args, extra=extra).resume is True, "PHASE3_RESUME=1 生效"
+    args_flag, extra_flag = _parse_args(["--phase3-loop", "--config", str(cfg_path), "--phase3-resume"])
+    assert Phase3LoopConfig.from_config(config, args_flag, extra=extra_flag).resume is True
+    # 仓库配置回归：phase3 micro = 256（P3-D 防 OOM 定案；stage A 标定上限）
+    repo_cfg = load_config("config/default.yaml")
+    assert repo_cfg["stages"]["B"]["phase3"]["micro"] == 256
 

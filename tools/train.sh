@@ -2,8 +2,8 @@
 # 训练入口（零参可跑）：路径/ckpt/日志由 config + tools/run_config.py 生成；setsid+nohup 后台化（脱离终端/
 # harness 会话轮换），[detach]/[exit] 证据落日志；环境覆盖（同名优先）：STAGE RESUME BC_DIR WORK_DIR GPUS
 # DEVICE LIMIT_DATASET EXTRA。
-# lane P3-C：PHASE3=1 → A→B→phase3 全链；PHASE3_ONLY=1 → 直接 phase3；PHASE3_ROUNDS=N 覆盖轮数；编排在
-# Python（tools/train.py --phase3-chain），本脚本只做后台化/日志/证据行。
+# lane P3-C/P3-D：PHASE3=1 → A→B→phase3 全链；PHASE3_ONLY=1 → 直接 phase3；PHASE3_ROUNDS=N 覆盖轮数；
+# PHASE3_RESUME=1 断点复用（跳过已有产物）；编排在 Python（tools/train.py --phase3-chain）。
 set -e; export PYTHONUNBUFFERED=1  # stdout 逐行落盘（否则块缓冲导致日志看起来"卡住"）
 GPUS="${GPUS:-0}"; CONFIG="${CONFIG:-config/default.yaml}"
 cd "$(dirname "$0")/.."
