@@ -15,7 +15,9 @@
    完整未来的真 stuck 行仍被清零、计数分开（``stuck`` / ``stuck_skipped_truncated``）；
 10. **lane U7 窗口模式报告口径**：yield 分母 = 窗口行数（gate 不再误报）、``filter_counts``
    只统计最终被置零的行（松弛/丢弃行不计）、整段模式口径逐位不变；
-11. 任务分块在 specs < chunk_size 时也按 worker 数铺开。
+11. **lane P3-A 流式扫描**：``--shuffle-seed`` 确定性（先 shuffle 后 limit）、``--target-fails``
+   达目标早停与计数、report 新增 scan 字段；``tools/make_dagger_pools.py --mode pool5k`` 池正确性；
+12. 任务分块在 specs < chunk_size 时也按 worker 数铺开。
 """
 
 from __future__ import annotations
@@ -691,3 +693,149 @@ def test_full_mode_yield_and_filter_counts_bitwise_unchanged() -> None:
     assert report["dataset_gate"]["bc_retained_step_yield"]["pass"] is False, "整段模式 gate 口径不变"
     assert report["filter_counts"] == {"terminal_window": 4, "stuck": 2}, "整段模式计数原样透传"
     assert report["window"] is None and report["total_candidate_steps"] == 100
+
+
+# ------------------------------------------- 11. lane P3-A：流式扫描 + 5k 池
+def _pool_file(tmp_path: Path, specs) -> Path:
+    from env.scenario.spec import save_specs
+
+    path = tmp_path / "pool.json"
+    save_specs(list(specs), path)
+    return path
+
+
+def test_shuffle_seed_deterministic_then_limit(tmp_path: Path) -> None:
+    """``--shuffle-seed``：0 = 原始顺序；同 seed 同序；先 shuffle 后 limit；provenance 记录 seed。"""
+    from env.scenario.spec import load_specs
+
+    specs = list(load_specs("env/specs/scenarios_smoke16.json"))[:12]
+    pool = _pool_file(tmp_path, specs)
+    ids = [int(spec.id) for spec in specs]
+
+    original, prov0 = dg._select_specs(Namespace(specs=str(pool), limit=0, shuffle_seed=0))
+    assert [int(s.id) for s in original] == ids, "seed=0 → 原始顺序"
+    assert prov0["shuffle_seed"] == 0 and prov0["pool_specs"] == 12 and prov0["scan_pool_specs"] == 12
+
+    shuffled_a, prov_a = dg._select_specs(Namespace(specs=str(pool), limit=0, shuffle_seed=7))
+    shuffled_b, _ = dg._select_specs(Namespace(specs=str(pool), limit=0, shuffle_seed=7))
+    order_a = [int(s.id) for s in shuffled_a]
+    assert order_a == [int(s.id) for s in shuffled_b], "同 seed 必须同序"
+    assert order_a != ids, "seed>0 应打乱（12! 下同序概率可忽略）"
+    assert sorted(order_a) == sorted(ids), "shuffle 无放回（集合不变）"
+    assert prov_a["shuffle_seed"] == 7
+
+    limited, prov_l = dg._select_specs(Namespace(specs=str(pool), limit=5, shuffle_seed=7))
+    assert [int(s.id) for s in limited] == order_a[:5], "先 shuffle 后 limit"
+    assert prov_l["scan_pool_specs"] == 5 and prov_l["limit"] == 5
+
+
+def test_scan_progress_and_streaming_early_stop(tmp_path: Path, monkeypatch) -> None:
+    """``--target-fails``：达 N 立即停止（不再跑后续 chunk）+ 计数正确；0 = 扫完整个池。"""
+    def summary(terminations):
+        return {"specs": [{"report": {"termination": t}} for t in terminations]}
+
+    assert dg._scan_progress([summary(["collision", "max_step", "out_of_road"])],
+                             fail_terminations=dg.DEFAULT_FAIL_TERMINATIONS,
+                             target_fails=2) == {
+        "scanned_specs": 3, "fail_count": 2, "target_fails": 2, "target_reached": True}
+    assert dg._scan_progress([summary(["max_step", "arrive_dest"])],
+                             fail_terminations=dg.DEFAULT_FAIL_TERMINATIONS,
+                             target_fails=1)["target_reached"] is False
+    assert dg._scan_progress([summary(["collision"])],
+                             fail_terminations=dg.DEFAULT_FAIL_TERMINATIONS,
+                             target_fails=0)["target_reached"] is False, "0 = 关闭"
+
+    calls: list = []
+
+    def fake_task(task):
+        calls.append(int(task["slot"]))
+        term = "collision" if int(task["slot"]) < 2 else "max_step"
+        return {"specs": [{"report": {"termination": term}} for _ in task["specs"]], "rows": 1}
+
+    monkeypatch.setattr(dg, "_dagger_task", fake_task)
+    specs = list(range(30))  # CHUNK_SPECS=10 → 3 个 chunk
+    summaries, scan = dg._run_dagger_workers(
+        specs, workers=1, config={}, shard_dir=tmp_path, target_fails=15,
+        fail_terminations=dg.DEFAULT_FAIL_TERMINATIONS, logger=lambda _: None,
+    )
+    assert calls == [0, 1], "达目标后不得再跑后续 chunk（早停）"
+    assert scan == {"scanned_specs": 20, "fail_count": 20, "target_fails": 15, "target_reached": True}
+    assert len(summaries) == 2
+
+    calls.clear()
+    _, scan_all = dg._run_dagger_workers(
+        specs, workers=1, config={}, shard_dir=tmp_path, target_fails=0,
+        fail_terminations=dg.DEFAULT_FAIL_TERMINATIONS, logger=lambda _: None,
+    )
+    assert calls == [0, 1, 2] and scan_all["target_reached"] is False, "target=0 → 扫完整个池"
+
+
+def test_report_scan_fields_and_provenance() -> None:
+    """report 新增 scan 字段（顶层同名键 + scan 块）；缺 scan 时 shuffle_seed 回退 provenance。"""
+    arrays = _report_arrays(n_trainable=3, n_zeroed=0)
+    scan = {"shuffle_seed": 7, "target_fails": 100, "scanned_specs": 42,
+            "fail_count": 3, "target_reached": False}
+    report = dg._build_report(
+        entries=[{"candidates": 10, "report": {"timing": {}, "window": None}}],
+        arrays=arrays, balance=_min_balance(), filter_counter=Counter(),
+        config={"window_fail_before": 0.0, "specs_path": "x"}, provenance={},
+        label_order=_LABELS8, kinematics_source="k", elapsed_s=0.1, scan=scan,
+    )
+    for key, value in scan.items():
+        assert report[key] == value, f"顶层缺少 scan 字段 {key}"
+    assert report["scan"] == scan
+    fallback = dg._build_report(
+        entries=[{"candidates": 10, "report": {"timing": {}, "window": None}}],
+        arrays=arrays, balance=_min_balance(), filter_counter=Counter(),
+        config={"window_fail_before": 0.0, "specs_path": "x"},
+        provenance={"shuffle_seed": 9}, label_order=_LABELS8, kinematics_source="k", elapsed_s=0.1,
+    )
+    assert fallback["shuffle_seed"] == 9 and fallback["scan"] == {}
+
+
+def test_make_dagger_pools_5k_mode(tmp_path: Path) -> None:
+    """``--mode pool5k``：5,000 条、∩eval/val=∅、spec 字段原样保留；合成小池走同一逻辑。"""
+    from env.scenario.spec import load_specs, save_specs
+
+    from tools import make_dagger_pools as pools
+
+    specs, provenance = pools.build_pool5k()
+    assert len(specs) == 5000 and provenance["count"] == 5000
+    assert provenance["isolation"]["scenarios_eval500.json"]["overlap"] == 0
+    assert provenance["isolation"]["scenarios_val.json"]["overlap"] == 0
+    source = {int(s.id): s.to_dict() for s in load_specs(pools.DEFAULT_TRAIN_REL)}
+    assert specs[0] == source[int(specs[0]["id"])], "spec 字段原样保留（不重采样）"
+
+    # CLI 写盘（/tmp）
+    out = tmp_path / "scenarios_train_5k.json"
+    assert pools.main(["--mode", "pool5k", "--out", str(out)]) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["count"] == 5000 and len(payload["specs"]) == 5000
+    assert payload["provenance"]["isolation"]["scenarios_val.json"]["overlap"] == 0
+
+    # 合成小池（root 参数）：交集 + 隔离断言同一逻辑
+    root = tmp_path / "synthetic"
+    (root / "env/specs").mkdir(parents=True)
+    (root / "ds").mkdir(parents=True)
+    smoke = list(load_specs("env/specs/scenarios_smoke16.json"))
+    train = smoke[:4]
+    save_specs(train, root / "env/specs/scenarios_train.json")
+    save_specs(smoke[5:7], root / "env/specs/scenarios_val.json")   # 先与池不相交
+    save_specs(smoke[7:8], root / "env/specs/scenarios_eval500.json")
+    (root / "ds/report.json").write_text(
+        json.dumps({"per_spec": [{"id": s.id, "seed": s.seed} for s in train[:3]]}), encoding="utf-8"
+    )
+    picked, prov = pools.build_pool5k(
+        train_rel="env/specs/scenarios_train.json", covered_by="ds", expect_count=3, root=root
+    )
+    assert [int(s["id"]) for s in picked] == [int(s.id) for s in train[:3]], "返回原始 spec dict（原样保留）"
+    assert prov["isolation"]["scenarios_val.json"]["overlap"] == 0
+    # 把全部 4 条纳入覆盖，并把 val 改成与池相交（train[1:3]）→ 隔离断言必须拦截
+    (root / "ds/report.json").write_text(
+        json.dumps({"per_spec": [{"id": s.id, "seed": s.seed} for s in train]}), encoding="utf-8"
+    )
+    save_specs(train[1:3], root / "env/specs/scenarios_val.json")
+    with pytest.raises(SystemExit, match="隔离失败"):
+        pools.build_pool5k(
+            train_rel="env/specs/scenarios_train.json", covered_by="ds", expect_count=4, root=root
+        )

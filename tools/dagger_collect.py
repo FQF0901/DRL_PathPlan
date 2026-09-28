@@ -769,10 +769,50 @@ def _chunk_tasks(specs: Sequence[Any], chunk_size: int, *, workers: int = 1) -> 
     return [indexed[start : start + size] for start in range(0, len(indexed), size)]
 
 
+def _scan_progress(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    fail_terminations: Sequence[str],
+    target_fails: int,
+) -> Dict[str, Any]:
+    """流式扫描进度（lane P3-A，纯函数）：已扫 spec 数 / 失败 episode 数 / 是否达目标。
+
+    ``summaries`` = 已完成的 chunk 摘要（``_summarize_records`` 产物）；失败判定 = 该 spec 的
+    ``report.termination`` ∈ ``fail_terminations``（``max_step``/``error`` 不计）。
+    """
+    fails = {str(item).strip().lower() for item in fail_terminations}
+    scanned = 0
+    fail_count = 0
+    for summary in summaries:
+        for entry in summary.get("specs", []) or []:
+            scanned += 1
+            termination = str((entry.get("report") or {}).get("termination", "")).strip().lower()
+            if termination in fails:
+                fail_count += 1
+    target = int(target_fails or 0)
+    return {
+        "scanned_specs": int(scanned),
+        "fail_count": int(fail_count),
+        "target_fails": target,
+        "target_reached": bool(target > 0 and fail_count >= target),
+    }
+
+
 def _run_dagger_workers(
-    specs: Sequence[Any], *, workers: int, config: Dict[str, Any], shard_dir: Path
-) -> List[Dict[str, Any]]:
-    """spawn 多核采集：静态分块 + ``Pool``（``maxtasksperchild`` 定期回收进程控 RSS）。"""
+    specs: Sequence[Any],
+    *,
+    workers: int,
+    config: Dict[str, Any],
+    shard_dir: Path,
+    target_fails: int = 0,
+    fail_terminations: Sequence[str] = (),
+    logger: Any = print,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """spawn 多核采集：静态分块 + ``Pool``；**按 chunk 顺序流式扫描**，失败数达 ``target_fails``
+    立即停止（不再跑后续 chunk；已完成 chunk 的分片保留）。返回 ``(summaries, scan)``。
+
+    ``target_fails<=0`` = 扫完整个池（旧行为，``target_reached=False``）。
+    """
     from multiprocessing import get_context
 
     ensure_gl_library_path()
@@ -781,11 +821,37 @@ def _run_dagger_workers(
         {"slot": index, "specs": chunk, "config": config, "shard_dir": str(shard_dir)}
         for index, chunk in enumerate(chunks)
     ]
+    summaries: List[Dict[str, Any]] = []
     if int(workers) <= 1:
-        return [_dagger_task(task) for task in tasks]
-    recycle = max(1, int(RECYCLE_EVERY_SPECS) // max(1, CHUNK_SPECS))
-    with get_context("spawn").Pool(processes=int(workers), maxtasksperchild=recycle) as pool:
-        return list(pool.map(_dagger_task, tasks, chunksize=1))
+        for task in tasks:
+            summaries.append(_dagger_task(task))
+            progress = _scan_progress(
+                summaries, fail_terminations=fail_terminations, target_fails=target_fails
+            )
+            if progress["target_reached"]:
+                break
+    else:
+        recycle = max(1, int(RECYCLE_EVERY_SPECS) // max(1, CHUNK_SPECS))
+        pool = get_context("spawn").Pool(processes=int(workers), maxtasksperchild=recycle)
+        try:
+            for summary in pool.imap(_dagger_task, tasks, chunksize=1):  # 有序：与静态分块顺序一致
+                summaries.append(summary)
+                progress = _scan_progress(
+                    summaries, fail_terminations=fail_terminations, target_fails=target_fails
+                )
+                if progress["target_reached"]:
+                    break
+        finally:
+            pool.terminate()  # 达目标/异常：不再跑剩余 chunk（未完成 chunk 的分片不被合并）
+            pool.join()
+    scan = _scan_progress(
+        summaries, fail_terminations=fail_terminations, target_fails=target_fails
+    )
+    logger(
+        f"[dagger] 流式扫描：已扫 {scan['scanned_specs']} 条 spec · 失败 {scan['fail_count']} 个"
+        f"（目标 {scan['target_fails']}，{'已达 → 提前收尾' if scan['target_reached'] else '未达/未启用'}）"
+    )
+    return summaries, scan
 
 
 # --------------------------------------------------------------------------- #
@@ -897,21 +963,33 @@ def _select_specs(args: argparse.Namespace) -> Tuple[List[Any], Dict[str, Any]]:
     if not path.is_file():
         raise SystemExit(f"[dagger] spec 池不存在：{path}")
     specs = list(load_specs(str(path)))
-    if int(getattr(args, "limit", 0) or 0):
-        specs = specs[: int(getattr(args, "limit"))]
     if not specs:
-        raise SystemExit(f"[dagger] 场景池为空（检查 --specs {path} / --limit）")
+        raise SystemExit(f"[dagger] 场景池为空（检查 --specs {path}）")
+    # 隔离守卫按**全池**校验（shuffle/limit 之前的加载集）
     guard = assert_no_eval_val_overlap(specs, context=f"pool:{path}")
+    pool_specs = int(len(specs))
+    # lane P3-A：先 shuffle 后截断（--limit 与 --target-fails 以先到者为准）
+    shuffle_seed = int(getattr(args, "shuffle_seed", 0) or 0)
+    if shuffle_seed > 0:
+        order = np.random.default_rng(shuffle_seed).permutation(pool_specs)
+        specs = [specs[int(index)] for index in order]
+    limit = int(getattr(args, "limit", 0) or 0)
+    if limit:
+        specs = specs[:limit]
     provenance: Dict[str, Any] = {
         "source": f"specs:{path}",
         "spec_source": str(path),
         "specs_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "pool_specs": int(len(specs)),
+        "pool_specs": pool_specs,
+        "scan_pool_specs": int(len(specs)),
+        "shuffle_seed": int(shuffle_seed),
+        "limit": int(limit),
         "isolation_guard": guard,
     }
     print(
-        f"[dagger] 场景池 {path} → {len(specs)} spec（sha256={provenance['specs_sha256'][:12]}；"
-        f"隔离守卫：与 eval/val 交集 = {guard['overlap']} ✓）",
+        f"[dagger] 场景池 {path} → {pool_specs} spec（sha256={provenance['specs_sha256'][:12]}；"
+        f"隔离守卫：与 eval/val 交集 = {guard['overlap']} ✓；shuffle_seed={shuffle_seed} → "
+        f"本次扫描上限 {len(specs)} 条）",
         flush=True,
     )
     return specs, provenance
@@ -1000,8 +1078,13 @@ def _build_report(
     kinematics_source: str,
     elapsed_s: float,
     shard_write_s: float = 0.0,
+    scan: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """与 collect_expert 同键的 report（计数/加权双口径 + dataset_gate），外加 DAgger 协议块。"""
+    """与 collect_expert 同键的 report（计数/加权双口径 + dataset_gate），外加 DAgger 协议块。
+
+    ``scan``（lane P3-A）：流式扫描结果（``shuffle_seed``/``target_fails``/``scanned_specs``/
+    ``fail_count``/``target_reached``）→ 顶层同名键 + ``scan`` 块（provenance 亦带 shuffle_seed）。
+    """
     train_weight = np.asarray(arrays["train_weight"], dtype=np.float64)
     effective = train_weight * np.asarray(arrays["balance_weight"], dtype=np.float64)
     positive = np.asarray(arrays["labels"]) > 0.5
@@ -1040,6 +1123,12 @@ def _build_report(
         "provenance": provenance,
         "kinematics_source": str(kinematics_source),
         "elapsed_s": round(float(elapsed_s), 3),
+        # lane P3-A：流式扫描（shuffle / target-fails）——顶层同名键便于消费
+        "shuffle_seed": int((scan or {}).get("shuffle_seed", provenance.get("shuffle_seed", 0)) or 0),
+        "target_fails": int((scan or {}).get("target_fails", 0) or 0),
+        "scanned_specs": int((scan or {}).get("scanned_specs", 0) or 0),
+        "fail_count": int((scan or {}).get("fail_count", 0) or 0),
+        "target_reached": bool((scan or {}).get("target_reached", False)),
         "total_candidate_steps": total_candidates,
         "stored_rows": stored_rows,
         "retained_steps": trainable_rows,
@@ -1080,6 +1169,7 @@ def _build_report(
         "per_spec": [entry["report"] for entry in entries],
         "window": _aggregate_window(entries, window_s=float(config.get("window_fail_before") or 0.0)),
         "timing": _aggregate_timing(entries, shard_write_s=shard_write_s),
+        "scan": dict(scan or {}),
         "config": dict(config),
         "dataset_gate": {
             "bc_retained_step_yield": {
@@ -1131,7 +1221,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="学生动作执行器（默认 lqr = 评测闭环协议；exact = 运动学精确执行）")
     parser.add_argument("--workers", type=int, default=4, help="spawn worker 数（多核；默认 4）")
     parser.add_argument("--max-steps", type=int, default=600, help="单 episode 最大 env step（默认 600）")
-    parser.add_argument("--limit", type=int, default=0, help="调试：spec 数上限（0=全部）")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="调试：spec 数上限（0=全部；**shuffle 之后**截断；与 --target-fails 先到者为准）")
+    parser.add_argument("--target-fails", type=int, default=1000,
+                        help="流式扫描目标失败数（默认 1000；>0 生效：按扫描顺序处理，失败 episode 数达 N "
+                             "立即停止并优雅收尾；0 = 关闭，扫完整个池）")
+    parser.add_argument("--shuffle-seed", type=int, default=0,
+                        help="扫描顺序：0/缺省 = 池原始顺序；>0 = numpy.default_rng(k) 无放回打乱（每轮换 k）")
     parser.add_argument("--device", type=str, default=None, help="策略运行设备（默认取 config train.device）")
     parser.add_argument("--model-config", type=str, default="config/model.yaml")
     parser.add_argument("--config", type=str, default="config/default.yaml")
@@ -1208,9 +1304,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     shard_dir = out / SHARD_DIRNAME
     if shard_dir.exists():
         shutil.rmtree(shard_dir, ignore_errors=True)
-    summaries = _run_dagger_workers(
-        specs, workers=max(1, int(args.workers)), config=worker_config, shard_dir=shard_dir
+    summaries, scan = _run_dagger_workers(
+        specs,
+        workers=max(1, int(args.workers)),
+        config=worker_config,
+        shard_dir=shard_dir,
+        target_fails=int(args.target_fails or 0),
+        fail_terminations=fail_terminations,
+        logger=print,
     )
+    scan["shuffle_seed"] = int(provenance.get("shuffle_seed", 0) or 0)
     entries, stored_rows, missing = _spec_entries(summaries, len(specs))
     if missing:
         print(f"[dagger] 警告：{len(missing)} 条 spec 无产出（worker 崩溃）：{missing[:8]}", flush=True)
@@ -1242,6 +1345,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         kinematics_source=kinematics_source,
         elapsed_s=time.perf_counter() - started,
         shard_write_s=float(sum(float(item.get("shard_write_s", 0.0)) for item in summaries)),
+        scan=scan,
+    )
+    provenance.update(
+        {key: scan[key] for key in ("shuffle_seed", "target_fails", "scanned_specs", "fail_count", "target_reached")}
     )
     pathological_total = {
         key: int(sum(int((entry["report"].get("pathological") or {}).get(key, 0)) for entry in entries))
@@ -1276,6 +1383,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "max_steps": int(args.max_steps),
         "window": report["window"],
         "timing": report["timing"],
+        "scan": dict(report["scan"]),
         "rows": int(stored_rows),
         "episodes": int(len([entry for entry in entries if int(entry["rows"]) > 0])),
         "filter_counts": dict(filter_counter),
@@ -1315,6 +1423,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flush=True,
     )
     print(f"[dagger] DONE → {out}（rows={stored_rows}，episodes={dagger['episodes']}，"
+          f"scanned={report['scanned_specs']} specs / fails={report['fail_count']}"
+          f"（target={report['target_fails']}，reached={report['target_reached']}），"
           f"elapsed={dagger['elapsed_s']:.1f}s）", flush=True)
     return 0
 
