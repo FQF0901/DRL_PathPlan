@@ -166,6 +166,7 @@ def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, A
 _SLIM_DIRECT: Dict[str, str] = {
     f"{_TRAIN_PREFIX}/wm_loss": "loss/wm",
     f"{_TRAIN_PREFIX}/wm_loss_od": "loss/od",
+    f"{_TRAIN_PREFIX}/wm_loss_ld": "loss/ld",   # lane P3-F：stage A 未来 LD 直接多步（恢复监督）
     f"{_TRAIN_PREFIX}/wm_loss_ego_next": "loss/ego_next",
     f"{_TRAIN_PREFIX}/wm_loss_presence": "loss/presence",
     f"{_TRAIN_PREFIX}/wm_loss_entry": "loss/entry",

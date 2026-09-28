@@ -69,8 +69,11 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["val_valid_samples"] > 0
     assert metrics["val_valid_weight_sum"] > 0.0
 
-    # 规格：未来 LD 损失移除；presence/entry 可用（新 net 有对应头）
-    assert metrics["ld_loss"] == "removed"
+    # 规格（lane P3-F）：未来 LD 监督恢复（direct_multi_step，与 OD 同构）；presence/entry 可用
+    assert metrics["ld_loss"] == "direct_multi_step"
+    assert metrics["ld_coef"] == 1.0
+    assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0
+    assert np.isfinite(metrics["val_loss_ld"])
     assert metrics["presence_available"] == 1.0
     assert np.isfinite(metrics["presence_auc"]) or np.isnan(metrics["presence_auc"])
     assert np.isfinite(metrics["presence_pos_rate"])
@@ -81,7 +84,7 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["dataset/weight_min"] == 0.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("loss/wm", "loss/od", "loss/ego_next", "loss/presence", "loss/entry",
+    for tag in ("loss/wm", "loss/od", "loss/ld", "loss/ego_next", "loss/presence", "loss/entry",
                 "val/od/ade_m/h1", "val/od/fde_m/h1", "val/od/ade_m/cv_h1", "val/od/fde_m/cv_h1",
                 "val/ego/action/err_weighted", "val/ego/traj/mae_m/h1", "val/ego/traj/fde_m"):
         assert tag in tags, f"Stage A 监控序列缺失：{tag}"

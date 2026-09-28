@@ -1233,7 +1233,7 @@ def weighted_od_multi_step_loss(
     valid: Optional["torch.Tensor"] = None,
     beta: float = 1.0,
 ) -> Tuple["torch.Tensor", List[Dict[str, float]]]:
-    """v2 加权直接多步 **OD** 损失（阶段 A；LD 目标按规格移除）。
+    """v2 加权直接多步 **OD** 损失（阶段 A；LD 用同构的 ``weighted_ld_multi_step_loss``，lane P3-F）。
 
     与 ``net.world_model.direct_multi_step_loss`` 的差别是**显式加权**：
 

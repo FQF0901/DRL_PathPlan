@@ -34,7 +34,8 @@ v2 数据流（mem-bank + 递归 rollout + plan-head MoE）
 ``action_mu/action_logstd (B,2)``、``value (B,1)``、``traj_xy (B,6,2)``、``plan (B,6,2)``
 （rollout 实际执行的 6 个动作，``plan[:,0] == action_mu``）、``router_logits (B,8)``、
 ``expert_weights (B,8)``、``latent (B,H)``；另含 ``od_pred (B,6,16,5)``、
-``ld_pred (B,6,16,4)``（LD 预测只作 rollout 输入/诊断，**未来 LD 监督已移除**）、
+``ld_pred (B,6,16,4)``（LD 预测作 rollout 输入/诊断 + **未来 LD 监督已恢复**：stage A
+``direct_multi_step``（``ld_fut`` 前 4 维；lane P3-F），stage B phase 3 亦监督）、
 ``od_presence_pred (B,6,16)``、``od_entry_pred (B,6,16)``（logits）、``traj_theta (B,6)``。
 
 ``forward(..., rollout=False, world_model=False)`` 是 PPO cheap path：省略

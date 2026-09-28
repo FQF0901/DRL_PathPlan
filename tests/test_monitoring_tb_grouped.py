@@ -77,6 +77,7 @@ def test_slim_tag_renames_retained_and_drops_removed() -> None:
     expected = {
         "train/wm_loss": "loss/wm",
         "train/wm_loss_od": "loss/od",
+        "train/wm_loss_ld": "loss/ld",
         "train/wm_loss_ego_next": "loss/ego_next",
         "train/wm_loss_presence": "loss/presence",
         "train/wm_loss_entry": "loss/entry",

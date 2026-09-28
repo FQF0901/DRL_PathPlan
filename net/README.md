@@ -29,7 +29,8 @@
   当前帧 `ego/od/ld/others/nav/signal` 可选（作为回退/上下文 token）。
 - 输出：`action_mu/action_logstd (2)`、`value (1)`、`traj_xy (6,2)`（t=0.5..3.0 s，t0 自车系）、
   `plan (6,2)`（rollout 实际执行的 6 个动作，`plan[:,0] == action_mu`）、
-  `od_pred (6,16,5)`、`ld_pred (6,16,4)`（LD 只作输入/诊断，**无未来 LD 监督**）、
+  `od_pred (6,16,5)`、`ld_pred (6,16,4)`（LD 作输入/诊断 + **未来 LD 监督已恢复**：
+  stage A `direct_multi_step`（`ld_fut` 前 4 维）+ stage B phase 3）、
   `od_presence_pred (6,16)`、`od_entry_pred (6,16)`（logits）、`router_logits (8)`、
   `expert_weights (8)`（top-2 分布）、`latent (H)`。
 - `forward(..., rollout=False, world_model=False)` 为 PPO cheap path：省略 traj/多步预测键，

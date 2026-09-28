@@ -5,11 +5,13 @@
 - **A = world model 训练（教师强制）**：ego 条件 = 专家 GT 动作序列 + **目标帧真实 ego**
   （``build_future.ego_fut``，退回解析运动学）；目标 = ``(episode_id, base+5k)`` 精确查表
   的未来 OD 帧（对齐到 t0、``od_id`` 身份匹配、``wm_valid`` 门控）。
-  **直接多步 OD 损失**（``train_weight × wm_valid`` 显式加权）+ **plan head ``ego_next``
+  **直接多步 OD 损失**（``train_weight × wm_valid`` 显式加权）+ **未来 LD 直接多步损失**
+  （lane P3-F 恢复：LD 属 WM，在 A 学会；``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid`` 掩码，
+  与 OD 同构；权重 ``stages.A.world_model.ld_coef``）+ **plan head ``ego_next``
   监督**（方案①：每步挤入 GT 帧前用同一 mem 预测第 k 帧 ego 前 6 维，plan head/MoE 因此在
   A 阶段有梯度，design-v1.2 §2.3）+ **presence/entry BCE + AUC（id 轴，见
-  :func:`presence_entry_targets`）**；**未来 LD 损失已移除**。
-  监控（Tier-1，lane B）：``loss/wm|od|ego_next|presence|entry``（训练目标分解，宏 batch 均值）+
+  :func:`presence_entry_targets`）**。
+  监控（Tier-1，lane B）：``loss/wm|od|ld|ego_next|presence|entry``（训练目标分解，宏 batch 均值）+
   OD KPI ``val/od/ade_m|fde_m/h*``（含 ``cv_h*`` 匀速基线）+ ``val/od/presence_auc|entry_auc`` +
   ego KPI ``val/ego/action/err_weighted`` / ``val/ego/traj/mae_m/h*`` / ``val/ego/traj/fde_m``；
   val 口径 loss 曲线/有效样本计数等已移除（``docs/metrics.md``）。
@@ -98,6 +100,7 @@ from pipeline.trainer import (  # noqa: E402
     to_device_tensor,
     to_device_tensors,
     trim_memory,
+    weighted_ld_multi_step_loss,
     weighted_od_multi_step_loss,
 )
 
@@ -1071,10 +1074,12 @@ class FrameWindows:
 # 墙钟 >95%（batch=256 时 Stage A ~0.44 s vs GPU 前反向 5–15 ms）。物化后循环内只做
 # numpy 切片 + pin/non-blocking H2D（`MaterializedBCDataset` 见 pipeline.trainer）。
 
-#: Stage A 未来目标物化保留的键（Stage A 只消费这些：LD 损失已移除、od_mask_raw 仅内部诊断）
+#: Stage A 未来目标物化保留的键（Stage A 消费：OD/LD 多步 + presence/entry + ego_next；od_mask_raw 仅内部诊断）
 _MATERIALIZED_FUTURE_KEYS: Tuple[str, ...] = (
     "od_fut",
+    "ld_fut",
     "od_mask",
+    "ld_mask",
     "wm_valid",
     "valid",
     "ego_fut",
@@ -1084,11 +1089,9 @@ _MATERIALIZED_FUTURE_KEYS: Tuple[str, ...] = (
     "od_id_t0",
 )
 
-#: stage B phase 3（lane P3-B）未来目标物化键：A 的键 + LD 恢复监督 + presence/entry 目标
-#: + 多步动作链（见 :func:`phase3_action_chain_targets`）。
+#: stage B phase 3（lane P3-B）未来目标物化键：A 的键 + presence/entry 目标 + 多步动作链
+#: （见 :func:`phase3_action_chain_targets`；LD 键已并入 A 的 :data:`_MATERIALIZED_FUTURE_KEYS`）。
 _PHASE3_FUTURE_KEYS: Tuple[str, ...] = _MATERIALIZED_FUTURE_KEYS + (
-    "ld_fut",
-    "ld_mask",
     "presence_target",
     "entry_target",
     "action_chain",
@@ -1519,6 +1522,12 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         if args.wm_ego_next_coef is not None
         else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ego_next_coef", 0.1)
     )
+    # lane P3-F：未来 LD 监督恢复（LD 属 WM，应在 A 学会）——权重与 od 同量级（od 隐式 1.0）
+    ld_coef = float(
+        args.wm_ld_coef
+        if args.wm_ld_coef is not None
+        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ld_coef", 1.0)
+    )
     presence_state = {"available": 0.0, "warning": False}
 
     def _to_tensor(batch: Mapping[str, np.ndarray]) -> Dict[str, "torch.Tensor"]:
@@ -1687,17 +1696,21 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         """宏/micro 口径的损失分母（纯数据计算，无需前向）。
 
         - ``od``：``Σ w·valid·od_mask``（= ``weighted_od_multi_step_loss`` 的分母）；
+        - ``ld``：``Σ w·valid·ld_mask``（= ``weighted_ld_multi_step_loss`` 的分母；lane P3-F）；
         - ``step``：``Σ w·valid``（= ``ego_next`` 的 ``step_weight`` 分母）；
         - ``presence``：``step × 槽位数``（= presence/entry BCE 的分母口径）。
         """
         wm_valid = np.asarray(future["wm_valid"], dtype=np.float64)
         od_mask = np.asarray(future["od_mask"], dtype=np.float64)
+        ld_mask = np.asarray(future["ld_mask"], dtype=np.float64)
         weight = np.asarray(frame_weight_np, dtype=np.float64).reshape(-1, 1)
         od_weight = od_mask * wm_valid[:, :, None] * weight[:, :, None]
+        ld_weight = ld_mask * wm_valid[:, :, None] * weight[:, :, None]
         step_weight = weight * wm_valid
         slots = int(od_mask.shape[-1]) if od_mask.ndim >= 2 else 0
         return {
             "od": float(od_weight.sum()),
+            "ld": float(ld_weight.sum()),
             "step": float(step_weight.sum()),
             "presence": float(step_weight.sum()) * float(slots),
         }
@@ -1774,9 +1787,20 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             frame_weight=frame_weight,
             valid=wm_valid,
         )
+        # lane P3-F：未来 LD 监督恢复（与 OD 同构：smooth_l1[0,1,3] + 1-cos[2]；
+        # 目标 = ``ld_fut`` 前 4 维（LD 预测空间 [dx,dy,heading,curvature]），掩码/valid 同 OD）
+        ld_loss, ld_per_horizon = weighted_ld_multi_step_loss(
+            predictions["ld_pred"],
+            _tensor(future["ld_fut"])[..., :4],
+            _tensor(future["ld_mask"]),
+            frame_weight=frame_weight,
+            valid=wm_valid,
+        )
         terms: Dict[str, Any] = {
             "od": od_loss,
+            "ld": ld_loss,
             "per_horizon": od_per_horizon,
+            "ld_per_horizon": ld_per_horizon,
             "od_pred": od_pred,
             "future": future,
             "frame_weight": frame_weight,
@@ -1847,6 +1871,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         if scales:
             # 梯度累积：把 micro 损失缩放到宏 batch 口径（MicroNum/MacroDen = L_micro·(Den_micro/Den_macro)）
             terms["od"] = terms["od"] * float(scales["od"])
+            terms["ld"] = terms["ld"] * float(scales["ld"])
             if "ego_next" in terms:
                 terms["ego_next"] = terms["ego_next"] * float(scales["step"])
             if "presence" in terms:
@@ -1854,7 +1879,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 terms["entry"] = terms["entry"] * float(scales["presence"])
                 terms["presence_auc"] = float("nan")
                 terms["entry_auc"] = float("nan")
-        total = terms["od"]
+        total = terms["od"] + ld_coef * terms["ld"]
         if "ego_next" in terms:
             total = total + ego_next_coef * terms["ego_next"]
         if "presence" in terms:
@@ -1913,6 +1938,11 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             slot_count = float(w_k.sum())
             per_horizon[f"h{k + 1}"] = {
                 "loss": float(terms["per_horizon"][k]["loss"].detach()) if slot_count > 0.0 else float("nan"),
+                "ld_loss": (
+                    float(terms["ld_per_horizon"][k]["loss"].detach())
+                    if float(terms["ld_per_horizon"][k]["weight"]) > 0.0
+                    else float("nan")
+                ),
                 "model_ade": float(model_ade_k),
                 "model_fde": float(model_fde_k),
                 "cv_ade": float(cv_ade_k),
@@ -1931,6 +1961,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         return {
             "eval_loss": float(terms["total"]),
             "eval_od_loss": float(terms["od"]),
+            "eval_ld_loss": float(terms["ld"]),
             "ego_next_loss": float(terms["ego_next"]) if "ego_next" in terms else float("nan"),
             "ego_next_available": bool(terms.get("ego_next_available", False)),
             "presence_loss": float(terms["presence"]) if "presence" in terms else float("nan"),
@@ -1988,8 +2019,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "presence_coef": presence_coef,
         "entry_coef": entry_coef,
         "ego_next_coef": ego_next_coef,
+        "ld_coef": ld_coef,
         "presence_entry_axis": "id",
-        "ld_loss": "removed",  # 规格：阶段 A 不再监督未来 LD
+        # lane P3-F：未来 LD 监督恢复（LD 属 WM；目标 = ld_fut 前 4 维，与 od 同构直接多步）
+        "ld_loss": "direct_multi_step",
         "materialize": bool(obs_source is not None),
         "fast_data": bool(obs_source is not None and future_source is not None),
         "ckpt_every": ckpt_every,
@@ -2032,7 +2065,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     for epoch in range(start_epoch, epochs):
         order = rng.permutation(train_idx)
         totals: Dict[str, float] = {
-            "total": 0.0, "od": 0.0, "presence": 0.0, "entry": 0.0, "ego_next": 0.0
+            "total": 0.0, "od": 0.0, "ld": 0.0, "presence": 0.0, "entry": 0.0, "ego_next": 0.0
         }
         batches = 0
         data_seconds = forward_seconds = backward_seconds = 0.0
@@ -2057,6 +2090,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 backward_seconds += time.perf_counter() - backward_started
                 totals["total"] += float(terms["total"].detach())
                 totals["od"] += float(terms["od"].detach())
+                totals["ld"] += float(terms["ld"].detach())
                 if "ego_next" in terms:
                     totals["ego_next"] += float(terms["ego_next"].detach())
                 if "presence" in terms:
@@ -2094,6 +2128,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                     backward_seconds += time.perf_counter() - backward_started
                     totals["total"] += float(terms_m["total"].detach())
                     totals["od"] += float(terms_m["od"].detach())
+                    totals["ld"] += float(terms_m["ld"].detach())
                     if "ego_next" in terms_m:
                         totals["ego_next"] += float(terms_m["ego_next"].detach())
                     if "presence" in terms_m:
@@ -2125,6 +2160,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "last_epoch": epoch + 1,
                 "wm_loss": train_loss,
                 "wm_loss_od": totals["od"] / max(1, batches),
+                "wm_loss_ld": totals["ld"] / max(1, batches),
                 "wm_loss_ego_next": totals["ego_next"] / max(1, batches),
                 "wm_loss_presence": totals["presence"] / max(1, batches),
                 "wm_loss_entry": totals["entry"] / max(1, batches),
@@ -2135,6 +2171,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "loss_curve": list(loss_curve),
                 "val_loss": eval_metrics["eval_loss"],
                 "val_loss_od": eval_metrics["eval_od_loss"],
+                "val_loss_ld": eval_metrics["eval_ld_loss"],
                 "presence_available": float(presence_state["available"]),
                 "presence_loss": eval_metrics["presence_loss"],
                 "entry_loss": eval_metrics["entry_loss"],
@@ -2162,6 +2199,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             train_payload: Dict[str, Any] = {
                 "wm_loss": train_loss,
                 "wm_loss_od": metrics["wm_loss_od"],
+                "wm_loss_ld": metrics["wm_loss_ld"],
                 "wm_loss_ego_next": metrics["wm_loss_ego_next"],
                 "wm_loss_presence": metrics["wm_loss_presence"],
                 "wm_loss_entry": metrics["wm_loss_entry"],
@@ -2189,6 +2227,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             monitor.flush(step=epoch + 1)
         print(
             f"[stageA] epoch {epoch + 1}/{epochs} loss={train_loss:.4f} val={eval_metrics['eval_loss']:.4f} "
+            f"od={metrics['wm_loss_od']:.4f} ld={metrics['wm_loss_ld']:.4f} "
             f"ADE(WM/CV)={eval_metrics['model_ade']:.3f}/{eval_metrics['cv_ade']:.3f} "
             f"FDE={eval_metrics['model_fde']:.3f}/{eval_metrics['cv_fde']:.3f} "
             f"presence_avail={int(presence_state['available'])} "
@@ -3625,6 +3664,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--wm-ego-next-coef", type=float, default=None,
                         help="阶段 A plan head ego_next 监督权重（默认取 config "
                              "stages.A.world_model.ego_next_coef=0.1；plan head/MoE 的唯一梯度来源）")
+    parser.add_argument("--wm-ld-coef", type=float, default=None,
+                        help="阶段 A 未来 LD 直接多步损失权重（默认取 config "
+                             "stages.A.world_model.ld_coef=1.0，与 od 同量级；lane P3-F 恢复监督）")
     # ---- 阶段 B ----
     parser.add_argument("--bc-epochs", type=int, default=None, help="阶段 B 总轮数（默认 config/stages.B.bc.epochs=10）")
     parser.add_argument("--bc-phase-split", type=float, default=None,
