@@ -303,7 +303,7 @@ obs fingerprint `v2-6a4d5de3f669`）。相对 §9 的变化：**schema v2 观测
 
 ```bash
 bash tools/train.sh                                                                # Stage A（20 epochs；data/epochs/batch 全在 config/train.yaml）
-RESUME=runs/BTC20260927-0920_stageA/stage_a/ckpt_epoch010.pt bash tools/train.sh   # 被杀后从 epoch 10 续跑 11–20
+RESUME=<run>/stage_a/ckpt_epoch010.pt bash tools/train.sh   # 被杀后从 epoch 10 续跑 11–20
 STAGE=B bash tools/train.sh                                                        # Stage B（primary 10 + specific 10）
 bash tools/test.sh    # 评测（50 条 val slice + lqr）；POLICY=baseline bash tools/test.sh 复现冻结基线
 ```
@@ -350,9 +350,8 @@ intersection 0.25、roundabout 0.25；curve / uturn / tollgate 仍 **0.00**（to
    后台长任务改为 `setsid` 分离 + 每阶段单日志（`[detach]`/`[exit]` 证据行）。
    **存活验证（2026-09-27）**：`setsid` 分离的金丝雀连续运行 **75.0 min**（>历史 ~64 min 杀点）零中断
    （101 ticks、最大间隔 45 s）→ 根因修复确认（harness 只清理自身作业进程组，独立会话不受影响）。
-5. 产物：`runs/BTC20260927-0920_stageA`（A 1–10）+ `runs/BTC20260927-1019_stageA_p4`（A 11–20）、
-   `runs/BTC20260927-1100_stageB`（B）、`runs/BTC20260927-1147_eval_lqr50`、`runs/BTC20260927-1149_eval_baseline50`、
-   报告 `runs/BTC20260927-1150_ilreport_5k`（`il_report.md/json` + 11 张 PNG）。
+5. 产物（**旧计划，已随 2026-09-28 清理删除**）：`runs/BTC20260927-0920_stageA` / `…-1019_stageA_p4` / `…-1100_stageB`、
+   `…-1147/1149` 评测、`…-1150_ilreport_5k` 报告。当前在用产物见 §11。
 
 ## 11. 去聚类 + MoE 负载均衡 + DAgger v2 迭代（2026-09-27/28；含事故更正与 v2 三轮结果）
 
@@ -459,11 +458,9 @@ v2 期间修复（均带回归测试，先复现后修复）：
 3. **未解决**：tollgate（0.04）、curve（0.09）偏低；速度偏慢（0.456 vs 基线 0.73）；collision 上升（0.030→0.056）⚠。
 4. 采集成本极低（~7 min/轮）→ 该机制可常态化复用；**唯一纪律 = 只允许 train spec 生成训练数据（硬隔离守卫）**。
 
-产物（v2）：采集 `datasets/BTC20260928-1006_dagger_r1`（5935 行）/ `BTC20260928-1109_dagger_r2`（5355）/ `BTC20260928-1154_dagger_r3`（4957）；
-训练 `runs/BTC20260928-1033_stageB_phase2b_r1` / `BTC20260928-1117_stageB_phase2b_r2` / `BTC20260928-1202_stageB_phase2b_r3`；
-评测 `runs/BTC20260928-1102_eval500_phase2b_r1` / `BTC20260928-1147_eval500_phase2b_r2` / `BTC20260928-1232_eval500_phase2b_r3`。
-干净基线：`runs/BTC20260927-2202_eval500_phase1`、`runs/BTC20260927-2209_eval500_phase2`、`runs/BTC20260927-1019_stageA_p4/stage_b`（`primary.pt` / `final.phase2.pt` / `metrics.phase2.json`）。
-作废留档：`runs/BTC20260928-*_eval500_phase2b_v1*_void`（仅事故追溯）。
+产物（v2，**2026-09-28 清理后现状**）：采集 `datasets/BTC20260928-1006_dagger_r1`（5935 行）/ `BTC20260928-1109_dagger_r2`（5355）/ `BTC20260928-1154_dagger_r3`（4957）；
+训练/评测目录（phase2b 轮 r1–r3）与 v1 `_void` 留档已随清理删除（数字保留于本表）。
+干净基线（保留）：`runs/BTC20260927-2202_eval500_phase1`、`runs/BTC20260927-2209_eval500_phase2`（另保留规则基线 `runs/BTC20260927-1839_eval500_baseline`）。
 
 ## 7. 口径与注意事项
 
