@@ -10,7 +10,9 @@
 ⑦ ``--val-dir``：train 行数 = train-dir 全部行、val 行数 = val-dir 全部行；
 ⑧ 端到端：phase 1 → 冻结 → phase 2（MoE 开 + 权重 + 负载指标）+ ``--dagger-dir`` 行合并（权重 1.0）；
 ⑨ **lane U4**：DAgger 行 traj-aux 逐行掩码（掩码行对 traj 损失贡献 = 0、非掩码行照旧、
-   `_merge_dagger_rows` 掩码与 merged 行序对齐、掩码全 1 ≡ 无掩码）。
+   `_merge_dagger_rows` 掩码与 merged 行序对齐、掩码全 1 ≡ 无掩码）；
+⑩ **lane U5**：多份 `--dagger-dir` 合并（episode_id 累积偏移 / 掩码全 0 / info 逐份行数）
+   + 防线（dagger 记录的 spec 来源命中 eval/val → SystemExit）。
 """
 
 from __future__ import annotations
@@ -519,7 +521,7 @@ def test_merge_dagger_rows_traj_mask_alignment(tmp_path: Path) -> None:
     worst[: n_main // 2] = 1.0
 
     merged, merged_idx, merged_worst, traj_valid, info = _merge_dagger_rows(
-        main, np.arange(n_main, dtype=np.int64), worst, str(dagger_dir), logger=lambda _: None
+        main, np.arange(n_main, dtype=np.int64), worst, [str(dagger_dir)], logger=lambda _: None
     )
     assert merged.count == n_main + n_dagger
     assert len(traj_valid) == merged.count and merged_idx.size == merged.count, "长度对齐 merged 行序"
@@ -527,3 +529,70 @@ def test_merge_dagger_rows_traj_mask_alignment(tmp_path: Path) -> None:
     assert np.allclose(traj_valid[n_main:], 0.0), "DAgger 行 traj-aux = 0"
     assert info["traj_aux_masked_rows"] == n_dagger and info["dagger_rows"] == n_dagger
     assert np.allclose(merged_worst[n_main:], 1.0), "DAgger 行权重 = worst（1.0）"
+
+
+# ------------------------------------------- lane U5：多份 dagger 合并 + 隔离防线
+def test_merge_multiple_dagger_rows_cumulative_offsets_and_mask(tmp_path: Path) -> None:
+    """多份 `--dagger-dir`：episode_id 累积偏移、traj 掩码全 0、info 逐份行数、行序 = 主集→各份。"""
+    main_dir = tmp_path / "main"
+    write_v2_dataset(main_dir, episodes=4, steps_per_episode=6)
+    d1_dir = tmp_path / "dagger1"
+    write_v2_dataset(d1_dir, episodes=1, steps_per_episode=6)
+    d2_dir = tmp_path / "dagger2"
+    write_v2_dataset(d2_dir, episodes=2, steps_per_episode=6)
+    main = BCDataset.load(str(main_dir))
+    n_main = int(main.count)
+    n1 = int(BCDataset.load(str(d1_dir)).count)
+    n2 = int(BCDataset.load(str(d2_dir)).count)
+    worst = np.zeros(n_main, dtype=np.float32)
+    worst[: n_main // 2] = 1.0
+
+    merged, merged_idx, merged_worst, traj_valid, info = _merge_dagger_rows(
+        main, np.arange(n_main, dtype=np.int64), worst, [str(d1_dir), str(d2_dir)], logger=lambda _: None
+    )
+    assert merged.count == n_main + n1 + n2
+    assert len(traj_valid) == merged.count and merged_idx.size == merged.count
+    assert np.allclose(traj_valid[: n_main + n1 + n2], [1.0] * n_main + [0.0] * n1 + [0.0] * n2)
+    assert [item["rows"] for item in info["dagger_dirs"]] == [n1, n2]
+    assert info["dagger_rows"] == n1 + n2 and info["traj_aux_masked_rows"] == n1 + n2
+    # episode_id 累积偏移：各份的 episode 集合互不相交（行内重复是同一 episode 的多帧）
+    episodes = np.asarray(merged.arrays["episode_id"])
+    parts = [episodes[:n_main], episodes[n_main : n_main + n1], episodes[n_main + n1 :]]
+    assert len(np.unique(episodes)) == 4 + 1 + 2, "episode 总数 = 主集 4 + d1 1 + d2 2"
+    assert not (set(parts[0].tolist()) & set(parts[1].tolist()))
+    assert not (set(parts[1].tolist()) & set(parts[2].tolist()))
+    assert not (set(parts[0].tolist()) & set(parts[2].tolist()))
+    offsets = info["episode_id_offsets"]
+    assert offsets[1] > offsets[0], "第二份偏移必须大于第一份（累积）"
+    assert np.all(episodes[n_main : n_main + n1] >= offsets[0])
+    assert np.all(episodes[n_main + n1 :] >= offsets[1])
+    assert np.allclose(merged_worst[n_main:], 1.0)
+
+
+def test_merge_dagger_rows_defense_blocks_eval_spec_source(tmp_path: Path) -> None:
+    """防线：dagger 目录记录的 spec 来源命中 eval/val → SystemExit；来源缺失 → 仅警告。"""
+    main_dir = tmp_path / "main"
+    write_v2_dataset(main_dir, episodes=2, steps_per_episode=6)
+    main = BCDataset.load(str(main_dir))
+    worst = np.zeros(int(main.count), dtype=np.float32)
+
+    bad_dir = tmp_path / "dagger_eval_source"
+    write_v2_dataset(bad_dir, episodes=1, steps_per_episode=6)
+    (bad_dir / "report.json").write_text(
+        json.dumps({"provenance": {"spec_source": "env/specs/scenarios_eval500.json"}}), encoding="utf-8"
+    )
+    with pytest.raises(SystemExit, match="隔离守卫"):
+        _merge_dagger_rows(
+            main, np.arange(int(main.count), dtype=np.int64), worst, [str(bad_dir)], logger=lambda _: None
+        )
+
+    # 来源字段缺失 → 警告日志、不阻塞（返回正常 5 元组）
+    warn_dir = tmp_path / "dagger_no_source"
+    write_v2_dataset(warn_dir, episodes=1, steps_per_episode=6)
+    logged: list = []
+    merged, _, _, traj_valid, info = _merge_dagger_rows(
+        main, np.arange(int(main.count), dtype=np.int64), worst, [str(warn_dir)], logger=logged.append
+    )
+    assert merged.count > int(main.count) and float(np.sum(traj_valid)) == float(int(main.count))
+    assert info["isolation_guard"] == []
+    assert any("读不到 spec 来源" in str(line) for line in logged), "字段缺失必须留警告"

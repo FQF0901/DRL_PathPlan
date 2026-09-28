@@ -247,65 +247,129 @@ def _merge_dagger_rows(
     dataset: Any,
     train_idx: np.ndarray,
     worst_flags: Optional[np.ndarray],
-    dagger_dir: str,
+    dagger_dirs: Sequence[str],
     *,
     logger: Any = print,
 ) -> "tuple[Any, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]":
-    """lane U1：把 DAgger 数据集行并入 phase 2 训练集（其行权重 = 1.0，与 worst 行同权）。
+    """lane U1/U5：把**多份** DAgger 数据集行并入 phase 2 训练集（行权重 = 1.0，与 worst 行同权）。
 
-    - 同 schema 契约：DAgger 数据集必须覆盖主集的全部数组键（缺键 → ``SystemExit``）；
-    - ``episode_id`` 偏移（``max(train)+1``）避免与主集历史查表冲突（``(episode_id, step)``）；
-    - 返回 ``(merged_dataset, merged_train_idx, merged_worst_flags, traj_aux_valid, info)``：
-      merged 行 = ``[主集全部行, DAgger 全部行]``；DAgger 行 ``worst=1``（→ hard_weight）；
-    - **lane U4**：``traj_aux_valid``（长度 = merged 行数）主集行 = 1.0、DAgger 行 = **0.0**
-      —— DAgger 行的 ``traj6/traj30`` 是"常量动作外推"合成值，**不得进 traj-aux 损失**
-      （否则把 plan 教成过度转向）；action/负载损失与监控统计不受掩码影响。
+    - 同 schema 契约：每份都必须覆盖主集的全部数组键（缺键 → ``SystemExit``）；
+    - ``episode_id`` **累积偏移**（主集 max+1 起、逐份递增，互不冲突）；
+    - 返回 ``(merged, merged_train_idx, merged_worst, traj_aux_valid, info)``：
+      merged 行 = ``[主集全部行, dagger1 全部行, dagger2 全部行, …]``；dagger 行 ``worst=1``；
+    - **traj-aux 掩码（lane U4）**：``traj_aux_valid`` 主集 1.0 + **所有 dagger 行 0.0**
+      （dagger 的 ``traj6/traj30`` 是常量外推合成值，不得进 traj 损失）；
+    - **防线（lane U5）**：每份 dagger 目录若能从 ``report.json`` / ``expert_bc.meta.json``
+      读到 spec 来源，则校验其不含 eval/val（命中 → ``SystemExit``；字段缺失 → 警告日志）。
     """
-    from pipeline.trainer import BCDataset
+    from env.scenario.spec import load_specs
 
-    dagger = BCDataset.load(str(dagger_dir))
-    missing = [key for key in dataset.arrays if key not in dagger.arrays]
-    if missing:
-        raise SystemExit(
-            f"[stageB] --dagger-dir 与主集 schema 不一致（缺键 {missing[:6]}）→ 拒绝合并"
-            f"（DAgger 必须与 BC 同 schema；见 tools/dagger_collect.py）"
-        )
-    n_train, n_dagger = int(dataset.count), int(dagger.count)
-    offset = int(np.max(np.asarray(dataset.arrays["episode_id"]))) + 1
+    from pipeline.trainer import BCDataset
+    from tools.dagger_collect import (
+        _looks_like_eval_or_val,
+        assert_no_eval_val_overlap,
+        dagger_spec_sources,
+    )
+
+    dirs = [str(item) for item in (dagger_dirs or []) if str(item).strip()]
+    if not dirs:
+        raise SystemExit("[stageB] --dagger-dir 为空（应给至少一个 dagger 数据集目录）")
+    dagger_datasets: list = []
+    per_dir: list = []
+    guard_records: list = []
+    for dagger_dir in dirs:
+        # 防线：spec 来源可读 → 过隔离守卫；不可读 → 警告（不阻塞，但留痕）
+        sources = dagger_spec_sources(dagger_dir)
+        if not sources:
+            logger(
+                f"[stageB] 警告：DAgger 目录 {dagger_dir} 读不到 spec 来源"
+                "（report.json/expert_bc.meta.json 缺字段）→ 无法校验隔离，请自行确认为 train spec 数据"
+            )
+        for source in sources:
+            path = Path(str(source))
+            if path.is_file():
+                guard_records.append(
+                    assert_no_eval_val_overlap(
+                        list(load_specs(str(path))), context=f"dagger:{dagger_dir}:{source}"
+                    )
+                )
+            elif _looks_like_eval_or_val(source):
+                raise SystemExit(
+                    f"[stageB] DAgger 目录 {dagger_dir} 记录的 spec 来源疑似 eval/val：{source}"
+                    "（文件缺失无法复核）→ 拒绝合并（训练数据只允许取自 train spec）"
+                )
+            else:
+                logger(f"[stageB] 警告：DAgger 目录 {dagger_dir} 的 spec 来源不存在：{source}（跳过隔离校验）")
+        dagger = BCDataset.load(dagger_dir)
+        missing = [key for key in dataset.arrays if key not in dagger.arrays]
+        if missing:
+            raise SystemExit(
+                f"[stageB] --dagger-dir {dagger_dir} 与主集 schema 不一致（缺键 {missing[:6]}）→ 拒绝合并"
+                f"（DAgger 必须与 BC 同 schema；见 tools/dagger_collect.py）"
+            )
+        dagger_datasets.append(dagger)
+        per_dir.append({"path": dagger_dir, "rows": int(dagger.count)})
+
+    n_train = int(dataset.count)
+    # episode_id 累积偏移（主集 max+1 起，逐份递增）
+    offsets: list = []
+    running = int(np.max(np.asarray(dataset.arrays["episode_id"]))) + 1
+    for dagger in dagger_datasets:
+        offsets.append(int(running))
+        running += int(np.max(np.asarray(dagger.arrays["episode_id"]))) + 1
+
     merged_arrays: Dict[str, np.ndarray] = {}
     for key, value in dataset.arrays.items():
         left = np.asarray(value)
-        right = np.asarray(dagger.arrays[key])
-        if key == "episode_id":
-            right = right + offset
-        merged_arrays[key] = np.concatenate([left, right.astype(left.dtype)], axis=0)
+        parts = [left]
+        for dagger, offset in zip(dagger_datasets, offsets):
+            right = np.asarray(dagger.arrays[key])
+            if key == "episode_id":
+                right = right + int(offset)
+            parts.append(right.astype(left.dtype))
+        merged_arrays[key] = np.concatenate(parts, axis=0)
     merged = BCDataset(merged_arrays, dict(dataset.meta))
-    merged_train_idx = np.concatenate(
-        [np.asarray(train_idx, dtype=np.int64), np.arange(n_train, n_train + n_dagger, dtype=np.int64)]
-    )
-    base_worst = (
+
+    idx_parts = [np.asarray(train_idx, dtype=np.int64)]
+    worst_parts = [
         np.asarray(worst_flags, dtype=np.float32)
         if worst_flags is not None
         else np.full(n_train, -1.0, dtype=np.float32)
-    )
-    merged_worst = np.concatenate([base_worst, np.ones(n_dagger, dtype=np.float32)])
-    # lane U4：traj-aux 逐行掩码（主集 1 / DAgger 0）——DAgger 行只有首步动作标签，
-    # traj6/traj30 是常量外推合成值，进 traj 损失会教坏 plan（证据：G2 0.396 → 0.040 坍缩）。
-    traj_aux_valid = np.concatenate(
-        [np.ones(n_train, dtype=np.float32), np.zeros(n_dagger, dtype=np.float32)]
-    )
+    ]
+    valid_parts = [np.ones(n_train, dtype=np.float32)]
+    row_base = n_train
+    for index, (dagger, offset) in enumerate(zip(dagger_datasets, offsets)):
+        rows = int(dagger.count)
+        idx_parts.append(np.arange(row_base, row_base + rows, dtype=np.int64))
+        worst_parts.append(np.ones(rows, dtype=np.float32))
+        valid_parts.append(np.zeros(rows, dtype=np.float32))
+        per_dir[index]["episode_id_offset"] = int(offset)
+        per_dir[index]["row_base"] = int(row_base)
+        row_base += rows
+    merged_train_idx = np.concatenate(idx_parts)
+    merged_worst = np.concatenate(worst_parts)
+    traj_aux_valid = np.concatenate(valid_parts)
+    total_dagger = int(sum(int(dagger.count) for dagger in dagger_datasets))
     info = {
-        "dagger_dir": str(dagger_dir),
-        "dagger_rows": int(n_dagger),
-        "train_rows": int(n_train),
-        "episode_id_offset": int(offset),
+        "dagger_dirs": per_dir,
+        "dagger_rows": total_dagger,
+        "train_rows": n_train,
+        "episode_id_offset": int(offsets[0]),
+        "episode_id_offsets": [int(item) for item in offsets],
         "dagger_weight": 1.0,
-        "traj_aux_masked_rows": int(n_dagger),
+        "traj_aux_masked_rows": total_dagger,
+        "isolation_guard": guard_records,
     }
+    for item in per_dir:
+        logger(
+            f"[stageB] DAgger 行合并：{item['path']} → {item['rows']} 行"
+            f"（episode_id 偏移 +{item['episode_id_offset']}，merged 行 [{item['row_base']},"
+            f"{item['row_base'] + item['rows']})；权重 = 1.0）"
+        )
     logger(
-        f"[stageB] DAgger 行合并：主集 {n_train} + DAgger {n_dagger} = {n_train + n_dagger} 行"
-        f"（DAgger 行权重 = 1.0，与 worst 行同权；episode_id 偏移 +{offset}；"
-        f"traj-aux 掩码：DAgger {n_dagger} 行 = 0）"
+        f"[stageB] DAgger 合并汇总：主集 {n_train} + DAgger {total_dagger}（{len(dirs)} 份）= "
+        f"{n_train + total_dagger} 行；traj-aux 掩码：DAgger {total_dagger} 行 = 0"
+        f"；隔离守卫 {len(guard_records)} 项通过"
     )
     return merged, merged_train_idx, merged_worst, traj_aux_valid, info
 
@@ -2756,15 +2820,15 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     specific_traj_valid: Optional[np.ndarray] = None  # lane U4：无 --dagger-dir → 全 1（None）
     val_worst = worst_flags if val_dataset is None else None  # legacy 切分：留出行与训练行同源
     dagger_info: Dict[str, Any] = {}
-    dagger_dir = str(getattr(args, "dagger_dir", "") or "")
-    if dagger_dir:
+    dagger_dirs = [str(item) for item in (getattr(args, "dagger_dir", None) or []) if str(item).strip()]
+    if dagger_dirs:
         (
             specific_dataset,
             specific_train_idx,
             specific_worst,
             specific_traj_valid,
             dagger_info,
-        ) = _merge_dagger_rows(dataset, train_idx, worst_flags, dagger_dir, logger=print)
+        ) = _merge_dagger_rows(dataset, train_idx, worst_flags, dagger_dirs, logger=print)
         val_worst = (
             np.concatenate(
                 [val_worst, np.ones(int(dagger_info["dagger_rows"]), dtype=np.float32)]
@@ -3095,8 +3159,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--mine-only", action="store_true",
                         help="lane U1：只跑 phase 1（primary，MoE 关）+ worst 权重挖掘"
                              "（产出 primary.pt + weight_sidecar.npz）后停止；审阅后再带 --weight-sidecar 重跑")
-    parser.add_argument("--dagger-dir", type=str, default=None,
-                        help="DAgger-lite 数据集目录（可选；phase 2 与主集行合并训练，其行权重 = 1.0）")
+    parser.add_argument("--dagger-dir", type=str, action="append", default=None,
+                        help="DAgger 数据集目录（**可重复**：`--dagger-dir A --dagger-dir B`；phase 2 与主集行"
+                             "合并训练，行权重 = 1.0；各份 episode_id 累积偏移；traj-aux 掩码 0）")
     # ---- 阶段 C ----
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
     parser.add_argument("--envs", type=int, default=1)

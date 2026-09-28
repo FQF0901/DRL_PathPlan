@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""DAgger-lite 采集（lane D2，2026-09-27 重写）：**策略驱动 roll-in + 规则专家"空问"标签**。
+"""DAgger-lite 采集（lane U5 v2）：**策略驱动 roll-in + 规则专家"空问"标签 + 失败窗口**。
 
-协议（用户定稿）
-----------------
-1. **场景池**：``--from-eval runs/*_eval*/episodes.csv``（``success=False`` 的 spec；spec 源默认
-   从该 run 的 ``metrics.json::meta.specs_path`` 解析，缺省回退 ``env/specs/scenarios_eval500.json``），
-   或 ``--specs`` 直接给池；不给则取最新的 ``runs/*eval500*/episodes.csv``。
+协议（用户定稿，2026-09-28）
+----------------------------
+0. **数据隔离（事故防复发）**：**只有 train spec 允许生成训练数据** —— ``--specs`` 必填，
+   载入后硬校验池 ``(id, seed)`` 与 ``env/specs/scenarios_eval500.json`` / ``scenarios_val.json``
+   的交集为空（命中 → ``SystemExit``；provenance 记录池路径 + sha256 + 校验结果 + 池大小）。
+   **``--from-eval`` 路径已删除**（v1 曾用 eval500 失败清单当池 → train-on-test 泄漏，数据已删）。
+1. **场景池**：``--specs <train spec json>``（必填）；``--limit`` 调试截断。
 2. **roll-in = 学生策略驱动**（``--ckpt``，与评测同协议）：复用
    ``pipeline.eval_runner._CkptController``（``--tracker lqr`` 默认 = ``engine.add_policy(LqrTracker)``
    + 每 0.5 s ``set_reference(plan)``；``--tracker exact`` = 运动学精确执行），观测链 =
    ``env.obs.builder.ObservationBuilder``（与 collect_expert/eval 同源）。**访问状态 = 学生自己踩到的状态**，
    不是专家状态分布（旧实现的差异点）。
-3. **标签 = 专家空问**：每个策略步对**当前状态**调用规则专家 ``act()``（默认
+3. **窗口模式（stage B phase 2b 迭代）**：``--window-fail-before <秒>``（>0 生效）——
+   **只保留失败 episode**（``--fail-terminations`` 默认 ``collision,out_of_road,terminal``；
+   ``max_step``（工具截断/env timeout）**不算失败**）的"终止前 N 秒"窗口行
+   （``ceil(秒/0.5)`` 个策略帧，含终止帧；不足则全取）；成功/``max_step`` episode **零行**（只记统计）。
+   窗口模式**自动关闭 terminal_window 过滤**，且默认**关闭 on_lane 与 yaw_outlier 过滤**
+   （恢复训练需要偏移/大修正样本；``--window-strict-filters`` 恢复 v1 行为）；
+   report 记录窗口秒数/失败类型/窗口帧数分布（min/p50/max）/各过滤"本会被拦掉"的计数。
+4. **标签 = 专家空问**：每个策略步对**当前状态**调用规则专家 ``act()``（默认
    ``env.expert.pure_pursuit_idm.PurePursuitIDMPolicy``；不注册进 engine —— 只计算不执行，
    策略是纯状态函数），首步动作换算成 BC 口径 ``(ds, dθ)``。
-4. **动作换算链（已核对，不复制既有逻辑）**：
+5. **动作换算链（已核对，不复制既有逻辑）**：
    - 仓库内没有现成的 ``[steer, throttle] → (ds, dθ)`` 反解函数（核对 ``env/tracking.py``、
      ``tools/collect_expert.py``、``tools/baseline_eval.py``）；本工具实现
      ``pipeline.trainer.expand_policy_action``（运动学执行模型）的解析逆映射：
@@ -25,11 +34,13 @@
      §8.5 单一真源）；6 点未来窗口无法从"空问"获得 → ``action[1:]`` = 首步**常量重复**、
      ``traj6/traj30`` 由其插值生成，meta 显式标注 ``label_scope=first_step_only`` /
      ``window_fill=constant_repeat``。
-5. **过滤**：``extract_samples`` 的 on-lane / terminal_window / cut_label_unverified（round-trip
+6. **过滤**：``extract_samples`` 的 on-lane / terminal_window / cut_label_unverified（round-trip
    过滤对"空问标签"不适用 → 阈值置 ∞ 并记录），外加 lane T 病态规则 ``stuck``（< 0.5 m/s）/
    ``yaw_outlier``（|dθ| > 0.35 rad/0.5 s）；逐行 ``train_weight`` 置 0（不删行），统计进
-   report/meta。
-6. **产物**（与 ``tools/collect_expert.py`` 同 schema 的**完整 episode** 数据）：
+   report/meta；窗口模式按 §3 松弛（stuck 恒生效）。
+7. **吞吐剖分**：worker 内累计 ``timing``（env 重建 / 学生步进 / 专家查询 / 行提取 / 分片写盘 / 其它），
+   report 新增 ``timing`` 段（总计 + 每 spec 均值）。
+8. **产物**（与 ``tools/collect_expert.py`` 同 schema 的**完整 episode** 数据）：
    ``expert_bc.npz`` + ``expert_bc.meta.json``（``dagger`` 块：driver ckpt sha256 / labeler /
    spec 清单 / 过滤统计 / ``roll_in: true`` / 标签口径）+ ``report.json`` + ``dagger.json`` +
    ``dagger_specs.json``；分片目录默认清理（``--keep-shards`` 保留）。``--workers N`` = spawn 多核。
@@ -47,14 +58,14 @@
 用法::
 
     tools/venv-python tools/dagger_collect.py --ckpt <stage_b/final.pt> \\
-        --from-eval runs/BTC20260927-1839_eval500_lqr/episodes.csv --limit 5 --max-steps 60 \\
-        --workers 1 --device cpu --out /tmp/opencode/dagger_smoke
+        --specs env/specs/scenarios_train_slice200.json --limit 5 --max-steps 60 \\
+        --window-fail-before 10 --workers 1 --device cpu --out /tmp/opencode/dagger_smoke
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
+import hashlib
 import json
 import math
 import shutil
@@ -91,6 +102,7 @@ from tools.collect_expert import (  # noqa: E402 - 复用共享实现（不改�
     _flag_dict,
     _merge_filter_counts,
     _on_lane,
+    _on_lane_ok,
     _shard_segments,
     _spec_entries,
     _spec_progress_line,
@@ -107,10 +119,13 @@ __all__ = ["main", "expert_action_to_ds_dtheta"]
 #: 病态过滤阈值（沿用 lane T；写死并记录进 report/meta）
 STUCK_SPEED_MPS = 0.5
 YAW_OUTLIER_RAD = 0.35
-#: 默认 labeler / spec 源 / 每 worker 一个任务的 spec 数（分片粒度）
+#: 默认 labeler / 每 worker 一个任务的 spec 数（分片粒度）
 DEFAULT_LABELER = "pure_pursuit"
-DEFAULT_SPEC_SOURCE = "env/specs/scenarios_eval500.json"
 CHUNK_SPECS = 10
+#: eval/val 冻结集（训练数据**禁止**取自这里；隔离守卫的唯一口径）
+EVAL_SPEC_SOURCES: Tuple[str, ...] = ("env/specs/scenarios_eval500.json", "env/specs/scenarios_val.json")
+#: 失败终止类型默认值（``max_step``（工具截断/env timeout）不算失败）
+DEFAULT_FAIL_TERMINATIONS: Tuple[str, ...] = ("collision", "out_of_road", "terminal")
 #: 换算链默认常数（DefaultVehicle 轴距 + 平台 max_steering=40°；见 pipeline.trainer.expand_policy_action）
 DEFAULT_WHEELBASE_M = 2.46894
 DEFAULT_MAX_STEER_RAD = math.radians(40.0)
@@ -211,6 +226,7 @@ def _dagger_episode(
     labeler_factory: Any,
     builder: ObservationBuilder,
     max_steps: int,
+    timing: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """跑一个**策略驱动** episode，逐 env-step 记位姿/标记 + 逐策略步记学生 obs 与专家空问标签。
 
@@ -222,9 +238,17 @@ def _dagger_episode(
     （``BasePolicy.show_policy_mark`` → ``get_engine()``），reset 前建 env 会触发
     "Please initialize the environment first!"。
     """
+    def _add(key: str, started_at: float) -> None:
+        if timing is not None:
+            timing[key] = float(timing.get(key, 0.0)) + (time.perf_counter() - started_at)
+
+    _t = time.perf_counter()
     env.reset()
     controller.bind(env)
+    _add("other_s", _t)
+    _t = time.perf_counter()
     labeler = labeler_factory()  # 空问专家（不注册 engine）
+    _add("other_s", _t)
     expert_labels: Dict[int, Dict[str, Any]] = {}
     frames: Dict[int, Dict[str, Any]] = {}
     poses: List[np.ndarray] = [_ego_pose(env.agent)]
@@ -234,8 +258,11 @@ def _dagger_episode(
     step = 0
     env.prev_policy_action = np.zeros(2, dtype=np.float64)
     while step < int(max_steps):
+        _t = time.perf_counter()
         action = controller.action(env)  # 学生策略驱动（同时写 prev_policy_action + 建 obs）
+        _add("student_step_s", _t)
         if step % STEPS_PER_POLICY == 0:
+            _t = time.perf_counter()
             obs = builder.build(env, spec)  # 同链二次 build（FrameMemory 同 step 幂等）
             labels_raw = compute_step_labels(env, spec)
             state = event_state(env)
@@ -257,11 +284,16 @@ def _dagger_episode(
                 "lane_lat": float(lateral),
                 "lane_width": float(width),
             }
+            _add("other_s", _t)
+            _t = time.perf_counter()
             expert_labels[step] = labeler.label(env.agent)  # 空问：当前状态 → 专家首步标签
+            _add("expert_query_s", _t)
+        _t = time.perf_counter()
         _, _, terminated, truncated, info = env.step(action)
         post_step = getattr(controller, "post_step", None)
         if callable(post_step):
             post_step(env)  # exact 跟踪器专有（lqr 无此方法）
+        _add("student_step_s", _t)
         step += 1
         poses.append(_ego_pose(env.agent))
         flag = _flag_dict(info)
@@ -377,6 +409,126 @@ def _apply_pathological_filters(
 
 
 # --------------------------------------------------------------------------- #
+# 失败窗口选择（lane U5：stage B phase 2b 迭代协议）
+# --------------------------------------------------------------------------- #
+
+def _window_mode(config: Mapping[str, Any]) -> bool:
+    """窗口模式是否开启（``--window-fail-before`` > 0）。"""
+    return float(config.get("window_fail_before") or 0.0) > 0.0
+
+
+def _effective_on_lane_frac(config: Mapping[str, Any]) -> float:
+    """on_lane 阈值：窗口模式默认松弛（``inf``），``--window-strict-filters`` 恢复 v1 值。"""
+    if _window_mode(config) and not bool(config.get("window_strict_filters")):
+        return float("inf")
+    return float(config.get("on_lane_frac", 0.5))
+
+
+def _effective_yaw_threshold(config: Mapping[str, Any]) -> float:
+    """yaw_outlier 阈值：窗口模式默认松弛（``inf``），``--window-strict-filters`` 恢复 v1 值。"""
+    if _window_mode(config) and not bool(config.get("window_strict_filters")):
+        return float("inf")
+    return float(config.get("yaw_outlier", YAW_OUTLIER_RAD))
+
+
+def _relax_episode_on_lane(episode: Mapping[str, Any]) -> int:
+    """窗口模式：把 episode 帧的 on_lane 视为通过（原值存 ``_on_lane_raw`` 供"本会被拦掉"统计）。
+
+    ``extract_samples`` 的 ``not frame["on_lane"]`` 分支不看阈值 → 必须从帧侧松弛；
+    返回被松弛的帧数。**仅在窗口模式且非 strict 时调用。**
+    """
+    relaxed = 0
+    for frame in (episode.get("frames") or {}).values():
+        raw = bool(frame.get("on_lane", True))
+        frame["_on_lane_raw"] = raw
+        if not raw:
+            frame["on_lane"] = True
+            relaxed += 1
+    return relaxed
+
+def _window_select_rows(
+    rows: Sequence[Dict[str, Any]],
+    episode: Mapping[str, Any],
+    *,
+    window_s: float,
+    fail_terminations: Sequence[str],
+    strict_filters: bool,
+    on_lane_frac: float = 0.5,
+    on_lane_margin: float = 0.3,
+    filter_counter: Optional[Counter] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """窗口模式：失败 episode 只保留"终止前 ``ceil(window_s/0.5)`` 个策略帧"的行；成功/``max_step`` → 零行。
+
+    - 行序 = 策略帧升序（``extract_samples`` 按 step 排序）→ 尾部切片即窗口（含终止帧）；
+    - **terminal_window 松弛**：窗口行必然"跨终止"→ 恢复 ``train_weight=1.0`` 并从
+      ``filter_counter`` 扣回（窗口模式自动关闭该过滤）；
+    - ``stats["would_filter"]`` 记录各过滤"本会被拦掉"的计数（on_lane 用 episode 帧按 v1 阈值复算；
+      yaw_outlier 按 ``|action[0,1]| > 阈值`` 复算；terminal_window = 实际松弛数）。
+    """
+    termination = str(episode.get("termination") or "")
+    fails = {str(item).strip().lower() for item in fail_terminations}
+    frames_per = max(1, int(math.ceil(float(window_s) / POLICY_DT)))
+    stats: Dict[str, Any] = {
+        "applied": True,
+        "window_s": float(window_s),
+        "frames_per_window": int(frames_per),
+        "fail_terminations": sorted(fails),
+        "strict_filters": bool(strict_filters),
+        "termination": termination,
+        "is_failure": termination.lower() in fails,
+    }
+    if termination.lower() not in fails:
+        stats.update({"kept_rows": 0, "dropped_rows": int(len(rows)), "window_frames": 0, "reason": "not_failure"})
+        return [], stats
+    kept = list(rows[-frames_per:]) if rows else []
+    stats.update({
+        "kept_rows": int(len(kept)),
+        "dropped_rows": int(len(rows) - len(kept)),
+        "window_frames": int(len(kept)),
+        "reason": "failure_window",
+    })
+    relaxed_terminal = 0
+    for row in kept:
+        if str(row.get("filter_reason", "")) == "terminal_window":
+            row["train_weight"] = 1.0
+            row["filter_reason"] = ""
+            relaxed_terminal += 1
+    if filter_counter is not None and relaxed_terminal:
+        remaining = int(filter_counter.get("terminal_window", 0)) - int(relaxed_terminal)
+        if remaining > 0:
+            filter_counter["terminal_window"] = remaining
+        else:
+            filter_counter.pop("terminal_window", None)
+    frames = episode.get("frames") or {}
+    would_on_lane = 0
+    for row in kept:
+        frame = frames.get(int(row.get("step", -1)))
+        if frame is None:
+            continue
+        raw_on_lane = bool(frame.get("_on_lane_raw", frame.get("on_lane", True)))
+        if (not raw_on_lane) or (
+            not _on_lane_ok(
+                float(frame.get("lane_lat", 0.0)),
+                float(frame.get("lane_width", 0.0)),
+                float(on_lane_frac),
+                float(on_lane_margin),
+            )
+        ):
+            would_on_lane += 1
+    would_yaw = 0
+    for row in kept:
+        action = np.asarray(row.get("action", np.zeros((1, 2))), dtype=np.float64)
+        if action.ndim == 2 and action.size and abs(float(action[0, 1])) > YAW_OUTLIER_RAD:
+            would_yaw += 1
+    stats["would_filter"] = {
+        "terminal_window": int(relaxed_terminal),
+        "on_lane": int(would_on_lane),
+        "yaw_outlier": int(would_yaw),
+    }
+    return kept, stats
+
+
+# --------------------------------------------------------------------------- #
 # 单 spec / worker / 编排
 # --------------------------------------------------------------------------- #
 
@@ -394,8 +546,15 @@ def _dagger_one_spec(
     env = None
     filter_counter: Counter = Counter()
     started = time.perf_counter()
+    timing: Dict[str, float] = {"env_build_s": 0.0, "student_step_s": 0.0, "expert_query_s": 0.0,
+                                "extract_s": 0.0, "other_s": 0.0}
+    window_s = float(config.get("window_fail_before") or 0.0)
+    window_mode = window_s > 0.0
+    strict = bool(config.get("window_strict_filters"))
     try:
+        _t = time.perf_counter()
         env = build_env(spec, traffic_density=config.get("traffic_density"), use_render=False)
+        timing["env_build_s"] += time.perf_counter() - _t
         controller = _CkptController(env, spec, dict(config["task"]))
         episode = _dagger_episode(
             env,
@@ -404,14 +563,19 @@ def _dagger_one_spec(
             labeler_factory=lambda: _make_labeler(env, spec, str(config["labeler"])),
             builder=builder,
             max_steps=int(config["max_steps"]),
+            timing=timing,
         )
+        _t = time.perf_counter()
+        if window_mode and not strict:
+            _relax_episode_on_lane(episode)  # 窗口模式默认松弛 on_lane（帧侧）
+        on_lane_frac = _effective_on_lane_frac(config)  # 窗口模式默认松弛 on_lane
         rows = extract_samples(
             episode,
             spec,
             episode_id=int(spec_index),
             label_order=config["label_order"],
             interpolate_fn=interpolate_fn,
-            on_lane_frac=float(config["on_lane_frac"]),
+            on_lane_frac=on_lane_frac,
             on_lane_margin=float(config["on_lane_margin"]),
             # 空问标签的窗口不是实测轨迹 → round-trip 过滤不适用（阈值 ∞，诊断字段重标为 NaN）
             roundtrip_key_mean=float("inf"),
@@ -421,14 +585,33 @@ def _dagger_one_spec(
             roundtrip_dense_mean=float("inf"),
         )
         _relabel_rows_with_expert(rows, episode, interpolate_fn=interpolate_fn)
+        window_stats: Optional[Dict[str, Any]] = None
+        if window_mode:
+            rows, window_stats = _window_select_rows(
+                rows,
+                episode,
+                window_s=window_s,
+                fail_terminations=config.get("fail_terminations") or DEFAULT_FAIL_TERMINATIONS,
+                strict_filters=strict,
+                on_lane_frac=float(config["on_lane_frac"]),
+                on_lane_margin=float(config["on_lane_margin"]),
+                filter_counter=filter_counter,
+            )
         pathological = _apply_pathological_filters(
             rows,
             stuck_speed=float(config["stuck_speed"]),
-            yaw_outlier=float(config["yaw_outlier"]),
+            yaw_outlier=_effective_yaw_threshold(config),  # 窗口模式默认松弛 yaw_outlier
             filter_counter=filter_counter,
         )
+        timing["extract_s"] += time.perf_counter() - _t
         candidates = len(episode["frames"])
         trainable = int(sum(1 for row in rows if row["train_weight"] > 0.0))
+        timing["total_s"] = time.perf_counter() - started
+        timing["other_s"] += max(
+            0.0,
+            timing["total_s"]
+            - timing["env_build_s"] - timing["student_step_s"] - timing["expert_query_s"] - timing["extract_s"],
+        )
         return {
             "spec_index": int(spec_index),
             "kept": rows,
@@ -437,6 +620,8 @@ def _dagger_one_spec(
             "steps": int(episode["steps"]),
             "elapsed_s": time.perf_counter() - started,
             "pathological": pathological,
+            "timing": timing,
+            "window": window_stats,
             "expert_params": episode.get("labeler_params") or {},
             "report": {
                 "id": int(getattr(spec, "id", -1)),
@@ -450,6 +635,8 @@ def _dagger_one_spec(
                 "retained_steps": trainable,
                 "step_yield": (trainable / candidates) if candidates else 0.0,
                 "pathological": pathological,
+                "timing": dict(timing),
+                "window": window_stats,
                 "expert_params": episode.get("labeler_params") or {},
             },
         }
@@ -495,9 +682,12 @@ def _dagger_task(task: Dict[str, Any]) -> Dict[str, Any]:
             f"[dagger] [w{int(task['slot'])}] spec#{int(spec_index)} {_spec_progress_line(record)}",
             flush=True,
         )
-    return _summarize_records(
+    _t = time.perf_counter()
+    summary = _summarize_records(
         int(task["slot"]), int(task["slot"]), records, Path(task["shard_dir"])
     )
+    summary["shard_write_s"] = float(time.perf_counter() - _t)
+    return summary
 
 
 def _chunk_tasks(specs: Sequence[Any], chunk_size: int, *, workers: int = 1) -> List[List[Tuple[int, Any]]]:
@@ -534,80 +724,126 @@ def _run_dagger_workers(
 # 场景池选择
 # --------------------------------------------------------------------------- #
 
-def _latest_eval_csv() -> Optional[Path]:
-    """最新 ``runs/*eval500*/episodes.csv``（回退 ``runs/*eval*/episodes.csv``）。"""
-    for pattern in ("*eval500*/episodes.csv", "*eval*/episodes.csv"):
-        candidates = sorted(
-            (Path("runs")).glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True
+def spec_keys(specs: Sequence[Any]) -> set:
+    """spec 列表 → ``{(id, seed)}`` 键集合（隔离守卫与 provenance 的唯一口径）。"""
+    return {(int(getattr(spec, "id", -1)), int(getattr(spec, "seed", -1))) for spec in specs}
+
+
+def eval_val_spec_keys(sources: Sequence[str] = EVAL_SPEC_SOURCES) -> Dict[str, Any]:
+    """读 eval/val 冻结集的 ``(id, seed)`` 键（文件缺失 → 记 ``missing``，不报错）。"""
+    out: Dict[str, Any] = {}
+    for source in sources:
+        path = Path(str(source))
+        if not path.is_file():
+            out[str(source)] = {"path": str(path), "specs": 0, "keys": set(), "missing": True}
+            continue
+        keys = spec_keys(list(load_specs(str(path))))
+        out[str(source)] = {"path": str(path), "specs": len(keys), "keys": keys, "missing": False}
+    return out
+
+
+def assert_no_eval_val_overlap(
+    specs: Sequence[Any], *, context: str, sources: Sequence[str] = EVAL_SPEC_SOURCES
+) -> Dict[str, Any]:
+    """隔离守卫（lane U5）：池 ``(id, seed)`` 与 eval500/val 交集必须为空，否则 ``SystemExit``。
+
+    返回可进 provenance 的校验记录：``{context, pool_specs, checked: {源: {path, specs, overlap}},
+    overlap}``（错误信息附交集样例 + 提示）。
+    """
+    pool = spec_keys(specs)
+    record: Dict[str, Any] = {"context": str(context), "pool_specs": int(len(pool)), "checked": {}, "overlap": 0}
+    overlaps: Dict[str, list] = {}
+    for name, info in eval_val_spec_keys(sources).items():
+        entry: Dict[str, Any] = {
+            "path": info["path"], "specs": int(info["specs"]), "missing": bool(info["missing"]),
+        }
+        if not info["missing"]:
+            inter = pool & info["keys"]
+            entry["overlap"] = int(len(inter))
+            if inter:
+                overlaps[name] = sorted(inter)[:5]
+        record["checked"][name] = entry
+    record["overlap"] = int(sum(int(v.get("overlap", 0)) for v in record["checked"].values()))
+    if overlaps:
+        sample = "；".join(f"{name} → {keys}" for name, keys in overlaps.items())
+        raise SystemExit(
+            f"[dagger] 隔离守卫失败：场景池与 eval/val 冻结集有交集（{record['overlap']} 个 (id,seed)）：{sample}\n"
+            "[dagger] 训练数据**只允许取自 train spec**（--specs env/specs/scenarios_train*.json）；"
+            "eval500/val 仅用于评测（train-on-test 泄漏事故防复发）。"
         )
-        if candidates:
-            return candidates[0]
-    return None
+    return record
 
 
-def _spec_source_from_eval_run(csv_path: Path) -> str:
-    """从 eval run 的 ``metrics.json::meta.specs_path`` 解析 spec 源（缺省回退 eval500 冻结集）。"""
-    metrics = csv_path.parent / "metrics.json"
-    if metrics.is_file():
+def dagger_spec_sources(dagger_dir: Any) -> List[str]:
+    """从 dagger 目录的 ``report.json`` / ``expert_bc.meta.json`` 读 spec 来源（读不到 → 空列表）。
+
+    用于训练侧防线（``pipeline.stages._merge_dagger_rows``）：能读到来源就必须过隔离守卫。
+    """
+    base = Path(str(dagger_dir))
+    found: List[str] = []
+    report_path = base / "report.json"
+    if report_path.is_file():
         try:
-            meta = dict(json.loads(metrics.read_text(encoding="utf-8")).get("meta") or {})
-            recorded = str(meta.get("specs_path") or "")
-            if recorded and Path(recorded).is_file():
-                return recorded
-        except Exception:  # noqa: BLE001 - 报告损坏不阻塞：退回默认源
+            doc = json.loads(report_path.read_text(encoding="utf-8"))
+            prov = dict(doc.get("provenance") or {})
+            for value in (doc.get("specs"), prov.get("spec_source"), prov.get("specs")):
+                text = str(value or "").strip()
+                if text:
+                    found.append(text)
+        except Exception:  # noqa: BLE001 - 报告损坏 → 视为缺失（调用方警告）
             pass
-    return DEFAULT_SPEC_SOURCE
+    meta_path = base / "expert_bc.meta.json"
+    if meta_path.is_file():
+        try:
+            doc = json.loads(meta_path.read_text(encoding="utf-8"))
+            prov = dict((doc.get("dagger") or {}).get("spec_source") or {})
+            for value in (prov.get("spec_source"), prov.get("specs")):
+                text = str(value or "").strip()
+                if text:
+                    found.append(text)
+        except Exception:  # noqa: BLE001
+            pass
+    seen, ordered = set(), []
+    for item in found:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
 
 
-def _load_failed_ids(csv_path: Path) -> Tuple[set, int]:
-    """读 eval ``episodes.csv`` → ``(失败 spec id 集合, 总条数)``；兼容 ``id``/``spec_id`` 列。"""
-    with Path(csv_path).open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        id_key = "spec_id" if "spec_id" in (reader.fieldnames or []) else "id"
-        failed, total = set(), 0
-        for row in reader:
-            total += 1
-            if str(row.get("success", "")).strip().lower() in ("false", "0", "no"):
-                failed.add(str(row.get(id_key, "")).strip())
-    return failed, total
+def _looks_like_eval_or_val(path_text: str) -> bool:
+    """路径名是否疑似 eval/val 集（文件缺失时的兜底判断；命中 → 拒绝）。"""
+    name = Path(str(path_text)).name.lower()
+    return ("eval" in name) or ("val" in name)
 
 
 def _select_specs(args: argparse.Namespace) -> Tuple[List[Any], Dict[str, Any]]:
-    """场景池：``--specs`` 直给，否则 ``--from-eval``（默认最新 eval500 失败清单）。"""
-    provenance: Dict[str, Any] = {"specs": str(args.specs or ""), "from_eval": str(args.from_eval or "")}
-    if args.specs:
-        specs = list(load_specs(str(args.specs)))
-        provenance.update({"source": f"specs:{args.specs}", "spec_source": str(args.specs)})
-    else:
-        csv_path = Path(args.from_eval) if args.from_eval else _latest_eval_csv()
-        if csv_path is None or not Path(csv_path).is_file():
-            raise SystemExit(
-                "[dagger] 需要 --specs 或 --from-eval（默认最新 runs/*eval500*/episodes.csv）；"
-                "未找到任何 eval 失败清单"
-            )
-        if not Path(csv_path).is_file():
-            raise SystemExit(f"[dagger] 失败清单不存在：{csv_path}")
-        spec_source = str(args.spec_source or _spec_source_from_eval_run(Path(csv_path)))
-        failed, total = _load_failed_ids(Path(csv_path))
-        specs = [spec for spec in load_specs(spec_source) if str(getattr(spec, "id", "")) in failed]
-        provenance.update(
-            {
-                "source": f"from_eval:{csv_path}",
-                "from_eval": str(csv_path),
-                "eval_rows": int(total),
-                "failed_ids": int(len(failed)),
-                "spec_source": spec_source,
-                "matched_specs": int(len(specs)),
-            }
+    """场景池：``--specs``（**必填**，只允许 train spec）→ 隔离守卫 → provenance。"""
+    specs_path = str(getattr(args, "specs", "") or "").strip()
+    if not specs_path:
+        raise SystemExit(
+            "[dagger] 需要 --specs <train spec json>（必填）——训练数据只允许取自 train spec；"
+            "eval500/val 仅用于评测（v1 的 --from-eval 路径已删除）"
         )
-    if int(args.limit or 0):
-        specs = specs[: int(args.limit)]
+    path = Path(specs_path)
+    if not path.is_file():
+        raise SystemExit(f"[dagger] spec 池不存在：{path}")
+    specs = list(load_specs(str(path)))
+    if int(getattr(args, "limit", 0) or 0):
+        specs = specs[: int(getattr(args, "limit"))]
     if not specs:
-        raise SystemExit("[dagger] 场景池为空（检查 --specs/--from-eval/spec 源/--limit）")
-    provenance["poll_specs"] = int(len(specs))
+        raise SystemExit(f"[dagger] 场景池为空（检查 --specs {path} / --limit）")
+    guard = assert_no_eval_val_overlap(specs, context=f"pool:{path}")
+    provenance: Dict[str, Any] = {
+        "source": f"specs:{path}",
+        "spec_source": str(path),
+        "specs_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "pool_specs": int(len(specs)),
+        "isolation_guard": guard,
+    }
     print(
-        f"[dagger] 场景池 {provenance.get('source')} → {len(specs)} spec"
-        f"（spec 源 {provenance.get('spec_source')}）",
+        f"[dagger] 场景池 {path} → {len(specs)} spec（sha256={provenance['specs_sha256'][:12]}；"
+        f"隔离守卫：与 eval/val 交集 = {guard['overlap']} ✓）",
         flush=True,
     )
     return specs, provenance
@@ -616,6 +852,73 @@ def _select_specs(args: argparse.Namespace) -> Tuple[List[Any], Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # 报告 / meta
 # --------------------------------------------------------------------------- #
+
+def _aggregate_timing(entries: Sequence[Dict[str, Any]], *, shard_write_s: float) -> Dict[str, Any]:
+    """吞吐剖分汇总：逐 spec 计时 → 总计 + 每 spec 均值（env 重建/学生步进/专家查询/行提取/其它）。"""
+    keys = ("env_build_s", "student_step_s", "expert_query_s", "extract_s", "other_s", "total_s")
+    totals = {key: 0.0 for key in keys}
+    specs = 0
+    for entry in entries:
+        timing = dict((entry.get("report") or {}).get("timing") or {})
+        if not timing:
+            continue
+        specs += 1
+        for key in keys:
+            totals[key] += float(timing.get(key, 0.0))
+    mean = {key: (value / specs if specs else 0.0) for key, value in totals.items()}
+    return {
+        "specs": int(specs),
+        "shard_write_s": round(float(shard_write_s), 4),
+        "total_s": {key: round(value, 4) for key, value in totals.items()},
+        "mean_per_spec_s": {key: round(value, 4) for key, value in mean.items()},
+    }
+
+
+def _aggregate_window(entries: Sequence[Dict[str, Any]], *, window_s: float) -> Optional[Dict[str, Any]]:
+    """窗口模式汇总：失败类型计数 / 窗口帧数分布（min/p50/max）/ 各过滤"本会被拦掉"的计数。"""
+    if float(window_s or 0.0) <= 0.0:
+        return None
+    frames: List[int] = []
+    terminations: Counter = Counter()
+    would: Counter = Counter()
+    kept_rows = dropped_rows = 0
+    failures = 0
+    for entry in entries:
+        window = (entry.get("report") or {}).get("window")
+        if not isinstance(window, dict):
+            continue
+        terminations[str(window.get("termination", "unknown"))] += 1
+        if bool(window.get("is_failure")):
+            failures += 1
+            frames.append(int(window.get("window_frames", 0)))
+        kept_rows += int(window.get("kept_rows", 0))
+        dropped_rows += int(window.get("dropped_rows", 0))
+        for key, value in dict(window.get("would_filter") or {}).items():
+            would[str(key)] += int(value)
+    frames_sorted = sorted(frames)
+    def _pct(values: Sequence[int], q: float) -> int:
+        if not values:
+            return 0
+        index = min(len(values) - 1, max(0, int(round(q * (len(values) - 1)))))
+        return int(values[index])
+    return {
+        "window_s": float(window_s),
+        "frames_per_window": int(math.ceil(float(window_s) / POLICY_DT)),
+        "specs": int(len(terminations)),
+        "failures": int(failures),
+        "terminations": dict(terminations),
+        "window_frames": {
+            "min": int(frames_sorted[0]) if frames_sorted else 0,
+            "p50": _pct(frames_sorted, 0.5),
+            "max": int(frames_sorted[-1]) if frames_sorted else 0,
+        },
+        "kept_rows": int(kept_rows),
+        "dropped_rows": int(dropped_rows),
+        "would_filter": dict(would),
+        "note": "窗口模式：失败 episode 保留终止前窗口行；成功/max_step 零行；terminal_window 恒松弛，"
+                "on_lane/yaw_outlier 默认松弛（--window-strict-filters 恢复）",
+    }
+
 
 def _build_report(
     *,
@@ -628,6 +931,7 @@ def _build_report(
     label_order: Sequence[str],
     kinematics_source: str,
     elapsed_s: float,
+    shard_write_s: float = 0.0,
 ) -> Dict[str, Any]:
     """与 collect_expert 同键的 report（计数/加权双口径 + dataset_gate），外加 DAgger 协议块。"""
     train_weight = np.asarray(arrays["train_weight"], dtype=np.float64)
@@ -693,6 +997,8 @@ def _build_report(
             **({"weight_range": balance_stats["weight_range"]} if "weight_range" in balance_stats else {}),
         },
         "per_spec": [entry["report"] for entry in entries],
+        "window": _aggregate_window(entries, window_s=float(config.get("window_fail_before") or 0.0)),
+        "timing": _aggregate_timing(entries, shard_write_s=shard_write_s),
         "config": dict(config),
         "dataset_gate": {
             "bc_retained_step_yield": {
@@ -730,12 +1036,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ckpt", type=Path, required=True, help="学生策略权重（Stage B；驱动闭环）")
     parser.add_argument("--out", type=Path, required=True, help="输出数据集目录（datasets/BTC<ts>_daggerN）")
-    parser.add_argument("--specs", type=str, default="", help="spec 池 json（与 --from-eval 二选一）")
-    parser.add_argument("--from-eval", type=str, default="",
-                        help="失败清单 episodes.csv（默认最新 runs/*eval500*/episodes.csv）")
-    parser.add_argument("--spec-source", type=str, default="",
-                        help=f"--from-eval 的 spec 源（默认读 eval run metrics.json::meta.specs_path；"
-                             f"回退 {DEFAULT_SPEC_SOURCE}）")
+    parser.add_argument("--specs", type=str, required=True,
+                        help="场景池 json（**必填**；只允许 train spec——隔离守卫拒绝 eval/val 交集）")
     parser.add_argument("--labeler", choices=("pure_pursuit", "idm"), default=DEFAULT_LABELER,
                         help="空问专家（默认 pure_pursuit；idm = MetaDrive 原始 IDMPolicy，动作语义不同）")
     parser.add_argument("--tracker", choices=("lqr", "exact"), default="lqr",
@@ -750,6 +1052,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="(difficulty, geometry) 组配平模式（默认 weights）")
     parser.add_argument("--balance-ratio", type=float, default=3.0, help="cap 模式最大组/最小组样本比")
     parser.add_argument("--traffic-density", type=float, default=None, help="覆盖 build_env 的 traffic_density")
+    parser.add_argument("--window-fail-before", type=float, default=0.0,
+                        help="窗口模式（>0 生效）：失败 episode 只保留终止前 N 秒（ceil(N/0.5) 个策略帧）的行；"
+                             "成功/max_step 零行。自动松弛 terminal_window，默认松弛 on_lane/yaw_outlier")
+    parser.add_argument("--fail-terminations", type=str, default=",".join(DEFAULT_FAIL_TERMINATIONS),
+                        help=f"失败终止类型（逗号分隔；默认 {','.join(DEFAULT_FAIL_TERMINATIONS)}；"
+                             "max_step（工具截断/env timeout）不算失败）")
+    parser.add_argument("--window-strict-filters", action="store_true",
+                        help="窗口模式下恢复 v1 过滤（on_lane + yaw_outlier 生效；默认关闭）")
     parser.add_argument("--keep-shards", action="store_true", help="保留 _shards 分片目录（默认清理）")
     return parser
 
@@ -790,6 +1100,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"[dagger] 学生={args.ckpt}（sha256={str(driver.get('sha256'))[:12]}，tracker={args.tracker}，"
           f"device={device}）· 专家={args.labeler}(empty-query) · spec 清单 → {spec_path}", flush=True)
 
+    fail_terminations = [
+        item.strip().lower() for item in str(args.fail_terminations or "").split(",") if item.strip()
+    ] or list(DEFAULT_FAIL_TERMINATIONS)
     worker_config = {
         "labeler": str(args.labeler),
         "max_steps": int(args.max_steps),
@@ -801,6 +1114,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "stuck_speed": STUCK_SPEED_MPS,
         "yaw_outlier": YAW_OUTLIER_RAD,
         "specs_path": str(provenance.get("spec_source", args.specs or "")),
+        "window_fail_before": float(args.window_fail_before or 0.0),
+        "fail_terminations": fail_terminations,
+        "window_strict_filters": bool(args.window_strict_filters),
     }
     shard_dir = out / SHARD_DIRNAME
     if shard_dir.exists():
@@ -838,6 +1154,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         label_order=label_order,
         kinematics_source=kinematics_source,
         elapsed_s=time.perf_counter() - started,
+        shard_write_s=float(sum(float(item.get("shard_write_s", 0.0)) for item in summaries)),
     )
     pathological_total = {
         key: int(sum(int((entry["report"].get("pathological") or {}).get(key, 0)) for entry in entries))
@@ -870,6 +1187,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "spec_ids": [int(getattr(spec, "id", -1)) for spec in specs],
         "workers": int(args.workers),
         "max_steps": int(args.max_steps),
+        "window": report["window"],
+        "timing": report["timing"],
         "rows": int(stored_rows),
         "episodes": int(len([entry for entry in entries if int(entry["rows"]) > 0])),
         "filter_counts": dict(filter_counter),
