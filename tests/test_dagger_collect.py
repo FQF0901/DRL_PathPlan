@@ -13,7 +13,9 @@
 8. **lane U5 吞吐剖分**：``timing`` 键齐备且不改 episode 结果；report 聚合段正确；
 9. **lane U6 窗口 × stuck 交互**：末帧附近 ``future_truncated`` 行跳过 ``stuck``（无观测不判决）、
    完整未来的真 stuck 行仍被清零、计数分开（``stuck`` / ``stuck_skipped_truncated``）；
-10. 任务分块在 specs < chunk_size 时也按 worker 数铺开。
+10. **lane U7 窗口模式报告口径**：yield 分母 = 窗口行数（gate 不再误报）、``filter_counts``
+   只统计最终被置零的行（松弛/丢弃行不计）、整段模式口径逐位不变；
+11. 任务分块在 specs < chunk_size 时也按 worker 数铺开。
 """
 
 from __future__ import annotations
@@ -590,3 +592,102 @@ def test_window_tail_rows_flagged_truncated_from_real_episode() -> None:
     assert stats["stuck_skipped_truncated"] >= 0
     assert rows[3]["filter_reason"] == "terminal_window", "截断行的既有原因不得被 stuck 覆盖"
     assert rows[3]["train_weight"] == 0.0, "该行仍由 terminal_window 过滤（非 stuck）"
+
+
+# ------------------------------------------- 10. lane U7：窗口模式报告口径
+_LABELS8 = ("cutin_active", "cutout_active", "crowded", "car_following",
+            "on_curve", "merging", "roundabout_near", "near_intersection")
+
+
+def _min_balance() -> dict:
+    return {"stats": {"mode": "weights", "ratio": 3.0, "group_counts_before": {},
+                      "group_counts_after": {}, "group_trainable_before": {}, "counts": {}}}
+
+
+def _report_arrays(n_trainable: int, n_zeroed: int, labels8: bool = True):
+    n = n_trainable + n_zeroed
+    train_weight = np.ones(n, dtype=np.float32)
+    train_weight[n_trainable:] = 0.0
+    return {
+        "train_weight": train_weight,
+        "balance_weight": np.ones(n, dtype=np.float32),
+        "labels": np.zeros((n, 8), dtype=np.float32),
+    }
+
+
+def _build_report_for(arrays, entries, *, window_fail_before: float, filter_counter: Counter):
+    return dg._build_report(
+        entries=entries, arrays=arrays, balance=_min_balance(), filter_counter=filter_counter,
+        config={"window_fail_before": window_fail_before, "specs_path": "x.json"},
+        provenance={}, label_order=_LABELS8, kinematics_source="k", elapsed_s=0.1,
+    )
+
+
+def test_window_mode_yield_denominator_is_window_rows_and_gate_passes() -> None:
+    """① 窗口模式：分母 = 窗口行数（20 行，1 行真 stuck 置零）→ yield 0.95、gate PASS。"""
+    entries = [{
+        "candidates": 100,  # 整段 episode 候选帧（仅参考）
+        "report": {"timing": {}, "window": {
+            "termination": "collision", "is_failure": True, "window_frames": 20,
+            "kept_rows": 20, "dropped_rows": 80,
+            "would_filter": {"terminal_window": 20, "on_lane": 0, "yaw_outlier": 0},
+        }},
+    }]
+    report = _build_report_for(
+        _report_arrays(n_trainable=19, n_zeroed=1), entries,
+        window_fail_before=10.0, filter_counter=Counter({"stuck": 1}),
+    )
+    assert report["stored_rows"] == 20 and report["retained_steps"] == 19
+    assert report["yield_denominator"] == "window_rows" and report["yield_denominator_value"] == 20
+    assert report["bc_retained_step_yield"] == pytest.approx(19 / 20)
+    assert report["dataset_gate"]["bc_retained_step_yield"]["pass"] is True, "gate 不应再误报 FAIL"
+    assert report["dataset_gate"]["bc_retained_step_yield"]["denominator"] == "window_rows"
+    assert report["total_candidate_steps"] == 100, "整段候选帧仍保留为参考字段（不进分母）"
+    assert report["counts"]["yield_denominator"] == "window_rows"
+
+
+def test_window_mode_filter_counts_exclude_relaxed_and_dropped_rows() -> None:
+    """② 松弛保留的 terminal_window 行与窗口丢弃行都不进 filter_counts；would_filter 计数不变。"""
+    normal = _moving_measured(7.5)
+    real_stuck = _moving_measured(0.5)
+    rows = [
+        {"step": 0, "train_weight": 1.0, "filter_reason": "terminal_window",
+         "action": np.array([[2.5, 0.0]]), "traj30_measured": normal},
+        {"step": 5, "train_weight": 1.0, "filter_reason": "terminal_window",
+         "action": np.array([[2.5, 0.0]]), "traj30_measured": normal},
+        {"step": 10, "train_weight": 1.0, "filter_reason": "",
+         "action": np.array([[2.5, 0.0]]), "traj30_measured": real_stuck},
+        {"step": 15, "train_weight": 1.0, "filter_reason": "",
+         "action": np.array([[2.5, 0.0]]), "traj30_measured": normal},
+    ]
+    episode = {"termination": "collision", "poses": [None] * 30,
+               "frames": {int(row["step"]): {"on_lane": True, "lane_lat": 0.1, "lane_width": 3.5}
+                          for row in rows}}
+    counter: Counter = Counter({"terminal_window": 6})  # extract_samples 计了 6（含被窗口丢弃的 2 行）
+    kept, window_stats = dg._window_select_rows(
+        rows, episode, window_s=10.0, fail_terminations=dg.DEFAULT_FAIL_TERMINATIONS,
+        strict_filters=False, filter_counter=counter,
+    )
+    dg._apply_pathological_filters(kept, filter_counter=counter)
+    final = dg._final_filter_counts(kept)
+    assert [row["train_weight"] for row in kept] == [1.0, 1.0, 0.0, 1.0], "仅真 stuck 行被置零"
+    assert dict(final) == {"stuck": 1}, "filter_counts 只统计最终被置零的行"
+    assert "terminal_window" not in dict(final), "松弛/丢弃行不得进最终计数"
+    assert dict(counter).get("terminal_window") == 4, "原始计数器含被窗口丢弃行的陈旧计数（修复前误报来源）"
+    assert window_stats["would_filter"]["terminal_window"] == 2, "would_filter 语义不变（本会被过滤）"
+
+
+def test_full_mode_yield_and_filter_counts_bitwise_unchanged() -> None:
+    """③ 整段模式（无窗口参数）：分母 = 整段候选帧、filter_counts 原样透传（修复前口径）。"""
+    entries = [{"candidates": 100, "report": {"timing": {}, "window": None}}]
+    counter: Counter = Counter({"terminal_window": 4, "stuck": 2})
+    report = _build_report_for(
+        _report_arrays(n_trainable=14, n_zeroed=6), entries,
+        window_fail_before=0.0, filter_counter=counter,
+    )
+    assert report["yield_denominator"] == "candidates" and report["yield_denominator_value"] == 100
+    assert report["bc_retained_step_yield"] == pytest.approx(14 / 100)
+    assert report["dataset_gate"]["bc_retained_step_yield"]["value"] == pytest.approx(14 / 100)
+    assert report["dataset_gate"]["bc_retained_step_yield"]["pass"] is False, "整段模式 gate 口径不变"
+    assert report["filter_counts"] == {"terminal_window": 4, "stuck": 2}, "整段模式计数原样透传"
+    assert report["window"] is None and report["total_candidate_steps"] == 100

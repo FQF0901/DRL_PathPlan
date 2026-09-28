@@ -451,6 +451,22 @@ def _apply_pathological_filters(
     }
 
 
+def _final_filter_counts(rows: Sequence[Dict[str, Any]]) -> Counter:
+    """窗口模式：``filter_counts`` 只统计**最终被置零**的行（lane U7）。
+
+    被窗口丢弃的行（不在 ``rows`` 里）与"松弛保留"的 ``terminal_window`` 行都不计入；
+    逐行取 ``filter_reason``（置零行必有原因）。``would_filter`` 仍是独立诊断字段
+    （"本会被过滤"的计数，语义不变）。
+    """
+    counter: Counter = Counter()
+    for row in rows:
+        if float(row.get("train_weight", 1.0)) <= 0.0:
+            reason = str(row.get("filter_reason", "")).strip()
+            if reason:
+                counter[reason] += 1
+    return counter
+
+
 # --------------------------------------------------------------------------- #
 # 失败窗口选择（lane U5：stage B phase 2b 迭代协议）
 # --------------------------------------------------------------------------- #
@@ -651,6 +667,10 @@ def _dagger_one_spec(
             filter_counter=filter_counter,
             future_truncated=truncated_mask,
         )
+        if window_mode:
+            # lane U7：filter_counts 只统计**最终被置零**的行 —— 被窗口丢弃的行与"松弛保留"的
+            # terminal_window 行都不计入（would_filter 仍是独立诊断：本会被过滤的计数）。
+            filter_counter = _final_filter_counts(rows)
         timing["extract_s"] += time.perf_counter() - _t
         candidates = len(episode["frames"])
         trainable = int(sum(1 for row in rows if row["train_weight"] > 0.0))
@@ -997,8 +1017,16 @@ def _build_report(
     total_candidates = int(sum(int(entry.get("candidates", 0)) for entry in entries))
     stored_rows = int(train_weight.shape[0])
     trainable_rows = int(gate.sum())
-    row_yield = (trainable_rows / total_candidates) if total_candidates else 0.0
-    weighted_yield = (float(effective.sum()) / total_candidates) if total_candidates else 0.0
+    # lane U7：窗口模式的 yield 分母 = **窗口候选行数**（窗口内实际考虑的帧 = 存储行；含窗口内被
+    # 真正置零的行）——分母若仍用整段 episode 候选帧（total_candidates）则比值失义、gate 误报。
+    # 整段模式（非窗口）分母 = 整段候选帧（与修复前逐位一致）。
+    window_mode = float(config.get("window_fail_before") or 0.0) > 0.0
+    if window_mode:
+        yield_denominator_name, yield_denominator = "window_rows", int(stored_rows)
+    else:
+        yield_denominator_name, yield_denominator = "candidates", int(total_candidates)
+    row_yield = (trainable_rows / yield_denominator) if yield_denominator else 0.0
+    weighted_yield = (float(effective.sum()) / yield_denominator) if yield_denominator else 0.0
     below_min = sorted(
         name for name, count in per_label_count.items() if count < DEFAULT_MIN_SAMPLES_PER_CATEGORY
     )
@@ -1016,6 +1044,8 @@ def _build_report(
         "stored_rows": stored_rows,
         "retained_steps": trainable_rows,
         "bc_retained_step_yield": float(row_yield),
+        "yield_denominator": yield_denominator_name,
+        "yield_denominator_value": int(yield_denominator),
         "per_label_positive": per_label_count,
         "counts": {
             "convention": "行数（train_weight>0 的可训练行）",
@@ -1024,12 +1054,15 @@ def _build_report(
             "trainable_rows": trainable_rows,
             "zero_weight_rows": int(stored_rows - trainable_rows),
             "step_yield": float(row_yield),
+            "yield_denominator": yield_denominator_name,
+            "yield_denominator_value": int(yield_denominator),
             "per_label_positive": per_label_count,
         },
         "weighted": {
             "convention": "权重和（train_weight*sample_weight）",
             "trainable_weight_sum": float(effective.sum()),
             "step_yield_weighted": float(weighted_yield),
+            "yield_denominator": yield_denominator_name,
             "per_label_positive_weighted": per_label_weighted,
         },
         "filter_counts": dict(filter_counter),
@@ -1053,7 +1086,13 @@ def _build_report(
                 "value": float(row_yield),
                 "min": DEFAULT_MIN_YIELD,
                 "pass": bool(row_yield >= DEFAULT_MIN_YIELD),
-                "convention": "行数口径：train_weight>0 行数 / 候选行数",
+                "denominator": yield_denominator_name,
+                "denominator_value": int(yield_denominator),
+                "convention": (
+                    "行数口径：train_weight>0 行数 / 窗口候选行数（窗口模式：窗口内实际考虑的行 = stored）"
+                    if window_mode
+                    else "行数口径：train_weight>0 行数 / 候选行数（整段 episode 候选帧）"
+                ),
             },
             "min_samples_per_category": {
                 "min": DEFAULT_MIN_SAMPLES_PER_CATEGORY,
