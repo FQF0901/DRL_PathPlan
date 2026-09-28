@@ -94,6 +94,14 @@ stages:
         entry: 0.1              # ③ entry BCE
         traj_aux: 0.0           # traj 仅监控不进损失（fail-window traj6 是常量外推合成值）
         load_balance: 0.01      # MoE Switch 式负载均衡 aux α（沿用阶段 B 口径）
+      freeze: specific_only     # lane P3-I：冻结配方（CLI --phase3-freeze）——specific_only（新默认）=
+                                # 只训 experts/router/residual_scale（复用 phase 2 冻结清单）；WM od/ld/presence/entry
+                                # 与 ego_next 在冻结下无梯度 → 损失自动置 0（保留 action/action_chain/load_balance）；
+                                # all = 全参数解冻（含 WM；旧行为，"无锚+全解冻"两次实证必崩 0.032/0.038）
+      anchor:                   # lane P3-I：5k 锚（CLI --phase3-anchor*；默认关 = 仅当轮窗口 dagger 行）
+        enabled: false          # 开启后 phase-3 训练集 = 窗口行（权 1.0）+ 锚行（权 ×mild_weight）
+        bc_dir: auto            # auto = 最新 datasets/BTC*_expert*（同 run.bc_dir 语义）；目录缺失 → 报错
+        mild_weight: 0.1        # 锚行权重 = train_weight×配平×mild_weight（窗口行权重不变）
       gpu:                      # lane P3-E：GPU 子步骤前显存守卫
         min_free_mib: 6144      # 空闲显存下限（低于 → 释放+等待重试 ≤3 次；仍不足 failed）
       eval:                     # 编排 lane：每轮闭环评测

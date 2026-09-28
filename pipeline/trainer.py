@@ -79,7 +79,7 @@ import sys
 import time
 import zipfile
 from collections.abc import Mapping as _MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -480,16 +480,18 @@ def build_phase3_optimizer(
     *,
     base_scale: float = 0.25,
     specific_scale: float = 0.5,
+    freeze_mode: str = "all",
 ) -> "torch.optim.Optimizer":
-    """phase 3（lane P3-B）LR 分组优化器：base 主干 × ``base_scale`` / specific × ``specific_scale``。
+    """phase 3（lane P3-B/P3-I）LR 分组优化器：base 主干 × ``base_scale`` / specific × ``specific_scale``。
 
-    组序固定 ``[base, specific]``（与 :data:`_PHASE3_SPECIFIC_PREFIXES` 同一划分口径）：
+    组序固定 ``[base?, specific]``（与 :data:`_PHASE3_SPECIFIC_PREFIXES` 同一划分口径）：
 
     - **base**：encoders / mem_encoder / plan_head（不含 MoE specific）/ WM(st_gnn) / policy / value；
     - **specific**：``plan_head.moe.experts.*`` / ``plan_head.moe.router.*`` / ``residual_scale``。
 
-    全参数解冻（``requires_grad=True``）时两组都非空；缺一组（模型无 MoE / 未解冻）→ ``ValueError``
-    （拒绝静默退化：phase 3 契约要求全参数可训 + 两组齐全）。
+    ``freeze_mode="all"``（旧行为）：要求两组齐全（模型无 MoE / 未解冻 → ``ValueError``，拒绝静默退化）；
+    ``freeze_mode="specific_only"``（lane P3-I）：base 组为空是**预期**（主干已冻结），只返回 specific 组；
+    此时 specific 组为空仍 ``ValueError``（experts/router/residual_scale 必须有可训参数）。
     """
     base: List["torch.Tensor"] = []
     specific: List["torch.Tensor"] = []
@@ -497,15 +499,16 @@ def build_phase3_optimizer(
         if not parameter.requires_grad:
             continue
         (specific if name.startswith(_PHASE3_SPECIFIC_PREFIXES) else base).append(parameter)
-    if not base or not specific:
+    if not specific or (not base and freeze_mode != "specific_only"):
         raise ValueError(
             f"phase 3 LR 分组为空：base={len(base)} · specific={len(specific)}"
-            "（要求全参数解冻且模型含 MoE experts/router/residual_scale）"
+            "（all 模式要求全参数解冻且两组齐全；specific_only 模式要求模型含 MoE "
+            "experts/router/residual_scale）"
         )
-    groups: List[Dict[str, Any]] = [
-        {"name": "base", "params": base, "lr": float(lr) * float(base_scale)},
-        {"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)},
-    ]
+    groups: List[Dict[str, Any]] = []
+    if base:
+        groups.append({"name": "base", "params": base, "lr": float(lr) * float(base_scale)})
+    groups.append({"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)})
     return torch.optim.Adam(groups, lr=float(lr))
 
 
@@ -639,15 +642,19 @@ class BCConfig:
 
 @dataclass
 class Phase3Config:
-    """stage B phase 3（迭代恢复训练；lane P3-B）超参。
+    """stage B phase 3（迭代恢复训练；lane P3-B / P3-I）超参。
 
     与 :class:`BCConfig` 的差异（用户定案）：
 
-    - **数据**：单一 dagger 目录（无 5k / 无 worst/mild 权重 / 无 mining）；
-    - **全参数解冻**（含 WM）；LR 分组：base × ``lr_base_scale`` / specific × ``lr_specific_scale``；
+    - **数据**：单一 dagger 目录（无 worst/mild 权重 / 无 mining）；lane P3-I 可选 5k 锚行
+      由 stages 层合并（``anchor``），本类只消费合并后的行权重；
+    - **冻结配方**（``freeze_mode``，lane P3-I）：``all`` = 全参数解冻（旧行为，含 WM）/
+      ``specific_only`` = 只训 experts/router/residual_scale（冻结前缀由 stages 传入）；
     - **损失组合**（上游三层监督 + 监控）：首步动作 + 多步动作链 + plan head ``ego_next`` +
       WM OD/LD + presence/entry BCE + MoE 负载均衡；``traj`` **只做监控**（不进损失，
       ``traj_aux_weight`` 默认 0 —— dagger 的 ``traj6`` 是常量外推合成值）。
+      ``freeze_mode="specific_only"`` 时上游监督项（:data:`PHASE3_WM_LOSS_KEYS`）无梯度 →
+      **自动降级为 0**（权重置 0 + 跳过 WM 教师强制前向，见 :func:`phase3_effective_config`）。
     """
 
     epochs: int = 5
@@ -661,7 +668,11 @@ class Phase3Config:
     shuffle: bool = True
     max_batches: Optional[int] = None
     phase: str = "phase3"
-    #: 为兼容 ``apply_freeze_prefixes`` 保留（phase 3 固定传空 = 全参数可训）。
+    #: 冻结模式（lane P3-I）：``all`` = 全参数解冻（旧行为）/ ``specific_only`` = 只训
+    #: experts/router/residual_scale（``freeze_prefixes`` 由 stages 层给 phase-2 冻结清单，
+    #: 且 :data:`PHASE3_WM_LOSS_KEYS` 自动降级为 0）。
+    freeze_mode: str = "all"
+    #: 冻结参数前缀（``apply_freeze_prefixes``；``all`` 模式为空 = 全参数可训）。
     freeze_prefixes: Tuple[str, ...] = ()
     #: 训练行索引子集（None = 全部行）。
     train_indices: Optional[np.ndarray] = None
@@ -696,6 +707,10 @@ class Phase3Config:
     # ---- LR 分组（config stages.B.phase3.lr_scale.*）----
     lr_base_scale: float = 0.25
     lr_specific_scale: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.freeze_mode not in ("all", "specific_only"):
+            raise ValueError(f"freeze_mode 非法：{self.freeze_mode!r}（all | specific_only）")
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -3201,6 +3216,11 @@ def evaluate_bc(
 # stage B phase 3（迭代恢复训练；lane P3-B）
 # --------------------------------------------------------------------------- #
 
+#: phase 3 **上游监督项**（WM 教师强制 ``od/ld/presence/entry`` + plan head ``ego_next``）。
+#: ``freeze_mode="specific_only"`` 下主干/WM 冻结 → 无梯度（规格：损失自动降级为 0，见
+#: :func:`phase3_effective_config`）；权重全 0 时 :func:`_phase3_loss_terms` 跳过教师强制前向。
+PHASE3_WM_LOSS_KEYS: Tuple[str, ...] = ("ego_next", "od", "ld", "presence", "entry")
+
 #: phase 3 损失/监控所需的目标键（future_fn/物化源必须全部提供）。
 PHASE3_FUTURE_KEYS: Tuple[str, ...] = (
     "od_fut",
@@ -3268,6 +3288,20 @@ def _phase3_future_tensors(
     }
 
 
+def phase3_effective_config(config: Phase3Config) -> "tuple[Phase3Config, Tuple[str, ...]]":
+    """冻结降级的**有效损失配置**（lane P3-I）。
+
+    ``freeze_mode="specific_only"`` 时上层监督项（:data:`PHASE3_WM_LOSS_KEYS`：WM 教师强制
+    ``od/ld/presence/entry`` + ``ego_next``）在冻结主干下无梯度 → 权重强制置 0（规格：自动
+    降级；保留 action/action_chain/load_balance）。返回 ``(effective_config, 被置零键)``；
+    ``freeze_mode="all"`` 原样返回 ``(config, ())``。
+    """
+    if config.freeze_mode != "specific_only":
+        return config, ()
+    zeroed = PHASE3_WM_LOSS_KEYS
+    return replace(config, **{f"{key}_weight": 0.0 for key in zeroed}), zeroed
+
+
 def _phase3_loss_terms(
     model: "nn.Module",
     obs: Mapping[str, "torch.Tensor"],
@@ -3282,6 +3316,9 @@ def _phase3_loss_terms(
     原始输出，供 traj 监控/负载统计）、``od_per_horizon``/``action_chain_per_step``。
     第三层 WM 监督走教师强制（``wm_teacher_forcing_predictions``），action 条件 =
     rollout ``plan`` 的 **detach** 动作链（policy 只由 ①/①b 直接监督）。
+
+    :data:`PHASE3_WM_LOSS_KEYS` 权重全 0（如 ``specific_only`` 降级后）→ **跳过教师强制前向**
+    （省一次 WM 编码/推演），对应项恒 0（不产生梯度也不占显存）。
     """
     import torch
     import torch.nn.functional as F
@@ -3308,43 +3345,51 @@ def _phase3_loss_terms(
         frame_weight=frame_weight,
         loss_type=config.loss_type,
     )
-    predictions = wm_teacher_forcing_predictions(model, obs, future_t, plan.detach())
-    od_target = model.st_gnn.od_state_from_features(future_t["od_fut"])
-    od_loss, _ = weighted_od_multi_step_loss(
-        predictions["od_pred"],
-        od_target,
-        future_t["od_mask"],
-        frame_weight=frame_weight,
-        valid=future_t["wm_valid"],
+    wm_active = any(
+        float(getattr(config, f"{key}_weight")) > 0.0 for key in PHASE3_WM_LOSS_KEYS
     )
-    ld_loss, _ = weighted_ld_multi_step_loss(
-        predictions["ld_pred"],
-        future_t["ld_fut"][..., :4],
-        future_t["ld_mask"],
-        frame_weight=frame_weight,
-        valid=future_t["wm_valid"],
-    )
-    # ② plan head ego_next：目标 = 未来 ego 特征前 H6 维；尾部按 wm_valid mask
-    ego_next_pred = predictions["ego_next_pred"]
-    ego_target = future_t["ego_fut"][..., : int(ego_next_pred.shape[-1])]
-    horizon = min(int(ego_target.shape[1]), int(ego_next_pred.shape[1]))
-    error = F.smooth_l1_loss(
-        ego_next_pred[:, :horizon] - ego_target[:, :horizon],
-        torch.zeros_like(ego_target[:, :horizon]),
-        beta=1.0,
-        reduction="none",
-    ).mean(dim=-1)
-    step_weight = frame_weight.reshape(-1, 1) * future_t["wm_valid"][:, :horizon]
-    ego_loss = (error * step_weight).sum() / step_weight.sum().clamp(min=1e-8)
-    # ③ presence/entry BCE（id 轴目标；帧权重 = w×wm_valid）；AUC 不进 phase 3 口径
-    presence_terms = presence_entry_loss(
-        predictions["presence_pred"],
-        predictions["entry_pred"],
-        future_t["presence_target"],
-        future_t["entry_target"],
-        frame_weight=step_weight,
-        collect={},
-    )
+    if wm_active:
+        predictions = wm_teacher_forcing_predictions(model, obs, future_t, plan.detach())
+        od_target = model.st_gnn.od_state_from_features(future_t["od_fut"])
+        od_loss, _ = weighted_od_multi_step_loss(
+            predictions["od_pred"],
+            od_target,
+            future_t["od_mask"],
+            frame_weight=frame_weight,
+            valid=future_t["wm_valid"],
+        )
+        ld_loss, _ = weighted_ld_multi_step_loss(
+            predictions["ld_pred"],
+            future_t["ld_fut"][..., :4],
+            future_t["ld_mask"],
+            frame_weight=frame_weight,
+            valid=future_t["wm_valid"],
+        )
+        # ② plan head ego_next：目标 = 未来 ego 特征前 H6 维；尾部按 wm_valid mask
+        ego_next_pred = predictions["ego_next_pred"]
+        ego_target = future_t["ego_fut"][..., : int(ego_next_pred.shape[-1])]
+        horizon = min(int(ego_target.shape[1]), int(ego_next_pred.shape[1]))
+        error = F.smooth_l1_loss(
+            ego_next_pred[:, :horizon] - ego_target[:, :horizon],
+            torch.zeros_like(ego_target[:, :horizon]),
+            beta=1.0,
+            reduction="none",
+        ).mean(dim=-1)
+        step_weight = frame_weight.reshape(-1, 1) * future_t["wm_valid"][:, :horizon]
+        ego_loss = (error * step_weight).sum() / step_weight.sum().clamp(min=1e-8)
+        # ③ presence/entry BCE（id 轴目标；帧权重 = w×wm_valid）；AUC 不进 phase 3 口径
+        presence_terms = presence_entry_loss(
+            predictions["presence_pred"],
+            predictions["entry_pred"],
+            future_t["presence_target"],
+            future_t["entry_target"],
+            frame_weight=step_weight,
+            collect={},
+        )
+    else:
+        zero = torch.zeros((), device=device)
+        od_loss = ld_loss = ego_loss = zero
+        presence_terms = {"presence": zero, "entry": zero}
     load_loss = out.get("load_balance_loss")
     if load_loss is None:
         load_loss = torch.zeros((), device=device)
@@ -3394,13 +3439,17 @@ def pretrain_bc_phase3(
     future_fn: Optional[Callable[[np.ndarray, Mapping[str, np.ndarray]], Mapping[str, np.ndarray]]] = None,
     val_future_fn: Optional[Callable[[np.ndarray, Mapping[str, np.ndarray]], Mapping[str, np.ndarray]]] = None,
 ) -> Dict[str, Any]:
-    """stage B phase 3 训练循环（迭代恢复训练；lane P3-B）。
+    """stage B phase 3 训练循环（迭代恢复训练；lane P3-B / P3-I）。
 
     与 :func:`pretrain_bc` 的差异：
 
-    - **全参数可训**（``freeze_prefixes`` 为空）+ LR 分组（base/specific，见
-      :func:`build_phase3_optimizer`）；
-    - 数据 = 单一 dagger 目录；无 worst/mild 权重、无 mining（权重 = ``train_weight``）；
+    - LR 分组（base/specific，见 :func:`build_phase3_optimizer`）：``freeze_mode="all"`` 时
+      全参数可训（``freeze_prefixes`` 为空 = 旧行为）；``"specific_only"`` 时只留 specific 组；
+    - 数据 = 单一 dagger 目录（或 stages 层合并 5k 锚后的行）；无 worst/mild 权重、无 mining
+      （权重 = ``train_weight``）；
+    - 冻结配方 ``freeze_mode``（lane P3-I）：``all`` = 全参数解冻（旧行为）/
+      ``specific_only`` = 只训 experts/router/residual_scale，且 :func:`phase3_effective_config`
+      把上游监督项（WM ``od``/``ld``/``presence``/``entry`` + ``ego_next``）权重置 0（自动降级）；
     - 损失 = 首步动作 + **动作链多步** + plan head ``ego_next`` + WM ``od``/``ld``
       （教师强制）+ ``presence``/``entry`` BCE + MoE 负载均衡；``traj`` 只监控；
     - ``future_source``（物化）/``future_fn``（逐 batch）必须提供
@@ -3420,12 +3469,15 @@ def pretrain_bc_phase3(
         raise ValueError("pretrain_bc_phase3 需要 future_source 或 future_fn（未来目标/动作链）")
     device = torch.device(resolve_device(config.device))
     model.to(device).train()
+    # lane P3-I：冻结降级（effective_config 的损失权重已置 0；freeze_mode=all 时原样）
+    effective_config, frozen_loss_keys = phase3_effective_config(config)
     frozen = apply_freeze_prefixes(model, config.freeze_prefixes)
     optimizer = build_phase3_optimizer(
         model,
         config.lr,
         base_scale=config.lr_base_scale,
         specific_scale=config.lr_specific_scale,
+        freeze_mode=config.freeze_mode,
     )
     if config.optimizer_state:
         load_optimizer_state(optimizer, config.optimizer_state, logger=logger)
@@ -3457,13 +3509,22 @@ def pretrain_bc_phase3(
         "epochs": int(config.epochs),
         "batches": 0,
         "phase": str(config.phase),
+        "freeze_mode": str(config.freeze_mode),
+        "frozen_loss_keys": list(frozen_loss_keys),
         "frozen_params": len(frozen),
         "trainable_params": sum(1 for parameter in model.parameters() if parameter.requires_grad),
+        "trainable_param_groups": [str(group.get("name")) for group in optimizer.param_groups],
     }
     logger(
-        f"[bc3] phase={config.phase} 全参数训练：frozen={len(frozen)} · 可训={metrics['trainable_params']} · "
+        f"[bc3] phase={config.phase} freeze={config.freeze_mode}：frozen={len(frozen)} · "
+        f"可训={metrics['trainable_params']} · "
         f"lr={float(config.lr):.2e}（base×{config.lr_base_scale} · specific×{config.lr_specific_scale}）· "
         f"moe={config.moe_enabled} · load_balance_coef={config.load_balance_coef}"
+        + (
+            f" · 损失降级置 0：{', '.join(frozen_loss_keys)}（冻结下无梯度）"
+            if frozen_loss_keys
+            else ""
+        )
     )
     loss_keys = ("action", "action_chain", "ego_next", "od", "ld", "presence", "entry", "load_balance")
     macro_size = max(1, int(config.batch_size))
@@ -3556,7 +3617,7 @@ def pretrain_bc_phase3(
                 frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
                 data_seconds += time.perf_counter() - data_started
                 forward_started = time.perf_counter()
-                terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, config)
+                terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, effective_config)
                 components = {key: terms[key] for key in loss_keys}
                 if micro_size < n_macro:
                     scales = _phase3_scale_factors(den_micro, den_macro)
@@ -3767,6 +3828,8 @@ def evaluate_bc_phase3(
         raise ValueError("evaluate_bc_phase3 需要 future_source 或 future_fn（未来目标/动作链）")
     device = torch.device(resolve_device(config.device))
     model.to(device).eval()
+    # lane P3-I：留出口径与训练侧同族 —— specific_only 降级项同样置 0
+    effective_config, _ = phase3_effective_config(config)
     macro_size = max(1, int(config.batch_size))
     loss_keys = ("action", "action_chain", "ego_next", "od", "ld", "presence", "entry")
     numerator = {key: 0.0 for key in loss_keys}
@@ -3798,7 +3861,7 @@ def evaluate_bc_phase3(
         future_t = _phase3_future_tensors(future_np, device)
         frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
         den = _phase3_term_denominators(future_np, np.asarray(targets_np["train_weight"], dtype=np.float64))
-        terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, config)
+        terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, effective_config)
         for key in loss_keys:
             denominator[key] += float(den[_term_key(key)])
             numerator[key] += float(terms[key].detach()) * float(den[_term_key(key)])

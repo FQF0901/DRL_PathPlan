@@ -71,6 +71,7 @@ from pipeline.trainer import (  # noqa: E402
     DEFAULT_PROBE_BATCH,
     DEFAULT_STAGE_BATCH_SIZE,
     MaterializedBCDataset,
+    PHASE3_WM_LOSS_KEYS,
     Phase3Config,
     PPOConfig,
     PPOTrainer,
@@ -2994,8 +2995,92 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
 
 # --------------------------------------------------------------------------- #
-# 阶段 B phase 3：迭代恢复训练（lane P3-B）
+# 阶段 B phase 3：迭代恢复训练（lane P3-B / P3-I）
 # --------------------------------------------------------------------------- #
+
+def _resolve_anchor_bc_dir(config: Mapping[str, Any]) -> str:
+    """phase-3 5k 锚目录解析（lane P3-I；``anchor.bc_dir=auto`` 或留空时）。
+
+    语义与 ``run.bc_dir: auto`` 一致：显式路径优先，否则 = 最新训练用
+    ``datasets/BTC*_expert*``（须含 ``expert_bc.npz``；见 :func:`pipeline.run_paths.latest_dataset`）。
+    """
+    run_bc = str((config.get("run", {}) or {}).get("bc_dir") or "")
+    if run_bc and run_bc.strip().lower() != "auto":
+        return run_bc
+    from pipeline.run_paths import latest_dataset
+
+    found = latest_dataset()
+    if found is None:
+        raise SystemExit(
+            "[stageB3] anchor.bc_dir=auto 但 datasets/ 下找不到 BTC*_expert*（含 expert_bc.npz）"
+            "→ 显式给 --phase3-anchor-bc-dir 或 config stages.B.phase3.anchor.bc_dir"
+        )
+    return str(found)
+
+
+def _merge_anchor_rows(
+    dataset: BCDataset,
+    train_idx: np.ndarray,
+    anchor: BCDataset,
+    anchor_dir: str,
+    mild_weight: float,
+    *,
+    logger: Any = print,
+) -> "tuple[BCDataset, np.ndarray, np.ndarray, Dict[str, Any]]":
+    """lane P3-I：把 5k 锚数据集行并入 phase-3 训练集（窗口行在前、锚行在后）。
+
+    - 同 schema 契约：锚必须覆盖窗口集的全部数组键（缺键 → ``SystemExit``，5k 与窗口同 schema）；
+    - ``episode_id`` 累积偏移（窗口 max+1）→ 帧查表/动作链/未来目标跨集不冲突；
+    - 锚行有效权重 = ``train_weight × 配平 × mild_weight``（锚段 ``train_weight`` 就地 ×
+      ``mild_weight``，:func:`row_action_weights` 再乘配平；窗口行不动 = 权 1.0 口径）；
+    - ``traj_aux_valid``：窗口行 0（dagger ``traj6`` 是常量外推合成值）、锚行 1（真实 traj6）。
+      沿用 lane U4 掩码语义（只作用于 traj 损失项）；phase 3 ``traj_aux=0`` → 掩码仅记录在
+      返回值/metrics，不参与损失（traj 只做监控）。
+    """
+    window_rows = int(dataset.count)
+    anchor_rows = int(anchor.count)
+    if anchor_rows <= 0:
+        raise SystemExit(f"[stageB3] 锚数据集为空：{anchor_dir}")
+    missing = [key for key in dataset.arrays if key not in anchor.arrays]
+    if missing:
+        raise SystemExit(
+            f"[stageB3] 锚数据集 {anchor_dir} 与窗口集 schema 不一致（缺键 {missing[:6]}）→ 拒绝合并"
+        )
+    offset = int(np.max(np.asarray(dataset.arrays["episode_id"], dtype=np.int64))) + 1
+    merged_arrays: Dict[str, np.ndarray] = {}
+    for key, value in dataset.arrays.items():
+        left = np.asarray(value)
+        right = np.asarray(anchor.arrays[key])
+        if key == "episode_id":
+            right = right.astype(np.int64) + offset
+        merged_arrays[key] = np.concatenate([left, right.astype(left.dtype)], axis=0)
+    if "train_weight" in merged_arrays:
+        merged_arrays["train_weight"][window_rows:] *= float(mild_weight)
+    merged = BCDataset(merged_arrays, dict(dataset.meta))
+    anchor_index = np.arange(window_rows, window_rows + anchor_rows, dtype=np.int64)
+    merged_train_idx = np.concatenate([np.asarray(train_idx, dtype=np.int64), anchor_index])
+    traj_aux_valid = np.concatenate(
+        [np.zeros(window_rows, dtype=np.float32), np.ones(anchor_rows, dtype=np.float32)]
+    )
+    info: Dict[str, Any] = {
+        "dir": str(anchor_dir),
+        "window_rows": window_rows,
+        "anchor_rows": anchor_rows,
+        "merged_rows": window_rows + anchor_rows,
+        "mild_weight": float(mild_weight),
+        "episode_id_offset": int(offset),
+        "anchor_row_base": int(window_rows),
+        "train_rows": int(merged_train_idx.size),
+        "window_traj_aux_masked": window_rows,
+        "anchor_traj_aux_valid": anchor_rows,
+    }
+    logger(
+        f"[stageB3] 5k 锚合并：窗口 {window_rows} + 锚 {anchor_rows}（{anchor_dir}）= "
+        f"{window_rows + anchor_rows} 行；锚权 = train_weight×配平×{mild_weight:g}"
+        f"（episode_id 偏移 +{offset}）；traj_aux：窗口 {window_rows} 行=0 / 锚 {anchor_rows} 行=1"
+    )
+    return merged, merged_train_idx, traj_aux_valid, info
+
 
 def _phase3_future_fn(
     dataset: BCDataset,
@@ -3042,11 +3127,16 @@ def _phase3_future_fn(
 
 
 def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """阶段 B phase 3：**迭代恢复训练**（单轮；lane P3-B，用户定案）。
+    """阶段 B phase 3：**迭代恢复训练**（单轮；lane P3-B，lane P3-I 配方开关）。
 
-    - 数据 = ``--phase3 <dagger_dir>`` **单独使用**（无 5k、无 worst/mild 权重、无 mining；
-      当轮采集的失败窗口行）；
-    - 起点 = ``--ckpt``（缺省读 config ``stages.B.phase3.init_ckpt``）→ **全参数解冻（含 WM）**；
+    - 数据 = ``--phase3 <dagger_dir>`` **单独使用**（无 worst/mild 权重、无 mining；当轮采集的
+      失败窗口行）；``anchor.enabled=true``（lane P3-I，默认关）时并入 ``anchor.bc_dir``（5k）
+      行，锚行权重 = ``train_weight×配平×anchor.mild_weight``，窗口行权重不变；
+    - 起点 = ``--ckpt``（缺省读 config ``stages.B.phase3.init_ckpt``）；
+    - **冻结配方** ``freeze``（lane P3-I，默认由 config 定）：
+      ``specific_only`` = 只训 experts/router(gate)/residual_scale（复用 phase-2 冻结清单
+      :data:`_SPECIFIC_PHASE_FREEZE`），WM/ego_next 无梯度 → 损失自动置 0（降级）；
+      ``all`` = 全参数解冻（含 WM；旧行为）；
     - 损失 = 首步动作 + **多步动作链**（rollout ``plan`` 第 2..6 步 vs 未来专家首步标签）
       + plan head ``ego_next``（``ego_fut`` + ``wm_valid`` 尾部 mask）+ WM **OD/LD 教师强制**
       + presence/entry BCE + MoE 负载均衡 aux；``traj_*`` 只做监控（不进损失）；
@@ -3069,11 +3159,47 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     p3_cfg = dict(stage_cfg.get("phase3", {}) or {})
     losses_cfg = dict(p3_cfg.get("losses", {}) or {})
     lr_scale_cfg = dict(p3_cfg.get("lr_scale", {}) or {})
+    anchor_cfg = dict(p3_cfg.get("anchor", {}) or {})
     train_cfg = dict(config.get("train", {}) or {})
     dagger_dir = str(getattr(args, "phase3", "") or "")
     if not dagger_dir or not Path(dagger_dir).exists():
         raise SystemExit(f"[stageB3] --phase3 dagger 目录不存在：{dagger_dir!r}")
     round_index = max(1, int(getattr(args, "phase3_round", None) or 1))
+
+    # ---- lane P3-I：配方开关（CLI > config；缺省 = all + 无锚 = 与旧行为一致）----
+    freeze_raw = (
+        args.phase3_freeze
+        if getattr(args, "phase3_freeze", None) is not None
+        else p3_cfg.get("freeze")
+    )
+    freeze_mode = str(freeze_raw or "all").strip().lower()
+    if freeze_mode not in ("all", "specific_only"):
+        raise SystemExit(f"[stageB3] freeze 非法：{freeze_mode!r}（all | specific_only）")
+    freeze_prefixes: Tuple[str, ...] = () if freeze_mode == "all" else _SPECIFIC_PHASE_FREEZE
+    frozen_loss_keys: Tuple[str, ...] = () if freeze_mode == "all" else PHASE3_WM_LOSS_KEYS
+    anchor_enabled = (
+        bool(args.phase3_anchor)
+        if getattr(args, "phase3_anchor", None) is not None
+        else bool(anchor_cfg.get("enabled", False))
+    )
+    anchor_bc_dir = str(
+        getattr(args, "phase3_anchor_bc_dir", None) or anchor_cfg.get("bc_dir") or ""
+    ).strip()
+    anchor_mild_weight = float(
+        args.phase3_anchor_mild_weight
+        if getattr(args, "phase3_anchor_mild_weight", None) is not None
+        else anchor_cfg.get("mild_weight", 0.1)
+    )
+    if anchor_mild_weight < 0.0:
+        raise SystemExit(f"[stageB3] anchor.mild_weight 必须 ≥0：{anchor_mild_weight}")
+    if anchor_enabled:
+        if anchor_bc_dir.lower() in ("", "auto"):
+            anchor_bc_dir = _resolve_anchor_bc_dir(config)
+        if not Path(anchor_bc_dir).exists():
+            raise SystemExit(
+                f"[stageB3] anchor 数据集不存在：{anchor_bc_dir}"
+                "（--phase3-anchor-bc-dir / config stages.B.phase3.anchor.bc_dir；auto=最新 datasets/BTC*_expert*）"
+            )
 
     # ---- 起点权重：--ckpt 优先，否则 config stages.B.phase3.init_ckpt；缺失 = 拒绝静默随机初始化 ----
     model = build_model(_load_yaml(args.model_config))
@@ -3111,15 +3237,6 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     arrays = dataset.arrays
     if "step" not in arrays:
         raise SystemExit("[stageB3] dagger 数据集缺少 'step'（未来目标/动作链需要精确查表）")
-    windows = FrameWindows(
-        arrays,
-        dataset.alignments,
-        episode_key="episode_id",
-        step_key="step",
-        keys=_bc_channel_keys(),
-        step_stride=_BC_STEP_STRIDE,
-    )
-    wm_valid_all = np.asarray(arrays["wm_valid"], dtype=np.float32) if "wm_valid" in arrays else None
     val_dir_explicit = getattr(args, "val_dir", None)
     val_dataset = None
     if val_dir_explicit:
@@ -3142,6 +3259,33 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             val_idx = train_idx
     if train_idx.size == 0:
         raise SystemExit("[stageB3] 训练帧为空（留出比例过高）")
+
+    # ---- lane P3-I：5k 锚行合并（默认关；val 仍只取窗口行）----
+    anchor_info: Dict[str, Any] = {"enabled": False}
+    traj_aux_valid: Optional[np.ndarray] = None
+    if anchor_enabled:
+        anchor_dataset = BCDataset.load(anchor_bc_dir, limit=args.limit_dataset)
+        anchor_contract = validate_bc_dataset(
+            anchor_dataset, anchor_bc_dir, "B", allow_legacy=_allow_legacy_dataset(args)
+        )
+        dataset, train_idx, traj_aux_valid, anchor_info = _merge_anchor_rows(
+            dataset, train_idx, anchor_dataset, anchor_bc_dir, anchor_mild_weight, logger=print
+        )
+        anchor_info["enabled"] = True
+        anchor_info["contract"] = dict(anchor_contract)
+        # 掩码语义记录（U4：只作用于 traj 损失；phase 3 traj_aux=0 → 仅落 metrics/审计）
+        anchor_info["traj_aux_valid_rows"] = int(traj_aux_valid.size)
+        anchor_info["traj_aux_valid_sum"] = float(np.sum(traj_aux_valid))
+        arrays = dataset.arrays
+    windows = FrameWindows(
+        arrays,
+        dataset.alignments,
+        episode_key="episode_id",
+        step_key="step",
+        keys=_bc_channel_keys(),
+        step_stride=_BC_STEP_STRIDE,
+    )
+    wm_valid_all = np.asarray(arrays["wm_valid"], dtype=np.float32) if "wm_valid" in arrays else None
 
     # ---- 超参：CLI 优先 → config stages.B.phase3.* → stage B 锚点 ----
     epochs = int(args.phase3_epochs if args.phase3_epochs is not None else p3_cfg.get("epochs", 5))
@@ -3181,6 +3325,13 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             f"[stageB3] traj_aux={loss_weights['traj_aux']} 不支持：phase 3 的 traj 只做监控"
             "（失败窗口的 traj6 是常量外推合成值，不进损失；见设计定案）"
         )
+    # lane P3-I：冻结下无梯度的上游监督项自动降级（配置值置 0；原始值留档 metrics）
+    configured_loss_weights = dict(loss_weights)
+    degraded_loss_weights = {
+        key: float(loss_weights[key]) for key in frozen_loss_keys if float(loss_weights[key]) > 0.0
+    }
+    for key in frozen_loss_keys:
+        loss_weights[key] = 0.0
     lr = float(args.lr)
     lr_base_scale = float(
         args.phase3_lr_base_scale if args.phase3_lr_base_scale is not None else lr_scale_cfg.get("base", 0.25)
@@ -3208,11 +3359,28 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             "（配置快照已变，续跑结果可能不可比）",
             flush=True,
         )
+    freeze_text = (
+        "全参数解冻（含 WM；freeze=all）"
+        if freeze_mode == "all"
+        else f"冻结配方=specific_only（只训 experts/router/residual_scale；"
+        f"降级置 0：{', '.join(frozen_loss_keys)}）"
+    )
+    anchor_rows_log = int(anchor_info.get("anchor_rows") or 0) if anchor_enabled else 0
+    anchor_text = (
+        f"锚={anchor_bc_dir}（锚行={anchor_rows_log} · mild_weight={anchor_mild_weight:g}）"
+        if anchor_enabled
+        else "无锚（仅窗口 dagger 行）"
+    )
     print(
-        f"[stageB3] round={round_index} · dagger={dagger_dir}（rows={dataset.count}）· "
-        f"起点={init_ckpt or resume_path} · epochs={epochs} · 全参数解冻（含 WM）· "
+        f"[stageB3] round={round_index} · dagger={dagger_dir}（窗口 rows={dataset.count - anchor_rows_log}）· "
+        f"起点={init_ckpt or resume_path} · epochs={epochs} · {freeze_text} · {anchor_text} · "
         f"lr={lr:.2e}（base×{lr_base_scale} · specific×{lr_specific_scale}）· "
-        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）",
+        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）"
+        + (
+            f" · 降级前权重：{degraded_loss_weights}"
+            if degraded_loss_weights
+            else ""
+        ),
         flush=True,
     )
 
@@ -3283,7 +3451,14 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "grad_accum": bool(micro_batch_size is not None and micro_batch_size < batch_size),
         "lr": lr,
         "lr_scale": {"base": lr_base_scale, "specific": lr_specific_scale},
+        # lane P3-I：配方开关（freeze/anchor）与降级留档
+        "freeze": freeze_mode,
+        "freeze_prefixes": list(freeze_prefixes),
+        "frozen_loss_keys": list(frozen_loss_keys),
         "losses": dict(loss_weights),
+        "losses_configured": configured_loss_weights,
+        "losses_degraded": degraded_loss_weights,
+        "anchor": dict(anchor_info),
         "loss_type": str(args.loss_type if args.loss_type is not None else "l2"),
         "traj_monitor_only": True,
         "wm_condition": "rollout_plan_detached",
@@ -3306,6 +3481,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             {
                 "phase3_round": float(round_index),
                 "phase3_rows": float(dataset.count),
+                "phase3_freeze_specific_only": float(freeze_mode == "specific_only"),
+                "phase3_anchor_rows": float(anchor_info.get("anchor_rows") or 0),
                 "phase3_lr_base": lr * lr_base_scale,
                 "phase3_lr_specific": lr * lr_specific_scale,
             },
@@ -3370,7 +3547,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         seed=int(shuffle_seed),
         device=device,
         max_batches=args.max_batches,
-        freeze_prefixes=(),
+        freeze_mode=freeze_mode,
+        freeze_prefixes=freeze_prefixes,
         train_indices=train_idx,
         val_indices=val_idx,
         val_dataset=val_dataset,
@@ -3722,6 +3900,19 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="entry BCE 权重（默认 0.1）")
     parser.add_argument("--phase3-traj-aux-weight", type=float, default=None,
                         help="轨迹辅助权重（默认 0.0：traj 只做监控，不进损失）")
+    # ---- lane P3-I：配方开关（冻结 / 5k 锚）----
+    parser.add_argument("--phase3-freeze", choices=("all", "specific_only"), default=None,
+                        help="phase 3 冻结配方（默认取 config stages.B.phase3.freeze）："
+                             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单；"
+                             "WM od/ld/presence/entry 与 ego_next 无梯度 → 损失自动置 0）；"
+                             "all = 全参数解冻（含 WM；旧行为）")
+    parser.add_argument("--phase3-anchor", action=argparse.BooleanOptionalAction, default=None,
+                        help="phase 3 5k 锚（默认取 config stages.B.phase3.anchor.enabled=false）："
+                             "开启后把锚数据集行并入训练集（权 = train_weight×配平×mild_weight）")
+    parser.add_argument("--phase3-anchor-bc-dir", type=str, default=None,
+                        help="锚数据集目录（默认 config …anchor.bc_dir；auto = 最新 datasets/BTC*_expert*）")
+    parser.add_argument("--phase3-anchor-mild-weight", type=float, default=None,
+                        help="锚行权重倍率（默认取 config …anchor.mild_weight=0.1）")
     parser.add_argument("--phase3-lr-base-scale", type=float, default=None,
                         help="base 主干（encoders/mem_encoder/plan_head/st_gnn/WM/policy/value）LR 缩放"
                              "（默认取 config stages.B.phase3.lr_scale.base=0.25）")
