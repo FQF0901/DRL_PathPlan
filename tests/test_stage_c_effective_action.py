@@ -7,6 +7,8 @@
 - 反事实：扰动 plan/WM 想象曲线（模型 ``plan`` 输出后段）**不改变** references；
 - ``plan``（仅对照的旧行为）：首步 = a_t，后 5 步 = 规划预览——同一扰动会改变 references
   （证明扰动确实进入了被修复的旧路径）；
+- V9（P2 性能）：``repeat_action`` 臂 collect 走 cheap path（``rollout=False``，不消费 plan），
+  ``plan`` 对照臂保留 ``rollout=True``；
 - 非法 ``plan_reference`` 值 fail-fast。
 
 stub 池只捕获 ``references``（不建 MetaDrive 仿真）。
@@ -34,10 +36,13 @@ class _PlanStubModel(torch.nn.Module):
         self.head_logstd = torch.nn.Parameter(torch.full((2,), -1.0))
         self.head_value = torch.nn.Linear(8, 1)
         self.plan_tail_bias = 0.0
+        #: 逐次 forward 的 rollout 标志（V9：collect 路径选择守卫）
+        self.rollout_flags: List[bool] = []
 
     def forward(  # noqa: D102 - stub 契约见类 docstring
         self, obs: dict, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False
     ) -> dict:
+        self.rollout_flags.append(bool(rollout))
         x = obs["ego"].flatten(start_dim=1)
         mu = torch.sigmoid(self.head_mu(x))
         logstd = self.head_logstd.clamp(-5.0, 0.0).unsqueeze(0).expand(x.shape[0], -1)
@@ -85,7 +90,9 @@ class _RewardStub:
         return float(pool_reward), {}
 
 
-def _collect(plan_tail_bias: float, *, plan_reference: str, horizon: int = HORIZON) -> _CapturePool:
+def _collect(
+    plan_tail_bias: float, *, plan_reference: str, horizon: int = HORIZON
+) -> tuple[_CapturePool, _PlanStubModel]:
     torch.manual_seed(0)
     model = _PlanStubModel()
     model.plan_tail_bias = float(plan_tail_bias)
@@ -100,11 +107,19 @@ def _collect(plan_tail_bias: float, *, plan_reference: str, horizon: int = HORIZ
     obs = {"ego": np.full((1, 8), 0.5, dtype=np.float32)}
     trainer.adopt_obs([obs])
     trainer.collect_rollout(horizon)
-    return pool
+    return pool, model
+
+
+def test_collect_path_follows_plan_reference() -> None:
+    """V9（P2 性能）：repeat_action 臂 collect 走 cheap path；plan 对照臂保留 rollout 前向。"""
+    _, cheap_model = _collect(0.0, plan_reference="repeat_action")
+    assert cheap_model.rollout_flags[:HORIZON] == [False] * HORIZON, "repeat_action 臂必须 rollout=False"
+    _, plan_model = _collect(0.0, plan_reference="plan")
+    assert plan_model.rollout_flags[:HORIZON] == [True] * HORIZON, "plan 对照臂必须保留 rollout=True"
 
 
 def test_references_are_repeated_actions() -> None:
-    pool = _collect(0.0, plan_reference="repeat_action")
+    pool, _ = _collect(0.0, plan_reference="repeat_action")
     assert len(pool.references) == HORIZON
     for actions, references in zip(pool.actions, pool.references):
         assert references is not None and references.shape == (1, 6, 2)
@@ -115,8 +130,8 @@ def test_references_are_repeated_actions() -> None:
 
 def test_counterfactual_plan_tail_does_not_change_references() -> None:
     """扰动 plan 后段（WM 想象曲线）→ repeat_action 口径 references 不变。"""
-    pool_a = _collect(0.0, plan_reference="repeat_action")
-    pool_b = _collect(0.9, plan_reference="repeat_action")
+    pool_a, _ = _collect(0.0, plan_reference="repeat_action")
+    pool_b, _ = _collect(0.9, plan_reference="repeat_action")
     assert len(pool_a.actions) == len(pool_b.actions) == HORIZON
     for index in range(HORIZON):
         assert np.allclose(pool_a.actions[index], pool_b.actions[index]), "同种子动作应一致"
@@ -127,8 +142,8 @@ def test_counterfactual_plan_tail_does_not_change_references() -> None:
 
 def test_plan_switch_is_sensitive_to_plan_tail() -> None:
     """legacy 对照开关：扰动确实作用在 plan 输出上（references 随 plan 后段变化）。"""
-    pool_a = _collect(0.0, plan_reference="plan")
-    pool_b = _collect(0.9, plan_reference="plan")
+    pool_a, _ = _collect(0.0, plan_reference="plan")
+    pool_b, _ = _collect(0.9, plan_reference="plan")
     for index in range(HORIZON):
         assert np.allclose(pool_a.actions[index], pool_b.actions[index])
         assert not np.allclose(pool_a.references[index], pool_b.references[index]), (

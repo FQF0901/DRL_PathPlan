@@ -27,7 +27,8 @@
   median/p95、全部 slice/label、软目标 KL/温度/专家混合权重等已移除（``docs/metrics.md``）。
 - **C = PPO RL（实验口径）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）已按
   **A-hold** 修复（references = repeat(a_t)；WM 全期冻结），P0-2（router 标签错位）已对齐
-  （标签步前取 + 终局 record/reset 分离）；仍未接入 W2 WM 自监督与 P2 性能项。KL 锚 =
+  （标签步前取 + 终局 record/reset 分离）；W2 WM 自监督未接入；P2 性能优化进行中
+  （V9：``plan_reference=repeat_action`` 时 collect 走 cheap path）。KL 锚 =
   阶段 B 快照（``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
 
 环境约束（§8.1）
@@ -3653,9 +3654,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "[stageC] P0-1 修复（A-hold）：references = repeat(a_t, 6)，执行只依赖记账动作。\n"
         "[stageC] P0-2 修复：router 标签步前同帧取 + 终局 record/reset 分离。\n"
         "[stageC] W1：WM（st_gnn）全期冻结（无 WM loss 信号；解冻被守卫禁止）。\n"
+        "[stageC] V9（P2）：collect cheap path——plan_reference=repeat_action 时 rollout=False"
+        "（与 update 同款）；plan 对照臂保留 rollout。\n"
         f"[stageC] R2/P0-6 trainable_scope={scope_wording}\n"
         "[stageC] 干净 PPO 基线的冻结口径以本行 trainable_scope 实际值为准。\n"
-        "[stageC] 仍为实验口径：W2（WM 自监督）与 P2 性能项未落地。\n"
+        "[stageC] 仍为实验口径：W2（WM 自监督）未接入（P2 性能优化进行中）。\n"
         "[stageC] ============================================================",
         flush=True,
     )

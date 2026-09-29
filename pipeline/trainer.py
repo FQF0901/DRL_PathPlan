@@ -562,7 +562,8 @@ class PPOConfig:
     device: str = "auto"  # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
     #: 收集侧跟踪器参考口径（P0-1 A-hold）：
     #: ``repeat_action``（默认）= 6 步参考全部 = 采样动作 ``a_t``（执行只依赖 PPO 记账的随机变量）；
-    #: ``plan`` = 旧行为（首步 ``a_t`` + 后 5 步 WM/plan head 规划预览），仅供对照，不得用于 RL 结论。
+    #: 该臂 collect 走 cheap path（rollout=False，V9）；``plan`` = 旧行为（首步 ``a_t`` + 后 5 步
+    #: WM/plan head 规划预览，需 rollout 前向），仅供对照，不得用于 RL 结论。
     plan_reference: str = "repeat_action"
 
     def __post_init__(self) -> None:
@@ -4747,17 +4748,22 @@ class PPOTrainer:
         self.model.eval()
         t_policy = 0.0
         t_env = 0.0
+        # V9（P2 性能，2026-09-30）：collect 默认走与 update 同款的 cheap path（rollout=False，
+        # 不跑 B1 递归编排/WM 多步）。P0-1 后默认 plan_reference=repeat_action，plan 输出无人
+        # 消费（LQR 参考 = repeat(a_t)，见下）；cheap 路径的 action_mu/logstd/value 与 rollout
+        # 路径逐位一致（net/model.py:466-468；tests/test_net_shapes.py::test_cheap_path_matches_full_forward）。
+        # plan_reference="plan"（旧行为对照）需 plan 输出 → 保留 rollout=True。
+        need_plan = self.config.plan_reference == "plan"
         for step in range(horizon):
             t0 = time.perf_counter()
             batch = self._to_tensor_obs(self._obs_list)
             with torch.no_grad():
-                # 收集需要 6 步规划预览（阶段 C 的 LQR 参考 = 30 点/3 s；单动作参考会退化）：
-                # 走 rollout 路径（跳过 WM 直接多步）；动作/价值/路由头与 cheap path 一致。
-                out = self.model(batch, rollout=True, world_model=False)
+                out = self.model(batch, rollout=need_plan, world_model=False)
                 mu = out["action_mu"]
                 logstd = out["action_logstd"]
                 value = out["value"].reshape(-1)
-                plan = out["plan"]
+                if need_plan:
+                    plan = out["plan"]
                 action, logprob = sample_action(
                     mu, logstd, self.low, self.high, mode=self.config.action_mode, generator=self.torch_generator
                 )
@@ -4767,7 +4773,7 @@ class PPOTrainer:
             # 跟踪器参考（P0-1 A-hold）：执行侧只依赖 PPO 记账的随机变量 a_t。
             #   repeat_action（默认）：6 步参考 = repeat(a_t)——与 buffer 的 (obs_t, a_t, r_t) 口径一致；
             #   plan（仅对照，旧行为）：首步 = a_t，后 5 步 = WM/plan head 规划预览（记账外变量）。
-            if self.config.plan_reference == "plan":
+            if need_plan:
                 references_np = plan.detach().cpu().numpy().astype(np.float32)
                 references_np[:, 0, :] = actions_np
             else:
@@ -4905,6 +4911,8 @@ class PPOTrainer:
             "env_step_s": float(t_env),
             "horizon": int(horizon),
             "num_envs": int(self._num_envs),
+            # V9：collect 前向路径口径（cheap = rollout=False，repeat_action 臂；rollout = plan 对照臂）
+            "path": "rollout" if need_plan else "cheap",
         }
         if not has_labels.any() and not self._pose_warned:
             self.logger("[trainer] rollout 无 router_labels（标签模块不可用？）→ router BCE 本轮跳过")
