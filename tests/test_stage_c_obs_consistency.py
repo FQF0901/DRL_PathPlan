@@ -170,6 +170,27 @@ def test_noop_update_has_zero_approx_kl_and_clipfrac(monkeypatch) -> None:
     assert float(metrics["clipfrac"]) == 0.0
 
 
+def test_full_batch_assembly_slice_matches_per_index() -> None:
+    """V12：整批组装 + 行切片 与 逐 minibatch 直接组装逐位一致（update 路径等价守卫）。"""
+    trainer = _trainer()
+    trainer.collect_rollout(HORIZON)
+    assert trainer.buffer is not None and trainer._valid_mask is not None
+    valid = np.where(trainer._valid_mask)[0]
+    assert valid.shape[0] >= 4
+    full = trainer._assemble_obs_batch(valid)
+    for selection in (
+        np.random.default_rng(0).permutation(valid.shape[0]),
+        np.array([3, 1]),
+    ):
+        sliced = {key: np.asarray(value)[selection] for key, value in full.items()}
+        direct = trainer._assemble_obs_batch(valid[selection])
+        assert set(sliced) == set(direct)
+        for key, expected in direct.items():
+            assert np.array_equal(sliced[key], expected, equal_nan=True), (
+                f"{key}: 整批组装+切片 与 直接组装不一致（selection={selection.tolist()}）"
+            )
+
+
 def test_update_obs_rebuild_matches_collect_frame() -> None:
     """弱版：update 侧重建的历史/前向与 collect 同帧逐位一致。"""
     trainer = _trainer()

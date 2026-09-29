@@ -4969,16 +4969,20 @@ class PPOTrainer:
 
     # ---------------------------------------------------------------- 更新
     def _assemble_obs_batch(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
-        """展平索引 → 模型输入：当前帧取缓冲，历史窗口用 ``buffer.build_history`` 重拼。"""
+        """展平索引 → 模型输入：当前帧取缓冲，历史窗口用 ``buffer.build_history`` 重拼。
+
+        V12（P2 性能）：当前帧/掩码用 fancy indexing（C 层 gather）替代逐行 ``np.stack``
+        （逐行等价、无 Python 循环开销）。
+        """
         assert self.buffer is not None
         indices = np.asarray(indices, dtype=np.int64)
         history = self.buffer.build_history(indices)
         batch: Dict[str, np.ndarray] = {}
         for name in self.buffer.channels:
-            batch[name] = np.stack([self.buffer.obs[name][index] for index in indices], axis=0).astype(np.float32)
+            batch[name] = np.asarray(self.buffer.obs[name][indices], dtype=np.float32)
             mask = self.buffer.obs_mask.get(name)
             if mask is not None:
-                batch[f"{name}_mask"] = np.stack([mask[index] for index in indices], axis=0).astype(np.float32)
+                batch[f"{name}_mask"] = np.asarray(mask[indices], dtype=np.float32)
         for key, value in history.items():
             batch[key] = np.asarray(value, dtype=np.float32)
         return squeeze_single_slot(batch)
@@ -5034,13 +5038,21 @@ class PPOTrainer:
         total = int(valid_indices.shape[0])
         t_data = t_forward = t_backward = 0.0
         try:
+            # V12（P2 性能）：obs/历史组装按行独立 ⇒ 每个 update 全量组装一次，minibatch 只做
+            # 行切片（旧实现每 epoch×minibatch 重复重建历史窗口；默认 epochs=2 时组装次数减半，
+            # 大 H 多 minibatch 时按 epochs 倍减少）。数值与逐 minibatch 组装逐位一致。
+            t0 = time.perf_counter()
+            obs_all = self._assemble_obs_batch(valid_indices)
+            t_data += time.perf_counter() - t0
             for epoch in range(max(1, int(self.config.epochs))):
                 rng = np.random.default_rng(self.config.seed + 1000 * epoch)
                 order = rng.permutation(total)
                 for start in range(0, total, max(1, int(self.config.minibatch_size))):
                     selection = order[start : start + max(1, int(self.config.minibatch_size))]
                     t0 = time.perf_counter()
-                    obs_batch = _to_device_obs(self._assemble_obs_batch(valid_indices[selection]), self.device)
+                    obs_batch = _to_device_obs(
+                        {key: np.asarray(value)[selection] for key, value in obs_all.items()}, self.device
+                    )
                     t_data += time.perf_counter() - t0
                     t1 = time.perf_counter()
                     # PPO 只需要 heads/router/logstd/value：走 cheap path（不跑 B1 rollout 与 WM 多步）
