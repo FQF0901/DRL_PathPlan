@@ -3649,6 +3649,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         print(f"[stageC] 警告：checkpoint {ckpt} 不存在 → 从随机初始化开始", flush=True)
     stage_cfg = _stage_section(config, "C")
     primary_lr_scale = float(stage_cfg.get("primary_lr_scale", 0.1) or 0.1)
+    # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
+    plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
     # KL 锚 = 阶段 B 快照（冻结参考模型）；系数线性衰减（默认 0.05 → 0）
     ref_model = copy.deepcopy(model).eval()
@@ -3696,6 +3698,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "critic_warmup_updates": critic_warmup_updates,
         "device": device,
         "probe_batch": probe_batch,
+        "plan_reference": plan_reference,
     }
     monitor = _make_monitor(
         out_dir / "monitor",
@@ -3712,6 +3715,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             bc_anchor_coef=float(args.bc_anchor_coef) if bc_dataset is not None else 0.0,
             primary_lr_scale=primary_lr_scale,
             critic_warmup_updates=critic_warmup_updates,
+            plan_reference=plan_reference,
             seed=int(args.seed),
             device=device,
         )
@@ -3917,6 +3921,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="experts/gate/residual_scale LR 缩放（默认取 config …lr_scale.specific=0.5）")
     # ---- 阶段 C ----
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
+    parser.add_argument("--plan-reference", choices=("repeat_action", "plan"), default=None,
+                        help="阶段 C 收集侧跟踪器参考口径（默认 repeat_action：6 步参考 = repeat(a_t)，"
+                             "P0-1 A-hold；plan = 旧行为（首步外取 WM 规划预览），仅供对照）")
     parser.add_argument("--envs", type=int, default=1)
     parser.add_argument("--updates", type=int, default=5)
     parser.add_argument("--rollout-steps", type=int, default=64)

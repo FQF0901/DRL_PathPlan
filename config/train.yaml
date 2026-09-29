@@ -146,6 +146,8 @@ stages:
     kl_anchor_coef: 0.05        # 初始系数（CLI --kl-anchor-coef）
     kl_anchor_final_coef: 0.0   # 末值（线性衰减，CLI --kl-anchor-final-coef）
     wm_freeze_updates: null     # 前 N 个 update 冻结 WM；null = updates//4
+    plan_reference: repeat_action  # P0-1 A-hold：收集侧跟踪器参考口径（repeat_action = 6 步
+                                   # repeat(a_t)，执行只依赖 PPO 记账变量；plan = 旧行为，仅供对照）
     primary_lr_scale: 0.1       # 主专家学习率 ×0.1
 
 monitoring:

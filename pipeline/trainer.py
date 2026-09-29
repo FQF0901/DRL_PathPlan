@@ -555,6 +555,14 @@ class PPOConfig:
     critic_warmup_updates: int = 0
     seed: int = 0
     device: str = "auto"  # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
+    #: 收集侧跟踪器参考口径（P0-1 A-hold）：
+    #: ``repeat_action``（默认）= 6 步参考全部 = 采样动作 ``a_t``（执行只依赖 PPO 记账的随机变量）；
+    #: ``plan`` = 旧行为（首步 ``a_t`` + 后 5 步 WM/plan head 规划预览），仅供对照，不得用于 RL 结论。
+    plan_reference: str = "repeat_action"
+
+    def __post_init__(self) -> None:
+        if self.plan_reference not in ("repeat_action", "plan"):
+            raise ValueError(f"未知 plan_reference={self.plan_reference!r}（可选 repeat_action/plan）")
 
 
 @dataclass
@@ -4637,9 +4645,14 @@ class PPOTrainer:
             actions_np = action.detach().cpu().numpy().astype(np.float32)
             logprob_np = logprob.detach().cpu().numpy()
             value_np = value.detach().cpu().numpy()
-            # 跟踪器参考：首个动作 = 实际执行的采样动作（PPO on-policy 口径），其余 5 步 = 规划预览
-            references_np = plan.detach().cpu().numpy().astype(np.float32)
-            references_np[:, 0, :] = actions_np
+            # 跟踪器参考（P0-1 A-hold）：执行侧只依赖 PPO 记账的随机变量 a_t。
+            #   repeat_action（默认）：6 步参考 = repeat(a_t)——与 buffer 的 (obs_t, a_t, r_t) 口径一致；
+            #   plan（仅对照，旧行为）：首步 = a_t，后 5 步 = WM/plan head 规划预览（记账外变量）。
+            if self.config.plan_reference == "plan":
+                references_np = plan.detach().cpu().numpy().astype(np.float32)
+                references_np[:, 0, :] = actions_np
+            else:
+                references_np = np.repeat(actions_np[:, None, :], 6, axis=1)
             t_policy += time.perf_counter() - t0
             t1 = time.perf_counter()
             records = self.pool.step(actions_np, references=references_np)
