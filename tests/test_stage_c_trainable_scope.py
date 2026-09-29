@@ -1,8 +1,10 @@
 """R2/P0-6 回归：阶段 C 冻结范围（design allowlist）与可训练参数组表。
 
 ``design``（默认）= 只保留 ``policy.*`` / ``value.*`` / ``plan_head.moe.experts.*`` /
-``plan_head.moe.router.*`` / ``plan_head.moe.residual_scale`` 可训；其余（encoders /
-mem_encoder / plan_head 主干 fusion·norm·ego_next·primary / st_gnn）全部冻结。
+``plan_head.moe.residual_scale`` 可训；其余（encoders / mem_encoder / plan_head 主干
+fusion·norm·ego_next·primary / router / st_gnn）全部冻结。
+V8r（2026-09-30，G1 §2）：``plan_head.moe.router.*`` 移出 allowlist
+（docs/db44fefe-system-review.md:127,240 "shared/primary/router/WM 冻结"）。
 组表 ``(前缀 → 参数量/LR)`` 与 ``build_optimizer`` 的 LR 分组同口径。
 """
 
@@ -22,6 +24,7 @@ _FROZEN_PROBES = (
     "plan_head.norm.weight",
     "plan_head.ego_next.0.weight",
     "plan_head.moe.primary.0.weight",
+    "plan_head.moe.router.2.weight",  # V8r：router 冻结（G1 §2）
     "st_gnn.spatial.layers.0.node_mlp.0.weight",
 )
 _TRAINABLE_PROBES = (
@@ -29,7 +32,6 @@ _TRAINABLE_PROBES = (
     "policy.trunk.0.weight",
     "value.net.2.weight",
     "plan_head.moe.experts.0.0.weight",
-    "plan_head.moe.router.2.weight",
     "plan_head.moe.residual_scale",
 )
 
@@ -60,9 +62,15 @@ def test_trainable_param_groups_match_optimizer_lr_grouping() -> None:
         "policy.",
         "value.",
         "plan_head.moe.experts.",
-        "plan_head.moe.router.",
         "plan_head.moe.residual_scale",
     }
+    # V8r：router 冻结 → 组表不得出现 router 组（G1 §2：shared/primary/router/WM 冻结）
+    assert "plan_head.moe.router." not in by_prefix
+    assert all(
+        not parameter.requires_grad
+        for name, parameter in model.named_parameters()
+        if name.startswith("plan_head.moe.router.")
+    )
     # design 下 primary 冻结 → 无 ×primary_lr_scale 组
     assert all(group["lr"] == 1e-4 for group in groups)
     assert sum(int(group["params"]) for group in groups) == sum(
@@ -73,11 +81,6 @@ def test_trainable_param_groups_match_optimizer_lr_grouping() -> None:
             parameter.numel()
             for name, parameter in model.named_parameters()
             if name.startswith("plan_head.moe.experts.")
-        ),
-        "plan_head.moe.router.": sum(
-            parameter.numel()
-            for name, parameter in model.named_parameters()
-            if name.startswith("plan_head.moe.router.")
         ),
     }
     for prefix, params in expected.items():

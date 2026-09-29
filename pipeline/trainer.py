@@ -742,13 +742,15 @@ def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[
 
 
 #: 阶段 C 可训练范围（R2/P0-6）：``design``（默认，docs/db44fefe-system-review.md P0-6/阶段C）
-#: 的 allowlist = policy/value 头 + MoE specific（experts/router/residual_scale）；
+#: 的 allowlist = policy/value 头 + MoE specific（experts/residual_scale）；
 #: 其余（encoders/mem_encoder/plan_head 主干（fusion/norm/ego_next/primary）/st_gnn）全部冻结。
+#: 2026-09-30（V8r，G1 §2 依据 docs/db44fefe-system-review.md:127,240"shared/primary/router/WM
+#: 冻结"）：router（``plan_head.moe.router.*``）移出 allowlist——阶段 C 无 router BCE/校准信号，
+#: 行为 loss 反传 gate 会把标签语义塑造成策略附庸；router 只观测不训练。
 STAGE_C_DESIGN_PREFIXES: Tuple[str, ...] = (
     "policy.",
     "value.",
     "plan_head.moe.experts.",
-    "plan_head.moe.router.",
     "plan_head.moe.residual_scale",
 )
 #: ``--trainable-scope`` 取值：``design``（默认，P0-6 设计冻结）/ ``all``（旧行为：仅 st_gnn 冻结）。

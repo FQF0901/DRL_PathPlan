@@ -151,7 +151,7 @@ stages:
     plan_reference: repeat_action  # P0-1 A-hold：收集侧跟踪器参考口径（repeat_action = 6 步
                                    # repeat(a_t)，执行只依赖 PPO 记账变量；plan = 旧行为，仅供对照）
     trainable_scope: design     # R2/P0-6 冻结范围：design（默认）= allowlist（policy/value +
-                                # plan_head.moe.experts/router/residual_scale 可训；encoders/primary/
+                                # plan_head.moe.experts/residual_scale 可训；encoders/primary/router/
                                 # st_gnn 等全冻，"干净 PPO 基线"的设计口径）；all = 旧行为（仅冻 st_gnn）
     primary_lr_scale: 0.1       # 主专家学习率 ×0.1
 

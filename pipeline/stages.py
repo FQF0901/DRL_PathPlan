@@ -3628,8 +3628,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     解冻守卫仅在 WM loss（W2）接线后可用）。
     R2/P0-6（2026-09-30）：``--trainable-scope``（config ``stages.C.trainable_scope``，默认
     ``design``）显式定义可训练范围——``design`` = allowlist（policy/value + MoE
-    experts/router/residual_scale），其余含共享主干/primary/WM 全冻；"干净 PPO 基线"的
+    experts/residual_scale），其余含共享主干/primary/router/WM 全冻；"干净 PPO 基线"的
     冻结口径仅在 ``design`` 下成立，``all``（仅冻 st_gnn）为旧行为对照。
+    V8r（2026-09-30，G1 §2）：router 移出 design allowlist（docs/db44fefe-system-review.md:127,240）。
 
     ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
     update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
@@ -3642,7 +3643,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             f"[stageC] 未知 trainable_scope={trainable_scope!r}（可选 {'/'.join(STAGE_C_TRAINABLE_SCOPES)}）"
         )
     scope_wording = (
-        "design（P0-6 设计冻结：policy/value + MoE specific 可训；shared/encoders/primary/WM 冻结）"
+        "design（P0-6 设计冻结：policy/value + MoE experts/residual_scale 可训；"
+        "shared/encoders/primary/router/WM 冻结）"
         if trainable_scope == "design"
         else "all（旧行为：仅冻 st_gnn；全参数共享主干可训，非设计口径）"
     )
@@ -4020,8 +4022,8 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
     parser.add_argument("--trainable-scope", choices=STAGE_C_TRAINABLE_SCOPES, default=None,
                         help="阶段 C 可训练范围（R2/P0-6；默认取 config stages.C.trainable_scope=design）："
-                             "design = 设计冻结 allowlist（policy/value + plan_head.moe.experts/router/"
-                             "residual_scale；encoders/mem_encoder/fusion/norm/ego_next/primary/st_gnn 全冻）"
+                             "design = 设计冻结 allowlist（policy/value + plan_head.moe.experts/"
+                             "residual_scale；encoders/mem_encoder/fusion/norm/ego_next/primary/router/st_gnn 全冻）"
                              "——'干净 PPO 基线'仅在此口径成立；"
                              "all = 旧行为（仅冻 st_gnn，共享主干全 LR 可训，非设计口径）")
     parser.add_argument("--plan-reference", choices=("repeat_action", "plan"), default=None,
