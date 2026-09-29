@@ -4764,9 +4764,12 @@ class PPOTrainer:
         # 组装 buffer（env-major + bootstrap 行）
         template = self._current_template(self._obs_list[0])
         channels = {key: tuple(np.asarray(value).shape) for key, value in template.items()}
+        # R7（G1 复核）：与 RolloutBuffer 默认 / env builder / Stage A/B 物化一致的四通道。
+        # 旧行为仅 ("od", "ld")：update 侧 ego/others 历史缺失 → net.mem 回退"当前帧复制 6 帧"，
+        # 与 collect 真历史不一致 ⇒ no-op 优化器下 approx_kl 仍非零（系统性 collect≠update 偏置）。
         history_channels = tuple(
-            name for name in ("od", "ld") if f"{name}{_HIST_SUFFIX}" in self._obs_list[0]
-        ) or ("od", "ld")
+            name for name in ("ego", "others", "od", "ld") if f"{name}{_HIST_SUFFIX}" in self._obs_list[0]
+        ) or ("ego", "others", "od", "ld")
         capacity = self._num_envs * (horizon + 1)
         buffer = RolloutBuffer(
             capacity,
