@@ -5543,7 +5543,10 @@ def trim_memory() -> None:
 
     实证：同一 mini-batch 反复 forward/backward，不 trim 时 RSS 高水位可达 ~2.5GB（缓存
     分配器 + glibc arena 不归还），``gc.collect() + malloc_trim(0)`` 后稳定在 ~0.4GB。
-    非 glibc 平台静默 no-op。训练循环每个 update 后调用一次。
+    非 glibc 平台静默 no-op。
+
+    调用策略（V11，P2 性能）：由调用方决定频率——阶段 C 默认每 ``train.trim_memory_every``
+    个 update + 收尾一次（旧版每 update 恒调 ≈72 ms/update）；单次成本不变。
     """
     import ctypes
     import gc

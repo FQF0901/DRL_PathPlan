@@ -3832,6 +3832,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             )
         history: List[Dict[str, Any]] = []
         kl_schedule: List[float] = []
+        # V11（P2 性能）：trim_memory 降频（config train.trim_memory_every；1 = 每个 update，
+        # 0/None = 仅收尾 trim）。基线实测 ~72 ms/update（恒 72 ms）；malloc_trim 只影响 RSS
+        # 回落节奏，不影响训练数值。
+        trim_every = int(train_cfg.get("trim_memory_every", 4) or 0)
+        trim_calls = 0
         for update in range(updates):
             update_started = time.perf_counter()
             # W1 fail-fast：st_gnn 全期冻结，任何解冻迹象立刻报错（WM loss 未启用）。
@@ -3844,7 +3849,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             trainer.collect_rollout(int(args.rollout_steps))
             update_metrics = trainer.update()
             update_metrics["kl_anchor_coef"] = float(trainer.config.kl_anchor_coef)
-            trim_memory()
+            if trim_every > 0 and (update + 1) % trim_every == 0:
+                trim_memory()
+                trim_calls += 1
             history.append(update_metrics)
             if monitor is not None:
                 monitor.on_train_step(update_metrics, step=update + 1)
@@ -3857,10 +3864,15 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 f"steps/s={int(args.rollout_steps) * int(getattr(pool, 'num_envs', 1)) / max(time.perf_counter() - update_started, 1e-9):.1f}",
                 flush=True,
             )
+        # V11：收尾必 trim 一次（RSS 回落；后续 rss_mb/rss_peak_mb 口径与旧版一致）
+        trim_memory()
+        trim_calls += 1
         metrics["ppo_updates"] = len(history)
         metrics["kl_anchor_coef_schedule"] = kl_schedule
         metrics["last"] = {key: history[-1].get(key) for key in ("total_loss", "approx_kl", "kl_anchor")}
         metrics["reward_source"] = reward_source
+        metrics["trim_memory_every"] = trim_every
+        metrics["trim_memory_calls"] = trim_calls
     finally:
         pool.close()
         if monitor is not None:

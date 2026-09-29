@@ -15,6 +15,8 @@
 - `stages.B.bc.traj_aux_weight`：**已验证配方 = 0.3**（闭环优于 0.1，p2-contract §11）；
   当前 yaml 默认仍为 0.1，正式跑用 CLI `--traj-aux-weight 0.3` 覆盖。
 - `train.critic_warmup_updates: 0`（默认关，= 旧行为）；阶段 C 推荐 `--critic-warmup-updates 10`。
+- `train.trim_memory_every: 4`（V11/P2）：阶段 C 每 N 个 update 调一次 `trim_memory`
+  （1 = 每个 update 旧行为；0 = 仅收尾一次）；只影响 RSS 回落节奏，不改训练数值。
 - `stages.C.trainable_scope: design`（R2/P0-6；CLI `--trainable-scope`）：`design` = allowlist
   （policy/value + MoE experts/residual_scale 可训，其余含 encoders/primary/router/st_gnn 全冻；
   V8r 起 router 冻结，对齐 db44fefe-system-review P0-6/阶段C），
