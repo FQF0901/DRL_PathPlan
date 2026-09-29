@@ -1526,7 +1526,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, default=Path("runs/eval"),
                         help="评测输出根目录（实际写到 <out>/<name>/，默认 runs/eval）")
     parser.add_argument("--name", default=None,
-                        help="运行名（默认 '<policy>_<时间戳>'；落地 <out>/<name>/metrics.json）")
+                        help="运行名（默认 'BTC<秒级北京戳>_<spec kind>_<policy>'；非规范名自动规范化，"
+                             "路径型 --name 原样；落地 <out>/<name>/metrics.json）")
     parser.add_argument("--limit", type=int, default=None, help="只评测前 N 条 spec（按文件顺序，冒烟用）")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                         help=f"spawn worker 数（默认 {DEFAULT_WORKERS}，评测与训练池互斥）")
@@ -1614,7 +1615,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     env_cfg = dict(config.get("env") or {})
-    run_name = str(args.name or f"{args.policy}_{time.strftime('%Y%m%d_%H%M%S')}")
+    from pipeline import run_paths  # run 名规范（--out 是路径根；调用方不手拼名字）
+
+    run_name = run_paths.eval_run_name(args.name, spec=spec_path, policy=args.policy)
     out_dir = Path(args.out) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 

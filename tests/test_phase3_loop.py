@@ -1,18 +1,29 @@
-"""phase 3 全自动循环编排（lane P3-C）回归。
+"""phase 3 全自动循环编排（lane P3-C；P4b R1/R4）回归。
 
 覆盖（用户定稿契约）：
 
-① 轮转与跨轮 student 传递：r{k} 采集用 r{k-1} 的 ``stage_b/final.pt``（r1 = init_ckpt），
-   训练每轮起点恒为 ``init_ckpt``；产物命名 ``BTC<stamp>_{phase3_dagger,stageB_phase3,eval500_phase3}_r{k}``；
-② 护栏：与上一轮比较 ``overall_success`` / ``easy`` success 绝对下降超阈 → 记录原因并停止；
+① 轮转与跨轮 student 传递：r{k} 采集/训练用 r{k-1} 的 ``stage_b/final.pt``（r1 = init_ckpt，
+   **R1 顺序续训**：训练起点 = running student，不再恒为 init_ckpt）；产物命名
+   ``BTC<stamp>_{phase3_dagger,stageB_phase3,eval500_phase3}_r{k}``；状态记 ``train.ckpt_in``
+   与 ``chain_root``；
+② 护栏（R4）：``guard.mode=base``（默认）与**入口基座自评** ``base_eval`` 比较
+   ``overall_success``，``net_vs_base < −stop_on_base_drop`` → 停机；基座缺失 = 硬错
+   （fail-closed）；本轮可选指标缺失 → 不判定；``mode=prev`` 保留旧口径（上一轮
+   overall/easy 绝对下降）；``mode=off`` 不判定且状态/日志显著标注；
 ③ 错误语义：任一步非零退出/产物缺失 → 立即停止（绝不带缺产物进下一轮）；
-④ 状态文件字段（``phase3_status.json``：schema/status/rounds/逐轮 collect/train/eval/guard）；
+   resume provenance 不符（采集/训练/评测/基座）→ 失败，不静默拼接；
+④ 状态文件字段（``phase3_status.json``：schema/status/guard_mode/chain_root/base_eval/
+   best/rounds/逐轮 collect/train/eval/guard）；
 ⑤ 配置决议顺序 CLI > 环境变量 ``PHASE3_ROUNDS`` > config；保留键不得透传覆盖；
+   锚接线：``stages.B.phase3.anchor.*`` → ``--phase3-anchor*``（默认关）；
 ⑥ ``tools/train.py --phase3-loop`` 入口分派；``tools/train.sh`` 的 ``PHASE3_ONLY=1``（跳过 A/B）
    与 ``PHASE3=1``（A→B→循环）链路（fake venv-python 骨架，不启动真实采集/训练/评测）；
 ⑦ **lane P3-G 全链起点**：``PHASE3=1`` 下 phase3 ``init_ckpt`` 自动 = 本次链 B ``final.pt``
    （``init_ckpt_source="chain-B"``，覆盖 config）；``PHASE3_ONLY``/独立 loop 不变；
-   ``init_ckpt: auto`` = 最新 ``runs/BTC*_stageB*/stage_b/final.pt``（缺失报错）。
+   ``init_ckpt: auto`` = 最新 ``runs/BTC*_stageB*/stage_b/final.pt``（缺失报错）；
+⑧ **keep-best（R4）**：候选 = {init_ckpt} ∪ {各轮产物}，平手取基座/更早；稳定导出
+   ``<loop>/best/{final.pt,metrics.json,manifest.json}``；全部未超基座 → 状态 ``no_gain``
+   （完成态）；停机时仍导出。
 
 全部桩化：不启动真实采集/训练/评测；shell 测试只跑 fake 骨架，产物落 tmp_path。
 """
@@ -64,13 +75,23 @@ def _write_pool_and_ckpt(tmp_path: Path) -> "tuple[Path, Path, Path]":
 
 
 class _Stubs:
-    """采集/训练/评测桩：记录 argv 并生成可通过校验的产物；可注入失败/缺产物。"""
+    """采集/训练/评测桩：记录 argv 并生成可通过校验的产物；可注入失败/缺产物。
+
+    R4 起循环先做**基座自评**（``eval`` 的 ``phase3_base`` 分支，独立记录在
+    ``base_eval_calls``/``base_overall``/``base_easy``）；``eval_calls`` 只记逐轮评测
+    （``overall``/``easy`` 按下标取，不足重复末项）。
+    """
 
     def __init__(
         self,
         *,
-        overall=(0.50, 0.50, 0.50),
+        overall=(0.55, 0.55, 0.55),
         easy=(0.80, 0.80, 0.80),
+        base_overall: float = 0.50,
+        base_easy: float = 0.80,
+        base_rc: int = 0,
+        base_missing: bool = False,
+        base_plan: "list[str] | None" = None,
         collect_rc: int = 0,
         train_rc: int = 0,
         eval_rc: int = 0,
@@ -84,6 +105,10 @@ class _Stubs:
     ):
         self.overall = list(overall)
         self.easy = list(easy)
+        self.base_overall = base_overall
+        self.base_easy = base_easy
+        self.base_rc = int(base_rc)
+        self.base_missing = bool(base_missing)
         self.collect_rc = int(collect_rc)
         self.train_rc = int(train_rc)
         self.eval_rc = int(eval_rc)
@@ -91,13 +116,15 @@ class _Stubs:
         self.collect_missing = bool(collect_missing)
         self.train_missing = bool(train_missing)
         self.eval_missing = bool(eval_missing)
-        #: 逐次尝试的行为计划（"ok"/"oom"/"oom_log"/"rc1"/"exc:<Type>:<msg>"；不足则重复末项）
+        #: 逐次尝试的行为计划（"ok"/"oom"/"oom_log"/"rc1"/"missing"/"exc:<Type>:<msg>"；不足则重复末项）
         self.train_plan = list(train_plan) if train_plan else None
         self.collect_plan = list(collect_plan) if collect_plan else None
         self.eval_plan = list(eval_plan) if eval_plan else None
+        self.base_plan = list(base_plan) if base_plan else None
         self.collect_calls: list = []
         self.train_calls: list = []
         self.eval_calls: list = []
+        self.base_eval_calls: list = []
 
     @staticmethod
     def _write_oom(log_path, message: str = "RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB") -> None:
@@ -199,10 +226,45 @@ class _Stubs:
         out = Path(_arg(argv, "--out"))
         name = _arg(argv, "--name")
         run_dir = out / name
+        ckpt = _arg(argv, "--ckpt")
+        if "phase3_base" in name:
+            index = len(self.base_eval_calls)
+            self.base_eval_calls.append(
+                {
+                    "ckpt": ckpt, "dir": run_dir,
+                    "workers": int(_arg(argv, "--workers")),
+                    "tracker": _arg(argv, "--tracker"),
+                    "spec": _arg(argv, "--spec"),
+                    "log": Path(log_path) if log_path else None,
+                }
+            )
+            action = self._action(self.base_plan, index)
+            if action == "oom_log":
+                self._write_oom(log_path)
+                return 1
+            if action == "oom":
+                raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+            if action == "rc1":
+                return 1
+            if action.startswith("exc:"):
+                self._raise_action(action)
+            if self.base_rc == 0 and not self.base_missing and action != "missing":
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "metrics.json").write_text(
+                    json.dumps(
+                        {
+                            "ckpt": ckpt,
+                            "overall": {"success_rate": self.base_overall},
+                            "by_difficulty": {"easy": {"success_rate": self.base_easy}},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return self.base_rc
         index = len(self.eval_calls)
         self.eval_calls.append(
             {
-                "ckpt": _arg(argv, "--ckpt"),
+                "ckpt": ckpt,
                 "dir": run_dir,
                 "workers": int(_arg(argv, "--workers")),
                 "tracker": _arg(argv, "--tracker"),
@@ -220,13 +282,28 @@ class _Stubs:
             return 1
         if action.startswith("exc:"):
             self._raise_action(action)
-        if self.eval_rc == 0 and not self.eval_missing:
+        if action == "no_overall":
+            # metrics.json 存在但可选指标 overall_success 缺失（R4：不判定、不得停机）
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "ckpt": ckpt,
+                        "overall": {},
+                        "by_difficulty": {"easy": {"success_rate": 0.8}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0
+        if self.eval_rc == 0 and not self.eval_missing and action != "missing":
             run_dir.mkdir(parents=True, exist_ok=True)
             overall = self.overall[min(index, len(self.overall) - 1)]
             easy = self.easy[min(index, len(self.easy) - 1)]
             (run_dir / "metrics.json").write_text(
                 json.dumps(
                     {
+                        "ckpt": ckpt,
                         "overall": {"success_rate": overall},
                         "by_difficulty": {"easy": {"success_rate": easy}},
                     }
@@ -262,12 +339,14 @@ def _status(tmp_path: Path) -> dict:
 
 # ---------------------------------------- ① 轮转 + 跨轮 student 传递 + 命名
 def test_phase3_loop_rotation_and_student_handoff(tmp_path: Path) -> None:
-    stubs = _Stubs()
+    stubs = _Stubs(overall=(0.55, 0.58, 0.60))
     rc = _loop(tmp_path, stubs, rounds=3).run()
     assert rc == 0
     assert len(stubs.collect_calls) == 3 and len(stubs.train_calls) == 3 and len(stubs.eval_calls) == 3
+    assert len(stubs.base_eval_calls) == 1, "R4：循环开始时对 init_ckpt 自评一次"
 
     init_ckpt = str(tmp_path / "init_phase2.pt")
+    assert stubs.base_eval_calls[0]["ckpt"] == init_ckpt
     # 跨轮 student：r1 = init_ckpt，r{k} = r{k-1} 的 final.pt
     expected_students = [
         init_ckpt,
@@ -275,8 +354,8 @@ def test_phase3_loop_rotation_and_student_handoff(tmp_path: Path) -> None:
         str(tmp_path / "runs" / "BTCTEST_stageB_phase3_r2" / "stage_b" / "final.pt"),
     ]
     assert [item["student"] for item in stubs.collect_calls] == expected_students
-    # 训练每轮起点恒为 init_ckpt（P3-B 契约）
-    assert [item["ckpt"] for item in stubs.train_calls] == [init_ckpt] * 3
+    # R1 顺序续训：训练每轮起点 = running student（不再恒为 init_ckpt）
+    assert [item["ckpt"] for item in stubs.train_calls] == expected_students
     assert [item["dagger"] for item in stubs.train_calls] == [
         str(tmp_path / "datasets" / f"BTCTEST_phase3_dagger_r{k}") for k in (1, 2, 3)
     ]
@@ -290,6 +369,7 @@ def test_phase3_loop_rotation_and_student_handoff(tmp_path: Path) -> None:
     assert [item["dir"].name for item in stubs.eval_calls] == [
         f"BTCTEST_eval500_phase3_r{k}" for k in (1, 2, 3)
     ]
+    assert stubs.base_eval_calls[0]["dir"].name == "BTCTEST_eval500_phase3_base"
     assert all(item["workers"] == 2 and item["tracker"] == "lqr" for item in stubs.eval_calls)
     # 采集口径：shuffle seed = base + round；target-fails/window/workers 来自 config
     assert [item["seed"] for item in stubs.collect_calls] == [101, 102, 103]
@@ -298,38 +378,118 @@ def test_phase3_loop_rotation_and_student_handoff(tmp_path: Path) -> None:
     status = _status(tmp_path)
     assert status["status"] == "completed" and status["stop_reason"] is None
     assert status["rounds_total"] == 3 and len(status["rounds"]) == 3
-    assert [item["guard"]["checked"] for item in status["rounds"]] == [False, True, True]
+    # R4 base 模式：每轮都有基座可比 → checked 全 True，无人低于基座 → 不停机
+    assert [item["guard"]["checked"] for item in status["rounds"]] == [True, True, True]
+    assert all(item["guard"]["mode"] == "base" for item in status["rounds"])
+    assert [item["guard"]["net_vs_base"] for item in status["rounds"]] == pytest.approx([0.05, 0.08, 0.10])
     assert all(item["collect"]["rows"] == 42 for item in status["rounds"])
     assert all(item["train"]["losses"]["bc_loss"] == 1.25 for item in status["rounds"])
+    # 状态：链根 id + 每轮 train.ckpt_in
+    assert status["chain_root"]["path"] == init_ckpt and len(status["chain_root"]["sha256"]) == 64
+    assert status["chain_root"]["source"] == "config"
+    assert [item["train"]["ckpt_in"] for item in status["rounds"]] == expected_students
+    # keep-best：r3 最优 → 稳定导出
+    assert status["best"]["round"] == 3 and status["best"]["no_gain"] is False
+    assert Path(status["best"]["ckpt"]).read_bytes() == (
+        tmp_path / "runs" / "BTCTEST_stageB_phase3_r3" / "stage_b" / "final.pt"
+    ).read_bytes()
 
 
-# ------------------------------------------------ ② 护栏（overall / easy）
-def test_phase3_loop_guard_stops_on_overall_drop(tmp_path: Path) -> None:
-    stubs = _Stubs(overall=(0.50, 0.40, 0.50), easy=(0.8, 0.8, 0.8))
+# ------------------------------------------------ ② 护栏（R4：base / prev / off）
+def test_phase3_loop_guard_base_mode_stops_on_drop(tmp_path: Path) -> None:
+    # 基座 0.60；r1 0.62（+0.02 安全）→ r2 0.55（−0.05 < −0.01）→ 停机
+    stubs = _Stubs(base_overall=0.60, overall=(0.62, 0.55, 0.70), easy=(0.8, 0.8, 0.8))
     rc = _loop(tmp_path, stubs, rounds=3).run()
     assert rc == 0, "护栏停止是预期停止（非错误退出）"
     assert len(stubs.collect_calls) == 2, "r2 超阈后不得再采集 r3"
-    assert len(stubs.eval_calls) == 2
+    assert len(stubs.eval_calls) == 2 and len(stubs.base_eval_calls) == 1
     status = _status(tmp_path)
     assert status["status"] == "stopped_guard"
-    assert "overall_success" in str(status["stop_reason"])
+    assert "基座" in str(status["stop_reason"]) and "0.0500" in str(status["stop_reason"])
     assert len(status["rounds"]) == 2
-    assert status["rounds"][1]["guard"]["stopped"] is True
-    assert status["rounds"][1]["guard"]["overall_delta"] == pytest.approx(0.10, abs=1e-6)
+    guard = status["rounds"][1]["guard"]
+    assert guard["mode"] == "base" and guard["stopped"] is True
+    assert guard["net_vs_base"] == pytest.approx(-0.05, abs=1e-6)
+    assert guard["base_overall"] == pytest.approx(0.60, abs=1e-6)
+    # 停机时仍导出 best（r1 0.62 > 基座 → best=r1，而非基座）
+    assert status["best"]["round"] == 1 and status["best"]["is_base"] is False
+    assert Path(status["best"]["ckpt"]).is_file()
 
 
-def test_phase3_loop_guard_stops_on_easy_drop(tmp_path: Path) -> None:
-    stubs = _Stubs(overall=(0.50, 0.50, 0.50), easy=(0.80, 0.60, 0.80))
-    rc = _loop(tmp_path, stubs, rounds=3).run()
+def test_phase3_loop_guard_prev_mode_keeps_old_semantics(tmp_path: Path) -> None:
+    # mode=prev：与上一轮比较（base 模式的新键不参与）；r2 相对 r1 下降 0.10 > 0.05 → 停
+    stubs = _Stubs(overall=(0.50, 0.40, 0.50), easy=(0.8, 0.8, 0.8))
+    rc = _loop(tmp_path, stubs, rounds=3, guard_mode="prev").run()
     assert rc == 0
     assert len(stubs.collect_calls) == 2
     status = _status(tmp_path)
     assert status["status"] == "stopped_guard"
-    assert "easy_success" in str(status["stop_reason"])
-    assert status["rounds"][1]["guard"]["easy_delta"] == pytest.approx(0.20, abs=1e-6)
+    assert "overall_success" in str(status["stop_reason"])
+    assert status["rounds"][1]["guard"]["mode"] == "prev"
+    assert status["rounds"][1]["guard"]["overall_delta"] == pytest.approx(0.10, abs=1e-6)
+    assert status["config"]["guard"]["mode"] == "prev"
+
+    # easy 口径（prev 模式下动态生效）：easy r1→r2 下降 0.20 > 0.10 → 停
+    second = tmp_path / "easy"
+    stubs2 = _Stubs(overall=(0.60, 0.60, 0.60), easy=(0.80, 0.60, 0.80))
+    assert _loop(second, stubs2, rounds=3, guard_mode="prev").run() == 0
+    assert len(stubs2.collect_calls) == 2
+    status2 = _status(second)
+    assert status2["status"] == "stopped_guard" and "easy_success" in str(status2["stop_reason"])
+    assert status2["rounds"][1]["guard"]["easy_delta"] == pytest.approx(0.20, abs=1e-6)
 
 
-def test_guard_decision_missing_metrics_never_stops() -> None:
+def test_phase3_loop_guard_off_mode_marks_and_never_stops(tmp_path: Path) -> None:
+    # mode=off：r1 大幅低于基座也不停；状态/日志必须显著标注
+    stubs = _Stubs(base_overall=0.60, overall=(0.10, 0.05, 0.02))
+    rc = _loop(tmp_path, stubs, rounds=2, guard_mode="off").run()
+    assert rc == 0
+    assert len(stubs.collect_calls) == 2, "off 模式不得因下降停机"
+    status = _status(tmp_path)
+    assert status["status"] == "no_gain", "全部低于基座 → 完成态 no_gain（非提前停）"
+    assert status["guard_off"] is True and status["guard_mode"] == "off"
+    assert status["config"]["guard"]["mode"] == "off"
+    assert all(item["guard"]["mode"] == "off" and item["guard"]["stopped"] is False
+               for item in status["rounds"])
+    log_text = (tmp_path / "runs" / "BTCTEST_phase3_loop" / "logs" / "phase3_loop.log").read_text(
+        encoding="utf-8"
+    )
+    assert "guard.mode=off" in log_text and "不判定" in log_text
+
+
+def test_guard_decision_base_mode_missing_optional_metrics_never_stops() -> None:
+    # 基座缺失/不可得 → 硬错（fail-closed）
+    with pytest.raises(ValueError, match="基座"):
+        guard_decision(None, {"overall_success": 0.5}, mode="base", base=None)
+    with pytest.raises(ValueError, match="基座"):
+        guard_decision(None, {"overall_success": 0.5}, mode="base", base={"overall_success": None})
+    # 本轮 overall 缺失/NaN → 不判定（缺失不停）
+    decision = guard_decision(
+        None, {"overall_success": None, "easy_success": 0.1}, mode="base", base={"overall_success": 0.5}
+    )
+    assert decision["stopped"] is False and decision["checked"] is False
+    assert decision["net_vs_base"] is None and decision["base_overall"] == 0.5
+    assert guard_decision(
+        None, {"overall_success": float("nan")}, mode="base", base={"overall_success": 0.5}
+    )["stopped"] is False
+    # 高于/低于基座边界：恰等/略高不停；超过阈值才停
+    assert guard_decision(
+        None, {"overall_success": 0.49}, mode="base", base={"overall_success": 0.50},
+        stop_on_base_drop=0.01,
+    )["stopped"] is False, "恰好 1pt 下降不算 > 阈值"
+    low = guard_decision(
+        None, {"overall_success": 0.4899}, mode="base", base={"overall_success": 0.50},
+        stop_on_base_drop=0.01,
+    )
+    assert low["stopped"] is True and low["net_vs_base"] == pytest.approx(-0.0101, abs=1e-9)
+    # mode=off 恒不判定
+    assert guard_decision(
+        {"overall_success": 1.0}, {"overall_success": 0.0}, mode="off",
+        stop_on_overall_drop=0.0, stop_on_easy_drop=0.0,
+    )["stopped"] is False
+
+
+def test_guard_decision_prev_mode_missing_metrics_never_stops() -> None:
     decision = guard_decision(
         {"overall_success": None, "easy_success": float("nan")},
         {"overall_success": 0.1, "easy_success": 0.1},
@@ -349,6 +509,7 @@ def test_phase3_loop_collect_failure_stops_immediately(tmp_path: Path) -> None:
     rc = _loop(tmp_path, stubs).run()
     assert rc == 1
     assert len(stubs.train_calls) == 0 and len(stubs.eval_calls) == 0
+    assert len(stubs.base_eval_calls) == 1, "基座自评必须先于轮转（R4）"
     status = _status(tmp_path)
     assert status["status"] == "failed" and "采集失败" in str(status["stop_reason"])
 
@@ -360,11 +521,44 @@ def test_phase3_loop_missing_artifacts_stop(tmp_path: Path) -> None:
     assert rc == 1 and len(stubs.eval_calls) == 0
     assert "训练产物缺失" in str(_status(tmp_path)["stop_reason"])
 
-    # 评测 rc=0 但 metrics.json 缺失 → 失败
-    stubs2 = _Stubs(eval_missing=True)
+    # 评测 rc=0 但 metrics.json 缺失 → 失败（基座评测成功，轮评测 missing）
+    stubs2 = _Stubs(eval_plan=["missing"])
     rc2 = _loop(tmp_path / "second", stubs2).run()
     assert rc2 == 1
     assert "评测产物缺失" in str(_status(tmp_path / "second")["stop_reason"])
+
+
+def test_phase3_loop_base_eval_missing_is_hard_error(tmp_path: Path) -> None:
+    """R4 fail-closed：基座评测产物/数值不可得 → 立即失败，不得跳过判定开跑。"""
+    for stubs, match in (
+        (_Stubs(base_missing=True), "基座评测产物缺失"),
+        (_Stubs(base_overall=None), "overall_success 缺失"),
+    ):
+        root = tmp_path / f"case-{match[:4]}"
+        rc = _loop(root, stubs).run()
+        assert rc == 1, match
+        assert len(stubs.collect_calls) == 0, "基座不可得不得进入轮转"
+        status = _status(root)
+        assert status["status"] == "failed" and "fail-closed" in str(status["stop_reason"])
+        assert match in str(status["stop_reason"])
+
+
+def test_phase3_loop_round_optional_metric_missing_no_judgement(tmp_path: Path) -> None:
+    """R4：本轮 metrics 缺 overall_success → 不判定（缺失不停）；候选留档但 ranked=false。"""
+    stubs = _Stubs(base_overall=0.50, overall=(0.60,), eval_plan=["no_overall", "ok"])
+    assert _loop(tmp_path, stubs, rounds=2).run() == 0
+    status = _status(tmp_path)
+    assert status["status"] == "completed" and status["stop_reason"] is None
+    guard_missing = status["rounds"][0]["guard"]
+    assert guard_missing["checked"] is False and guard_missing["stopped"] is False
+    assert guard_missing["net_vs_base"] is None
+    assert status["rounds"][1]["guard"]["stopped"] is False
+    manifest = json.loads(
+        (tmp_path / "runs" / "BTCTEST_phase3_loop" / "best" / "manifest.json").read_text(encoding="utf-8")
+    )
+    r1_candidate = next(item for item in manifest["candidates"] if item["round"] == 1)
+    assert r1_candidate["overall_success"] is None and r1_candidate["ranked"] is False
+    assert manifest["best"]["round"] == 2
 
 
 def test_phase3_loop_empty_collection_stops(tmp_path: Path) -> None:
@@ -377,13 +571,14 @@ def test_phase3_loop_empty_collection_stops(tmp_path: Path) -> None:
 
 # ------------------------------------------------------ ④ 状态文件字段
 def test_phase3_loop_status_file_fields(tmp_path: Path) -> None:
-    stubs = _Stubs()
+    stubs = _Stubs(overall=(0.60,))
     assert _loop(tmp_path, stubs, rounds=1).run() == 0
     status = _status(tmp_path)
     for key in (
         "schema_version", "lane", "status", "stop_reason", "started_at", "updated_at",
         "rounds_total", "current_round", "current_step", "stamp", "loop_dir",
         "runs_root", "datasets_root", "init_ckpt", "config", "rounds",
+        "chain_root", "base_eval", "best", "guard_mode",
     ):
         assert key in status, f"状态文件缺少字段 {key}"
     assert status["schema_version"] == 1 and status["lane"] == "P3-C"
@@ -391,13 +586,22 @@ def test_phase3_loop_status_file_fields(tmp_path: Path) -> None:
     assert status["current_round"] == 1 and status["stamp"] == "TEST"
     assert status["config"]["collect"] == {"workers": 3, "window_s": 5.0}
     assert status["config"]["eval"] == {"spec": str(tmp_path / "eval.json"), "workers": 2}
-    assert status["config"]["guard"] == {"stop_on_overall_drop": 0.05, "stop_on_easy_drop": 0.10}
+    assert status["config"]["guard"] == {
+        "mode": "base", "stop_on_base_drop": 0.01,
+        "stop_on_overall_drop": 0.05, "stop_on_easy_drop": 0.10,
+    }
+    assert status["config"]["anchor"] == {"enabled": False, "bc_dir": "", "mild_weight": 0.1}
+    # base_eval：引用 + 数值
+    assert status["base_eval"]["overall_success"] == 0.50
+    assert status["base_eval"]["dir"].endswith("BTCTEST_eval500_phase3_base")
+    assert Path(status["base_eval"]["metrics"]).is_file()
     entry = status["rounds"][0]
     for key in ("round", "student_in", "student_out", "collect", "train", "eval", "guard"):
         assert key in entry, f"逐轮条目缺少字段 {key}"
     for step in ("collect", "train", "eval"):
         assert entry[step]["rc"] == 0 and "duration_s" in entry[step] and "log" in entry[step]
-    assert entry["eval"]["overall_success"] == 0.50 and entry["eval"]["easy_success"] == 0.80
+    assert entry["train"]["ckpt_in"] == str(tmp_path / "init_phase2.pt")
+    assert entry["eval"]["overall_success"] == 0.60 and entry["eval"]["easy_success"] == 0.80
     # 原子写：无残留 tmp
     assert not (tmp_path / "runs" / "BTCTEST_phase3_loop" / "phase3_status.json.tmp").exists()
 
@@ -418,7 +622,9 @@ def test_phase3_loop_config_resolution_order(tmp_path: Path, monkeypatch) -> Non
         "      collect: {workers: 3, window_s: 5.0}\n"
         "      init_ckpt: runs/init.pt\n"
         "      eval: {spec: env/specs/eval.json, workers: 4}\n"
-        "      guard: {stop_on_overall_drop: 0.01, stop_on_easy_drop: 0.02}\n",
+        "      guard: {mode: prev, stop_on_base_drop: 0.02, stop_on_overall_drop: 0.01,"
+        " stop_on_easy_drop: 0.02}\n"
+        "      anchor: {enabled: true, bc_dir: datasets/EXP, mild_weight: 1.0}\n",
         encoding="utf-8",
     )
     config = load_config(str(cfg_path))
@@ -430,6 +636,18 @@ def test_phase3_loop_config_resolution_order(tmp_path: Path, monkeypatch) -> Non
     assert cfg.collect_workers == 3 and cfg.collect_window_s == 5.0
     assert cfg.init_ckpt == "runs/init.pt"
     assert cfg.eval_workers == 4 and cfg.stop_on_overall_drop == 0.01
+    assert cfg.guard_mode == "prev" and cfg.stop_on_base_drop == 0.02
+    assert cfg.anchor_enabled is True and cfg.anchor_bc_dir == "datasets/EXP" and cfg.anchor_mild_weight == 1.0
+    # 默认：base 模式 + 0.01 阈值 + 锚关（行为不变）
+    default_cfg = Phase3LoopConfig()
+    assert default_cfg.guard_mode == "base" and default_cfg.stop_on_base_drop == 0.01
+    assert default_cfg.anchor_enabled is False
+    # 非法 mode 拒绝
+    bad_path = tmp_path / "bad.yaml"
+    bad_path.write_text("stages:\n  B:\n    phase3:\n      guard: {mode: nope}\n", encoding="utf-8")
+    bad_args, bad_extra = _parse_args(["--phase3-loop", "--config", str(bad_path)])
+    with pytest.raises(ValueError, match="guard.mode"):
+        Phase3LoopConfig.from_config(load_config(str(bad_path)), bad_args, extra=bad_extra)
 
     monkeypatch.setenv("PHASE3_ROUNDS", "3")
     cfg_env = Phase3LoopConfig.from_config(config, args, extra=extra)
@@ -489,6 +707,7 @@ def _stub_chain(monkeypatch, tmp_path: Path, stage_results=None):
     fake_b = tmp_path / "fake_run" / "stage_b" / "final.pt"
     fake_b.parent.mkdir(parents=True, exist_ok=True)
     fake_b.write_bytes(b"fake-chain-b-final")
+    (fake_b.parent / "primary.pt").write_bytes(b"fake-chain-b-primary")
 
     def _fake_stage(stage, **kwargs):
         calls.append(("stage", stage))
@@ -498,7 +717,12 @@ def _stub_chain(monkeypatch, tmp_path: Path, stage_results=None):
         calls.append(("loop", int(self.cfg.rounds), str(self.cfg.init_ckpt), str(self.cfg.init_ckpt_source)))
         return 0
 
+    def _fake_monitor(tag, ckpt, cfg):
+        calls.append(("monitor", str(tag)))
+        return 0
+
     monkeypatch.setattr(phase3_loop, "_run_train_stage", _fake_stage)
+    monkeypatch.setattr(phase3_loop, "_chain_monitor_eval", _fake_monitor)
     monkeypatch.setattr(
         phase3_loop, "_stage_final_ckpt", lambda stage, *, config: fake_b if stage == "B" else None
     )
@@ -513,8 +737,9 @@ def test_phase3_chain_orders_ab_then_loop(tmp_path: Path, monkeypatch) -> None:
     rc = phase3_loop.run_chain(["--phase3-chain", "--config", str(cfg_path), "--phase3-rounds", "2"])
     assert rc == 0
     assert calls == [
-        ("stage", "A"), ("stage", "B"), ("loop", 2, str(fake_b), "chain-B"),
-    ], "全链必须 A→B→循环，且 phase3 起点 = 本次链 B final（chain-B）"
+        ("stage", "A"), ("stage", "B"), ("monitor", "phase1"), ("monitor", "phase2"),
+        ("loop", 2, str(fake_b), "chain-B"),
+    ], "全链必须 A→B→（B 监控评测）→循环，且 phase3 起点 = 本次链 B final（chain-B）"
 
 
 def test_phase3_chain_only_skips_ab(tmp_path: Path, monkeypatch) -> None:
@@ -762,8 +987,15 @@ def test_phase3_loop_resume_reuses_collect(tmp_path: Path) -> None:
     reused.mkdir(parents=True)
     (reused / "expert_bc.npz").write_bytes(b"npz")
     (reused / "expert_bc.meta.json").write_text(json.dumps({"count": 321}), encoding="utf-8")
+    init_ckpt = str(tmp_path / "init_phase2.pt")
     (reused / "report.json").write_text(
-        json.dumps({"counts": {"stored_rows": 321}}), encoding="utf-8"
+        json.dumps(
+            {
+                "counts": {"stored_rows": 321},
+                "dagger": {"driver_ckpt": {"path": init_ckpt}},  # R1 provenance
+            }
+        ),
+        encoding="utf-8",
     )
     rc = _loop(tmp_path, stubs, rounds=1, resume=True).run()
     assert rc == 0
@@ -780,15 +1012,24 @@ def test_phase3_loop_resume_reuses_collect(tmp_path: Path) -> None:
 def test_phase3_loop_resume_reuses_train_and_eval(tmp_path: Path) -> None:
     stubs = _Stubs()
     runs = tmp_path / "runs"
+    init_ckpt = str(tmp_path / "init_phase2.pt")
     train_dir = runs / "BTC20260901-0000_stageB_phase3_r1" / "stage_b"
     train_dir.mkdir(parents=True)
     final = train_dir / "final.pt"
     final.write_bytes(b"reused-final")
-    (train_dir / "metrics.json").write_text(json.dumps({"bc_loss": 0.9}), encoding="utf-8")
+    (train_dir / "metrics.json").write_text(
+        json.dumps({"bc_loss": 0.9, "init_ckpt": init_ckpt}), encoding="utf-8"
+    )  # R1 provenance
     eval_dir = runs / "BTC20260901-0000_eval500_phase3_r1"
     eval_dir.mkdir(parents=True)
     (eval_dir / "metrics.json").write_text(
-        json.dumps({"overall": {"success_rate": 0.61}, "by_difficulty": {"easy": {"success_rate": 0.7}}}),
+        json.dumps(
+            {
+                "ckpt": str(final),  # R1 provenance
+                "overall": {"success_rate": 0.61},
+                "by_difficulty": {"easy": {"success_rate": 0.7}},
+            }
+        ),
         encoding="utf-8",
     )
     rc = _loop(tmp_path, stubs, rounds=1, resume=True).run()
@@ -842,9 +1083,10 @@ def test_phase3_loop_exception_persists_failed_status(tmp_path: Path) -> None:
     def _boom_collect(argv, log_path):
         raise RuntimeError("boom-collect")
 
+    stubs1 = _Stubs()
     loop = Phase3Loop(
         _cfg(tmp_path), collect_fn=_boom_collect,
-        train_fn=lambda argv, log: 0, eval_fn=lambda argv, log: 0, logger=lambda _: None,
+        train_fn=lambda argv, log: 0, eval_fn=stubs1.eval, logger=lambda _: None,
     )
     assert loop.run() == 1
     status = _status(tmp_path)
@@ -904,10 +1146,10 @@ def test_phase3_loop_releases_gpu_after_training_and_records_reserved(tmp_path: 
     assert len(freed) == 1, "训练步结束后必须强制释放（成功路径，无重试）"
     status = _status(tmp_path)
     assert status["rounds"][0]["train"]["reserved_mib"] == {"before": 10000.0, "after": 120.0}
-    # GPU 段：三步（collect/train/eval）前各一条 free MiB 快照
+    # GPU 段：基座评测 + 三步（collect/train/eval）前各一条 free MiB 快照
     checks = status["gpu"]["checks"]
     assert status["gpu"]["threshold_mib"] == 6144.0
-    assert [item["step"] for item in checks] == ["collect", "train", "eval"]
+    assert [item["step"] for item in checks] == ["base_eval", "collect", "train", "eval"]
     assert all(item["free_mib"] == 9000.0 and item["ok"] is True and item["waits"] == 0 for item in checks)
     log_text = (tmp_path / "runs" / "BTCTEST_phase3_loop" / "logs" / "phase3_loop.log").read_text(encoding="utf-8")
     assert "仍高位" not in log_text, "reserved 已回落（120 MiB）不应告警"
@@ -935,11 +1177,11 @@ def test_phase3_loop_gpu_precheck_waits_then_fails(tmp_path: Path, monkeypatch) 
     assert rc == 1 and len(stubs.collect_calls) == 0 and len(stubs.train_calls) == 0, "低显存绝不带病启动"
     status = _status(tmp_path)
     assert status["status"] == "failed" and "GPU 空闲不足" in str(status["stop_reason"])
-    assert status["current_step"] == "collect"
+    assert status["current_step"] == "base_eval", "R4 基座评测在轮转之前（fail-closed）"
     assert len(waits) == phase3_loop.GPU_WAIT_RETRIES == 3
     assert len(freed) == 3, "每次等待前先释放"
     check = status["gpu"]["checks"][-1]
-    assert check["step"] == "collect" and check["ok"] is False and check["waits"] == 3
+    assert check["step"] == "base_eval" and check["ok"] is False and check["waits"] == 3
     assert check["free_mib"] == 1000.0
 
 
@@ -954,7 +1196,7 @@ def test_phase3_loop_gpu_precheck_recovers_after_wait(tmp_path: Path, monkeypatc
     assert rc == 0 and len(stubs.collect_calls) == 1
     assert len(waits) == 1, "一次等待后显存恢复 → 继续"
     check = _status(tmp_path)["gpu"]["checks"][0]
-    assert check["ok"] is True and check["waits"] == 1
+    assert check["step"] == "base_eval" and check["ok"] is True and check["waits"] == 1
 
 
 def test_phase3_loop_collect_oom_retries_then_cpu_fallback(tmp_path: Path, monkeypatch) -> None:
@@ -1064,6 +1306,7 @@ def test_phase3_chain_init_ckpt_flows_to_collect_student_and_train_ckpt(tmp_path
 
     # 只桩 A/B 与 B final 解析；**真跑** Phase3Loop.run（步函数用桩，不启动真实子进程）
     monkeypatch.setattr(phase3_loop, "_run_train_stage", lambda stage, **kwargs: 0)
+    monkeypatch.setattr(phase3_loop, "_chain_monitor_eval", lambda tag, ckpt, cfg: 0)
     monkeypatch.setattr(phase3_loop, "_stage_final_ckpt", lambda stage, *, config: fake_b)
     real_loop = phase3_loop.Phase3Loop
 
@@ -1081,9 +1324,10 @@ def test_phase3_chain_init_ckpt_flows_to_collect_student_and_train_ckpt(tmp_path
     ])
     assert rc == 0
     assert stubs.collect_calls[0]["student"] == str(fake_b), "r1 采集 student = 链内 B final"
-    assert [call["ckpt"] for call in stubs.train_calls] == [str(fake_b), str(fake_b)], (
-        "训练每轮起点恒为 init_ckpt（= 链内 B final）"
-    )
+    assert [call["ckpt"] for call in stubs.train_calls] == [
+        str(fake_b),
+        str(stubs.train_calls[0]["out"] / "final.pt"),
+    ], "R1 顺序续训：r1 起点 = 链内 B final；r2 起点 = r1 产物"
     assert stubs.collect_calls[1]["student"] == str(stubs.train_calls[0]["out"] / "final.pt"), (
         "r2 采集 student = r1 训练产物（既有轮转语义）"
     )
@@ -1159,3 +1403,151 @@ def test_phase3_init_ckpt_auto_resolution(tmp_path: Path, monkeypatch) -> None:
     plain_args, plain_extra = _parse_args(["--phase3-loop", "--config", str(plain)])
     cfg_plain = Phase3LoopConfig.from_config(load_config(str(plain)), plain_args, extra=plain_extra)
     assert cfg_plain.init_ckpt == "runs/init.pt" and cfg_plain.init_ckpt_source == "config"
+
+
+# ---------------------- ⑨ lane P4b：keep-best / provenance / 2 轮假循环 / 锚接线
+def test_phase3_loop_keep_best_exports_manifest(tmp_path: Path) -> None:
+    """候选 = {基座} ∪ {各轮}；最优导出 best/final.pt + metrics.json + manifest.json（含 reach 面）。"""
+    stubs = _Stubs(base_overall=0.50, overall=(0.52, 0.70))
+    assert _loop(tmp_path, stubs, rounds=2).run() == 0
+    status = _status(tmp_path)
+    assert status["status"] == "completed" and status["best"]["no_gain"] is False
+    best_dir = tmp_path / "runs" / "BTCTEST_phase3_loop" / "best"
+    assert Path(status["best"]["ckpt"]) == best_dir / "final.pt"
+    r2_final = tmp_path / "runs" / "BTCTEST_stageB_phase3_r2" / "stage_b" / "final.pt"
+    assert (best_dir / "final.pt").read_bytes() == r2_final.read_bytes()
+    manifest = json.loads((best_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["best"]["round"] == 2 and manifest["best"]["is_base"] is False
+    assert manifest["best"]["vs_base"] == pytest.approx(0.20, abs=1e-9)
+    assert manifest["base"]["overall_success"] == 0.50
+    assert manifest["metric"] == "overall_success"
+    assert len(manifest["spec_sha256"]) == 64 and manifest["spec"].endswith("eval.json")
+    assert [item["round"] for item in manifest["candidates"]] == [0, 1, 2]
+    assert manifest["candidates"][0]["is_base"] is True and manifest["candidates"][0]["vs_base"] == 0.0
+    assert manifest["candidates"][2]["overall_success"] == 0.70
+    assert (best_dir / "metrics.json").is_file(), "胜者评测指标随导出（消费方直读）"
+    assert json.loads((best_dir / "metrics.json").read_text(encoding="utf-8"))["overall"]["success_rate"] == 0.70
+    assert "下游消费 best/final.pt" in manifest["consumer"]
+
+
+def test_phase3_loop_keep_best_tie_prefers_base_and_no_gain(tmp_path: Path) -> None:
+    """全部轮次未超基座（含平手取基座）→ no_gain（完成态）；导出基座 + 清单 is_base。"""
+    stubs = _Stubs(base_overall=0.50, overall=(0.45, 0.50))
+    assert _loop(tmp_path, stubs, rounds=2, guard_mode="off").run() == 0
+    status = _status(tmp_path)
+    assert status["status"] == "no_gain" and status["current_step"] == "done"
+    assert "未超过基座" in str(status["stop_reason"])
+    assert status["best"]["is_base"] is True and status["best"]["no_gain"] is True
+    best_dir = tmp_path / "runs" / "BTCTEST_phase3_loop" / "best"
+    assert (best_dir / "final.pt").read_bytes() == (tmp_path / "init_phase2.pt").read_bytes()
+    manifest = json.loads((best_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["best"]["round"] == 0 and manifest["best"]["is_base"] is True
+    assert manifest["best"]["vs_base"] == 0.0
+    assert [item["round"] for item in manifest["candidates"]] == [0, 1, 2], "候选仍全量留档"
+
+
+def test_phase3_loop_two_round_fake_integration(tmp_path: Path) -> None:
+    """2 轮假循环集成：R1 链式起点/评测、R4 基座判定、keep-best 选择。"""
+    stubs = _Stubs(base_overall=0.40, overall=(0.45, 0.42), easy=(0.70, 0.60))
+    assert _loop(tmp_path, stubs, rounds=2).run() == 0
+    status = _status(tmp_path)
+    assert status["status"] == "completed" and status["stop_reason"] is None
+    assert status["current_step"] == "done" and status["current_round"] == 2
+    init_ckpt = str(tmp_path / "init_phase2.pt")
+    r1 = str(tmp_path / "runs" / "BTCTEST_stageB_phase3_r1" / "stage_b" / "final.pt")
+    r2 = str(tmp_path / "runs" / "BTCTEST_stageB_phase3_r2" / "stage_b" / "final.pt")
+    assert [c["student"] for c in stubs.collect_calls] == [init_ckpt, r1]
+    assert [c["ckpt"] for c in stubs.train_calls] == [init_ckpt, r1]
+    assert [c["ckpt"] for c in stubs.eval_calls] == [r1, r2]
+    assert [item["student_out"] for item in status["rounds"]] == [r1, r2]
+    assert [item["train"]["ckpt_in"] for item in status["rounds"]] == [init_ckpt, r1]
+    assert status["rounds"][0]["guard"]["net_vs_base"] == pytest.approx(0.05, abs=1e-6)
+    assert status["rounds"][1]["guard"]["net_vs_base"] == pytest.approx(0.02, abs=1e-6)
+    assert status["base_eval"]["overall_success"] == 0.40
+    assert status["best"]["round"] == 1 and status["best"]["vs_base"] == pytest.approx(0.05, abs=1e-6)
+
+
+def test_phase3_loop_resume_provenance_mismatch_fails(tmp_path: Path) -> None:
+    """R1：resume 复用 provenance 不符 → 报错停止（绝不静默拼接）。"""
+    # ① 采集 driver 不符
+    root1 = tmp_path / "collect"
+    stubs1 = _Stubs()
+    reused = root1 / "datasets" / "BTC20260901-0000_phase3_dagger_r1"
+    reused.mkdir(parents=True)
+    (reused / "expert_bc.npz").write_bytes(b"npz")
+    (reused / "report.json").write_text(
+        json.dumps(
+            {
+                "counts": {"stored_rows": 10},
+                "dagger": {"driver_ckpt": {"path": "/some/other/student.pt"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc1 = _loop(root1, stubs1, rounds=1, resume=True).run()
+    assert rc1 == 1 and len(stubs1.collect_calls) == 0 and len(stubs1.train_calls) == 0
+    status1 = _status(root1)
+    assert status1["status"] == "failed"
+    assert "采集复用 provenance 校验失败" in str(status1["stop_reason"])
+    assert "拒绝静默拼接" in str(status1["stop_reason"])
+
+    # ② 训练 init_ckpt 不符
+    root2 = tmp_path / "train"
+    stubs2 = _Stubs()
+    train_dir = root2 / "runs" / "BTC20260901-0000_stageB_phase3_r1" / "stage_b"
+    train_dir.mkdir(parents=True)
+    (train_dir / "final.pt").write_bytes(b"stale")
+    (train_dir / "metrics.json").write_text(
+        json.dumps({"bc_loss": 0.5, "init_ckpt": "/some/other/parent.pt"}), encoding="utf-8"
+    )
+    rc2 = _loop(root2, stubs2, rounds=1, resume=True).run()
+    assert rc2 == 1 and len(stubs2.train_calls) == 0, "provenance 不符不得复用（也不得重训掩盖）"
+    assert "训练复用 provenance 校验失败" in str(_status(root2)["stop_reason"])
+
+    # ③ 评测 ckpt 不符
+    root3 = tmp_path / "eval"
+    stubs3 = _Stubs()
+    eval_dir = root3 / "runs" / "BTC20260901-0000_eval500_phase3_r1"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "metrics.json").write_text(
+        json.dumps({"ckpt": "/some/other/ckpt.pt", "overall": {"success_rate": 0.9}}),
+        encoding="utf-8",
+    )
+    rc3 = _loop(root3, stubs3, rounds=1, resume=True).run()
+    assert rc3 == 1 and len(stubs3.eval_calls) == 0
+    assert "评测复用 provenance 校验失败" in str(_status(root3)["stop_reason"])
+
+    # ④ 基座评测 ckpt 不符（fail-closed）
+    root4 = tmp_path / "base"
+    stubs4 = _Stubs()
+    base_dir = root4 / "runs" / "BTC20260901-0000_eval500_phase3_base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "metrics.json").write_text(
+        json.dumps({"ckpt": "/some/other/base.pt", "overall": {"success_rate": 0.5}}),
+        encoding="utf-8",
+    )
+    rc4 = _loop(root4, stubs4, rounds=1, resume=True).run()
+    assert rc4 == 1 and len(stubs4.collect_calls) == 0 and len(stubs4.base_eval_calls) == 0
+    assert "base_eval 校验失败" in str(_status(root4)["stop_reason"])
+
+
+def test_phase3_loop_train_argv_anchor_wiring(tmp_path: Path) -> None:
+    """锚接线：config anchor.* → train argv ``--phase3-anchor*``；默认关不传（行为不变）。"""
+    on_loop = _loop(
+        tmp_path, _Stubs(), rounds=1,
+        anchor_enabled=True, anchor_bc_dir="datasets/EXP_anchor", anchor_mild_weight=1.0,
+    )
+    init_ckpt = tmp_path / "init_phase2.pt"
+    argv = on_loop._train_argv(
+        dagger_dir=tmp_path / "d", train_out=tmp_path / "o", ckpt=str(init_ckpt), round_index=2
+    )
+    assert "--phase3-anchor" in argv
+    assert _arg(argv, "--phase3-anchor-bc-dir") == "datasets/EXP_anchor"
+    assert _arg(argv, "--phase3-anchor-mild-weight") == "1"
+    assert _arg(argv, "--ckpt") == str(init_ckpt) and _arg(argv, "--phase3-round") == "2"
+
+    off_loop = _loop(tmp_path / "off", _Stubs(), rounds=1)
+    argv_off = off_loop._train_argv(
+        dagger_dir=tmp_path / "d", train_out=tmp_path / "o", ckpt=str(init_ckpt), round_index=1
+    )
+    assert not any(str(item).startswith("--phase3-anchor") for item in argv_off), "默认关不得透传锚参数"

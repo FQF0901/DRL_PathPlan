@@ -9,6 +9,8 @@
   ``model.snapshot.yaml``、``stage_a/``、``stage_b/``（训练由 stages.py 写在 ``--out`` 下，
   含 ckpt/monitor/metrics 等——保持原位）。
 - 兼容旧平铺 run（``runs/<run>/stage_a/{final.pt,ckpt_epochNNN.pt}`` 及 ckpt 直接位于 run 根）的发现。
+- 评测 run 名（``tools/test.py`` / ``pipeline.eval_runner.py`` 共用）= ``runs/BTC<秒级北京戳>_<kind>_<tag>``：
+  由 :func:`canonical_run_name` / :func:`eval_run_name` 幂等规范化（调用方不手拼名字）。
 """
 
 from __future__ import annotations
@@ -23,11 +25,82 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 _BJ = timezone(timedelta(hours=8))
 _LEGACY_STAGE_RE = re.compile(r"_stage([AB])$")
+#: 规范 run 名前缀：``BTC<YYYYMMDD>-<HHMM(SS)>_…``（分钟戳 = 旧 ``beijing_stamp`` 产物，兼容）
+_CANONICAL_RUN_NAME_RE = re.compile(r"^BTC\d{8}-(?:\d{4}|\d{6})(?:_|$)")
+#: 手拼漂移伪前缀：只有日期段的 ``BTC<YYYYMMDD>-``（如 ``BTC20260929-EXP_*``）
+_PSEUDO_BTC_PREFIX_RE = re.compile(r"^BTC\d{8}-")
 
 
 def beijing_stamp(now: datetime | None = None) -> str:
     """北京戳 ``YYYYMMDD-HHMM``（datasets/ 与 runs/ 命名统一用它）。"""
     return (now or datetime.now(_BJ)).strftime("%Y%m%d-%H%M")
+
+
+def beijing_stamp_seconds(now: datetime | None = None) -> str:
+    """秒级北京戳 ``YYYYMMDD-HHMMSS``（规范 run 名用；datasets/训练仍走分钟档）。"""
+    return (now or datetime.now(_BJ)).strftime("%Y%m%d-%H%M%S")
+
+
+def looks_like_path(value: str | Path) -> bool:
+    """路径型输入（绝对/相对路径：含 ``/`` 或 ``~``）——不得当 run 名做规范化。"""
+    text = str(value)
+    return "/" in text or os.sep in text or text.startswith("~")
+
+
+def canonical_run_name(
+    name: str | None = None,
+    *,
+    kind: str = "",
+    tag: str | None = None,
+    stamp: str | None = None,
+) -> str:
+    """规范 run 名（幂等；runs/ 命名唯一入口）：``BTC<秒级北京戳>_<kind>[_<tag>]``。
+
+    - ``name`` 已是规范前缀 ``BTC<YYYYMMDD>-<HHMM(SS)>_…`` → 原样返回（历史分钟戳兼容）；
+    - ``name`` 非规范（如 ``EXP_foo`` / 伪前缀 ``BTC20260929-EXP_foo``）→ 剥掉形如
+      ``BTC<YYYYMMDD>-`` 的伪前缀（只有日期段的实验脚本手拼漂移），再补 ``BTC<秒级戳>_``；
+    - ``name`` 为 None/空 → 直接用 ``kind``/``tag`` 生成。
+
+    ``stamp`` 缺省 = 当前秒级北京戳（可注入以便测试/复现）。
+    """
+    stamp_value = stamp or beijing_stamp_seconds()
+    if name is None or not str(name).strip():
+        suffix = "_".join(part for part in (kind, tag) if part)
+        return f"BTC{stamp_value}_{suffix}" if suffix else f"BTC{stamp_value}"
+    text = str(name).strip()
+    if _CANONICAL_RUN_NAME_RE.match(text):
+        return text
+    rest = _PSEUDO_BTC_PREFIX_RE.sub("", text)
+    return f"BTC{stamp_value}_{rest}" if rest else f"BTC{stamp_value}"
+
+
+def spec_run_kind(spec: str | Path | None, default: str = "eval") -> str:
+    """spec 路径 → run 名 kind（``…/scenarios_eval500.json`` → ``eval500``）；缺省/空 → ``default``。"""
+    if spec is None or not str(spec).strip():
+        return str(default)
+    stem = Path(str(spec)).stem
+    match = re.match(r"^scenarios?[_-](.+)$", stem)
+    return (match.group(1) if match else stem) or str(default)
+
+
+def eval_run_name(
+    name: str | None = None,
+    *,
+    spec: str | Path | None = None,
+    policy: str = "ckpt",
+    stamp: str | None = None,
+    default_kind: str = "eval",
+) -> str:
+    """评测 run 名（``tools/test.py`` / ``pipeline.eval_runner.py`` 共用）。
+
+    - 路径型 ``name``（``/tmp/…`` 或含 ``/``）→ 原样返回（显式路径不当名字处理）；
+    - 其余 → :func:`canonical_run_name`：缺省 ``BTC<秒级戳>_<spec kind>_<policy>``，
+      非规范名按伪前缀规则纠正（``EXP_foo`` → ``BTC<秒级戳>_EXP_foo``）。
+    """
+    if name is not None and str(name).strip() and looks_like_path(name):
+        return str(name)
+    kind = spec_run_kind(spec, default=default_kind)
+    return canonical_run_name(name, kind=kind, tag=policy, stamp=stamp)
 
 
 def new_work_dir(name: str, root: Path = ROOT, stamp: str | None = None) -> Path:
@@ -263,7 +336,7 @@ def tb_spec(root: Path = ROOT) -> list[tuple[str, str]]:
     ``runs/*eval*/monitor``（按 manifest 的 ckpt 判定归属）；无事件文件/无目录 → 跳过。
     """
     spec: dict[str, str] = {}
-    for work_dir, out_dir, stage in run_candidates(root):  # 新→旧；同名字首个即最新
+    for _work_dir, out_dir, stage in run_candidates(root):  # 新→旧；同名字首个即最新
         name = f"train_stage{stage}"
         if name in spec:
             continue

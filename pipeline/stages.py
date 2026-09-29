@@ -6,8 +6,9 @@
   （``build_future.ego_fut``，退回解析运动学）；目标 = ``(episode_id, base+5k)`` 精确查表
   的未来 OD 帧（对齐到 t0、``od_id`` 身份匹配、``wm_valid`` 门控）。
   **直接多步 OD 损失**（``train_weight × wm_valid`` 显式加权）+ **未来 LD 直接多步损失**
-  （lane P3-F 恢复：LD 属 WM，在 A 学会；``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid`` 掩码，
-  与 OD 同构；权重 ``stages.A.world_model.ld_coef``）+ **plan head ``ego_next``
+  （``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid`` 掩码，与 OD 同构；权重
+  ``stages.A.world_model.ld_coef`` **默认 0.0**（2026-09-30 拍板）——LD 损失仅监控、不监督 LD 头；
+  可经配置/``--wm-ld-coef`` 开启）+ **plan head ``ego_next``
   监督**（方案①：每步挤入 GT 帧前用同一 mem 预测第 k 帧 ego 前 6 维，plan head/MoE 因此在
   A 阶段有梯度，design-v1.2 §2.3）+ **presence/entry BCE + AUC（id 轴，见
   :func:`presence_entry_targets`）**。
@@ -83,7 +84,6 @@ from pipeline.trainer import (  # noqa: E402
     config_snapshot_hash,
     dataset_weight_report,
     ego_kpi_arrays,
-    evaluate_bc_phase3,
     load_checkpoint,
     load_optimizer_state,
     load_training_checkpoint,
@@ -1243,7 +1243,7 @@ def match_future_od_slots(
             valid_current[:, None, :] * any_match * matched_mask
         ).astype(np.float32)
         return out
-    batch, steps, slots, _ = od_fut.shape
+    batch, steps, _, _ = od_fut.shape
     horizon = np.arange(1, steps + 1, dtype=np.float32).reshape(1, steps, 1, 1)
     prior = cur[:, None, :, :2] + horizon * float(dt) * cur[:, None, :, 2:4]  # (B,K,16,2)
     distance = np.linalg.norm(prior[:, :, :, None, :] - od_fut[:, :, None, :, :2], axis=-1)  # (B,K,S,S)
@@ -1400,7 +1400,8 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         meta = load_checkpoint(args.ckpt, model)
         print(f"[stageA] 载入 {args.ckpt}（missing={len(meta.get('missing_keys', []))}）", flush=True)
 
-    # lane U1+：Stage A 也关闭 MoE（experts+gate 只在 B-phase2 训练；A 输出严格 = primary）
+    # lane U1+：Stage A 关闭 MoE（experts+gate 只在 B-phase2 训练；A 输出严格 = primary）。
+    # 2026-09-30：MoE-in-A 路线已由 W2/T2 闭环实验证伪（version_ledger），实验开关 STAGE_A_MOE 移除。
     model.set_moe(enabled=False)
     print("[stageA] MoE 已关闭（experts/router 不参与）", flush=True)
 
@@ -1524,7 +1525,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ld_coef = float(
         args.wm_ld_coef
         if args.wm_ld_coef is not None
-        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ld_coef", 1.0)
+        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ld_coef", 0.0)
     )
     presence_state = {"available": 0.0, "warning": False}
 
@@ -2808,6 +2809,8 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     # resume：ckpt 与当前相位同源 → 传优化器/RNG；跨相位边界 → 全新（原跑法本身按相位重建）
     mid_primary = 0 < resume_epoch < primary_epochs
     mid_specific = resume_epoch > primary_epochs
+    # 2026-09-30：phase1-MoE 路线已由 W2/T2 闭环实验证伪（version_ledger），实验开关 STAGE_B_P1_MOE 移除；
+    # phase 1 保持 MoE 关闭 + experts/router 冻结（lane U1 既有语义）。
     metrics["primary"] = _slim_phase_result(
         _run_phase(
             "primary",
@@ -3838,7 +3841,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "stages.A.world_model.ego_next_coef=0.1；plan head/MoE 的唯一梯度来源）")
     parser.add_argument("--wm-ld-coef", type=float, default=None,
                         help="阶段 A 未来 LD 直接多步损失权重（默认取 config "
-                             "stages.A.world_model.ld_coef=1.0，与 od 同量级；lane P3-F 恢复监督）")
+                             "stages.A.world_model.ld_coef=0.0；2026-09-30 拍板：LD 损失仅监控、不监督 LD 头）")
     # ---- 阶段 B ----
     parser.add_argument("--bc-epochs", type=int, default=None, help="阶段 B 总轮数（默认 config/stages.B.bc.epochs=10）")
     parser.add_argument("--bc-phase-split", type=float, default=None,

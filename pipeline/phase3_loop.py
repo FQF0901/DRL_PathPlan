@@ -5,20 +5,34 @@
 ``tools/train.sh`` 的 ``PHASE3=1`` 走全链、``PHASE3_ONLY=1`` 直接进循环（**不新增 .sh**，
 编排自包含在 repo 内）。
 
+循环开始：**基座自评（R4）**——对 ``init_ckpt`` 用同一评测口径（spec/limit/workers）评一次 →
+状态 ``base_eval``（引用 + 数值）；**不可得 = 硬错（fail-closed，不许跳过判定）**。
+
 每轮 ``k=1..N``：
 
-1. **采集**（subprocess ``tools/dagger_collect.py``）：学生 = 上一轮
-   ``<work>/stage_b/final.pt``（``r1`` = ``stages.B.phase3.init_ckpt`` 的 phase2 产物），
+1. **采集**（subprocess ``tools/dagger_collect.py``）：学生 = **running student**
+   （``r1`` = ``stages.B.phase3.init_ckpt``；``r{k}`` = 第 ``k-1`` 轮训练产物 ``final.pt``），
    在 ``spec_pool`` 上攒 ``fail_target`` 个失败窗口（``--window-fail-before <collect.window_s>``、
    ``--shuffle-seed <shuffle_seed_base+k>``、``--workers <collect.workers>``）→
    ``<datasets_root>/BTC<stamp>_phase3_dagger_r{k}``；
-2. **训练**（**独立子进程** ``tools/train.py --phase3 <dir> --phase3-round k``，**每轮起点恒为
-   ``init_ckpt``**；进程退出天然释放显存）→ ``<runs_root>/BTC<stamp>_stageB_phase3_r{k}/stage_b``；
+2. **训练**（**独立子进程** ``tools/train.py --phase3 <dir> --phase3-round k``，**起点 = running
+   student**（顺序续训 R1：``--ckpt`` = 上一轮输出，``r1`` = ``init_ckpt``）；进程退出天然释放
+   显存）→ ``<runs_root>/BTC<stamp>_stageB_phase3_r{k}/stage_b``；anchor 接线：
+   ``stages.B.phase3.anchor.enabled=true`` 时透传 ``--phase3-anchor*``（**默认 false，行为不变**）；
 3. **评测**（subprocess ``tools/test.py``，LQR，``eval.spec``/``eval.workers``）→
    ``<runs_root>/BTC<stamp>_eval500_phase3_r{k}``；
-4. **护栏**：与**上一轮**比较 ``overall_success`` / ``easy`` 组 ``success_rate``，
-   绝对下降超过 ``guard.stop_on_overall_drop`` / ``guard.stop_on_easy_drop`` → 记录原因并停止
-   （不静默继续；``r1`` 无上一轮 → 只记录基线不判定）。
+4. **护栏（R4）**：``guard.mode=base``（默认）比较 ``overall_success`` 相对**入口基座**
+   （``base_eval``）：``net_vs_base = 本轮 − 基座``，``net_vs_base < −guard.stop_on_base_drop``
+   （默认 0.01；确定性评测下阈值 = 实质显著性）→ 记录原因并停止；本轮指标缺失/NaN → **不判定**
+   （缺失不停，与基座缺失=硬错区分）；``mode=prev`` = 旧口径（与上一轮比较，
+   ``stop_on_overall_drop``/``stop_on_easy_drop`` 仅此模式使用）；``mode=off`` = 不判定
+   （状态/日志显著标注）。
+
+**keep-best（R4）**：候选 = ``{init_ckpt} ∪ {各轮产物}``，指标 ``overall_success``，平手取基座/
+更早轮；循环结束（含 ``stopped_guard``）导出稳定路径 ``<loop_dir>/best/final.pt`` +
+``best/metrics.json`` + ``best/manifest.json``（round/eval dir/spec hash/vs base/is_base）；
+**下游消费方 = ``best/final.pt``**（清单 ``best/manifest.json``、状态 ``best``）。全部轮次均未超
+基座 → 状态 ``no_gain``（**完成态、非提前停**）。
 
 状态文件 ``<runs_root>/BTC<stamp>_phase3_loop/phase3_status.json``：每步**原子重写**
 （tmp + ``os.replace``），含 loop 级状态 + 逐轮 collect/train/eval/guard 结果，供 10 分钟轮询审计；
@@ -38,10 +52,13 @@
 （采集：``BTC*_phase3_dagger_r{k}`` 且 ``report.json.counts.stored_rows>0``；训练：
 ``BTC*_stageB_phase3_r{k}/stage_b/final.pt``+``metrics.json``；评测：
 ``BTC*_eval500_phase3_r{k}/metrics.json``）→ 跳过并在日志/状态标 ``reused=<path>``。
+**复用必须通过 provenance 校验（R1）**：训练侧 ``metrics.json["init_ckpt"]``、采集侧
+``report.json.dagger.driver_ckpt.path``、评测侧 ``metrics.json["ckpt"]`` 必须等于**期望父节点**
+（当轮 running student / 当轮训练产物）；不符/不可得 → 报错停止（绝不静默拼接）。
 
 **错误语义**：任一步异常/非零退出/产物缺失（``expert_bc.npz`` / ``final.pt`` / ``metrics.json``）
 → 写 ``status="failed"`` + ``stop_reason``（异常类型+摘要，含 traceback 落日志）后立即返回非零，
-绝不带缺产物进入下一轮；``stopped_guard`` 语义不变。
+绝不带缺产物进入下一轮；``stopped_guard`` / ``no_gain`` 语义见上。
 
 用法::
 
@@ -55,8 +72,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -85,6 +104,16 @@ GPU_RESERVED_WARN_MIB = 1024.0
 #: 采集/评测 GPU OOM 重试次数（采集第 2 次重试退 ``--device cpu``）
 COLLECT_OOM_RETRIES = 2
 EVAL_OOM_RETRIES = 2
+#: R4 护栏模式：``base`` = 与循环入口基座（``base_eval``）比较（默认）；``prev`` = 与上一轮比较
+#: （旧语义，``stop_on_overall_drop``/``stop_on_easy_drop`` 仅此模式生效）；``off`` = 不判定
+GUARD_MODES = ("base", "prev", "off")
+#: R4 基座护栏默认阈值：评测确定性（``eval_runner`` deterministic=True，动作=action_mu）下无评测
+#: 噪声 → 阈值即"实质显著性"（0.01 = 1pt）；相对基座下降**超过**该值才停机
+GUARD_STOP_ON_BASE_DROP = 0.01
+#: 浮点比较容差：下降恰好等于阈值（如 0.49 vs 0.50 的二进制误差）不算"超过"
+_GUARD_EPS = 1e-9
+#: keep-best 稳定导出目录名（相对 loop_dir）：下游消费 ``best/final.pt``
+BEST_DIRNAME = "best"
 #: 编排层自身接管的参数：禁止经透传 EXTRA 覆盖（避免把轮次/路径/起点接错）
 _RESERVED_EXTRA_ARGS = frozenset(
     {
@@ -113,6 +142,89 @@ def _abs(path: Any) -> Path:
     """仓库根相对路径 → 绝对路径（``--phase3-loop`` 可能在任意 cwd 启动）。"""
     value = Path(str(path))
     return value if value.is_absolute() else ROOT / value
+
+
+def _sha256_file(path: Any) -> str:
+    """文件 sha256（缺失/不可读 → 空串；用于 provenance/导出校验，不做静默替代）。"""
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def _ckpt_id(path: Any) -> Dict[str, Any]:
+    """权重文件标识（链根 id 等）：``{path, sha256, bytes}``（不可读 → sha256 空串）。"""
+    target = Path(str(path))
+    try:
+        return {"path": str(target), "sha256": _sha256_file(target), "bytes": int(target.stat().st_size)}
+    except OSError:
+        return {"path": str(target), "sha256": "", "bytes": None}
+
+
+def _same_path(left: Any, right: Any) -> bool:
+    """路径等价判定（``expanduser+resolve`` 归一化；非法/空 → False）。"""
+    try:
+        left_path = Path(str(left)).expanduser().resolve()
+        right_path = Path(str(right)).expanduser().resolve()
+    except (OSError, TypeError, ValueError):
+        return False
+    if not str(left or "").strip() or not str(right or "").strip():
+        return False
+    return left_path == right_path
+
+
+def _verify_train_provenance(metrics_path: Path, expected_ckpt: Any) -> "tuple[bool, str]":
+    """resume 复用训练产物（R1）：``metrics.json["init_ckpt"]`` 必须 = 期望父节点（running student）。"""
+    metrics = _read_json(Path(metrics_path))
+    if not isinstance(metrics, Mapping):
+        return False, f"metrics.json 不可读：{metrics_path}"
+    recorded = metrics.get("init_ckpt")
+    if not str(recorded or "").strip():
+        return False, f"metrics.json 缺 init_ckpt（无法校验父节点）：{metrics_path}"
+    if not _same_path(recorded, expected_ckpt):
+        return False, f"训练产物父节点不符：init_ckpt={recorded!r} != 期望 {str(expected_ckpt)!r}"
+    return True, ""
+
+
+def _verify_collect_provenance(report_path: Path, expected_ckpt: Any) -> "tuple[bool, str]":
+    """resume 复用采集目录（R1）：``report.json.dagger.driver_ckpt.path`` 必须 = 期望父节点。"""
+    report = _read_json(Path(report_path))
+    if not isinstance(report, Mapping):
+        return False, f"report.json 不可读：{report_path}"
+    dagger = report.get("dagger")
+    driver = dagger.get("driver_ckpt") if isinstance(dagger, Mapping) else None
+    recorded = driver.get("path") if isinstance(driver, Mapping) else None
+    if not str(recorded or "").strip():
+        return False, f"report.json 缺 dagger.driver_ckpt.path（无法校验 driver）：{report_path}"
+    if not _same_path(recorded, expected_ckpt):
+        return False, f"采集 driver 不符：driver_ckpt={recorded!r} != 期望 {str(expected_ckpt)!r}"
+    return True, ""
+
+
+def _verify_eval_provenance(metrics_path: Path, expected_ckpt: Any) -> "tuple[bool, str]":
+    """resume 复用评测产物（R1）：``metrics.json["ckpt"]`` 必须 = 期望父节点（本轮训练产物）。"""
+    metrics = _read_json(Path(metrics_path))
+    if not isinstance(metrics, Mapping):
+        return False, f"metrics.json 不可读：{metrics_path}"
+    recorded = metrics.get("ckpt")
+    if not str(recorded or "").strip():
+        return False, f"metrics.json 缺 ckpt（无法校验评测对象）：{metrics_path}"
+    if not _same_path(recorded, expected_ckpt):
+        return False, f"评测对象不符：ckpt={recorded!r} != 期望 {str(expected_ckpt)!r}"
+    return True, ""
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    """原子写 JSON（tmp + ``os.replace``；与状态文件同口径）。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _latest_path(paths: Sequence[Path]) -> Optional[Path]:
@@ -238,24 +350,60 @@ def guard_decision(
     previous: Optional[Mapping[str, Any]],
     current: Mapping[str, Any],
     *,
-    stop_on_overall_drop: float,
-    stop_on_easy_drop: float,
+    mode: str = "prev",
+    base: Optional[Mapping[str, Any]] = None,
+    stop_on_base_drop: float = GUARD_STOP_ON_BASE_DROP,
+    stop_on_overall_drop: float = 0.05,
+    stop_on_easy_drop: float = 0.10,
 ) -> Dict[str, Any]:
-    """护栏判定（纯函数）：返回 ``checked/stopped/reason/overall_delta/easy_delta``。
+    """护栏判定（纯函数）：返回 ``mode/checked/stopped/reason/net_vs_base/overall_delta/easy_delta``。
 
-    - ``previous is None``（r1）→ 只记录基线，不判定；
-    - 指标缺失/NaN → 该项不判定（``delta=None``），另一项照常；
-    - 判定口径 = **绝对下降**（``上一轮 − 本轮 > 阈值`` 即停）。
+    - ``mode="base"``（编排默认，R4）：与**入口基座** ``base``（``base_eval``，含
+      ``overall_success``）比较；``net_vs_base = 本轮 − 基座``（正 = 增益），
+      ``net_vs_base < −stop_on_base_drop`` → 停机；**基座缺失/不可得 → ValueError（fail-closed）**；
+      本轮 ``overall_success`` 缺失/NaN → 不判定（``checked=False``；缺失不停）；
+    - ``mode="prev"``：旧口径——与**上一轮**比较绝对下降；``previous is None``（r1）→ 只记录基线，
+      指标缺失/NaN → 该项不判定（``delta=None``），另一项照常；
+    - ``mode="off"``：不判定（调用方须在状态/日志显著标注）。
     """
+    mode = str(mode or "prev").strip().lower()
+    if mode not in GUARD_MODES:
+        raise ValueError(f"guard.mode 非法：{mode!r}（应为 {' | '.join(GUARD_MODES)}）")
     result: Dict[str, Any] = {
-        "checked": previous is not None,
+        "mode": mode,
+        "checked": False,
         "stopped": False,
         "reason": None,
+        "net_vs_base": None,
+        "base_overall": None,
         "overall_delta": None,
         "easy_delta": None,
     }
+    if mode == "off":
+        result["reason"] = "guard.mode=off（不判定）"
+        return result
+    if mode == "base":
+        base_overall = _opt_num((base or {}).get("overall_success"))
+        if base_overall is None:
+            raise ValueError("guard.mode=base 但基座 overall_success 缺失/不可得（fail-closed）")
+        result["base_overall"] = base_overall
+        cur_overall = _opt_num(current.get("overall_success"))
+        if cur_overall is None:
+            return result
+        net = cur_overall - base_overall
+        result["checked"] = True
+        result["net_vs_base"] = net
+        if net < -float(stop_on_base_drop) - _GUARD_EPS:
+            result["stopped"] = True
+            result["reason"] = (
+                f"overall_success 相对基座下降 {-net:.4f} > {float(stop_on_base_drop):.4f}"
+                f"（基座 {base_overall:.4f} → 本轮 {cur_overall:.4f}）"
+            )
+        return result
+    # mode == "prev"：旧的与上一轮比较口径
     if previous is None:
         return result
+    result["checked"] = True
     prev_overall = _opt_num(previous.get("overall_success"))
     cur_overall = _opt_num(current.get("overall_success"))
     prev_easy = _opt_num(previous.get("easy_success"))
@@ -297,6 +445,14 @@ class Phase3LoopConfig:
     eval_workers: int = 16
     stop_on_overall_drop: float = 0.05
     stop_on_easy_drop: float = 0.10
+    #: R4 护栏模式（``guard.mode``）：base = 与入口基座比较（默认）；prev = 与上一轮比较；off = 不判定
+    guard_mode: str = "base"
+    #: R4 基座护栏阈值（``guard.stop_on_base_drop``；仅 mode=base）：确定性评测下阈值=实质显著性
+    stop_on_base_drop: float = GUARD_STOP_ON_BASE_DROP
+    #: 锚接线（lane P4b；``stages.B.phase3.anchor``）：透传 ``--phase3-anchor*``；默认关（行为不变）
+    anchor_enabled: bool = False
+    anchor_bc_dir: str = ""
+    anchor_mild_weight: float = 0.1
     config: str = "config/default.yaml"
     model_config: str = "config/model.yaml"
     device: Optional[str] = None
@@ -324,6 +480,7 @@ class Phase3LoopConfig:
         eval_cfg = dict(p3.get("eval", {}) or {})
         guard = dict(p3.get("guard", {}) or {})
         gpu_cfg = dict(p3.get("gpu", {}) or {})
+        anchor_cfg = dict(p3.get("anchor", {}) or {})
         bc_cfg = dict((config.get("train", {}) or {}).get("bc", {}) or {})
         env_rounds = os.environ.get("PHASE3_ROUNDS", "").strip()
         if getattr(args, "phase3_rounds", None) is not None:
@@ -351,6 +508,9 @@ class Phase3LoopConfig:
         else:
             init_ckpt_source = "config" if init_ckpt else ""
         micro_raw = p3.get("micro", bc_cfg.get("micro_batch_size"))
+        guard_mode = str(guard.get("mode", cls.guard_mode) or cls.guard_mode).strip().lower()
+        if guard_mode not in GUARD_MODES:
+            raise ValueError(f"guard.mode 非法：{guard_mode!r}（应为 {' | '.join(GUARD_MODES)}）")
         resume = bool(getattr(args, "phase3_resume", False)) or str(
             os.environ.get("PHASE3_RESUME", "")
         ).strip().lower() in ("1", "true", "yes", "on")
@@ -367,6 +527,11 @@ class Phase3LoopConfig:
             eval_workers=int(eval_cfg.get("workers", cls.eval_workers)),
             stop_on_overall_drop=float(guard.get("stop_on_overall_drop", cls.stop_on_overall_drop)),
             stop_on_easy_drop=float(guard.get("stop_on_easy_drop", cls.stop_on_easy_drop)),
+            guard_mode=guard_mode,
+            stop_on_base_drop=float(guard.get("stop_on_base_drop", cls.stop_on_base_drop)),
+            anchor_enabled=bool(anchor_cfg.get("enabled", cls.anchor_enabled)),
+            anchor_bc_dir=str(anchor_cfg.get("bc_dir") or cls.anchor_bc_dir),
+            anchor_mild_weight=float(anchor_cfg.get("mild_weight", cls.anchor_mild_weight)),
             config=str(getattr(args, "config", None) or cls.config),
             model_config=str(getattr(args, "model_config", None) or cls.model_config),
             device=(str(args.device) if getattr(args, "device", None) else None),
@@ -527,17 +692,34 @@ class Phase3Loop:
         return argv
 
     def _train_argv(
-        self, *, dagger_dir: Path, train_out: Path, round_index: int, micro: Optional[int] = None
+        self,
+        *,
+        dagger_dir: Path,
+        train_out: Path,
+        ckpt: str,
+        round_index: int,
+        micro: Optional[int] = None,
     ) -> List[str]:
+        """phase-3 单轮训练 argv（独立子进程）。
+
+        R1 顺序续训：``--ckpt`` = **当轮起点 = running student**（r1 = ``init_ckpt``，
+        r{k} = r{k-1} 轮产物）；anchor 接线：``anchor.enabled=true`` 时透传 ``--phase3-anchor*``
+        （默认 false → 不传，行为不变）。
+        """
         cfg = self.cfg
         argv = [
             "--phase3", str(dagger_dir),
             "--phase3-round", str(round_index),
-            "--ckpt", str(_abs(cfg.init_ckpt)),
+            "--ckpt", str(_abs(ckpt)),
             "--out", str(train_out),
             "--config", str(_abs(cfg.config)),
             "--model-config", str(_abs(cfg.model_config)),
         ]
+        if cfg.anchor_enabled:
+            argv += ["--phase3-anchor"]
+            if str(cfg.anchor_bc_dir).strip():
+                argv += ["--phase3-anchor-bc-dir", str(cfg.anchor_bc_dir)]
+            argv += ["--phase3-anchor-mild-weight", f"{float(cfg.anchor_mild_weight):g}"]
         if micro is not None:
             argv += ["--micro-batch-size", str(int(micro))]
         if cfg.device:
@@ -595,6 +777,231 @@ class Phase3Loop:
         return _latest_path(
             [item for item in root.glob(f"BTC*_eval500_phase3_r{round_index}/metrics.json") if item.is_file()]
         )
+
+    def _reuse_base_eval(self) -> Optional[Path]:
+        """可复用基座评测（R4，最新）：``BTC*_eval500_phase3_base/metrics.json``。"""
+        root = _abs(self.cfg.runs_root)
+        candidates = [
+            item for item in root.glob("BTC*_eval500_phase3_base/metrics.json") if item.is_file()
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item.stat().st_mtime, str(item)))
+
+    def _base_eval_reusable(self, metrics_path: Path) -> "tuple[bool, str]":
+        """resume 复用基座评测的 provenance 校验：ckpt = ``init_ckpt``、spec/limit 同口径。"""
+        metrics = _read_json(Path(metrics_path))
+        if not isinstance(metrics, Mapping):
+            return False, "metrics.json 不可读"
+        if not _same_path(metrics.get("ckpt"), self.cfg.init_ckpt):
+            return False, f"ckpt={metrics.get('ckpt')!r} != init_ckpt"
+        if not _same_path(metrics.get("specs_path"), _abs(self.cfg.eval_spec)):
+            return False, f"spec={metrics.get('specs_path')!r} != {str(_abs(self.cfg.eval_spec))!r}"
+        metric_limit = metrics.get("limit")
+        if (self.cfg.limit is None) != (metric_limit is None) or (
+            self.cfg.limit is not None and int(metric_limit) != int(self.cfg.limit)
+        ):
+            return False, f"limit={metric_limit!r} != {self.cfg.limit!r}"
+        if _opt_num((metrics.get("overall") or {}).get("success_rate")) is None:
+            return False, "overall.success_rate 缺失/NaN"
+        return True, ""
+
+    def _ensure_base_eval(
+        self, *, base_ckpt: Path, base_dir: Path, log_dir: Path
+    ) -> "tuple[Optional[Dict[str, Any]], Optional[str]]":
+        """R4 基线：``resume`` 时复用已校验的基座评测，否则对 ``init_ckpt`` 自评一次。
+
+        返回 ``(base_eval, None)`` 或 ``(None, 错误原因)``；**任何不可得 → 硬错（fail-closed）**。
+        ``base_eval`` = 引用（dir/metrics）+ 数值（overall/easy）。
+        """
+        cfg = self.cfg
+        if cfg.resume:
+            reused = self._reuse_base_eval()
+            if reused is not None:
+                ok, detail = self._base_eval_reusable(reused)
+                if not ok:
+                    return None, (
+                        f"resume 复用的 base_eval 校验失败：{detail}（{reused}；拒绝静默拼接；"
+                        "如需重评请移除该目录或换 --phase3-runs-root）"
+                    )
+                summary = _eval_summary(reused)
+                self._log(f"base_eval reuse={reused} overall={summary.get('overall_success')}")
+                return (
+                    {
+                        "ckpt": str(base_ckpt),
+                        "ckpt_sha256": _sha256_file(base_ckpt),
+                        "dir": str(reused.parent),
+                        "metrics": str(reused),
+                        "overall_success": summary.get("overall_success"),
+                        "easy_success": summary.get("easy_success"),
+                        "reused": True,
+                        "spec": str(cfg.eval_spec),
+                        "workers": int(cfg.eval_workers),
+                        "limit": cfg.limit,
+                        "attempts": [],
+                    },
+                    None,
+                )
+        free_mib, gpu_ok = self._gpu_check(round_index=0, step="base_eval")
+        if not gpu_ok:
+            return None, (
+                f"基座评测前 GPU 空闲不足：free={free_mib:.0f} MiB < {cfg.gpu_min_free_mib:.0f} MiB"
+                f"（释放+等待 {GPU_WAIT_RETRIES} 次后仍不足）"
+            )
+        eval_log = Path(log_dir) / "base_eval.log"
+        self._log(
+            f"base_eval start ckpt={base_ckpt} dir={base_dir} "
+            f"free={free_mib if free_mib is not None else 'n/a'}"
+        )
+        started = time.perf_counter()
+        attempts: List[Dict[str, Any]] = []
+        rc, oom = 1, False
+        while True:
+            attempt: Dict[str, Any] = {}
+            log_start = eval_log.stat().st_size if eval_log.exists() else 0
+            try:
+                rc = int(
+                    self._eval_fn(self._eval_argv(final_ckpt=base_ckpt, eval_dir=base_dir), eval_log)
+                )
+                oom = rc != 0 and _log_has_oom(eval_log, start=log_start)
+            except Exception as exc:  # noqa: BLE001 - 基线评测异常（含 CUDA OOM）
+                rc = 1
+                oom = _is_cuda_oom(exc)
+                attempt["error"] = f"{type(exc).__name__}: {exc}"
+                if not oom:
+                    attempts.append({**attempt, "rc": rc, "oom": False})
+                    self._log_exception(exc)
+                    return None, f"基座评测异常 {type(exc).__name__}: {exc}（log={eval_log}）"
+            attempt.update({"rc": rc, "oom": bool(oom)})
+            attempts.append(attempt)
+            if not oom or len(attempts) > EVAL_OOM_RETRIES:
+                break
+            _free_cuda_memory()
+            self._log(f"base_eval OOM → 释放 → 重试（第 {len(attempts)}/{EVAL_OOM_RETRIES} 次）")
+        duration = time.perf_counter() - started
+        metrics_path = Path(base_dir) / "metrics.json"
+        if rc != 0:
+            return None, f"基座评测失败 rc={rc}（log={eval_log}）"
+        if not metrics_path.is_file():
+            return None, f"基座评测产物缺失：{metrics_path}"
+        summary = _eval_summary(metrics_path)
+        if summary.get("overall_success") is None:
+            return None, f"基座评测 overall_success 缺失/NaN：{metrics_path}（fail-closed）"
+        self._log(
+            f"base_eval ok overall={summary.get('overall_success')} "
+            f"easy={summary.get('easy_success')} ({duration:.0f}s)"
+        )
+        return (
+            {
+                "ckpt": str(base_ckpt),
+                "ckpt_sha256": _sha256_file(base_ckpt),
+                "dir": str(base_dir),
+                "metrics": str(metrics_path),
+                "overall_success": summary.get("overall_success"),
+                "easy_success": summary.get("easy_success"),
+                "reused": False,
+                "spec": str(cfg.eval_spec),
+                "workers": int(cfg.eval_workers),
+                "limit": cfg.limit,
+                "attempts": attempts,
+            },
+            None,
+        )
+
+    # ------------------------------------------------------------------ keep-best（R4）
+    def _export_best(
+        self,
+        *,
+        loop_dir: Path,
+        candidates: Sequence[Mapping[str, Any]],
+        base_overall: Optional[float],
+    ) -> Dict[str, Any]:
+        """keep-best：``{init_ckpt} ∪ {各轮产物}`` 按 ``overall_success`` 选最优并稳定导出。
+
+        - 平手取基座/更早轮（``round`` 小者优先，基座 round=0）；
+        - 稳定消费路径：``<loop_dir>/best/final.pt`` + ``best/metrics.json`` +
+          ``best/manifest.json``（清单：round / eval dir / spec hash / vs base / is_base）；
+        - 返回状态块（调用方写入 ``status["best"]``）。
+        """
+        best_dir = Path(loop_dir) / BEST_DIRNAME
+        ranked = [item for item in candidates if _opt_num(item.get("overall_success")) is not None]
+        if not ranked:
+            raise RuntimeError("keep-best 无可用候选（基座数值缺失）")
+        best = max(ranked, key=lambda item: (float(item["overall_success"]), -int(item.get("round", 0))))
+        source = Path(str(best["ckpt"]))
+        exported = best_dir / "final.pt"
+        best_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, exported)
+        source_sha = _sha256_file(source)
+        exported_sha = _sha256_file(exported)
+        if source_sha and exported_sha != source_sha:
+            raise RuntimeError(f"keep-best 导出校验失败（sha256 不一致）：{exported} != {source}")
+        metrics_src = Path(str(best.get("metrics") or ""))
+        metrics_dst = best_dir / "metrics.json"
+        metrics_consumer = str(best.get("metrics") or "")
+        if metrics_src.is_file():
+            shutil.copyfile(metrics_src, metrics_dst)
+            metrics_consumer = str(metrics_dst)
+        spec_path = _abs(self.cfg.eval_spec)
+        best_overall = float(best["overall_success"])
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "phase3_keep_best",
+            "generated_at": _now(),
+            "metric": "overall_success",
+            "tie_break": "高分优先；平手取基座（round=0）/更早轮",
+            "spec": str(spec_path),
+            "spec_sha256": _sha256_file(spec_path),
+            "workers": int(self.cfg.eval_workers),
+            "limit": self.cfg.limit,
+            "base": {
+                "ckpt": str(_abs(self.cfg.init_ckpt)),
+                "overall_success": base_overall,
+            },
+            "best": {
+                "round": int(best.get("round", 0)),
+                "is_base": bool(best.get("is_base")),
+                "ckpt_source": str(source),
+                "ckpt_sha256": exported_sha or source_sha,
+                "export_ckpt": str(exported),
+                "eval_dir": str(best.get("eval_dir") or ""),
+                "eval_metrics": metrics_consumer,
+                "overall_success": best_overall,
+                "easy_success": _opt_num(best.get("easy_success")),
+                "vs_base": (best_overall - float(base_overall)) if base_overall is not None else None,
+            },
+            "candidates": [
+                {
+                    "round": int(item.get("round", 0)),
+                    "is_base": bool(item.get("is_base")),
+                    "ckpt": str(item.get("ckpt") or ""),
+                    "overall_success": _opt_num(item.get("overall_success")),
+                    "easy_success": _opt_num(item.get("easy_success")),
+                    "eval_dir": str(item.get("eval_dir") or ""),
+                    "ranked": _opt_num(item.get("overall_success")) is not None,
+                    "vs_base": (
+                        float(item["overall_success"]) - float(base_overall)
+                        if _opt_num(item.get("overall_success")) is not None and base_overall is not None
+                        else None
+                    ),
+                }
+                for item in candidates
+            ],
+            "consumer": "下游消费 best/final.pt（清单 best/manifest.json；状态 phase3_status.json::best）",
+        }
+        _write_json_atomic(best_dir / "manifest.json", manifest)
+        return {
+            "dir": str(best_dir),
+            "ckpt": str(exported),
+            "metrics": metrics_consumer,
+            "manifest": str(best_dir / "manifest.json"),
+            "round": int(best.get("round", 0)),
+            "is_base": bool(best.get("is_base")),
+            "overall_success": best_overall,
+            "easy_success": _opt_num(best.get("easy_success")),
+            "vs_base": manifest["best"]["vs_base"],
+            "no_gain": bool(best.get("is_base")),
+        }
 
     # ------------------------------------------------------------------ GPU 显存守卫（lane P3-E）
     def _record_gpu_check(
@@ -660,10 +1067,10 @@ class Phase3Loop:
         cfg = self.cfg
         from pipeline import run_paths
 
-        stamp = cfg.stamp or run_paths.beijing_stamp()
+        stamp = cfg.stamp or run_paths.beijing_stamp_seconds()
         runs_root = _abs(cfg.runs_root)
         datasets_root = _abs(cfg.datasets_root)
-        loop_dir = runs_root / f"BTC{stamp}_phase3_loop"
+        loop_dir = runs_root / run_paths.canonical_run_name(kind="phase3_loop", stamp=stamp)
         log_dir = loop_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_handle = (log_dir / "phase3_loop.log").open("a", encoding="utf-8")
@@ -684,6 +1091,7 @@ class Phase3Loop:
             "datasets_root": str(datasets_root),
             "init_ckpt": str(_abs(cfg.init_ckpt)),
             "init_ckpt_source": str(cfg.init_ckpt_source or ""),
+            "guard_mode": str(cfg.guard_mode),
             "config": {
                 "spec_pool": str(cfg.spec_pool),
                 "fail_target": int(cfg.fail_target),
@@ -691,14 +1099,24 @@ class Phase3Loop:
                 "collect": {"workers": int(cfg.collect_workers), "window_s": float(cfg.collect_window_s)},
                 "eval": {"spec": str(cfg.eval_spec), "workers": int(cfg.eval_workers)},
                 "guard": {
+                    "mode": str(cfg.guard_mode),
+                    "stop_on_base_drop": float(cfg.stop_on_base_drop),
                     "stop_on_overall_drop": float(cfg.stop_on_overall_drop),
                     "stop_on_easy_drop": float(cfg.stop_on_easy_drop),
+                },
+                "anchor": {
+                    "enabled": bool(cfg.anchor_enabled),
+                    "bc_dir": str(cfg.anchor_bc_dir),
+                    "mild_weight": float(cfg.anchor_mild_weight),
                 },
                 "micro": cfg.micro,
                 "resume": bool(cfg.resume),
                 "gpu": {"min_free_mib": float(cfg.gpu_min_free_mib)},
             },
             "gpu": {"threshold_mib": float(cfg.gpu_min_free_mib), "checks": []},
+            "chain_root": None,
+            "base_eval": None,
+            "best": None,
             "rounds": [],
         }
         self._status = status
@@ -708,7 +1126,7 @@ class Phase3Loop:
             """落盘终态（failed 保留 current_step = 失败所在步，便于审计）；句柄由 finally 关闭。"""
             status["status"] = state
             status["stop_reason"] = reason
-            if state in ("completed", "stopped_guard"):
+            if state in ("completed", "stopped_guard", "no_gain"):
                 status["current_step"] = "done"
             _write_status(status_path, status)
             if reason:
@@ -729,10 +1147,17 @@ class Phase3Loop:
                 f"cfg spec_pool={cfg.spec_pool} fail_target={cfg.fail_target} "
                 f"collect=({cfg.collect_workers}w/{cfg.collect_window_s}s) "
                 f"eval=({cfg.eval_spec} · {cfg.eval_workers}w · lqr) "
-                f"guard=(overall-{cfg.stop_on_overall_drop}/easy-{cfg.stop_on_easy_drop}) "
+                f"guard=(mode={cfg.guard_mode} base-{cfg.stop_on_base_drop} "
+                f"prev-overall-{cfg.stop_on_overall_drop}/easy-{cfg.stop_on_easy_drop}) "
+                f"anchor={'on' if cfg.anchor_enabled else 'off'} "
                 f"micro={cfg.micro} resume={bool(cfg.resume)} "
                 f"gpu_min_free={cfg.gpu_min_free_mib:.0f}MiB"
             )
+            if cfg.guard_mode == "off":
+                status["guard_off"] = True
+                self._log(
+                    "警告：guard.mode=off → 护栏**不判定**（下降不停机）；状态已标注 guard_off=true"
+                )
 
             init_ckpt = _abs(cfg.init_ckpt)
             if not cfg.init_ckpt or not init_ckpt.is_file():
@@ -745,6 +1170,44 @@ class Phase3Loop:
                 return _finish(1, "failed", f"采集池不存在：{cfg.spec_pool!r}")
             if not _abs(cfg.eval_spec).is_file():
                 return _finish(1, "failed", f"评测 spec 不存在：{cfg.eval_spec!r}")
+
+            # 链根 id（R1）：循环入口权重 + sha256 + 来源（跨 resume 对齐用）
+            status["chain_root"] = {**_ckpt_id(init_ckpt), "source": str(cfg.init_ckpt_source or "unknown")}
+            _write_status(status_path, status)
+
+            # ---- R4 基线：对 init_ckpt 自评一次（同 spec/limit/workers）；不可得 = 硬错 ----
+            status["current_step"] = "base_eval"
+            _write_status(status_path, status)
+            base_dir = runs_root / run_paths.canonical_run_name(
+                kind="eval500", tag="phase3_base", stamp=stamp
+            )
+            base_eval, base_error = self._ensure_base_eval(
+                base_ckpt=init_ckpt, base_dir=base_dir, log_dir=log_dir
+            )
+            if base_eval is None:
+                return _finish(1, "failed", f"基线评测不可得（fail-closed）：{base_error}")
+            status["base_eval"] = base_eval
+            status["current_step"] = "base_eval"
+            _write_status(status_path, status)
+            self._log(
+                f"base_eval ok overall={base_eval.get('overall_success')} "
+                f"easy={base_eval.get('easy_success')} dir={base_eval.get('dir')}"
+                + ("（reused）" if base_eval.get("reused") else "")
+            )
+
+            # keep-best 候选：基座 + 各轮产物（平手取基座/更早轮）
+            candidates: List[Dict[str, Any]] = [
+                {
+                    "round": 0,
+                    "is_base": True,
+                    "ckpt": str(init_ckpt),
+                    "ckpt_sha256": str(status["chain_root"].get("sha256") or ""),
+                    "eval_dir": str(base_eval.get("dir") or ""),
+                    "metrics": str(base_eval.get("metrics") or ""),
+                    "overall_success": base_eval.get("overall_success"),
+                    "easy_success": base_eval.get("easy_success"),
+                }
+            ]
 
             student = str(init_ckpt)
             previous_eval: Optional[Dict[str, Any]] = None
@@ -764,10 +1227,22 @@ class Phase3Loop:
                 # ---- ① 采集（断点复用：最新可用 dagger 目录）----
                 status["current_step"] = "collect"
                 _write_status(status_path, status)
-                dagger_dir = datasets_root / f"BTC{stamp}_phase3_dagger_r{round_index}"
+                dagger_dir = datasets_root / run_paths.canonical_run_name(
+                    kind="phase3_dagger", tag=f"r{round_index}", stamp=stamp
+                )
                 collect_log = log_dir / f"round{round_index}_collect.log"
                 reused = self._reuse_collect(round_index) if cfg.resume else None
                 if reused is not None:
+                    # R1 provenance：复用目录的 driver 必须 = 期望父节点（当轮 running student）
+                    ok, detail = _verify_collect_provenance(reused / "report.json", student)
+                    if not ok:
+                        round_entry["collect"] = {"rc": None, "reused": str(reused), "out": str(reused)}
+                        _write_status(status_path, status)
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 采集复用 provenance 校验失败：{detail}"
+                            f"（--phase3-resume 拒绝静默拼接；如需重采请移除 {reused}）",
+                        )
                     status["current_step"] = "collect_reuse"
                     rows = _dagger_rows(reused)
                     dagger_dir = reused
@@ -868,19 +1343,32 @@ class Phase3Loop:
                         )
                     self._log(f"r{round_index} collect ok rows={rows} ({duration:.0f}s)")
 
-                # ---- ② 训练（每轮起点恒为 init_ckpt；OOM 自愈：micro 减半整步重试）----
+                # ---- ② 训练（R1 顺序续训：起点 = 当轮 running student；OOM 自愈：micro 减半整步重试）----
                 status["current_step"] = "train"
                 _write_status(status_path, status)
-                train_out = runs_root / f"BTC{stamp}_stageB_phase3_r{round_index}" / "stage_b"
+                train_out = runs_root / run_paths.canonical_run_name(
+                    kind="stageB", tag=f"phase3_r{round_index}", stamp=stamp
+                ) / "stage_b"
                 train_log = log_dir / f"round{round_index}_train.log"
                 reused = self._reuse_train(round_index) if cfg.resume else None
                 if reused is not None:
+                    # R1 provenance：复用训练产物的 init_ckpt 必须 = 期望父节点（当轮 running student）
+                    ok, detail = _verify_train_provenance(reused.parent / "metrics.json", student)
+                    if not ok:
+                        round_entry["train"] = {"rc": None, "reused": str(reused), "out": str(reused.parent)}
+                        _write_status(status_path, status)
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 训练复用 provenance 校验失败：{detail}"
+                            f"（--phase3-resume 拒绝静默拼接；如需重训请移除 {reused.parent}）",
+                        )
                     status["current_step"] = "train_reuse"
                     final_ckpt = reused
                     train_metrics = _read_json(reused.parent / "metrics.json")
                     round_entry["train"] = {
                         "rc": None, "reused": str(reused), "duration_s": 0.0,
                         "out": str(reused.parent), "final": str(reused),
+                        "ckpt_in": str(student),
                         "metrics": (str(reused.parent / "metrics.json") if train_metrics is not None else None),
                         "losses": _loss_subset(train_metrics), "micro": cfg.micro,
                         "attempts": [], "log": None,
@@ -896,7 +1384,7 @@ class Phase3Loop:
                             f"{cfg.gpu_min_free_mib:.0f} MiB（释放+等待 {GPU_WAIT_RETRIES} 次后仍不足）",
                         )
                     self._log(
-                        f"r{round_index} train start out={train_out} ckpt={init_ckpt} micro={cfg.micro} "
+                        f"r{round_index} train start out={train_out} ckpt={student} micro={cfg.micro} "
                         f"free={free_mib if free_mib is not None else 'n/a'}"
                     )
                     started = time.perf_counter()
@@ -914,7 +1402,7 @@ class Phase3Loop:
                                 self._train_fn(
                                     self._train_argv(
                                         dagger_dir=dagger_dir, train_out=train_out,
-                                        round_index=round_index, micro=micro,
+                                        ckpt=student, round_index=round_index, micro=micro,
                                     ),
                                     train_log,
                                 )
@@ -931,6 +1419,7 @@ class Phase3Loop:
                                     "rc": rc, "duration_s": round(time.perf_counter() - started, 1),
                                     "out": str(train_out), "final": None, "metrics": None,
                                     "losses": None, "micro": micro, "attempts": attempts,
+                                    "ckpt_in": str(student),
                                     "reserved_mib": {"before": reserved_before, "after": reserved_after},
                                     "log": str(train_log),
                                 }
@@ -957,7 +1446,8 @@ class Phase3Loop:
                         round_entry["train"] = {
                             "rc": None, "duration_s": None, "out": str(train_out),
                             "final": None, "metrics": None, "losses": None,
-                            "micro": micro, "attempts": attempts, "log": str(train_log),
+                            "micro": micro, "attempts": attempts, "ckpt_in": str(student),
+                            "log": str(train_log),
                         }
                         _write_status(status_path, status)
                         self._log(
@@ -973,6 +1463,7 @@ class Phase3Loop:
                     round_entry["train"] = {
                         "rc": rc, "duration_s": round(duration, 1), "out": str(train_out),
                         "final": (str(final_ckpt) if final_ckpt.is_file() else None),
+                        "ckpt_in": str(student),
                         "metrics": (str(train_out / "metrics.json") if train_metrics is not None else None),
                         "losses": _loss_subset(train_metrics), "micro": attempts[-1]["micro"],
                         "attempts": attempts,
@@ -1001,10 +1492,22 @@ class Phase3Loop:
                 # ---- ③ 评测（断点复用：最新可用 metrics.json）----
                 status["current_step"] = "eval"
                 _write_status(status_path, status)
-                eval_dir = runs_root / f"BTC{stamp}_eval500_phase3_r{round_index}"
+                eval_dir = runs_root / run_paths.canonical_run_name(
+                    kind="eval500", tag=f"phase3_r{round_index}", stamp=stamp
+                )
                 eval_log = log_dir / f"round{round_index}_eval.log"
                 reused = self._reuse_eval(round_index) if cfg.resume else None
                 if reused is not None:
+                    # R1 provenance：复用评测的 ckpt 必须 = 期望父节点（本轮训练产物）
+                    ok, detail = _verify_eval_provenance(reused, final_ckpt)
+                    if not ok:
+                        round_entry["eval"] = {"rc": None, "reused": str(reused), "dir": str(reused.parent)}
+                        _write_status(status_path, status)
+                        return _finish(
+                            1, "failed",
+                            f"r{round_index} 评测复用 provenance 校验失败：{detail}"
+                            f"（--phase3-resume 拒绝静默拼接；如需重评请移除 {reused.parent}）",
+                        )
                     status["current_step"] = "eval_reuse"
                     eval_metrics_path = reused
                     eval_dir = reused.parent
@@ -1097,28 +1600,69 @@ class Phase3Loop:
                         f"easy={summary.get('easy_success')} ({duration:.0f}s)"
                     )
 
-                # ---- ④ 护栏（与上一轮比较）----
+                # ---- ④ 护栏（R4：mode=base 相对入口基座；prev 相对上一轮；off 不判定）----
                 status["current_step"] = "guard"
                 decision = guard_decision(
                     previous_eval,
                     summary,
+                    mode=cfg.guard_mode,
+                    base=base_eval,
+                    stop_on_base_drop=cfg.stop_on_base_drop,
                     stop_on_overall_drop=cfg.stop_on_overall_drop,
                     stop_on_easy_drop=cfg.stop_on_easy_drop,
                 )
                 round_entry["guard"] = decision
-                if decision["checked"]:
+                if decision["mode"] == "off":
+                    self._log(f"r{round_index} guard mode=off（不判定）")
+                elif decision["mode"] == "base":
                     self._log(
-                        f"r{round_index} guard overall_delta={decision['overall_delta']} "
+                        f"r{round_index} guard mode=base base={decision['base_overall']} "
+                        f"net_vs_base={decision['net_vs_base']} stopped={decision['stopped']}"
+                    )
+                elif decision["checked"]:
+                    self._log(
+                        f"r{round_index} guard mode=prev overall_delta={decision['overall_delta']} "
                         f"easy_delta={decision['easy_delta']} stopped={decision['stopped']}"
                     )
                 else:
                     self._log(f"r{round_index} guard 基线（无上一轮，不判定）")
+                # 候选留档：指标缺失（None）也入清单（不参与选择；缺失不停）
+                candidates.append(
+                    {
+                        "round": round_index,
+                        "is_base": False,
+                        "ckpt": str(final_ckpt),
+                        "ckpt_sha256": _sha256_file(final_ckpt),
+                        "eval_dir": str(eval_dir),
+                        "metrics": str(eval_metrics_path),
+                        "overall_success": _opt_num(summary.get("overall_success")),
+                        "easy_success": _opt_num(summary.get("easy_success")),
+                    }
+                )
                 previous_eval = dict(summary)
                 student = str(final_ckpt)
                 _write_status(status_path, status)
                 if decision["stopped"]:
+                    best = self._export_best(
+                        loop_dir=loop_dir,
+                        candidates=candidates,
+                        base_overall=base_eval.get("overall_success"),
+                    )
+                    status["best"] = best
                     return _finish(0, "stopped_guard", str(decision["reason"]))
 
+            best = self._export_best(
+                loop_dir=loop_dir,
+                candidates=candidates,
+                base_overall=base_eval.get("overall_success"),
+            )
+            status["best"] = best
+            if best["no_gain"]:
+                return _finish(
+                    0, "no_gain",
+                    f"{int(cfg.rounds)} 轮均未超过基座（best=基座 overall={best['overall_success']}；"
+                    "keep-best 已导出基座 → best/final.pt）",
+                )
             return _finish(0, "completed")
         except KeyboardInterrupt:
             return _finish(130, "failed", "KeyboardInterrupt: 用户中断")
@@ -1291,10 +1835,50 @@ def run_chain(argv: Optional[Sequence[str]] = None) -> int:
                 f"（覆盖 {previous or '<空>'}；source=chain-B）",
                 flush=True,
             )
+            # 链内 B 阶段监控（2026-09-29）：phase1/phase2 完成后各做一次闭环评测（同一评测口径/worker 数）
+            from pipeline import run_paths
+
+            stamp = str(cfg.stamp or run_paths.beijing_stamp_seconds())
+            cfg = replace(cfg, stamp=stamp)
+            for mon_tag, mon_ckpt in (
+                ("phase1", Path(b_final).parent / "primary.pt"),
+                ("phase2", Path(b_final)),
+            ):
+                if not mon_ckpt.is_file():
+                    print(f"[chain] B 阶段监控评测跳过（缺 {mon_ckpt}）", flush=True)
+                    continue
+                rc_mon = _chain_monitor_eval(mon_tag, Path(mon_ckpt), cfg)
+                if rc_mon != 0:
+                    print(f"[chain] B 监控评测 {mon_tag} 失败（rc={rc_mon}）→ 停止，不进入 phase3", file=sys.stderr)
+                    return rc_mon
         return int(Phase3Loop(cfg).run())
     except KeyboardInterrupt:  # pragma: no cover - 交互中断
         print("[phase3] interrupted", file=sys.stderr)
         return 130
+
+
+def _chain_monitor_eval(tag: str, ckpt: Path, cfg: "Phase3LoopConfig") -> int:
+    """链内 B 阶段监控评测（phase1/phase2 各一次；与评测同口径的 ``tools/test.py`` 子进程）。"""
+    from pipeline import run_paths
+
+    name = run_paths.canonical_run_name(kind="eval500", tag=tag, stamp=str(cfg.stamp))
+    argv = [
+        VENV_PY, "tools/test.py",
+        "--policy", "ckpt",
+        "--ckpt", str(ckpt),
+        "--spec", str(_abs(cfg.eval_spec)),
+        "--out", str(_abs(cfg.runs_root)),
+        "--name", name,
+        "--workers", str(int(cfg.eval_workers)),
+        "--tracker", "lqr",
+        "--config", str(_abs(cfg.config)),
+    ]
+    if cfg.device:
+        argv += ["--device", str(cfg.device)]
+    if cfg.limit:
+        argv += ["--limit", str(int(cfg.limit))]
+    print(f"[chain] B 阶段监控评测（{tag}）→ {name}", flush=True)
+    return run_subprocess(argv)
 
 
 def _add_loop_flags(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

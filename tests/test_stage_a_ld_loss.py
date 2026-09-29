@@ -1,12 +1,13 @@
-"""Stage A 未来 LD 监督恢复（lane P3-F）回归。
+"""Stage A 未来 LD 损失（ld_coef=0 新语义，2026-09-30 拍板）回归。
 
-规格变更：LD 属 WM，应在 stage A 学会（不是 phase 3 窄数据里补）——
-A 的 WM 损失组合接回 ``weighted_ld_multi_step_loss``（``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid``，
-与 OD 同构），权重 ``stages.A.world_model.ld_coef``（默认 1.0，与 od 同量级）。
+规格：A 的 WM 损失组合保留 ``weighted_ld_multi_step_loss``（``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid``，
+与 OD 同构），但权重 ``stages.A.world_model.ld_coef`` **默认 0.0**——LD 损失照算（监控口径），
+A **不监督 LD 头**（2026-09-30 用户拍板：闭环证据 ld=0 链（L2→基座 0.328→E-β′ 0.436）优于
+ld=0.02 链（phase2 0.222））；非零权重（config/CLI）时监督接通、回传 ``st_gnn.ld_head``。
 
 覆盖：
 
-① A 训练中 LD 损失被计算且**可回传**（合成 v2 小数据 CPU smoke；``st_gnn.ld_head`` 权重更新）；
+① A 训练中 LD 损失被计算（监控）/默认不更新 LD 头；非零 coef 回传（合成 v2 小数据 CPU smoke）；
 ② ``ld_mask`` / ``wm_valid`` 掩码目标不贡献（monkeypatch ``build_future`` 注入损坏，损失不变）；
 ③ ``ld_coef`` 权重可配（config dict / CLI），且只影响总损失、监控口径仍记录 ``wm_loss_ld``；
 ④ loss 函数自身掩码语义（unit：掩码槽位无梯度/不贡献，有效项照常）。
@@ -56,28 +57,28 @@ def _run_a(tmp_path: Path, *, out_name: str, ckpt: Path, extra: "list[str] | Non
     return run_stage_a(args, config if config is not None else {})
 
 
-# ---------------------------------------------- ① 计算 + 回传（ld_head 更新）
-def test_stage_a_ld_loss_computed_and_backprops(tmp_path: Path) -> None:
+# ---------------------------------------------- ① 计算（监控）+ 默认不监督 LD 头
+def test_stage_a_ld_loss_computed_and_default_not_supervised(tmp_path: Path) -> None:
     ckpt = _tiny_ckpt(tmp_path)
     before = torch.load(ckpt, map_location="cpu", weights_only=False)["model"]
     metrics = _run_a(tmp_path, out_name="stage_a", ckpt=ckpt)
 
     # 规格/口径
     assert metrics["ld_loss"] == "direct_multi_step"
-    assert metrics["ld_coef"] == 1.0
-    assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0, "LD 损失必须被计算"
+    assert metrics["ld_coef"] == 0.0, "2026-09-30 拍板：默认不监督 LD 头"
+    assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0, "LD 损失必须被计算（监控）"
     assert np.isfinite(metrics["val_loss_ld"]) and metrics["val_loss_ld"] > 0.0
     for k in range(1, 7):
         item = metrics["per_horizon"][f"h{k}"]
         assert "ld_loss" in item, f"per_horizon h{k} 缺 ld_loss"
         assert item["ld_loss"] == item["ld_loss"], "ld_loss 不应是 NaN（有有效 LD 目标）"
 
-    # 可回传：LD 损失必须更新 st_gnn.ld_head（OD-only 时该头无梯度）
+    # 默认 ld_coef=0：无梯度回传 → ld_head 逐元素不变（LD 头未训练属预期）
     after = torch.load(tmp_path / "stage_a" / "final.pt", map_location="cpu", weights_only=False)["model"]
     ld_names = [name for name in after if name.startswith("st_gnn.ld_head.")]
     assert ld_names, "checkpoint 缺少 st_gnn.ld_head"
-    assert any(not torch.equal(before[name], after[name]) for name in ld_names), (
-        "LD 损失未回传到 st_gnn.ld_head（监督未接通？）"
+    assert all(torch.equal(before[name], after[name]) for name in ld_names), (
+        "ld_coef=0 时 st_gnn.ld_head 不应被更新（监督已关闭）"
     )
 
 
@@ -146,15 +147,18 @@ def test_stage_a_ld_loss_respects_ld_mask_and_wm_valid(tmp_path: Path, monkeypat
 # ---------------------------------------------- ③ ld_coef 可配（config / CLI）
 def test_stage_a_ld_coef_config_and_cli(tmp_path: Path) -> None:
     ckpt = _tiny_ckpt(tmp_path)
+    before = torch.load(ckpt, map_location="cpu", weights_only=False)["model"]
     repo_cfg = load_config("config/default.yaml")
-    assert repo_cfg["stages"]["A"]["world_model"]["ld_coef"] == 1.0, "config 默认 1.0（与 od 同量级）"
+    assert repo_cfg["stages"]["A"]["world_model"]["ld_coef"] == 0.0, (
+        "config 默认 0.0（2026-09-30 拍板：ld=0 链闭环优于 ld=0.02 链）"
+    )
 
     base = _run_a(tmp_path, out_name="coef_default", ckpt=ckpt)
-    zero = _run_a(tmp_path, out_name="coef_zero", ckpt=ckpt, extra=["--wm-ld-coef", "0.0"])
-    assert base["ld_coef"] == 1.0 and zero["ld_coef"] == 0.0
+    half = _run_a(tmp_path, out_name="coef_half", ckpt=ckpt, extra=["--wm-ld-coef", "0.25"])
+    assert base["ld_coef"] == 0.0 and half["ld_coef"] == 0.25
     # LD 项本身照算（监控口径），权重只改总损失组合：
     # val_loss = od + ld_coef·ld + ego_next_coef·ego_next + presence_coef·presence + entry_coef·entry
-    for metrics, coef in ((base, 1.0), (zero, 0.0)):
+    for metrics, coef in ((base, 0.0), (half, 0.25)):
         assert float(metrics["wm_loss_ld"]) > 0.0, "coef=0 时 LD 损失仍应计算（监控）"
         expected = (
             float(metrics["val_loss_od"])
@@ -166,14 +170,30 @@ def test_stage_a_ld_coef_config_and_cli(tmp_path: Path) -> None:
         assert float(metrics["val_loss"]) == pytest.approx(expected, rel=1e-6), (
             f"ld_coef={coef} 时总损失组合不符"
         )
-    assert float(zero["val_loss"]) < float(base["val_loss"]), "ld_coef=0 的 val 总损失应少一个 LD 项"
+    assert float(half["val_loss"]) > float(base["val_loss"]), "非零 ld_coef 的 val 总损失应多一个 LD 项"
+
+    # 监督接通/关闭：非零 coef → LD 回传 st_gnn.ld_head；默认 0 → 头不变
+    after_base = torch.load(
+        tmp_path / "coef_default" / "final.pt", map_location="cpu", weights_only=False
+    )["model"]
+    after_half = torch.load(
+        tmp_path / "coef_half" / "final.pt", map_location="cpu", weights_only=False
+    )["model"]
+    ld_names = [name for name in after_half if name.startswith("st_gnn.ld_head.")]
+    assert ld_names, "checkpoint 缺少 st_gnn.ld_head"
+    assert any(not torch.equal(before[name], after_half[name]) for name in ld_names), (
+        "非零 ld_coef 时 LD 损失必须回传 st_gnn.ld_head（监督未接通？）"
+    )
+    assert all(torch.equal(before[name], after_base[name]) for name in ld_names), (
+        "默认 ld_coef=0 时 st_gnn.ld_head 不应被更新"
+    )
 
     # config dict 覆盖（非 CLI 路径）
-    half = _run_a(
+    cfg = _run_a(
         tmp_path, out_name="coef_config", ckpt=ckpt,
         config={"stages": {"A": {"world_model": {"ld_coef": 0.25}}}},
     )
-    assert half["ld_coef"] == 0.25
+    assert cfg["ld_coef"] == 0.25
 
 
 # ---------------------------------------------- ④ loss 函数掩码语义（unit）

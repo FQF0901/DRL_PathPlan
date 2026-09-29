@@ -56,8 +56,9 @@ stages:
       loss: direct_multi_step           # Huber + 角度 1-cos
       noise: ego_plan                   # ego plan 噪声增强（CLI --plan-noise*）
       ego_next_coef: 0.1        # plan head `ego_next` 监督权重（方案①：A 阶段 plan head/MoE 唯一梯度源）
-      ld_coef: 1.0              # 未来 LD 直接多步权重（lane P3-F 恢复监督：LD 属 WM，在 A 学会；
-                                # 与 od 同量级——od 隐式权重 1.0；目标 = ld_fut 前 4 维，ld_mask/wm_valid 掩码）
+      ld_coef: 0.0              # 未来 LD 直接多步权重（2026-09-30 用户拍板：0.02→0.0。闭环证据：ld=0 链
+                                # L2→基座 0.328→E-β′ 0.436 优于 ld=0.02 链（phase2 0.222）；A 不再监督 LD 头
+                                # （LD 损失仅监控，可经 --wm-ld-coef 开启）。目标 = ld_fut 前 4 维，ld_mask/wm_valid 掩码）
       presence_coef: 0.1        # presence BCE 权重（id 轴：未来帧同 track id 是否仍在盒内）
       entry_coef: 0.1           # entry BCE 权重（id 轴：新 id 是否出现，"t0 无、t+k 有"）
       trainable: [encoders, mem_encoder, plan_head, st_gnn]  # lane U1+：MoE 在 A 关闭（experts+gate 只在 B-phase2 训）；policy/value 头不参与
@@ -75,7 +76,7 @@ stages:
       collect:                  # 采集侧（编排 lane：tools/dagger_collect.py）
         workers: 16             # spawn worker 数（实测 16 workers ≈ 0.85 s/spec）
         window_s: 10            # 失败窗口 = 终止前 N 秒（--window-fail-before）
-      init_ckpt: runs/BTC20260927-1019_stageA_p4/stage_b/final.phase2.pt  # 起点权重（CLI --ckpt 优先）
+      init_ckpt: runs/BTC20260929-0425_fixA_nold/stage_b/final.pt  # 起点权重（CLI --ckpt 优先；2026-09-29 切至 L2 链 B final = 新代码代最优闭环 0.328 作 phase3 基座）；注意 auto 解析器 glob 尚不适配 _train 命名（待修）
       epochs: 5                 # 每轮 epoch 数（CLI --phase3-epochs）
       batch: *stage_b_batch     # 宏 batch（CLI --batch-size；缺省复用阶段 B 锚点）
       micro: 256                # micro batch：phase3 混合路径（rollout + WM 教师强制 + 多损失）实测
@@ -100,16 +101,33 @@ stages:
                                 # all = 全参数解冻（含 WM；旧行为，"无锚+全解冻"两次实证必崩 0.032/0.038）
       anchor:                   # lane P3-I：5k 锚（CLI --phase3-anchor*；默认关 = 仅当轮窗口 dagger 行）
         enabled: false          # 开启后 phase-3 训练集 = 窗口行（权 1.0）+ 锚行（权 ×mild_weight）
+                                # 2026-09-29 试验启用（③ 验证中）；通过后转正、否则回退
+                                # ③ 真循环结果（2026-09-29 20:45，BTC20260929-195151）：r1 即触发 base
+                                # 护栏（基座 0.3260 → 0.2260，net −0.10；对照无锚 r1=0.232）→ 未通过，已回退
         bc_dir: auto            # auto = 最新 datasets/BTC*_expert*（同 run.bc_dir 语义）；目录缺失 → 报错
         mild_weight: 0.1        # 锚行权重 = train_weight×配平×mild_weight（窗口行权重不变）
+        # P4b（R1/R4）接线口径：phase3_loop 读本块并透传 --phase3-anchor / --phase3-anchor-bc-dir /
+        # --phase3-anchor-mild-weight；enabled=false（默认）时完全不传 → 行为与旧版一致（默认保持关）。
+        # 强锚 mild_weight=1.0 为已确认"窗口×强锚"交互增益候选（E-β′ 0.436）；真循环验证在独立 lane。
+        # 混教师提醒：强锚数据=idm、窗口标签=pure_pursuit（勿误读为已对齐）。
       gpu:                      # lane P3-E：GPU 子步骤前显存守卫
         min_free_mib: 6144      # 空闲显存下限（低于 → 释放+等待重试 ≤3 次；仍不足 failed）
       eval:                     # 编排 lane：每轮闭环评测
         spec: env/specs/scenarios_eval500.json
-        workers: 16
+        workers: 6              # 2026-09-29：16→6（本机 12GB 卡实测 6 workers ≈ 9.5GB；16 会 OOM）
       guard:                    # 编排 lane：早停守卫（相对 phase2 基线的 success 绝对下降阈值）
         stop_on_overall_drop: 0.05
         stop_on_easy_drop: 0.10
+        # ---- P4b（R1/R4）新增：口径澄清（旧注释上方的两个键仅在 mode=prev 生效）----
+        mode: base              # 默认 base = 与循环入口基座自评比较（base_eval：对 init_ckpt 用同一
+                                # spec/limit/workers 评一次；不可得 = 硬错 fail-closed）；r1 起即判定。
+                                # prev = 旧口径（仅与上一轮比较；stop_on_overall_drop/stop_on_easy_drop
+                                # 只在此模式生效）。off = 不判定（状态 guard_off=true + 日志显著标注）。
+        stop_on_base_drop: 0.01 # base 模式：net_vs_base = 本轮 overall_success − 基座；下降超过该值 →
+                                # stopped_guard（记录原因）。评测确定性（deterministic=True，动作=action_mu，
+                                # 无评测噪声）→ 阈值=实质显著性（0.01 = 1pt）。
+                                # 张力提示：无锚配方下 r1 可能即低于基座而触发（护栏正确工作，非 bug；
+                                # 见 docs/phase3_rootcause_analysis.md §8.1 注 / §10.5）。
     bc:
       epochs: *stage_b_epochs   # 总轮数（CLI --bc-epochs 优先）
       primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）

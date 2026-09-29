@@ -69,9 +69,9 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["val_valid_samples"] > 0
     assert metrics["val_valid_weight_sum"] > 0.0
 
-    # 规格（lane P3-F）：未来 LD 监督恢复（direct_multi_step，与 OD 同构）；presence/entry 可用
+    # 规格（2026-09-30 拍板）：LD 损失保留（direct_multi_step，与 OD 同构）但 coef=0（仅监控，不监督 LD 头）；presence/entry 可用
     assert metrics["ld_loss"] == "direct_multi_step"
-    assert metrics["ld_coef"] == 1.0
+    assert metrics["ld_coef"] == 0.0
     assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0
     assert np.isfinite(metrics["val_loss_ld"])
     assert metrics["presence_available"] == 1.0

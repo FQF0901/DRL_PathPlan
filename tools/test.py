@@ -8,6 +8,12 @@
 - ``--policy ckpt``：加载 N1 ``DrivingModel`` 权重 + N3 跟踪器闭环（必须给 ``--ckpt``）。
 
 未识别参数原样透传（``--workers/--limit/--name/--max-steps/--baseline-ref/--seed``），
+run 名由代码自适应规范化（``pipeline/run_paths.py::eval_run_name``；调用方不手拼）：
+
+- ``--name`` 缺省 → ``BTC<秒级北京戳>_eval500_<policy>``（kind 随 ``--spec`` 文件名自适应）；
+- ``--name EXP_foo`` → ``BTC<秒级北京戳>_EXP_foo``；已是规范名则原样；
+- ``--out`` 是输出根目录（路径型，不参与命名；实际写 ``<out>/<name>/``）。
+
 例如薄切片冒烟::
 
     tools/venv-python tools/test.py --policy ckpt --ckpt runs/train/stageA/final.pt \\
@@ -49,6 +55,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _drop_name_arg(argv: "list[str]") -> "list[str]":
+    """去掉透传 argv 里的 ``--name``/``--name=…``（命名已由本入口统一接管，避免 raw 值后到覆盖）。"""
+    kept: "list[str]" = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "--name":
+            skip_next = True
+            continue
+        if item.startswith("--name="):
+            continue
+        kept.append(item)
+    return kept
+
+
 def main(argv: "list[str] | None" = None) -> int:
     argv_list = list(sys.argv[1:] if argv is None else argv)
     args, _extra = build_parser().parse_known_args(argv_list)
@@ -68,21 +91,26 @@ def main(argv: "list[str] | None" = None) -> int:
             return 2
 
     # 运行目录布局（代码默认，见 pipeline/run_paths.py）：logs/ + manifest + 配置快照。
+    # 自适应命名（runs/BTC<秒级戳>_<kind>_<tag>）：--out 是路径根不当名字；路径型 --name 原样透传。
     from pipeline import run_paths
 
-    name = run_paths.extra_value(argv_list, "--name")
-    work_dir = Path(args.out) / name if name else Path(args.out)
+    raw_name = run_paths.extra_value(argv_list, "--name")
+    run_name = run_paths.eval_run_name(
+        raw_name or None, spec=args.spec, policy=args.policy, default_kind="eval500"
+    )
+    work_dir = Path(args.out) / run_name
     run_paths.prepare_layout(work_dir)
     run_paths.write_manifest(
         work_dir, stage="eval", config=args.config, out=work_dir, argv=["tools/test.py", *argv_list]
     )
 
-    forward = ["--config", str(args.config), "--policy", args.policy, "--out", str(args.out)]
+    forward = ["--config", str(args.config), "--policy", args.policy, "--out", str(args.out),
+               "--name", run_name]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
     if args.ckpt is not None:
         forward += ["--ckpt", str(args.ckpt)]
-    forward += list(_extra)  # --workers/--limit/--name/--max-steps/--baseline-ref/--seed 透传
+    forward += _drop_name_arg(_extra)  # --workers/--limit/... 透传（--name 已规范化）
 
     # GL 修复：在 import metadrive/panda3d 之前预载 venv glvnd，并让 spawn worker 继承路径。
     # （即使本入口未经 tools/venv-python 启动也要生效；见 pipeline/gl_runtime.py）
