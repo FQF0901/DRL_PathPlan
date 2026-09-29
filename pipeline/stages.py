@@ -190,6 +190,11 @@ def _monitor_legacy_tags(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "monitor_legacy_tags", False))
 
 
+def _wm_trainable(model: Any) -> bool:
+    """W1 fail-fast 判据：``st_gnn.*`` 是否存在可训练参数（阶段 C 期望恒 False）。"""
+    return any(parameter.requires_grad for name, parameter in model.named_parameters() if name.startswith("st_gnn."))
+
+
 #: 监控瘦身清单（docs/metrics.md）：这些阶段结果键不再进 metrics.json（CSV/TB 侧由
 #: ``pipeline.monitoring`` 的白名单过滤）。保留项示例：``bc_traj_mse*``（损失口径字段）、
 #: ``bc_load_*``（MoE 负载元数据）。
@@ -3665,13 +3670,34 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         args.critic_warmup_updates if args.critic_warmup_updates is not None else (critic_warmup_cfg or 0)
     )
     critic_warmup_updates = max(0, critic_warmup_updates)
-    # WM 初始冻结：--wm-freeze-updates（None = updates//4）；解冻 = 参数重新进入优化器
-    wm_freeze_updates = args.wm_freeze_updates
-    if wm_freeze_updates is None:
-        wm_freeze_updates = max(1, updates // 4) if updates > 0 else 0
-    wm_freeze_updates = int(wm_freeze_updates)
-    if wm_freeze_updates > 0:
-        apply_freeze_prefixes(model, ("st_gnn.",))
+    # W1（P1）：WM（ST-GNN）全期冻结。旧 ``--wm-freeze-updates`` 的"解冻"只是把参数重新
+    # 加入优化器：PPO 更新走 rollout=False cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
+    # 恒 None（P0 侦察 §B），故弃用旧解冻语义。
+    if args.wm_freeze_updates is not None:
+        print(
+            "[stageC] --wm-freeze-updates 已弃用（W1）：st_gnn 全期冻结；"
+            "解冻仅在 WM loss 启用时可用（当前无 WM loss → 不触发）",
+            flush=True,
+        )
+    wm_freeze_updates = int(updates) if updates > 0 else 0  # 兼容 metrics 字段：全期冻结 ⇒ = updates
+    frozen_wm = apply_freeze_prefixes(model, ("st_gnn.",))
+    if not frozen_wm:
+        raise SystemExit("[stageC] fail-fast：模型不含 st_gnn.* 参数，无法执行 W1 全期冻结")
+    # WM 解冻守卫（W2 待做）：只有 WM loss 接线后才允许训练 st_gnn。当前无 WM 损失项，
+    # 置 true 直接 fail-fast（无信号训练只烧显存/时间）。
+    wm_loss_enabled = bool(stage_cfg.get("wm_loss_enabled", False))
+    if wm_loss_enabled:
+        raise SystemExit(
+            "[stageC] fail-fast：wm_loss_enabled=true 但 WM 自监督损失尚未实现（W2）→ "
+            "拒绝解冻 st_gnn"
+        )
+    if _wm_trainable(model):
+        raise SystemExit("[stageC] fail-fast：st_gnn 冻结失败（仍有可训练参数）")
+    print(
+        f"[stageC] WM 冻结（W1）：st_gnn.* {len(frozen_wm)} 个参数全期 requires_grad=false"
+        "（wm_trainable=false）",
+        flush=True,
+    )
 
     bc_dataset = None
     if args.bc_anchor and Path(args.bc_dir).exists():
@@ -3695,6 +3721,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "primary_lr_scale": primary_lr_scale,
         "kl_anchor": {"initial": kl_initial, "final": kl_final, "decay": kl_decay, "source": str(ckpt)},
         "wm_freeze_updates": wm_freeze_updates,
+        "wm_trainable": _wm_trainable(model),
+        "wm_frozen_params": len(frozen_wm),
         "critic_warmup_updates": critic_warmup_updates,
         "device": device,
         "probe_batch": probe_batch,
@@ -3741,19 +3769,10 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         kl_schedule: List[float] = []
         for update in range(updates):
             update_started = time.perf_counter()
-            # WM 解冻：requires_grad 打开 + 参数加入优化器（保留已有 Adam 状态）
-            if wm_freeze_updates > 0 and update == wm_freeze_updates:
-                apply_freeze_prefixes(model, ())
-                wm_params = [
-                    parameter for name, parameter in model.named_parameters() if name.startswith("st_gnn.")
-                ]
-                existing = {
-                    id(parameter) for group in trainer.optimizer.param_groups for parameter in group["params"]
-                }
-                fresh = [p for p in wm_params if id(p) not in existing and p.requires_grad]
-                if fresh:
-                    trainer.optimizer.add_param_group({"params": fresh, "lr": float(args.lr)})
-                print(f"[stageC] update {update}: world model（ST-GNN）解冻（{len(fresh)} 个参数进入优化器）", flush=True)
+            # W1 fail-fast：st_gnn 全期冻结，任何解冻迹象立刻报错（WM loss 未启用）。
+            if not wm_loss_enabled and _wm_trainable(model):
+                raise RuntimeError("[stageC] fail-fast：st_gnn 在训练中变为可训练（WM loss 未启用）")
+            # W2（待做）：WM 自监督损失接线后才允许在此按 wm_freeze_updates 解冻（守卫见上）。
             progress = update / max(updates - 1, 1) if updates > 1 else 0.0
             trainer.config.kl_anchor_coef = kl_initial + (kl_final - kl_initial) * progress if kl_decay else kl_initial
             kl_schedule.append(float(trainer.config.kl_anchor_coef))
@@ -3935,7 +3954,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--kl-anchor-decay", action=argparse.BooleanOptionalAction, default=True,
                         help="阶段 C KL 锚系数线性衰减到末值（默认开）")
     parser.add_argument("--wm-freeze-updates", type=int, default=None,
-                        help="阶段 C 前 N 个 update 冻结 WM（默认 updates//4；0=不冻结）")
+                        help="【已弃用（W1）】阶段 C 的 st_gnn 现为全期冻结；该参数仅触发弃用告警接收兼容")
     parser.add_argument("--critic-warmup-updates", type=int, default=None,
                         help="阶段 C 前 N 个 update 只拟合 critic（value 头；策略/主干冻结）。"
                              "默认取 config/train.yaml train.critic_warmup_updates=0（0=关闭）")
