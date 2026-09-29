@@ -3646,6 +3646,20 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
 # 阶段 C：PPO RL（Stage-B 快照 KL 锚 + 衰减）
 # --------------------------------------------------------------------------- #
 
+def _parse_reward_term_weights(items: Optional[Sequence[str]]) -> Dict[str, float]:
+    """``--reward-term-weight NAME=WEIGHT``（可重复）→ ``{name: weight}``；格式错误 fail-fast。"""
+    out: Dict[str, float] = {}
+    for item in items or []:
+        name, _, raw = str(item).partition("=")
+        if not name.strip() or not raw.strip():
+            raise SystemExit(f"[stageC] --reward-term-weight 需要 NAME=WEIGHT 形式，收到 {item!r}")
+        try:
+            out[name.strip()] = float(raw)
+        except ValueError as exc:
+            raise SystemExit(f"[stageC] --reward-term-weight 权重无法解析：{item!r}") from exc
+    return out
+
+
 def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
     """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ 显式冻结范围（R2）+ primary lr ×0.1 + WM 全期冻结。
 
@@ -3666,6 +3680,10 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ``--ckpt-every N``（config ``stages.C.ckpt_every``，默认 25；0=关）：每 N 个 update 保存
     ``<out>/ckpt_u<NNN>.pt``（与 ``final.pt`` 同格式；仅保存点，不引入 resume），保存列表记入
     ``metrics.json::ckpt_saved``（G3 最小下一步的周期 ckpt）。
+
+    ``--reward-term-weight NAME=W``（P4 消融钩子）：按奖励项名覆盖权重（如 ``speed_ratio=0``），
+    作用于 config ``stages.C.reward.terms``（透传 ``build_reward_adapter``）或默认
+    ``DEFAULT_TERM_CONFIGS`` 的同名项（私有副本，不改全局默认）；未命中 fail-fast。
     """
     stage_cfg = _stage_section(config, "C")
     # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
@@ -3725,6 +3743,10 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         else "[stageC] 周期 ckpt：关闭（仅 final.pt）",
         flush=True,
     )
+    # P4 消融钩子：reward adapter 接 config（stages.C.reward）+ CLI 项权重覆盖（如 speed_ratio=0）
+    reward_cfg = stage_cfg.get("reward")
+    reward_cfg = dict(reward_cfg) if isinstance(reward_cfg, Mapping) else None
+    reward_term_weights = _parse_reward_term_weights(getattr(args, "reward_term_weight", None))
     # KL 锚 = 阶段 B 快照（冻结参考模型）；系数线性衰减（默认 0.05 → 0）
     ref_model = copy.deepcopy(model).eval()
     for parameter in ref_model.parameters():
@@ -3827,6 +3849,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "device": device,
         "probe_batch": probe_batch,
         "plan_reference": plan_reference,
+        "reward_config": reward_cfg,
+        "reward_term_weights": reward_term_weights,
         "pool": {
             # R4：记真实池类型（LocalEnvPool / VectorPoolAdapter），不再只记请求 kind
             "kind": type(pool).__name__,
@@ -3841,7 +3865,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         legacy_tags=_monitor_legacy_tags(args),
     )
     try:
-        reward_adapter, reward_source = build_reward_adapter(logger=print)
+        reward_adapter, reward_source = build_reward_adapter(
+            reward_cfg, logger=print, term_weights=reward_term_weights or None
+        )
         ppo_cfg = PPOConfig(
             lr=float(args.lr),
             epochs=int(args.ppo_epochs),
@@ -4112,6 +4138,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "默认取 config/train.yaml train.critic_warmup_updates=0（0=关闭）")
     parser.add_argument("--bc-anchor", action="store_true", help="阶段 C 启用 BC 动作锚（默认关）")
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
+    parser.add_argument("--reward-term-weight", action="append", default=None, metavar="NAME=W",
+                        help="阶段 C 奖励项权重覆盖（可重复，如 speed_ratio=0.0）；作用于 config "
+                             "stages.C.reward.terms 或默认 DEFAULT_TERM_CONFIGS 的同名项；"
+                             "未命中 fail-fast（P4 消融钩子）")
     # ---- 通用 ----
     parser.add_argument("--batch-size", type=int, default=None,
                         help="A/B 默认取 config train.wm.batch_size / train.bc.batch_size（1024）")

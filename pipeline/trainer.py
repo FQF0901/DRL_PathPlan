@@ -971,10 +971,18 @@ def build_reward_adapter(
     *,
     dt: float = _POLICY_DT,
     logger: Callable[[str], None] = print,
+    term_weights: Optional[Mapping[str, float]] = None,
 ) -> Tuple[RewardAdapter, str]:
-    """构造奖励适配器：优先 N2 的 ``RewardAggregator``，不可用时回退文档化 stub。"""
+    """构造奖励适配器：优先 N2 的 ``RewardAggregator``，不可用时回退文档化 stub。
+
+    ``term_weights``（P4 消融钩子）：按奖励项名覆盖权重（如 ``{"speed_ratio": 0.0}``），
+    在默认项/config 项的**私有副本**上生效（不改 :data:`DEFAULT_TERM_CONFIGS`）；未命中的
+    名字 fail-fast（防消融配置拼错静默失效）。
+    """
+    overrides = {str(name): float(weight) for name, weight in dict(term_weights or {}).items()}
     factory: Optional[Callable[[], Any]] = None
     source = "trainer.make_stub_reward"
+    term_configs: List[Dict[str, Any]] = []
     try:
         from reward_model import (  # type: ignore
             DEFAULT_TERM_CONFIGS,
@@ -984,7 +992,7 @@ def build_reward_adapter(
         )
 
         cfg = dict(config or {})
-        term_configs = list(cfg.get("terms") or DEFAULT_TERM_CONFIGS)
+        term_configs = [dict(term) for term in (cfg.get("terms") or DEFAULT_TERM_CONFIGS)]
         aggregation = dict(cfg.get("aggregation") or {})
 
         def factory() -> Any:  # noqa: F811 - 每 env 一份聚合器
@@ -993,6 +1001,17 @@ def build_reward_adapter(
         source = "reward_model.aggregation.RewardAggregator"
     except Exception as exc:  # noqa: BLE001
         logger(f"[reward] reward_model 不可用（{type(exc).__name__}: {exc}）→ 使用文档化 stub 奖励")
+    if overrides:
+        if factory is None:
+            raise RuntimeError("reward term_weights 覆盖需要 reward_model（当前不可用）")
+        known = [term.get("name") for term in term_configs]
+        unknown = [name for name in overrides if name not in known]
+        if unknown:
+            raise ValueError(f"reward term_weights 未命中奖励项 {unknown}；可用项 {known}")
+        for term in term_configs:
+            if term.get("name") in overrides:
+                term["weight"] = overrides[term["name"]]
+        source = f"{source}+term_weights"
     fallback = None if factory is not None else make_stub_reward()
     return RewardAdapter(factory=factory, fallback=fallback, dt=dt), source
 
