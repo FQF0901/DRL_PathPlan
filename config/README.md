@@ -15,6 +15,9 @@
 - `stages.B.bc.traj_aux_weight`：**已验证配方 = 0.3**（闭环优于 0.1，p2-contract §11）；
   当前 yaml 默认仍为 0.1，正式跑用 CLI `--traj-aux-weight 0.3` 覆盖。
 - `train.critic_warmup_updates: 0`（默认关，= 旧行为）；阶段 C 推荐 `--critic-warmup-updates 10`。
+- `stages.C.trainable_scope: design`（R2/P0-6；CLI `--trainable-scope`）：`design` = allowlist
+  （policy/value + MoE experts/router/residual_scale 可训，其余含 encoders/primary/st_gnn 全冻），
+  "干净 PPO 基线"仅在此口径成立；`all` = 旧行为（仅冻 st_gnn）。
 - `train.probe_batch: runs/bc_expert_full`（null=关闭）：PPO 固定探针诊断（动作漂移 + 低速告警）的输入。
 
 ## 评估协议（eval.yaml）

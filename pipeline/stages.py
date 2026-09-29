@@ -77,8 +77,11 @@ from pipeline.trainer import (  # noqa: E402
     Phase3Config,
     PPOConfig,
     PPOTrainer,
+    STAGE_C_DESIGN_PREFIXES,
+    STAGE_C_TRAINABLE_SCOPES,
     apply_freeze_prefixes,
     apply_thread_limits,
+    apply_trainable_allowlist,
     build_pool,
     build_reward_adapter,
     capture_rng_state,
@@ -101,6 +104,7 @@ from pipeline.trainer import (  # noqa: E402
     squeeze_single_slot,
     to_device_tensor,
     to_device_tensors,
+    trainable_param_groups,
     trim_memory,
     weighted_ld_multi_step_loss,
     weighted_od_multi_step_loss,
@@ -3615,22 +3619,40 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
 # --------------------------------------------------------------------------- #
 
 def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ primary lr ×0.1 + WM 全期冻结。
+    """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ 显式冻结范围（R2）+ primary lr ×0.1 + WM 全期冻结。
 
     P0-1（2026-09-30 修复，A-hold）：收集侧跟踪器参考 = ``repeat(a_t, 6)``——执行侧只依赖
     PPO 记账的随机变量；``plan_reference="plan"`` 仅作旧行为对照。
     P0-2（2026-09-30 修复）：router 标签在动作执行前按同帧观测取；终局 record 与 reset 分离。
     W1（2026-09-30）：``st_gnn.*`` 全期冻结（旧 ``--wm-freeze-updates`` 解冻无训练信号，已弃用；
     解冻守卫仅在 WM loss（W2）接线后可用）。
+    R2/P0-6（2026-09-30）：``--trainable-scope``（config ``stages.C.trainable_scope``，默认
+    ``design``）显式定义可训练范围——``design`` = allowlist（policy/value + MoE
+    experts/router/residual_scale），其余含共享主干/primary/WM 全冻；"干净 PPO 基线"的
+    冻结口径仅在 ``design`` 下成立，``all``（仅冻 st_gnn）为旧行为对照。
 
     ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
     update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
     """
+    stage_cfg = _stage_section(config, "C")
+    # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
+    trainable_scope = str(args.trainable_scope or stage_cfg.get("trainable_scope", "design"))
+    if trainable_scope not in STAGE_C_TRAINABLE_SCOPES:
+        raise SystemExit(
+            f"[stageC] 未知 trainable_scope={trainable_scope!r}（可选 {'/'.join(STAGE_C_TRAINABLE_SCOPES)}）"
+        )
+    scope_wording = (
+        "design（P0-6 设计冻结：policy/value + MoE specific 可训；shared/encoders/primary/WM 冻结）"
+        if trainable_scope == "design"
+        else "all（旧行为：仅冻 st_gnn；全参数共享主干可训，非设计口径）"
+    )
     print(
         "[stageC] ============================================================\n"
         "[stageC] P0-1 修复（A-hold）：references = repeat(a_t, 6)，执行只依赖记账动作。\n"
         "[stageC] P0-2 修复：router 标签步前同帧取 + 终局 record/reset 分离。\n"
         "[stageC] W1：WM（st_gnn）全期冻结（无 WM loss 信号；解冻被守卫禁止）。\n"
+        f"[stageC] R2/P0-6 trainable_scope={scope_wording}\n"
+        "[stageC] 干净 PPO 基线的冻结口径以本行 trainable_scope 实际值为准。\n"
         "[stageC] 仍为实验口径：W2（WM 自监督）与 P2 性能项未落地。\n"
         "[stageC] ============================================================",
         flush=True,
@@ -3653,7 +3675,6 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         print(f"[stageC] 载入阶段 B 策略快照 {ckpt}", flush=True)
     else:
         print(f"[stageC] 警告：checkpoint {ckpt} 不存在 → 从随机初始化开始", flush=True)
-    stage_cfg = _stage_section(config, "C")
     primary_lr_scale = float(stage_cfg.get("primary_lr_scale", 0.1) or 0.1)
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
@@ -3699,6 +3720,25 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "（wm_trainable=false）",
         flush=True,
     )
+    # R2/P0-6：design = 只保留 allowlist（policy/value + MoE specific）可训，其余全部冻结。
+    # 与 build_optimizer 的 LR 分组同口径的"可训练参数组表"（前缀 → 参数量/LR）随启动打印。
+    if trainable_scope == "design":
+        frozen_scope = apply_trainable_allowlist(model, STAGE_C_DESIGN_PREFIXES)
+        print(
+            f"[stageC] 冻结范围（R2/P0-6）：design allowlist={list(STAGE_C_DESIGN_PREFIXES)}；"
+            f"其余 {len(frozen_scope)} 个参数 requires_grad=false",
+            flush=True,
+        )
+    trainable_groups = trainable_param_groups(model, float(args.lr), primary_lr_scale)
+    if not trainable_groups:
+        raise SystemExit("[stageC] fail-fast：可训练参数为空（scope 配置错误？）")
+    for group in trainable_groups:
+        print(
+            f"[stageC] trainable group {group['prefix']:<28s} params={group['params']:>7d} "
+            f"lr={group['lr']:.3e}",
+            flush=True,
+        )
+    trainable_params = sum(int(group["params"]) for group in trainable_groups)
 
     bc_dataset = None
     if args.bc_anchor and Path(args.bc_dir).exists():
@@ -3724,6 +3764,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         },
         "specs": len(specs),
         "primary_lr_scale": primary_lr_scale,
+        "trainable_scope": trainable_scope,
+        "trainable_params": trainable_params,
+        "trainable_groups": [dict(group) for group in trainable_groups],
         "kl_anchor": {"initial": kl_initial, "final": kl_final, "decay": kl_decay, "source": str(ckpt)},
         "wm_freeze_updates": wm_freeze_updates,
         "wm_trainable": _wm_trainable(model),
@@ -3843,7 +3886,8 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pipeline.stages", description="阶段 A/B/C 编排（v1.1）")
     parser.add_argument("--stage", choices=("A", "B", "C"), default=None,
                         help="A=WM 教师强制训练；B=planner BC（primary→specific）；"
-                             "C=PPO RL（P0-1/P0-2 已修（A-hold/标签对齐）；WM 全期冻结；实验口径）；"
+                             "C=PPO RL（P0-1/P0-2 已修（A-hold/标签对齐）；WM 全期冻结；"
+                             "冻结范围默认 design（P0-6 allowlist）；实验口径）；"
                              "--phase3 模式下可省略")
     parser.add_argument("--config", default="config/default.yaml", help="主配置（includes 合并）")
     parser.add_argument("--model-config", default=_DEFAULT_MODEL_CFG)
@@ -3968,6 +4012,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="experts/gate/residual_scale LR 缩放（默认取 config …lr_scale.specific=0.5）")
     # ---- 阶段 C ----
     parser.add_argument("--pool", choices=("auto", "vector", "local"), default="local")
+    parser.add_argument("--trainable-scope", choices=STAGE_C_TRAINABLE_SCOPES, default=None,
+                        help="阶段 C 可训练范围（R2/P0-6；默认取 config stages.C.trainable_scope=design）："
+                             "design = 设计冻结 allowlist（policy/value + plan_head.moe.experts/router/"
+                             "residual_scale；encoders/mem_encoder/fusion/norm/ego_next/primary/st_gnn 全冻）"
+                             "——'干净 PPO 基线'仅在此口径成立；"
+                             "all = 旧行为（仅冻 st_gnn，共享主干全 LR 可训，非设计口径）")
     parser.add_argument("--plan-reference", choices=("repeat_action", "plan"), default=None,
                         help="阶段 C 收集侧跟踪器参考口径（默认 repeat_action：6 步参考 = repeat(a_t)，"
                              "P0-1 A-hold；plan = 旧行为（首步外取 WM 规划预览），仅供对照）")

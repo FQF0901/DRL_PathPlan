@@ -10,7 +10,8 @@
 - ``B`` = planner BC（primary→specific；动作主损失 + 小权重 rollout 轨迹辅助（WM 冻结 + detach）
   + router 软目标 CE/KL），产出 ``final.pt``（策略快照）；
 - ``C`` = PPO RL（``LqrTracker`` 闭环 + **阶段 B 快照** KL 锚（系数衰减）+ primary lr ×0.1 +
-  WM 冻结/解冻）。
+  WM 冻结/解冻；可训练范围 ``--trainable-scope``（R2/P0-6，默认 ``design`` allowlist =
+  policy/value + MoE specific，"干净 PPO 基线"的设计口径；``all`` = 旧行为仅冻 st_gnn））。
 
 未识别的参数原样透传给 ``pipeline.stages``（如 ``--envs/--updates/--pool/--bc-dir/--bc-epochs``），
 因此 ``tools/train.py`` 与 ``python -m pipeline.stages`` 等价，只是固定了入口与常用默认值。

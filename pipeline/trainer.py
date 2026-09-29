@@ -113,6 +113,10 @@ __all__ = [
     "RewardAdapter",
     "RewardStatistics",
     "DEFAULT_PROBE_BATCH",
+    "STAGE_C_DESIGN_PREFIXES",
+    "STAGE_C_TRAINABLE_SCOPES",
+    "apply_trainable_allowlist",
+    "trainable_param_groups",
     "LocalEnvPool",
     "VectorPoolAdapter",
     "build_pool",
@@ -734,6 +738,75 @@ def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[
         if not trainable:
             frozen.append(name)
     return tuple(frozen)
+
+
+#: 阶段 C 可训练范围（R2/P0-6）：``design``（默认，docs/db44fefe-system-review.md P0-6/阶段C）
+#: 的 allowlist = policy/value 头 + MoE specific（experts/router/residual_scale）；
+#: 其余（encoders/mem_encoder/plan_head 主干（fusion/norm/ego_next/primary）/st_gnn）全部冻结。
+STAGE_C_DESIGN_PREFIXES: Tuple[str, ...] = (
+    "policy.",
+    "value.",
+    "plan_head.moe.experts.",
+    "plan_head.moe.router.",
+    "plan_head.moe.residual_scale",
+)
+#: ``--trainable-scope`` 取值：``design``（默认，P0-6 设计冻结）/ ``all``（旧行为：仅 st_gnn 冻结）。
+STAGE_C_TRAINABLE_SCOPES: Tuple[str, ...] = ("all", "design")
+
+
+def apply_trainable_allowlist(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
+    """只保留 ``prefixes`` 前缀参数可训练，其余 ``requires_grad_(False)``；返回被冻结参数名。
+
+    与 :func:`apply_freeze_prefixes` 互补（后者按前缀冻结，本函数按前缀**保留**），
+    供阶段 C ``trainable_scope=design`` 的 allowlist 冻结使用。
+    """
+    frozen: List[str] = []
+    normalized = tuple(str(prefix) for prefix in prefixes)
+    for name, parameter in model.named_parameters():
+        trainable = any(name.startswith(prefix) for prefix in normalized)
+        parameter.requires_grad_(trainable)
+        if not trainable:
+            frozen.append(name)
+    return tuple(frozen)
+
+
+#: 可训练参数组表的前缀划分（最长匹配优先；未匹配 = 参数名首段）。
+_TRAINABLE_GROUP_PREFIXES: Tuple[str, ...] = (
+    "plan_head.moe.experts.",
+    "plan_head.moe.router.",
+    "plan_head.moe.residual_scale",
+    "plan_head.moe.primary.",
+    "plan_head.",
+    "encoders.",
+    "mem_encoder.",
+    "st_gnn.",
+    "policy.",
+    "value.",
+)
+
+
+def trainable_param_groups(
+    model: "nn.Module", lr: float, primary_lr_scale: float = 1.0
+) -> Tuple[Dict[str, Any], ...]:
+    """可训练参数组表 ``(prefix, params, lr)``：与 :func:`build_optimizer` 的 LR 分组同口径。
+
+    ``primary`` 参数取 ``lr × primary_lr_scale``（阶段 C 契约 ×0.1），其余取 ``lr``；
+    只统计 ``requires_grad=True`` 的参数（启动打印 + metrics 用）。
+    """
+    totals: Dict[Tuple[str, float], int] = {}
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        group_lr = float(lr) * (float(primary_lr_scale) if "primary" in name.lower() else 1.0)
+        prefix = next(
+            (candidate for candidate in _TRAINABLE_GROUP_PREFIXES if name.startswith(candidate)),
+            name.split(".")[0] + ".",
+        )
+        key = (prefix, group_lr)
+        totals[key] = totals.get(key, 0) + int(parameter.numel())
+    return tuple(
+        {"prefix": prefix, "params": count, "lr": group_lr} for (prefix, group_lr), count in totals.items()
+    )
 
 
 # --------------------------------------------------------------------------- #
