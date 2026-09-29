@@ -18,7 +18,8 @@
 - `stages.C.trainable_scope: design`（R2/P0-6；CLI `--trainable-scope`）：`design` = allowlist
   （policy/value + MoE experts/router/residual_scale 可训，其余含 encoders/primary/st_gnn 全冻），
   "干净 PPO 基线"仅在此口径成立；`all` = 旧行为（仅冻 st_gnn）。
-- `train.probe_batch: runs/bc_expert_full`（null=关闭）：PPO 固定探针诊断（动作漂移 + 低速告警）的输入。
+- `train.probe_batch: datasets/BTC20260926-2343_expert5k`（null=关闭）：PPO 固定探针诊断
+  （动作漂移 + 低速告警）的输入；路径缺失时显式告警并关闭探针。
 
 ## 评估协议（eval.yaml）
 - `recycle_every_specs: 150`：worker 按 spec 数回收（build_env 泄漏 ≈3.5MB/spec）；

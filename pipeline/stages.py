@@ -3664,7 +3664,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         raise SystemExit("[stages] 阶段 C 没有可用 spec")
     apply_thread_limits(workers=1, config=config)
     train_cfg = dict(config.get("train", {}) or {})
-    # 固定探针批（诊断）：train.probe_batch；缺失 → 默认 runs/bc_expert_full，显式 null → 关闭
+    # 固定探针批（诊断）：train.probe_batch；缺失 → 默认 datasets/BTC20260926-2343_expert5k，显式 null → 关闭
     probe_cfg = train_cfg.get("probe_batch", DEFAULT_PROBE_BATCH)
     probe_batch = None if probe_cfg is None else str(probe_cfg)
     device = resolve_device(args.device, config)
@@ -3758,7 +3758,12 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "stage": "C",
         "experimental": True,
         "p0_fixes": {
-            "P0-1": "repeat_action(A-hold)",
+            # R4：按实际 plan_reference 生成（消除 plan 臂下 p0_fixes 自称 A-hold 的自相矛盾）
+            "P0-1": (
+                "repeat_action(A-hold)"
+                if plan_reference == "repeat_action"
+                else "plan(legacy对照，未启用 A-hold)"
+            ),
             "P0-2": "label_alignment(pre-step)",
             "W1": "wm_frozen",
         },
@@ -3776,7 +3781,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "probe_batch": probe_batch,
         "plan_reference": plan_reference,
         "pool": {
-            "kind": str(args.pool),
+            # R4：记真实池类型（LocalEnvPool / VectorPoolAdapter），不再只记请求 kind
+            "kind": type(pool).__name__,
             "num_envs": int(getattr(pool, "num_envs", 1)),
             "tracker": str(getattr(pool, "tracker_kind", "kinematic")),
         },

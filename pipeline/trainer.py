@@ -183,8 +183,9 @@ _HIST_SUFFIX = "_hist"
 # --------------------------------------------------------------------------- #
 
 #: 固定探针批默认路径（BC 数据集目录/npz）：动作 ds/logstd 漂移 + 低速吸引子检测。
-#: 配置覆盖：``config/train.yaml::train.probe_batch``（null = 关闭探针）。
-DEFAULT_PROBE_BATCH = "runs/bc_expert_full"
+#: 默认为仓库内**实际存在**的数据集目录；配置覆盖：``config/train.yaml::train.probe_batch``
+#: （null = 关闭探针；路径缺失时显式告警并关闭）。
+DEFAULT_PROBE_BATCH = "datasets/BTC20260926-2343_expert5k"
 #: 探针批大小（帧；固定不随 update 变化，保证序列可比）。
 DEFAULT_PROBE_SIZE = 256
 #: 探针分速度档（m/s）：0–1 / 1–2 / 2–4 / 4–8 / >8。
@@ -4611,7 +4612,10 @@ class PPOTrainer:
             return
         target = Path(str(probe_batch))
         if not target.exists():
-            self.logger(f"[probe] 探针批不存在：{target} → 动作漂移/低速吸引子探针关闭")
+            self.logger(
+                f"[probe] 警告：train.probe_batch 路径不存在：{target} → "
+                "动作漂移/低速吸引子探针关闭（probe.available=0；置 null 可显式关闭告警）"
+            )
             return
         try:
             dataset = BCDataset.load(str(target))
