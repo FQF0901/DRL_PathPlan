@@ -352,7 +352,12 @@ class ResidentEnv:
         env.prev_policy_action = np.zeros(2, dtype=np.float64)
         return self._record(info=info, reward=0.0, terminated=False, truncated=False)
 
-    def step(self, actions: Any, prev_action: Optional[Sequence[float]] = None) -> dict:
+    def step(
+        self,
+        actions: Any,
+        prev_action: Optional[Sequence[float]] = None,
+        skip_post_step_labels: bool = False,
+    ) -> dict:
         """执行一个动作或一串 env-step 动作（0.5 s 策略步），返回最后一步结果。
 
         ``prev_action`` = 本策略步 ``(ds, dθ)``（§8.4）；给定时在步进前写入
@@ -361,6 +366,9 @@ class ResidentEnv:
 
         P0-2：``labels_at_step_start`` = **子步推进前**的 router 标签快照，与训练侧
         ``obs_current``（步前观测）同帧；``router_labels`` 保持步后口径（兼容旧消费端）。
+
+        ``skip_post_step_labels``（V10，P2 性能）：True 时跳过 record 的 post-step
+        ``router_labels`` 双算（对齐消费方直接读 ``labels_at_step_start``）。
         """
         if self._env is None:
             raise RuntimeError("ResidentEnv.step 前必须先 reset(spec)")
@@ -376,7 +384,13 @@ class ResidentEnv:
             reward_total += float(reward)
             if terminated or truncated:
                 break
-        record = self._record(info=info, reward=reward_total, terminated=terminated, truncated=truncated)
+        record = self._record(
+            info=info,
+            reward=reward_total,
+            terminated=terminated,
+            truncated=truncated,
+            compute_labels=not skip_post_step_labels,
+        )
         record["labels_at_step_start"] = labels_at_step_start
         return record
 
@@ -452,7 +466,9 @@ class ResidentEnv:
             pass
         return np.zeros(2, dtype=np.float32)
 
-    def _record(self, *, info: Any, reward: float, terminated: bool, truncated: bool) -> dict:
+    def _record(
+        self, *, info: Any, reward: float, terminated: bool, truncated: bool, compute_labels: bool = True
+    ) -> dict:
         spec = self._spec
         pose = self._pose()
         obs = self._build_obs()
@@ -472,7 +488,9 @@ class ResidentEnv:
             "env_builds": int(self.env_builds),
             "resets": int(self.resets),
         }
-        labels = self._router_labels()
+        # V10：compute_labels=False（对齐消费方已持步前快照）→ 跳过 post-step 标签计算；
+        # record 级兼容字段置 None/False，消费方读 labels_at_step_start。
+        labels = self._router_labels() if compute_labels else None
         record["router_labels"] = labels
         record["has_router_labels"] = bool(labels is not None)
         # P0-2：step() 在子步推进前填充（与步前 obs_current 同帧）；reset 记录保持 None。
@@ -500,8 +518,12 @@ def _worker_main(conn: Connection, worker_id: int, cfg: dict) -> None:
             if command == "reset":
                 conn.send((True, state.reset(payload)))
             elif command == "step":
-                # 新 payload = (子步动作, 策略动作 (ds,dθ) 数组 | None)；旧 payload = 纯子步动作
-                if (
+                # payload：3 元组 = (子步动作, 策略动作 (ds,dθ) | None, skip_post_step_labels)；
+                # 2 元组 = (子步动作, 策略动作)；其它 = 纯子步动作（旧调用方）
+                skip_post_step_labels = False
+                if isinstance(payload, tuple) and len(payload) == 3:
+                    actions, prev_action, skip_post_step_labels = payload
+                elif (
                     isinstance(payload, tuple)
                     and len(payload) == 2
                     and (payload[1] is None or np.ndim(payload[1]) >= 1)
@@ -509,7 +531,7 @@ def _worker_main(conn: Connection, worker_id: int, cfg: dict) -> None:
                     actions, prev_action = payload
                 else:
                     actions, prev_action = payload, None
-                conn.send((True, state.step(actions, prev_action)))
+                conn.send((True, state.step(actions, prev_action, bool(skip_post_step_labels))))
             elif command == "stats":
                 conn.send((True, state.stats()))
             elif command == "close":
@@ -944,7 +966,7 @@ class VectorEnvPool:
                 raise ValueError(f"policy_actions 每项需要 2 维 (ds, dtheta)，收到 shape={item.shape}")
         return batch
 
-    def step(self, actions: Any, policy_actions: Any = None) -> list:
+    def step(self, actions: Any, policy_actions: Any = None, skip_post_step_labels: bool = False) -> list:
         """执行一批动作（每 worker 一项；若无法判定为批量则广播）。
 
         每项可为 ``(2,)`` 单步动作或 ``(k,2)`` 动作序列（worker 内顺序执行）。
@@ -952,6 +974,9 @@ class VectorEnvPool:
         worker；``None`` = 不注入，worker 保持现值）。worker 在构建步后观测**之前**写入
         ``env.prev_policy_action``，故 record 的 ``prev_action`` 与 ``obs["ego"][0, 6:8]``
         一致（§8.4）。
+
+        ``skip_post_step_labels``（V10，P2 性能）：转发给 worker → 跳过 record 的 post-step
+        标签计算（``labels_at_step_start`` 步前快照不受影响）。
         """
         if self._closed:
             raise RuntimeError("VectorEnvPool 已关闭")
@@ -959,8 +984,9 @@ class VectorEnvPool:
             raise RuntimeError("step 前必须先 reset(specs)")
         seq = self._normalize_action_batch(actions)
         policy_seq = self._normalize_policy_batch(policy_actions)
+        skip_labels = bool(skip_post_step_labels)
         for index, (action, policy_action) in enumerate(zip(seq, policy_seq)):
-            self._conns[index].send(("step", (action, policy_action)))  # type: ignore[union-attr]
+            self._conns[index].send(("step", (action, policy_action, skip_labels)))  # type: ignore[union-attr]
         records = []
         for index in range(len(seq)):
             ok, reply = self._recv_from(self._conns[index], self._procs[index], self.recv_timeout)  # type: ignore[arg-type]

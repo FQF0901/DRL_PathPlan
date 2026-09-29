@@ -4176,7 +4176,14 @@ class LocalEnvPool:
 
     记录 dict 含 ``obs``（含 ``pose``/``hist_valid``）、``info``（含 ``router_labels`` 与
     ``on_*_continuous_line``）、``reward/terminated/truncated``；env 终局后池内自动 reset。
+
+    V10（P2 性能，2026-09-30）：``step(pre_step_labels=...)`` 由对齐消费方（``collect_rollout``
+    已调 :meth:`labels_now`）传入 → 跳过 ``_record`` 内 post-step 标签的重复计算（同帧标签
+    由调用方持有，P0-2 语义不变）；终局 record 与 reset 首帧仍计算标签（记录语义不变）。
     """
+
+    #: V10：step 支持 ``pre_step_labels``（trainer 能力探测，避免对旧 stub 池传未知 kwarg）
+    accepts_pre_step_labels = True
 
     def __init__(
         self,
@@ -4278,15 +4285,18 @@ class LocalEnvPool:
             return None
         return _router_labels_from_env(self._env, self._spec, self._order)
 
-    def _record(self, *, reward: float, terminated: bool, truncated: bool) -> Dict[str, Any]:
+    def _record(
+        self, *, reward: float, terminated: bool, truncated: bool, compute_labels: bool = True
+    ) -> Dict[str, Any]:
         env = self._env
         obs = self._obs_now()
         ego = env.agent
         info = dict(self._current_info)
         info["pose"] = obs["pose"].copy()
-        labels = _router_labels_from_env(env, self._spec, self._order)
-        if labels is not None:
-            info["router_labels"] = labels
+        if compute_labels:  # V10：对齐路径跳过 post-step 标签双算（调用方持步前同帧标签）
+            labels = _router_labels_from_env(env, self._spec, self._order)
+            if labels is not None:
+                info["router_labels"] = labels
         info["on_white_continuous_line"] = bool(getattr(ego, "on_white_continuous_line", False))
         info["on_yellow_continuous_line"] = bool(getattr(ego, "on_yellow_continuous_line", False))
         return {
@@ -4297,11 +4307,21 @@ class LocalEnvPool:
             "truncated": bool(truncated),
         }
 
-    def step(self, actions: np.ndarray, references: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
+    def step(
+        self,
+        actions: np.ndarray,
+        references: Optional[np.ndarray] = None,
+        *,
+        pre_step_labels: Optional[np.ndarray] = None,
+    ) -> List[Dict[str, Any]]:
         """执行一个策略步（1 个动作 ``(2,)``），返回单元素记录；终局自动 reset。
 
         P0-2：终局记录的 obs/info/pose 取自**终局帧**；reset 后的新 episode 首帧只经
         ``record["next_obs"]`` 返回（不再混入终局记录）。
+
+        ``pre_step_labels``（V10，P2 性能）：非 None = 调用方已按 P0-2 取好步前同帧标签
+        （``labels_now()``），普通步的 ``_record`` 不再重复计算 post-step 标签（省 ~0.2ms/步）；
+        终局 record 仍按终局帧计算（记录语义不变）。
 
         ``references``：``(N,6,2)`` 策略规划预览（阶段 C LQR 用）。给定且 ``tracker_kind=="lqr"``
         时，跟踪器参考 = 该 6 动作序列（30 点 / 3 s），而不是单动作（单动作会退化为
@@ -4344,6 +4364,8 @@ class LocalEnvPool:
             # P0-2：终局 record 与 reset 分离。record 必须来自终局帧（obs/pose/info/labels）；
             # reset 后的新 episode 首帧只作为 next_obs 交回 trainer。
             record = self._record(reward=0.0, terminated=terminated, truncated=truncated)
+            if pre_step_labels is not None:
+                record["labels_at_step_start"] = np.asarray(pre_step_labels, dtype=np.float32)
             self._env.reset()
             self._setup_episode()
             self._current_info = {}
@@ -4353,7 +4375,14 @@ class LocalEnvPool:
             return [record]
         # §8.4：下一次 build 的 ego reserved0/1 = 本策略步动作 (ds,dθ)
         self._env.prev_policy_action = np.asarray(action, dtype=np.float64).reshape(2)
-        return [self._record(reward=0.0, terminated=False, truncated=False)]
+        # V10：对齐路径（调用方已取步前标签）跳过 post-step 标签双算；步前快照放入
+        # record["labels_at_step_start"]（与 Vector worker 同键，记录自描述）。
+        record = self._record(
+            reward=0.0, terminated=False, truncated=False, compute_labels=pre_step_labels is None
+        )
+        if pre_step_labels is not None:
+            record["labels_at_step_start"] = np.asarray(pre_step_labels, dtype=np.float32)
+        return [record]
 
     def close(self) -> None:
         if self._env is not None:
@@ -4416,6 +4445,10 @@ class VectorPoolAdapter:
         #: 序列逐项一致；每次 :meth:`reset` 推进各自的游标）。
         self._spec_cursor: List[int] = list(range(self.num_envs))
 
+    #: V10：step 支持 ``pre_step_labels``（trainer 能力探测）；Vector worker 始终在步开始
+    #: 快照标签（``labels_at_step_start``），故 ``_record`` 的 post-step 标签可安全跳过。
+    accepts_pre_step_labels = True
+
     def _next_spec(self, env_index: int) -> Any:
         spec = self.specs[self._spec_cursor[env_index] % len(self.specs)]
         self._spec_cursor[env_index] += self.num_envs
@@ -4428,8 +4461,16 @@ class VectorPoolAdapter:
         # 新 episode 首帧没有"上一策略步动作"：worker 已把 env.prev_policy_action 置 0
         return records
 
-    def step(self, actions: np.ndarray, references: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
+    def step(
+        self,
+        actions: np.ndarray,
+        references: Optional[np.ndarray] = None,
+        *,
+        pre_step_labels: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
         # references（阶段 C 的 6 步规划预览）在 kinematic 展开路径不使用（只执行单动作）
+        # V10：worker 每步已在子步推进前快照 labels_at_step_start（P0-2 同帧），故 record 的
+        # post-step 标签（仅兼容旧消费端）可跳过（pre_step_labels 仅作能力/对齐信号，值不消费）。
         actions = np.asarray(actions, dtype=np.float32).reshape(self.num_envs, 2)
         expanded = []
         for env_index in range(self.num_envs):
@@ -4441,7 +4482,7 @@ class VectorPoolAdapter:
             except Exception:  # noqa: BLE001
                 pass
             expanded.append(expand_policy_action(actions[env_index], speed=speed))
-        records = self.pool.step(expanded, policy_actions=actions)
+        records = self.pool.step(expanded, policy_actions=actions, skip_post_step_labels=True)
         # record["obs"] 是**本步之后**的观测：worker 在构建它之前写入了
         # env.prev_policy_action = 本步动作 (ds,dθ)，故 ego reserved 6:8 已就位（§8.4）。
         # 记录速度估计（供下一策略步展开使用）：obs ego[0,0]
@@ -4790,7 +4831,14 @@ class PPOTrainer:
                 except Exception:  # noqa: BLE001 - 标签失败不阻塞训练
                     labels_pre = None
             t1 = time.perf_counter()
-            records = self.pool.step(actions_np, references=references_np)
+            # V10（P2 性能）：对齐池支持 pre_step_labels 时不重复计算 _record 的 post-step 标签
+            # （步前同帧标签已由上一步 labels_now()/worker 快照持有）；旧 stub 池无该能力 → 原样调用。
+            if getattr(self.pool, "accepts_pre_step_labels", False):
+                records = self.pool.step(
+                    actions_np, references=references_np, pre_step_labels=labels_pre
+                )
+            else:
+                records = self.pool.step(actions_np, references=references_np)
             t_env += time.perf_counter() - t1
             next_obs = []
             for env_index in range(self._num_envs):
