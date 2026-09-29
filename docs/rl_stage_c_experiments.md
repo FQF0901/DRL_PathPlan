@@ -55,7 +55,7 @@
 | `--seed` | 0 |
 | probe | `datasets/BTC20260926-2343_expert5k`（config `train.probe_batch` 默认） |
 | `trim_memory_every` | 4（config 默认） |
-| 训练 spec | `env/specs/scenarios_train_slice200.json`（content sha256 `2090f69e48bf…`，200 条） |
+| 训练 spec | `env/specs/scenarios_train_slice200.json`（raw sha256 `6df46b26…`；canonical content sha256（剔除 `generated_at`）`6873f4e7…`；200 条；G3 复核口径） |
 | `critic_warmup` | 0 |
 | 记录 | `--monitor --monitor-legacy-tags`（仅日志，不改变训练数值） |
 | 保存 | last-only：`<out>/final.pt` |
