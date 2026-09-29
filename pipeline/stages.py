@@ -3732,6 +3732,12 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "device": device,
         "probe_batch": probe_batch,
         "plan_reference": plan_reference,
+        "pool": {
+            "kind": str(args.pool),
+            "num_envs": int(getattr(pool, "num_envs", 1)),
+            "tracker": str(getattr(pool, "tracker_kind", "kinematic")),
+        },
+        "tracker": str(getattr(pool, "tracker_kind", "kinematic")),
     }
     monitor = _make_monitor(
         out_dir / "monitor",
@@ -3805,6 +3811,23 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         pool.close()
         if monitor is not None:
             monitor.close()
+    # 资源指标（对照阶段 B vram_peak_mb）：Local 单进程另报进程 RSS（当前 + 峰值）
+    try:
+        import torch
+
+        if torch.device(device).type == "cuda":
+            metrics["vram_peak_mb"] = float(torch.cuda.max_memory_allocated(device) / 1e6)
+    except Exception:  # noqa: BLE001 - 指标失败不阻塞产物
+        pass
+    try:
+        import resource
+
+        metrics["rss_peak_mb"] = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0)
+        from pipeline.vector_env import process_rss_mb
+
+        metrics["rss_mb"] = float(process_rss_mb())
+    except Exception:  # noqa: BLE001
+        pass
     save_checkpoint(out_dir / "final.pt", model, meta={"stage": "C"})
     metrics["checkpoint"] = str(out_dir / "final.pt")
     _write_json(out_dir / "metrics.json", metrics)
