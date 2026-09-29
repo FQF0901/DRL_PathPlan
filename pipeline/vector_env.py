@@ -358,11 +358,15 @@ class ResidentEnv:
         ``prev_action`` = 本策略步 ``(ds, dθ)``（§8.4）；给定时在步进前写入
         ``env.prev_policy_action``，使**步后观测**的 ego reserved 6:8 承载它。``None``
         （默认）时保持现值（reset 后为 0），兼容只传子步动作的旧调用方。
+
+        P0-2：``labels_at_step_start`` = **子步推进前**的 router 标签快照，与训练侧
+        ``obs_current``（步前观测）同帧；``router_labels`` 保持步后口径（兼容旧消费端）。
         """
         if self._env is None:
             raise RuntimeError("ResidentEnv.step 前必须先 reset(spec)")
         if prev_action is not None:
             self._set_prev_policy_action(prev_action)
+        labels_at_step_start = self._router_labels()
         steps = _normalize_env_steps(actions)
         reward_total = 0.0
         terminated = truncated = False
@@ -372,7 +376,9 @@ class ResidentEnv:
             reward_total += float(reward)
             if terminated or truncated:
                 break
-        return self._record(info=info, reward=reward_total, terminated=terminated, truncated=truncated)
+        record = self._record(info=info, reward=reward_total, terminated=terminated, truncated=truncated)
+        record["labels_at_step_start"] = labels_at_step_start
+        return record
 
     def stats(self) -> dict:
         """worker 资源/计数快照。"""
@@ -469,6 +475,8 @@ class ResidentEnv:
         labels = self._router_labels()
         record["router_labels"] = labels
         record["has_router_labels"] = bool(labels is not None)
+        # P0-2：step() 在子步推进前填充（与步前 obs_current 同帧）；reset 记录保持 None。
+        record["labels_at_step_start"] = None
         record["prev_action"] = self._prev_action()
         if labels is not None:
             record["info"]["router_labels"] = labels  # 兼容既有 info 消费口径

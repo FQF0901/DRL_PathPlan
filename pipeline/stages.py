@@ -25,9 +25,10 @@
   ``val/loss/planner/...``）、``ego/action/err_weighted``、``ego/traj/mae_m|fde_m``（留出
   ``val/ego/...``）、``router/{ce,acc,acc_majority}``（留出 ``val/router/...``）；动作误差
   median/p95、全部 slice/label、软目标 KL/温度/专家混合权重等已移除（``docs/metrics.md``）。
-- **C = PPO RL（EXPERIMENTAL）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）与
-  P0-2（router 标签错位）未修复前**不得用于 RL 结论**，仅保留管线冒烟。KL 锚 = 阶段 B 快照
-  （``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
+- **C = PPO RL（实验口径）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）已按
+  **A-hold** 修复（references = repeat(a_t)；WM 全期冻结），P0-2（router 标签错位）已对齐
+  （标签步前取 + 终局 record/reset 分离）；仍未接入 W2 WM 自监督与 P2 性能项。KL 锚 =
+  阶段 B 快照（``--ckpt``）系数线性衰减；primary lr ×0.1；critic warmup。
 
 环境约束（§8.1）
 ----------------
@@ -3614,23 +3615,23 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
 # --------------------------------------------------------------------------- #
 
 def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
-    """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ primary lr ×0.1 + WM 冻结/解冻。
+    """PPO：LqrTracker 闭环 + Stage-B 快照 KL 锚（衰减）+ primary lr ×0.1 + WM 全期冻结。
 
-    .. warning::
-        **EXPERIMENTAL（2026-09-26）**：P0-1（环境有效动作 = 整条 6 步 plan，PPO 只对首动作
-        记账；WM 解冻无训练信号）与 P0-2（router 标签与观测错位一步）未修复前，本阶段
-        输出**不得用于任何 RL 结论**（见 ``docs/db44fefe-system-review.md``）。保留可运行仅用于
-        管线冒烟/回归；正式 RL 结论必须等两项修复 + 回归测试落地。
+    P0-1（2026-09-30 修复，A-hold）：收集侧跟踪器参考 = ``repeat(a_t, 6)``——执行侧只依赖
+    PPO 记账的随机变量；``plan_reference="plan"`` 仅作旧行为对照。
+    P0-2（2026-09-30 修复）：router 标签在动作执行前按同帧观测取；终局 record 与 reset 分离。
+    W1（2026-09-30）：``st_gnn.*`` 全期冻结（旧 ``--wm-freeze-updates`` 解冻无训练信号，已弃用；
+    解冻守卫仅在 WM loss（W2）接线后可用）。
 
     ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
     update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
     """
     print(
         "[stageC] ============================================================\n"
-        "[stageC] EXPERIMENTAL：P0-1/P0-2 未修复前，Stage C 不得用于 RL 结论。\n"
-        "[stageC] P0-1 = 整条 plan 执行 vs 首动作 PPO 记账/ WM 解冻无信号；\n"
-        "[stageC] P0-2 = router 标签（动作后）配给动作前观测。\n"
-        "[stageC] 仅用于管线冒烟/回归（见 docs/db44fefe-system-review.md）。\n"
+        "[stageC] P0-1 修复（A-hold）：references = repeat(a_t, 6)，执行只依赖记账动作。\n"
+        "[stageC] P0-2 修复：router 标签步前同帧取 + 终局 record/reset 分离。\n"
+        "[stageC] W1：WM（st_gnn）全期冻结（无 WM loss 信号；解冻被守卫禁止）。\n"
+        "[stageC] 仍为实验口径：W2（WM 自监督）与 P2 性能项未落地。\n"
         "[stageC] ============================================================",
         flush=True,
     )
@@ -3716,7 +3717,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     metrics: Dict[str, Any] = {
         "stage": "C",
         "experimental": True,
-        "blocked_by": ["P0-1", "P0-2"],
+        "p0_fixes": {
+            "P0-1": "repeat_action(A-hold)",
+            "P0-2": "label_alignment(pre-step)",
+            "W1": "wm_frozen",
+        },
         "specs": len(specs),
         "primary_lr_scale": primary_lr_scale,
         "kl_anchor": {"initial": kl_initial, "final": kl_final, "decay": kl_decay, "source": str(ckpt)},
@@ -3815,7 +3820,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pipeline.stages", description="阶段 A/B/C 编排（v1.1）")
     parser.add_argument("--stage", choices=("A", "B", "C"), default=None,
                         help="A=WM 教师强制训练；B=planner BC（primary→specific）；"
-                             "C=PPO RL（EXPERIMENTAL：P0-1/P0-2 未修，不得用于 RL 结论）；"
+                             "C=PPO RL（P0-1/P0-2 已修（A-hold/标签对齐）；WM 全期冻结；实验口径）；"
                              "--phase3 模式下可省略")
     parser.add_argument("--config", default="config/default.yaml", help="主配置（includes 合并）")
     parser.add_argument("--model-config", default=_DEFAULT_MODEL_CFG)

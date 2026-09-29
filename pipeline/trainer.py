@@ -4073,6 +4073,19 @@ def _router_labels_from_env(env: Any, spec: Any, order: Sequence[str]) -> Option
         return None
 
 
+def _labels_for_env(labels_pre: Any, env_index: int) -> Optional[Any]:
+    """``labels_now()`` 返回值 → 第 ``env_index`` 个 env 的标签（``(8,)`` 数组或 per-env 列表）。"""
+    if labels_pre is None:
+        return None
+    if isinstance(labels_pre, np.ndarray):
+        if labels_pre.ndim == 1:
+            return labels_pre if env_index == 0 else None
+        return labels_pre[env_index] if env_index < labels_pre.shape[0] else None
+    if isinstance(labels_pre, (list, tuple)):
+        return labels_pre[env_index] if env_index < len(labels_pre) else None
+    return None
+
+
 class LocalEnvPool:
     """**单进程常驻池**（MetaDrive 每进程一个 engine → 该池恰好 1 个 env）。
 
@@ -4119,6 +4132,8 @@ class LocalEnvPool:
         self._order = load_supervised_labels()
         self._tracker: Any = None
         self._tracker_policy: Any = None
+        #: 最近一次 env.step 的 info（P0-2：reset 时清空，终局 record 与 reset 分离）
+        self._current_info: Dict[str, Any] = {}
 
     # ---------------------------------------------------------------- 生命周期
     def _build(self, spec: Any) -> None:
@@ -4161,19 +4176,36 @@ class LocalEnvPool:
         self._setup_episode()
         # §8.4：新 episode 起点没有上一动作 → reserved 维保持 0
         self._env.prev_policy_action = np.zeros(2, dtype=np.float64)
+        # P0-2：episode 首帧不得复用上一 episode（尤其终局）残留的 step info
+        self._current_info = {}
         return [self._record(reward=0.0, terminated=False, truncated=False)]
 
-    def _record(self, *, reward: float, terminated: bool, truncated: bool) -> Dict[str, Any]:
+    def _obs_now(self) -> Dict[str, Any]:
+        """当前 env 状态的 obs 快照（含 ``pose``）。"""
         import numpy as np  # noqa: F811 - 局部引用保持模块顶层无 MetaDrive 依赖
 
         env = self._env
-        info = self._current_info if hasattr(self, "_current_info") else {}
         obs = self._builder.build(env, self._spec)
         ego = env.agent
         obs["pose"] = np.array(
             [float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta)], dtype=np.float32
         )
-        info = dict(info)
+        return obs
+
+    def labels_now(self) -> Optional[np.ndarray]:
+        """**步前** router 标签快照（与调用侧 ``obs_current`` 同帧；标签模块不可用 → None）。
+
+        P0-2：标签必须在动作执行/状态推进之前取，否则会配给"动作后"的观测（``p(y_{t+1}|o_t)``）。
+        """
+        if self._env is None or not self._order:
+            return None
+        return _router_labels_from_env(self._env, self._spec, self._order)
+
+    def _record(self, *, reward: float, terminated: bool, truncated: bool) -> Dict[str, Any]:
+        env = self._env
+        obs = self._obs_now()
+        ego = env.agent
+        info = dict(self._current_info)
         info["pose"] = obs["pose"].copy()
         labels = _router_labels_from_env(env, self._spec, self._order)
         if labels is not None:
@@ -4190,6 +4222,9 @@ class LocalEnvPool:
 
     def step(self, actions: np.ndarray, references: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
         """执行一个策略步（1 个动作 ``(2,)``），返回单元素记录；终局自动 reset。
+
+        P0-2：终局记录的 obs/info/pose 取自**终局帧**；reset 后的新 episode 首帧只经
+        ``record["next_obs"]`` 返回（不再混入终局记录）。
 
         ``references``：``(N,6,2)`` 策略规划预览（阶段 C LQR 用）。给定且 ``tracker_kind=="lqr"``
         时，跟踪器参考 = 该 6 动作序列（30 点 / 3 s），而不是单动作（单动作会退化为
@@ -4229,14 +4264,19 @@ class LocalEnvPool:
         if not (terminated or truncated) and self._steps >= self.max_episode_steps:
             truncated = True
         if terminated or truncated:
+            # P0-2：终局 record 与 reset 分离。record 必须来自终局帧（obs/pose/info/labels）；
+            # reset 后的新 episode 首帧只作为 next_obs 交回 trainer。
+            record = self._record(reward=0.0, terminated=terminated, truncated=truncated)
             self._env.reset()
             self._setup_episode()
+            self._current_info = {}
             # §8.4：终局 reset 后上一动作为 0
             self._env.prev_policy_action = np.zeros(2, dtype=np.float64)
-        else:
-            # §8.4：下一次 build 的 ego reserved0/1 = 本策略步动作 (ds,dθ)
-            self._env.prev_policy_action = np.asarray(action, dtype=np.float64).reshape(2)
-        return [self._record(reward=0.0, terminated=terminated, truncated=truncated)]
+            record["next_obs"] = self._obs_now()
+            return [record]
+        # §8.4：下一次 build 的 ego reserved0/1 = 本策略步动作 (ds,dθ)
+        self._env.prev_policy_action = np.asarray(action, dtype=np.float64).reshape(2)
+        return [self._record(reward=0.0, terminated=False, truncated=False)]
 
     def close(self) -> None:
         if self._env is not None:
@@ -4654,6 +4694,16 @@ class PPOTrainer:
             else:
                 references_np = np.repeat(actions_np[:, None, :], 6, axis=1)
             t_policy += time.perf_counter() - t0
+            # P0-2：router 标签必须与 buffer 的 obs_current 同帧 → 在动作执行**前**取快照。
+            # LocalEnvPool 提供 labels_now()（1 env）；Vector 池由 worker 在 step 开始时快照
+            # （record["labels_at_step_start"]）。
+            labels_pre: Optional[Any] = None
+            labels_now = getattr(self.pool, "labels_now", None)
+            if callable(labels_now):
+                try:
+                    labels_pre = labels_now()
+                except Exception:  # noqa: BLE001 - 标签失败不阻塞训练
+                    labels_pre = None
             t1 = time.perf_counter()
             records = self.pool.step(actions_np, references=references_np)
             t_env += time.perf_counter() - t1
@@ -4671,8 +4721,13 @@ class PPOTrainer:
                 )
                 self._reward_stats.update(reward_meta, reward)
                 pose = self._frame_pose(env_index, obs_current)
-                # router_labels：优先 record 级（VectorEnvPool 新契约），回退 info（LocalEnvPool/旧接口）
-                labels = record.get("router_labels") if isinstance(record, dict) else None
+                # router_labels（P0-2 对齐）：worker 步开始快照（Vector）> 池级步前快照（Local）
+                #   > record/info 的步后标签（旧接口回退）。
+                labels = record.get("labels_at_step_start") if isinstance(record, dict) else None
+                if labels is None and labels_pre is not None:
+                    labels = _labels_for_env(labels_pre, env_index)
+                if labels is None:
+                    labels = record.get("router_labels") if isinstance(record, dict) else None
                 if labels is None:
                     labels = info.get("router_labels") if isinstance(info, dict) else None
                 pending[env_index][step] = {
