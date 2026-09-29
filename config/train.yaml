@@ -156,6 +156,8 @@ stages:
                                 # plan_head.moe.experts/residual_scale 可训；encoders/primary/router/
                                 # st_gnn 等全冻，"干净 PPO 基线"的设计口径）；all = 旧行为（仅冻 st_gnn）
     primary_lr_scale: 0.1       # 主专家学习率 ×0.1
+    ckpt_every: 25              # G3 最小下一步：每 N 个 update 保存 <out>/ckpt_u<NNN>.pt（CLI
+                                # --ckpt-every；0=关；仅保存点，不引入 resume；final.pt 仍写）
 
 monitoring:
   tensorboard: true               # 输出 tensorboard

@@ -464,6 +464,33 @@ def _periodic_ckpt_path(out_dir: Path, global_epoch: int) -> Path:
     return out_dir / f"ckpt_epoch{int(global_epoch):03d}.pt"
 
 
+def _resolve_stage_c_ckpt_every(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
+    """阶段 C 周期 ckpt 间隔（update）：CLI ``--ckpt-every`` 优先，否则 ``config stages.C.ckpt_every``。
+
+    默认 25（G3 最小下一步：周期保存点，不引入 resume）；0 = 关闭周期保存（阶段末 ``final.pt`` 仍写）。
+    """
+    value = getattr(args, "ckpt_every", None)
+    if value is None:
+        value = dict(stage_cfg or {}).get("ckpt_every", 25)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        print(f"[stages] 无法解析 stage C ckpt_every={value!r} → 回退 25", flush=True)
+        return 25
+
+
+def _stage_c_periodic_updates(updates: int, ckpt_every: int) -> List[int]:
+    """阶段 C 周期 ckpt 的 update 编号（1 基）列表；``ckpt_every<=0`` → 空（关闭）。"""
+    if ckpt_every <= 0:
+        return []
+    return [update for update in range(1, max(0, int(updates)) + 1) if update % ckpt_every == 0]
+
+
+def _stage_c_ckpt_path(out_dir: Path, update: int) -> Path:
+    """阶段 C 周期 ckpt 命名（与 ``final.pt`` 同格式/payload）：``<out>/ckpt_u<NNN>.pt``。"""
+    return out_dir / f"ckpt_u{int(update):03d}.pt"
+
+
 def _resume_epoch_of(resume_info: Mapping[str, Any], total_epochs: int) -> int:
     """resume ckpt 的已完成 epoch 数（0 基；``epoch`` 键缺失/None → 0，超出总轮数 → 截断）。"""
     epoch = resume_info.get("epoch") if resume_info else None
@@ -3635,6 +3662,10 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
 
     ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
     update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
+
+    ``--ckpt-every N``（config ``stages.C.ckpt_every``，默认 25；0=关）：每 N 个 update 保存
+    ``<out>/ckpt_u<NNN>.pt``（与 ``final.pt`` 同格式；仅保存点，不引入 resume），保存列表记入
+    ``metrics.json::ckpt_saved``（G3 最小下一步的周期 ckpt）。
     """
     stage_cfg = _stage_section(config, "C")
     # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
@@ -3684,6 +3715,16 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
+    # G3 最小下一步（周期 ckpt）：每 N update 保存 <out>/ckpt_u<NNN>.pt（仅保存点，不做 resume）。
+    ckpt_every = _resolve_stage_c_ckpt_every(args, stage_cfg)
+    ckpt_updates = set(_stage_c_periodic_updates(updates, ckpt_every))
+    print(
+        f"[stageC] 周期 ckpt：每 {ckpt_every} update 保存 <out>/ckpt_u<NNN>.pt"
+        f"（0=关；本 run 保存点 {sorted(ckpt_updates)}）"
+        if ckpt_every > 0
+        else "[stageC] 周期 ckpt：关闭（仅 final.pt）",
+        flush=True,
+    )
     # KL 锚 = 阶段 B 快照（冻结参考模型）；系数线性衰减（默认 0.05 → 0）
     ref_model = copy.deepcopy(model).eval()
     for parameter in ref_model.parameters():
@@ -3782,6 +3823,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "wm_trainable": _wm_trainable(model),
         "wm_frozen_params": len(frozen_wm),
         "critic_warmup_updates": critic_warmup_updates,
+        "ckpt_every": ckpt_every,
         "device": device,
         "probe_batch": probe_batch,
         "plan_reference": plan_reference,
@@ -3832,6 +3874,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             )
         history: List[Dict[str, Any]] = []
         kl_schedule: List[float] = []
+        ckpt_saved: List[str] = []
         # V11（P2 性能）：trim_memory 降频（config train.trim_memory_every；1 = 每个 update，
         # 0/None = 仅收尾 trim）。基线实测 ~72 ms/update（恒 72 ms）；malloc_trim 只影响 RSS
         # 回落节奏，不影响训练数值。
@@ -3864,11 +3907,17 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 f"steps/s={int(args.rollout_steps) * int(getattr(pool, 'num_envs', 1)) / max(time.perf_counter() - update_started, 1e-9):.1f}",
                 flush=True,
             )
+            if (update + 1) in ckpt_updates:
+                ckpt_path = _stage_c_ckpt_path(out_dir, update + 1)
+                save_checkpoint(ckpt_path, model, meta={"stage": "C", "update": update + 1})
+                ckpt_saved.append(str(ckpt_path))
+                print(f"[stageC] 周期 ckpt（update {update + 1}/{updates}）→ {ckpt_path}", flush=True)
         # V11：收尾必 trim 一次（RSS 回落；后续 rss_mb/rss_peak_mb 口径与旧版一致）
         trim_memory()
         trim_calls += 1
         metrics["ppo_updates"] = len(history)
         metrics["kl_anchor_coef_schedule"] = kl_schedule
+        metrics["ckpt_saved"] = ckpt_saved
         metrics["last"] = {key: history[-1].get(key) for key in ("total_loss", "approx_kl", "kl_anchor")}
         metrics["reward_source"] = reward_source
         metrics["trim_memory_every"] = trim_every
@@ -3922,8 +3971,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="A=初始化权重；B=阶段 A 产物（默认 runs/train/stage_a/final.pt）；"
                              "C=阶段 B 快照（默认 runs/train/stage_b/final.pt）")
     parser.add_argument("--ckpt-every", type=int, default=None,
-                        help="A/B 周期 ckpt 间隔（epoch）：每 N 轮保存 <out>/ckpt_epoch{N:03d}.pt"
-                             "（0=关；默认取 config/train.yaml train.ckpt_every=5）")
+                        help="周期 ckpt 间隔。A/B 按 epoch：每 N 轮保存 <out>/ckpt_epoch{N:03d}.pt"
+                             "（0=关；默认取 config/train.yaml train.ckpt_every=5）；"
+                             "C 按 update：每 N 个 update 保存 <out>/ckpt_u{NNN:03d}.pt"
+                             "（0=关；默认取 config stages.C.ckpt_every=25；仅保存点，不引入 resume）")
     parser.add_argument("--resume", default=None,
                         help="A/B 从周期 ckpt 恢复（模型/优化器/epoch/RNG，从 epoch+1 继续）；"
                              "无优化器状态/参数组不匹配时回退全新优化器（见日志）")
