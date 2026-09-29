@@ -121,10 +121,98 @@ tools/venv-python tools/test.py --policy ckpt --ckpt runs/BTC<STAMP>_stage_c_p3_
 5. 所有臂输出落盘：`/tmp/opencode/rl_p3_<arm>.json`、`/tmp/opencode/rl_p3_<arm>.log`、
    `runs/BTC<STAMP>_stage_c_p3_<arm>/`、两个 eval 目录。
 
-## 6. 运行结果（运行后回填）
+## 6. 运行结果（2026-09-30 03:22 → 05:0x，A1–A5 完成；A6 见 6.5）
 
-_TBD_（每臂：命令/耗时/两 eval succ/net-z/训练读数/判定）。
+- 代码 HEAD = `38038f7`（= 预声明提交 `e19d469` 之上无代码改动；训练/评测路径仍同 `1f58589`），起跑 clean。
+- 每臂：`tools/train.py`（manifest 落 `<out>/manifest.txt`）→ `tools/test.py` ×2。日志
+  `/tmp/opencode/rl_p3_<arm>.log`，汇总 `/tmp/opencode/rl_p3_<arm>.json`。
+- A1 完整命令（其余臂只替换 `--out` 与臂变量；公共段与 §4 模板一致）：
+  ```bash
+  tools/venv-python tools/train.py --stage C --ckpt runs/_refs_rlbase/e_beta_prime/final.pt \
+    --spec env/specs/scenarios_train_slice200.json --pool local --envs 1 \
+    --trainable-scope design --plan-reference repeat_action --updates 200 --rollout-steps 256 \
+    --ppo-epochs 2 --minibatch-size 1024 --seed 0 --critic-warmup-updates 0 --device cuda \
+    --monitor --monitor-legacy-tags --out runs/BTC20260930-0322_stage_c_p3_a1 \
+    --lr 3e-4 --kl-anchor-coef 0.05 --kl-anchor-final-coef 0
+  ```
 
-## 7. 异常与偏差记录（运行后回填）
+### 6.1 臂执行记录
 
-_TBD_。
+| 臂 | init | 臂变量（相对模板） | train out | 训练 wall | eval clean / eval500 wall |
+|---|---|---|---|---|---|
+| A1 | E-β′ | `--lr 3e-4 --kl-anchor-coef 0.05 --kl-anchor-final-coef 0` | `runs/BTC20260930-0322_stage_c_p3_a1` | 473 s | 358 s / 357 s |
+| A2 | L2 | 同 A1（仅换 init） | `runs/BTC20260930-0342_stage_c_p3_a2` | 503 s | 260 s / 258 s |
+| A3 | E-β′ | `--lr 1e-4 --kl-anchor-coef 0.05 --kl-anchor-final-coef 0` | `runs/BTC20260930-0359_stage_c_p3_a3` | 468 s | 354 s / 354 s |
+| A4 | E-β′ | `--lr 3e-4 --kl-anchor-coef 0.05 --kl-anchor-final-coef 0.01` | `runs/BTC20260930-0418_stage_c_p3_a4` | 471 s | 478 s / 484 s |
+| A5 | E-β′ | `--lr 3e-4 --kl-anchor-coef 0 --kl-anchor-final-coef 0` | `runs/BTC20260930-0442_stage_c_p3_a5` | 481 s | 316 s / 313 s |
+
+eval 目录 = `runs/BTC<stamp>_eval500_p3<arm>_clean` 与 `runs/BTC<stamp>_eval500_p3<arm>`（stamp 同 train out）。
+
+### 6.2 双评测结果 + 逐 (id,seed) 配对（判定主表）
+
+配对 base = 对应 init 的同集 episodes（E-β′：clean `…224519_eval500_clean_ebeta`（0.446）/ eval500
+`_refs_rlbase/e_beta_prime`（0.436）；L2：clean `…225323_eval500_clean_l2`（0.318）/ eval500
+`BTC20260929-100314_eval500_L2p2`（0.328））。`fixed` = 失败→成功，`broken` = 成功→失败，`net = fixed − broken`。
+
+| 臂 | clean500 succ | Δ vs init | fixed/broken | net | z | eval500 succ | Δ vs init | fixed/broken | net | z | 判定（§5） |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A1 | 0.256 | −0.190 | 2 / 97 | **−95** | 9.55 | 0.244 | −0.192 | 2 / 98 | **−96** | 9.60 | 未超过 init（显著回归） |
+| A2 | 0.098 | −0.220 | 6 / 116 | **−110** | 9.96 | 0.122 | −0.206 | 10 / 113 | **−103** | 9.29 | 未超过 init（显著回归） |
+| A3 | 0.266 | −0.180 | 1 / 91 | **−90** | 9.38 | 0.260 | −0.176 | 0 / 88 | **−88** | 9.38 | 未超过 init（显著回归） |
+| A4 | 0.322 | −0.124 | 9 / 71 | **−62** | 6.93 | 0.330 | −0.106 | 11 / 64 | **−53** | 6.12 | 未超过 init（显著回归，least-bad） |
+| A5 | 0.150 | −0.296 | 8 / 156 | **−148** | 11.56 | 0.124 | −0.312 | 4 / 160 | **−156** | 12.18 | 未超过 init（显著回归） |
+
+- 所有臂在两套评测上**均显著低于对应 init**；两套评测的臂间排序一致（A4 最好、A5 最差），无主辅矛盾。
+- 与零点引用的净 Δ（绝对 succ）：A1 −0.190/−0.192、A2 −0.220/−0.206、A3 −0.180/−0.176、
+  A4 −0.124/−0.106、A5 −0.296/−0.312（clean/eval500）。**无臂超过零点**。
+
+### 6.3 训练读数（monitor CSV；reward=`train/returns/mean`，末 20 update 均值）
+
+| 臂 | reward first→last | reward last20 | approx_kl last20 | entropy last20 | probe ds 0–1 m/s | probe ds 1–2 m/s | low_speed_alert | probe logstd | value EV last20 | RSS 峰值 | VRAM 峰值 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A1 | −0.82 → +11.70 | 8.711 | 0.0110 | 0.8148 | 1.814 | 2.738 | 128/200 | −1.012 | −0.008 | 2246 MB | 109 MB |
+| A2 | +0.58 → +8.42 | 5.518 | 0.0140 | 0.8266 | 0.801 | 1.860 | 200/200 | −1.006 | −0.004 | 2245 MB | 109 MB |
+| A3 | −0.82 → +11.80 | 12.089 | 0.0046 | 0.8228 | 0.759 | 1.619 | 200/200 | −1.008 | −0.003 | 2245 MB | 109 MB |
+| A4 | −0.82 → +11.10 | 9.288 | 0.0160 | 0.8336 | 0.818 | 1.582 | 200/200 | −1.002 | −0.003 | 2246 MB | 109 MB |
+| A5 | −0.82 → +7.86 | 9.475 | 0.0094 | 0.8239 | 1.135 | 2.164 | 200/200 | −1.007 | −0.002 | 2246 MB | 104 MB |
+
+（init 的 probe 记录：update 1 时 ds 0–1 = 0.31 m、ds 1–2 ≈ 0.73–0.79 m，即 **init 本身已在
+「低速吸引子」告警区**；trim_memory_calls=51、RSS 峰值 ≈2246 MB 五臂一致，性能口径无回归。）
+
+### 6.4 判定（按 §5 规则，不事后改口径）
+
+1. **是否超过 init**：A1–A5 主集 net 全部为负（z 6.12–11.56）→ 全部判「未超过 init」，且为显著回归。
+   辅集（eval500）同向同量级。**是否超过零点的净 Δ**：全为负，无臂可为 stage D 基座替换。
+2. **剂量–反应（单变量）**：
+   - KL 锚退火到 0 是主要伤害源之一——保留 floor 0.01（A4）把回归从 −95 减到 −62；
+   - 完全去锚（A5）伤害最大（−148）：锚的作用在本设定下是**抑制漂移**而非加速学习；
+   - lr 1e-4（A3）对比 3e-4（A1）几乎无改善（−90 vs −95）→ 不是步长问题；
+   - init L2（A2）比 E-β′（A1）更差（−110 vs −95）→ 与 init 质量一致（E-β′ 更能扛）。
+3. **机制读数（surrogate，不作单独判定）**：五臂训练 reward 大幅上升（→ +7.9…+12.1）而闭环 succ
+   崩塌、coll 由 0.04 升到 0.08–0.11、probe 低速档 ds 上升——一致指向**训练奖励与闭环 KPI 错配**
+   （策略被推离保守慢速区，换来更多碰撞/出界），且 critic EV≈−0.003…−0.008 未学到价值。
+   这不是「训练没跑起来」，而是「训练目标跑偏」。
+4. **选型判定**：本批（lr/KL/init 三维）**无臂可采纳**；如必须给一个「损伤最小反事实」= **A4**
+   （clean net −62、eval500 net −53）。winner 规则见 §7 第 2 条的澄清。
+5. **A6**：winner=A4 的 seed=11 复现，结果见 §6.5。
+
+### 6.5 A6（A4 · seed=11 复现）
+
+_TBD_（运行中）。
+
+## 7. 异常与偏差记录
+
+1. **执行完整性**：A1–A5 全部 train rc=0、10/10 评测 rc=0，无失败、无保留现场；无数据丢弃。
+   A1–A5 链总耗时 03:22:19 → 05:01:07（99 min，与 ≈23 min/臂预算一致）。
+2. **winner 规则澄清（预声明文本的偏离）**：§4 原文「net 最高且 z 最高」在 5 臂全部负 net 时不可同时
+   满足（z = |net|/√(fixed+broken) 度量**变化幅度**，最高 z 恰是最差臂 A5）。按协议意图（选损伤最小者）
+   取 **clean net 最高 = A4**；未改判定阈值与其他口径。
+3. **eval500 spec 重生成**：raw sha256 由 `acc326e2…` → `98856105…`（`generated_at` 差异），
+   canonical content sha256 `38512b1b…` 不变；specs 列表已验证与确定性重算一致（§2）。
+4. **零点引用噪声**：L2 的 eval500 既有 0.328（pairing base）与 0.326（`…195151_eval500_phase3_base`）
+   两次记录（±1 条/500）；A2 全程按 0.328 为 base，结论对该选择不敏感（net −103，两基准差 1 条）。
+5. **A5 的 clean eval 耗时偏短（316 s）**，A4 偏长（478 s）：机器负载波动，非评测口径差异（workers=6、
+   同一 spec/参数；episodes 数均为 500）。
+6. **A6**：_TBD_。
+7. **边界提示**：A4 仍是 −62 的显著回归；「least-bad ≠ 可采纳」。若做后续（另案），应优先审查训练奖励
+   adapter 与闭环 KPI 的对齐（本 lane 未做，不越界）。
