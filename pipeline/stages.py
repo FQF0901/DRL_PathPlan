@@ -528,6 +528,24 @@ def _resolve_stage_c_policy_logstd_max(args: argparse.Namespace, stage_cfg: Mapp
     return number
 
 
+def _resolve_stage_c_value_lr_scale(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> float:
+    """阶段 C value 头 LR 缩放（CLI ``--value-lr-scale`` 优先；config ``train.value_lr_scale``）。
+
+    默认 1.0 = 现状（``value.*`` 不单独建组、与旧优化器分组逐位一致）；非法（非有限/负数）
+    fail-fast。
+    """
+    value = getattr(args, "value_lr_scale", None)
+    if value is None:
+        value = dict(train_cfg or {}).get("value_lr_scale", 1.0)
+    try:
+        number = float(1.0 if value is None else value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"[stageC] 无法解析 value_lr_scale={value!r}（需有限非负浮点）") from None
+    if not math.isfinite(number) or number < 0.0:
+        raise SystemExit(f"[stageC] value_lr_scale 必须是有限非负浮点（收到 {value!r}）")
+    return number
+
+
 def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
     """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
 
@@ -3800,6 +3818,14 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     else:
         print(f"[stageC] 警告：checkpoint {ckpt} 不存在 → 从随机初始化开始", flush=True)
     primary_lr_scale = float(stage_cfg.get("primary_lr_scale", 0.1) or 0.1)
+    # ① value 头 LR 缩放（v4）：CLI --value-lr-scale > config train.value_lr_scale > 1.0（现状）
+    value_lr_scale = _resolve_stage_c_value_lr_scale(args, train_cfg)
+    print(
+        f"[stageC] value_lr_scale={value_lr_scale:g}"
+        + ("（1.0 = 现状：value.* 不单独建组）" if value_lr_scale == 1.0
+           else "（value.* 组 lr = lr×scale；与 policy 组分离）"),
+        flush=True,
+    )
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
@@ -3897,7 +3923,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             f"其余 {len(frozen_scope)} 个参数 requires_grad=false",
             flush=True,
         )
-    trainable_groups = trainable_param_groups(model, float(args.lr), primary_lr_scale)
+    trainable_groups = trainable_param_groups(model, float(args.lr), primary_lr_scale, value_lr_scale)
     if not trainable_groups:
         raise SystemExit("[stageC] fail-fast：可训练参数为空（scope 配置错误？）")
     for group in trainable_groups:
@@ -3938,6 +3964,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         },
         "specs": len(specs),
         "primary_lr_scale": primary_lr_scale,
+        "value_lr_scale": value_lr_scale,
         "trainable_scope": trainable_scope,
         "trainable_params": trainable_params,
         "trainable_groups": [dict(group) for group in trainable_groups],
@@ -3980,6 +4007,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             kl_anchor_coef=kl_initial,
             bc_anchor_coef=float(args.bc_anchor_coef) if bc_dataset is not None else 0.0,
             primary_lr_scale=primary_lr_scale,
+            value_lr_scale=value_lr_scale,
             critic_warmup_updates=critic_warmup_updates,
             adv_norm=adv_norm,
             plan_reference=plan_reference,
@@ -4183,9 +4211,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "**全部行** + val-dir **全部行**；缺省回退 legacy 按 episode 比例切分并告警")
     parser.add_argument("--weight-sidecar", type=str, default=None,
                         help="worst/mild 权重 sidecar（tools/mine_hard.py 产物）；给了则跳过在线挖掘")
-    parser.add_argument("--hard-frac", type=float, default=0.5, help="worst 行占比（默认 top-50%）")
+    parser.add_argument("--hard-frac", type=float, default=0.5, help="worst 行占比（默认 top-50%%）")
     parser.add_argument("--mine-hard", action=argparse.BooleanOptionalAction, default=None,
-                        help="primary 结束后在线挖掘 worst-50% 权重（默认开；--weight-sidecar 给出则跳过）")
+                        help="primary 结束后在线挖掘 worst-50%% 权重（默认开；--weight-sidecar 给出则跳过）")
     parser.add_argument("--hard-weight", type=float, default=None,
                         help="worst 行权重倍率（默认取 config stages.B.bc.hard_weight=1.0）")
     parser.add_argument("--mild-weight", type=float, default=None,
@@ -4257,6 +4285,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ppo-epochs", type=int, default=2)
     parser.add_argument("--minibatch-size", type=int, default=None,
                         help="默认取 config/train.yaml train.ppo.minibatch_size（1024）")
+    parser.add_argument("--value-lr-scale", type=float, default=None, metavar="SCALE",
+                        help="阶段 C value 头 LR 缩放：value.* 参数组 lr = lr × SCALE"
+                             "（默认取 config/train.yaml train.value_lr_scale=1.0=现状）")
     parser.add_argument("--kl-anchor-coef", type=float, default=0.05, help="阶段 C KL 锚初始系数（默认 0.05）")
     parser.add_argument("--kl-anchor-final-coef", type=float, default=0.0, help="阶段 C KL 锚末值（默认 0）")
     parser.add_argument("--kl-anchor-decay", action=argparse.BooleanOptionalAction, default=True,

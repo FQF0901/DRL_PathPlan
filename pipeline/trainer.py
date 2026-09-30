@@ -485,15 +485,35 @@ def gaussian_kl(
     return (logstd2 - logstd1 + (var1 + (mu1 - mu2) ** 2) / (2.0 * var2) - 0.5).sum(dim=-1)
 
 
-def build_optimizer(model: "nn.Module", lr: float, primary_lr_scale: float = 1.0) -> "torch.optim.Optimizer":
-    """参数分组：名字含 ``primary`` 的参数用 ``lr × primary_lr_scale``（阶段 C 契约 ×0.1）。"""
+def build_optimizer(
+    model: "nn.Module",
+    lr: float,
+    primary_lr_scale: float = 1.0,
+    value_lr_scale: float = 1.0,
+) -> "torch.optim.Optimizer":
+    """参数分组：名字含 ``primary`` 的参数用 ``lr × primary_lr_scale``（阶段 C 契约 ×0.1）；
+    ``value.*``（价值头）用 ``lr × value_lr_scale``。
+
+    ``value_lr_scale == 1.0``（默认）= **不单独建 value 组**（组序/参数展平序与旧版逐位一致，
+    旧 ckpt 的优化器状态可原样恢复）；只有显式给非 1.0 缩放时才插入 value 组
+    （组序 ``[other, value?, primary]``）。
+    """
     primary: List["torch.Tensor"] = []
+    value: List["torch.Tensor"] = []
     other: List["torch.Tensor"] = []
+    value_names = set(_value_parameter_names(model)) if float(value_lr_scale) != 1.0 else set()
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        (primary if "primary" in name.lower() else other).append(parameter)
+        if "primary" in name.lower():
+            primary.append(parameter)
+        elif name in value_names:
+            value.append(parameter)
+        else:
+            other.append(parameter)
     groups: List[Dict[str, Any]] = [{"params": other, "lr": float(lr)}]
+    if value:
+        groups.append({"params": value, "lr": float(lr) * float(value_lr_scale)})
     if primary:
         groups.append({"params": primary, "lr": float(lr) * float(primary_lr_scale)})
     return torch.optim.Adam(groups, lr=float(lr))
@@ -590,6 +610,9 @@ class PPOConfig:
     kl_anchor_coef: float = 0.0
     bc_anchor_coef: float = 0.0
     primary_lr_scale: float = 1.0
+    #: value 头学习率缩放（CLI ``--value-lr-scale`` / config ``train.value_lr_scale``）：
+    #: ``value.*`` 参数组 lr = ``lr × value_lr_scale``（默认 1.0 = 不单独建组，与旧版逐位一致）。
+    value_lr_scale: float = 1.0
     target_kl: Optional[float] = None
     #: 前 N 个 update 只拟合 critic（value 头），策略/共享主干冻结（0 = 关闭，行为同旧版）。
     critic_warmup_updates: int = 0
@@ -615,6 +638,11 @@ class PPOConfig:
             if not math.isfinite(value):
                 raise ValueError(f"policy_logstd_max 必须是有限浮点或 None（收到 {self.policy_logstd_max!r}）")
             self.policy_logstd_max = value
+        if self.value_lr_scale is not None:
+            scale = float(self.value_lr_scale)
+            if not math.isfinite(scale) or scale < 0.0:
+                raise ValueError(f"value_lr_scale 必须是有限非负浮点（收到 {self.value_lr_scale!r}）")
+            self.value_lr_scale = scale
 
 
 @dataclass
@@ -836,18 +864,28 @@ _TRAINABLE_GROUP_PREFIXES: Tuple[str, ...] = (
 
 
 def trainable_param_groups(
-    model: "nn.Module", lr: float, primary_lr_scale: float = 1.0
+    model: "nn.Module",
+    lr: float,
+    primary_lr_scale: float = 1.0,
+    value_lr_scale: float = 1.0,
 ) -> Tuple[Dict[str, Any], ...]:
     """可训练参数组表 ``(prefix, params, lr)``：与 :func:`build_optimizer` 的 LR 分组同口径。
 
-    ``primary`` 参数取 ``lr × primary_lr_scale``（阶段 C 契约 ×0.1），其余取 ``lr``；
+    ``primary`` 参数取 ``lr × primary_lr_scale``（阶段 C 契约 ×0.1）、``value.*`` 取
+    ``lr × value_lr_scale``（默认 1.0 = 与旧版一致），其余取 ``lr``；
     只统计 ``requires_grad=True`` 的参数（启动打印 + metrics 用）。
     """
     totals: Dict[Tuple[str, float], int] = {}
+    value_names = set(_value_parameter_names(model)) if float(value_lr_scale) != 1.0 else set()
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        group_lr = float(lr) * (float(primary_lr_scale) if "primary" in name.lower() else 1.0)
+        if "primary" in name.lower():
+            group_lr = float(lr) * float(primary_lr_scale)
+        elif name in value_names:
+            group_lr = float(lr) * float(value_lr_scale)
+        else:
+            group_lr = float(lr)
         prefix = next(
             (candidate for candidate in _TRAINABLE_GROUP_PREFIXES if name.startswith(candidate)),
             name.split(".")[0] + ".",
@@ -4772,7 +4810,9 @@ class PPOTrainer:
                 parameter.requires_grad_(False)
         self.bc_dataset = bc_dataset
         self.logger = logger
-        self.optimizer = build_optimizer(self.model, config.lr, config.primary_lr_scale)
+        self.optimizer = build_optimizer(
+            self.model, config.lr, config.primary_lr_scale, config.value_lr_scale
+        )
         self.monitor = RouterMonitor()
         self.rng = np.random.default_rng(config.seed)
         self.torch_generator = torch.Generator(device=self.device).manual_seed(int(config.seed))

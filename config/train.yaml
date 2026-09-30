@@ -25,6 +25,8 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
   adv_norm: global                # 阶段 C 优势归一化口径（CLI --adv-norm）：global=全批零均值/单位方差（旧行为）；
                                   # per_scenario=按帧级 spec.id 分组各自归一化；none=不归一化
                                   # 2026-09-30 G3：global 同时修复 padding 行污染（compute_gae valid_mask）
+  value_lr_scale: 1.0             # v4 ①：阶段 C value 头 LR 缩放（CLI --value-lr-scale）——
+                                  # value.* 组 lr = lr × scale；1.0（默认）= 不单独建组 = 现状/旧分组逐位一致
   trim_memory_every: 4            # V11/P2：阶段 C trim_memory 降频（1=每个 update；0=仅收尾一次）；
                                   # 只影响 RSS 回落节奏，不改变训练数值（旧版恒 72 ms/update）
   ckpt_every: &ckpt_every 5       # A/B 每 N 个 epoch 周期保存 <stage_out>/ckpt_epoch{N:03d}.pt（0=关；
