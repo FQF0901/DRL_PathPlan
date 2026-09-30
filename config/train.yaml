@@ -20,7 +20,8 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
                                   # 每 N 个 update 记录 policy/value/experts/other 的 pre-clip 梯度范数
                                   # 与实际更新范数（纯监控，不进优化器；0=关）
     anchor_grad_probe: true       # v4 ④ KL 锚梯度探针（CLI --anchor-grad-probe/--no-…）：
-                                  # kl_anchor_coef>0 时独立重算锚 loss（与主损失同口径，mu 路径 detach）
+                                  # kl_anchor_coef>0 时独立重算锚 loss（与主损失同口径；v4 ⑨ 后
+                                  # mu/raw logstd 均有梯度——旧版 mu 路径 detach 的历史行为已修复）
                                   # 并记录 anchor_grad_norm/{policy,value,experts,other,mu,logstd}
                                   # —— 只读、不进优化器（判定锚是否真作用于参数）
     anchor_grad_probe_size: 128   # ④ 探针子批行数（只影响探针开销/统计口径，不影响训练数值）
