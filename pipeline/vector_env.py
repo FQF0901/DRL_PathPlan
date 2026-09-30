@@ -64,6 +64,7 @@ from env.metadrive_env import (
     _spec_seed,
     _spec_traffic_density,
     build_env,
+    lane_lateral_info,
 )
 from pipeline.gl_runtime import ensure_gl_library_path
 
@@ -475,13 +476,23 @@ class ResidentEnv:
         if isinstance(obs, dict):
             obs = dict(obs)
             obs["pose"] = pose.copy()  # trainer/缓冲的历史重建直接可用（NON_OBS_KEYS）
+        # lane_center 项输入（无车道时键缺失 → 该项为 0；agent 未就绪同样降级）。
+        # 必须在 sanitize_info/IPC 之前注入，worker 记录的 info 与 LocalEnvPool 同键。
+        agent = None
+        if self._env is not None:
+            try:
+                agent = self._env.agent
+            except Exception:  # noqa: BLE001 - agent 未就绪时按无车道信息处理
+                agent = None
+        payload = dict(info) if isinstance(info, dict) else {}
+        payload.update(lane_lateral_info(agent))
         record = {
             "worker": self.worker_id,
             "spec_id": int(getattr(spec, "id", -1)) if spec is not None else -1,
             "seed": self._seed,
             "obs": obs,
             "pose": pose,
-            "info": sanitize_info(info),
+            "info": sanitize_info(payload),
             "reward": float(reward),
             "terminated": bool(terminated),
             "truncated": bool(truncated),

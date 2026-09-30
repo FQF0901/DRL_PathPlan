@@ -164,6 +164,7 @@ stages:
     # reward:                   # P4 奖励钩子（透传 build_reward_adapter；缺省 = DEFAULT_TERM_CONFIGS）
     #   terms:                  #   项配置列表（name/weight/…）；单点覆盖可直接用 CLI
     #     - {name: speed_ratio, weight: 0.0}   #   --reward-term-weight speed_ratio=0.0（推荐，落 manifest）
+    #     - {name: lane_center, weight: -0.1}  #   默认关的车道保持项（死区 0.25m/截断 3m）在此或 CLI 追加启用
     #   aggregation: {}         #   聚合配置（AggregationConfig 字段）
 
 monitoring:

@@ -4,6 +4,7 @@
 --------
 - 安全（终止型）：``crash``（任意 ``crash*`` 标志）/ ``out_of_road``。
 - 舒适（死区二次软惩罚）：``comfort_lon`` / ``comfort_lat`` / ``comfort_jerk``。
+- 车道保持（死区线性惩罚，**默认关**）：``lane_center``（偏离本车道中心线 ``|d_lat|``；无车道信息时为 0）。
 - 效率：``speed_ratio``（``v / 车道限速`` 的截断收益，防爬行；超速交由合规项）。
 - 合规：``solid_line``（连续实线跨越）/ ``speed_limit``（超速量）。
 - 达成：``route_completion``（势能塑形 ``γΦ(s') − Φ(s)``，策略序保持）。
@@ -26,11 +27,13 @@ __all__ = [
     "LongitudinalAccelPenalty",
     "LateralAccelPenalty",
     "JerkPenalty",
+    "LaneCenterPenalty",
     "SpeedRatioTerm",
     "SolidLineCrossingPenalty",
     "SpeedLimitViolationPenalty",
     "RouteCompletionShaping",
     "DEFAULT_TERM_CONFIGS",
+    "lane_lateral_offset_from_ctx",
 ]
 
 #: 任意一个为真即视为碰撞（MetaDrive ``info`` / P1a 契约 §0）
@@ -89,6 +92,31 @@ def speed_ratio_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
     if speed is None or limit is None or limit <= 0.0:
         return None
     return speed / limit
+
+
+def lane_lateral_offset_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
+    """读取横向偏差 ``d_lat``（m，自车相对当前车道中心线；本项只用 ``|d_lat|``）。
+
+    读取顺序（只读 ``step_ctx``，不 import env/metadrive）：
+
+    1. 显式键 ``d_lat`` / ``lane_lateral_offset`` / ``lateral_offset`` / ``lane_offset``
+       （MetaDrive 车道系横向坐标 ``lane.local_coordinates(position)[1]`` 口径）；
+    2. 回退：由最近的左右车道边界距离推导
+       ``d_lat = (dist_to_left_side − dist_to_right_side) / 2``
+       （MetaDrive ``BaseVehicle.dist_to_left_side / dist_to_right_side`` 同名口径：到本车道
+       左 / 右边界的最近距离（m，>= 0）；两者之和 = 本车道宽度，故差值的一半即相对中心线偏移，
+       与 ``local_coordinates`` 横向分量同号）；
+    3. 键缺失 / 非法（None、非数值）→ ``None``（调用方按无车道信息处理）。
+    """
+    for key in ("d_lat", "lane_lateral_offset", "lateral_offset", "lane_offset"):
+        value = _optional_float(step_ctx.get(key))
+        if value is not None:
+            return value
+    left = _optional_float(step_ctx.get("dist_to_left_side"))
+    right = _optional_float(step_ctx.get("dist_to_right_side"))
+    if left is None or right is None:
+        return None
+    return 0.5 * (left - right)
 
 
 @register_term
@@ -167,6 +195,34 @@ class JerkPenalty(Term):
     def compute(self, step_ctx: Mapping[str, Any]) -> float:
         value = _optional_float(step_ctx.get("jerk"))
         return 0.0 if value is None else _hinge(value, self.deadband)
+
+
+@register_term
+class LaneCenterPenalty(Term):
+    """车道保持：偏离本车道中心线的**线性死区**惩罚 ``max(0, min(|d_lat|, clamp) − deadband)``。
+
+    - ``|d_lat|`` 先截断到 ``clamp``（默认 3.0 m）→ 单步原始值上界 ``clamp − deadband = 2.75``；
+    - 死区默认 0.25 m（车道中心附近不惩罚）；默认权重 −0.1 → 单步最差 −0.275；
+    - **无车道 / 无横向信息 → 0.0**（不惩罚、不崩溃）；横向偏差读取顺序见
+      :func:`lane_lateral_offset_from_ctx`（显式 ``d_lat`` → 最近左右车道边界距离回退）；
+    - **默认不在** :data:`DEFAULT_TERM_CONFIGS`（默认关）；经 config ``reward.terms`` 或
+      CLI ``--reward-term-weight lane_center=-0.1`` 启用（``build_reward_adapter`` 的
+      override 会把已注册但未配置的项按给定权重追加）。
+    """
+
+    name: ClassVar[str] = "lane_center"
+
+    def __init__(self, weight: float = -0.1, deadband: float = 0.25, clamp: float = 3.0) -> None:
+        super().__init__(weight=weight, deadband=float(deadband), clamp=float(clamp))
+        self.deadband = float(deadband)
+        self.clamp = float(clamp)
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        value = lane_lateral_offset_from_ctx(step_ctx)
+        if value is None:
+            return 0.0
+        excess = _clip(abs(value), 0.0, self.clamp) - self.deadband
+        return excess if excess > 0.0 else 0.0
 
 
 @register_term

@@ -17,6 +17,7 @@ import yaml
 from reward_model import (
     AggregationConfig,
     CarlRule,
+    DEFAULT_TERM_CONFIGS,
     KPI_NAMES,
     RewardAggregator,
     ShapingDecay,
@@ -41,6 +42,7 @@ EXPECTED_TERMS = {
     "comfort_lon",
     "comfort_lat",
     "comfort_jerk",
+    "lane_center",
     "speed_ratio",
     "solid_line",
     "speed_limit",
@@ -95,6 +97,65 @@ def test_comfort_hinge_deadbands() -> None:
     assert jerk.compute({"jerk": 7.0}) == pytest.approx(4.0)
 
 
+def test_lane_center_deadband_clamp_and_default_off() -> None:
+    """lane_center 数学：死区 0.25 / 截断 3.0 / 权重 -0.1；默认不在 DEFAULT_TERM_CONFIGS。"""
+    term = make_term("lane_center", weight=-0.1)
+    assert term.weight == pytest.approx(-0.1)
+    assert term.deadband == pytest.approx(0.25)
+    assert term.clamp == pytest.approx(3.0)
+    for d_lat in (0.0, 0.1, 0.25, -0.25):
+        assert term.compute({"d_lat": d_lat}) == 0.0
+    assert term.compute({"d_lat": 1.25}) == pytest.approx(1.0)  # |1.25| - 0.25
+    assert term.compute({"d_lat": -1.25}) == pytest.approx(1.0)
+    assert term.compute({"d_lat": 3.0}) == pytest.approx(2.75)  # clamp 3 m
+    assert term.compute({"d_lat": 10.0}) == pytest.approx(2.75)
+    assert term.weight * term.compute({"d_lat": 10.0}) == pytest.approx(-0.275)
+    # 单调不增（越偏越差）；死区边界取 0 起点
+    rewards = [term.weight * term.compute({"d_lat": value}) for value in (0.25, 0.5, 1.0, 2.0, 3.0, 10.0)]
+    assert all(later <= earlier for earlier, later in zip(rewards, rewards[1:]))
+    # 默认关（不在默认 term 列表）
+    assert "lane_center" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
+
+
+def test_lane_center_boundary_fallback_and_no_lane() -> None:
+    term = make_term("lane_center", weight=-0.1)
+    # 回退：最近左右车道边界距离 → d_lat=(left-right)/2；|0.75| 超死区 0.5
+    assert term.compute({"dist_to_left_side": 2.75, "dist_to_right_side": 1.25}) == pytest.approx(0.5)
+    # 交替键名等价
+    assert term.compute({"lateral_offset": 0.75}) == pytest.approx(0.5)
+    assert term.compute({"lane_lateral_offset": 0.75}) == pytest.approx(0.5)
+    assert term.compute({"dist_to_left_side": 1.5, "dist_to_right_side": 1.5}) == 0.0
+    # 无车道信息 / 键非法 → 0，不崩溃
+    assert term.compute({}) == 0.0
+    assert term.compute({"dist_to_left_side": 2.0}) == 0.0
+    assert term.compute({"d_lat": None}) == 0.0
+    assert term.compute({"d_lat": "bad"}) == 0.0
+
+
+def test_lane_center_enablement_via_term_weight_override() -> None:
+    """``build_reward_adapter(term_weights={"lane_center": -0.1})`` = 追加启用（默认项不动）。"""
+    from pipeline.trainer import build_reward_adapter
+
+    before = [dict(term) for term in DEFAULT_TERM_CONFIGS]
+    adapter, source = build_reward_adapter(term_weights={"lane_center": -0.1})
+    assert source.endswith("+term_weights+append(lane_center)")
+    aggregator = adapter.factory()
+    weights = {term.name: term.weight for term in aggregator.terms}
+    assert weights["lane_center"] == pytest.approx(-0.1)
+    assert weights["route_completion"] == 1.0
+    # 聚合正确：lane_center 贡献 = weight × raw（无横向键时 0）
+    step = aggregator.step({"speed_ratio": 0.5, "d_lat": 1.25})
+    assert step.components["lane_center"] == pytest.approx(-0.1)
+    assert step.components["speed_ratio"] == pytest.approx(0.5)
+    assert step.reward == pytest.approx(0.4)
+    centered = aggregator.step({"speed_ratio": 0.5, "d_lat": 0.1})
+    assert centered.components["lane_center"] == 0.0
+    # 未配置且未注册的名字仍 fail-fast；默认配置不被污染
+    with pytest.raises(ValueError, match="未命中奖励项"):
+        build_reward_adapter(term_weights={"not_a_term": 1.0})
+    assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
+
+
 def test_speed_ratio_efficiency_term() -> None:
     term = make_term("speed_ratio", cap=1.0)
     assert term.compute({"speed": 4.0, "speed_limit_mps": 8.0}) == pytest.approx(0.5)
@@ -129,6 +190,62 @@ def test_route_completion_term_telescopes() -> None:
         total += term.compute({"route_completion": rc, "route_completion_prev": previous})
         previous = rc
     assert total == pytest.approx(1.0)  # Φ_T − Φ_0
+
+
+# --------------------------------------------------------------------------- #
+# 奖励序不变量：蠕动 < 碰撞 < 正常行驶（lane_center 复活适配版）
+# --------------------------------------------------------------------------- #
+
+def _roll_synthetic_scenario(
+    steps: int,
+    speed_ratio: float,
+    rc_target: float,
+    terminal: str,
+    *,
+    d_lat: float | None = None,
+) -> float:
+    """真实 ``RewardAggregator`` 滚一条合成轨迹（含终局步，共 steps+1 步）。
+
+    ``d_lat`` 非 None 时启用 lane_center（默认项 + 追加项），否则验证"无横向键 → 项为 0"。
+    """
+    configs = [dict(config) for config in DEFAULT_TERM_CONFIGS]
+    if d_lat is not None:
+        configs.append({"name": "lane_center", "weight": -0.1})
+    aggregator = RewardAggregator(build_terms(configs))
+    total = 0.0
+    for index in range(steps + 1):
+        ctx: dict[str, object] = {
+            "speed_ratio": speed_ratio,
+            "route_completion": rc_target * index / steps,
+        }
+        if d_lat is not None:
+            ctx["d_lat"] = d_lat
+        if index == steps:
+            ctx[terminal] = True
+        total += aggregator.step(ctx).reward
+    return total
+
+
+def test_reward_ordering_creep_collision_drive_with_and_without_lane_center() -> None:
+    """排序不变量（f23b925 适配版）：蠕动 < 碰撞 < 正常行驶；lane_center 不改变该序。
+
+    - lane_center 关（现默认）：无横向键 → 项为 0，序保持；
+    - lane_center 开（追加项）：偏航的蠕动被进一步压低，序仍保持。
+    """
+    creep = _roll_synthetic_scenario(1000, 0.06, 0.20, "max_step")
+    collision = _roll_synthetic_scenario(150, 0.80, 0.45, "collision")
+    drive = _roll_synthetic_scenario(300, 0.80, 1.0, "arrive_dest")
+    assert creep < collision < drive
+
+    creep_lc = _roll_synthetic_scenario(1000, 0.06, 0.20, "max_step", d_lat=1.5)
+    collision_lc = _roll_synthetic_scenario(150, 0.80, 0.45, "collision", d_lat=0.5)
+    drive_lc = _roll_synthetic_scenario(300, 0.80, 1.0, "arrive_dest", d_lat=0.5)
+    assert creep_lc < collision_lc < drive_lc
+    # 启用 lane_center 后每步罚 = weight×max(0,|d_lat|-0.25)；碰撞终局步的 dense 项被
+    # CaRL 乘子清零（终局步不贡献），故步数 = steps。
+    assert creep_lc == pytest.approx(creep - 1001 * 0.1 * (1.5 - 0.25), abs=0.02)
+    assert collision_lc == pytest.approx(collision - 150 * 0.1 * (0.5 - 0.25), abs=0.02)
+    assert drive_lc < drive
 
 
 # --------------------------------------------------------------------------- #

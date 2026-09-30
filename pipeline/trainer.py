@@ -988,8 +988,9 @@ def build_reward_adapter(
     """构造奖励适配器：优先 N2 的 ``RewardAggregator``，不可用时回退文档化 stub。
 
     ``term_weights``（P4 消融钩子）：按奖励项名覆盖权重（如 ``{"speed_ratio": 0.0}``），
-    在默认项/config 项的**私有副本**上生效（不改 :data:`DEFAULT_TERM_CONFIGS`）；未命中的
-    名字 fail-fast（防消融配置拼错静默失效）。
+    在默认项/config 项的**私有副本**上生效（不改 :data:`DEFAULT_TERM_CONFIGS`）；名字未在任何
+    term 列表里时：若已注册（如默认关的 ``lane_center``）→ 按给定权重**追加启用**，完全未注册
+    → fail-fast（防消融配置拼错静默失效）。
     """
     overrides = {str(name): float(weight) for name, weight in dict(term_weights or {}).items()}
     factory: Optional[Callable[[], Any]] = None
@@ -1016,14 +1017,30 @@ def build_reward_adapter(
     if overrides:
         if factory is None:
             raise RuntimeError("reward term_weights 覆盖需要 reward_model（当前不可用）")
-        known = [term.get("name") for term in term_configs]
-        unknown = [name for name in overrides if name not in known]
-        if unknown:
-            raise ValueError(f"reward term_weights 未命中奖励项 {unknown}；可用项 {known}")
-        for term in term_configs:
-            if term.get("name") in overrides:
-                term["weight"] = overrides[term["name"]]
+        configured = {term.get("name"): term for term in term_configs}
+        appended: List[str] = []
+        for name, weight in overrides.items():
+            if name in configured:
+                configured[name]["weight"] = weight
+                continue
+            # 已注册但未在 term 列表里的项（如默认关的 lane_center）→ 按给定权重追加启用；
+            # 完全未注册的名字仍 fail-fast（防消融拼错静默失效）。
+            try:
+                from reward_model import available_terms  # type: ignore
+
+                registered = tuple(available_terms())
+            except Exception:  # noqa: BLE001 - reward_model 已在上方 import 成功，这里兜底
+                registered = ()
+            if name not in registered:
+                raise ValueError(
+                    f"reward term_weights 未命中奖励项 {name!r}；已配置 {sorted(configured)}；"
+                    f"可注册项 {list(registered)}"
+                )
+            term_configs.append({"name": name, "weight": weight})
+            appended.append(name)
         source = f"{source}+term_weights"
+        if appended:
+            source = f"{source}+append({','.join(appended)})"
     fallback = None if factory is not None else make_stub_reward()
     return RewardAdapter(factory=factory, fallback=fallback, dt=dt), source
 
@@ -4367,6 +4384,9 @@ class LocalEnvPool:
                 info["router_labels"] = labels
         info["on_white_continuous_line"] = bool(getattr(ego, "on_white_continuous_line", False))
         info["on_yellow_continuous_line"] = bool(getattr(ego, "on_yellow_continuous_line", False))
+        from env.metadrive_env import lane_lateral_info  # 惰性：保持模块顶层无 MetaDrive 依赖
+
+        info.update(lane_lateral_info(ego))  # lane_center 项输入（无车道时键缺失 → 该项为 0）
         return {
             "obs": obs,
             "info": info,

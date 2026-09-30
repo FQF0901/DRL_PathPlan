@@ -580,6 +580,51 @@ class SpecMetaDriveEnv(MetaDriveEnv):
 # ======================================================================================
 # 公开接口
 # ======================================================================================
+def lane_lateral_info(agent: Any) -> dict[str, float]:
+    """自车横向偏移的 info 键（供 ``reward_model`` 的 ``lane_center`` 项消费）。
+
+    契约（读取顺序见 ``reward_model/terms.py::lane_lateral_offset_from_ctx``）：
+
+    1. **主路径**：当前车道横向坐标 ``lane.local_coordinates(agent.position)[1]``
+       （``agent.lane`` 缺失时用 ``navigation.current_ref_lanes[0]`` 兜底）→
+       写入 ``{"lane_lateral_offset": float}``；
+    2. **回退**：lane 投影不可用（None / 抛错 / 非有限值）而
+       ``agent.dist_to_left_side`` / ``dist_to_right_side`` 为有效距离（两者之和 > 0，
+       排除 MetaDrive 无导航时的 ``(0, 0)`` 占位）→ 写入这两个键；
+    3. **无车道信息** → ``{}``（键缺失；reward 侧按 0 处理，不给惩罚）。**任何异常都不外抛。**
+
+    符号：与 ``local_coordinates`` 横向分量一致（MetaDrive 车道系，正 = 车道方向右侧；
+    回退式 ``(dist_to_left_side − dist_to_right_side)/2`` 同号）——``lane_center`` 只用
+    ``|d_lat|``，符号不影响取值。开销：一次点积，每策略步每 env 一次。
+    """
+    lane = None
+    try:
+        lane = getattr(agent, "lane", None)
+        if lane is None:
+            navigation = getattr(agent, "navigation", None)
+            ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
+            if ref_lanes:
+                lane = ref_lanes[0]
+    except Exception:  # noqa: BLE001 - lane 属性链异常一律降级
+        lane = None
+    if lane is not None:
+        try:
+            _, lateral = lane.local_coordinates(agent.position)
+            value = float(lateral)
+            if math.isfinite(value):
+                return {"lane_lateral_offset": value}
+        except Exception:  # noqa: BLE001 - 投影失败（圆弧车道的 ValueError 等）→ 回退
+            pass
+    try:
+        left = float(getattr(agent, "dist_to_left_side", None))
+        right = float(getattr(agent, "dist_to_right_side", None))
+    except (TypeError, ValueError):
+        return {}
+    if not (math.isfinite(left) and math.isfinite(right)) or left + right <= 0.0:
+        return {}
+    return {"dist_to_left_side": left, "dist_to_right_side": right}
+
+
 def build_env(
     spec,
     *,
