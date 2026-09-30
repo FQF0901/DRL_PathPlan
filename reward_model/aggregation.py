@@ -6,10 +6,26 @@
   ``shaping_decay`` 退火系数（训练后期退火稠密塑形，契约 §3）。
 - **终止型项**（``kind="terminating"``）：原始值 > 0 即 ``done=True`` 并记录原因
   （``crash`` → collision、``out_of_road``）；其加权值在乘性惩罚之后叠加。
-- **CaRL 式乘性/终止惩罚**：``carl_rules`` 命中违规时把稠密和乘以 ``factor``
-  （默认 0.0，即碰撞清零稠密奖励），并可 ``terminate`` / 追加 ``penalty``。
+- **CaRL 式乘性/终止惩罚**：``carl_rules`` 命中违规时把**正向稠密和**乘以 ``factor``
+  （默认 0.0，即碰撞清零收益/塑形），并可 ``terminate`` / 追加 ``penalty``。
 - **终局 outcome**：``arrive_dest`` / ``collision`` / ``out_of_road`` / ``max_step`` /
   ``error`` 对应 ``terminal_values``（到达加分、碰撞/出界/超时扣分），仅在终局步加一次。
+
+稠密和与乘子（v4 修复）
+----------------------
+``dense_sum`` = 该帧全部稠密项加权贡献之和；按**该帧贡献符号**拆成两部分：正向
+（``dense_positive_sum``，>0）与负向（``dense_negative_sum``，<0）。CaRL 乘子只作用于正向：
+
+    reward = dense_positive_sum × multiplier + dense_negative_sum
+             + terminating_sum + carl_penalty + terminal_value
+
+理由：违规帧的乘子语义是"取消本帧的收益/进度塑形"（碰撞后不再奖励速度与前进）；而惩罚项
+（``solid_line`` / ``comfort_*`` / 负向 shaping）是**已经发生的代价**，不应被同一帧的另一条
+违规抹掉——旧式 ``dense_sum × 0`` 会让"出界/碰撞帧压了实线"的 −2.0 罚凭空消失，与 KPI 口径
+（出界帧仍记 ``solid_line``）相反。按帧贡献符号拆分而非按"项类别"拆分，是因为
+``route_completion`` 这类塑形项同一项既可能是正也可能为负，符号即"本帧收益/代价"的语义。
+不变量：无违规帧（``multiplier == 1``）时公式退化为 ``dense_sum + ...``，逐位与旧口径同；
+normal 排序不变量（蠕动 < 碰撞 < 正常）与塑形势能 telescoping 性质不受影响。
 
 信用分配
 --------
@@ -166,6 +182,9 @@ class StepReward:
     components: dict[str, float]
     raw_components: dict[str, float]
     dense_sum: float
+    #: 稠密和按帧贡献符号拆分：正向部分乘 CaRL ``carl_multiplier``，负向部分不乘。
+    dense_positive_sum: float
+    dense_negative_sum: float
     carl_multiplier: float
     terminating_sum: float
     carl_penalty: float
@@ -246,6 +265,8 @@ class RewardAggregator:
         raw_components: dict[str, float] = {}
         components: dict[str, float] = {}
         dense_sum = 0.0
+        dense_positive_sum = 0.0
+        dense_negative_sum = 0.0
         terminating_sum = 0.0
         done = _truthy(ctx.get("done"))
         reason: str | None = None
@@ -263,6 +284,10 @@ class RewardAggregator:
                 if term.shaping:
                     contribution *= decay
                 dense_sum += contribution
+                if contribution > 0.0:
+                    dense_positive_sum += contribution
+                elif contribution < 0.0:
+                    dense_negative_sum += contribution
             components[term.name] = contribution
 
         multiplier = 1.0
@@ -294,13 +319,19 @@ class RewardAggregator:
                 pass
 
         reward = (
-            dense_sum * multiplier + terminating_sum + carl_penalty + terminal_value
+            dense_positive_sum * multiplier
+            + dense_negative_sum
+            + terminating_sum
+            + carl_penalty
+            + terminal_value
         )
         return StepReward(
             reward=float(reward),
             components=components,
             raw_components=raw_components,
             dense_sum=float(dense_sum),
+            dense_positive_sum=float(dense_positive_sum),
+            dense_negative_sum=float(dense_negative_sum),
             carl_multiplier=float(multiplier),
             terminating_sum=float(terminating_sum),
             carl_penalty=float(carl_penalty),

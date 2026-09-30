@@ -227,7 +227,7 @@ def _roll_synthetic_scenario(
 
 
 def test_reward_ordering_creep_collision_drive_with_and_without_lane_center() -> None:
-    """排序不变量（f23b925 适配版）：蠕动 < 碰撞 < 正常行驶；lane_center 不改变该序。
+    """排序不变量（f23b925 适配版，v4 CaRL 修复后重校）：蠕动 < 碰撞 < 正常行驶。
 
     - lane_center 关（现默认）：无横向键 → 项为 0，序保持；
     - lane_center 开（追加项）：偏航的蠕动被进一步压低，序仍保持。
@@ -241,10 +241,10 @@ def test_reward_ordering_creep_collision_drive_with_and_without_lane_center() ->
     collision_lc = _roll_synthetic_scenario(150, 0.80, 0.45, "collision", d_lat=0.5)
     drive_lc = _roll_synthetic_scenario(300, 0.80, 1.0, "arrive_dest", d_lat=0.5)
     assert creep_lc < collision_lc < drive_lc
-    # 启用 lane_center 后每步罚 = weight×max(0,|d_lat|-0.25)；碰撞终局步的 dense 项被
-    # CaRL 乘子清零（终局步不贡献），故步数 = steps。
+    # 启用 lane_center 后每步罚 = weight×max(0,|d_lat|-0.25)；v4 修复后 CaRL 乘子只清零
+    # **正向**稠密项，终局帧的 lane_center 罚（负向）保留，故步数 = steps + 1（含终局帧）。
     assert creep_lc == pytest.approx(creep - 1001 * 0.1 * (1.5 - 0.25), abs=0.02)
-    assert collision_lc == pytest.approx(collision - 150 * 0.1 * (0.5 - 0.25), abs=0.02)
+    assert collision_lc == pytest.approx(collision - 151 * 0.1 * (0.5 - 0.25), abs=0.02)
     assert drive_lc < drive
 
 
@@ -339,6 +339,57 @@ def test_carl_partial_factor_and_penalty_only_rule() -> None:
     out = penalty_only.step({"out_of_road": True})
     assert out.reward == pytest.approx(-3.0)
     assert out.done and out.reason == "out_of_road"
+
+
+def test_carl_multiplier_zeroes_gains_but_keeps_same_frame_penalties() -> None:
+    """v4 修复：违规帧乘子只清零正向稠密项；同帧的罚分项保留（不再被连带抹掉）。"""
+    terms = build_terms(
+        [
+            {"name": "speed_ratio", "weight": 1.0},
+            {"name": "solid_line", "weight": -2.0},
+            {"name": "out_of_road", "weight": -8.0},
+        ]
+    )
+    aggregator = RewardAggregator(
+        terms,
+        AggregationConfig(
+            terminal_values={"out_of_road": -5.0},
+            carl_rules={"out_of_road": CarlRule(factor=0.0, terminate=True)},
+        ),
+    )
+    normal = aggregator.step({"speed_ratio": 0.6})
+    assert normal.reward == pytest.approx(0.6)
+    assert normal.dense_positive_sum == pytest.approx(0.6)
+    assert normal.dense_negative_sum == 0.0
+
+    off = aggregator.step({"speed_ratio": 0.8, "solid_line_crossing": True, "out_of_road": True})
+    assert off.carl_multiplier == 0.0
+    assert off.dense_positive_sum == pytest.approx(0.8)  # 正向：speed_ratio 被清零
+    assert off.dense_negative_sum == pytest.approx(-2.0)  # 负向：solid_line 保留
+    assert off.dense_sum == pytest.approx(-1.2)
+    assert off.components["speed_ratio"] == pytest.approx(0.8)
+    assert off.components["solid_line"] == pytest.approx(-2.0)
+    assert off.components["out_of_road"] == pytest.approx(-8.0)
+    assert off.terminal_value == pytest.approx(-5.0)
+    assert off.reward == pytest.approx(-15.0)  # 0 + (−2.0) + (−8.0) + (−5.0)
+    assert off.done and off.reason == "out_of_road"
+
+
+def test_carl_fix_holds_on_term_weight_override_path() -> None:
+    """``--reward-term-weight``（``build_reward_adapter``）路径与修复后的聚合口径一致。"""
+    from pipeline.trainer import build_reward_adapter
+
+    before = [dict(term) for term in DEFAULT_TERM_CONFIGS]
+    adapter, source = build_reward_adapter(term_weights={"solid_line": -3.0})
+    assert source.endswith("+term_weights")
+    step = adapter.factory().step(
+        {"speed_ratio": 0.5, "solid_line_crossing": True, "out_of_road": True}
+    )
+    assert step.components["speed_ratio"] == pytest.approx(0.5)  # 覆盖后仍按默认权重 1.0 计
+    assert step.components["solid_line"] == pytest.approx(-3.0)
+    # 0（正向清零）+ (−3.0) + (−8.0) + (−5.0)
+    assert step.reward == pytest.approx(-16.0)
+    assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
 
 
 def test_terminal_values_arrival_and_timeout() -> None:
