@@ -134,6 +134,8 @@ __all__ = [
     "grad_probe_group",
     "episode_termination_reason",
     "episode_window_metrics",
+    "lane_speed_limit_info",
+    "LANE_SPEED_LIMIT_FALLBACK_MPS",
     "LocalEnvPool",
     "VectorPoolAdapter",
     "build_pool",
@@ -1002,6 +1004,45 @@ def _update_group_norms(
 
 _CRASH_KEYS = ("crash", "crash_vehicle", "crash_object", "crash_building", "crash_sidewalk", "crash_human")
 
+#: 车道限速兜底（m/s）：与 ``pipeline/eval_runner.py::DEFAULT_SPEED_LIMIT_FALLBACK`` 同值
+#: （评测 KPI 的 ``_lane_limit_mps`` 默认兜底）。tests 有防漂移断言。
+LANE_SPEED_LIMIT_FALLBACK_MPS = 13.9
+
+
+def lane_speed_limit_info(agent: Any) -> Dict[str, float]:
+    """读**与评测 KPI 同源**的车道限速（``agent.lane.speed_limit`` → ``lane_speed_limit_mps``）。
+
+    口径与 ``pipeline/eval_runner.py::_lane_limit_mps`` 一致：``lane_speed_limit_mps``
+    （``units="mps"``；MetaDrive 未设置 ``>= 1000`` → 兜底
+    :data:`LANE_SPEED_LIMIT_FALLBACK_MPS`）。lane 缺失时按
+    ``env.metadrive_env.lane_lateral_info`` 同链回退 ``navigation.current_ref_lanes[0]``。
+
+    Returns:
+        ``{"lane_speed_limit_mps": float}``；无 lane / 非法值 → ``{}``（调用方回退 obs ld）。
+        任何异常都不外抛（诊断/奖励路径不得因 env 细节中断训练）。
+    """
+    lane = None
+    try:
+        lane = getattr(agent, "lane", None)
+        if lane is None:
+            navigation = getattr(agent, "navigation", None)
+            ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
+            if ref_lanes:
+                lane = ref_lanes[0]
+    except Exception:  # noqa: BLE001 - lane 属性链异常一律降级
+        lane = None
+    if lane is None:
+        return {}
+    try:
+        from env.expert.pure_pursuit_idm import lane_speed_limit_mps
+
+        limit = float(lane_speed_limit_mps(lane, units="mps", fallback_mps=LANE_SPEED_LIMIT_FALLBACK_MPS))
+    except Exception:  # noqa: BLE001 - 单位折算失败 → 回退 obs ld
+        return {}
+    if not math.isfinite(limit) or limit <= 0.0:
+        return {}
+    return {"lane_speed_limit_mps": limit}
+
 
 def episode_termination_reason(
     info: Mapping[str, Any],
@@ -1085,9 +1126,16 @@ class RewardAdapter:
       * ``a_lon``：优先按策略步速度差（与 eval 的 a_lon 口径一致），否则 obs ego 的 0.1s 加速度；
       * ``a_lat``：obs ego 通道 index 2（``v·yaw_rate``，m/s²）；
       * ``jerk``：相邻策略步 ``a_lon`` 差分 / ``dt``；
-      * ``speed_limit_mps``：obs LD 通道 **slot 0**（ego 车道 5 m 采样点）第 4 维；
-      * ``speed_ratio``：``velocity / speed_limit_mps``。
+      * ``speed_limit_mps``（**v4 ⑥a 修复：来源对齐评测 KPI**）：优先
+        ``info["lane_speed_limit_mps"]``（由 :func:`lane_speed_limit_info` 从
+        ``agent.lane.speed_limit`` 注入，与 ``pipeline/eval_runner.py::_lane_limit_mps`` 同源）；
+        缺失时回退旧路径 obs LD 通道 **slot 0**（ego 车道 5 m 采样点）第 4 维；两源都缺 →
+        一次性告警 + 该帧无值；
+      * ``speed_ratio``：``velocity / speed_limit_mps``（终局帧掩码回退见 :meth:`step`）。
     - 终止步先算奖励再 ``reset()``（终局 outcome 不能丢）。
+    - **v4 ⑥b 终局帧掩码回退**：到达帧 ``ld_mask[0]=0`` 且 lane 源缺失时，
+      ``speed_limit_mps`` 回退**本 env 最后有效值**（``self._last_speed_limit``），保证终局帧
+      ``speed_ratio``/``speed_limit`` 口径连续（不再静默失效）。
     """
 
     def __init__(
@@ -1096,20 +1144,54 @@ class RewardAdapter:
         fallback: Optional[Callable[..., float]] = None,
         *,
         dt: float = _POLICY_DT,
+        logger: Optional[Callable[[str], None]] = None,
     ):
         self.factory = factory
         self.fallback = fallback
         self.dt = float(dt)
+        self.logger = logger
         self._aggregators: Dict[int, Any] = {}
         self._prev_a_lon: Dict[int, float] = {}
         self._prev_speed: Dict[int, float] = {}
+        #: ⑥b：每 env 最后有效的限速（lane 源或 ld slot0），终局帧掩码回退用。
+        self._last_speed_limit: Dict[int, float] = {}
+        self._speed_limit_warned = False
         self.early_terminations = 0
 
     def reset_all(self) -> None:
         self._aggregators.clear()
         self._prev_a_lon.clear()
         self._prev_speed.clear()
+        self._last_speed_limit.clear()
         self.early_terminations = 0
+
+    @staticmethod
+    def _lane_speed_limit(info: Mapping[str, Any]) -> Optional[float]:
+        """⑥a：lane 源限速（``lane_speed_limit_info`` 注入的 info 键；非法 → None）。"""
+        value = info.get("lane_speed_limit_mps") if isinstance(info, Mapping) else None
+        try:
+            limit = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+        if limit is None or not math.isfinite(limit) or limit <= 0.0:
+            return None
+        return limit
+
+    @staticmethod
+    def _ld_speed_limit(obs: Mapping[str, np.ndarray]) -> Optional[float]:
+        """旧路径：obs LD 通道 slot 0 第 4 维（仅在 ``ld_mask[0] > 0.5`` 时有效）。"""
+        ld = obs.get("ld") if isinstance(obs, Mapping) else None
+        if ld is None:
+            return None
+        ld_array = np.asarray(ld, dtype=np.float32)
+        mask = obs.get("ld_mask") if isinstance(obs, Mapping) else None
+        mask_array = np.asarray(mask, dtype=np.float32).reshape(-1) if mask is not None else None
+        if ld_array.ndim != 2 or ld_array.shape[0] < 1 or ld_array.shape[1] < 5:
+            return None
+        if mask_array is not None and mask_array.shape[0] > 0 and mask_array[0] <= 0.5:
+            return None
+        limit = float(ld_array[0, 4])
+        return limit if math.isfinite(limit) and limit > 0.0 else None
 
     def _build_ctx(self, env_index: int, info: Dict[str, Any], obs: Mapping[str, np.ndarray]) -> Dict[str, Any]:
         ctx: Dict[str, Any] = dict(info) if isinstance(info, dict) else {}
@@ -1131,16 +1213,29 @@ class RewardAdapter:
                 self._prev_speed[env_index] = float(speed)
             except (TypeError, ValueError):
                 pass
-        ld = obs.get("ld") if isinstance(obs, Mapping) else None
-        if ld is not None and "speed_limit_mps" not in ctx:
-            ld_array = np.asarray(ld, dtype=np.float32)
-            mask = obs.get("ld_mask") if isinstance(obs, Mapping) else None
-            mask_array = np.asarray(mask, dtype=np.float32).reshape(-1) if mask is not None else None
-            if ld_array.ndim == 2 and ld_array.shape[0] >= 1 and ld_array.shape[1] >= 5:
-                if mask_array is None or mask_array.shape[0] == 0 or mask_array[0] > 0.5:
-                    limit = float(ld_array[0, 4])
-                    if limit > 0.0:
-                        ctx["speed_limit_mps"] = limit
+        if "speed_limit_mps" not in ctx:
+            # ⑥a：lane 源（与评测 KPI 同源）优先；缺失回退旧 ld slot0；两源都缺 → 一次性告警
+            limit = self._lane_speed_limit(info)
+            if limit is None:
+                limit = self._ld_speed_limit(obs)
+            if limit is not None:
+                ctx["speed_limit_mps"] = limit
+                self._last_speed_limit[env_index] = limit
+            elif not self._speed_limit_warned and self.logger is not None:
+                self._speed_limit_warned = True
+                self.logger(
+                    "[reward] 警告：lane 源（agent.lane.speed_limit）与 obs ld slot0 均无有效限速 → "
+                    "speed_limit_mps 缺失（speed_ratio/speed_limit 项按无值处理）；本告警只打一次"
+                )
+        # ⑥b 缓存：info 自带的 speed_limit_mps 也纳入"最后有效值"（终局帧回退用）
+        existing = ctx.get("speed_limit_mps")
+        if existing is not None:
+            try:
+                value = float(existing)
+                if math.isfinite(value) and value > 0.0:
+                    self._last_speed_limit[env_index] = value
+            except (TypeError, ValueError):
+                pass
         return ctx
 
     def step(
@@ -1159,6 +1254,12 @@ class RewardAdapter:
             return float(self.fallback(env_index, info, done)), {}
         ctx = self._build_ctx(env_index, info, obs)
         ctx["done"] = bool(done)
+        # ⑥b 终局帧掩码回退：本帧无任何限速源（lane 缺失 + ld_mask[0]=0）时用最后有效值，
+        # 保证终局帧 speed_ratio/speed_limit 口径连续（不再静默失效）。
+        if "speed_limit_mps" not in ctx and done:
+            cached = self._last_speed_limit.get(env_index)
+            if cached is not None:
+                ctx["speed_limit_mps"] = float(cached)
         a_lon = ctx.get("a_lon")
         if a_lon is not None:
             previous = self._prev_a_lon.get(env_index)
@@ -1263,7 +1364,7 @@ def build_reward_adapter(
         if appended:
             source = f"{source}+append({','.join(appended)})"
     fallback = None if factory is not None else make_stub_reward()
-    return RewardAdapter(factory=factory, fallback=fallback, dt=dt), source
+    return RewardAdapter(factory=factory, fallback=fallback, dt=dt, logger=logger), source
 
 
 class RewardStatistics:
@@ -4641,6 +4742,10 @@ class LocalEnvPool:
         from env.metadrive_env import lane_lateral_info  # 惰性：保持模块顶层无 MetaDrive 依赖
 
         info.update(lane_lateral_info(ego))  # lane_center 项输入（无车道时键缺失 → 该项为 0）
+        # v4 ⑥a：限速来源对齐评测 KPI（agent.lane.speed_limit → lane_speed_limit_mps；
+        # 缺 lane 时键缺失，RewardAdapter 回退 obs ld slot0）。Vector 池 worker 未注入该键 →
+        # 该路径仍走旧回退（pipeline/vector_env.py 不在本 lane 修改范围）。
+        info.update(lane_speed_limit_info(ego))
         return {
             "obs": obs,
             "info": info,
