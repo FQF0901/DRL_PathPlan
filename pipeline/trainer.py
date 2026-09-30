@@ -378,6 +378,18 @@ def span_of(low: "torch.Tensor", high: "torch.Tensor") -> "torch.Tensor":
     return (high - low).clamp(min=1e-6)
 
 
+def clamp_logstd(logstd: "torch.Tensor", logstd_max: Optional[float] = None) -> "torch.Tensor":
+    """S2（v3 探索降噪）：策略分布构建处的 logstd 上界钳制（``None`` = 原样返回，位级不变）。
+
+    ``collect_rollout``（采样）与 :meth:`PPOTrainer.update`（logprob/entropy/KL）在从模型输出
+    组装分布参数时统一调用本函数 → **采样与 logprob 消费同一钳制后分布**（on-policy ratio
+    口径一致）；默认 ``None`` 不引入任何数值变化。
+    """
+    if logstd_max is None:
+        return logstd
+    return torch.clamp(logstd, max=float(logstd_max))
+
+
 def sample_action(
     mu_squashed: "torch.Tensor",
     logstd: "torch.Tensor",
@@ -575,12 +587,21 @@ class PPOConfig:
     #: 该臂 collect 走 cheap path（rollout=False，V9）；``plan`` = 旧行为（首步 ``a_t`` + 后 5 步
     #: WM/plan head 规划预览，需 rollout 前向），仅供对照，不得用于 RL 结论。
     plan_reference: str = "repeat_action"
+    #: S2（v3 探索降噪）：策略分布 logstd 上界钳制（CLI ``--policy-logstd-max`` / config
+    #: ``stages.C.policy_logstd_max``）；``None``（默认）= 不钳制（行为逐位不变）。
+    #: 在 collect（采样）与 update（logprob/entropy/KL）的分布构建点统一生效。
+    policy_logstd_max: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.plan_reference not in ("repeat_action", "plan"):
             raise ValueError(f"未知 plan_reference={self.plan_reference!r}（可选 repeat_action/plan）")
         if self.adv_norm not in ("global", "per_scenario", "none"):
             raise ValueError(f"未知 adv_norm={self.adv_norm!r}（可选 global/per_scenario/none）")
+        if self.policy_logstd_max is not None:
+            value = float(self.policy_logstd_max)
+            if not math.isfinite(value):
+                raise ValueError(f"policy_logstd_max 必须是有限浮点或 None（收到 {self.policy_logstd_max!r}）")
+            self.policy_logstd_max = value
 
 
 @dataclass
@@ -4935,7 +4956,8 @@ class PPOTrainer:
             with torch.no_grad():
                 out = self.model(batch, rollout=need_plan, world_model=False)
                 mu = out["action_mu"]
-                logstd = out["action_logstd"]
+                # S2：分布构建点统一钳制（None=原样）；sample_action 与 update 的 logprob 同口径
+                logstd = clamp_logstd(out["action_logstd"], self.config.policy_logstd_max)
                 value = out["value"].reshape(-1)
                 if need_plan:
                     plan = out["plan"]
@@ -5216,7 +5238,8 @@ class PPOTrainer:
                         loss = value_loss
                     else:
                         mu = out["action_mu"]
-                        logstd = out["action_logstd"]
+                        # S2：与 collect_rollout 同一钳制（采样与 logprob 同分布）
+                        logstd = clamp_logstd(out["action_logstd"], self.config.policy_logstd_max)
                         new_logprob = logprob_from_action(
                             mu, logstd, actions_t[selection], self.low, self.high, mode=self.config.action_mode
                         )

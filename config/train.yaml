@@ -162,6 +162,9 @@ stages:
                                 # episode（默认，修正）= 每个 episode 终局 auto-reset 按 round-robin 轮换
                                 # 下一条 spec（旧行为"整个 run 只训 spec[0]"是 v2 各臂的隐藏混杂）；
                                 # off = 旧行为（auto-reset 复用当前 spec，仅显式 reset 轮换）
+    policy_logstd_max: null     # S2/v3（2026-09-30 探索降噪）：策略分布 logstd 上界（CLI --policy-logstd-max）。
+                                # null（默认）= 不钳制、行为逐位不变；给值（如 -1.5/-2.0）→ 采样与
+                                # update logprob/entropy/KL 使用同一钳制后分布（init 采样近乎必崩的降噪手段）
     primary_lr_scale: 0.1       # 主专家学习率 ×0.1
     ckpt_every: 25              # G3 最小下一步：每 N 个 update 保存 <out>/ckpt_u<NNN>.pt（CLI
                                 # --ckpt-every；0=关；仅保存点，不引入 resume；final.pt 仍写）

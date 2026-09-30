@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import re
 import sys
@@ -505,6 +506,25 @@ def _resolve_stage_c_spec_rotation(args: argparse.Namespace, stage_cfg: Mapping[
     if mode not in SPEC_ROTATION_MODES:
         raise SystemExit(f"[stageC] 未知 spec_rotation={value!r}（可选 {'/'.join(SPEC_ROTATION_MODES)}）")
     return mode
+
+
+def _resolve_stage_c_policy_logstd_max(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> Optional[float]:
+    """S2：策略 logstd 上界（CLI ``--policy-logstd-max`` 优先；config ``stages.C.policy_logstd_max``）。
+
+    默认 ``None`` = 不钳制（行为逐位不变）；非法（非有限数）fail-fast。
+    """
+    value = getattr(args, "policy_logstd_max", None)
+    if value is None:
+        value = dict(stage_cfg or {}).get("policy_logstd_max")
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"[stageC] 无法解析 policy_logstd_max={value!r}（需有限浮点或 null）") from None
+    if not math.isfinite(number):
+        raise SystemExit(f"[stageC] policy_logstd_max 必须是有限浮点或 null（收到 {value!r}）")
+    return number
 
 
 def _resume_epoch_of(resume_info: Mapping[str, Any], total_epochs: int) -> int:
@@ -3705,6 +3725,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ——LocalEnvPool 终局 auto-reset 轮换下一条 spec（round-robin），修正"整个 run 只训 spec[0]"；
     ``off`` = 旧行为。metrics 记 ``spec_rotation`` + 逐 episode ``episode_spec_ids`` /
     去重 ``training_spec_ids``。
+    S2（v3，2026-09-30 探索降噪）：``--policy-logstd-max``（config ``stages.C.policy_logstd_max``，
+    默认 ``None``）——策略分布构建点钳制 logstd 上界（采样与 update logprob 同一钳制后分布）；
+    ``None`` = 不钳制（行为逐位不变）。
     """
     stage_cfg = _stage_section(config, "C")
     # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
@@ -3804,6 +3827,13 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         ),
         flush=True,
     )
+    # S2（v3 探索降噪）：策略分布 logstd 上界（默认 None = 不钳制，行为逐位不变）
+    policy_logstd_max = _resolve_stage_c_policy_logstd_max(args, stage_cfg)
+    print(
+        f"[stageC] policy_logstd_max={policy_logstd_max}"
+        + ("（不钳制，旧行为）" if policy_logstd_max is None else "（采样/更新同一钳制后分布）"),
+        flush=True,
+    )
     # W1（P1）：WM（ST-GNN）全期冻结。旧 ``--wm-freeze-updates`` 的"解冻"只是把参数重新
     # 加入优化器：PPO 更新走 rollout=False cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
     # 恒 None（P0 侦察 §B），故弃用旧解冻语义。
@@ -3892,6 +3922,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "critic_warmup_updates": critic_warmup_updates,
         "adv_norm": adv_norm,
         "spec_rotation": spec_rotation,
+        "policy_logstd_max": policy_logstd_max,
         "ckpt_every": ckpt_every,
         "device": device,
         "probe_batch": probe_batch,
@@ -3925,6 +3956,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             critic_warmup_updates=critic_warmup_updates,
             adv_norm=adv_norm,
             plan_reference=plan_reference,
+            policy_logstd_max=policy_logstd_max,
             seed=int(args.seed),
             device=device,
         )
@@ -4204,6 +4236,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C 训练 spec 轮换口径（S1/v3；默认取 config stages.C.spec_rotation=episode）："
                              "episode=LocalEnvPool 每 episode 终局 auto-reset 轮换下一条 spec（round-robin）；"
                              "off=旧行为（auto-reset 复用当前 spec，整个 run 只训初始 spec）")
+    parser.add_argument("--policy-logstd-max", type=float, default=None, metavar="LOGSTD_MAX",
+                        help="阶段 C 策略分布 logstd 上界钳制（S2/v3 探索降噪；默认取 config "
+                             "stages.C.policy_logstd_max=null）：采样与 update logprob 使用同一钳制后分布；"
+                             "缺省/null=不钳制（行为逐位不变）")
     parser.add_argument("--bc-anchor", action="store_true", help="阶段 C 启用 BC 动作锚（默认关）")
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
     parser.add_argument("--reward-term-weight", action="append", default=None, metavar="NAME=W",
