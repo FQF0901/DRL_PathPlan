@@ -78,6 +78,7 @@ from pipeline.trainer import (  # noqa: E402
     Phase3Config,
     PPOConfig,
     PPOTrainer,
+    SPEC_ROTATION_MODES,
     STAGE_C_DESIGN_PREFIXES,
     STAGE_C_TRAINABLE_SCOPES,
     apply_freeze_prefixes,
@@ -489,6 +490,21 @@ def _stage_c_periodic_updates(updates: int, ckpt_every: int) -> List[int]:
 def _stage_c_ckpt_path(out_dir: Path, update: int) -> Path:
     """阶段 C 周期 ckpt 命名（与 ``final.pt`` 同格式/payload）：``<out>/ckpt_u<NNN>.pt``。"""
     return out_dir / f"ckpt_u{int(update):03d}.pt"
+
+
+def _resolve_stage_c_spec_rotation(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> str:
+    """S1：阶段 C spec 轮换口径（CLI ``--spec-rotation`` 优先；config ``stages.C.spec_rotation``）。
+
+    默认 ``episode`` = LocalEnvPool 终局 auto-reset 轮换下一条 spec（修正"整个 run 只训
+    spec[0]"）；``off`` = 旧行为。非法值 fail-fast。
+    """
+    value = getattr(args, "spec_rotation", None)
+    if value is None:
+        value = dict(stage_cfg or {}).get("spec_rotation", "episode")
+    mode = "episode" if value is None else str(value)
+    if mode not in SPEC_ROTATION_MODES:
+        raise SystemExit(f"[stageC] 未知 spec_rotation={value!r}（可选 {'/'.join(SPEC_ROTATION_MODES)}）")
+    return mode
 
 
 def _resume_epoch_of(resume_info: Mapping[str, Any], total_epochs: int) -> int:
@@ -3684,6 +3700,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ``--reward-term-weight NAME=W``（P4 消融钩子）：按奖励项名覆盖权重（如 ``speed_ratio=0``），
     作用于 config ``stages.C.reward.terms``（透传 ``build_reward_adapter``）或默认
     ``DEFAULT_TERM_CONFIGS`` 的同名项（私有副本，不改全局默认）；未命中 fail-fast。
+
+    S1（v3，2026-09-30）：``--spec-rotation``（config ``stages.C.spec_rotation``，默认 ``episode``）
+    ——LocalEnvPool 终局 auto-reset 轮换下一条 spec（round-robin），修正"整个 run 只训 spec[0]"；
+    ``off`` = 旧行为。metrics 记 ``spec_rotation`` + 逐 episode ``episode_spec_ids`` /
+    去重 ``training_spec_ids``。
     """
     stage_cfg = _stage_section(config, "C")
     # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
@@ -3771,6 +3792,18 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "per_scenario=按 spec.id 分组，none=不归一化；CLI --adv-norm 优先）",
         flush=True,
     )
+    # S1（v3 修正）：LocalEnvPool 终局 auto-reset 轮换 spec（默认 episode；off = 旧行为）
+    spec_rotation = _resolve_stage_c_spec_rotation(args, stage_cfg)
+    print(
+        f"[stageC] spec_rotation={spec_rotation}"
+        + (
+            "（每个 episode 终局 auto-reset 轮换下一条 spec，round-robin；"
+            "修正旧行为：整个 run 只训 spec[0]）"
+            if spec_rotation == "episode"
+            else "（旧行为：auto-reset 复用当前 spec，整个 run 只训初始 spec）"
+        ),
+        flush=True,
+    )
     # W1（P1）：WM（ST-GNN）全期冻结。旧 ``--wm-freeze-updates`` 的"解冻"只是把参数重新
     # 加入优化器：PPO 更新走 rollout=False cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
     # 恒 None（P0 侦察 §B），故弃用旧解冻语义。
@@ -3831,6 +3864,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         tracker="lqr",
         traffic_density=args.traffic_density,
         mem_floor_mb=args.mem_floor_mb,
+        spec_rotation=spec_rotation,
         logger=print,
     )
     metrics: Dict[str, Any] = {
@@ -3857,6 +3891,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "wm_frozen_params": len(frozen_wm),
         "critic_warmup_updates": critic_warmup_updates,
         "adv_norm": adv_norm,
+        "spec_rotation": spec_rotation,
         "ckpt_every": ckpt_every,
         "device": device,
         "probe_batch": probe_batch,
@@ -3961,6 +3996,18 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         metrics["reward_source"] = reward_source
         metrics["trim_memory_every"] = trim_every
         metrics["trim_memory_calls"] = trim_calls
+        # S1（v3）：训练期场景覆盖证据——``episode_spec_ids`` = 逐 episode 的 spec_id（起点顺序），
+        # ``training_spec_ids`` = 去重集合（默认轮换下 ≈ episode 数；off 下恒 1）。
+        metrics["episode_spec_ids"] = list(trainer.episode_spec_ids)
+        metrics["training_spec_ids"] = sorted(trainer.spec_ids_seen)
+        metrics["training_specs_covered"] = len(trainer.spec_ids_seen)
+        preview = sorted(trainer.spec_ids_seen)[:16]
+        print(
+            f"[stageC] 训练 spec 覆盖：{len(trainer.spec_ids_seen)} 条 distinct"
+            f"（episodes={len(trainer.episode_spec_ids)}；ids={preview}"
+            + ("..." if len(trainer.spec_ids_seen) > len(preview) else "") + "）",
+            flush=True,
+        )
     finally:
         pool.close()
         if monitor is not None:
@@ -4153,6 +4200,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C 优势归一化口径（默认取 config train.adv_norm=global）："
                              "global=全批零均值/单位方差（旧行为）；per_scenario=按帧级 spec.id "
                              "分组各自归一化；none=不归一化")
+    parser.add_argument("--spec-rotation", choices=SPEC_ROTATION_MODES, default=None,
+                        help="阶段 C 训练 spec 轮换口径（S1/v3；默认取 config stages.C.spec_rotation=episode）："
+                             "episode=LocalEnvPool 每 episode 终局 auto-reset 轮换下一条 spec（round-robin）；"
+                             "off=旧行为（auto-reset 复用当前 spec，整个 run 只训初始 spec）")
     parser.add_argument("--bc-anchor", action="store_true", help="阶段 C 启用 BC 动作锚（默认关）")
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
     parser.add_argument("--reward-term-weight", action="append", default=None, metavar="NAME=W",

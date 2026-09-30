@@ -4248,6 +4248,20 @@ def _labels_for_env(labels_pre: Any, env_index: int) -> Optional[Any]:
     return None
 
 
+#: S1（v3 修正）：训练 spec 轮换口径（CLI ``--spec-rotation`` / config ``stages.C.spec_rotation``）。
+#: ``episode`` = 每个 episode 终局 auto-reset 按 round-robin 轮换到下一条 spec（默认，修正
+#: "整个 run 只训 spec[0]"）；``off`` = 旧行为（auto-reset 复用当前 spec，仅显式 reset 轮换）。
+SPEC_ROTATION_MODES: Tuple[str, ...] = ("episode", "off")
+
+
+def _resolve_spec_rotation(mode: Any) -> str:
+    """校验 spec 轮换口径；``None`` 视作默认 ``episode``。"""
+    value = "episode" if mode is None else str(mode)
+    if value not in SPEC_ROTATION_MODES:
+        raise ValueError(f"未知 spec_rotation={mode!r}（可选 episode/off）")
+    return value
+
+
 class LocalEnvPool:
     """**单进程常驻池**（MetaDrive 每进程一个 engine → 该池恰好 1 个 env）。
 
@@ -4265,6 +4279,12 @@ class LocalEnvPool:
     V10（P2 性能，2026-09-30）：``step(pre_step_labels=...)`` 由对齐消费方（``collect_rollout``
     已调 :meth:`labels_now`）传入 → 跳过 ``_record`` 内 post-step 标签的重复计算（同帧标签
     由调用方持有，P0-2 语义不变）；终局 record 与 reset 首帧仍计算标签（记录语义不变）。
+
+    S1（v3，2026-09-30）：``spec_rotation``（默认 ``episode``）= 终局 auto-reset 时按
+    round-robin ``self._index`` 轮换到下一条 spec（复用 :meth:`reset` 同款
+    ``_build``/``_setup_episode`` 路径）；``off`` = 旧行为（auto-reset 保持当前 spec，
+    整个 run 只训显式 ``reset()`` 选中的那条）。终局 record 仍取终局帧（新 episode 首帧
+    只经 ``record["next_obs"]`` 返回，P0-2 不变）。
     """
 
     #: V10：step 支持 ``pre_step_labels``（trainer 能力探测，避免对旧 stub 池传未知 kwarg）
@@ -4278,6 +4298,7 @@ class LocalEnvPool:
         max_episode_steps: int = 600,
         traffic_density: Optional[float] = None,
         obs_config: Optional[Dict[str, Any]] = None,
+        spec_rotation: str = "episode",
         logger: Callable[[str], None] = print,
     ):
         from env.obs.builder import ObservationBuilder
@@ -4288,6 +4309,7 @@ class LocalEnvPool:
         if tracker not in ("exact", "lqr", "kinematic"):
             raise ValueError(f"未知 tracker={tracker!r}（exact/lqr/kinematic）")
         self.tracker_kind = str(tracker)
+        self.spec_rotation = _resolve_spec_rotation(spec_rotation)
         self.max_episode_steps = int(max_episode_steps)
         self.traffic_density = traffic_density
         self.obs_config = dict(obs_config or {})
@@ -4336,17 +4358,28 @@ class LocalEnvPool:
         else:
             self._tracker = None
 
-    def reset(self) -> List[Dict[str, Any]]:
-        """切换到下一条 spec 并 reset；返回单元素记录列表。"""
-        self._index = (self._index + 1) % len(self.specs)
-        spec = self.specs[self._index]
-        self._build(spec)
+    def _reset_episode(self, *, rotate: bool) -> None:
+        """episode 边界公共路径：可选轮换 spec → 重建/重置 env → 重建执行器 → 清残留状态。
+
+        ``rotate=True``（显式 :meth:`reset`，或 ``spec_rotation="episode"`` 的终局
+        auto-reset）：``_index`` round-robin 前进一条并 ``_build`` 新 spec 的 env；
+        ``rotate=False``（``off`` 口径）：复用当前 env 仅 ``reset``（旧行为）。
+        P0-2 语义不变：``prev_policy_action`` 清零 + ``_current_info`` 清空（新 episode 首帧
+        不得复用上一 episode 的 step info）；obs 历史由 builder 在 ``episode_step==0`` 时清空。
+        """
+        if rotate:
+            self._index = (self._index + 1) % len(self.specs)
+            self._build(self.specs[self._index])
         self._env.reset()
         self._setup_episode()
         # §8.4：新 episode 起点没有上一动作 → reserved 维保持 0
         self._env.prev_policy_action = np.zeros(2, dtype=np.float64)
         # P0-2：episode 首帧不得复用上一 episode（尤其终局）残留的 step info
         self._current_info = {}
+
+    def reset(self) -> List[Dict[str, Any]]:
+        """切换到下一条 spec 并 reset；返回单元素记录列表。"""
+        self._reset_episode(rotate=True)
         return [self._record(reward=0.0, terminated=False, truncated=False)]
 
     def _obs_now(self) -> Dict[str, Any]:
@@ -4407,7 +4440,8 @@ class LocalEnvPool:
         """执行一个策略步（1 个动作 ``(2,)``），返回单元素记录；终局自动 reset。
 
         P0-2：终局记录的 obs/info/pose 取自**终局帧**；reset 后的新 episode 首帧只经
-        ``record["next_obs"]`` 返回（不再混入终局记录）。
+        ``record["next_obs"]`` 返回（不再混入终局记录）。S1：终局 auto-reset 依
+        ``self.spec_rotation`` 决定是否轮换 spec（``episode`` = 轮换，``off`` = 复用当前）。
 
         ``pre_step_labels``（V10，P2 性能）：非 None = 调用方已按 P0-2 取好步前同帧标签
         （``labels_now()``），普通步的 ``_record`` 不再重复计算 post-step 标签（省 ~0.2ms/步）；
@@ -4456,11 +4490,8 @@ class LocalEnvPool:
             record = self._record(reward=0.0, terminated=terminated, truncated=truncated)
             if pre_step_labels is not None:
                 record["labels_at_step_start"] = np.asarray(pre_step_labels, dtype=np.float32)
-            self._env.reset()
-            self._setup_episode()
-            self._current_info = {}
-            # §8.4：终局 reset 后上一动作为 0
-            self._env.prev_policy_action = np.zeros(2, dtype=np.float64)
+            # S1：episode 终局 auto-reset（默认轮换下一条 spec；off = 复用当前 spec）
+            self._reset_episode(rotate=self.spec_rotation == "episode")
             record["next_obs"] = self._obs_now()
             return [record]
         # §8.4：下一次 build 的 ego reserved0/1 = 本策略步动作 (ds,dθ)
@@ -4620,6 +4651,7 @@ def build_pool(
     traffic_density: Optional[float] = None,
     mem_floor_mb: Optional[float] = None,
     seed_pool: Optional[Sequence[int]] = None,
+    spec_rotation: str = "episode",
     logger: Callable[[str], None] = print,
 ) -> Any:
     """构造环境池。
@@ -4628,10 +4660,15 @@ def build_pool(
       否则 ``LocalEnvPool``（单进程，1 env，MetaDrive singleton 约束）；
     - ``vector``：强制子进程池；
     - ``local``：强制单进程池（``num_envs`` 强制 1）。
+
+    ``spec_rotation``（S1，默认 ``episode``）只作用于 ``LocalEnvPool``（终局 auto-reset
+    轮换 spec）；Vector 池本就按 per-env 轮转分配 spec（整池 reset 时推进游标），
+    该参数不改变其行为（``off`` 时打一行说明）。
     """
     kind = str(kind).lower()
     if kind not in ("auto", "vector", "local"):
         raise ValueError(f"未知 pool kind={kind!r}（auto/vector/local）")
+    spec_rotation = _resolve_spec_rotation(spec_rotation)
     if kind in ("auto", "vector"):
         try:
             pool = VectorPoolAdapter(
@@ -4643,6 +4680,8 @@ def build_pool(
                 seed_pool=seed_pool,
                 logger=logger,
             )
+            if spec_rotation == "off":
+                logger("[pool] Vector 池按 per-env 轮转分配 spec（整池 reset 推进游标）；--spec-rotation off 对其无效")
             return pool
         except Exception as exc:  # noqa: BLE001
             if kind == "vector":
@@ -4655,6 +4694,7 @@ def build_pool(
         tracker=tracker if tracker in ("exact", "lqr") else "kinematic",
         max_episode_steps=max_episode_steps,
         traffic_density=traffic_density,
+        spec_rotation=spec_rotation,
         logger=logger,
     )
 
@@ -4715,6 +4755,10 @@ class PPOTrainer:
         self._has_router_labels: Optional[np.ndarray] = None
         self._total_steps = 0
         self._updates_done = 0
+        #: S1（v3）：训练期 episode 场景覆盖——``episode_spec_ids`` 按 episode 起点顺序记录，
+        #: ``spec_ids_seen`` 为其去重集合（供 run_stage_c 落 metrics 验证 spec 轮换）。
+        self.episode_spec_ids: List[int] = []
+        self.spec_ids_seen: set = set()
         self._value_param_names = _value_parameter_names(model)
         self._last_metrics: Dict[str, Any] = {}
         self._last_collect_timing: Dict[str, Any] = {}
@@ -4953,6 +4997,12 @@ class PPOTrainer:
                     labels = record.get("router_labels") if isinstance(record, dict) else None
                 if labels is None:
                     labels = info.get("router_labels") if isinstance(info, dict) else None
+                # 帧级场景标识（LocalEnvPool._record / worker record；旧 stub 池缺省 -1）
+                spec_id = int(record.get("spec_id", -1)) if isinstance(record, dict) else -1
+                if spec_id >= 0 and self._step_in_episode[env_index] == 0:
+                    # S1：episode 起点帧 → 记录本 episode 的 spec（轮换验证/覆盖统计）
+                    self.episode_spec_ids.append(spec_id)
+                    self.spec_ids_seen.add(spec_id)
                 pending[env_index][step] = {
                     "obs": obs_current,
                     "pose": pose,
@@ -4965,8 +5015,7 @@ class PPOTrainer:
                     "router_labels": np.asarray(labels, dtype=np.float32) if labels is not None else None,
                     "episode": int(self._episode_id[env_index]),
                     "step": int(self._step_in_episode[env_index]),
-                    # 帧级场景标识（LocalEnvPool._record / worker record；旧 stub 池缺省 -1）
-                    "spec_id": int(record.get("spec_id", -1)) if isinstance(record, dict) else -1,
+                    "spec_id": spec_id,
                 }
                 self._advance_pose(env_index, actions_np[env_index])
                 self._step_in_episode[env_index] += 1

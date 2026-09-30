@@ -66,6 +66,8 @@ def _make_pool(env: _FakeEnv) -> LocalEnvPool:
     pool._env = env
     pool._spec = pool.specs[0]
     pool._index = 0
+    # 本文件锁定 P0-2 记录协议（终局 record/reset 分离）：固定 spec（S1 轮换关闭）
+    pool.spec_rotation = "off"
     pool._steps = 0
     pool._order = ("cutin_active",)
     pool._tracker = None
