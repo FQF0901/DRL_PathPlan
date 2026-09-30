@@ -166,6 +166,10 @@ stages:
                                 # null（默认）= 不钳制、行为逐位不变；给值（如 -1.5/-2.0）→ 采样与
                                 # update logprob/entropy/KL 使用同一钳制后分布（init 采样近乎必崩的降噪手段）
     primary_lr_scale: 0.1       # 主专家学习率 ×0.1
+    probe_interval: 25          # G4/v3（2026-09-30 漂移探针）：每 N 个 update（含 u1 基准）在
+                                # train.probe_batch 固定探针批上做一次 rollout=True, world_model=False
+                                # 前向，记 plan[:,1:6]/action_mu 相对首次记录的 RMS 位移（CLI
+                                # --probe-interval；0=关）；纯监控（不进 loss/动作/buffer）
     ckpt_every: 25              # G3 最小下一步：每 N 个 update 保存 <out>/ckpt_u<NNN>.pt（CLI
                                 # --ckpt-every；0=关；仅保存点，不引入 resume；final.pt 仍写）
     # reward:                   # P4 奖励钩子（透传 build_reward_adapter；缺省 = DEFAULT_TERM_CONFIGS）

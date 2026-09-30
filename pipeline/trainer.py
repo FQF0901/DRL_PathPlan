@@ -47,7 +47,14 @@ PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
   ``value/{mean,std,explained_var}``（``1 − Var(ret−V)/Var(ret)``）；
 - ``probe/*``：**固定探针批**（``train.probe_batch``，默认 :data:`DEFAULT_PROBE_BATCH`，
   加载一次）上的 ``action_mu[:,0]``/``logstd`` 均值-方差与分速度档 ds 均值；
-  任一 speed<2 m/s 档 ds<1.5 m → ``probe/low_speed_alert=1`` + 打印告警（低速吸引子）。
+  任一 speed<2 m/s 档 ds<1.5 m → ``probe/low_speed_alert=1`` + 打印告警（低速吸引子）；
+- ``drift/*``（Stage C v3 预注册 §0 G4 必需项，纯监控）：每 ``probe_interval``
+  （默认 :data:`DEFAULT_PROBE_INTERVAL`=25，0=关）个 update——记录点 = u1（基准）+
+  interval 的倍数——在同一固定探针批上做一次 ``rollout=True, world_model=False``
+  前向，记录 ``plan[:,1:6]``（尾部 5 步执行参考预览）与 ``action_mu`` 相对**首次记录**
+  的 RMS 位移（``drift/plan_rms_vs_init`` / ``drift/mu_rms_vs_init``）与尾部 5 步
+  平均绝对值（``drift/plan_tail_abs``）；``torch.no_grad`` + eval 前向，不参与 loss、
+  不改动作、不写 buffer（探针批不可用时跳过并告警一次）。
 
 ``pipeline.monitoring`` 递归展平嵌套指标 → CSV + tensorboard（``train/...``）。
 
@@ -118,6 +125,7 @@ __all__ = [
     "RewardAdapter",
     "RewardStatistics",
     "DEFAULT_PROBE_BATCH",
+    "DEFAULT_PROBE_INTERVAL",
     "STAGE_C_DESIGN_PREFIXES",
     "STAGE_C_TRAINABLE_SCOPES",
     "apply_trainable_allowlist",
@@ -193,6 +201,11 @@ _HIST_SUFFIX = "_hist"
 DEFAULT_PROBE_BATCH = "datasets/BTC20260926-2343_expert5k"
 #: 探针批大小（帧；固定不随 update 变化，保证序列可比）。
 DEFAULT_PROBE_SIZE = 256
+#: drift 探针默认间隔（update）：u1 记基准，之后每个 interval 的倍数各记一次
+#: ``plan[:,1:6]``/``action_mu`` 相对首次记录的 RMS 位移（0=关；CLI/config 可配）。
+DEFAULT_PROBE_INTERVAL = 25
+#: drift 探针的 plan 尾段：``plan[:, 1:6]`` = 除首动作外的尾部 5 步（执行参考预览）。
+_DRIFT_PLAN_TAIL_SLICE = slice(1, 6)
 #: 探针分速度档（m/s）：0–1 / 1–2 / 2–4 / 4–8 / >8。
 _PROBE_SPEED_BINS: Tuple[Tuple[float, float], ...] = (
     (0.0, 1.0),
@@ -4738,6 +4751,7 @@ class PPOTrainer:
         bc_dataset: Optional[BCDataset] = None,
         probe_batch: Optional[str] = None,
         probe_size: int = DEFAULT_PROBE_SIZE,
+        probe_interval: int = DEFAULT_PROBE_INTERVAL,
         logger: Callable[[str], None] = print,
         dt: float = _POLICY_DT,
     ):
@@ -4784,10 +4798,17 @@ class PPOTrainer:
         self._last_metrics: Dict[str, Any] = {}
         self._last_collect_timing: Dict[str, Any] = {}
         self._pose_warned = False
-        # 诊断：逐步奖励分解窗口 + 固定探针批（动作漂移 / 低速吸引子）
+        # 诊断：逐步奖励分解窗口 + 固定探针批（动作漂移 / 低速吸引子 / plan 执行参考漂移）
         self._reward_stats = RewardStatistics()
         self._probe_obs: Optional[Dict[str, "torch.Tensor"]] = None
         self._probe_speed: Optional[np.ndarray] = None
+        #: drift 探针间隔（update；0=关）：记录点 = u1（基准）+ 每个 interval 的倍数。
+        self.probe_interval = max(0, int(probe_interval))
+        self._drift_ref_plan_tail: Optional[np.ndarray] = None
+        self._drift_ref_mu: Optional[np.ndarray] = None
+        #: drift 记录序列（``update``/``plan_rms_vs_init``/``mu_rms_vs_init``/``plan_tail_abs``）。
+        self._drift_history: List[Dict[str, float]] = []
+        self._drift_shape_warned = False
         self._setup_probe(probe_batch, probe_size)
 
     # ---------------------------------------------------------------- 工具
@@ -4805,15 +4826,23 @@ class PPOTrainer:
         """加载**固定**探针批（一次），供每个 update 检测动作分布漂移/低速吸引子。
 
         失败/路径缺失时静默关闭（只打日志），绝不影响训练；观测/ego 速度在加载时固化，
-        保证跨 update 可比（唯一变量 = 模型权重）。
+        保证跨 update 可比（唯一变量 = 模型权重）。G4 drift 探针（``plan``/``action_mu``
+        RMS 位移）共用该探针批；不可用时同批跳过（启动打印可用性）。
         """
+        drift_note = (
+            f"drift 探针每 {self.probe_interval} upd（u1 基准）"
+            if self.probe_interval > 0
+            else "drift 探针关闭（probe_interval=0）"
+        )
         if not probe_batch:
+            self.logger(f"[probe] train.probe_batch=null → 固定探针关闭（probe.available=0；{drift_note}）")
             return
         target = Path(str(probe_batch))
         if not target.exists():
             self.logger(
                 f"[probe] 警告：train.probe_batch 路径不存在：{target} → "
-                "动作漂移/低速吸引子探针关闭（probe.available=0；置 null 可显式关闭告警）"
+                f"动作漂移/低速吸引子/drift 探针关闭（probe.available=0；{drift_note}；"
+                "置 null 可显式关闭告警）"
             )
             return
         try:
@@ -4829,11 +4858,13 @@ class PPOTrainer:
             speed = ego[indices, 0, 0] if ego.ndim == 3 else ego[indices, 0]
             self._probe_obs = _to_device_obs(obs, self.device)
             self._probe_speed = np.asarray(speed, dtype=np.float64).reshape(-1)
-            self.logger(f"[probe] 固定探针批已加载：{target}（{size} 帧，device={self.device}）")
+            self.logger(
+                f"[probe] 固定探针批已加载：{target}（{size} 帧，device={self.device}；{drift_note}）"
+            )
         except Exception as exc:  # noqa: BLE001 - 探针是诊断，绝不阻塞训练
             self._probe_obs = None
             self._probe_speed = None
-            self.logger(f"[probe] 探针批加载失败（{type(exc).__name__}: {exc}）→ 探针关闭")
+            self.logger(f"[probe] 探针批加载失败（{type(exc).__name__}: {exc}）→ 探针关闭（{drift_note}）")
 
     @torch.no_grad() if torch is not None else (lambda fn: fn)
     def _probe_metrics(self) -> Dict[str, Any]:
@@ -4884,6 +4915,81 @@ class PPOTrainer:
                 f"（speed<2 m/s：{', '.join(low_speed_reports)}）"
             )
         return {"probe": stats}
+
+    # ------------------------------------------------------------ drift 探针
+    def _drift_due(self) -> bool:
+        """本次 update 是否触发 drift 记录：u1（基准）+ 每个 ``probe_interval`` 的倍数。"""
+        if self.probe_interval <= 0:
+            return False
+        index = self._updates_done + 1
+        return index == 1 or index % self.probe_interval == 0
+
+    @torch.no_grad() if torch is not None else (lambda fn: fn)
+    def _drift_metrics(self) -> Dict[str, Any]:
+        """G4 drift 探针：固定批 ``rollout=True, world_model=False`` 前向的 plan/mu 漂移。
+
+        记录 ``plan[:,1:6]``（尾部 5 步）与 ``action_mu`` 相对**首次记录**的 RMS 位移，
+        以及尾部 5 步平均绝对值（量级参考）。纯监控：eval + no_grad 前向，不参与 loss、
+        不改动作、不写 buffer；非记录点返回 ``{}``。探针批不可用/plan 形状不符时跳过
+        （后者告警一次），返回 ``{"drift": {"available": 0.0, ...}}``。
+        """
+        if not self._drift_due():
+            return {}
+        update_index = self._updates_done + 1
+        if self._probe_obs is None:
+            return {"drift": {"available": 0.0, "update": float(update_index)}}
+        was_training = bool(self.model.training)
+        self.model.eval()
+        try:
+            out = self.model(self._probe_obs, rollout=True, world_model=False)
+            plan = out["plan"].detach().double().cpu().numpy()
+            mu = out["action_mu"].detach().double().cpu().numpy()
+        finally:
+            self.model.train(was_training)
+        if plan.ndim != 3 or int(plan.shape[1]) < _DRIFT_PLAN_TAIL_SLICE.stop:
+            # 尾部 5 步 = plan[:,1:6] 需要 ≥6 步的 rollout；不满足（自定义模型）→ 停用该探针
+            if not self._drift_shape_warned:
+                self._drift_shape_warned = True
+                self.logger(
+                    f"[drift] 警告：plan 形状 {tuple(plan.shape)} 不足 6 步 → drift 探针停用"
+                    "（plan[:,1:6] 尾 5 步口径不可用）"
+                )
+            return {"drift": {"available": 0.0, "update": float(update_index)}}
+        tail = plan[:, _DRIFT_PLAN_TAIL_SLICE, :]  # (B, 5, 2)：尾部 5 步执行参考预览
+        first_record = self._drift_ref_plan_tail is None or self._drift_ref_mu is None
+        if first_record:
+            # 首次记录 = 基准（u1）：位移为零，只给量级参考
+            plan_rms = mu_rms = 0.0
+        else:
+            plan_rms = float(np.sqrt(np.mean(np.square(tail - self._drift_ref_plan_tail))))
+            mu_rms = float(np.sqrt(np.mean(np.square(mu - self._drift_ref_mu))))
+        plan_tail_abs = float(np.mean(np.abs(tail)))
+        if first_record:
+            self._drift_ref_plan_tail = tail.copy()
+            self._drift_ref_mu = mu.copy()
+        record = {
+            "update": float(update_index),
+            "plan_rms_vs_init": plan_rms,
+            "mu_rms_vs_init": mu_rms,
+            "plan_tail_abs": plan_tail_abs,
+        }
+        self._drift_history.append(record)
+        self.logger(
+            f"[drift] update {update_index}: plan_rms_vs_init={plan_rms:.4g} "
+            f"mu_rms_vs_init={mu_rms:.4g} plan_tail_abs={plan_tail_abs:.4g}（n={int(tail.shape[0])}）"
+        )
+        return {"drift": {"available": 1.0, "n": float(tail.shape[0]), **record}}
+
+    def drift_summary(self) -> Dict[str, Any]:
+        """结尾汇总：drift 记录序列（相对首次记录的位移 + 尾部绝对值量级），供 metrics.json。"""
+        return {
+            "available": 1.0 if self._drift_ref_plan_tail is not None else 0.0,
+            "interval": int(self.probe_interval),
+            "updates": [int(record["update"]) for record in self._drift_history],
+            "plan_rms_vs_init": [record["plan_rms_vs_init"] for record in self._drift_history],
+            "mu_rms_vs_init": [record["mu_rms_vs_init"] for record in self._drift_history],
+            "plan_tail_abs": [record["plan_tail_abs"] for record in self._drift_history],
+        }
 
     def _to_tensor_obs(self, obs_list: Sequence[Mapping[str, np.ndarray]]) -> Dict["torch.Tensor"]:
         keys = [key for key in obs_list[0] if key not in NON_OBS_KEYS]
@@ -5336,6 +5442,7 @@ class PPOTrainer:
         metrics.update(self._reward_stats.summary())
         metrics.update(advantage_stats)
         metrics.update(self._probe_metrics())
+        metrics.update(self._drift_metrics())
         metrics.update(self.monitor.summary())
         self._last_metrics = metrics
         self._updates_done += 1

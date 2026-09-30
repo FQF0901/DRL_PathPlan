@@ -73,6 +73,7 @@ from pipeline.trainer import (  # noqa: E402
     BCConfig,
     BCDataset,
     DEFAULT_PROBE_BATCH,
+    DEFAULT_PROBE_INTERVAL,
     DEFAULT_STAGE_BATCH_SIZE,
     MaterializedBCDataset,
     PHASE3_WM_LOSS_KEYS,
@@ -525,6 +526,23 @@ def _resolve_stage_c_policy_logstd_max(args: argparse.Namespace, stage_cfg: Mapp
     if not math.isfinite(number):
         raise SystemExit(f"[stageC] policy_logstd_max 必须是有限浮点或 null（收到 {value!r}）")
     return number
+
+
+def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
+    """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
+
+    默认 :data:`DEFAULT_PROBE_INTERVAL` = 25（update）：u1 记基准，之后每个 interval 的倍数
+    各记一次 ``plan[:,1:6]``/``action_mu`` 相对首次记录的 RMS 位移。``0`` = 关闭 drift 探针
+    （固定探针批的既有 ``probe/*`` 指标不受影响）。
+    """
+    value = getattr(args, "probe_interval", None)
+    if value is None:
+        value = dict(stage_cfg or {}).get("probe_interval", DEFAULT_PROBE_INTERVAL)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        print(f"[stages] 无法解析 stage C probe_interval={value!r} → 回退 {DEFAULT_PROBE_INTERVAL}", flush=True)
+        return DEFAULT_PROBE_INTERVAL
 
 
 def _resume_epoch_of(resume_info: Mapping[str, Any], total_epochs: int) -> int:
@@ -3728,6 +3746,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     S2（v3，2026-09-30 探索降噪）：``--policy-logstd-max``（config ``stages.C.policy_logstd_max``，
     默认 ``None``）——策略分布构建点钳制 logstd 上界（采样与 update logprob 同一钳制后分布）；
     ``None`` = 不钳制（行为逐位不变）。
+    G4（v3 预注册 §0 必需项）：``--probe-interval``（config ``stages.C.probe_interval``，默认 25；
+    0=关）——每 N 个 update（含 u1 基准）在 ``train.probe_batch`` 固定探针批上做一次
+    ``rollout=True, world_model=False`` 前向，记录 ``plan[:,1:6]`` 尾部 5 步与 ``action_mu`` 相对
+    首次记录的 RMS 位移（``drift/*`` 指标 + ``metrics.json::drift`` 序列）。纯监控：no_grad，
+    不参与 loss、不改动作、不写 buffer；探针批缺失时启动告警并跳过该探针。
     """
     stage_cfg = _stage_section(config, "C")
     # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
@@ -3765,6 +3788,9 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     # 固定探针批（诊断）：train.probe_batch；缺失 → 默认 datasets/BTC20260926-2343_expert5k，显式 null → 关闭
     probe_cfg = train_cfg.get("probe_batch", DEFAULT_PROBE_BATCH)
     probe_batch = None if probe_cfg is None else str(probe_cfg)
+    # G4 drift 探针（v3 预注册 §0 必需项）：每 N update 在固定探针批上记录 plan[1:6]/action_mu
+    # 相对首次记录的 RMS 位移（纯监控；CLI --probe-interval 优先，0=关）
+    probe_interval = _resolve_stage_c_probe_interval(args, stage_cfg)
     device = resolve_device(args.device, config)
     model = build_model(_load_yaml(args.model_config))
     ckpt = args.ckpt or "runs/train/stage_b/final.pt"
@@ -3926,6 +3952,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "ckpt_every": ckpt_every,
         "device": device,
         "probe_batch": probe_batch,
+        "probe_interval": probe_interval,
         "plan_reference": plan_reference,
         "reward_config": reward_cfg,
         "reward_term_weights": reward_term_weights,
@@ -3968,6 +3995,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             ref_model=ref_model,
             bc_dataset=bc_dataset,
             probe_batch=probe_batch,
+            probe_interval=probe_interval,
             logger=print,
         )
         initial = pool.reset()
@@ -4038,6 +4066,16 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             f"[stageC] 训练 spec 覆盖：{len(trainer.spec_ids_seen)} 条 distinct"
             f"（episodes={len(trainer.episode_spec_ids)}；ids={preview}"
             + ("..." if len(trainer.spec_ids_seen) > len(preview) else "") + "）",
+            flush=True,
+        )
+        # G4 drift 探针：结尾汇总（相对首次记录的位移序列 + 尾部 5 步量级；异常抬升 ⇒ 结论受限）
+        metrics["drift"] = trainer.drift_summary()
+        drift = metrics["drift"]
+        print(
+            f"[stageC] drift 探针汇总：interval={drift['interval']} "
+            f"available={int(drift['available'])} updates={drift['updates']} "
+            f"plan_rms_vs_init={[round(value, 4) for value in drift['plan_rms_vs_init']]} "
+            f"mu_rms_vs_init={[round(value, 4) for value in drift['mu_rms_vs_init']]}",
             flush=True,
         )
     finally:
@@ -4240,6 +4278,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C 策略分布 logstd 上界钳制（S2/v3 探索降噪；默认取 config "
                              "stages.C.policy_logstd_max=null）：采样与 update logprob 使用同一钳制后分布；"
                              "缺省/null=不钳制（行为逐位不变）")
+    parser.add_argument("--probe-interval", type=int, default=None, metavar="N",
+                        help="阶段 C drift 探针间隔（G4 必需项；默认取 config stages.C.probe_interval=25）："
+                             "u1 记基准，之后每 N 个 update 在固定探针批上记录 plan[:,1:6]/action_mu 的 "
+                             "RMS 位移（纯监控，不进 loss/动作/buffer；0=关）")
     parser.add_argument("--bc-anchor", action="store_true", help="阶段 C 启用 BC 动作锚（默认关）")
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
     parser.add_argument("--reward-term-weight", action="append", default=None, metavar="NAME=W",
