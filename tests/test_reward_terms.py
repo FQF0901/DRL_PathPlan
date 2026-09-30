@@ -44,6 +44,7 @@ EXPECTED_TERMS = {
     "comfort_lat",
     "comfort_jerk",
     "lane_center",
+    "lane_boundary",
     "ttc",
     "speed_ratio",
     "solid_line",
@@ -229,6 +230,102 @@ def test_ttc_enablement_and_aggregation_components() -> None:
     assert step.raw_components["ttc"] == pytest.approx(0.5)
     assert step.components["ttc"] == pytest.approx(-0.25)
     assert step.reward == pytest.approx(0.5 + 0.1 - 0.25)
+
+
+def test_lane_boundary_margin_threshold_and_default_off() -> None:
+    """lane_boundary：居中 → 0、贴线 → 罚、压线封顶、单调、默认关（与 lane_center 互补）。"""
+    term = make_term("lane_boundary", weight=-0.2)
+    assert term.margin_threshold == pytest.approx(0.5)
+    half = 1.75  # 3.5 m 车道
+    # 余量 >= 阈值（|d_lat| <= 1.25）→ 0：车道内任意合法偏移不罚
+    for d_lat in (0.0, 0.5, -1.25, 1.25):
+        assert term.compute({"d_lat": d_lat, "lane_half_width_m": half}) == 0.0
+    # 贴线：|d_lat| = 1.6 → 余量 0.15 → raw = 0.35 → 加权 −0.07
+    assert term.compute({"d_lat": 1.6, "lane_half_width_m": half}) == pytest.approx(0.35)
+    assert term.compute({"d_lat": -1.6, "lane_half_width_m": half}) == pytest.approx(0.35)
+    assert term.weight * term.compute({"d_lat": 1.6, "lane_half_width_m": half}) == pytest.approx(-0.07)
+    # 压线/越界：margin <= 0 → raw 封顶在 margin_threshold（单步最差 −0.1）
+    assert term.compute({"d_lat": half, "lane_half_width_m": half}) == pytest.approx(0.5)
+    assert term.compute({"d_lat": 5.0, "lane_half_width_m": half}) == pytest.approx(0.5)
+    # 单调不减（越贴线 raw 越大；压线后封顶）
+    raws = [
+        term.compute({"d_lat": value, "lane_half_width_m": half})
+        for value in (1.0, 1.25, 1.4, 1.6, 1.75, 3.0)
+    ]
+    assert all(later >= earlier for earlier, later in zip(raws, raws[1:]))
+    # 默认关 + 参数非法 fail-fast
+    assert "lane_boundary" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
+    with pytest.raises(ValueError):
+        make_term("lane_boundary", margin_threshold=0.0)
+
+
+def test_lane_boundary_missing_keys_fallback_and_warn_once() -> None:
+    """lane_boundary：缺键 → 0 且只告警一次；lane_half_width_m 可由左右边界距离回退。"""
+    term = make_term("lane_boundary", weight=-0.2)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({"speed": 5.0}) == 0.0  # d_lat 与半宽都缺
+        assert term.compute({"d_lat": 1.6}) == 0.0  # 有横向偏差但缺半宽
+        assert term.compute({"lane_half_width_m": 1.75}) == 0.0  # 有半宽但缺 d_lat
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+    # 回退：d_lat=(2.75−1.25)/2=0.75、half=(2.75+1.25)/2=2.0 → 余量 1.25 → 0（车道内）
+    assert term.compute({"dist_to_left_side": 2.75, "dist_to_right_side": 1.25}) == 0.0
+    # 显式半宽非正 → 走回退；d_lat=−1.7、half=2.0 → 余量 0.3 → raw 0.2
+    assert term.compute(
+        {"d_lat": -1.7, "lane_half_width_m": 0.0, "dist_to_left_side": 3.7, "dist_to_right_side": 0.3}
+    ) == pytest.approx(0.2)
+    # 非法 d_lat（None / 非数值）→ 0
+    assert term.compute({"d_lat": None, "lane_half_width_m": 1.75}) == 0.0
+    assert term.compute({"d_lat": "bad", "lane_half_width_m": 1.75}) == 0.0
+
+
+def test_new_dense_terms_registered_and_default_list_frozen() -> None:
+    """新项已注册（可经 config/CLI 启用）；DEFAULT_TERM_CONFIGS 逐项快照不变。"""
+    assert {"ttc", "lane_boundary"} <= set(available_terms())
+    assert [dict(config) for config in DEFAULT_TERM_CONFIGS] == [
+        {"name": "route_completion", "weight": 1.0, "gamma": 1.0},
+        {"name": "speed_ratio", "weight": 1.0, "cap": 1.0},
+        {"name": "comfort_lon", "weight": -0.05, "deadband": 2.5},
+        {"name": "comfort_lat", "weight": -0.05, "deadband": 2.0},
+        {"name": "comfort_jerk", "weight": -0.005, "deadband": 5.0},
+        {"name": "solid_line", "weight": -2.0},
+        {"name": "speed_limit", "weight": -5.0, "tolerance": 0.05},
+        {"name": "crash", "weight": -10.0},
+        {"name": "out_of_road", "weight": -8.0},
+    ]
+
+
+def test_new_terms_enablement_via_term_weight_override_and_aggregation() -> None:
+    """``--reward-term-weight ttc=... lane_boundary=...`` 追加启用 + 聚合 components 数值。"""
+    from pipeline.trainer import build_reward_adapter
+
+    before = [dict(term) for term in DEFAULT_TERM_CONFIGS]
+    adapter, source = build_reward_adapter(term_weights={"ttc": -0.5, "lane_boundary": -0.2})
+    assert source.endswith("+term_weights+append(ttc,lane_boundary)")
+    aggregator = adapter.factory()
+    weights = {term.name: term.weight for term in aggregator.terms}
+    assert weights["ttc"] == pytest.approx(-0.5)
+    assert weights["lane_boundary"] == pytest.approx(-0.2)
+    assert weights["route_completion"] == 1.0
+
+    step = aggregator.step(
+        {
+            "speed_ratio": 0.5,
+            "route_completion": 0.2,
+            "lead_gap_m": 10.0,
+            "lead_speed_mps": 0.0,
+            "velocity": 10.0,
+            "d_lat": 1.6,
+            "lane_half_width_m": 1.75,
+        }
+    )
+    assert step.raw_components["ttc"] == pytest.approx(0.5)
+    assert step.components["ttc"] == pytest.approx(-0.25)
+    assert step.raw_components["lane_boundary"] == pytest.approx(0.35)
+    assert step.components["lane_boundary"] == pytest.approx(-0.07)
+    assert step.reward == pytest.approx(0.5 + 0.2 - 0.25 - 0.07)
+    assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
 
 
 def test_speed_ratio_efficiency_term() -> None:

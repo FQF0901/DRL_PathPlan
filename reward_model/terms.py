@@ -6,6 +6,8 @@
 - 安全（稠密近失，**默认关**）：``ttc``（前车时距危险度；无前车 / 缺键 = 0）。
 - 舒适（死区二次软惩罚）：``comfort_lon`` / ``comfort_lat`` / ``comfort_jerk``。
 - 车道保持（死区线性惩罚，**默认关**）：``lane_center``（偏离本车道中心线 ``|d_lat|``；无车道信息时为 0）。
+- 车道保持（贴近边界罚，**默认关**）：``lane_boundary``（``lane_half_width_m − |d_lat|`` 小于
+  阈值时线性罚；只罚"快出界"，不罚居中偏离）。
 - 效率：``speed_ratio``（``v / 车道限速`` 的截断收益，防爬行；超速交由合规项）。
 - 合规：``solid_line``（连续实线跨越）/ ``speed_limit``（超速量）。
 - 达成：``route_completion``（势能塑形 ``γΦ(s') − Φ(s)``，策略序保持）。
@@ -33,6 +35,7 @@ __all__ = [
     "LateralAccelPenalty",
     "JerkPenalty",
     "LaneCenterPenalty",
+    "LaneBoundaryPenalty",
     "SpeedRatioTerm",
     "SolidLineCrossingPenalty",
     "SpeedLimitViolationPenalty",
@@ -40,6 +43,7 @@ __all__ = [
     "DEFAULT_TERM_CONFIGS",
     "ego_speed_from_ctx",
     "lane_lateral_offset_from_ctx",
+    "lane_half_width_from_ctx",
 ]
 
 #: 任意一个为真即视为碰撞（MetaDrive ``info`` / P1a 契约 §0）
@@ -136,6 +140,29 @@ def lane_lateral_offset_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
     if left is None or right is None:
         return None
     return 0.5 * (left - right)
+
+
+def lane_half_width_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
+    """车道半宽（m）：优先显式 ``lane_half_width_m``（pipeline 侧注入）。
+
+    回退：由最近的左右车道边界距离推导 ``(dist_to_left_side + dist_to_right_side) / 2``
+    （两者之和 = 本车道宽度，与 :func:`lane_lateral_offset_from_ctx` 的回退同源）。
+    显式键非正 / 非有限，或回退值非正 → ``None``（调用方按无车道信息处理）。
+    """
+    explicit = _optional_float(step_ctx.get("lane_half_width_m"))
+    if explicit is not None and math.isfinite(explicit) and explicit > 0.0:
+        return explicit
+    left = _optional_float(step_ctx.get("dist_to_left_side"))
+    right = _optional_float(step_ctx.get("dist_to_right_side"))
+    if (
+        left is None
+        or right is None
+        or not math.isfinite(left)
+        or not math.isfinite(right)
+    ):
+        return None
+    half = 0.5 * (left + right)
+    return half if half > 0.0 else None
 
 
 @register_term
@@ -328,6 +355,60 @@ class LaneCenterPenalty(Term):
             return 0.0
         excess = _clip(abs(value), 0.0, self.clamp) - self.deadband
         return excess if excess > 0.0 else 0.0
+
+
+@register_term
+class LaneBoundaryPenalty(Term, _WarnMissingInputMixin):
+    """车道保持（贴近车道边界/路缘罚，**默认关**）：只罚"快出界"，不罚居中偏离。
+
+    定义
+    ----
+    ``margin = lane_half_width_m − |d_lat|``（自车中心到本车道边界的剩余余量，m）；
+
+    ``raw = max(0, margin_threshold − max(margin, 0))``
+
+    - 余量 ≥ ``margin_threshold``（默认 0.5 m）→ 0：车道内任意合法偏移都不罚，与
+      :class:`LaneCenterPenalty` 的"偏离中心"死区罚互补（后者从 ``|d_lat| > 0.25`` 起罚，
+      本项只在 ``|d_lat| > lane_half_width − 0.5`` 时触发）；
+    - 余量 < 阈值 → 线性罚，越贴线越大；``margin <= 0``（车中心已压线/越界）时
+      ``max(margin, 0)`` 把 raw 封顶在 ``margin_threshold``（默认权重 −0.2 → 单步最差 −0.1），
+      避免"越界越深罚越重"的无界斜坡；
+    - 单调：同一 ``lane_half_width_m`` 下 ``|d_lat|`` 越大 raw 越大（不增）；
+    - 语义边界（如实记录）：合法变道穿越边界带（``|d_lat| > lane_half_width_m − 阈值``）的
+      少数帧会触发小额罚（约 0.5 m 带宽 × 单步 ≤ 0.1），属"贴近路缘"信号本身；ctx 无可靠
+      信号可区分合法变道与跑偏，故不做变道豁免。
+
+    输入键
+    ------
+    - ``d_lat``：同 :func:`lane_lateral_offset_from_ctx`（显式别名 → 左右边界距离回退）；
+    - ``lane_half_width_m``：车道半宽（pipeline 侧注入）；缺失时回退
+      ``(dist_to_left_side + dist_to_right_side) / 2``（见 :func:`lane_half_width_from_ctx`）。
+
+    任一缺失 / 非法 → 0 且**只告警一次**（每实例）。启用：config
+    ``stages.C.reward.terms`` 追加，或 CLI ``--reward-term-weight lane_boundary=-0.2``；
+    默认**不在** :data:`DEFAULT_TERM_CONFIGS`。
+    """
+
+    name: ClassVar[str] = "lane_boundary"
+
+    def __init__(self, weight: float = -0.2, margin_threshold: float = 0.5) -> None:
+        if margin_threshold <= 0.0:
+            raise ValueError(f"margin_threshold 必须 > 0，收到 {margin_threshold}")
+        super().__init__(weight=weight, margin_threshold=float(margin_threshold))
+        self.margin_threshold = float(margin_threshold)
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        d_lat = lane_lateral_offset_from_ctx(step_ctx)
+        half_width = lane_half_width_from_ctx(step_ctx)
+        if d_lat is None or half_width is None or not math.isfinite(d_lat):
+            self._warn_missing_input(
+                "lane_boundary: 缺少 d_lat / lane_half_width_m 之一或值非法 → 该项记 0"
+                "（每个项实例只告警一次）"
+            )
+            return 0.0
+        margin = half_width - abs(d_lat)
+        deficit = self.margin_threshold - max(margin, 0.0)
+        return deficit if deficit > 0.0 else 0.0
 
 
 @register_term

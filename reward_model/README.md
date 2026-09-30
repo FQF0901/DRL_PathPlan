@@ -13,12 +13,21 @@
 | `speed_limit` | −5.0 | 超速量（默认 5% 容差） |
 | `crash` | −10.0 | 任意 `crash*` 标志，终止型 |
 | `out_of_road` | −8.0 | 出界，终止型 |
+| `ttc`（默认关） | −0.5（示例） | 前车近失：`raw = max(0, 1/max(ttc, 0.5) − 1/2.0)`，`ttc = lead_gap_m / max(v_ego − lead_speed_mps, ε)`；无前车/缺键 = 0 |
+| `lane_boundary`（默认关） | −0.2（示例） | 贴近路缘：`raw = max(0, 0.5 − max(lane_half_width_m − |d_lat|, 0))`；缺键 = 0 |
+| `lane_center`（默认关） | −0.1（示例） | 偏离车道中心死区罚 `max(0, min(|d_lat|, 3) − 0.25)`；缺键 = 0 |
 
 ## 聚合（`aggregation.py`）
 - 稠密项按权重求和；`shaping=True` 的项可乘 `shaping_decay` 退火（契约 §3 训练后期退火）。
-- 终止型项原始值 >0 即终止并记录原因；CaRL 式规则命中时把稠密和乘 `factor`（默认 0，碰撞清零）并可追加惩罚。
+- **CaRL 乘子只作用于正向稠密和**（v4 修复）：`reward = pos_dense×mult + neg_dense + terminating
+  + carl_penalty + terminal_value`——违规帧清零收益/塑形，但同帧的 `solid_line` 等罚分保留
+  （旧式 `dense_sum×0` 会把 −2.0 一并抹掉，与 KPI 口径相反）。
+- 终止型项原始值 >0 即终止并记录原因；CaRL 式规则命中时可追加惩罚（`factor=None` 表示不乘）。
 - 终局 outcome 仅终局步加一次：`arrive_dest +10` / `collision −5` / `out_of_road −5` / `max_step −2` / `error −5`。
 - `credit_assignment="dense"`（PPO/GAE 口径）| `"grouped_discounted"`（GRPO 消融）。
+- 默认关项的启用：config `stages.C.reward.terms` 追加，或 CLI 追加（已注册未配置 → 按给定权重启用）：
+  `--reward-term-weight ttc=-0.5 --reward-term-weight lane_boundary=-0.2`（参数可配 `ttc_threshold` /
+  `ttc_floor` / `margin_threshold`，见各类 docstring）。
 
 ## KPI（`kpi.py`）
 - 与 `config/eval.yaml` 同名同序 12 项；按 primary 标签（`spec.labels.geometry`）分组，附带标签单列
