@@ -132,6 +132,8 @@ __all__ = [
     "trainable_param_groups",
     "GRAD_PROBE_GROUPS",
     "grad_probe_group",
+    "episode_termination_reason",
+    "episode_window_metrics",
     "LocalEnvPool",
     "VectorPoolAdapter",
     "build_pool",
@@ -999,6 +1001,56 @@ def _update_group_norms(
 # --------------------------------------------------------------------------- #
 
 _CRASH_KEYS = ("crash", "crash_vehicle", "crash_object", "crash_building", "crash_sidewalk", "crash_human")
+
+
+def episode_termination_reason(
+    info: Mapping[str, Any],
+    *,
+    terminated: bool = False,
+    truncated: bool = False,
+    cut: bool = False,
+) -> str:
+    """训练侧 episode 终止原因（与 ``pipeline/eval_runner.py`` 的 termination 判定同序）。
+
+    判定序：``arrive_dest`` → 碰撞（``_CRASH_KEYS`` 任一）→ ``out_of_road`` → ``cut``
+    （池级整批 reset 的截断，见 VectorPoolAdapter）→ ``max_step``（truncated/info.max_step）
+    → ``other``。**纯函数、只读 info**。
+    """
+    info = info if isinstance(info, Mapping) else {}
+    if bool(info.get("arrive_dest", False)):
+        return "arrive_dest"
+    if any(bool(info.get(key, False)) for key in _CRASH_KEYS):
+        return "collision"
+    if bool(info.get("out_of_road", False)):
+        return "out_of_road"
+    if cut:
+        return "cut"
+    if truncated or bool(info.get("max_step", False)):
+        return "max_step"
+    return "other"
+
+
+def episode_window_metrics(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """一个 update 窗口内的 episode 统计（⑤ v4 训练侧数据探针）。
+
+    ``records`` 每项 = ``{"reason", "steps", "return"}``（termination 当步写入）；
+    返回 ``{"count", "termination_counts", "mean_steps_by_reason", "mean_return_by_reason"}``
+    （空窗口 → count=0 + 空映射；嵌套 dict 由 monitoring 展平为 ``episodes/...`` tag）。
+    """
+    counts: Dict[str, int] = {}
+    steps: Dict[str, List[int]] = {}
+    returns: Dict[str, List[float]] = {}
+    for record in records:
+        reason = str(record.get("reason", "other"))
+        counts[reason] = counts.get(reason, 0) + 1
+        steps.setdefault(reason, []).append(int(record.get("steps", 0)))
+        returns.setdefault(reason, []).append(float(record.get("return", 0.0)))
+    return {
+        "count": float(len(records)),
+        "termination_counts": {key: float(value) for key, value in sorted(counts.items())},
+        "mean_steps_by_reason": {key: float(np.mean(value)) for key, value in sorted(steps.items())},
+        "mean_return_by_reason": {key: float(np.mean(value)) for key, value in sorted(returns.items())},
+    }
 
 
 def make_stub_reward() -> Callable[..., float]:
@@ -4920,6 +4972,9 @@ class PPOTrainer:
         self._obs_list: Optional[List[Dict[str, np.ndarray]]] = None
         self._episode_id = [0] * self._num_envs
         self._step_in_episode = [0] * self._num_envs
+        #: ⑤ v4 训练侧 episode 探针：跨 update 的 episode 累计回报（done 时清零）+ 窗口记录。
+        self._episode_reward = [0.0] * self._num_envs
+        self._episode_records: List[Dict[str, Any]] = []
         self._pose_est: List[Optional[np.ndarray]] = [None] * self._num_envs
         self.buffer: Optional[RolloutBuffer] = None
         self._valid_mask: Optional[np.ndarray] = None
@@ -4957,6 +5012,7 @@ class PPOTrainer:
         self._num_envs = int(len(self._obs_list))
         self._episode_id = [0] * self._num_envs
         self._step_in_episode = [0] * self._num_envs
+        self._episode_reward = [0.0] * self._num_envs
         self._pose_est = [None] * self._num_envs
         self.reward_adapter.reset_all()
 
@@ -5332,6 +5388,8 @@ class PPOTrainer:
                     env_index, info, obs_current, done, float(record.get("reward", 0.0) or 0.0)
                 )
                 self._reward_stats.update(reward_meta, reward)
+                # ⑤ v4 episode 探针：跨 update 累计本 episode 回报（done 时结算并清零）
+                self._episode_reward[env_index] += float(reward)
                 pose = self._frame_pose(env_index, obs_current)
                 # router_labels（P0-2 对齐）：worker 步开始快照（Vector）> 池级步前快照（Local）
                 #   > record/info 的步后标签（旧接口回退）。
@@ -5365,6 +5423,17 @@ class PPOTrainer:
                 self._advance_pose(env_index, actions_np[env_index])
                 self._step_in_episode[env_index] += 1
                 if done:
+                    # ⑤ v4：episode 终止当步结算（steps = 本 episode 步数；return = 累计奖励）
+                    self._episode_records.append(
+                        {
+                            "reason": episode_termination_reason(
+                                info, terminated=terminated, truncated=truncated, cut=cut
+                            ),
+                            "steps": int(self._step_in_episode[env_index]),
+                            "return": float(self._episode_reward[env_index]),
+                        }
+                    )
+                    self._episode_reward[env_index] = 0.0
                     self._episode_id[env_index] += 1
                     self._step_in_episode[env_index] = 0
                     self._pose_est[env_index] = None
@@ -5713,6 +5782,9 @@ class PPOTrainer:
             "backward_s": float(t_backward),
         }
         metrics["reward_early_terminations"] = int(self.reward_adapter.early_terminations)
+        # ⑤ v4 训练侧数据探针：本 update 窗口内 episode 统计（termination/步数/回报）
+        metrics["episodes"] = episode_window_metrics(self._episode_records)
+        self._episode_records = []
         metrics.update(self._reward_stats.summary())
         metrics.update(advantage_stats)
         metrics.update(self._probe_metrics())
