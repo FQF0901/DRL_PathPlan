@@ -565,6 +565,22 @@ def _resolve_stage_c_target_kl(args: argparse.Namespace, train_cfg: Mapping[str,
     return number
 
 
+def _resolve_stage_c_group_probe_every(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> int:
+    """③ v4 分组梯度/更新范数探针间隔（CLI ``--group-probe-every`` 优先；config
+    ``train.ppo.group_probe_every``）。
+
+    默认 1 = 每 update；0 = 关闭；非法（负数/非整数）回退 1（诊断项，不 fail-fast 训练）。
+    """
+    value = getattr(args, "group_probe_every", None)
+    if value is None:
+        value = (dict(train_cfg or {}).get("ppo") or {}).get("group_probe_every", 1)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        print(f"[stages] 无法解析 stage C group_probe_every={value!r} → 回退 1", flush=True)
+        return 1
+
+
 def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
     """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
 
@@ -3852,6 +3868,14 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                                  else f"{target_kl:g}（approx_kl 超阈值 → 跳过剩余 minibatch）"),
         flush=True,
     )
+    # ③ 分参数组梯度/更新范数探针（v4）：默认每 update（0=关；纯监控）
+    group_probe_every = _resolve_stage_c_group_probe_every(args, train_cfg)
+    print(
+        f"[stageC] group_probe_every={group_probe_every}"
+        + ("（每 update 记录 grad_group/<group>/{pre_clip,update}；纯监控）"
+           if group_probe_every > 0 else "（分组梯度探针关闭）"),
+        flush=True,
+    )
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
@@ -3992,6 +4016,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "primary_lr_scale": primary_lr_scale,
         "value_lr_scale": value_lr_scale,
         "target_kl": target_kl,
+        "group_probe_every": group_probe_every,
         "trainable_scope": trainable_scope,
         "trainable_params": trainable_params,
         "trainable_groups": [dict(group) for group in trainable_groups],
@@ -4036,6 +4061,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             primary_lr_scale=primary_lr_scale,
             value_lr_scale=value_lr_scale,
             target_kl=target_kl,
+            group_probe_every=group_probe_every,
             critic_warmup_updates=critic_warmup_updates,
             adv_norm=adv_norm,
             plan_reference=plan_reference,
@@ -4321,6 +4347,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "某 minibatch approx_kl > TARGET_KL 时跳过该 epoch 剩余 minibatch"
                              "（并终止本 update 后续 epoch），记 train/kl_early_stop；"
                              "null/缺省=旧行为（跑满 epochs×minibatch）")
+    parser.add_argument("--group-probe-every", type=int, default=None, metavar="N",
+                        help="阶段 C 分参数组梯度/更新范数探针间隔（默认取 config "
+                             "train.ppo.group_probe_every=1=每 update）：记录 policy/value/experts/other 的 "
+                             "pre-clip 梯度范数与实际更新范数（纯监控，不进优化器）；0=关闭")
     parser.add_argument("--kl-anchor-coef", type=float, default=0.05, help="阶段 C KL 锚初始系数（默认 0.05）")
     parser.add_argument("--kl-anchor-final-coef", type=float, default=0.0, help="阶段 C KL 锚末值（默认 0）")
     parser.add_argument("--kl-anchor-decay", action=argparse.BooleanOptionalAction, default=True,

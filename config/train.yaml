@@ -16,6 +16,9 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
     target_kl: null               # v4 ② KL 守门（CLI --target-kl）：某 minibatch approx_kl > 该值时
                                   # 跳过该 epoch 剩余 minibatch（并终止本 update 后续 epoch），
                                   # 记 train/kl_early_stop；null（默认）= 不守门（旧行为：跑满）
+    group_probe_every: 1          # v4 ③ 分参数组梯度/更新范数探针间隔（CLI --group-probe-every）：
+                                  # 每 N 个 update 记录 policy/value/experts/other 的 pre-clip 梯度范数
+                                  # 与实际更新范数（纯监控，不进优化器；0=关）
   wm:
     batch_size: &stage_a_batch 1024   # Stage A 宏 batch（物化快路径 + 梯度累积；CLI --batch-size 覆盖）
     micro_batch_size: &stage_a_micro 256  # ST-GNN 6 步展开实测 ~32MB/样本：12GB 卡 micro 上限 256（384 OOM）

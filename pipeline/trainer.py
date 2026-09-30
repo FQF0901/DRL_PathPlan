@@ -130,6 +130,8 @@ __all__ = [
     "STAGE_C_TRAINABLE_SCOPES",
     "apply_trainable_allowlist",
     "trainable_param_groups",
+    "GRAD_PROBE_GROUPS",
+    "grad_probe_group",
     "LocalEnvPool",
     "VectorPoolAdapter",
     "build_pool",
@@ -618,6 +620,10 @@ class PPOConfig:
     #: 指标 ``kl_early_stop``（本次 update 是否触发）/ ``kl_early_stop_total``（累计次数）；
     #: ``None``（默认）= 不守门（旧行为：跑满 epochs×minibatch）。
     target_kl: Optional[float] = None
+    #: ③ v4 分参数组梯度/更新范数探针间隔（CLI ``--group-probe-every`` / config
+    #: ``train.ppo.group_probe_every``）：每 N 个 update 记录一次 ``grad_group/<group>/{pre_clip,update}``
+    #: （policy/value/experts/other）；``1``（默认）= 每 update，``0`` = 关闭（纯监控，不影响数值）。
+    group_probe_every: int = 1
     #: 前 N 个 update 只拟合 critic（value 头），策略/共享主干冻结（0 = 关闭，行为同旧版）。
     critic_warmup_updates: int = 0
     seed: int = 0
@@ -652,6 +658,13 @@ class PPOConfig:
             if not math.isfinite(target) or target <= 0.0:
                 raise ValueError(f"target_kl 必须是有限正浮点或 None（收到 {self.target_kl!r}）")
             self.target_kl = target
+        try:
+            every = int(self.group_probe_every)
+        except (TypeError, ValueError):
+            raise ValueError(f"group_probe_every 必须是整数（收到 {self.group_probe_every!r}）") from None
+        if every < 0:
+            raise ValueError(f"group_probe_every 必须 >= 0（收到 {self.group_probe_every!r}）")
+        self.group_probe_every = every
 
 
 @dataclass
@@ -904,6 +917,67 @@ def trainable_param_groups(
     return tuple(
         {"prefix": prefix, "params": count, "lr": group_lr} for (prefix, group_lr), count in totals.items()
     )
+
+
+# --------------------------------------------------------------------------- #
+# ③ v4 分参数组梯度/更新范数探针（纯监控；不进 loss/优化器）
+# --------------------------------------------------------------------------- #
+
+#: 组划分前缀（最长匹配优先）：policy.* / value.* / plan_head.moe.experts.*；其余 = other。
+_GRAD_PROBE_GROUP_PREFIXES: Tuple[Tuple[str, str], ...] = (
+    ("experts", "plan_head.moe.experts."),
+    ("policy", "policy."),
+    ("value", "value."),
+)
+#: 探针输出的固定组序（指标键 grad_group/<group>/{pre_clip,update}）。
+GRAD_PROBE_GROUPS: Tuple[str, ...] = ("policy", "value", "experts", "other")
+
+
+def grad_probe_group(name: str, value_names: "frozenset[str]" = frozenset()) -> str:
+    """参数名 → 探针组（``policy`` / ``value`` / ``experts`` / ``other``）。
+
+    ``value_names`` 为 :func:`_value_parameter_names` 的兜底集合（真实模型 ``value.*`` 由前缀
+    命中；smoke stub ``head_value.*`` 靠集合命中）。
+    """
+    for group, prefix in _GRAD_PROBE_GROUP_PREFIXES:
+        if name.startswith(prefix):
+            return group
+    return "value" if name in value_names else "other"
+
+
+def _grad_group_norms(model: "nn.Module", value_names: "frozenset[str]" = frozenset()) -> Dict[str, float]:
+    """当前 ``.grad`` 的**分组 pre-clip 梯度范数**（只读；无梯度组记 0.0）。"""
+    sums: Dict[str, float] = {group: 0.0 for group in GRAD_PROBE_GROUPS}
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        sums[grad_probe_group(name, value_names)] += float(parameter.grad.detach().pow(2).sum())
+    return {group: math.sqrt(value) for group, value in sums.items()}
+
+
+def _param_snapshot(model: "nn.Module") -> Dict[str, "torch.Tensor"]:
+    """``optimizer.step`` 前快照（只含可能被更新的参数：``requires_grad`` 且有 ``.grad``）。"""
+    return {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    }
+
+
+def _update_group_norms(
+    snapshot: Mapping[str, "torch.Tensor"],
+    model: "nn.Module",
+    value_names: "frozenset[str]" = frozenset(),
+) -> Dict[str, float]:
+    """``step`` 前后参数差的分组范数（实际更新范数；未在快照中的参数按 0 计）。"""
+    sums: Dict[str, float] = {group: 0.0 for group in GRAD_PROBE_GROUPS}
+    for name, parameter in model.named_parameters():
+        before = snapshot.get(name)
+        if before is None:
+            continue
+        delta = parameter.detach() - before
+        sums[grad_probe_group(name, value_names)] += float(delta.pow(2).sum())
+    return {group: math.sqrt(value) for group, value in sums.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -5082,6 +5156,14 @@ class PPOTrainer:
             env_index, info, obs, done, pool_reward, step_index=self._step_in_episode[env_index]
         )
 
+    def _group_probe_due(self) -> bool:
+        """③ v4 分组梯度/更新范数探针是否在本 update 记录：``group_probe_every`` 的倍数。
+
+        ``1``（默认）= 每 update；``0`` = 关闭；``N>1`` = 第 u1、u1+N、... 个 update（纯监控）。
+        """
+        every = int(self.config.group_probe_every)
+        return every > 0 and (self._updates_done % every == 0)
+
     # ---------------------------------------------------------------- 收集
     def reset_pool(self) -> List[Dict[str, np.ndarray]]:
         records = self.pool.reset()
@@ -5370,6 +5452,13 @@ class PPOTrainer:
         t_data = t_forward = t_backward = 0.0
         #: ② v4 KL 守门：本 update 是否触发（None=不守门时恒 False）。
         kl_early_stop = False
+        # ③ v4 分参数组梯度/更新范数探针（纯监控）：每 group_probe_every 个 update 记录一次。
+        group_probe = self._group_probe_due()
+        group_value_names: "frozenset[str]" = frozenset()
+        grad_group_pre: Dict[str, List[float]] = {}
+        grad_group_update: Dict[str, List[float]] = {}
+        if group_probe:
+            group_value_names = frozenset(self._value_param_names)
         try:
             # V12（P2 性能）：obs/历史组装按行独立 ⇒ 每个 update 全量组装一次，minibatch 只做
             # 行切片（旧实现每 epoch×minibatch 重复重建历史窗口；默认 epochs=2 时组装次数减半，
@@ -5449,8 +5538,18 @@ class PPOTrainer:
                     t2 = time.perf_counter()
                     self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
+                    if group_probe:
+                        # ③ pre-clip 分组梯度范数（clip 前；纯读 .grad）
+                        pre_clip_norms = _grad_group_norms(self.model, group_value_names)
                     grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm))
+                    snapshot = _param_snapshot(self.model) if group_probe else None
                     self.optimizer.step()
+                    if group_probe:
+                        update_norms = _update_group_norms(snapshot or {}, self.model, group_value_names)
+                        for group, value in pre_clip_norms.items():
+                            grad_group_pre.setdefault(group, []).append(value)
+                        for group, value in update_norms.items():
+                            grad_group_update.setdefault(group, []).append(value)
                     t_backward += time.perf_counter() - t2
                     self.monitor.update(out)
                     if warmup:
@@ -5502,6 +5601,17 @@ class PPOTrainer:
         metrics["kl_early_stop"] = 1.0 if kl_early_stop else 0.0
         metrics["kl_early_stop_total"] = float(self._kl_early_stops)
         metrics["target_kl"] = float(self.config.target_kl) if self.config.target_kl is not None else None
+        # ③ v4 分组探针：本 update 的 pre-clip 梯度范数 + 实际更新范数（纯监控；every=0 不产出）
+        if group_probe and grad_group_pre:
+            metrics["grad_group"] = {
+                group: {
+                    "pre_clip": float(np.mean(grad_group_pre.get(group, [0.0]))),
+                    "update": float(np.mean(grad_group_update.get(group, [0.0]))),
+                }
+                for group in GRAD_PROBE_GROUPS
+                if group in grad_group_pre or group in grad_group_update
+            }
+            metrics["grad_group_every"] = int(self.config.group_probe_every)
         metrics["total_steps"] = self._total_steps
         metrics["update_timing_s"] = {
             "data_s": float(t_data),
