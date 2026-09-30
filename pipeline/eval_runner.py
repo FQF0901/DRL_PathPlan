@@ -8,7 +8,9 @@
    ``runs/baseline_eval/val_reference.json``）；``--policy ckpt`` = 加载 N1 的
    ``DrivingModel`` 权重并用 N3 的 ``env.tracking`` 执行动作：
    ``--tracker exact``（默认，阶段 A/B：每 0.1 s 子步置于插值位姿，衡量规划轨迹本身）
-   或 ``--tracker lqr``（阶段 C 闭环，含控制器跟踪误差）；
+   或 ``--tracker lqr``（阶段 C 闭环，含控制器跟踪误差）；跟踪器参考口径由
+   ``--eval-reference`` 选择：``plan``（默认，6 步规划预览，历史口径）/
+   ``repeat_action``（``repeat(action_mu, 6)``，与训练 A-hold 同构的语义定价口径）；
 2. **内存纪律（§8.1）**：运行前程序化检查 ``MemAvailable >= eval.mem_available_floor_mb``，
    按 ``eval.train_pool_policy`` 调可选的训练池暂停钩子；spawn 进程池按
    ``eval.recycle_every_specs``（每 worker 每代处理的 spec 数）重建池 —— 照抄
@@ -85,7 +87,9 @@ except ImportError:  # pragma: no cover
 __all__ = [
     "DEFAULT_BASELINE_REF",
     "DEFAULT_MAX_STEPS",
+    "EVAL_REFERENCES",
     "KPI_DEFINITIONS",
+    "build_eval_references",
     "build_report",
     "category_target",
     "evaluate_verdicts",
@@ -763,12 +767,49 @@ def _build_model_from_config(config: Mapping[str, Any]) -> Any:
 # + 每策略步 `set_reference((N,2))`（见 `_CkptController.bind/action`）。
 
 
+#: 评测跟踪器参考口径（``--eval-reference``）：
+#: ``plan``（默认，历史口径）= 6 步 plan 预览（``plan[0] = action_mu``，rollout 前向）；
+#: ``repeat_action`` = ``repeat(action_mu, 6)``（与训练 P0-1 A-hold 同构；走 cheap path，不需要 plan）。
+EVAL_REFERENCES: tuple[str, ...] = ("plan", "repeat_action")
+
+
+def build_eval_references(
+    mu_action: np.ndarray, plan: Optional[np.ndarray], reference: str
+) -> np.ndarray:
+    """构造跟踪器 6 步参考 ``(6,2)``（确定性评测：动作 = ``action_mu``）。
+
+    - ``repeat_action``：``np.repeat(mu_action[None, :], 6, axis=0)``——与训练
+      ``PPOTrainer.collect_rollout`` 的 A-hold 口径同构（训练用采样动作 ``a_t``，评测确定性
+      用 ``mu``）；不需要 plan 输出（可走 ``rollout=False`` cheap path）；
+    - ``plan``（默认，现状）：plan 预览 ``(6,2)``，首步强制 = ``mu_action``（旧行为逐位不变）。
+    """
+    mu = np.asarray(mu_action, dtype=np.float64).reshape(2)
+    if reference == "repeat_action":
+        return np.repeat(mu[None, :], 6, axis=0)
+    if reference != "plan":
+        raise ValueError(f"未知 eval_reference={reference!r}（可选 {'/'.join(EVAL_REFERENCES)}）")
+    if plan is None:
+        raise ValueError("eval_reference='plan' 需要模型 plan 输出（rollout=True）")
+    tail = np.asarray(plan, dtype=np.float64).reshape(-1, 2).copy()
+    if tail.shape[0] != 6:
+        raise ValueError(f"plan 参考期望 (6,2)，收到 {tail.shape}")
+    tail[0] = mu
+    return tail
+
+
 class _CkptController:
     """ckpt 策略：每 0.5 s 用 ``DrivingModel`` 出 ``(ds, dθ)``，交给 N3 跟踪器逐步执行。
 
     观测每 env step 都过 ``ObservationBuilder``（历史窗口依赖逐 step push），动作只
-    在 5 步（0.5 s）边界重算；跟踪器参考由 ``env.tracking.interpolate`` 从单个动作
+    在 5 步（0.5 s）边界重算；跟踪器参考由 ``env.tracking.interpolate`` 从 6 步动作序列
     插值成 30 点（契约 §1）。
+
+    ``task["eval_reference"]``（``--eval-reference``，默认 ``plan``）：
+
+    - ``plan``（历史口径，默认）：6 步 plan 预览（``plan[0] = action_mu``），模型前向走
+      ``rollout=True``；
+    - ``repeat_action``：参考 = ``repeat(action_mu, 6)``（训练 A-hold 同构）→ ``rollout=False``
+      cheap path（不消费 plan）。
     """
 
     kind = "ckpt"
@@ -790,11 +831,17 @@ class _CkptController:
         self.tracker_config = dict(task.get("tracker_config") or {})
         #: "exact"（阶段 A/B 精确/运动学执行，默认）| "lqr"（阶段 C 闭环）
         self.tracker_kind = str(task.get("tracker") or "exact").lower()
+        #: 跟踪器参考口径（``--eval-reference``；默认 plan = 历史口径，行为不变）
+        self.eval_reference = str(task.get("eval_reference") or "plan")
+        if self.eval_reference not in EVAL_REFERENCES:
+            raise ValueError(
+                f"未知 eval_reference={self.eval_reference!r}（可选 {'/'.join(EVAL_REFERENCES)}）"
+            )
         self.builder = None
         self.tracker = None
         self._steps = 0
         self._action = [0.0, 0.0]
-        #: 最近一次策略决策实际下发的 ``(ds[m], dθ[rad])``（``plan[0] == action_mu``）
+        #: 最近一次策略决策实际下发的 ``(ds[m], dθ[rad])``（``references[0] == action_mu``）
         self._plan_action = np.zeros(2, dtype=np.float64)
         #: 逐 env step 的自车实测位姿（用于重建"上一策略步实测动作"，见 _measured_prev_action）
         self._pose_history: List[Tuple[float, float, float]] = []
@@ -874,21 +921,25 @@ class _CkptController:
             env.prev_policy_action = measured  # 供本次决策的 obs（ego reserved 6:8）
         obs = self.builder.build(env, self.spec)
         if self._steps % self.decision_interval == 0:
+            # 参考口径（--eval-reference，默认 plan=现状）：
+            #   plan：需要 6 步规划预览（跟踪器参考：首步执行动作 + 后 5 步 WM/plan 预览）；
+            #   repeat_action：参考 = repeat(mu, 6)（训练 A-hold 同构）→ cheap path（rollout=False）。
+            need_plan = self.eval_reference == "plan"
             with torch.no_grad():
-                # 需要 6 步规划预览（跟踪器参考）：走 rollout 路径（跳过 WM 直接多步）。
-                # 单动作参考会退化为"瞄准参考终点"的 4–5 m 前视 → 车道保持/速度都会退化。
-                output = self.model(self._tensors(obs), rollout=True, world_model=False)
+                output = self.model(self._tensors(obs), rollout=need_plan, world_model=False)
             mu = np.asarray(output["action_mu"].detach().cpu(), dtype=np.float64).reshape(-1)
-            plan = np.asarray(output["plan"].detach().cpu(), dtype=np.float64).reshape(-1, 2)
-            plan[0] = mu[:2]  # 执行动作与策略均值一致（确定性评测）
+            plan = None
+            if need_plan:
+                plan = np.asarray(output["plan"].detach().cpu(), dtype=np.float64).reshape(-1, 2)
+            references = build_eval_references(mu[:2], plan, self.eval_reference)
             # 实际下发动作（供 action_ds/action_dtheta 指标；见 action_info）
-            self._plan_action = np.array(plan[0], dtype=np.float64, copy=True)
+            self._plan_action = np.array(references[0], dtype=np.float64, copy=True)
             if self.tracker_kind == "exact":
-                # 阶段 A/B：把 6 步预览插值成 30 点参考，逐步 apply（env.step 之后）
-                self.tracker.arm(env, actions=plan)
+                # 阶段 A/B：把 6 步参考插值成 30 点参考，逐步 apply（env.step 之后）
+                self.tracker.arm(env, actions=references)
             else:
                 # 阶段 C：set_reference((N,2) 动作序列)，跟踪器内部插值成 30 点
-                self.tracker.set_reference(plan)
+                self.tracker.set_reference(references)
         self._steps += 1
         # engine 已注册策略，传回的占位动作会被忽略（engine/base_engine.py:98-104）
         return self._action
@@ -1542,6 +1593,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracker", choices=("lqr", "exact"), default="exact",
                         help="ckpt 动作执行器：exact=阶段 A/B 精确/运动学执行（默认，衡量规划轨迹本身）；"
                              "lqr=阶段 C 闭环跟踪（含控制器跟踪误差）")
+    parser.add_argument("--eval-reference", choices=EVAL_REFERENCES, default="plan",
+                        help="ckpt 跟踪器参考口径（默认 plan = 现状：6 步规划预览，plan[0]=action_mu）；"
+                             "repeat_action = repeat(action_mu,6)（训练 A-hold 同构，cheap path，不消费 plan）")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
@@ -1648,6 +1702,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "torch_threads": torch_threads,
             "omp_num_threads": int(omp_num_threads),
             "tracker": str(args.tracker),
+            "eval_reference": str(args.eval_reference),
             "moe_off": bool(getattr(args, "moe_off", False)),
         }
         for spec in specs
@@ -1689,6 +1744,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "policy_class": ("env.expert.pure_pursuit_idm.PurePursuitIDMPolicy"
                          if args.policy == "baseline" else "net.model.DrivingModel"),
         "tracker": str(args.tracker) if args.policy == "ckpt" else None,
+        "eval_reference": str(args.eval_reference) if args.policy == "ckpt" else None,
         "policy_params_effective": effective_params,
         "workers": workers,
         "recycle_every_specs": recycle_every,
