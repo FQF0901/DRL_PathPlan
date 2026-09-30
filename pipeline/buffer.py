@@ -18,7 +18,8 @@ slot 身份由 OD 通道固定（槽位 = track id，见 ``env/obs/od.py``）。
 - :meth:`RolloutBuffer.build_history`：给定帧下标批量重建历史窗口
   （``<ch>_hist (B,6,N,F)`` / ``<ch>_hist_mask (B,6,N)`` / ``od_id_hist`` / ``hist_valid``）；
 - :meth:`RolloutBuffer.compute_gae`：GAE(λ) 优势/回报（按 episode 切断，终局不 bootstrap，
-  截断处按 ``truncation_bootstrap`` 处理）；
+  截断处按 ``truncation_bootstrap`` 处理；``valid_mask`` 给定时 padding/bootstrap 行
+  不参与优势链、仅作前一有效帧的 bootstrap 价值容器）；
 - :meth:`RolloutBuffer.episode_slices`：按 episode 的连续区间（PPO 分段用）。
 """
 
@@ -124,6 +125,9 @@ class RolloutBuffer:
         self.truncated = np.zeros(self.capacity, dtype=bool)
         self.episode = np.zeros(self.capacity, dtype=np.int32)
         self.step_index = np.zeros(self.capacity, dtype=np.int32)
+        #: 帧级场景/环境标识（spec.id；未知 = -1）。per_scenario 优势归一化的分组键
+        #: （见 ``PPOConfig.adv_norm``）；默认全 -1 → 该口径退化为单组（= global）。
+        self.spec_id = np.full(self.capacity, -1, dtype=np.int32)
         self._len = 0
         self._lookup: Optional[FrameLookup] = None
         self._lookup_len = -1
@@ -155,12 +159,14 @@ class RolloutBuffer:
         truncated: bool = False,
         episode: Optional[int] = None,
         step: Optional[int] = None,
+        spec_id: Optional[int] = None,
     ) -> int:
         """写入一帧（当前帧通道 + 掩码 + 伴随数组 + 位姿 + 动作/回报等元信息），返回帧下标。
 
         ``obs`` 只取**当前帧**通道（``ego/od/ld/nav/signal/others`` 与 ``*_mask``）与伴随数组
         （``od_id``/``od_presence``），``*_hist`` 之类的键被忽略。``episode``/``step`` 缺省时按
-        "上一帧终局则新 episode、步号自增"自动维护。
+        "上一帧终局则新 episode、步号自增"自动维护。``spec_id`` = 该帧所属场景（spec.id，
+        未知/旧调用方缺省 -1），供 ``per_scenario`` 优势归一化分组。
         """
         if self._len >= self.capacity:
             raise BufferError(f"RolloutBuffer 已满（capacity={self.capacity}）")
@@ -198,6 +204,7 @@ class RolloutBuffer:
         self.truncated[index] = bool(truncated)
         self.episode[index] = episode_id
         self.step_index[index] = step_id
+        self.spec_id[index] = -1 if spec_id is None else int(spec_id)
         self._len += 1
         self._invalidate_lookup()
         return index
@@ -333,6 +340,7 @@ class RolloutBuffer:
         lam: float = 0.95,
         truncation_bootstrap: float = 0.0,
         normalize: bool = False,
+        valid_mask: Optional[Any] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """GAE(λ) → ``(advantages, returns)``（均 float32）。
 
@@ -341,11 +349,35 @@ class RolloutBuffer:
           中间被截断的 episode 用 ``truncation_bootstrap``（默认 0，因为 reset 后的
           "下一观测"不在本缓冲内）；
         - ``normalize=True`` 时对优势做零均值/单位方差（不改 returns）。
+
+        ``valid_mask``（trainer 口径，2026-09-30 G3 修复）：长度 >= ``len(self)`` 的布尔数组，
+        ``False`` 行 = **padding/bootstrap 行**（env-major 布局里每 env 段末尾的
+        "下一观测价值容器"；见 ``PPOTrainer.collect_rollout``）。给定时的语义：
+
+        * padding 行不参与优势链——其优势记 0，且不把自身（伪）优势沿 ``γλ`` 传播给前一帧
+          （旧实现把 padding 行当成真实一步，末段有效帧的优势会带 ``−γλ·V_bootstrap`` 的
+          系统性偏差，且随 ``(γλ)^k`` 衰减污染整个尾部）；
+        * padding 行仍作为**其前一有效帧的 bootstrap 价值容器**（``V(s_H)`` 供末帧
+          ``δ = r + γV(s_H) − V(s_t)`` 使用）。
+
+        ``None`` = 旧行为（所有行都参与链；纯 buffer 单测/无 padding 布局逐位不变）。
         """
         n = self._len
         advantages = np.zeros(n, dtype=np.float32)
+        if valid_mask is None:
+            valid = None
+        else:
+            mask = np.asarray(valid_mask, dtype=bool)
+            if mask.shape[0] < n:
+                raise ValueError(f"valid_mask 长度 {mask.shape[0]} < buffer 长度 {n}")
+            valid = mask[:n]
         last_gae = 0.0
         for t in range(n - 1, -1, -1):
+            if valid is not None and not valid[t]:
+                # padding/bootstrap 行：仅价值容器，不参与优势链
+                advantages[t] = 0.0
+                last_gae = 0.0
+                continue
             is_last = t == n - 1
             same_next = (not is_last) and int(self.episode[t + 1]) == int(self.episode[t])
             if is_last:
@@ -361,8 +393,14 @@ class RolloutBuffer:
             advantages[t] = last_gae
         returns = advantages + self.value[:n]
         if normalize and n > 1:
-            std = float(advantages.std())
-            advantages = (advantages - float(advantages.mean())) / (std + 1e-8)
+            pool = advantages if valid is None else advantages[valid]
+            if pool.size > 1:
+                normalized = (pool - pool.mean()) / (pool.std() + 1e-8)
+                if valid is None:
+                    advantages = normalized
+                else:
+                    advantages = advantages.copy()
+                    advantages[valid] = normalized
         return advantages, returns.astype(np.float32)
 
     # ------------------------------------------------------------------ 视图
@@ -393,6 +431,7 @@ class RolloutBuffer:
             "truncated": self.truncated[: self._len],
             "episode": self.episode[: self._len],
             "step_index": self.step_index[: self._len],
+            "spec_id": self.spec_id[: self._len],
         }
         if copy:
             return {key: value.copy() for key, value in data.items()}

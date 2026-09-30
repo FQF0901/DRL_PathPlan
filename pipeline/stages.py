@@ -3760,6 +3760,17 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         args.critic_warmup_updates if args.critic_warmup_updates is not None else (critic_warmup_cfg or 0)
     )
     critic_warmup_updates = max(0, critic_warmup_updates)
+    # 优势归一化口径（G3/v3）：CLI > config train.adv_norm > global（默认，旧行为）
+    adv_norm = str(args.adv_norm or train_cfg.get("adv_norm", "global") or "global")
+    if adv_norm not in ("global", "per_scenario", "none"):
+        raise SystemExit(
+            f"[stageC] 未知 adv_norm={adv_norm!r}（可选 global/per_scenario/none）"
+        )
+    print(
+        f"[stageC] adv_norm={adv_norm}（优势归一化口径；global=全批旧行为，"
+        "per_scenario=按 spec.id 分组，none=不归一化；CLI --adv-norm 优先）",
+        flush=True,
+    )
     # W1（P1）：WM（ST-GNN）全期冻结。旧 ``--wm-freeze-updates`` 的"解冻"只是把参数重新
     # 加入优化器：PPO 更新走 rollout=False cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
     # 恒 None（P0 侦察 §B），故弃用旧解冻语义。
@@ -3845,6 +3856,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "wm_trainable": _wm_trainable(model),
         "wm_frozen_params": len(frozen_wm),
         "critic_warmup_updates": critic_warmup_updates,
+        "adv_norm": adv_norm,
         "ckpt_every": ckpt_every,
         "device": device,
         "probe_batch": probe_batch,
@@ -3876,6 +3888,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             bc_anchor_coef=float(args.bc_anchor_coef) if bc_dataset is not None else 0.0,
             primary_lr_scale=primary_lr_scale,
             critic_warmup_updates=critic_warmup_updates,
+            adv_norm=adv_norm,
             plan_reference=plan_reference,
             seed=int(args.seed),
             device=device,
@@ -4136,6 +4149,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--critic-warmup-updates", type=int, default=None,
                         help="阶段 C 前 N 个 update 只拟合 critic（value 头；策略/主干冻结）。"
                              "默认取 config/train.yaml train.critic_warmup_updates=0（0=关闭）")
+    parser.add_argument("--adv-norm", choices=("global", "per_scenario", "none"), default=None,
+                        help="阶段 C 优势归一化口径（默认取 config train.adv_norm=global）："
+                             "global=全批零均值/单位方差（旧行为）；per_scenario=按帧级 spec.id "
+                             "分组各自归一化；none=不归一化")
     parser.add_argument("--bc-anchor", action="store_true", help="阶段 C 启用 BC 动作锚（默认关）")
     parser.add_argument("--bc-anchor-coef", type=float, default=0.1)
     parser.add_argument("--reward-term-weight", action="append", default=None, metavar="NAME=W",

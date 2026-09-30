@@ -57,6 +57,11 @@ PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
 - 阶段 C：``kl_anchor_coef``（冻结参考模型）+ ``bc_anchor_coef``（专家动作，权重感知）+ primary lr ×0.1；
   critic warmup（``train.critic_warmup_updates`` / CLI ``--critic-warmup-updates``）：前 N 个
   update 只拟合 value 头（策略/主干冻结，指标 ``critic_warmup=true``），之后恢复常规 PPO；
+  优势归一化（``train.adv_norm`` / CLI ``--adv-norm``，默认 ``global`` 旧行为）：
+  ``per_scenario`` 按帧级 ``spec_id`` 分组各自归一化（v3 组式 baseline 预备）；
+- 2026-09-30（G3 查证修复）：``compute_gae(valid_mask=...)`` 下 padding/bootstrap 行
+  （每 env 段末尾的"下一观测价值容器"）不再污染同 episode 尾部有效帧的优势
+  （旧实现把伪优势 ``-V_bootstrap`` 沿 γλ 衰减注入；见 ``tests/test_adv_norm.py``）；
 - Stage B（lane U1，2026-09-27 去聚类）：router **无监督标签**（无簇 CE/acc）；
   MoE 负载均衡 aux = Switch 式 ``α·E·Σ_i f_i·P_i``（α=``load_balance_coef``），KPI =
   ``router/expert_load/*`` + ``router/load_cv`` + ``router/gate_entropy``
@@ -549,6 +554,11 @@ class PPOConfig:
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True
+    #: 优势归一化口径（``--adv-norm`` / config ``train.adv_norm``；默认 ``global`` 不变）：
+    #: ``global`` = 全批有效帧零均值/单位方差；``per_scenario`` = 按帧级场景标识
+    #: （``RolloutBuffer.spec_id``，未知 = -1 归一组）分组各自归一化（单帧组保持原值，避免零化）；
+    #: ``none`` = 不归一化。``normalize_advantage=False``（旧开关）等价于 ``none``（向后兼容）。
+    adv_norm: str = "global"
     action_mode: str = "sigmoid_squashed"  # sigmoid_squashed（net 约定）| clip
     action_low: Tuple[float, float] = DEFAULT_ACTION_LOW
     action_high: Tuple[float, float] = DEFAULT_ACTION_HIGH
@@ -569,6 +579,8 @@ class PPOConfig:
     def __post_init__(self) -> None:
         if self.plan_reference not in ("repeat_action", "plan"):
             raise ValueError(f"未知 plan_reference={self.plan_reference!r}（可选 repeat_action/plan）")
+        if self.adv_norm not in ("global", "per_scenario", "none"):
+            raise ValueError(f"未知 adv_norm={self.adv_norm!r}（可选 global/per_scenario/none）")
 
 
 @dataclass
@@ -1073,6 +1085,43 @@ def _probe_speed_bin_key(low: float, high: float) -> str:
     left = f"{low:g}"
     right = "inf" if math.isinf(high) else f"{high:g}"
     return f"{left}_{right}"
+
+
+def _normalize_advantages(
+    advantages: np.ndarray,
+    mode: str = "global",
+    *,
+    groups: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """优势归一化（``PPOConfig.adv_norm`` 的数学口径）。
+
+    - ``global``：全批零均值/单位方差——与旧实现**同一表达式**（逐位一致）；
+    - ``per_scenario``：按 ``groups``（帧级场景标识，如 ``RolloutBuffer.spec_id``）分组，
+      组内各自零均值/单位方差；单帧组保持原值（避免被零化）；``groups`` 缺失报错；
+    - ``none``：原样返回。
+
+    返回 float64 数组（``size <= 1`` 时不归一化，与旧 ``advantages.size > 1`` 守卫一致）。
+    """
+    values = np.asarray(advantages, dtype=np.float64)
+    if mode == "none" or values.size <= 1:
+        return values
+    if mode == "global":
+        return (values - values.mean()) / (values.std() + 1e-8)
+    if mode != "per_scenario":
+        raise ValueError(f"未知优势归一化口径 adv_norm={mode!r}（global/per_scenario/none）")
+    if groups is None:
+        raise ValueError("per_scenario 优势归一化需要 groups（帧级场景标识）")
+    group_ids = np.asarray(groups).reshape(-1)
+    if group_ids.shape[0] != values.shape[0]:
+        raise ValueError(f"groups 长度 {group_ids.shape[0]} != 优势长度 {values.shape[0]}")
+    out = values.copy()
+    for group_id in np.unique(group_ids):
+        mask = group_ids == group_id
+        if int(mask.sum()) <= 1:
+            continue  # 单帧组无组内方差信息 → 保持原值
+        group = values[mask]
+        out[mask] = (group - group.mean()) / (group.std() + 1e-8)
+    return out
 
 
 def _advantage_stats(
@@ -4324,6 +4373,8 @@ class LocalEnvPool:
             "reward": float(reward),
             "terminated": bool(terminated),
             "truncated": bool(truncated),
+            # 帧级场景标识（per_scenario 优势归一化分组键；与 worker record 同键）
+            "spec_id": int(getattr(self._spec, "id", -1)) if self._spec is not None else -1,
         }
 
     def step(
@@ -4894,6 +4945,8 @@ class PPOTrainer:
                     "router_labels": np.asarray(labels, dtype=np.float32) if labels is not None else None,
                     "episode": int(self._episode_id[env_index]),
                     "step": int(self._step_in_episode[env_index]),
+                    # 帧级场景标识（LocalEnvPool._record / worker record；旧 stub 池缺省 -1）
+                    "spec_id": int(record.get("spec_id", -1)) if isinstance(record, dict) else -1,
                 }
                 self._advance_pose(env_index, actions_np[env_index])
                 self._step_in_episode[env_index] += 1
@@ -4950,6 +5003,7 @@ class PPOTrainer:
                     truncated=frame["truncated"],
                     episode=frame["episode"],
                     step=frame["step"],
+                    spec_id=frame.get("spec_id", -1),
                 )
                 valid[index] = True
                 if frame["router_labels"] is not None:
@@ -5018,8 +5072,14 @@ class PPOTrainer:
             raise RuntimeError("update() 之前必须先 collect_rollout()")
         buffer = self.buffer
         valid_indices = np.where(self._valid_mask)[0]
+        # 2026-09-30（G3 查证修复）：padding/bootstrap 行（每 env 段末尾的"下一观测价值容器"）
+        # 不参与优势链——旧实现把它当成真实一步，其伪优势 ``-V_bootstrap`` 沿 γλ 衰减污染
+        # 同 episode 尾部有效帧的优势（见 tests/test_adv_norm.py::test_gae_padding_row_*）。
         advantages_all, returns_all = buffer.compute_gae(
-            last_value=0.0, gamma=self.config.gamma, lam=self.config.lam
+            last_value=0.0,
+            gamma=self.config.gamma,
+            lam=self.config.lam,
+            valid_mask=self._valid_mask,
         )
         # 诊断统计：原始（归一化前）优势 + 回报/价值解释方差（进入 metrics → monitor）
         advantage_stats = _advantage_stats(
@@ -5029,8 +5089,12 @@ class PPOTrainer:
         )
         advantages = advantages_all[valid_indices].astype(np.float64)
         returns = returns_all[valid_indices].astype(np.float32)
-        if self.config.normalize_advantage and advantages.size > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # 优势归一化口径：CLI/config train.adv_norm（global/per_scenario/none）；
+        # 旧开关 normalize_advantage=False 等价 none（向后兼容）。
+        adv_norm_mode = str(self.config.adv_norm) if self.config.normalize_advantage else "none"
+        if adv_norm_mode != "none":
+            adv_groups = buffer.spec_id[valid_indices] if adv_norm_mode == "per_scenario" else None
+            advantages = _normalize_advantages(advantages, adv_norm_mode, groups=adv_groups)
         advantages_t = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
         returns_t = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
         old_logprobs_t = torch.as_tensor(buffer.logprob[valid_indices], dtype=torch.float32, device=self.device)
