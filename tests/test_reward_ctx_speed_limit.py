@@ -164,7 +164,9 @@ def test_missing_both_sources_warns_once() -> None:
     first = _step(adapter, captured, {"velocity": 5.0}, _obs(ld_limit=0.0, mask=0.0))
     second = _step(adapter, captured, {"velocity": 5.0}, _obs(ld_limit=0.0, mask=0.0))
     assert "speed_limit_mps" not in first and "speed_limit_mps" not in second
-    assert len(warnings) == 1 and "限速" in warnings[0], "两源都缺 → 一次性告警"
+    # ⑥a 的限速告警恰好一次（⑦ 的车道上下文告警是另一条，见 test_reward_ctx_lane_keys.py）
+    speed_warnings = [line for line in warnings if "均无有效限速" in line]
+    assert len(speed_warnings) == 1, "两源都缺 → 一次性告警"
 
 
 # --------------------------------------------------------------------------- #

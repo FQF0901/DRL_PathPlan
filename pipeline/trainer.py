@@ -136,6 +136,10 @@ __all__ = [
     "episode_window_metrics",
     "lane_speed_limit_info",
     "LANE_SPEED_LIMIT_FALLBACK_MPS",
+    "LANE_CTX_KEYS",
+    "lane_reward_info",
+    "lane_half_width_m",
+    "lead_vehicle_info",
     "LocalEnvPool",
     "VectorPoolAdapter",
     "build_pool",
@@ -1044,6 +1048,142 @@ def lane_speed_limit_info(agent: Any) -> Dict[str, float]:
     return {"lane_speed_limit_mps": limit}
 
 
+#: ⑦ v4 ctx 新增键（Lane 2 新奖励项接口契约；缺数据 = null；默认计算、无行为影响）。
+LANE_CTX_KEYS: Tuple[str, ...] = ("lead_gap_m", "lead_speed_mps", "lane_half_width_m")
+
+#: 前车横向过滤余量（m）：|横向偏移| <= 半车道宽 + 该余量 视为"本车道/路径前车"。
+LEAD_LATERAL_MARGIN_M = 0.5
+#: 前车搜索距离上限（m；中心距）。
+LEAD_MAX_RANGE_M = 100.0
+
+
+def _resolve_ego_lane(agent: Any) -> Any:
+    """自车当前车道（``agent.lane``；缺失回退 ``navigation.current_ref_lanes[0]``）。
+
+    与 ``env.metadrive_env.lane_lateral_info`` 同一解析链；异常一律降级 None。
+    """
+    try:
+        lane = getattr(agent, "lane", None)
+        if lane is not None:
+            return lane
+        navigation = getattr(agent, "navigation", None)
+        ref_lanes = getattr(navigation, "current_ref_lanes", None) if navigation is not None else None
+        if ref_lanes:
+            return ref_lanes[0]
+    except Exception:  # noqa: BLE001 - lane 属性链异常一律降级
+        return None
+    return None
+
+
+def lane_half_width_m(agent: Any, lane: Any = None) -> Optional[float]:
+    """自车当前车道半宽（``lane.width_at(local_x)/2``；回退 ``lane.width/2``）。
+
+    返回 None 表示无 lane / 宽度不可得（调用方置 null + 回退 ``dist_to_left/right_side``）。
+    """
+    lane = lane if lane is not None else _resolve_ego_lane(agent)
+    if lane is None:
+        return None
+    try:
+        longitudinal = 0.0
+        try:
+            longitudinal = float(lane.local_coordinates(agent.position)[0])
+        except Exception:  # noqa: BLE001 - 投影失败 → 用 s=0
+            longitudinal = 0.0
+        width = float(lane.width_at(longitudinal))
+    except Exception:  # noqa: BLE001
+        try:
+            width = float(getattr(lane, "width", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            width = 0.0
+    if not math.isfinite(width) or width <= 0.0:
+        return None
+    return 0.5 * width
+
+
+def lead_vehicle_info(agent: Any, engine: Any, half_width: Optional[float]) -> Dict[str, Optional[float]]:
+    """本车道/路径**最近前车**的 bumper 距离与纵向速度（⑦ v4 ctx 新键来源）。
+
+    - 过滤：其他对象（需有 ``position``/``velocity``/``LENGTH``）；自车系 ``rel_x > 0``；
+      ``|rel_y| <= half_width + LEAD_LATERAL_MARGIN_M``（half_width 未知时不加横向过滤）；
+      中心距 <= :data:`LEAD_MAX_RANGE_M`；
+    - ``lead_gap_m`` = 中心距 − 0.5·(自车长 + 前车长)（bumper 净距，下限 0；与
+      ``pure_pursuit_idm`` 的 IDM gap 同式）；``lead_speed_mps`` = 前车速度在自车航向上的投影；
+    - 无前车/engine 不可用 → 两键均为 ``None``（正常语义，不是告警条件）。
+    """
+    out: Dict[str, Optional[float]] = {"lead_gap_m": None, "lead_speed_mps": None}
+    if engine is None:
+        return out
+    try:
+        objects = list(engine.get_objects().values())
+    except Exception:  # noqa: BLE001 - 车辆检索失败不应中断训练
+        return out
+    ego_length = 4.0
+    try:
+        ego_length = float(getattr(agent, "LENGTH", 4.0) or 4.0)
+    except (TypeError, ValueError):
+        pass
+    heading = None
+    try:
+        heading = np.asarray(agent.heading, dtype=np.float64).reshape(-1)[:2]
+    except Exception:  # noqa: BLE001
+        heading = None
+    best_gap: Optional[float] = None
+    best_speed: Optional[float] = None
+    for obj in objects:
+        if obj is agent or not hasattr(obj, "LENGTH"):
+            continue
+        try:
+            rel_pos = np.asarray(
+                agent.convert_to_local_coordinates(obj.position, agent.position), dtype=np.float64
+            ).reshape(-1)
+        except Exception:  # noqa: BLE001 - 静态物体/异常对象跳过
+            continue
+        if rel_pos.shape[0] < 2 or float(rel_pos[0]) <= 0.0:
+            continue
+        if half_width is not None and abs(float(rel_pos[1])) > float(half_width) + LEAD_LATERAL_MARGIN_M:
+            continue
+        center = float(rel_pos[0])
+        if center > LEAD_MAX_RANGE_M:
+            continue
+        try:
+            obj_length = float(getattr(obj, "LENGTH", ego_length) or ego_length)
+        except (TypeError, ValueError):
+            obj_length = ego_length
+        gap = max(center - 0.5 * (ego_length + obj_length), 0.0)
+        if best_gap is not None and gap >= best_gap:
+            continue
+        best_gap = gap
+        try:
+            velocity = np.asarray(obj.velocity, dtype=np.float64).reshape(-1)
+            if heading is not None and heading.shape[0] >= 2 and velocity.shape[0] >= 2:
+                best_speed = float(velocity[0] * heading[0] + velocity[1] * heading[1])
+            elif velocity.size:
+                best_speed = float(np.linalg.norm(velocity))
+            else:
+                best_speed = None
+        except Exception:  # noqa: BLE001
+            best_speed = None
+    out["lead_gap_m"] = best_gap
+    out["lead_speed_mps"] = best_speed
+    return out
+
+
+def lane_reward_info(agent: Any, engine: Any = None) -> Dict[str, Optional[float]]:
+    """⑦ v4 奖励 ctx 的车道上下文（限速 + 半宽 + 最近前车；缺数据 = None）。
+
+    供 ``LocalEnvPool._record`` 注入 info；``RewardAdapter._build_ctx`` 原样透传到 ctx。
+    **默认计算、无行为影响**（现有奖励项不消费这三个新键；接口契约供 Lane 2 新项使用）。
+    任何异常都不外抛。
+    """
+    out: Dict[str, Optional[float]] = {key: None for key in LANE_CTX_KEYS}
+    out.update(lane_speed_limit_info(agent))
+    lane = _resolve_ego_lane(agent)
+    if lane is not None:
+        out["lane_half_width_m"] = lane_half_width_m(agent, lane)
+    out.update(lead_vehicle_info(agent, engine, out["lane_half_width_m"]))
+    return out
+
+
 def episode_termination_reason(
     info: Mapping[str, Any],
     *,
@@ -1156,6 +1296,8 @@ class RewardAdapter:
         #: ⑥b：每 env 最后有效的限速（lane 源或 ld slot0），终局帧掩码回退用。
         self._last_speed_limit: Dict[int, float] = {}
         self._speed_limit_warned = False
+        #: ⑦：ctx 新键（lane 上下文）整体不可用的"一次性告警"标记。
+        self._lane_ctx_warned = False
         self.early_terminations = 0
 
     def reset_all(self) -> None:
@@ -1236,6 +1378,31 @@ class RewardAdapter:
                     self._last_speed_limit[env_index] = value
             except (TypeError, ValueError):
                 pass
+        # ⑦ v4 ctx 新键（接口契约）：缺数据 = None（现有奖励项不消费 → 无行为影响）。
+        for key in LANE_CTX_KEYS:
+            if ctx.get(key) is None:
+                ctx[key] = None
+        if ctx.get("lane_half_width_m") is None:
+            # lane API 不可得 → 用 lane_lateral_info 的 dist_to_left/right_side 折算半宽
+            try:
+                left = ctx.get("dist_to_left_side")
+                right = ctx.get("dist_to_right_side")
+                if left is not None and right is not None:
+                    width = float(left) + float(right)
+                    if math.isfinite(width) and width > 0.0:
+                        ctx["lane_half_width_m"] = 0.5 * width
+            except (TypeError, ValueError):
+                pass
+        if (
+            all(ctx.get(key) is None for key in LANE_CTX_KEYS)
+            and not self._lane_ctx_warned
+            and self.logger is not None
+        ):
+            self._lane_ctx_warned = True
+            self.logger(
+                "[reward] 警告：车道上下文（lead_gap_m/lead_speed_mps/lane_half_width_m）不可用 → "
+                "ctx 键置 null（暂无项消费）；本告警只打一次"
+            )
         return ctx
 
     def step(
@@ -4745,7 +4912,8 @@ class LocalEnvPool:
         # v4 ⑥a：限速来源对齐评测 KPI（agent.lane.speed_limit → lane_speed_limit_mps；
         # 缺 lane 时键缺失，RewardAdapter 回退 obs ld slot0）。Vector 池 worker 未注入该键 →
         # 该路径仍走旧回退（pipeline/vector_env.py 不在本 lane 修改范围）。
-        info.update(lane_speed_limit_info(ego))
+        # v4 ⑦：ctx 新键（lead_gap_m/lead_speed_mps/lane_half_width_m；缺数据 None）。
+        info.update(lane_reward_info(ego, getattr(env, "engine", None)))
         return {
             "obs": obs,
             "info": info,
