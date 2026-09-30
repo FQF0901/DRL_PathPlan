@@ -13,6 +13,9 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
                                   # 此处的 1 保护 eval 多 worker spawn（避免每 worker 8 OMP 线程风暴）
   ppo:
     minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU；与 --batch-size 独立）
+    target_kl: null               # v4 ② KL 守门（CLI --target-kl）：某 minibatch approx_kl > 该值时
+                                  # 跳过该 epoch 剩余 minibatch（并终止本 update 后续 epoch），
+                                  # 记 train/kl_early_stop；null（默认）= 不守门（旧行为：跑满）
   wm:
     batch_size: &stage_a_batch 1024   # Stage A 宏 batch（物化快路径 + 梯度累积；CLI --batch-size 覆盖）
     micro_batch_size: &stage_a_micro 256  # ST-GNN 6 步展开实测 ~32MB/样本：12GB 卡 micro 上限 256（384 OOM）

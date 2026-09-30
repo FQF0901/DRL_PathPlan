@@ -613,6 +613,10 @@ class PPOConfig:
     #: value 头学习率缩放（CLI ``--value-lr-scale`` / config ``train.value_lr_scale``）：
     #: ``value.*`` 参数组 lr = ``lr × value_lr_scale``（默认 1.0 = 不单独建组，与旧版逐位一致）。
     value_lr_scale: float = 1.0
+    #: KL 守门（CLI ``--target-kl`` / config ``train.ppo.target_kl``，v4 ②）：某 minibatch 的
+    #: ``approx_kl > target_kl`` 时跳过该 epoch 剩余 minibatch（并终止本 update 的后续 epoch），
+    #: 指标 ``kl_early_stop``（本次 update 是否触发）/ ``kl_early_stop_total``（累计次数）；
+    #: ``None``（默认）= 不守门（旧行为：跑满 epochs×minibatch）。
     target_kl: Optional[float] = None
     #: 前 N 个 update 只拟合 critic（value 头），策略/共享主干冻结（0 = 关闭，行为同旧版）。
     critic_warmup_updates: int = 0
@@ -643,6 +647,11 @@ class PPOConfig:
             if not math.isfinite(scale) or scale < 0.0:
                 raise ValueError(f"value_lr_scale 必须是有限非负浮点（收到 {self.value_lr_scale!r}）")
             self.value_lr_scale = scale
+        if self.target_kl is not None:
+            target = float(self.target_kl)
+            if not math.isfinite(target) or target <= 0.0:
+                raise ValueError(f"target_kl 必须是有限正浮点或 None（收到 {self.target_kl!r}）")
+            self.target_kl = target
 
 
 @dataclass
@@ -4830,6 +4839,8 @@ class PPOTrainer:
         self._has_router_labels: Optional[np.ndarray] = None
         self._total_steps = 0
         self._updates_done = 0
+        #: ② v4 KL 守门累计触发次数（指标 ``kl_early_stop_total``；默认 target_kl=None 恒 0）。
+        self._kl_early_stops = 0
         #: S1（v3）：训练期 episode 场景覆盖——``episode_spec_ids`` 按 episode 起点顺序记录，
         #: ``spec_ids_seen`` 为其去重集合（供 run_stage_c 落 metrics 验证 spec 轮换）。
         self.episode_spec_ids: List[int] = []
@@ -5357,6 +5368,8 @@ class PPOTrainer:
         batches = 0
         total = int(valid_indices.shape[0])
         t_data = t_forward = t_backward = 0.0
+        #: ② v4 KL 守门：本 update 是否触发（None=不守门时恒 False）。
+        kl_early_stop = False
         try:
             # V12（P2 性能）：obs/历史组装按行独立 ⇒ 每个 update 全量组装一次，minibatch 只做
             # 行切片（旧实现每 epoch×minibatch 重复重建历史窗口；默认 epochs=2 时组装次数减半，
@@ -5461,10 +5474,23 @@ class PPOTrainer:
                         aggregates.setdefault("clipfrac", []).append(clipfrac)
                         aggregates.setdefault("grad_norm", []).append(grad_norm)
                     batches += 1
-                if not warmup and self.config.target_kl is not None and aggregates.get("approx_kl"):
-                    recent = aggregates["approx_kl"][-max(1, batches // max(1, self.config.epochs)) :]
-                    if float(np.mean(recent)) > 1.5 * float(self.config.target_kl):
+                    if (
+                        not warmup
+                        and self.config.target_kl is not None
+                        and approx_kl > float(self.config.target_kl)
+                    ):
+                        # ② v4 KL 守门：本 minibatch approx_kl 超阈值 → 跳过本 epoch 剩余
+                        # minibatch；本 update 的后续 epoch 一并终止（标准 PPO 早停语义）。
+                        kl_early_stop = True
                         break
+                if kl_early_stop:
+                    self._kl_early_stops += 1
+                    self.logger(
+                        f"[trainer] kl_early_stop：update {self._updates_done + 1} epoch {epoch + 1} "
+                        f"minibatch approx_kl={approx_kl:.4g} > target_kl={float(self.config.target_kl):.4g}"
+                        f" → 跳过剩余 minibatch（本 update 后续 epoch 一并终止）"
+                    )
+                    break
         finally:
             if saved_requires is not None:
                 for parameter, flag in saved_requires:
@@ -5472,6 +5498,10 @@ class PPOTrainer:
         metrics = {key: float(np.mean(values)) for key, values in aggregates.items()}
         metrics["critic_warmup"] = bool(warmup)
         metrics["batches"] = batches
+        # ② v4 KL 守门：本次是否触发 + 累计触发次数（默认 target_kl=None 恒 0/0）
+        metrics["kl_early_stop"] = 1.0 if kl_early_stop else 0.0
+        metrics["kl_early_stop_total"] = float(self._kl_early_stops)
+        metrics["target_kl"] = float(self.config.target_kl) if self.config.target_kl is not None else None
         metrics["total_steps"] = self._total_steps
         metrics["update_timing_s"] = {
             "data_s": float(t_data),

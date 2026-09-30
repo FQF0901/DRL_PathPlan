@@ -546,6 +546,25 @@ def _resolve_stage_c_value_lr_scale(args: argparse.Namespace, train_cfg: Mapping
     return number
 
 
+def _resolve_stage_c_target_kl(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> Optional[float]:
+    """阶段 C PPO KL 守门阈值（CLI ``--target-kl`` 优先；config ``train.ppo.target_kl``）。
+
+    默认 ``None`` = 不守门（旧行为）；非法（非有限/非正数）fail-fast。
+    """
+    value = getattr(args, "target_kl", None)
+    if value is None:
+        value = (dict(train_cfg or {}).get("ppo") or {}).get("target_kl")
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"[stageC] 无法解析 target_kl={value!r}（需有限正浮点或 null）") from None
+    if not math.isfinite(number) or number <= 0.0:
+        raise SystemExit(f"[stageC] target_kl 必须是有限正浮点或 null（收到 {value!r}）")
+    return number
+
+
 def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
     """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
 
@@ -3826,6 +3845,13 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
            else "（value.* 组 lr = lr×scale；与 policy 组分离）"),
         flush=True,
     )
+    # ② KL 守门（v4）：CLI --target-kl > config train.ppo.target_kl > None（不守门 = 旧行为）
+    target_kl = _resolve_stage_c_target_kl(args, train_cfg)
+    print(
+        "[stageC] target_kl=" + ("null（不守门，旧行为）" if target_kl is None
+                                 else f"{target_kl:g}（approx_kl 超阈值 → 跳过剩余 minibatch）"),
+        flush=True,
+    )
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
@@ -3965,6 +3991,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "specs": len(specs),
         "primary_lr_scale": primary_lr_scale,
         "value_lr_scale": value_lr_scale,
+        "target_kl": target_kl,
         "trainable_scope": trainable_scope,
         "trainable_params": trainable_params,
         "trainable_groups": [dict(group) for group in trainable_groups],
@@ -4008,6 +4035,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             bc_anchor_coef=float(args.bc_anchor_coef) if bc_dataset is not None else 0.0,
             primary_lr_scale=primary_lr_scale,
             value_lr_scale=value_lr_scale,
+            target_kl=target_kl,
             critic_warmup_updates=critic_warmup_updates,
             adv_norm=adv_norm,
             plan_reference=plan_reference,
@@ -4288,6 +4316,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--value-lr-scale", type=float, default=None, metavar="SCALE",
                         help="阶段 C value 头 LR 缩放：value.* 参数组 lr = lr × SCALE"
                              "（默认取 config/train.yaml train.value_lr_scale=1.0=现状）")
+    parser.add_argument("--target-kl", type=float, default=None, metavar="TARGET_KL",
+                        help="阶段 C PPO KL 守门（默认取 config/train.yaml train.ppo.target_kl=null）："
+                             "某 minibatch approx_kl > TARGET_KL 时跳过该 epoch 剩余 minibatch"
+                             "（并终止本 update 后续 epoch），记 train/kl_early_stop；"
+                             "null/缺省=旧行为（跑满 epochs×minibatch）")
     parser.add_argument("--kl-anchor-coef", type=float, default=0.05, help="阶段 C KL 锚初始系数（默认 0.05）")
     parser.add_argument("--kl-anchor-final-coef", type=float, default=0.0, help="阶段 C KL 锚末值（默认 0）")
     parser.add_argument("--kl-anchor-decay", action=argparse.BooleanOptionalAction, default=True,
