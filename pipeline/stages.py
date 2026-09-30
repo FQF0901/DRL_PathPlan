@@ -581,6 +581,20 @@ def _resolve_stage_c_group_probe_every(args: argparse.Namespace, train_cfg: Mapp
         return 1
 
 
+def _resolve_stage_c_anchor_grad_probe(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> bool:
+    """④ v4 KL 锚梯度探针开关（CLI ``--anchor-grad-probe/--no-anchor-grad-probe`` 优先；
+    config ``train.ppo.anchor_grad_probe``；默认 True = 开）。
+    """
+    value = getattr(args, "anchor_grad_probe", None)
+    if value is None:
+        value = (dict(train_cfg or {}).get("ppo") or {}).get("anchor_grad_probe", True)
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return bool(value)
+
+
 def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
     """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
 
@@ -3876,6 +3890,13 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
            if group_probe_every > 0 else "（分组梯度探针关闭）"),
         flush=True,
     )
+    # ④ KL 锚梯度探针（v4）：默认开（kl_anchor_coef>0 时生效；只读）
+    anchor_grad_probe = _resolve_stage_c_anchor_grad_probe(args, train_cfg)
+    print(
+        f"[stageC] anchor_grad_probe={'on' if anchor_grad_probe else 'off'}"
+        + ("（kl_anchor_coef>0 时记录 anchor_grad_norm/*；只读）" if anchor_grad_probe else ""),
+        flush=True,
+    )
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
@@ -4017,6 +4038,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "value_lr_scale": value_lr_scale,
         "target_kl": target_kl,
         "group_probe_every": group_probe_every,
+        "anchor_grad_probe": anchor_grad_probe,
         "trainable_scope": trainable_scope,
         "trainable_params": trainable_params,
         "trainable_groups": [dict(group) for group in trainable_groups],
@@ -4062,6 +4084,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             value_lr_scale=value_lr_scale,
             target_kl=target_kl,
             group_probe_every=group_probe_every,
+            anchor_grad_probe=anchor_grad_probe,
             critic_warmup_updates=critic_warmup_updates,
             adv_norm=adv_norm,
             plan_reference=plan_reference,
@@ -4351,6 +4374,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C 分参数组梯度/更新范数探针间隔（默认取 config "
                              "train.ppo.group_probe_every=1=每 update）：记录 policy/value/experts/other 的 "
                              "pre-clip 梯度范数与实际更新范数（纯监控，不进优化器）；0=关闭")
+    parser.add_argument("--anchor-grad-probe", action=argparse.BooleanOptionalAction, default=None,
+                        help="阶段 C KL 锚梯度探针（默认取 config train.ppo.anchor_grad_probe=true）："
+                             "kl_anchor_coef>0 时独立重算锚 loss 并记录其对 policy/value 参数与 "
+                             "mu/logstd 的梯度范数（只读，不进优化器；--no-anchor-grad-probe 关闭）")
     parser.add_argument("--kl-anchor-coef", type=float, default=0.05, help="阶段 C KL 锚初始系数（默认 0.05）")
     parser.add_argument("--kl-anchor-final-coef", type=float, default=0.0, help="阶段 C KL 锚末值（默认 0）")
     parser.add_argument("--kl-anchor-decay", action=argparse.BooleanOptionalAction, default=True,

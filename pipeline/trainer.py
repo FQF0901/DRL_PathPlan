@@ -624,6 +624,13 @@ class PPOConfig:
     #: ``train.ppo.group_probe_every``）：每 N 个 update 记录一次 ``grad_group/<group>/{pre_clip,update}``
     #: （policy/value/experts/other）；``1``（默认）= 每 update，``0`` = 关闭（纯监控，不影响数值）。
     group_probe_every: int = 1
+    #: ④ v4 KL 锚梯度探针（CLI ``--anchor-grad-probe`` / config ``train.ppo.anchor_grad_probe``）：
+    #: ``kl_anchor_coef > 0`` 时每 update 独立重算锚 loss（**与主损失同口径**：mu 路径在
+    #: ``no_grad`` 内反解 → 锚对 mu 无梯度）并记录其对 policy/value/experts/other 参数与
+    #: mu/logstd 输出的梯度范数（``torch.autograd.grad`` 只读、不进优化器）；默认 True。
+    anchor_grad_probe: bool = True
+    #: ④ 锚梯度探针子批大小（固定取前 N 行；只影响探针开销/统计口径，不影响训练数值）。
+    anchor_grad_probe_size: int = 128
     #: 前 N 个 update 只拟合 critic（value 头），策略/共享主干冻结（0 = 关闭，行为同旧版）。
     critic_warmup_updates: int = 0
     seed: int = 0
@@ -665,6 +672,13 @@ class PPOConfig:
         if every < 0:
             raise ValueError(f"group_probe_every 必须 >= 0（收到 {self.group_probe_every!r}）")
         self.group_probe_every = every
+        try:
+            probe_size = int(self.anchor_grad_probe_size)
+        except (TypeError, ValueError):
+            raise ValueError(f"anchor_grad_probe_size 必须是整数（收到 {self.anchor_grad_probe_size!r}）") from None
+        if probe_size < 1:
+            raise ValueError(f"anchor_grad_probe_size 必须 >= 1（收到 {self.anchor_grad_probe_size!r}）")
+        self.anchor_grad_probe_size = probe_size
 
 
 @dataclass
@@ -5164,6 +5178,76 @@ class PPOTrainer:
         every = int(self.config.group_probe_every)
         return every > 0 and (self._updates_done % every == 0)
 
+    def _anchor_grad_metrics(
+        self, obs_all: Mapping[str, np.ndarray], total: int
+    ) -> Dict[str, Any]:
+        """④ v4 KL 锚梯度探针：独立重算锚 loss 并记录梯度范数（只读，不进优化器）。
+
+        与主损失**同口径**（``update`` 内锚 loss 的 mu 路径在 ``no_grad`` 内反解 → 本探针
+        同样如此），因此 ``anchor_grad_norm/mu == 0`` 即"实现上锚对 mu 无梯度"的直接证据；
+        ``logstd``/``policy`` 组非零则说明锚经 logstd 路径作用于参数（解 A2/A3 异常）。
+
+        梯度用 ``torch.autograd.grad`` 计算（不写 ``.grad``），失败只告警返回 ``available=0``。
+        """
+        size = max(1, min(int(self.config.anchor_grad_probe_size), int(total)))
+        selection = np.arange(size)
+        value_names = frozenset(self._value_param_names)
+        try:
+            batch = _to_device_obs(
+                {key: np.asarray(value)[selection] for key, value in obs_all.items()}, self.device
+            )
+            out = self.model(batch, rollout=False, world_model=False)
+            mu = out["action_mu"]
+            logstd = clamp_logstd(out["action_logstd"], self.config.policy_logstd_max)
+            with torch.no_grad():
+                ref_out = self.ref_model(batch, rollout=False, world_model=False)  # type: ignore[union-attr]
+                ref_raw_mu = raw_mu_from_action(
+                    ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
+                )
+                raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
+            anchor_loss = float(self.config.kl_anchor_coef) * gaussian_kl(
+                raw_mu, logstd, ref_raw_mu, ref_out["action_logstd"]
+            ).mean()
+            output_targets: List[Any] = []
+            output_names: List[str] = []
+            if mu.requires_grad:
+                output_targets.append(mu)
+                output_names.append("mu")
+            if logstd.requires_grad:
+                output_targets.append(logstd)
+                output_names.append("logstd")
+            param_groups: Dict[str, List["torch.Tensor"]] = {}
+            for name, parameter in self.model.named_parameters():
+                if parameter.requires_grad:
+                    param_groups.setdefault(grad_probe_group(name, value_names), []).append(parameter)
+            param_targets: List[Any] = []
+            for group in GRAD_PROBE_GROUPS:
+                param_targets.extend(param_groups.get(group, []))
+            grads = torch.autograd.grad(
+                anchor_loss, output_targets + param_targets, allow_unused=True, retain_graph=False
+            )
+            stats: Dict[str, float] = {
+                "available": 1.0,
+                "coef": float(self.config.kl_anchor_coef),
+                "n": float(size),
+            }
+            for index, name in enumerate(output_names):
+                grad = grads[index]
+                stats[name] = float(grad.detach().norm()) if grad is not None else 0.0
+            cursor = len(output_targets)
+            for group in GRAD_PROBE_GROUPS:
+                total_sq = 0.0
+                for _parameter in param_groups.get(group, []):
+                    grad = grads[cursor]
+                    cursor += 1
+                    if grad is not None:
+                        total_sq += float(grad.detach().pow(2).sum())
+                stats[group] = math.sqrt(total_sq)
+            return {"anchor_grad_norm": stats}
+        except Exception as exc:  # noqa: BLE001 - 探针是诊断，绝不阻塞训练
+            self.logger(f"[anchor-grad] 探针失败（{type(exc).__name__}: {exc}）→ 跳过")
+            return {"anchor_grad_norm": {"available": 0.0}}
+
     # ---------------------------------------------------------------- 收集
     def reset_pool(self) -> List[Dict[str, np.ndarray]]:
         records = self.pool.reset()
@@ -5466,6 +5550,16 @@ class PPOTrainer:
             t0 = time.perf_counter()
             obs_all = self._assemble_obs_batch(valid_indices)
             t_data += time.perf_counter() - t0
+            # ④ v4 KL 锚梯度探针：kl_anchor_coef>0 且非 warmup 时，独立重算锚 loss 记录梯度
+            # 范数（只读；默认开，见 PPOConfig.anchor_grad_probe）。
+            anchor_probe_metrics: Dict[str, Any] = {}
+            if (
+                not warmup
+                and self.config.anchor_grad_probe
+                and self.ref_model is not None
+                and float(self.config.kl_anchor_coef) > 0.0
+            ):
+                anchor_probe_metrics = self._anchor_grad_metrics(obs_all, total)
             for epoch in range(max(1, int(self.config.epochs))):
                 rng = np.random.default_rng(self.config.seed + 1000 * epoch)
                 order = rng.permutation(total)
@@ -5623,6 +5717,7 @@ class PPOTrainer:
         metrics.update(advantage_stats)
         metrics.update(self._probe_metrics())
         metrics.update(self._drift_metrics())
+        metrics.update(anchor_probe_metrics)
         metrics.update(self.monitor.summary())
         self._last_metrics = metrics
         self._updates_done += 1
