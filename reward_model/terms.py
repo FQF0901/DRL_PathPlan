@@ -3,6 +3,7 @@
 类别与项
 --------
 - 安全（终止型）：``crash``（任意 ``crash*`` 标志）/ ``out_of_road``。
+- 安全（稠密近失，**默认关**）：``ttc``（前车时距危险度；无前车 / 缺键 = 0）。
 - 舒适（死区二次软惩罚）：``comfort_lon`` / ``comfort_lat`` / ``comfort_jerk``。
 - 车道保持（死区线性惩罚，**默认关**）：``lane_center``（偏离本车道中心线 ``|d_lat|``；无车道信息时为 0）。
 - 效率：``speed_ratio``（``v / 车道限速`` 的截断收益，防爬行；超速交由合规项）。
@@ -15,6 +16,9 @@
 
 from __future__ import annotations
 
+import math
+import warnings
+
 from typing import Any, ClassVar, Mapping
 
 from reward_model.registry import TERMINATING, Term, register_term
@@ -24,6 +28,7 @@ __all__ = [
     "SOLID_LINE_TYPE_IDS",
     "CrashPenalty",
     "OutOfRoadPenalty",
+    "TTCLeadPenalty",
     "LongitudinalAccelPenalty",
     "LateralAccelPenalty",
     "JerkPenalty",
@@ -33,6 +38,7 @@ __all__ = [
     "SpeedLimitViolationPenalty",
     "RouteCompletionShaping",
     "DEFAULT_TERM_CONFIGS",
+    "ego_speed_from_ctx",
     "lane_lateral_offset_from_ctx",
 ]
 
@@ -94,6 +100,19 @@ def speed_ratio_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
     return speed / limit
 
 
+def ego_speed_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
+    """自车速度（m/s，标量）：读取顺序 ``speed`` → ``velocity``（与 :func:`speed_ratio_from_ctx` 一致）。
+
+    MetaDrive ``info["velocity"]`` 即自车标量速度（m/s，``base_vehicle.py:245``）；``speed``
+    为评测/合成序列的别名。非数值 / 非有限值 / 非标量（如向量列表）→ ``None``。
+    """
+    for key in ("speed", "velocity"):
+        value = _optional_float(step_ctx.get(key))
+        if value is not None:
+            return value if math.isfinite(value) else None
+    return None
+
+
 def lane_lateral_offset_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
     """读取横向偏差 ``d_lat``（m，自车相对当前车道中心线；本项只用 ``|d_lat|``）。
 
@@ -146,6 +165,92 @@ class OutOfRoadPenalty(Term):
 
     def compute(self, step_ctx: Mapping[str, Any]) -> float:
         return 1.0 if _truthy(step_ctx.get("out_of_road")) else 0.0
+
+
+class _WarnMissingInputMixin:
+    """缺键诊断：每个项实例**只告警一次**（逐帧缺键时避免训练日志刷屏）。"""
+
+    _warned_missing_input: bool = False
+
+    def _warn_missing_input(self, message: str) -> None:
+        if self._warned_missing_input:
+            return
+        self._warned_missing_input = True
+        warnings.warn(message, UserWarning, stacklevel=3)
+
+
+@register_term
+class TTCLeadPenalty(Term, _WarnMissingInputMixin):
+    """安全（稠密近失罚，**默认关**）：由前车时距（TTC）定义的危险度；无前车 / 缺键 = 0。
+
+    定义
+    ----
+    ``ttc = gap / max(v_ego − v_lead, ε)``（s）。原始值取**逆时距超出阈值**的量并封顶：
+
+    ``raw = max(0, 1 / max(ttc, ttc_floor) − 1 / ttc_threshold)``
+
+    - 连续：``ttc = ttc_threshold``（默认 2.0 s）处 raw 恰为 0，``ttc`` 更大恒为 0；
+    - 单调：``gap`` 越小 / 接近速度越大 → ``ttc`` 越小 → raw 越大；
+    - 封顶：``ttc_floor``（默认 0.5 s）把 ``1/ttc`` 钉在 ≤ 2 /s → raw ≤ ``2 − 0.5 = 1.5``
+      （默认权重 −0.5 → 单步最差 −0.75），避免贴车时 ``1/ttc`` 发散；
+    - ``v_ego − v_lead <= 0``（未接近前车）→ 0；
+    - 与 KPI 的 ``min_ttc`` 无关：本项只消费 step_ctx，不读 ctx 里可能存在的同名 ``ttc``
+      键（评测口径由 ``kpi.py`` 从 eval 记录算）。
+
+    输入键（pipeline 侧注入；与 PP/IDM expert 的 ``pp_lead_gap_m`` / 前车纵向速度投影同口径）
+    ------------------------------------------------------------------------------------
+    - ``lead_gap_m``：自车车头到前车车尾的净距（m）；``<= 0``（含 −1 哨兵）= 无前车 → 0；
+    - ``lead_speed_mps``：前车速度在自车纵轴上的投影（m/s，>= 0）；
+    - 自车速度：``speed`` → ``velocity``（见 :func:`ego_speed_from_ctx`）。
+
+    必需键缺失 / 非有限值 → 0 且**只告警一次**（每实例）；``gap <= 0`` 的"无前车"路径属
+    正常语义、不告警。启用：config ``stages.C.reward.terms`` 追加，或 CLI
+    ``--reward-term-weight ttc=-0.5``；默认**不在** :data:`DEFAULT_TERM_CONFIGS`。
+    """
+
+    name: ClassVar[str] = "ttc"
+
+    def __init__(
+        self,
+        weight: float = -0.5,
+        ttc_threshold: float = 2.0,
+        ttc_floor: float = 0.5,
+    ) -> None:
+        if ttc_threshold <= 0.0 or ttc_floor <= 0.0:
+            raise ValueError(
+                f"ttc_threshold / ttc_floor 必须 > 0，收到 {ttc_threshold} / {ttc_floor}"
+            )
+        super().__init__(
+            weight=weight, ttc_threshold=float(ttc_threshold), ttc_floor=float(ttc_floor)
+        )
+        self.ttc_threshold = float(ttc_threshold)
+        self.ttc_floor = float(ttc_floor)
+        self.inverse_threshold = 1.0 / self.ttc_threshold
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        gap = _optional_float(step_ctx.get("lead_gap_m"))
+        lead_speed = _optional_float(step_ctx.get("lead_speed_mps"))
+        ego_speed = ego_speed_from_ctx(step_ctx)
+        if (
+            gap is None
+            or lead_speed is None
+            or ego_speed is None
+            or not math.isfinite(gap)
+            or not math.isfinite(lead_speed)
+        ):
+            self._warn_missing_input(
+                "ttc: 缺少 lead_gap_m / lead_speed_mps / 自车速度(speed|velocity) 之一或值非法"
+                " → 该项记 0（每个项实例只告警一次）"
+            )
+            return 0.0
+        if gap <= 0.0:  # 无前车（PP/IDM 约定：非正净距含 −1 哨兵）
+            return 0.0
+        closing = ego_speed - lead_speed
+        if closing <= 0.0:  # 未在接近前车 → 无近失
+            return 0.0
+        ttc = gap / closing
+        raw = 1.0 / max(ttc, self.ttc_floor) - self.inverse_threshold
+        return raw if raw > 0.0 else 0.0
 
 
 @register_term

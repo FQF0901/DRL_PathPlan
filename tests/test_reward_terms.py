@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,7 @@ EXPECTED_TERMS = {
     "comfort_lat",
     "comfort_jerk",
     "lane_center",
+    "ttc",
     "speed_ratio",
     "solid_line",
     "speed_limit",
@@ -154,6 +156,79 @@ def test_lane_center_enablement_via_term_weight_override() -> None:
     with pytest.raises(ValueError, match="未命中奖励项"):
         build_reward_adapter(term_weights={"not_a_term": 1.0})
     assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
+
+
+def test_ttc_no_lead_missing_keys_and_warn_once() -> None:
+    """ttc：无前车 → 0（不告警）；缺键 → 0 且只告警一次。"""
+    term = make_term("ttc", weight=-0.5)
+    assert term.weight == pytest.approx(-0.5)
+    assert term.ttc_threshold == pytest.approx(2.0)
+    assert term.ttc_floor == pytest.approx(0.5)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        # PP/IDM 约定：非正净距（含 −1 哨兵）= 无前车，属正常语义
+        assert term.compute({"lead_gap_m": -1.0, "lead_speed_mps": 3.0, "velocity": 6.0}) == 0.0
+        assert term.compute({"lead_gap_m": 0.0, "lead_speed_mps": 3.0, "velocity": 6.0}) == 0.0
+        assert caught == []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({"velocity": 6.0}) == 0.0  # 两个前车键都缺
+        assert term.compute({"lead_gap_m": 10.0, "lead_speed_mps": 2.0}) == 0.0  # 自车速度缺
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+    with pytest.raises(ValueError):
+        make_term("ttc", ttc_threshold=0.0)
+    with pytest.raises(ValueError):
+        make_term("ttc", ttc_floor=-1.0)
+    # 默认关
+    assert "ttc" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
+
+
+def test_ttc_boundary_continuity_monotone_and_floor() -> None:
+    """ttc：阈值处连续为 0、随 gap 单调、ttc_floor 封顶、未接近 → 0。"""
+    term = make_term("ttc", weight=-0.5)
+    # ttc = 2.0（gap=20, v_rel=10）恰在阈值 → 0；更安全恒为 0
+    assert term.compute({"lead_gap_m": 20.0, "lead_speed_mps": 0.0, "velocity": 10.0}) == 0.0
+    assert term.compute({"lead_gap_m": 200.0, "lead_speed_mps": 0.0, "velocity": 10.0}) == 0.0
+    # 跨阈值连续：ttc 略小于 2 → 罚从 0 连续上升
+    just_below = term.compute(
+        {"lead_gap_m": 20.0 - 1e-3, "lead_speed_mps": 0.0, "velocity": 10.0}
+    )
+    assert 0.0 < just_below < 1e-3
+    # 阈值内解析值：ttc=1 → raw = 1/1 − 1/2 = 0.5（加权 −0.25）
+    assert term.compute({"lead_gap_m": 10.0, "lead_speed_mps": 0.0, "velocity": 10.0}) == pytest.approx(0.5)
+    # 随 gap 单调不增
+    raws = [
+        term.compute({"lead_gap_m": gap, "lead_speed_mps": 0.0, "velocity": 10.0})
+        for gap in (5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 30.0)
+    ]
+    assert all(later <= earlier for earlier, later in zip(raws, raws[1:]))
+    # ttc_floor=0.5s 封顶：ttc<=0.5 → raw = 2 − 0.5 = 1.5（单步加权 −0.75）
+    assert term.compute({"lead_gap_m": 5.0, "lead_speed_mps": 0.0, "velocity": 10.0}) == pytest.approx(1.5)
+    assert term.compute({"lead_gap_m": 0.1, "lead_speed_mps": 0.0, "velocity": 10.0}) == pytest.approx(1.5)
+    # 未接近（v_ego <= v_lead）→ 0；speed 别名与 velocity 等价
+    assert term.compute({"lead_gap_m": 5.0, "lead_speed_mps": 12.0, "velocity": 10.0}) == 0.0
+    assert term.compute({"lead_gap_m": 5.0, "lead_speed_mps": 10.0, "velocity": 10.0}) == 0.0
+    assert term.compute({"lead_gap_m": 10.0, "lead_speed_mps": 0.0, "speed": 10.0}) == pytest.approx(0.5)
+
+
+def test_ttc_enablement_and_aggregation_components() -> None:
+    """启用 ttc（默认项 + 追加项）时 components / reward 数值正确。"""
+    configs = [dict(config) for config in DEFAULT_TERM_CONFIGS]
+    configs.append({"name": "ttc", "weight": -0.5, "ttc_threshold": 2.0})
+    aggregator = RewardAggregator(build_terms(configs))
+    step = aggregator.step(
+        {
+            "speed_ratio": 0.5,
+            "route_completion": 0.1,
+            "lead_gap_m": 10.0,
+            "lead_speed_mps": 0.0,
+            "velocity": 10.0,
+        }
+    )
+    assert step.raw_components["ttc"] == pytest.approx(0.5)
+    assert step.components["ttc"] == pytest.approx(-0.25)
+    assert step.reward == pytest.approx(0.5 + 0.1 - 0.25)
 
 
 def test_speed_ratio_efficiency_term() -> None:
