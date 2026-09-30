@@ -633,9 +633,9 @@ class PPOConfig:
     #: （policy/value/experts/other）；``1``（默认）= 每 update，``0`` = 关闭（纯监控，不影响数值）。
     group_probe_every: int = 1
     #: ④ v4 KL 锚梯度探针（CLI ``--anchor-grad-probe`` / config ``train.ppo.anchor_grad_probe``）：
-    #: ``kl_anchor_coef > 0`` 时每 update 独立重算锚 loss（**与主损失同口径**：mu 路径在
-    #: ``no_grad`` 内反解 → 锚对 mu 无梯度）并记录其对 policy/value/experts/other 参数与
-    #: mu/logstd 输出的梯度范数（``torch.autograd.grad`` 只读、不进优化器）；默认 True。
+    #: ``kl_anchor_coef > 0`` 时每 update 独立重算锚 loss（**与主损失同口径**：v4 ⑨ 后
+    #: ``raw_mu`` 反解在梯度内、锚 KL 用 raw logstd）并记录其对 policy/value/experts/other
+    #: 参数与 mu/logstd 输出的梯度范数（``torch.autograd.grad`` 只读、不进优化器）；默认 True。
     anchor_grad_probe: bool = True
     #: ④ 锚梯度探针子批大小（固定取前 N 行；只影响探针开销/统计口径，不影响训练数值）。
     anchor_grad_probe_size: int = 128
@@ -5512,9 +5512,9 @@ class PPOTrainer:
     ) -> Dict[str, Any]:
         """④ v4 KL 锚梯度探针：独立重算锚 loss 并记录梯度范数（只读，不进优化器）。
 
-        与主损失**同口径**（``update`` 内锚 loss 的 mu 路径在 ``no_grad`` 内反解 → 本探针
-        同样如此），因此 ``anchor_grad_norm/mu == 0`` 即"实现上锚对 mu 无梯度"的直接证据；
-        ``logstd``/``policy`` 组非零则说明锚经 logstd 路径作用于参数（解 A2/A3 异常）。
+        与主损失**同口径**（v4 ⑨ 后：``raw_mu`` 反解在梯度内、锚 KL 用 raw logstd），因此
+        ``anchor_grad_norm/mu > 0`` 与 ``logstd > 0`` 即"锚真正作用于 mu / raw logstd 参数"
+        的直接证据（修复前两者均为 0）；``policy`` 组 > 0 说明锚经 policy 头作用于参数。
 
         梯度用 ``torch.autograd.grad`` 计算（不写 ``.grad``），失败只告警返回 ``available=0``。
         """
@@ -5527,23 +5527,24 @@ class PPOTrainer:
             )
             out = self.model(batch, rollout=False, world_model=False)
             mu = out["action_mu"]
-            logstd = clamp_logstd(out["action_logstd"], self.config.policy_logstd_max)
+            raw_logstd = out["action_logstd"]
             with torch.no_grad():
                 ref_out = self.ref_model(batch, rollout=False, world_model=False)  # type: ignore[union-attr]
                 ref_raw_mu = raw_mu_from_action(
                     ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
                 )
-                raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
+            # v4 ⑨：mu 反解在梯度内（与主损失同口径）；锚 KL 用 raw logstd（非 S2 钳制值）
+            raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
             anchor_loss = float(self.config.kl_anchor_coef) * gaussian_kl(
-                raw_mu, logstd, ref_raw_mu, ref_out["action_logstd"]
+                raw_mu, raw_logstd, ref_raw_mu, ref_out["action_logstd"]
             ).mean()
             output_targets: List[Any] = []
             output_names: List[str] = []
             if mu.requires_grad:
                 output_targets.append(mu)
                 output_names.append("mu")
-            if logstd.requires_grad:
-                output_targets.append(logstd)
+            if raw_logstd.requires_grad:
+                output_targets.append(raw_logstd)
                 output_names.append("logstd")
             param_groups: Dict[str, List["torch.Tensor"]] = {}
             for name, parameter in self.model.named_parameters():
@@ -5938,15 +5939,18 @@ class PPOTrainer:
                         loss = policy_loss + self.config.vf_coef * value_loss - self.config.ent_coef * entropy
                         kl_anchor = torch.zeros((), device=self.device)
                         if self.ref_model is not None and self.config.kl_anchor_coef > 0.0:
+                            # v4 ⑨：ref 侧保持 no_grad（冻结参考）；mu 反解必须在梯度内，
+                            # 否则锚对 mu 路径零梯度（v4 ④ 探针实测 anchor_grad_norm/mu==0）。
                             with torch.no_grad():
                                 ref_out = self.ref_model(obs_batch, rollout=False, world_model=False)
-                            with torch.no_grad():
                                 ref_raw_mu = raw_mu_from_action(
                                     ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
                                 )
-                                raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
+                            raw_mu = raw_mu_from_action(mu, self.low, self.high, mode=self.config.action_mode)
+                            # 锚 KL 用 raw logstd（S2 钳制只服务采样/logprob 分布，不应用于锚：
+                            # 钳制会在 logstd 越界时切断锚对 logstd 参数的梯度）。
                             kl_anchor = self.config.kl_anchor_coef * gaussian_kl(
-                                raw_mu, logstd, ref_raw_mu, ref_out["action_logstd"]
+                                raw_mu, out["action_logstd"], ref_raw_mu, ref_out["action_logstd"]
                             ).mean()
                             loss = loss + kl_anchor
                         bc_anchor = torch.zeros((), device=self.device)
