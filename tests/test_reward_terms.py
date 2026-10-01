@@ -46,6 +46,7 @@ EXPECTED_TERMS = {
     "lane_center",
     "lane_boundary",
     "ttc",
+    "low_speed",
     "speed_ratio",
     "solid_line",
     "speed_limit",
@@ -149,8 +150,8 @@ def test_lane_center_enablement_via_term_weight_override() -> None:
     # 聚合正确：lane_center 贡献 = weight × raw（无横向键时 0）
     step = aggregator.step({"speed_ratio": 0.5, "d_lat": 1.25})
     assert step.components["lane_center"] == pytest.approx(-0.1)
-    assert step.components["speed_ratio"] == pytest.approx(0.5)
-    assert step.reward == pytest.approx(0.4)
+    assert step.components["speed_ratio"] == pytest.approx(0.2)  # v5：权重 0.4
+    assert step.reward == pytest.approx(0.1)
     centered = aggregator.step({"speed_ratio": 0.5, "d_lat": 0.1})
     assert centered.components["lane_center"] == 0.0
     # 未配置且未注册的名字仍 fail-fast；默认配置不被污染
@@ -229,7 +230,8 @@ def test_ttc_enablement_and_aggregation_components() -> None:
     )
     assert step.raw_components["ttc"] == pytest.approx(0.5)
     assert step.components["ttc"] == pytest.approx(-0.25)
-    assert step.reward == pytest.approx(0.5 + 0.1 - 0.25)
+    # v5：speed_ratio 权重 0.4；low_speed 在 ctx 无速度键时为 0（只告警一次，不影响数值）
+    assert step.reward == pytest.approx(0.4 * 0.5 + 0.1 - 0.25)
 
 
 def test_lane_boundary_margin_threshold_and_default_off() -> None:
@@ -285,7 +287,8 @@ def test_new_dense_terms_registered_and_default_list_frozen() -> None:
     assert {"ttc", "lane_boundary"} <= set(available_terms())
     assert [dict(config) for config in DEFAULT_TERM_CONFIGS] == [
         {"name": "route_completion", "weight": 1.0, "gamma": 1.0},
-        {"name": "speed_ratio", "weight": 1.0, "cap": 1.0},
+        {"name": "speed_ratio", "weight": 0.4, "cap": 1.0},  # v5 §2
+        {"name": "low_speed", "weight": -0.2},  # v5 §4 默认启用
         {"name": "comfort_lon", "weight": -0.05, "deadband": 2.5},
         {"name": "comfort_lat", "weight": -0.05, "deadband": 2.0},
         {"name": "comfort_jerk", "weight": -0.005, "deadband": 5.0},
@@ -324,8 +327,108 @@ def test_new_terms_enablement_via_term_weight_override_and_aggregation() -> None
     assert step.components["ttc"] == pytest.approx(-0.25)
     assert step.raw_components["lane_boundary"] == pytest.approx(0.35)
     assert step.components["lane_boundary"] == pytest.approx(-0.07)
-    assert step.reward == pytest.approx(0.5 + 0.2 - 0.25 - 0.07)
+    assert step.reward == pytest.approx(0.4 * 0.5 + 0.2 - 0.25 - 0.07)
     assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
+
+
+def test_low_speed_boundary_continuity_and_magnitude() -> None:
+    """v5 §4：``v<2`` 时 ``−0.2×(1−v/2)``；边界连续、单调、封顶；阈值与 KPI 对齐。"""
+    from pipeline.eval_runner import CRAWL_SPEED_MPS
+    from reward_model.terms import LOW_SPEED_THRESHOLD_MPS
+
+    from reward_model import get_term_class
+
+    term = make_term("low_speed", weight=-0.2)  # 默认权重 −0.2 / 阈值 2.0
+    assert get_term_class("low_speed")().weight == pytest.approx(-0.2)  # 类默认值
+    assert term.weight == pytest.approx(-0.2)
+    assert term.threshold == pytest.approx(2.0)
+    assert LOW_SPEED_THRESHOLD_MPS == pytest.approx(CRAWL_SPEED_MPS)  # 与评测 KPI 同阈值
+
+    # 规格样例：v=0 → −0.2；v=1 → −0.1；v=2 → 0；v>2 → 0
+    assert term.weight * term.compute({"speed": 0.0}) == pytest.approx(-0.2)
+    assert term.weight * term.compute({"speed": 1.0}) == pytest.approx(-0.1)
+    assert term.weight * term.compute({"speed": 2.0}) == pytest.approx(0.0)
+    assert term.weight * term.compute({"speed": 2.5}) == pytest.approx(0.0)
+    assert term.weight * term.compute({"velocity": 5.0}) == pytest.approx(0.0)
+    # 连续性：阈值两侧 raw 从 0 连续上升；阈值下界夹到 0（不产生正奖励）
+    assert term.compute({"speed": 2.0 - 1e-9}) == pytest.approx(0.0, abs=1e-8)
+    assert term.compute({"speed": 1.0 + 1e-9}) == pytest.approx(0.5, abs=1e-8)
+    # 单调：v 越小 raw 越大；v<0 封顶 1.0（加权不超权重）
+    raws = [term.compute({"speed": v}) for v in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0)]
+    assert all(later <= earlier for earlier, later in zip(raws, raws[1:]))
+    assert term.compute({"speed": -3.0}) == pytest.approx(1.0)
+    # speed 与 velocity 同口径
+    assert term.compute({"speed": 0.6}) == pytest.approx(term.compute({"velocity": 0.6}))
+    # 非法阈值 fail-fast
+    with pytest.raises(ValueError):
+        make_term("low_speed", threshold=0.0)
+
+
+def test_low_speed_missing_key_warn_once_and_default_enabled() -> None:
+    """缺速度键 → 0 且只告警一次；默认启用（在 DEFAULT_TERM_CONFIGS）。"""
+    term = make_term("low_speed", weight=-0.2)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({}) == 0.0
+        assert term.compute({"speed": None}) == 0.0
+        assert term.compute({"speed": "bad"}) == 0.0
+        assert term.compute({"velocity": float("nan")}) == 0.0
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+    # 缺键帧在聚合器里贡献 0（不改变 reward）
+    configs = [dict(config) for config in DEFAULT_TERM_CONFIGS]
+    assert "low_speed" in {config["name"] for config in configs}
+    aggregator = RewardAggregator(build_terms(configs))
+    step = aggregator.step({"speed_ratio": 0.5})
+    assert step.components["low_speed"] == 0.0
+    assert step.reward == pytest.approx(0.2)
+
+
+def test_v5_terminal_values_provisional_table() -> None:
+    """v5 §1 临时终局值表（审计重解前的代码默认；P2 审计后由报告回填）。"""
+    from reward_model import default_terminal_values
+
+    values = default_terminal_values()
+    assert values == {
+        "arrive_dest": 31.0,
+        "collision": -17.0,
+        "out_of_road": -11.0,
+        "max_step": -19.0,
+        "error": -5.0,
+    }
+    aggregator = RewardAggregator([])  # 默认 AggregationConfig 用该表
+    assert aggregator.step({"arrive_dest": True}).reward == pytest.approx(31.0)
+    assert aggregator.step({"collision": True}).reward == pytest.approx(-17.0)
+    assert aggregator.step({"out_of_road": True}).reward == pytest.approx(-11.0)
+    assert aggregator.step({"max_step": True}).reward == pytest.approx(-19.0)
+    assert aggregator.step({"error": True}).reward == pytest.approx(-5.0)
+
+
+def test_route_completion_tier_and_terminal_values_config_override_path() -> None:
+    """rc 档（3/10/30）与终局值的 config/CLI 覆盖路径（P4 臂入口）。"""
+    from pipeline.trainer import build_reward_adapter
+
+    # CLI 路径：--reward-term-weight route_completion=10（build_reward_adapter 的 term_weights）
+    adapter, source = build_reward_adapter(
+        term_weights={"route_completion": 10.0},
+    )
+    assert source.endswith("+term_weights")
+    weights = {term.name: term.weight for term in adapter.factory().terms}
+    assert weights["route_completion"] == pytest.approx(10.0)
+    assert weights["speed_ratio"] == pytest.approx(0.4)
+    assert weights["low_speed"] == pytest.approx(-0.2)
+
+    # config 路径：stages.C.reward = {terms, aggregation.terminal_values}
+    config = {
+        "terms": [dict(term) for term in DEFAULT_TERM_CONFIGS],
+        "aggregation": {"terminal_values": {"arrive_dest": 3.5, "collision": -7.25}},
+    }
+    adapter_cfg, _ = build_reward_adapter(config)
+    aggregator = adapter_cfg.factory()
+    assert aggregator.step({"arrive_dest": True}).reward == pytest.approx(3.5)
+    aggregator.reset()
+    # 默认 crash 终止项（−10）与覆盖后的 collision 终局值（−7.25）叠加
+    assert aggregator.step({"collision": True}).reward == pytest.approx(-17.25)
 
 
 def test_speed_ratio_efficiency_term() -> None:
@@ -557,10 +660,10 @@ def test_carl_fix_holds_on_term_weight_override_path() -> None:
     step = adapter.factory().step(
         {"speed_ratio": 0.5, "solid_line_crossing": True, "out_of_road": True}
     )
-    assert step.components["speed_ratio"] == pytest.approx(0.5)  # 覆盖后仍按默认权重 1.0 计
+    assert step.components["speed_ratio"] == pytest.approx(0.2)  # 覆盖后仍按默认权重 0.4 计
     assert step.components["solid_line"] == pytest.approx(-3.0)
-    # 0（正向清零）+ (−3.0) + (−8.0) + (−5.0)
-    assert step.reward == pytest.approx(-16.0)
+    # 0（正向清零）+ (−3.0) + (−8.0) + v5 out_of_road 终局值 (−11.0)
+    assert step.reward == pytest.approx(-22.0)
     assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
 
 
