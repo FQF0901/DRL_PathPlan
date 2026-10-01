@@ -43,7 +43,14 @@
     `tools/train.py --phase3 datasets/BTC20260929-1357_phase3_dagger_r5 --phase3-round 5 --ckpt runs/BTC20260929-0425_fixA_nold/stage_b/final.pt --config config/default.yaml --model-config config/model.yaml --micro-batch-size 256 --phase3-anchor --phase3-anchor-bc-dir datasets/BTC20260926-2343_expert5k --phase3-anchor-mild-weight 1.0`
   - 零点：clean500 **0.446** / eval500 **0.436**（`docs/rl_stage_c_experiments.md` §3）。
 - **E-β″（v6 新基座）** = **同配方链重训**：新架构从 Stage A 重训（A20 micro256 → B20 micro512）→ 同 argv 的 phase3 r5 dagger + expert5k 锚 mild=1.0（micro256）。
-- **数据窗口 sha256 清单前置**：P3 开跑前冻结并落 repo：`datasets/BTC20260926-2343_expert5k`、`datasets/BTC20260929-1357_phase3_dagger_r5`、`datasets/BTC20260927-1734_expert500val` 及所用 spec json 的 sha256 清单；清单写入 run manifest。
+- **数据窗口 sha256 清单前置（Gate1 补证-A 修订，2026-10-01）**：P3 开跑前冻结并落 repo，清单写入 run manifest：
+  - **v3 补采（obs schema v3，世界键 → A4 生效；`tools/collect_expert.py` 同 seed/配置重采）**：
+    - train：`datasets/BTC20261001-1327_expert5k`（360,407 行 / 259,522 可训；raw `024bc02e39b5ea4397f559a239b3ddd745e486a5ff5ef8baf582230cf0c75e97`；canonical `499c3f94c008ea9ebb57b54572969ceda98e71e6b2bcc79cc44fb680ab17b967`）
+    - val：`datasets/BTC20261001-1327_expert500val`（36,147 行 / 25,855 可训；raw `3843ba86e0ea57de581beacef2158f91dc5d9a4b121fc98456cdcc513c566c3d`；canonical `e7592e83f22d7e5a2f32ff552481c8c67ce6290efc9d949219bc97dc8071a4e8`）
+    - 逐位对照：expert5k 4988/5000、val 499/500 episode 与旧 v2 基础字段逐位一致；13 个 episode 为采集侧罕见 run-to-run 非确定性（非 v3 变更；差异记录见 `/tmp/opencode/v6_p3_data.md` §2）。
+  - **phase3 冻结池（显式接受 v2 + 断言）**：`datasets/BTC20260929-1357_phase3_dagger_r5`（raw `45e38b3ccb1bc3d805f08db500bc64ec645d01b5e3d932a78a51eb3b38199056`）+ 锚 `datasets/BTC20260926-2343_expert5k`（raw `2b4b0d41b300044289fe4a6df7237a05b8f8a6b33932425596221bf0829a2bef`）。r5 driver 为 pre-v6 ckpt（新 policy/value 头 missing=20）→ 忠实 v3 重采不可行；v2 下 A4 rollout nav 回退 t0（影响仅 action_chain 第 2..6 步上下文，与 E-β′ 训练口径一致）。开跑前 preflight 断言（`/tmp/opencode/v6_p3_dagger_check.py --expect-v2`）+ manifest 记录 `a4_nav_rebuild=false (accepted)`。
+  - spec json：`env/specs/scenarios_train.json` `1595acaf77c0c29226e01f8598d14a59d8aec3a0cba75180ce674f087483595b`、`env/specs/scenarios_eval500.json` `98856105eca17461bbdabbf88f203102be7b585fd3de82820b17460358dd4595`、`env/specs/scenarios_train_5k.json` `211575f09675975c200a6bac73cd50090b7836a7eb3515bc93393780814fb91e`（phase3 池）。
+  - 旧 v2 `expert5k`/`expert500val` 仅作 E-β′ 参照，不用于 E-β″ 的 A/B 训练。
 
 ### 4.2 mini 重训闸（32k 行，先于全量）
 
@@ -53,7 +60,8 @@
 2. Stage A 单 epoch **≤ 28 s**（32k 切片；实测基线 24–25 s + 新架构增量）；
 3. Stage B **micro 选定档无 OOM**，且 **`st_gnn` 在主路径实际执行**（耗时/图证据）；
 4. 损失有限（无 NaN/Inf），曲线无异常；
-5. mini ckpt 可评测（**≥ 16 条**）且 run manifest 完整 + 工作树 clean。
+5. mini ckpt 可评测（**≥ 16 条**）且 run manifest 完整 + 工作树 clean；
+6. **A4 nav 世界键生效断言（fail-closed）**：mini 训练（Stage A/B，数据 = §4.1 v3 数据集）**首 batch 无** `[stageA]`/`[trainer]` nav 回退 WARN，且数据契约含 `ego_world`/`route_world`（`obs_schema_version=3`；等价证据：rollout/教师强制逐步重建生效）；不满足 → 停（训练/评测口径不一致）。
 
 ### 4.3 micro / 可训性预案
 
@@ -62,8 +70,8 @@
 
 ### 4.4 abort 判据与预算
 
-- **abort**：单 epoch 墙钟超基线 **+25%** 即停（检查是否落 +7–23% 增量带外）。
-- **预算 ≤ 5 h/轮**（含 A+B 全量 2.6–3.1 h + phase3 链 + 评测/keep-best；超预算按优先级截断）。
+- **abort**：单 epoch 墙钟超基线 **+30%** 即停（A4 生效口径 full rollout @B=256 = **102.6 ms** vs 旧架构基线 84.93 ms = **+20.9%**（中心）；+25% 只剩 ~4pt 余量、带内抖动即误停 → 放宽至 +30%，仍在旧增量带宽 [+7%, +23%] 之外，可捕获真异常）。
+- **预算 ≤ 5 h/轮**（含 A+B 全量 **≈2.9 h**（2.4 h 基线 × 1.21；带宽 2.6–3.0 h）+ phase3 链 + 评测/keep-best；超预算按优先级截断）。
 - **E3 硬闸**：clean500 / eval500 ≥ **0.446 / 0.436**（细则 §6）。
 - **Gate3**：新基座验收证据——不达标不进 RL。
 
