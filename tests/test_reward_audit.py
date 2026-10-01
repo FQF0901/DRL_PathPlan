@@ -1,7 +1,9 @@
 """P2 奖励审计工具（``tools/reward_audit.py``）口径单测：dry-run 端到端 + 分区互斥 + 重放语义。
 
 - dry-run：合成样本每类 3 条（≥2），全档反解→重放应回到目标剖面（|Δ| ≤ 0.5）；
-- 审计/反解样本同类内交替分配 → 互斥且确定性；
+- 审计/反解样本按终局类**分层随机**划分 → 互斥、seed 可复现、与输入顺序无关；
+- **exclude 默认生效**（排除 eval500）与 ``--no-exclude``；analyze 兜底过滤；
+- 报告 meta 记录 HEAD commit sha + split seed；
 - 重放：CaRL 乘子只清零正向稠密、终局值只在终局帧、max_step 注入、low_speed 前车拆分。
 """
 
@@ -41,19 +43,83 @@ def test_dry_run_roundtrip_targets(tmp_path: Path) -> None:
     assert (out / "config_draft_rc3.yaml").is_file()
 
 
-def test_partition_is_mutually_exclusive_and_deterministic() -> None:
+def _keys(rows) -> set:
+    return {(e["meta"]["spec_id"], e["meta"]["spec_seed"]) for e in rows}
+
+
+def test_partition_is_stratified_random_and_deterministic() -> None:
+    """分层随机划分：同类内 seed 随机、同 seed 可复现、与输入顺序无关、两半互斥且覆盖全集。"""
     episodes = []
     for cls_index, cls in enumerate(CLASS_ORDER):
-        for repeat in range(5):
+        for repeat in range(8):
             episodes.append(_synthetic_episode(cls, spec_id=cls_index * 100 + repeat))
-    audit, solve = _partition(episodes)
-    keys_audit = {(e["meta"]["spec_id"], e["meta"]["spec_seed"]) for e in audit}
-    keys_solve = {(e["meta"]["spec_id"], e["meta"]["spec_seed"]) for e in solve}
+    audit, solve = _partition(episodes, split_seed=1234)
+    keys_audit, keys_solve = _keys(audit), _keys(solve)
     assert not (keys_audit & keys_solve)
-    assert len(audit) == 12 and len(solve) == 8  # 每类 5 条 → 交替 3/2
-    audit2, solve2 = _partition(list(reversed(episodes)))
-    assert [(e["meta"]["spec_id"]) for e in audit2] == [e["meta"]["spec_id"] for e in audit]
-    assert [(e["meta"]["spec_id"]) for e in solve2] == [e["meta"]["spec_id"] for e in solve]
+    assert len(audit) == 16 and len(solve) == 16  # 每类 8 条 → 4/4（分层平衡）
+    assert keys_audit | keys_solve == _keys(episodes)
+    for cls in CLASS_ORDER:
+        assert sum(1 for e in audit if e["meta"]["termination"] == cls) == 4
+    # 同 seed 确定性 + 输入顺序无关
+    audit2, solve2 = _partition(list(reversed(episodes)), split_seed=1234)
+    assert _keys(audit2) == keys_audit and _keys(solve2) == keys_solve
+    # 不同 seed 划分不同（8/类，同划分概率 ~ (1/C(8,4))^4 ≈ 4e-8）
+    audit3, _ = _partition(episodes, split_seed=4321)
+    assert _keys(audit3) != keys_audit
+    # A/B 互换：两半对调
+    audit4, solve4 = _partition(episodes, split_seed=1234, swap_ab=True)
+    assert _keys(audit4) == keys_solve and _keys(solve4) == keys_audit
+
+
+def test_exclude_default_removes_eval500_from_val_pool() -> None:
+    """默认排除 eval500（Gate2 P4 MUST ①）：val 池候选 500 条且与 eval500 零交集。"""
+    pool, exclude = reward_audit.DEFAULT_POOL, reward_audit.DEFAULT_EXCLUDE
+    if not pool.is_file() or not exclude.is_file():
+        pytest.skip("env/specs 未生成（gitignored 产物）")
+    pairs = reward_audit._candidate_pairs(pool, exclude)
+    assert len(pairs) == 500
+    assert not (set(pairs) & set(reward_audit._load_spec_pairs(exclude)))
+    assert reward_audit._candidate_pairs(pool, None) == sorted(reward_audit._load_spec_pairs(pool))
+
+
+def test_collect_cli_exclude_default_and_no_exclude() -> None:
+    """CLI：collect/analyze 默认排除 eval500；--no-exclude 显式关闭；划分参数有默认。"""
+    parser = reward_audit._build_parser()
+    ns = parser.parse_args(["collect"])
+    assert ns.exclude == str(reward_audit.DEFAULT_EXCLUDE)
+    assert ns.no_exclude is False
+    ns = parser.parse_args(["collect", "--no-exclude"])
+    assert ns.no_exclude is True
+    ns = parser.parse_args(["analyze"])
+    assert ns.exclude == str(reward_audit.DEFAULT_EXCLUDE)
+    assert ns.no_exclude is False
+    assert ns.split_seed == reward_audit.DEFAULT_SPLIT_SEED
+    assert ns.swap_ab is False
+    assert ns.min_per_class == reward_audit.MIN_PER_CLASS
+
+
+def test_resolve_exclude_empty_is_error_and_no_exclude_wins() -> None:
+    """空值 --exclude（历史污染根因）报错；--no-exclude 优先于 --exclude。"""
+    with pytest.raises(SystemExit):
+        reward_audit._resolve_exclude(argparse.Namespace(exclude="", no_exclude=False))
+    assert (
+        reward_audit._resolve_exclude(
+            argparse.Namespace(exclude=str(reward_audit.DEFAULT_EXCLUDE), no_exclude=True)
+        )
+        is None
+    )
+    assert reward_audit._resolve_exclude(argparse.Namespace(exclude=None, no_exclude=False)) is None
+    with pytest.raises(SystemExit):  # fail-closed：排除文件缺失报错
+        reward_audit._load_excluded(Path("/nonexistent/exclude.json"))
+
+
+def test_analyze_filter_excluded_episodes() -> None:
+    """analyze 兜底过滤：采集未排除 eval500 时，复算仍剔除其 (id, seed)。"""
+    episodes = [_synthetic_episode(cls, spec_id=i) for i, cls in enumerate(CLASS_ORDER)]
+    kept = reward_audit._filter_excluded(episodes, {(0, 5000000)})
+    assert len(kept) == len(episodes) - 1
+    assert all((e["meta"]["spec_id"], e["meta"]["spec_seed"]) != (0, 5000000) for e in kept)
+    assert reward_audit._filter_excluded(episodes, set()) == episodes
 
 
 def test_replay_collision_carl_and_terminal_semantics() -> None:
@@ -120,6 +186,20 @@ def test_solve_uses_effective_dense_semantics() -> None:
     raw = TARGETS["collision"] - item["dense_effective_mean"] - item["terminating_mean"] - item["carl_penalty_mean"]
     assert item["resolved_raw"] == pytest.approx(raw)
     assert abs(item["recompute_delta"]) <= reward_audit.TOLERANCE
+
+
+def test_report_records_head_commit_and_split_seed(tmp_path: Path) -> None:
+    """报告 meta/markdown 记录 HEAD commit sha + split seed（Gate2 P4 MUST ④）。"""
+    out = tmp_path / "dry_head"
+    result = reward_audit.dry_run(argparse.Namespace(out=str(out)))
+    meta = result["meta"]
+    assert meta["split_seed"] == reward_audit.DEFAULT_SPLIT_SEED
+    assert meta["swap_ab"] is False
+    assert meta["min_per_class"] == reward_audit.MIN_PER_CLASS
+    assert isinstance(meta["head_commit"], str) and len(meta["head_commit"]) >= 7
+    markdown = (out / "reward_audit.md").read_text(encoding="utf-8")
+    assert meta["head_commit"] in markdown
+    assert f"split seed `{reward_audit.DEFAULT_SPLIT_SEED}`" in markdown
 
 
 def test_analyze_manifest_hashes(tmp_path: Path) -> None:
