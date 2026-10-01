@@ -96,7 +96,20 @@
 
 - **spec 池 pin = `env/specs/scenarios_train_dagger_r1.json`（500 条；pool 是唯一防塌杠杆，`docs/rl_stage_c_v4_report.md` §4）**；`--pool local --envs 1`，GPU 串行（臂间可比）。
 - **奖励 bundle（定义）**：剖面 C 的默认奖励改动集合作为**一个整体底座臂**——`speed_ratio` 0.4 + rc 选定档 + `low_speed` 启用 + 终局值定稿表；其余臂在 bundle 之上单变量。
-- **开臂前置**：P3 后、P4 前先跑一次奖励审计/重解（E-β″ 上定稿终局值与剖面；[`docs/rl_reward_v5.md`](rl_reward_v5.md) §7）；未复算不得开臂。
+- **开臂前置（E-β″ 奖励复算规格；Gate2 P4 MUST 修订，2026-10-01）**：P3 后、P4 前在 E-β″ 上跑一次奖励审计/重解
+  （定稿该基座终局值与剖面，作为 P4 奖励口径；工具 [`docs/rl_reward_v5.md`](rl_reward_v5.md) §7）；**未复算不得开臂**：
+  1. **排除 eval500**：审计池必须排除 `env/specs/scenarios_eval500.json` 的全部 500 条（P2 池与其全量重叠的教训；
+     工具默认排除，`--no-exclude` 仅显式关闭，`--exclude ""` 报错）；
+  2. **分层随机划分**：审计/反解样本按终局类分层随机划分（工具 `--split-seed` 固定并记录；替代 P2 的按序号交替
+     ——两半难度不可交换：P2 collision 两半 5.34 vs 8.85）；
+  3. **A/B 互换交叉验证**：`--swap-ab` 两向各跑一次（两半角色互换），两向结论一致方可作为 P4 奖励口径；
+  4. **每类 n ≥ 50**：审计与反解各自按终局类计（`--min-per-class 50`；不足则该类只报 n 与区间、复算不通过）。
+     注：排除 eval500 后 val 池仅剩 500 条（E-β′ 实测 collision/max_step 各 20 条 < 50）⇒ **须用与 eval500
+     不相交的补充池补足**，池组成与来源写入复算报告 meta；
+  5. **max_step 接线后执行**：须先完成训练侧 max_step 接线（P4 前置-B；P2 已证未接线时"超时"被误读为正收益）
+     再复算；口径断言 `terminal_key=max_step`（终局值按复算档取值，当前代码默认基准档 −23）；
+  6. **记录 HEAD commit sha + split seed**：复算报告 meta 必含（工具已支持），报告入库 tracked 路径
+     （`docs/reward_audit/`；原始 `runs/` 路径 + sha256 对照见其 `MANIFEST.md`）。
 - **顺序（每臂单变量，前臂通过再开下臂）**：
   1. **bundle 底座臂**（v5 奖励默认全量）；
   2. **rc 扫档 3 / 10 / 30**（固定剖面、终局值为因变量）；

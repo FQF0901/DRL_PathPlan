@@ -1,9 +1,9 @@
 # 奖励 v5 规格（剖面 C）· 冻结
 
-> **状态：冻结（2026-10-01；Gate0 复核修正版 + P2 审计回填）**。P2 实现与 Gate2 审计以本文件为准。**终局值表（§1）已由 P2 审计重解定稿**（原临时值保留对照，见 §1/§3）。
-> 关联：[`docs/v6_program_prereg.md`](v6_program_prereg.md)（P2/Gate2）、[`docs/v6_net_design.md`](v6_net_design.md)（新基座）。
+> **状态：冻结（2026-10-01；Gate0 复核修正版 + P2 审计回填 + Gate2 P4 前置-A 修订）**。P2 实现与 Gate2 审计以本文件为准。**终局值表（§1）已由 P2 审计重解定稿**（原临时值保留对照，见 §1/§3）。
+> 关联：[`docs/v6_program_prereg.md`](v6_program_prereg.md)（P2/Gate2；E-β″ 复算规格 §7.1）、[`docs/v6_net_design.md`](v6_net_design.md)（新基座）。
 > 上游：`.slim/deepwork/v6-net-retrain.md`（剖面 C 已锁）；反解输入 = E-β′ 1000 episode 真实 rollout（P2 审计，见 §3；原 50 场景重建临时输入作废）。
-> P2 审计报告：`runs/reward_audit/report/reward_audit.{md,json}`（+ `config_draft_rc{1,3,10,30}.yaml`；验收镜像 `/tmp/opencode/v6_reward_audit.md`）。
+> P2 审计报告（入库）：`docs/reward_audit/reward_audit.{md,json}`（+ `config_draft_rc{1,3,10,30}.yaml`；原始 `runs/reward_audit/report/` 路径 + sha256 对照见 `docs/reward_audit/MANIFEST.md`；验收镜像 `/tmp/opencode/v6_reward_audit.md`）。
 
 ## 0. 聚合结构（不变式）
 
@@ -45,7 +45,8 @@ reward = dense_positive_sum × carl_multiplier
 | rc=10 | +22 | −23 | −18 | −29 | −5 | 2.76 |
 | rc=30 | +2 | −33 | −26 | −42 | −5 | 1.88 |
 
-- 配置草案：`runs/reward_audit/report/config_draft_rc{1,3,10,30}.yaml`（经
+- 配置草案（入库）：`docs/reward_audit/config_draft_rc{1,3,10,30}.yaml`（原始
+  `runs/reward_audit/report/` 副本 + sha256 见 `docs/reward_audit/MANIFEST.md`；经
   `stages.C.reward.aggregation.terminal_values` 或对应 arm 配置启用）。
 
 ## 2. 权重
@@ -85,8 +86,9 @@ reward = dense_positive_sum × carl_multiplier
 - 复算差冻结容差 **≤ 0.5**（P2 实测 max 0.494）。
 - **每档（3 / 10 / 30）以完整 v5 项集重跑反解样本**（与审计样本互斥；rc 权重改变稠密贡献），
   按同式反解产出该档终局值；**不得复用其他档的终局值**。各档反解表/剖面见报告 §2/§3。
-- 执行/归档：`tools/reward_audit.py analyze` 以真实聚合器复算并落
-  `runs/reward_audit/report/`（含样本清单与 sha256）。
+- 执行/归档：`tools/reward_audit.py analyze` 以真实聚合器复算并落 `runs/reward_audit/report/`
+  （含样本清单与 sha256）；P2 报告/配置草案已入库 `docs/reward_audit/`（原始路径 + sha256 对照见
+  `docs/reward_audit/MANIFEST.md`）。
 
 ## 4. 新项 `low_speed`（P2 已实现，默认启用）
 
@@ -126,11 +128,14 @@ reward = dense_positive_sum × carl_multiplier
 
 - 工具：`tools/reward_audit.py`（名 P2 定，接口冻结）。
 - 输入：ckpt + spec + 场景数 **≥ 50**（真实 rollout）；**真实** `RewardAggregator` + `RewardAdapter._build_ctx`（禁用 `implied_reward.py` 类近似）。
-- **样本纪律（Gate0 裁定）**：
-  - **样本与反解互斥**：审计样本（验证剖面）与 rc 档反解样本（产出终局值）必须来自**互斥**的场景集合（同一批不得既反解又审计）；
-  - **每终局类 n ≥ 10**（成功 / 碰撞 / 出界 / 超时 / error；不足则该类只报 n 与区间，不做达标判定）；
+  **默认排除 `env/specs/scenarios_eval500.json`**（collect 池过滤 + analyze 兜底过滤；`--no-exclude` 仅显式关闭；
+  `--exclude ""` 报错——空值曾导致 P2 池与 eval500 全量重叠）。
+- **样本纪律（Gate0 裁定；Gate2 P4 前置-A 修订）**：
+  - **样本与反解互斥**：审计样本（验证剖面）与 rc 档反解样本（产出终局值）必须来自**互斥**的场景集合（同一批不得既反解又审计）；划分须**按终局类分层随机**（`--split-seed` 固定记录；P2 的按序号交替两半难度不可交换，已作废），并以 `--swap-ab` 做 A/B 互换交叉验证（见 §7.1）；
+  - **每终局类 n ≥ 10**（成功 / 碰撞 / 出界 / 超时 / error；不足则该类只报 n 与区间，不做达标判定）；E-β″ 复算提高到 **≥ 50**（§7.1）；
   - **完整项集**：含 `low_speed`（不得用旧项集近似）。
 - 输出：`reward_audit.{md,json}`：
+  - 报告 meta：**HEAD commit sha**、split seed（`--split-seed`）、exclude 集、每类最小样本数（`--min-per-class`，E-β″ 复算用 50）；
   - 每终局类：n、total reward 均值、`dense_positive_sum` / `dense_negative_sum`、terminating、carl_penalty、terminal_value；
   - **分类剖面 vs 目标**（+50 / −20 / −15 / −10）与 |Δ|；逐项贡献 top（`speed_ratio` / `route_completion` / `low_speed` / `comfort_*` / `solid_line` / `speed_limit`）；
   - **分层报告**：① **折扣 / 未折扣**两列（γ 折扣回报 vs 原始累计）；② **dense 语义拆分**（`pos×mult+neg` 聚合 vs 正稠密口径）；③ `low_speed` 按**有无前车**拆分；④ **E-β′ vs E-β″ 两列**（新旧基座各一列）；
@@ -143,10 +148,16 @@ reward = dense_positive_sum × carl_multiplier
     `031cc1c`（`/tmp/opencode/v6_pre`）下 rollout **1000 episode**（`scenarios_val.json`；分类
     arrive 441 / out_of_road 490 / collision 34 / max_step 35；rollout 与评测同口径）；
   - 重放/反解：HEAD `tools/reward_audit.py analyze`（完整 v5 项集含 `low_speed`）；审计 501 /
-    反解 499（互斥）；报告 `runs/reward_audit/report/reward_audit.{md,json}` + 4 份配置草案；
+    反解 499（互斥）；报告 `docs/reward_audit/reward_audit.{md,json}`（原始 `runs/` 副本 + sha256 见
+    `docs/reward_audit/MANIFEST.md`）+ 4 份配置草案；
   - 判定：**四档（rc=1/3/10/30）剖面均通过**（|Δ|max 3.66 / 3.57 / 2.76 / 1.88 ≤ 5；每类 n ≥ 10：
     audit collision 17 / max_step 18）；基准档反解复算差 max 0.494 ≤ 0.5；
-  - E-β″ 列：P3 重训后补（同一工具复算；见 §7 执行时点）。
+  - **池重叠声明（Gate2 P4 MUST ①）**：P2 审计池 = `scenarios_val.json` 1000 条，与
+    `scenarios_eval500.json` **重叠全部 500 条**（采集时 `--exclude` 因空值静默失效，
+    `collect_summary.exclude=null`）⇒ 本报告含 eval500 场景。**E-β″ 复算将排除 eval500**（工具默认
+    排除；空值报错；analyze 侧兜底过滤），并执行 §7.1 完整规格（分层随机划分 + A/B 互换 + 每类 n≥50 +
+    max_step 接线后 + 记录 HEAD commit sha/split seed）。
+  - E-β″ 列：P3 重训后补（同一工具按 §7.1 规格复算；见 §7 执行时点）。
 
 ## 8. 验收清单（P2 / Gate2）
 

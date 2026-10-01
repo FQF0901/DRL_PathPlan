@@ -1,0 +1,24 @@
+# P2 审计配置草案：rc 档 = 30（v5 剖面 C；终局值反解自审计工具）
+# 用法：合并进 config/train.yaml 的 stages.C，或按 CLI --reward-term-weight route_completion=<档> 覆盖权重；
+# 终局值经 stages.C.reward.aggregation.terminal_values 透传（AggregationConfig）。
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 30, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 2
+          collision: -33
+          out_of_road: -26
+          max_step: -42
+          error: -5
