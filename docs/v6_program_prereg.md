@@ -234,3 +234,4 @@
 - Gate2 P4 前置-A（审计工具 exclude 默认/分层随机/HEAD+seed 记录 + 产物入库 + v5 池重叠声明 + §7.1 E-β″ 复算规格）内容 commit：`0120ac0`（工具/单测）、`b0fa3b1`（文档/产物，2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
 
 - Gate2 P4 收尾（max_step 裁定 + horizon 显式接受 + P4 臂配置组装 `config/arms/` + dry-run 单测）内容 commit：`920395e`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- Gate4 修正集（horizon 对齐 200 策略步 + 首臂后复核/终评判据/keep-best/driver pin 表 + 测试加固）内容 commit：`0c725db`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
