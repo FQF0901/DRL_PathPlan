@@ -1,6 +1,13 @@
 # E-β″ 奖励审计报告（v6 基座 / 剖面 C；方向 A） 配置草案：rc 档 = 30（v5 剖面 C；终局值反解自审计工具）
 # 用法：合并进 config/train.yaml 的 stages.C，或按 CLI --reward-term-weight route_completion=<档> 覆盖权重；
 # 终局值经 stages.C.reward.aggregation.terminal_values 透传（AggregationConfig）。
+#
+# max_step 裁定（Orchestrator，2026-10-01；E-β″ 复算定稿后）——采用 E-β″ 点估计 -71（反解 raw -71.360）：
+#   标注 **n=8/向、不判通过**（§7.1 ④ 结构性不足）、**首臂后复核**、不扩采（~5-6h 超预算）。
+#   依据：profile 一致性——审计半区 mean -14.757、Δ-4.757（边界；方向 B mean -4.640、Δ+5.360，
+#   两向均判不通过）；若沿用 P2 -42 则同类均值随终局值直接翻正（超时正收益）。
+#   horizon 显式接受：训练截断 600 策略步 vs 审计/评测 1000 物理步；max_step 在训练更稀有；值不变。
+#   裁定记录见 docs/v6_program_prereg.md §7.1 与 docs/reward_audit/ebeta2/MANIFEST.md。
 stages:
   C:
     reward:

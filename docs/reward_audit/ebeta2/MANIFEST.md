@@ -18,6 +18,26 @@
 | `docs/reward_audit/ebeta2/config_draft_rc10.yaml` | `runs/reward_audit_ebeta2/report/config_draft_rc10.yaml` | `6b32b264ef1bcfcba67a8262dc8860e53aa3615bd1c2fc219ea6f2aadb50dfd8` |
 | `docs/reward_audit/ebeta2/config_draft_rc30.yaml` | `runs/reward_audit_ebeta2/report/config_draft_rc30.yaml` | `c6245282892586e630d5311cad636c7f0ac335da745af255f0abd922f3620634` |
 
+> **注释补丁（2026-10-01，P4 收尾；仅注释，数值不变）**：`config_draft_rc{1,3,10,30}.yaml`
+> 入库副本追加 max_step 裁定注释；YAML 数值段与原始 `runs/` 副本**逐位一致**（`diff <(grep -v '^#')` 校验）。
+> 补丁后 tracked sha256：rc1 `136befea…` / rc3 `14b07cec…` / rc10 `eed27deb…` / rc30 `a2c73323…`
+> （上表 sha256 列为补丁前入库副本 = 原始 `runs/` 副本，保持溯源）。
+
+## 裁定记录（max_step 终局值 + horizon；Orchestrator，2026-10-01；P4 收尾）
+
+- **max_step 终局值采用 E-β″ 点估计**（rc=1 **−46** / rc=3 −48 / rc=10 −54 / rc=30 −71；
+  `config_draft_rc*.yaml` 数值即该裁定值，本次仅补注释锚）。依据：profile 一致性——
+  rc=1 审计半区 mean **−15.050**、Δ **−5.050**（边界；方向 B mean −4.750、Δ +5.250）；
+  若沿用 P2 −23 则 rc=1 审计半区 mean ≈ **+8.05**、Δ +18（= 超时正收益）。
+- **标注**：max_step 每类 **n=8/向、不判通过**（§7.1 ④ 结构性不足）、**首臂后复核**、
+  **不扩采**（~5-6 h 超预算）。
+- **horizon 显式接受**：训练截断 600 策略步 vs 审计/评测 1000 物理步；max_step 在训练侧更稀有；
+  终局值不变。
+- 其余三类用 E-β″ 定稿值（rc=1 +29/−22/−14；rc=3 +27/−23/−15；rc=10 +20/−28/−18；
+  rc=30 +0/−41/−26；两向非 max_step 类 |Δ|≤5）。
+- P4 臂配置组装见 `config/arms/`（8 臂；逐臂单变量/预期见其 README；dry-run 单测
+  `tests/test_p4_arm_configs.py`）。
+
 ## 溯源
 
 - 工具落库 commit：`abffdf6`（本目录产物的生成代码 `tools/reward_audit*.py` + `tests/test_reward_audit.py`；

@@ -1,0 +1,65 @@
+# P4 arm4/8 — λ=0.98 对照（相对 arm0 单变量：train.ppo.lam 0.95→0.98）
+# 用途：§7.1 顺序第 3 臂 / §7.2 λ 对照——记录 returns / EV / 崩解窗口。
+# 预期：与 arm0（λ=0.95）单变量对照；其余 pins 完全一致（同 bundle、同档终局值）。
+# 加载：tools/train.py --stage C --config config/arms/arm4_lam098.yaml ...
+# 单变量：train.ppo.lam（0.98）。
+# 说明：本文件显式钉住整段 train（值 = 当前 config/train.yaml，仅 lam 改 0.98）——
+#   因 includes 为平铺合并（顶层键整体替换），只写 train.ppo.lam 会把 train 段其余键
+#   打回代码默认（如 threads cap 8→4）；整段复制保证「λ 单变量、其余 pins 逐位一致」。
+# 终局值：E-β″ 定稿 rc=1（+29/−22/−14；max_step 裁定 −46，n=8/向、不判通过、首臂后复核）。
+# 注：includes 平铺合并语义见 config/arms/README.md「加载语义」。
+# includes 说明：训练侧 pipeline.stages.load_config 只解析一层（不递归）——单写 config/default.yaml
+# 只会带入其 project 元数据而丢失 train/data/run 等段（dry-run 实测）；故同时列出 default.yaml 的
+# 四个叶子子配置，保证平铺合并结果 = 解析 config/default.yaml；递归加载器（eval_runner.load_config）
+# 下两种写法等价。详见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+train:
+  device: auto
+  threads:
+    max_per_process: 8
+    omp_num_threads: 1
+  ppo:
+    lam: 0.98
+    minibatch_size: 1024
+    target_kl: null
+    group_probe_every: 1
+    anchor_grad_probe: true
+    anchor_grad_probe_size: 128
+  wm:
+    batch_size: 1024
+    micro_batch_size: 256
+  bc:
+    batch_size: 1024
+    micro_batch_size: 512
+  probe_batch: datasets/BTC20260926-2343_expert5k
+  critic_warmup_updates: 0
+  adv_norm: global
+  value_lr_scale: 1.0
+  trim_memory_every: 4
+  ckpt_every: 5
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -22
+          out_of_road: -14
+          max_step: -46
+          error: -5

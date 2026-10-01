@@ -1,0 +1,38 @@
+# P4 arm2/8 — rc=10 档（相对 arm0 单变量：route_completion 1→10 + 同档终局值）
+# 用途：§7.1 顺序第 2 臂——rc 扫档 10（固定剖面、终局值为因变量）。
+# 预期：与 arm0/arm1 对照读 rc 权重影响（同档配对；不得跨档复用终局值）。
+# 加载：tools/train.py --stage C --config config/arms/arm2_rc10.yaml ...
+# 单变量：route_completion 权重 + 该档 terminal_values（其余同 arm0 bundle）。
+# 终局值：E-β″ 定稿 rc=10（+20/−28/−18；max_step 裁定 −54，n=8/向、不判通过、首臂后复核）。
+# 注：includes 平铺合并语义（stages 段整体替换）见 config/arms/README.md「加载语义」。
+# includes 说明：训练侧 pipeline.stages.load_config 只解析一层（不递归）——单写 config/default.yaml
+# 只会带入其 project 元数据而丢失 train/data/run 等段（dry-run 实测）；故同时列出 default.yaml 的
+# 四个叶子子配置，保证平铺合并结果 = 解析 config/default.yaml；递归加载器（eval_runner.load_config）
+# 下两种写法等价。详见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 10, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 20
+          collision: -28
+          out_of_road: -18
+          max_step: -54
+          error: -5

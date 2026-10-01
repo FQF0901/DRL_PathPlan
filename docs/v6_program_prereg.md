@@ -110,6 +110,14 @@
      再复算；口径断言 `terminal_key=max_step`（终局值按复算档取值，当前代码默认基准档 −23）；
   6. **记录 HEAD commit sha + split seed**：复算报告 meta 必含（工具已支持），报告入库 tracked 路径
      （`docs/reward_audit/`；原始 `runs/` 路径 + sha256 对照见其 `MANIFEST.md`）。
+- **max_step 裁定 + horizon 显式接受（Orchestrator，2026-10-01；E-β″ 复算定稿后）**：
+  - **max_step 终局值采用 E-β″ 点估计**：rc=1 **−46** / rc=3 −48 / rc=10 −54 / rc=30 −71
+    （落点 `docs/reward_audit/ebeta2/config_draft_rc*.yaml`）。依据：profile 一致性——rc=1 审计半区
+    mean **−15.050**、Δ **−5.050**（边界；方向 B mean −4.750、Δ +5.250）；若沿用 P2 −23 则
+    mean ≈ **+8.05**、Δ +18（= 超时正收益）。标注 **n=8/向、不判通过**（第 4 条）、
+    **首臂后复核**、**不扩采**（~5-6 h 超预算）。
+  - **horizon 显式接受**：训练截断 600 策略步 vs 审计/评测 1000 物理步；max_step 在训练侧更稀有；
+    终局值不变。
 - **顺序（每臂单变量，前臂通过再开下臂）**：
   1. **bundle 底座臂**（v5 奖励默认全量）；
   2. **rc 扫档 3 / 10 / 30**（固定剖面、终局值为因变量）；
@@ -150,3 +158,4 @@
 - 三份冻结文档（本文件 + `docs/v6_net_design.md` + `docs/rl_reward_v5.md`）的 Gate0 修正版 commit：`d27395dd0e1590d2151c42830f6a930bb5aafd2c`（短 `d27395d`，2026-10-01，首次 commit）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - Gate1 补证-A（P3 数据窗口 v3 补采 + mini 闸 A4 断言 + abort/预算校准）内容 commit：`0863186`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - Gate2 P4 前置-A（审计工具 exclude 默认/分层随机/HEAD+seed 记录 + 产物入库 + v5 池重叠声明 + §7.1 E-β″ 复算规格）内容 commit：`0120ac0`（工具/单测）、`b0fa3b1`（文档/产物，2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
+
