@@ -384,23 +384,23 @@ def test_low_speed_missing_key_warn_once_and_default_enabled() -> None:
     assert step.reward == pytest.approx(0.2)
 
 
-def test_v5_terminal_values_provisional_table() -> None:
-    """v5 §1 临时终局值表（审计重解前的代码默认；P2 审计后由报告回填）。"""
+def test_v5_terminal_values_audited_table() -> None:
+    """v5 §1 终局值表（P2 审计重解定稿；rc=1.0 基准档；报告 runs/reward_audit/report/）。"""
     from reward_model import default_terminal_values
 
     values = default_terminal_values()
     assert values == {
-        "arrive_dest": 31.0,
-        "collision": -17.0,
-        "out_of_road": -11.0,
-        "max_step": -19.0,
+        "arrive_dest": 30.0,
+        "collision": -19.0,
+        "out_of_road": -15.0,
+        "max_step": -23.0,
         "error": -5.0,
     }
     aggregator = RewardAggregator([])  # 默认 AggregationConfig 用该表
-    assert aggregator.step({"arrive_dest": True}).reward == pytest.approx(31.0)
-    assert aggregator.step({"collision": True}).reward == pytest.approx(-17.0)
-    assert aggregator.step({"out_of_road": True}).reward == pytest.approx(-11.0)
-    assert aggregator.step({"max_step": True}).reward == pytest.approx(-19.0)
+    assert aggregator.step({"arrive_dest": True}).reward == pytest.approx(30.0)
+    assert aggregator.step({"collision": True}).reward == pytest.approx(-19.0)
+    assert aggregator.step({"out_of_road": True}).reward == pytest.approx(-15.0)
+    assert aggregator.step({"max_step": True}).reward == pytest.approx(-23.0)
     assert aggregator.step({"error": True}).reward == pytest.approx(-5.0)
 
 
@@ -662,8 +662,8 @@ def test_carl_fix_holds_on_term_weight_override_path() -> None:
     )
     assert step.components["speed_ratio"] == pytest.approx(0.2)  # 覆盖后仍按默认权重 0.4 计
     assert step.components["solid_line"] == pytest.approx(-3.0)
-    # 0（正向清零）+ (−3.0) + (−8.0) + v5 out_of_road 终局值 (−11.0)
-    assert step.reward == pytest.approx(-22.0)
+    # 0（正向清零）+ (−3.0) + (−8.0) + v5 定稿 out_of_road 终局值 (−15.0)
+    assert step.reward == pytest.approx(-26.0)
     assert [dict(term) for term in DEFAULT_TERM_CONFIGS] == before
 
 

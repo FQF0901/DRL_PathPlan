@@ -88,18 +88,23 @@ def _carl_reason(key: str) -> str:
 
 
 def default_terminal_values() -> dict[str, float]:
-    """默认终局 outcome 奖惩（v5 剖面 C；**provisional，P2 审计重解后定稿**）。
+    """默认终局 outcome 奖惩（v5 剖面 C；**P2 审计重解定稿**，rc=1.0 基准档）。
 
-    现行值（到达 +31、碰撞 −17、出界 −11、超时 −19、基建错误 −5）来自 Gate0 的 50 场景
-    重建反解（无归档，`docs/rl_reward_v5.md` §1/§3），**在 P2 奖励审计（完整 v5 项集重放）
-    完成前为临时值**；审计以 `tools/reward_audit.py` 按 rc 档（1.0 基准 / 3 / 10 / 30）
-    反解并回填。不得跨档复用（每档一套，见 §3）。
+    现行值（到达 +30、碰撞 −19、出界 −15、超时 −23、基建错误 −5）= P2 奖励审计
+    （`tools/reward_audit.py`；E-β′ 1000 episode 真实 rollout，完整 v5 项集离线重放）在
+    rc 权重 1.0 基准档上的反解整数定稿；报告：
+    `runs/reward_audit/report/reward_audit.{md,json}`（反解复算差 ≤ 0.5）。
+    临时值（+31/−17/−11/−19）→ 定稿差异见 `docs/rl_reward_v5.md` §1。
+
+    rc 扫档 3 / 10 / 30 各有**独立**终局值（不得跨档复用）：配置草案见
+    `runs/reward_audit/report/config_draft_rc{3,10,30}.yaml`（经
+    ``stages.C.reward.aggregation.terminal_values`` 或对应 arm 配置启用）。
     """
     return {
-        "arrive_dest": 31.0,
-        "collision": -17.0,
-        "out_of_road": -11.0,
-        "max_step": -19.0,
+        "arrive_dest": 30.0,
+        "collision": -19.0,
+        "out_of_road": -15.0,
+        "max_step": -23.0,
         "error": -5.0,
     }
 
