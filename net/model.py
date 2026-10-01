@@ -620,6 +620,16 @@ class DrivingModel(nn.Module):
                 raise ValueError(
                     f"obs['ego_world'] 形状应为 (B,3)（或 (B,1,3)），收到 {tuple(ego_world.shape)}"
                 )
+        if torch.is_tensor(route_world_mask):
+            # 透传契约：mask 原样进 rollout/教师强制的 nav 重建（缺省 None ⇒ 全部顶点视为有效）。
+            # 规范形状 (B,M)（容忍 (B,1,M) 单例槽位维，与 ego_world 同口径）。
+            route_world_mask = route_world_mask.float()
+            if route_world_mask.ndim == 3 and int(route_world_mask.shape[1]) == 1:
+                route_world_mask = route_world_mask[:, 0]
+            if route_world_mask.ndim != 2 or int(route_world_mask.shape[0]) != mem.batch:
+                raise ValueError(
+                    f"obs['route_world_mask'] 形状应为 (B,M)（或 (B,1,M)），收到 {tuple(route_world_mask.shape)}"
+                )
         return {
             "mem": mem,
             "encoded": encoded,

@@ -158,14 +158,16 @@ def _obs_with_world(batch: int = 2, seed: int = 0) -> dict[str, torch.Tensor]:
 
 
 def test_rollout_rebuilds_nav_every_step_from_world(monkeypatch: pytest.MonkeyPatch) -> None:
-    """有 route_world/ego_world 时：rollout 每步重建 nav（6 次），位姿逐步推进。"""
+    """有 route_world/ego_world 时：rollout 每步重建 nav（6 次），位姿逐步推进，mask 透传。"""
     model = DrivingModel(hidden=16).eval()
     obs = _obs_with_world(batch=2)
     seen: list[torch.Tensor] = []
+    seen_masks: list[object] = []
     real = net_model_module.rebuild_nav_from_world
 
     def spy(mem: object, ego_pose_world: torch.Tensor, route_world: object, mask: object = None):
         seen.append(ego_pose_world.detach().clone())
+        seen_masks.append(mask.detach().clone() if torch.is_tensor(mask) else mask)
         return real(mem, ego_pose_world, route_world, mask)
 
     monkeypatch.setattr(net_model_module, "rebuild_nav_from_world", spy)
@@ -173,6 +175,35 @@ def test_rollout_rebuilds_nav_every_step_from_world(monkeypatch: pytest.MonkeyPa
     assert len(seen) == 6, f"rollout 应逐步重建 nav（6 步），实际 {len(seen)}"
     assert all(torch.isfinite(pose).all() for pose in seen)
     assert not torch.allclose(seen[0], seen[-1], atol=1e-6), "ego 世界位姿必须逐步推进"
+    # route_world_mask 必须逐步原值到达重建 helper（不得在 model 内被丢弃）
+    assert all(torch.is_tensor(mask) for mask in seen_masks)
+    assert all(torch.equal(mask, obs["route_world_mask"]) for mask in seen_masks)  # type: ignore[arg-type]
+
+
+def test_encode_canonicalizes_and_passes_route_world_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """route_world_mask 透传契约：encode 规范为 ``(B,M)``（容忍 ``(B,1,M)``），原值到达重建。"""
+    model = DrivingModel(hidden=16).eval()
+    obs = _obs_with_world(batch=2)
+    mask = torch.tensor(
+        [[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]]
+    )
+    obs["route_world_mask"] = mask.unsqueeze(1)  # (B,1,M) 单例槽位维
+    seen: list[torch.Tensor] = []
+    real = net_model_module._mem_nav_features_from_world
+
+    def spy(pose: torch.Tensor, route: torch.Tensor, route_mask: object = None):
+        seen.append(route_mask.detach().clone())  # type: ignore[union-attr]
+        return real(pose, route, route_mask)
+
+    monkeypatch.setattr(net_model_module, "_mem_nav_features_from_world", spy)
+    encoded = model.encode(obs)
+    assert tuple(encoded["route_world_mask"].shape) == (2, 8), "encode 必须把 mask 规范为 (B,M)"
+    assert torch.equal(encoded["route_world_mask"], mask)
+    model(obs)  # rollout 重建必须收到同一 mask
+    assert seen and all(torch.equal(item, mask) for item in seen)
+    # 非法形状 fail-fast（而不是静默丢弃 mask）
+    with pytest.raises(ValueError, match="route_world_mask"):
+        model.encode({**obs, "route_world_mask": torch.ones(3, 8)})
 
 
 def test_rollout_without_world_inputs_keeps_t0_context(monkeypatch: pytest.MonkeyPatch) -> None:
