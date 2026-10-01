@@ -149,3 +149,4 @@
 
 - 三份冻结文档（本文件 + `docs/v6_net_design.md` + `docs/rl_reward_v5.md`）的 Gate0 修正版 commit：`d27395dd0e1590d2151c42830f6a930bb5aafd2c`（短 `d27395d`，2026-10-01，首次 commit）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - Gate1 补证-A（P3 数据窗口 v3 补采 + mini 闸 A4 断言 + abort/预算校准）内容 commit：`0863186`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- Gate2 P4 前置-A（审计工具 exclude 默认/分层随机/HEAD+seed 记录 + 产物入库 + v5 池重叠声明 + §7.1 E-β″ 复算规格）内容 commit：`0120ac0`（工具/单测）、`b0fa3b1`（文档/产物，2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
