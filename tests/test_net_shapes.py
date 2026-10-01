@@ -483,19 +483,20 @@ def test_arc_step_and_interpolation() -> None:
 
 
 def test_policy_sample_and_log_prob() -> None:
-    """策略采样有界、固定 generator 可复现、log_prob 有限。"""
+    """策略采样有界、固定 generator 可复现、log_prob 有限（v6：交叉注意力头吃令牌集合）。"""
     torch.manual_seed(0)
     policy = PolicyHead(hidden=16)
-    latent = torch.randn(5, 16)
-    mu, log_std = policy(latent)
+    tokens = torch.randn(5, 37, 16)
+    key_mask = torch.ones(5, 37)
+    mu, log_std = policy(tokens, key_mask)
     assert torch.all(mu >= policy.action_low - 1e-6) and torch.all(mu <= policy.action_high + 1e-6)
     assert torch.all(log_std >= LOG_STD_MIN - 1e-6) and torch.all(log_std <= LOG_STD_MAX + 1e-6)
 
-    sample_a = policy.sample(latent, generator=torch.Generator().manual_seed(1))
-    sample_b = policy.sample(latent, generator=torch.Generator().manual_seed(1))
+    sample_a = policy.sample(tokens, key_mask, generator=torch.Generator().manual_seed(1))
+    sample_b = policy.sample(tokens, key_mask, generator=torch.Generator().manual_seed(1))
     assert torch.equal(sample_a, sample_b)
     assert torch.all(sample_a >= policy.action_low - 1e-6) and torch.all(sample_a <= policy.action_high + 1e-6)
-    log_prob = policy.log_prob(latent, sample_a)
+    log_prob = policy.log_prob(tokens, key_mask, sample_a)
     assert log_prob.shape == (5,) and torch.isfinite(log_prob).all()
 
 
@@ -545,15 +546,28 @@ def test_cheap_path_matches_full_forward() -> None:
 
     只需策略/价值/路由头，不跑 B1 rollout 与 WM 直接多步；本测试证明与完整前向在
     eval/固定种子下逐位一致（``action_mu``/``action_logstd``/``value``），且不产出多步预测键。
+
+    v6 A3 扩展：**t0 单次 st_gnn 消息传递必须进入两条路径**——用 ``st_gnn.spatial``
+    的 forward hook 计数：cheap path = 1 次（encode 内），完整前向 = 1 + 6 次（t0 + rollout 6 步）。
     """
     torch.manual_seed(0)
     model = DrivingModel().eval()
     obs = make_obs(batch=3, seed=11)
 
-    torch.manual_seed(0)
-    full = model(obs)
-    torch.manual_seed(0)
+    counter = {"n": 0}
+    handle = model.st_gnn.spatial.register_forward_hook(
+        lambda *_: counter.__setitem__("n", counter["n"] + 1)
+    )
+    counter["n"] = 0
     cheap = model(obs, rollout=False, world_model=False)
+    cheap_calls = counter["n"]
+    counter["n"] = 0
+    full = model(obs)
+    full_calls = counter["n"]
+    handle.remove()
+
+    assert cheap_calls == 1, f"cheap path 必须执行 t0 单次 st_gnn 消息传递（实际 {cheap_calls}）"
+    assert full_calls == 1 + 6, f"完整前向 = t0 单次 + rollout 6 步（实际 {full_calls}）"
 
     for key in ("action_mu", "action_logstd", "value"):
         assert torch.allclose(cheap[key], full[key], atol=1e-6), f"{key} 与完整前向不一致"

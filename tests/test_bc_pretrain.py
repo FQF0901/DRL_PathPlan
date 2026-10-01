@@ -117,14 +117,22 @@ def test_pretrain_bc_action_loss_nonzero_and_immediate_action() -> None:
 
 
 # ---------------------------------------------------------------------- 缺陷 3：参数化
+def _tokens(batch: int = 5, hidden: int = 16, length: int = 37) -> tuple[torch.Tensor, torch.Tensor]:
+    """v6 交叉注意力头的玩具令牌集合 + 全有效 key mask。"""
+    return torch.randn(batch, length, hidden), torch.ones(batch, length)
+
+
 def test_policy_head_init_is_midrange_and_trainable() -> None:
-    """新策略头初始 raw=0 → 动作 = 界中点 (5 m, 0)，且专家工作点附近梯度不饱和。"""
+    """新策略头初始 raw=0 → 动作 = 界中点 (5 m, 0)，且专家工作点附近梯度不饱和。
+
+    v6：头输入 = 令牌集合（OD/LD 逐槽 + others + ego + nav + signal + 融合 latent）+ key mask。
+    """
     torch.manual_seed(0)
     policy = PolicyHead(hidden=16)
-    latent = torch.randn(5, 16)
-    raw_mu, _ = policy.raw(latent)
+    tokens, key_mask = _tokens()
+    raw_mu, _ = policy.raw(tokens, key_mask)
     assert torch.allclose(raw_mu, torch.zeros_like(raw_mu), atol=1e-6)
-    action_mu, _ = policy(latent)
+    action_mu, _ = policy(tokens, key_mask)
     assert torch.allclose(action_mu[:, 0], torch.full((5,), 5.0), atol=1e-5)
     assert torch.allclose(action_mu[:, 1], torch.zeros(5), atol=1e-5)
     assert torch.all(action_mu >= policy.action_low - 1e-6)
@@ -137,18 +145,22 @@ def test_policy_head_init_is_midrange_and_trainable() -> None:
     grad = torch.autograd.grad(ds, raw)[0]
     assert float(grad) > 0.5, f"ds 工作点梯度饱和：{float(grad)}"
 
-    loss = (policy(latent)[0][:, 0] - 3.0).pow(2).mean()
+    loss = (policy(tokens, key_mask)[0][:, 0] - 3.0).pow(2).mean()
     loss.backward()
     assert policy.mu.weight.grad is not None
     assert float(policy.mu.weight.grad.abs().sum()) > 0.0
+    # v6：logstd 头权重非零 ⇒ 注意力栈经 logstd 路径也有梯度（mu 零初始化不再挡死上游）
+    policy.zero_grad(set_to_none=True)
+    policy(tokens, key_mask)[1].sum().backward()
+    assert float(policy.layers[0].attn.in_proj_weight.grad.abs().sum()) > 0.0
 
 
 def test_trainer_sampling_matches_policy_head_log_prob() -> None:
     """trainer 的采样/logprob 与 ``PolicyHead`` 同分布（PPO ratio 契约）。"""
     torch.manual_seed(0)
     policy = PolicyHead(hidden=16)
-    latent = torch.randn(4, 16)
-    mu, log_std = policy(latent)
+    tokens, key_mask = _tokens(batch=4)
+    mu, log_std = policy(tokens, key_mask)
     low = torch.tensor(ACTION_LOW)
     high = torch.tensor(ACTION_HIGH)
 
@@ -157,7 +169,7 @@ def test_trainer_sampling_matches_policy_head_log_prob() -> None:
     )
     assert torch.all(action >= low - 1e-6) and torch.all(action <= high + 1e-6)
 
-    assert torch.allclose(logprob, policy.log_prob(latent, action), atol=1e-4)
+    assert torch.allclose(logprob, policy.log_prob(tokens, key_mask, action), atol=1e-4)
     assert torch.allclose(
         logprob, logprob_from_action(mu, log_std, action, low, high, mode="sigmoid_squashed"), atol=1e-4
     )
