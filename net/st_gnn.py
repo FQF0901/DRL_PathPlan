@@ -109,6 +109,39 @@ class SpatioTemporalGNN(nn.Module):
             state = state * ld_mask.unsqueeze(-1)
         return state
 
+    # ---------------------------------------------------------------- 节点特征（公共委托）
+    def node_features(
+        self,
+        *,
+        ego_ctx: Tensor,
+        od_ctx: Tensor,
+        ld_ctx: Tensor,
+        node_mask: Tensor,
+        pose: Tensor,
+        step_index: int = 1,
+    ) -> tuple[Tensor, Tensor]:
+        """**公共委托**：节点构造 + 步嵌入 + ``spatial`` 消息传递 → ``(h_od (B,S,H), h_ld (B,L,H))``。
+
+        与 :meth:`forward` 解码器前的节点级输出同一实现（forward 内部亦调用本方法）；
+        ``net.model`` 的 t0 单次消息传递（A3）用它取对象级特征，不再直连 ``self.spatial``/
+        ``self.step_embed``（消除对内部结构的耦合）。
+
+        Args:
+            ego_ctx: ``(B,H)`` ego 节点特征（forward 内为更新后 ego mem 聚合）。
+            od_ctx/ld_ctx: ``(B,S,H)/(B,L,H)`` OD/LD 节点特征。
+            node_mask: ``(B,1+S+L)`` 图节点掩码（ego 恒 1）。
+            pose: ``(B,1+S+L,3)`` 节点位姿（ego 在原点）。
+            step_index: 1..steps（1-based，决定步嵌入；默认 1 = t0 单次 pass）。
+        """
+        batch = int(ego_ctx.shape[0])
+        index = torch.full((batch, ), int(step_index) - 1, dtype=torch.long, device=ego_ctx.device)
+        nodes = torch.cat(
+            [ego_ctx.unsqueeze(1) + self.step_embed(index).unsqueeze(1), od_ctx, ld_ctx],
+            dim=1,
+        )
+        nodes = self.spatial(nodes, node_mask, pose)
+        return nodes[:, 1 : 1 + self.od_slots], nodes[:, 1 + self.od_slots :]
+
     # ---------------------------------------------------------------- 单步推演
     def forward(
         self,
@@ -137,15 +170,14 @@ class SpatioTemporalGNN(nn.Module):
         """
         if not 1 <= int(step_index) <= self.steps:
             raise ValueError(f"step_index 必须在 1..{self.steps}，收到 {step_index}")
-        batch = ego_ctx.shape[0]
-        index = torch.full((batch, ), int(step_index) - 1, dtype=torch.long, device=ego_ctx.device)
-        nodes = torch.cat(
-            [ego_ctx.unsqueeze(1) + self.step_embed(index).unsqueeze(1), od_ctx, ld_ctx],
-            dim=1,
+        h_od, h_ld = self.node_features(
+            ego_ctx=ego_ctx,
+            od_ctx=od_ctx,
+            ld_ctx=ld_ctx,
+            node_mask=node_mask,
+            pose=pose,
+            step_index=int(step_index),
         )
-        nodes = self.spatial(nodes, node_mask, pose)
-        h_od = nodes[:, 1 : 1 + self.od_slots]
-        h_ld = nodes[:, 1 + self.od_slots :]
 
         # 先验：OD 匀速外推（t0 状态 + k·dt·v），LD 在 t0 帧静止
         offset = int(step_index) * self.dt

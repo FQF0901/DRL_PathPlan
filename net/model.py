@@ -509,25 +509,20 @@ class DrivingModel(nn.Module):
     def _t0_object_features(self, encoded: EncodedMem) -> tuple[Tensor, Tensor]:
         """A3：t0 帧**单次 st_gnn 消息传递** → 对象级特征 ``(od (B,S,H), ld (B,L,H))``。
 
-        执行与 :meth:`SpatioTemporalGNN.forward` 内部相同的节点构造 + ``st_gnn.spatial``
-        消息传递（step_index=1 的步嵌入），但不跑解码器——注意力头只要对象级节点特征。
+        经 :meth:`SpatioTemporalGNN.node_features` 公共委托执行（step_index=1），不跑解码器
+        ——注意力头只要对象级节点特征；模型不再直连 ``st_gnn.spatial``/``st_gnn.step_embed``。
         在 ``no_grad`` 下执行：st_gnn 的训练信号保持 WM 损失口径（traj/policy 损失不得
         回传 st_gnn；tests/test_stage_v11.py 锁定），本 pass 只提供"当前权重下的特征"。
         """
         with torch.no_grad():
-            batch = int(encoded.ego_ctx.shape[0])
-            index = torch.zeros((batch, ), dtype=torch.long, device=encoded.ego_ctx.device)
-            step_embed = self.st_gnn.step_embed(index).unsqueeze(1)
-            nodes = torch.cat(
-                [
-                    encoded.ego_ctx.unsqueeze(1) + step_embed,
-                    encoded.od_ctx,
-                    encoded.ld_ctx,
-                ],
-                dim=1,
+            return self.st_gnn.node_features(
+                ego_ctx=encoded.ego_ctx,
+                od_ctx=encoded.od_ctx,
+                ld_ctx=encoded.ld_ctx,
+                node_mask=encoded.frame.node_mask,
+                pose=encoded.frame.pose,
+                step_index=1,
             )
-            nodes = self.st_gnn.spatial(nodes, encoded.frame.node_mask, encoded.frame.pose)
-        return nodes[:, 1 : 1 + self.od_slots], nodes[:, 1 + self.od_slots :]
 
     def _head_tokens(
         self,

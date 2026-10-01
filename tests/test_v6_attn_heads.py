@@ -14,6 +14,7 @@ from net.encoders import NAV_DIM
 from net.mem import mem_from_obs
 from net.model import DrivingModel, arc_step, compose_pose
 from net.policy import CrossAttnHead, PolicyHead, ValueHead
+from net.st_gnn import SpatioTemporalGNN
 from pipeline.stages import _load_yaml, build_model
 from pipeline.trainer import STAGE_C_DESIGN_PREFIXES, apply_trainable_allowlist
 from tests.test_net_shapes import clone_obs, make_obs
@@ -143,6 +144,49 @@ def test_encode_runs_single_t0_st_gnn_message_passing() -> None:
     assert encoded["key_mask"][:, 36].all(), "plan_head 融合 latent token 恒有效"
     # §5 #4：nav/signal mask 随 token 一起返回
     assert tuple(encoded["nav_mask"].shape) == (2, 1) and tuple(encoded["signal_mask"].shape) == (2, 1)
+
+
+# ---------------------------------------------------------------- A3：st_gnn 公共委托
+def test_st_gnn_node_features_matches_spatial_reference() -> None:
+    """``node_features`` = forward 解码器前的节点输出（同一 spatial/step_embed 实现）。"""
+    torch.manual_seed(0)
+    st_gnn = SpatioTemporalGNN(hidden=16, od_slots=16, ld_slots=16)
+    ego = torch.randn(2, 16)
+    od = torch.randn(2, 16, 16)
+    ld = torch.randn(2, 16, 16)
+    node_mask = torch.ones(2, 33)
+    pose = torch.zeros(2, 33, 3)
+    h_od, h_ld = st_gnn.node_features(
+        ego_ctx=ego, od_ctx=od, ld_ctx=ld, node_mask=node_mask, pose=pose
+    )
+    assert tuple(h_od.shape) == (2, 16, 16) and tuple(h_ld.shape) == (2, 16, 16)
+    # 参考：历史 _t0_object_features 的内联实现（step_index=1 → step_embed(0)）
+    index = torch.zeros(2, dtype=torch.long)
+    nodes = torch.cat([ego.unsqueeze(1) + st_gnn.step_embed(index).unsqueeze(1), od, ld], dim=1)
+    nodes = st_gnn.spatial(nodes, node_mask, pose)
+    assert torch.equal(h_od, nodes[:, 1:17]) and torch.equal(h_ld, nodes[:, 17:])
+    # step_index 决定步嵌入（forward 每步调用同一委托）
+    h_od3, _ = st_gnn.node_features(
+        ego_ctx=ego, od_ctx=od, ld_ctx=ld, node_mask=node_mask, pose=pose, step_index=3
+    )
+    assert not torch.equal(h_od, h_od3)
+
+
+def test_t0_object_features_delegates_to_public_node_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_t0_object_features`` 走 ``st_gnn.node_features``（不再直连 spatial/step_embed）。"""
+    model = DrivingModel(hidden=16).eval()
+    encoded = model.encode(make_obs(batch=2))["encoded"]
+    calls: list[int] = []
+    real = model.st_gnn.node_features
+
+    def spy(**kwargs: object):
+        calls.append(int(kwargs.get("step_index", -1)))  # type: ignore[arg-type]
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(model.st_gnn, "node_features", spy)
+    od_obj, ld_obj = model._t0_object_features(encoded)
+    assert calls == [1], "t0 单次 pass 必须以 step_index=1 经公共委托"
+    assert tuple(od_obj.shape) == (2, 16, 16) and tuple(ld_obj.shape) == (2, 16, 16)
 
 
 # ---------------------------------------------------------------- A4：nav 逐步重建
