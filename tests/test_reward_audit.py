@@ -212,3 +212,186 @@ def test_analyze_manifest_hashes(tmp_path: Path) -> None:
                 assert row["ctx_sha256"].startswith("sha256:")
                 assert row["file_sha256"].startswith("sha256:")
                 assert isinstance(row["spec_id"], int)
+
+
+# --------------------------------------------------------------------------- #
+# P4 前置-C：E-β″ 复算（current-code 模式 + seeded 切片 + 交集记录 + 审计/反解各自判定）
+# --------------------------------------------------------------------------- #
+def _write_specs(path: Path, pairs) -> Path:
+    doc = {
+        "schema_version": 1,
+        "count": len(pairs),
+        "specs": [{"id": int(i), "seed": int(s)} for i, s in pairs],
+    }
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_pool_exclude_overlap_and_id_drop(tmp_path: Path) -> None:
+    """池 ∩ 排除集计数（pair 级 + 数值 id 级）与可选 id 级剔除。"""
+    pool = _write_specs(tmp_path / "pool.json", [(0, 10), (1, 11), (2, 12), (3, 13)])
+    exclude = _write_specs(tmp_path / "exclude.json", [(2, 12), (3, 999)])
+    assert reward_audit._pool_exclude_overlap(pool, exclude) == {
+        "pair_overlap": 1,
+        "id_overlap": 2,
+    }
+    pairs = reward_audit._candidate_pairs(pool, exclude)
+    assert pairs == [(0, 10), (1, 11), (3, 13)]  # pair 级排除
+    kept, dropped = reward_audit._drop_exclude_ids(pairs, exclude)
+    assert dropped == 1 and kept == [(0, 10), (1, 11)]  # 数值 id 3 被剔除
+    assert reward_audit._pool_exclude_overlap(pool, None) == {"pair_overlap": 0, "id_overlap": 0}
+    assert reward_audit._drop_exclude_ids(pairs, None) == (pairs, 0)
+
+
+def test_order_pairs_seeded_deterministic() -> None:
+    """seeded 切片：同 seed 可复现、是置换、不同 seed 不同、None 保持原序。"""
+    pairs = [(i, 1000 + i) for i in range(200)]
+    a = reward_audit._order_pairs(pairs, 20261001)
+    b = reward_audit._order_pairs(pairs, 20261001)
+    c = reward_audit._order_pairs(pairs, 7)
+    assert a == b and sorted(a) == sorted(pairs) and a != pairs and c != a
+    assert reward_audit._order_pairs(pairs, None) == pairs
+
+
+def test_collect_cli_current_code_and_slice_flags() -> None:
+    """collect 支持 --code-mode current / --pool-shuffle-seed / --drop-exclude-ids；analyze --label。"""
+    parser = reward_audit._build_parser()
+    ns = parser.parse_args(
+        [
+            "collect",
+            "--code-mode",
+            "current",
+            "--pool-shuffle-seed",
+            "20261001",
+            "--drop-exclude-ids",
+            "--pool-extra",
+            "env/specs/scenarios_train_5k.json",
+        ]
+    )
+    assert ns.code_mode == "current"
+    assert ns.pool_shuffle_seed == 20261001
+    assert ns.drop_exclude_ids is True
+    assert ns.pool_extra == ["env/specs/scenarios_train_5k.json"]
+    ns2 = parser.parse_args(["collect"])
+    assert ns2.code_mode == "pre"
+    assert ns2.pool_shuffle_seed is None and ns2.drop_exclude_ids is False
+    assert ns2.pool_extra is None
+    ns3 = parser.parse_args(["analyze", "--label", "E-β″ 奖励审计报告（v6 基座）"])
+    assert ns3.label.startswith("E-β")
+
+
+def test_collector_cli_code_mode_requires_pre_root() -> None:
+    """采集器：current 模式无需 --pre-root；pre 模式缺 --pre-root 报错（fail-closed）。"""
+    from tools import reward_audit_collect
+
+    assert reward_audit_collect._repo_root() == reward_audit.ROOT
+    with pytest.raises(SystemExit):
+        reward_audit_collect.main(
+            ["--code-mode", "pre", "--specs", "x", "--spec-id", "1", "--spec-seed", "2",
+             "--out", "/tmp/opencode/should_not_exist.json"]
+        )
+
+
+def test_collect_routes_each_pair_to_its_source_pool(tmp_path: Path, monkeypatch) -> None:
+    """回归：补充池候选必须以自己的 --specs 传给采集器（曾全用主池 → 补充池全部失败）。"""
+    pool_main = _write_specs(tmp_path / "val.json", [(0, 10), (1, 11)])
+    pool_extra = _write_specs(tmp_path / "5k.json", [(100, 110), (101, 111)])
+    exclude = _write_specs(tmp_path / "exclude.json", [(9, 99)])
+    out_dir = tmp_path / "eps"
+    calls: list = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        if "reward_audit_collect.py" not in cmd[1]:
+            return _Result()
+        calls.append(list(cmd))
+        spec_id = int(cmd[cmd.index("--spec-id") + 1])
+        seed = int(cmd[cmd.index("--spec-seed") + 1])
+        specs = cmd[cmd.index("--specs") + 1]
+        episode = _synthetic_episode("arrive_dest", spec_id=spec_id)
+        episode["meta"]["spec_seed"] = seed
+        episode["meta"]["spec_file"] = specs
+        out = Path(cmd[cmd.index("--out") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(episode), encoding="utf-8")
+        return _Result()
+
+    monkeypatch.setattr(reward_audit.subprocess, "run", fake_run)
+    ns = argparse.Namespace(
+        code_mode="current",
+        pre_root=None,
+        pre_commit="x",
+        ckpt=str(tmp_path / "ckpt.pt"),
+        pool=str(pool_main),
+        pool_extra=[str(pool_extra)],
+        exclude=str(exclude),
+        no_exclude=False,
+        drop_exclude_ids=False,
+        pool_shuffle_seed=None,
+        out_dir=str(out_dir),
+        workers=1,
+        batch=10,
+        max_steps=1000,
+        per_class_target=1,
+        max_episodes=0,
+        python="python3",
+        config="config/default.yaml",
+        tracker="lqr",
+        eval_reference="plan",
+        device="cpu",
+    )
+    summary = reward_audit.collect(ns)
+    routed = {}
+    for cmd in calls:
+        routed[(int(cmd[cmd.index("--spec-id") + 1]), int(cmd[cmd.index("--spec-seed") + 1]))] = cmd[
+            cmd.index("--specs") + 1
+        ]
+    assert routed[(0, 10)] == str(pool_main)
+    assert routed[(1, 11)] == str(pool_main)
+    assert routed[(100, 110)] == str(pool_extra)
+    assert routed[(101, 111)] == str(pool_extra)
+    assert summary["pool_candidates"] == 4
+    assert summary["effective_pair_overlap"] == 0
+
+
+def test_analyze_per_class_checks_audit_and_solve(tmp_path: Path) -> None:
+    """§7.1 ④：每类 n ≥ 阈值对审计与反解**各自**判定（合成 6/类 → 3/3）。"""
+    out = tmp_path / "out"
+    episodes_dir = tmp_path / "eps"
+    episodes_dir.mkdir(parents=True)
+    for cls_index, cls in enumerate(CLASS_ORDER):
+        for repeat in range(6):
+            episode = _synthetic_episode(cls, spec_id=cls_index * 100 + repeat)
+            path = episodes_dir / f"id{episode['meta']['spec_id']}_seed{episode['meta']['spec_seed']}.json"
+            path.write_text(json.dumps(episode), encoding="utf-8")
+            episode["path"] = str(path)
+    ns = argparse.Namespace(
+        episodes_dir=str(episodes_dir),
+        out=str(out),
+        tiers="1,3,10,30",
+        mirror_md=None,
+        exclude=None,
+        no_exclude=True,
+        split_seed=123,
+        swap_ab=False,
+        min_per_class=3,
+        label="E-β″ 奖励审计报告（v6 基座）",
+    )
+    result = reward_audit.analyze(ns)
+    assert result["meta"]["audit_per_class_pass"] is True
+    assert result["meta"]["solve_per_class_pass"] is True
+    assert result["meta"]["per_class_pass"] is True
+    assert result["meta"]["solve_class_counts"] == {cls: 3 for cls in CLASS_ORDER}
+    markdown = (out / "reward_audit.md").read_text(encoding="utf-8")
+    assert markdown.startswith("# E-β″ 奖励审计报告（v6 基座）")
+    assert "审计/反解各自" in markdown
+
+    ns.min_per_class = 4  # 审计 3 / 反解 3 均不足
+    result2 = reward_audit.analyze(ns)
+    assert result2["meta"]["audit_per_class_pass"] is False
+    assert result2["meta"]["solve_per_class_pass"] is False
+    assert result2["meta"]["per_class_pass"] is False

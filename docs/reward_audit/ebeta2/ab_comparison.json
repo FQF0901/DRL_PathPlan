@@ -1,0 +1,288 @@
+{
+ "direction_a": {
+  "path": "runs/reward_audit_ebeta2/report/reward_audit.json"
+ },
+ "direction_b": {
+  "path": "runs/reward_audit_ebeta2/report_swap/reward_audit.json"
+ },
+ "consistency": {
+  "1.0": {
+   "arrive_dest": {
+    "a": 29.0,
+    "b": 29.0,
+    "same": true
+   },
+   "collision": {
+    "a": -22.0,
+    "b": -21.0,
+    "same": false
+   },
+   "out_of_road": {
+    "a": -14.0,
+    "b": -14.0,
+    "same": true
+   },
+   "max_step": {
+    "a": -46.0,
+    "b": -41.0,
+    "same": false
+   },
+   "profile": {
+    "arrive_dest": {
+     "a_delta": -0.34818586369306104,
+     "b_delta": 0.09950689714341365,
+     "both_within_5": true
+    },
+    "collision": {
+     "a_delta": -1.394645899715652,
+     "b_delta": 0.9127497254189763,
+     "both_within_5": true
+    },
+    "out_of_road": {
+     "a_delta": 0.00465752962636401,
+     "b_delta": 0.39719560076815696,
+     "both_within_5": true
+    },
+    "max_step": {
+     "a_delta": -5.049918221576958,
+     "b_delta": 5.249971830401088,
+     "both_within_5": false
+    }
+   }
+  },
+  "3.0": {
+   "arrive_dest": {
+    "a": 27.0,
+    "b": 27.0,
+    "same": true
+   },
+   "collision": {
+    "a": -23.0,
+    "b": -22.0,
+    "same": false
+   },
+   "out_of_road": {
+    "a": -15.0,
+    "b": -15.0,
+    "same": true
+   },
+   "max_step": {
+    "a": -48.0,
+    "b": -43.0,
+    "same": false
+   },
+   "profile": {
+    "arrive_dest": {
+     "a_delta": -0.38585148544996883,
+     "b_delta": 0.062345620531367274,
+     "both_within_5": true
+    },
+    "collision": {
+     "a_delta": -1.1148780904011915,
+     "b_delta": 1.2419780536322698,
+     "both_within_5": true
+    },
+    "out_of_road": {
+     "a_delta": -0.22204329580865334,
+     "b_delta": 0.19342828572118442,
+     "both_within_5": true
+    },
+    "max_step": {
+     "a_delta": -5.305603636362008,
+     "b_delta": 4.981679055100688,
+     "both_within_5": false
+    }
+   }
+  },
+  "10.0": {
+   "arrive_dest": {
+    "a": 20.0,
+    "b": 21.0,
+    "same": false
+   },
+   "collision": {
+    "a": -28.0,
+    "b": -26.0,
+    "same": false
+   },
+   "out_of_road": {
+    "a": -18.0,
+    "b": -17.0,
+    "same": false
+   },
+   "max_step": {
+    "a": -54.0,
+    "b": -49.0,
+    "same": false
+   },
+   "profile": {
+    "arrive_dest": {
+     "a_delta": -0.5176811615991213,
+     "b_delta": 0.9322811523891943,
+     "both_within_5": true
+    },
+    "collision": {
+     "a_delta": -1.635690757800571,
+     "b_delta": 1.8942772023787882,
+     "both_within_5": true
+    },
+    "out_of_road": {
+     "a_delta": -0.5154961848312176,
+     "b_delta": 0.9802426830567796,
+     "both_within_5": true
+    },
+    "max_step": {
+     "a_delta": -5.2005025881097104,
+     "b_delta": 5.042654341549262,
+     "both_within_5": false
+    }
+   }
+  },
+  "30.0": {
+   "arrive_dest": {
+    "a": 0.0,
+    "b": 1.0,
+    "same": false
+   },
+   "collision": {
+    "a": -41.0,
+    "b": -39.0,
+    "same": false
+   },
+   "out_of_road": {
+    "a": -26.0,
+    "b": -25.0,
+    "same": false
+   },
+   "max_step": {
+    "a": -71.0,
+    "b": -66.0,
+    "same": false
+   },
+   "profile": {
+    "arrive_dest": {
+     "a_delta": -0.8943373791681566,
+     "b_delta": 0.5606683862687092,
+     "both_within_5": true
+    },
+    "collision": {
+     "a_delta": -1.8380126646559525,
+     "b_delta": 2.186560484511695,
+     "both_within_5": true
+    },
+    "out_of_road": {
+     "a_delta": -0.7825044391813964,
+     "b_delta": 0.9425695325870489,
+     "both_within_5": true
+    },
+    "max_step": {
+     "a_delta": -4.757356735960284,
+     "b_delta": 5.359726588545183,
+     "both_within_5": false
+    }
+   }
+  }
+ },
+ "p2_diff": {
+  "1.0": {
+   "arrive_dest": {
+    "ebeta2": 29.0,
+    "p2": 30.0,
+    "delta": -1.0
+   },
+   "collision": {
+    "ebeta2": -22.0,
+    "p2": -19.0,
+    "delta": -3.0
+   },
+   "out_of_road": {
+    "ebeta2": -14.0,
+    "p2": -15.0,
+    "delta": 1.0
+   },
+   "max_step": {
+    "ebeta2": -46.0,
+    "p2": -23.0,
+    "delta": -23.0
+   }
+  },
+  "3.0": {
+   "arrive_dest": {
+    "ebeta2": 27.0,
+    "p2": 28.0,
+    "delta": -1.0
+   },
+   "collision": {
+    "ebeta2": -23.0,
+    "p2": -20.0,
+    "delta": -3.0
+   },
+   "out_of_road": {
+    "ebeta2": -15.0,
+    "p2": -16.0,
+    "delta": 1.0
+   },
+   "max_step": {
+    "ebeta2": -48.0,
+    "p2": -24.0,
+    "delta": -24.0
+   }
+  },
+  "10.0": {
+   "arrive_dest": {
+    "ebeta2": 20.0,
+    "p2": 22.0,
+    "delta": -2.0
+   },
+   "collision": {
+    "ebeta2": -28.0,
+    "p2": -23.0,
+    "delta": -5.0
+   },
+   "out_of_road": {
+    "ebeta2": -18.0,
+    "p2": -18.0,
+    "delta": 0.0
+   },
+   "max_step": {
+    "ebeta2": -54.0,
+    "p2": -29.0,
+    "delta": -25.0
+   }
+  },
+  "30.0": {
+   "arrive_dest": {
+    "ebeta2": 0.0,
+    "p2": 2.0,
+    "delta": -2.0
+   },
+   "collision": {
+    "ebeta2": -41.0,
+    "p2": -33.0,
+    "delta": -8.0
+   },
+   "out_of_road": {
+    "ebeta2": -26.0,
+    "p2": -26.0,
+    "delta": 0.0
+   },
+   "max_step": {
+    "ebeta2": -71.0,
+    "p2": -42.0,
+    "delta": -29.0
+   }
+  }
+ },
+ "verdict": {
+  "terminal_values_identical": false,
+  "profile_pass_a": false,
+  "profile_pass_b": false,
+  "per_class_pass_a": false,
+  "per_class_pass_b": false,
+  "audit_per_class_a": false,
+  "solve_per_class_a": false,
+  "audit_per_class_b": false,
+  "solve_per_class_b": false,
+  "consistent": false
+ }
+}

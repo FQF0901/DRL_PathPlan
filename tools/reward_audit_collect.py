@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""P2 奖励审计：单 episode rollout 采集器（**在 pre-v6 代码快照下运行**）。
+"""P2/E-β″ 奖励审计：单 episode rollout 采集器（pre-v6 快照 **或** 当前 HEAD 代码）。
 
-为什么需要 pre-v6 快照
-----------------------
-审计对象 = E-β′（`runs/_refs_rlbase/e_beta_prime/final.pt`，旧架构）。HEAD 的 v6 新头无法
-加载 E-β′（新 policy/value 头 missing=20），因此 rollout **必须**在 pre-v6 快照
-（`git archive 031cc1c` 解包到 /tmp/opencode/v6_pre，见 `tools/reward_audit.py snapshot`）
-下执行；HEAD 侧只做**离线重放**（`tools/reward_audit.py analyze`）。
+两种代码模式（``--code-mode``）
+------------------------------
+- ``pre``（默认，P2/E-β′）：审计对象 E-β′（`runs/_refs_rlbase/e_beta_prime/final.pt`，旧
+  架构）无法在 HEAD 加载（v6 新头 missing=20），rollout 在 pre-v6 快照（`git archive
+  031cc1c` 解包到 /tmp/opencode/v6_pre，见 `tools/reward_audit.py snapshot`）下执行；HEAD
+  侧只做离线重放（`tools/reward_audit.py analyze`）。
+- ``current``（P4 前置-C，E-β″）：审计对象 = v6 新架构基座（如
+  `runs/BTC20261001-1631_v6p3/stage_b/ckpt_epoch005.pt`），HEAD 代码可直接加载 →
+  采集与重放同一份 HEAD 代码（含 P4 前置-B max_step 接线），无需快照。
 
 口径
 ----
@@ -22,9 +25,16 @@
 用法（由 `tools/reward_audit.py collect` 调起；也可单独运行）::
 
     PYTHONPATH=/tmp/opencode/v6_pre <venv-python> tools/reward_audit_collect.py \
-        --pre-root /tmp/opencode/v6_pre --ckpt runs/_refs_rlbase/e_beta_prime/final.pt \
+        --code-mode pre --pre-root /tmp/opencode/v6_pre \
+        --ckpt runs/_refs_rlbase/e_beta_prime/final.pt \
         --specs env/specs/scenarios_val.json --spec-id 4 --spec-seed 5000004 \
         --out /tmp/opencode/v6_audit_episodes/id4_seed5000004.json --max-steps 1000
+
+    # E-β″（current-code；在仓库根目录执行）
+    <venv-python> tools/reward_audit_collect.py --code-mode current \
+        --ckpt runs/BTC20261001-1631_v6p3/stage_b/ckpt_epoch005.pt \
+        --specs env/specs/scenarios_train_5k.json --spec-id 0 --spec-seed 1000 \
+        --out /tmp/opencode/ebeta2_episodes/id0_seed1000.json --max-steps 1000
 
 产物：单 episode JSON（meta + 逐策略步 ctx/奖励），并打印一行 `[audit-collect] ...` 摘要。
 """
@@ -36,6 +46,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -43,7 +54,24 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 
-__all__ = ["main"]
+__all__ = ["main", "run_collect"]
+
+
+def _repo_root() -> Path:
+    """本采集器所在仓库根目录（`tools/` 的上一级）。"""
+    return Path(__file__).resolve().parents[1]
+
+
+def _head_commit(repo: Path) -> Optional[str]:
+    """当前 HEAD commit sha（记录进 meta；git 不可用/非仓库时 None）。"""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+        )
+    except Exception:  # noqa: BLE001 - 记录性字段，不阻塞采集
+        return None
+    text = proc.stdout.strip()
+    return text if proc.returncode == 0 and text else None
 
 
 # --------------------------------------------------------------------------- #
@@ -101,15 +129,38 @@ def _file_sha256(path: str) -> Optional[str]:
 # rollout
 # --------------------------------------------------------------------------- #
 def run_collect(args: argparse.Namespace) -> Dict[str, Any]:
-    pre_root = Path(args.pre_root).resolve()
-    if str(pre_root) not in sys.path:
-        sys.path.insert(0, str(pre_root))
-    # fail-closed：确认加载的是 pre-v6 快照而不是 HEAD/主仓库
-    import pipeline  # noqa: E402
+    code_mode = str(getattr(args, "code_mode", "pre") or "pre")
+    if code_mode not in ("pre", "current"):
+        raise SystemExit(f"未知 --code-mode={code_mode!r}（可选 pre|current）")
+    root = _repo_root()
+    if code_mode == "current":
+        # E-β″：采集/重放同一份 HEAD 代码；fail-closed 防误加载快照。
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        import pipeline  # noqa: E402
 
-    loaded = Path(pipeline.__file__).resolve()
-    if not str(loaded).startswith(str(pre_root)):
-        raise SystemExit(f"collector 必须加载 pre-v6 快照：pipeline 实际来自 {loaded}")
+        loaded = Path(pipeline.__file__).resolve()
+        if not str(loaded).startswith(str(root)) or "/tmp/opencode/" in str(loaded):
+            raise SystemExit(
+                f"current-code 模式必须加载仓库 HEAD 代码：pipeline 实际来自 {loaded}（root={root}）"
+            )
+        pre_root: Optional[Path] = None
+        code_root = root
+        head_commit: Optional[str] = _head_commit(root)
+        code_commit: Optional[str] = head_commit
+    else:
+        pre_root = Path(args.pre_root).resolve()
+        if str(pre_root) not in sys.path:
+            sys.path.insert(0, str(pre_root))
+        # fail-closed：确认加载的是 pre-v6 快照而不是 HEAD/主仓库
+        import pipeline  # noqa: E402
+
+        loaded = Path(pipeline.__file__).resolve()
+        if not str(loaded).startswith(str(pre_root)):
+            raise SystemExit(f"collector 必须加载 pre-v6 快照：pipeline 实际来自 {loaded}")
+        code_root = pre_root
+        head_commit = None
+        code_commit = str(getattr(args, "pre_commit", "") or "") or None
 
     from pipeline.eval_runner import (  # noqa: E402
         _CkptController,
@@ -339,11 +390,15 @@ def run_collect(args: argparse.Namespace) -> Dict[str, Any]:
         "spec_file": str(args.specs),
         "ckpt": str(args.ckpt),
         "ckpt_sha256": _file_sha256(str(args.ckpt)),
-        "pre_root": str(pre_root),
-        "pre_commit": str(args.pre_commit),
+        "code_mode": code_mode,
+        "code_root": str(code_root),
+        "code_commit": code_commit,
+        "head_commit": head_commit,
+        "pre_root": str(pre_root) if pre_root is not None else None,
+        "pre_commit": str(args.pre_commit) if code_mode == "pre" else None,
         "reward_source": reward_source,
         "reward_code_files": {
-            rel: _file_sha256(str(pre_root / rel))
+            rel: _file_sha256(str(code_root / rel))
             for rel in ("reward_model/aggregation.py", "reward_model/terms.py")
         },
         "tracker": str(args.tracker),
@@ -366,9 +421,15 @@ def run_collect(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="P2 奖励审计单 episode 采集（pre-v6 快照）")
-    parser.add_argument("--pre-root", required=True, help="pre-v6 代码快照根目录（031cc1c）")
-    parser.add_argument("--pre-commit", default="031cc1c", help="快照 commit（写入 meta）")
+    parser = argparse.ArgumentParser(description="奖励审计单 episode 采集（pre-v6 快照 / 当前 HEAD 代码）")
+    parser.add_argument(
+        "--code-mode",
+        choices=("pre", "current"),
+        default="pre",
+        help="pre = pre-v6 快照（E-β′，P2）；current = 当前 HEAD 代码（E-β″，P4 前置-C）",
+    )
+    parser.add_argument("--pre-root", default=None, help="pre-v6 代码快照根目录（code-mode=pre 必填）")
+    parser.add_argument("--pre-commit", default="031cc1c", help="快照 commit（pre 模式写入 meta）")
     parser.add_argument("--specs", required=True)
     parser.add_argument("--spec-id", type=int, required=True)
     parser.add_argument("--spec-seed", type=int, required=True)
@@ -382,6 +443,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
+    if args.code_mode == "pre" and not args.pre_root:
+        parser.error("code-mode=pre 需要 --pre-root（快照根目录）")
 
     doc = run_collect(args)
     out_path = Path(args.out)

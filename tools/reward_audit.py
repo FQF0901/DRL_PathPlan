@@ -21,6 +21,12 @@
    `env/specs/scenarios_eval500.json` 的 (id, seed) 集；`--no-exclude` 显式关闭；
    `--exclude ""` 报错（空值曾导致排除静默失效）。报告 meta 记录 **HEAD commit sha**、
    split seed、exclude 与每类最小样本数（E-β″ 复算用 `--min-per-class 50`）。
+6. **E-β″ 复算（P4 前置-C，`--code-mode current`）**：审计对象 = v6 新架构基座，HEAD 代码
+   可直接加载 → 采集与重放均用当前 HEAD（无 pre-v6 快照）；补充池用
+   `env/specs/scenarios_train_5k.json` 的 **seeded 切片**（`--pool-shuffle-seed` 固定顺序；
+   `--drop-exclude-ids` 可再剔除数值 id 重叠），池组成/交集/切片 seed 写入 meta；A/B 互换
+   （`--swap-ab`）两向各跑一次，两向结论一致方可定稿。`--min-per-class 50` 对审计与反解
+   **各自**按终局类判定。
 
 产物（`runs/reward_audit/report/`，`runs/` 为 gitignore）：`reward_audit.md`、
 `reward_audit.json`、`config_draft_rc{tier}.yaml`、`episodes/`（采集缓存）。`--mirror-md`
@@ -168,6 +174,44 @@ def _candidate_pairs(pool_path: Path, exclude_path: Optional[Path]) -> List[Tupl
     return pairs
 
 
+def _pool_exclude_overlap(pool_path: Path, exclude_path: Optional[Path]) -> Dict[str, int]:
+    """池 ∩ 排除集交集计数：pair 级（场景身份 = (id, seed)，项目隔离口径）与数值 id 级。
+
+    E-β″ 复算（P4 前置-C）要求验证补充池与 eval500 交集 = 0；报告两者并注明口径：
+    数值 id 相同而 seed 不同 ⇒ blocks/geometry 不同（场景身份以 (id, seed) 为准，
+    与 `tools/dagger_collect.py::assert_no_eval_val_overlap` 同口径）。
+    """
+    if exclude_path is None or not exclude_path.is_file():
+        return {"pair_overlap": 0, "id_overlap": 0}
+    pool = set(_load_spec_pairs(pool_path))
+    excluded = set(_load_spec_pairs(exclude_path))
+    return {
+        "pair_overlap": len(pool & excluded),
+        "id_overlap": len({i for i, _ in pool} & {i for i, _ in excluded}),
+    }
+
+
+def _drop_exclude_ids(
+    pairs: Sequence[Tuple[int, int]], exclude_path: Optional[Path]
+) -> Tuple[List[Tuple[int, int]], int]:
+    """剔除数值 id 出现在 exclude 集的候选（可选的更严隔离；返回 (剩余, 剔除数)）。"""
+    if exclude_path is None or not exclude_path.is_file():
+        return list(pairs), 0
+    excluded_ids = {i for i, _ in _load_spec_pairs(exclude_path)}
+    kept = [pair for pair in pairs if pair[0] not in excluded_ids]
+    return kept, len(pairs) - len(kept)
+
+
+def _order_pairs(
+    pairs: Sequence[Tuple[int, int]], order_seed: Optional[int]
+) -> List[Tuple[int, int]]:
+    """seeded 切片顺序：`order_seed` 非 None 时确定性 shuffle（可复现），否则保持原序。"""
+    ordered = list(pairs)
+    if order_seed is not None:
+        random.Random(int(order_seed)).shuffle(ordered)
+    return ordered
+
+
 def _filter_excluded(
     episodes: Sequence[Mapping[str, Any]], excluded: set
 ) -> List[Mapping[str, Any]]:
@@ -234,23 +278,62 @@ def ensure_snapshot(pre_root: Path, commit: str, *, repo: Path = ROOT) -> Dict[s
 # 2) 采集
 # --------------------------------------------------------------------------- #
 def collect(args: argparse.Namespace) -> Dict[str, Any]:
-    pre_root = Path(args.pre_root).resolve()
-    snap = ensure_snapshot(pre_root, args.pre_commit)
+    code_mode = str(getattr(args, "code_mode", "pre") or "pre")
+    if code_mode not in ("pre", "current"):
+        raise SystemExit(f"未知 --code-mode={code_mode!r}（可选 pre|current）")
+    pre_root = Path(args.pre_root).resolve() if code_mode == "pre" else None
+    if code_mode == "pre":
+        snap = ensure_snapshot(pre_root, args.pre_commit)
+    else:
+        snap = {"pre_root": None, "commit": None, "method": "current-code"}
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     log_dir = out_dir.parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # 路径按调用侧 cwd 解析（collector 子进程 cwd=pre_root，不能依赖相对路径）
+    # 路径按调用侧 cwd 解析（collector 子进程 cwd=快照/仓库根，不能依赖相对路径）
     pool_path = Path(args.pool).resolve()
+    extra_paths = [Path(str(p)).resolve() for p in (getattr(args, "pool_extra", None) or [])]
     exclude_path = _resolve_exclude(args)
+    overlap = _pool_exclude_overlap(pool_path, exclude_path)  # 过滤前交集计数（pair 级 + 数值 id 级）
     pairs = _candidate_pairs(pool_path, exclude_path)  # 确定性顺序（id, seed）+ 排除 eval500
+    pair_pool: Dict[Tuple[int, int], Path] = {pair: pool_path for pair in pairs}  # 每候选的来源池
+    extra_overlaps: List[Dict[str, Any]] = []
+    extra_pairs: List[Tuple[int, int]] = []
+    for extra_path in extra_paths:
+        extra_overlaps.append({"pool": str(extra_path), **_pool_exclude_overlap(extra_path, exclude_path)})
+        extra = _candidate_pairs(extra_path, exclude_path)
+        for pair in extra:
+            pair_pool[pair] = extra_path
+        extra_pairs.extend(extra)
+    id_overlap_dropped = 0
+    if bool(getattr(args, "drop_exclude_ids", False)):
+        pairs, dropped_main = _drop_exclude_ids(pairs, exclude_path)
+        extra_pairs, dropped_extra = _drop_exclude_ids(extra_pairs, exclude_path)
+        id_overlap_dropped = dropped_main + dropped_extra
+    order_seed = getattr(args, "pool_shuffle_seed", None)
+    extra_pairs = _order_pairs(extra_pairs, order_seed)  # seeded 切片：仅补充池 shuffle，固定可复现
+    pairs = pairs + extra_pairs  # 主池（val−eval500）全量在前，补充池（5k seeded 切片）在后
+    pool_candidates = len(pairs)
+    # 过滤后隔离校验（fail-closed）：有效候选与排除集 pair 级交集必须为 0
+    excluded_pairs = _load_excluded(exclude_path)
+    excluded_ids = {i for i, _ in excluded_pairs}
+    effective_pair_overlap = len(set(pairs) & excluded_pairs)
+    effective_id_overlap = len({i for i, _ in pairs} & excluded_ids)
+    if exclude_path is not None and effective_pair_overlap:
+        raise SystemExit(
+            f"池隔离失败：过滤后仍有 {effective_pair_overlap} 个 (id, seed) 与 {exclude_path} 重叠"
+        )
     if args.max_episodes:
         pairs = pairs[: int(args.max_episodes)]
 
     per_class_target = int(args.per_class_target)
     print(
-        f"[audit] collect：pool={pool_path}（排除 {exclude_path or '无'}）候选 {len(pairs)} 条；"
+        f"[audit] collect：code_mode={code_mode} pool={pool_path}（排除 {exclude_path or '无'}；"
+        f"pair 交集={overlap['pair_overlap']}，id 交集={overlap['id_overlap']}，"
+        f"id 级剔除={id_overlap_dropped}）候选 {pool_candidates} 条"
+        + (f"；补充池 {[o['pool'] for o in extra_overlaps]}" if extra_overlaps else "")
+        + f"；order_seed={order_seed}；过滤后 pair/id 交集={effective_pair_overlap}/{effective_id_overlap}；"
         f"每类目标 n≥{per_class_target}；workers={args.workers}",
         flush=True,
     )
@@ -267,14 +350,12 @@ def collect(args: argparse.Namespace) -> Dict[str, Any]:
         cmd = [
             args.python,
             str(ROOT / "tools/reward_audit_collect.py"),
-            "--pre-root",
-            str(pre_root),
-            "--pre-commit",
-            args.pre_commit,
+            "--code-mode",
+            code_mode,
             "--ckpt",
             str(Path(args.ckpt).resolve()),
             "--specs",
-            str(pool_path),
+            str(pair_pool.get(pair, pool_path)),  # 每候选按其来源池解析（主池/补充池）
             "--spec-id",
             str(spec_id),
             "--spec-seed",
@@ -292,8 +373,11 @@ def collect(args: argparse.Namespace) -> Dict[str, Any]:
             "--out",
             str(out_path),
         ]
-        env = dict(os.environ, PYTHONPATH=str(pre_root))
-        proc = subprocess.run(cmd, cwd=str(pre_root), env=env, capture_output=True, text=True)
+        if code_mode == "pre":
+            cmd[2:2] = ["--pre-root", str(pre_root), "--pre-commit", args.pre_commit]
+        code_root = pre_root if code_mode == "pre" else ROOT
+        env = dict(os.environ, PYTHONPATH=str(code_root))
+        proc = subprocess.run(cmd, cwd=str(code_root), env=env, capture_output=True, text=True)
         log_path = log_dir / f"id{spec_id}_seed{seed}.log"
         log_path.write_text(
             (proc.stdout or "") + ("\n--- stderr ---\n" + proc.stderr if proc.stderr else ""),
@@ -328,14 +412,29 @@ def collect(args: argparse.Namespace) -> Dict[str, Any]:
     collected = _existing_outcomes(out_dir)
     counts = _class_counts(collected)
     summary = {
+        "code_mode": code_mode,
+        "head_commit": _head_commit(),
         "pre_snapshot": snap,
         "pool": str(pool_path),
+        "pool_extra": [str(path) for path in extra_paths],
+        "pool_extra_overlaps": extra_overlaps,
         "exclude": str(exclude_path) if exclude_path else None,
         "exclude_pairs": len(_load_excluded(exclude_path)),
-        "head_commit": _head_commit(),
+        "pool_pair_overlap": overlap["pair_overlap"],
+        "pool_id_overlap": overlap["id_overlap"],
+        "effective_pair_overlap": effective_pair_overlap,
+        "effective_id_overlap": effective_id_overlap,
+        "id_overlap_dropped": id_overlap_dropped,
+        "pool_order_seed": order_seed,
+        "pool_candidates": pool_candidates,
+        "max_episodes": int(args.max_episodes),
         "episodes_dir": str(out_dir),
         "attempted": attempted,
         "collected": len(collected),
+        "collected_pairs": [
+            f"{int(episode['meta'].get('spec_id', -1))}:{int(episode['meta'].get('spec_seed', -1))}"
+            for episode in collected
+        ],
         "class_counts": dict(counts),
         "workers": int(args.workers),
         "max_steps": int(args.max_steps),
@@ -611,19 +710,42 @@ def _render_markdown(result: Mapping[str, Any]) -> str:
     lines: List[str] = []
     meta = result["meta"]
     min_per_class = meta.get("min_per_class", MIN_PER_CLASS)
-    lines.append("# P2 奖励审计报告（v5 剖面 C）\n")
+    lines.append(f"# {meta.get('label') or 'P2 奖励审计报告（v5 剖面 C）'}\n")
     lines.append(
-        f"- 生成：{meta['generated_at']}（工具 `tools/reward_audit.py`；HEAD commit `{meta.get('head_commit')}`）"
+        f"- 生成：{meta['generated_at']}（工具 `tools/reward_audit.py`；分析 HEAD commit `{meta.get('head_commit')}`"
+        + (f"；采集 HEAD commit `{meta.get('collect_head_commit')}`"
+           if meta.get("collect_head_commit") and meta.get("collect_head_commit") != meta.get("head_commit") else "")
+        + "）"
     )
-    snapshot = meta.get("pre_snapshot") or {"pre_root": "—", "commit": "—", "method": "—"}
-    lines.append(f"- pre-v6 快照：`{snapshot['pre_root']}` @ `{snapshot['commit']}`（{snapshot['method']}）")
+    code_mode = meta.get("code_mode", "pre")
+    if code_mode == "current":
+        lines.append(f"- 代码模式：**current**（采集/重放均 HEAD 当前代码；无 pre-v6 快照）")
+    else:
+        snapshot = meta.get("pre_snapshot") or {"pre_root": "—", "commit": "—", "method": "—"}
+        lines.append(f"- pre-v6 快照：`{snapshot['pre_root']}` @ `{snapshot['commit']}`（{snapshot['method']}）")
     lines.append(f"- ckpt：`{meta.get('ckpt', '—')}`（sha256 `{meta.get('ckpt_sha256')}`）")
     lines.append(f"- 池：`{meta.get('pool', '—')}`，排除 `{meta.get('exclude')}`；采集 episode {meta['collected']} 条"
                  + (f"（原始 {meta.get('collected_raw')}，剔除 {meta.get('excluded_episodes')}）"
                     if meta.get("excluded_episodes") else ""))
+    if meta.get("pool_extra"):
+        lines.append(
+            f"- 补充池：`{'; '.join(meta['pool_extra'])}`（与排除集原始交集："
+            + "; ".join(
+                f"pair={item.get('pair_overlap')}/id={item.get('id_overlap')}"
+                for item in meta.get("pool_extra_overlaps", [])
+            )
+            + "）"
+        )
+    if meta.get("pool_pair_overlap") is not None:
+        lines.append(
+            f"- 池隔离：原始交集 pair/id = `{meta.get('pool_pair_overlap')}/{meta.get('pool_id_overlap')}`；"
+            f"**过滤后有效交集 pair/id = `{meta.get('effective_pair_overlap')}/{meta.get('effective_id_overlap')}`**"
+            f"（id 级剔除 {meta.get('id_overlap_dropped')}）；"
+            f"seeded 切片 order seed `{meta.get('pool_order_seed')}`（候选 {meta.get('pool_candidates')} 条）"
+        )
     lines.append(f"- 分类计数：{meta['class_counts']}")
     lines.append(f"- 划分：分层随机（split seed `{meta.get('split_seed')}`；A/B 互换 `{meta.get('swap_ab')}`）；"
-                 f"每类 n ≥ {min_per_class}")
+                 f"每类 n ≥ {min_per_class}（审计/反解各自）")
     lines.append(f"- 审计样本 {meta['audit']['n']} 条 / 反解样本 {meta['solve']['n']} 条（互斥，见 §样本清单）")
     lines.append(f"- 重放口径：HEAD `RewardAggregator`（完整 v5 项集含 `low_speed`；`ttc`/`lane_boundary`/"
                  f"`lane_center` 默认关）；γ={GAMMA}；反解复算容差 ≤ {TOLERANCE}，"
@@ -632,8 +754,9 @@ def _render_markdown(result: Mapping[str, Any]) -> str:
     lines.append("## 0. 结论\n")
     lines.append(f"- 目标剖面达标（审计样本，未折扣均值 |Δ| ≤ {PROFILE_TOLERANCE}）："
                  + ("**是**" if result["meta"]["profile_pass"] else "**否**"))
-    lines.append(f"- 每类 n ≥ {min_per_class}："
-                 + ("**是**" if result["meta"]["per_class_pass"] else "**否**"))
+    lines.append(f"- 每类 n ≥ {min_per_class}（审计/反解各自）："
+                 + ("**是**" if result["meta"]["per_class_pass"] else "**否**")
+                 + f"（审计 {result['meta'].get('audit_per_class_pass')} / 反解 {result['meta'].get('solve_per_class_pass')}）")
     lines.append(f"- 总样本 ≥ {MIN_TOTAL}（审计/反解各自）："
                  + ("**是**" if result["meta"]["total_pass"] else "**否**"))
     for tier in result["meta"]["tiers"]:
@@ -785,7 +908,7 @@ def _render_markdown(result: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _config_draft(tier: float, terminal_values: Mapping[str, float]) -> str:
+def _config_draft(tier: float, terminal_values: Mapping[str, float], *, label: Optional[str] = None) -> str:
     terms = [
         ("route_completion", f"{{name: route_completion, weight: {tier:g}, gamma: 1.0}}"),
         ("speed_ratio", "{name: speed_ratio, weight: 0.4, cap: 1.0}"),
@@ -798,8 +921,9 @@ def _config_draft(tier: float, terminal_values: Mapping[str, float]) -> str:
         ("crash", "{name: crash, weight: -10.0}"),
         ("out_of_road", "{name: out_of_road, weight: -8.0}"),
     ]
+    title = str(label or "P2 奖励审计")
     lines = [
-        f"# P2 审计配置草案：rc 档 = {tier:g}（v5 剖面 C；终局值反解自审计工具）",
+        f"# {title} 配置草案：rc 档 = {tier:g}（v5 剖面 C；终局值反解自审计工具）",
         "# 用法：合并进 config/train.yaml 的 stages.C，或按 CLI --reward-term-weight route_completion=<档> 覆盖权重；",
         "# 终局值经 stages.C.reward.aggregation.terminal_values 透传（AggregationConfig）。",
         "stages:",
@@ -876,14 +1000,26 @@ def analyze(args: argparse.Namespace) -> Dict[str, Any]:
         "meta": {
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "tool": "tools/reward_audit.py",
+            "label": str(getattr(args, "label", "") or "") or "P2 奖励审计报告（v5 剖面 C）",
             "head_commit": _head_commit(),
+            "collect_head_commit": collect_summary.get("head_commit"),
+            "code_mode": collect_summary.get("code_mode", "pre"),
             "episodes_dir": str(episodes_dir),
             "pre_snapshot": collect_summary.get("pre_snapshot"),
             "ckpt": collect_summary.get("ckpt"),
             "ckpt_sha256": collect_summary.get("ckpt_sha256"),
             "pool": collect_summary.get("pool"),
+            "pool_extra": collect_summary.get("pool_extra") or [],
+            "pool_extra_overlaps": collect_summary.get("pool_extra_overlaps") or [],
             "exclude": str(exclude_path) if exclude_path else None,
             "exclude_pairs": len(excluded),
+            "pool_pair_overlap": collect_summary.get("pool_pair_overlap"),
+            "pool_id_overlap": collect_summary.get("pool_id_overlap"),
+            "effective_pair_overlap": collect_summary.get("effective_pair_overlap"),
+            "effective_id_overlap": collect_summary.get("effective_id_overlap"),
+            "id_overlap_dropped": collect_summary.get("id_overlap_dropped"),
+            "pool_order_seed": collect_summary.get("pool_order_seed"),
+            "pool_candidates": collect_summary.get("pool_candidates"),
             "collected": len(episodes),
             "collected_raw": len(episodes_all),
             "excluded_episodes": len(episodes_all) - len(episodes),
@@ -991,18 +1127,27 @@ def analyze(args: argparse.Namespace) -> Dict[str, Any]:
                 entry["total"] = totals.get((entry["spec_id"], entry["seed"]))
         result[label]["manifest"] = manifest
 
-    # 判定
+    # 判定（§7.1：审计与反解**各自**按终局类计 n ≥ min_per_class）
     base_profile = result["tiers"][str(tiers[0])]["audit_profile"]
-    per_class_pass = all(
+    solve_n = {cls: 0 for cls in CLASS_ORDER}
+    for episode in solve_set:
+        cls = str(episode["meta"].get("termination"))
+        if cls in solve_n:
+            solve_n[cls] += 1
+    audit_per_class_pass = all(
         base_profile.get(cls, {}).get("n", 0) >= min_per_class for cls in CLASS_ORDER
     )
+    solve_per_class_pass = all(solve_n[cls] >= min_per_class for cls in CLASS_ORDER)
     deltas = [
         abs(base_profile[cls]["delta"])
         for cls in CLASS_ORDER
         if base_profile.get(cls, {}).get("n") and base_profile[cls]["delta"] is not None
     ]
     profile_pass = bool(deltas) and all(delta <= PROFILE_TOLERANCE for delta in deltas)
-    result["meta"]["per_class_pass"] = per_class_pass
+    result["meta"]["audit_per_class_pass"] = audit_per_class_pass
+    result["meta"]["solve_per_class_pass"] = solve_per_class_pass
+    result["meta"]["solve_class_counts"] = solve_n
+    result["meta"]["per_class_pass"] = audit_per_class_pass and solve_per_class_pass
     result["meta"]["total_pass"] = len(audit_set) >= MIN_TOTAL and len(solve_set) >= MIN_TOTAL
     result["meta"]["profile_pass"] = profile_pass
 
@@ -1013,10 +1158,19 @@ def analyze(args: argparse.Namespace) -> Dict[str, Any]:
         "重放时对终局帧补 max_step=True 以结算终局值；**E-β″ 复算须在训练侧 max_step 接线后执行**。",
         "rc=1.0 为代码默认基准档（回填 default_terminal_values）；3/10/30 为 P4 扫档（每档一套终局值，不得跨档复用）。",
         "dense 语义两列：pos×mult+neg（真实聚合器口径，用于反解）与 pos+neg（忽略 CaRL 乘子，仅对照）。",
-        "E-β′ vs E-β″：本报告 = E-β′（旧架构，P2/Gate2，池含 eval500 重叠，见 docs/rl_reward_v5.md §7）；"
-        "E-β″ 在 P3 重训后按 docs/v6_program_prereg.md §7.1 用同一工具复算（排除 eval500、分层随机、A/B 互换、"
-        "每类 n≥50、max_step 接线后；P3 后、P4 前，作为 P4 奖励口径）。",
     ]
+    if collect_summary.get("code_mode") == "current":
+        result["meta"]["notes"].append(
+            "E-β″（v6 新架构基座）复算（P4 前置-C）：采集与重放均为 HEAD 当前代码（无 pre-v6 快照）；"
+            "池 = 补充池（见 meta.pool；`pool_order_seed` 固定 seeded 切片），已排除 eval500；"
+            "采集期 HEAD 见 `collect_head_commit`，分析期 HEAD 见 `head_commit`。"
+        )
+    else:
+        result["meta"]["notes"].append(
+            "E-β′ vs E-β″：本报告 = E-β′（旧架构，P2/Gate2，池含 eval500 重叠，见 docs/rl_reward_v5.md §7）；"
+            "E-β″ 在 P3 重训后按 docs/v6_program_prereg.md §7.1 用同一工具复算（排除 eval500、分层随机、A/B 互换、"
+            "每类 n≥50、max_step 接线后；P3 后、P4 前，作为 P4 奖励口径）。"
+        )
     if excluded:
         result["meta"]["notes"].append(
             f"排除集生效：{exclude_path}（{len(excluded)} 个 (id, seed)）；"
@@ -1028,10 +1182,11 @@ def analyze(args: argparse.Namespace) -> Dict[str, Any]:
         result["meta"]["notes"].append(
             f"样本量不足：审计 {len(audit_set)} / 反解 {len(solve_set)}（目标 ≥ {MIN_TOTAL}）→ 需补采。"
         )
-    if not per_class_pass:
+    if not result["meta"]["per_class_pass"]:
         result["meta"]["notes"].append(
-            f"分类样本不足（每类目标 ≥ {min_per_class}）："
-            + ", ".join(f"{cls}={base_profile.get(cls, {}).get('n', 0)}" for cls in CLASS_ORDER)
+            f"分类样本不足（审计/反解各自目标 ≥ {min_per_class}）："
+            f"审计 " + ", ".join(f"{cls}={base_profile.get(cls, {}).get('n', 0)}" for cls in CLASS_ORDER)
+            + "；反解 " + ", ".join(f"{cls}={solve_n[cls]}" for cls in CLASS_ORDER)
             + " → 该类只报 n 与区间，不做达标判定。"
         )
 
@@ -1043,7 +1198,9 @@ def analyze(args: argparse.Namespace) -> Dict[str, Any]:
     markdown = _render_markdown(result)
     (out_dir / "reward_audit.md").write_text(markdown, encoding="utf-8")
     for tier in tiers:
-        draft = _config_draft(tier, result["tiers"][str(tier)]["terminal_values"])
+        draft = _config_draft(
+            tier, result["tiers"][str(tier)]["terminal_values"], label=result["meta"]["label"]
+        )
         (out_dir / f"config_draft_rc{tier:g}.yaml").write_text(draft, encoding="utf-8")
     if args.mirror_md:
         Path(args.mirror_md).write_text(markdown, encoding="utf-8")
@@ -1144,16 +1301,39 @@ def _build_parser() -> argparse.ArgumentParser:
     p_snap.add_argument("--pre-root", default=str(DEFAULT_PRE_ROOT))
     p_snap.add_argument("--pre-commit", default=DEFAULT_PRE_COMMIT)
 
-    p_collect = sub.add_parser("collect", help="pre-v6 快照下采集 rollout（分层补足）")
+    p_collect = sub.add_parser("collect", help="快照/HEAD 代码下采集 rollout（分层补足 + seeded 切片）")
+    p_collect.add_argument(
+        "--code-mode",
+        choices=("pre", "current"),
+        default="pre",
+        help="pre = pre-v6 快照（E-β′，P2）；current = HEAD 当前代码（E-β″，P4 前置-C）",
+    )
     p_collect.add_argument("--pre-root", default=str(DEFAULT_PRE_ROOT))
     p_collect.add_argument("--pre-commit", default=DEFAULT_PRE_COMMIT)
     p_collect.add_argument("--ckpt", default=str(DEFAULT_CKPT))
     p_collect.add_argument("--pool", default=str(DEFAULT_POOL))
     p_collect.add_argument(
+        "--pool-extra",
+        action="append",
+        default=None,
+        help="补充池（可重复）：主池全量在前，补充池按 seeded 顺序在后（E-β″：val−eval500 + 5k 切片）",
+    )
+    p_collect.add_argument(
         "--exclude", default=str(DEFAULT_EXCLUDE), help="排除的场景 (id, seed) 文件（默认 eval500）"
     )
     p_collect.add_argument(
         "--no-exclude", action="store_true", help="显式关闭排除（默认排除 eval500；空值 --exclude '' 会报错）"
+    )
+    p_collect.add_argument(
+        "--drop-exclude-ids",
+        action="store_true",
+        help="额外剔除数值 id 出现在排除集的候选（更严隔离；默认关，只按 (id, seed) 排除）",
+    )
+    p_collect.add_argument(
+        "--pool-shuffle-seed",
+        type=int,
+        default=None,
+        help="池候选 seeded 切片：按该 seed 确定性 shuffle 后按序采集（默认不 shuffle，按 (id, seed) 序）",
     )
     p_collect.add_argument("--out-dir", default=str(ROOT / "runs/reward_audit/episodes"))
     p_collect.add_argument("--workers", type=int, default=6)
@@ -1172,6 +1352,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--out", default=str(ROOT / "runs/reward_audit/report"))
     p_analyze.add_argument("--tiers", default="1,3,10,30")
     p_analyze.add_argument("--mirror-md", default=None)
+    p_analyze.add_argument("--label", default=None, help="报告标题（默认 P2；E-β″ 复算用）")
     p_analyze.add_argument(
         "--exclude", default=str(DEFAULT_EXCLUDE), help="分析前剔除的场景 (id, seed) 文件（默认 eval500）"
     )
