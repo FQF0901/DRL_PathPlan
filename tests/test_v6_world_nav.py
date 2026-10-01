@@ -226,18 +226,21 @@ def _mem_with_others(nav_features: torch.Tensor, batch: int = 1) -> MemBank:
     )
 
 
-def test_rebuild_nav_syncs_others_nav_dims():
+def test_rebuild_nav_is_pure_and_sync_returns_new_mem():
+    """rebuild 不原地写 mem；sync_others_nav_dims 返回新 MemBank（赋值式替换，可反向）。"""
     t0, _ = nav_features_from_world(_pose(6.43, 0.0, 0.0), _route_t())
     mem = _mem_with_others(t0.clone())
     feats, mask = rebuild_nav_from_world(mem, _pose(36.43, 0.0, 0.0), _route_t())
     assert mask.item() == 1.0
-    assert torch.allclose(mem.others[:, -1, :11], feats), "others 的 nav 子向量必须同步重建"
-    assert not torch.allclose(mem.others[:, -1, :11], t0), "others nav 不得停留在 t0"
-    # sync_others_nav_dims 是同一路径的薄封装
-    mem2 = _mem_with_others(t0.clone())
-    feats2 = sync_others_nav_dims(mem2, _pose(36.43, 0.0, 0.0), _route_t())
-    assert torch.allclose(feats2, feats)
-    assert torch.allclose(mem2.others[:, -1, :11], feats)
+    assert torch.allclose(mem.others[:, -1, :11], t0), "rebuild 必须纯函数、不改 mem.others"
+    synced = sync_others_nav_dims(mem, feats)
+    assert torch.allclose(synced.others[:, -1, :11], feats), "sync 后新 mem 的 nav 维 = 重建值"
+    assert not torch.allclose(synced.others[:, -1, :11], t0), "others nav 不得停留在 t0"
+    assert torch.allclose(mem.others[:, -1, :11], t0), "原 mem 仍不被修改（无 in-place）"
+    assert synced.others is not mem.others
+    # 历史帧与其他字段保持共享/不变
+    assert torch.equal(synced.others[:, :-1], mem.others[:, :-1])
+    assert synced.ego is mem.ego
 
 
 def test_rebuild_nav_falls_back_when_world_keys_missing(monkeypatch):
@@ -308,6 +311,7 @@ class _StubEncoded:
         self.ego_ctx = torch.zeros(batch, H_STUB)
         self.od_ctx = torch.zeros(batch, 16, H_STUB)
         self.ld_ctx = torch.zeros(batch, 16, H_STUB)
+        self.others_ctx = torch.zeros(batch, H_STUB)
         self.od_now = torch.zeros(batch, 16, 9)
         self.od_live = torch.zeros(batch, 16)
         self.ld_now = torch.zeros(batch, 16, 7)
@@ -412,6 +416,81 @@ def test_teacher_forcing_without_world_keys_keeps_t0_nav():
     assert len(model.seen_nav) == 6
     for token in model.seen_nav:
         assert torch.allclose(token, obs["nav"][:, :H_STUB]), "缺世界系键时必须保持 t0 nav"
+
+
+class _GradStubMemEncoder:
+    """``encode`` 依赖 ``mem.others`` 的可微投影（复现 in-place 写 mem 导致的 backward 崩溃）。"""
+
+    def __init__(self):
+        self.proj = torch.nn.Linear(28, H_STUB)
+        self.synced_nav: List[torch.Tensor] = []
+
+    def encode(self, encoders, mem: MemBank) -> _StubEncoded:
+        self.synced_nav.append(mem.others[:, -1, :11].detach().clone())
+        encoded = _StubEncoded(mem.batch)
+        encoded.others_ctx = self.proj(mem.others[:, -1])  # 图依赖 mem.others
+        return encoded
+
+
+class _GradStubModel(_StubModel):
+    """带可微 others 通路的 teacher forcing stub（用于 backward 回归）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.mem_encoder = _GradStubMemEncoder()
+        self.head = torch.nn.Linear(H_STUB, 6)
+
+    def plan_step(self, encoded, nav_token, signal_token):  # noqa: ANN001
+        self.seen_nav.append(nav_token.detach().clone())
+        ego_next = self.head(encoded.others_ctx + nav_token)
+        return None, ego_next, {}
+
+
+def test_teacher_forcing_backward_survives_nav_rebuild():
+    """回归：nav 重建/同步不得原地写 ``mem.others``（否则 teacher forcing backward 崩）。
+
+    旧实现 ``rebuild_nav_from_world`` 直接 ``mem.others[:, -1, :11] = feats``；第 2 步
+    backward 会因"a variable needed for gradient computation has been modified by an
+    inplace operation"失败。现实现 = 纯 rebuild + 赋值式 sync（返回新 MemBank）。
+    """
+    model = _GradStubModel()
+    obs = _teacher_obs(with_world=True)
+    actions = torch.full((_B, 6, 2), 0.1)
+    predictions = wm_teacher_forcing_predictions(model, obs, {}, actions)
+    loss = sum(tensor.float().mean() for tensor in predictions.values())
+    loss.backward()  # 旧实现在此抛 RuntimeError(inplace)
+    grads = [parameter.grad for parameter in model.mem_encoder.proj.parameters()]
+    assert all(grad is not None for grad in grads), "others 投影参数必须收到梯度"
+    assert any(float(grad.abs().sum()) > 0.0 for grad in grads), "梯度不得为全 0"
+    # others 同步仍逐步发生（synced_nav[0] = 第 1 步位姿，纯函数路径不得破坏同步语义）
+    assert len(model.mem_encoder.synced_nav) == 6
+    pose = obs["ego_world"].clone()
+    pose = advance_pose_world(pose, actions[:, 0, 0], actions[:, 0, 1])
+    expected, _ = nav_features_from_world(pose, obs["route_world"], obs["route_world_mask"])
+    assert torch.allclose(model.mem_encoder.synced_nav[0], expected)
+
+
+def test_old_inplace_sync_would_break_backward(monkeypatch):
+    """对照探针：旧实现（原地写 ``mem.others``）在同一路径上确实 backward 崩溃。
+
+    证明 :func:`test_teacher_forcing_backward_survives_nav_rebuild` 有区分度：把
+    ``sync_others_nav_dims`` 换成 in-place 版本后，第二次 encode 之前改写了此前 autograd
+    图引用的张量 → backward 抛 inplace RuntimeError。
+    """
+    import net.mem as mem_module
+
+    def _inplace_sync(mem: MemBank, nav_features: torch.Tensor, *, nav_dim: int = 11) -> MemBank:
+        mem.others[:, -1, :nav_dim] = nav_features.to(mem.others.dtype)
+        return mem
+
+    monkeypatch.setattr(mem_module, "sync_others_nav_dims", _inplace_sync)
+    model = _GradStubModel()
+    obs = _teacher_obs(with_world=True)
+    actions = torch.full((_B, 6, 2), 0.1)
+    predictions = wm_teacher_forcing_predictions(model, obs, {}, actions)
+    loss = sum(tensor.float().mean() for tensor in predictions.values())
+    with pytest.raises(RuntimeError, match="inplace|modified"):
+        loss.backward()
 
 
 # --------------------------------------------------------------------------- #

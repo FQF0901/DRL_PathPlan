@@ -16,6 +16,7 @@ import torch
 from torch import nn
 
 from net.moe import top_k_softmax
+from pipeline.stages import _router_monitor_summary
 from pipeline.trainer import PPOConfig, PPOTrainer, RouterMonitor, _SmokeModel
 
 OBS = {"ego": np.full((1, 8), 0.5, dtype=np.float32)}
@@ -167,3 +168,40 @@ def test_expert_norm_probe_populates_dead_key_and_is_bitwise_noop():
         assert metrics["router_mean_output_norm"] is None
     # 探针 hook 在 update 结束后必须摘除（不污染 collect/后续 forward）
     assert len(trainer_on.model.plan_head.moe.experts[0]._forward_hooks) == 0
+
+
+# --------------------------------------------------------------------------- #
+# E1 指标落盘：metrics.json::router_monitor 汇总
+# --------------------------------------------------------------------------- #
+
+def test_router_monitor_summary_persists_to_metrics_payload():
+    history = [
+        {
+            "router_mean_weight": [0.5, 0.5, 0.0, 0.0],
+            "router_active_rate": [0.5, 0.5, 0.0, 0.0],
+            "router_mean_output_norm": [1.0, 2.0, 3.0, 4.0],
+            "router_effective_n": 2.0,
+            "router_mean_entropy": 0.5,
+            "router_load_imbalance": 1.0,
+        },
+        {
+            "router_mean_weight": [0.25, 0.75, 0.0, 0.0],
+            "router_active_rate": [0.25, 0.75, 0.0, 0.0],
+            "router_mean_output_norm": [3.0, 4.0, 5.0, 6.0],
+            "router_effective_n": 3.0,
+            "router_mean_entropy": 0.7,
+            "router_load_imbalance": 2.0,
+        },
+    ]
+    summary = _router_monitor_summary(history)
+    assert summary["updates"] == 2
+    assert summary["effective_n_mean"] == pytest.approx(2.5)
+    assert summary["mean_entropy_mean"] == pytest.approx(0.6)
+    assert summary["load_imbalance_mean"] == pytest.approx(1.5)
+    assert summary["mean_weight_mean"] == pytest.approx([0.375, 0.625, 0.0, 0.0])  # 逐 expert 跨 update 均值
+    np.testing.assert_allclose(summary["output_norm_mean"], [2.0, 3.0, 4.0, 5.0])
+    assert summary["output_norm_updates"] == 2
+    # 无数据（探针关/无 MoE）→ None，不抛异常
+    empty = _router_monitor_summary([{"total_loss": 1.0}])
+    assert empty["updates"] == 1
+    assert empty["output_norm_mean"] is None and empty["effective_n_mean"] is None

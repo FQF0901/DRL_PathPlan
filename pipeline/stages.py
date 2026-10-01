@@ -609,6 +609,42 @@ def _resolve_stage_c_router_expert_norm_probe(args: argparse.Namespace, train_cf
     return bool(value)
 
 
+def _router_monitor_summary(history: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """E1：``trainer.update()`` 的 router 监控序列 → ``metrics.json::router_monitor`` 汇总。
+
+    ``router_mean_*``（top-2 负载 + 专家输出范数）在瘦身监控下不进 TB/CSV，这里显式
+    持久化（纯监控，不影响训练数值）；无数据键为 None。
+    """
+
+    def _mean(values: Sequence[Any]) -> Optional[float]:
+        clean = [float(value) for value in values if value is not None]
+        return float(np.mean(clean)) if clean else None
+
+    weights = [item.get("router_mean_weight") for item in history if item.get("router_mean_weight") is not None]
+    norms = [
+        item.get("router_mean_output_norm")
+        for item in history
+        if item.get("router_mean_output_norm") is not None
+    ]
+    return {
+        "updates": len(history),
+        "effective_n_mean": _mean([item.get("router_effective_n") for item in history]),
+        "mean_entropy_mean": _mean([item.get("router_mean_entropy") for item in history]),
+        "load_imbalance_mean": _mean([item.get("router_load_imbalance") for item in history]),
+        "mean_weight_mean": (
+            [float(value) for value in np.mean(np.asarray(weights, dtype=np.float64), axis=0)]
+            if weights
+            else None
+        ),
+        "output_norm_mean": (
+            [float(value) for value in np.mean(np.asarray(norms, dtype=np.float64), axis=0)]
+            if norms
+            else None
+        ),
+        "output_norm_updates": len(norms),
+    }
+
+
 def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
     """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
 
@@ -1810,7 +1846,12 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         if ego_now.ndim == 3:
             ego_now = ego_now[:, 0]
         # A4：nav 逐步重建（世界系路线 + 位姿链）。缺 ego_world/route_world（旧数据）→ 旧行为。
-        from net.mem import advance_pose_world, rebuild_nav_from_world, world_state_from_obs
+        from net.mem import (
+            advance_pose_world,
+            rebuild_nav_from_world,
+            sync_others_nav_dims,
+            world_state_from_obs,
+        )
 
         ego_world, route_world, route_world_mask = world_state_from_obs(obs)
         nav_rebuild = ego_world is not None and route_world is not None
@@ -1868,13 +1909,15 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步 GT 动作
             mem.shift_ego(ego_frame.detach())
             if nav_rebuild:
-                # A4：位姿链用同一步进语义（与 rollout 一致）；nav 重算并同步 others 的 nav 维
+                # A4：位姿链用同一步进语义（与 rollout 一致）；nav 重算并同步 others 的 nav 维。
+                # 纯函数路径：sync 返回新 MemBank（赋值式，避免 autograd inplace 报错）。
                 pose_world = advance_pose_world(
                     pose_world, raw_action[:, 0].detach(), raw_action[:, 1].detach()
                 )
                 nav_feats, nav_mask = rebuild_nav_from_world(
                     mem, pose_world, route_world, route_world_mask
                 )
+                mem = sync_others_nav_dims(mem, nav_feats)
                 nav_token = model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask.reshape(-1, 1))
             enc_k = model.mem_encoder.encode(model.encoders, mem)
             od_pred_k, ld_pred_k, presence_k, entry_k = model.st_gnn(
@@ -4217,6 +4260,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         metrics["kl_anchor_coef_schedule"] = kl_schedule
         metrics["ckpt_saved"] = ckpt_saved
         metrics["last"] = {key: history[-1].get(key) for key in ("total_loss", "approx_kl", "kl_anchor")}
+        # E1：router 监控（top-2 负载 + 专家输出范数）落 metrics.json（瘦身监控不写这些 tag）
+        metrics["router_monitor"] = _router_monitor_summary(history)
         metrics["reward_source"] = reward_source
         metrics["trim_memory_every"] = trim_every
         metrics["trim_memory_calls"] = trim_calls

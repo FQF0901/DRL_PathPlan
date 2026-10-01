@@ -2912,7 +2912,12 @@ def wm_teacher_forcing_predictions(
     """
     import torch
 
-    from net.mem import advance_pose_world, rebuild_nav_from_world, world_state_from_obs
+    from net.mem import (
+        advance_pose_world,
+        rebuild_nav_from_world,
+        sync_others_nav_dims,
+        world_state_from_obs,
+    )
 
     encoded = model.encode(obs)
     mem = encoded["mem"].clone()
@@ -2980,11 +2985,14 @@ def wm_teacher_forcing_predictions(
         ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步动作
         mem.shift_ego(ego_frame.detach())
         if nav_rebuild:
-            # A4：位姿链 + nav 重建（同步 others 的 nav 维），与 rollout 同一步进语义
+            # A4：位姿链 + nav 重建（同步 others 的 nav 维），与 rollout 同一步进语义。
+            # 纯函数路径：rebuild 只算特征；sync 返回**新** MemBank（赋值式，避免 autograd
+            # inplace 报错——teacher forcing 要反向）。
             pose_world = advance_pose_world(
                 pose_world, raw_action[:, 0].detach(), raw_action[:, 1].detach()
             )
             nav_feats, nav_mask = rebuild_nav_from_world(mem, pose_world, route_world, route_world_mask)
+            mem = sync_others_nav_dims(mem, nav_feats)
             nav_token = model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask.reshape(-1, 1))
         enc_k = model.mem_encoder.encode(model.encoders, mem)
         od_pred, ld_pred, presence, entry = model.st_gnn(

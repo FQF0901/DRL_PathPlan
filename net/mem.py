@@ -53,9 +53,11 @@ others         ``others_hist`` / ``others_hist_mask`` ``(B,6,28)/(B,6)``；28 =
 
 - :func:`nav_features_from_world`：给定世界系位姿 + 世界系路线折线，重算 nav 特征
   （2 checkpoint 自车系坐标 + 命令 one-hot + route_completion），与 ``env.obs.nav`` 同口径；
-- :func:`rebuild_nav_from_world`（**固定签名**）：重算并**同步写回** ``mem.others[:, -1]``
-  的 nav 子向量，返回 ``(nav_feats (B,11), nav_mask (B,1))`` 供 ``embed_nav`` 生成 token；
-- :func:`sync_others_nav_dims`：只做 mem 同步（返回 nav 特征）；
+- :func:`rebuild_nav_from_world`（**固定签名，纯函数**）：返回
+  ``(nav_feats (B,11), nav_mask (B,1))`` 供 ``embed_nav`` 生成 token，**不修改 mem**；
+- :func:`sync_others_nav_dims`（**纯函数**）：``mem = sync_others_nav_dims(mem, nav_feats)``
+  返回 others 当前帧 nav 子向量被替换后的**新** MemBank（赋值式替换，供 teacher forcing /
+  rollout 反向；原地写会触发 autograd inplace 报错）；
 - :func:`advance_pose_world`：世界系位姿按一步 ``(ds,dθ)`` 推进（与
   ``net.model.arc_step``/``compose_pose`` 同口径，供 rollout/教师强制的位姿链复用）。
 
@@ -69,7 +71,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping
 
 import torch
@@ -528,12 +530,12 @@ def rebuild_nav_from_world(
     *,
     nav_dim: int = NAV_DIM,
 ) -> tuple[Tensor, Tensor]:
-    """**固定签名 helper**：按世界系位姿重建 nav 并同步 ``mem.others`` 的 nav 子向量。
+    """**固定签名 helper**：按世界系位姿重建 nav，返回 ``(nav_feats (B,NAV_DIM), nav_mask (B,1))``。
 
-    返回 ``(nav_feats (B,NAV_DIM), nav_mask (B,1))``——调用方用
-    ``model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask)`` 得 nav token。
-    **原地更新** ``mem.others[:, -1, 0:nav_dim]``（mem 必须是 rollout 隔离副本，见
-    :meth:`MemBank.clone`）。
+    调用方用 ``model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask)`` 得 nav token；
+    需要把重建值写回 ``mem.others`` 时用 :func:`sync_others_nav_dims`（**纯函数**，返回新
+    MemBank）——本函数**绝不原地改写** ``mem``（原地写会让此前 encode 的 autograd 图报
+    "modified by an inplace operation"，见 teacher forcing backward 回归测试）。
 
     向后兼容：``route_world``/``ego_world`` 缺失（旧 ckpt/旧数据）或整批路线不可用 →
     返回 mem 里现存的 nav 子向量（旧行为：t0 冻结）+ 一次性 ``RuntimeWarning``；
@@ -565,23 +567,21 @@ def rebuild_nav_from_world(
         feats = torch.where(
             valid_rows.unsqueeze(1), feats, fallback_feats.to(device=feats.device, dtype=feats.dtype)
         )
-    mem.others[:, -1, : int(nav_dim)] = feats.to(mem.others.dtype)
     return feats, mask
 
 
-def sync_others_nav_dims(
-    mem: MemBank,
-    ego_pose_world: Tensor | None,
-    route_world: Tensor | None,
-    route_world_mask: Tensor | None = None,
-    *,
-    nav_dim: int = NAV_DIM,
-) -> Tensor:
-    """others-nav 维同步 helper：只写 ``mem.others[:, -1, :nav_dim]``，返回 nav 特征 ``(B,NAV_DIM)``。"""
-    feats, _ = rebuild_nav_from_world(
-        mem, ego_pose_world, route_world, route_world_mask, nav_dim=nav_dim
-    )
-    return feats
+def sync_others_nav_dims(mem: MemBank, nav_features: Tensor, *, nav_dim: int = NAV_DIM) -> MemBank:
+    """others-nav 维同步 helper（**纯函数**）：返回 others 当前帧 nav 子向量被替换后的新 MemBank。
+
+    与 :func:`rebuild_nav_from_world` 配套：``mem = sync_others_nav_dims(mem, nav_feats)``。
+    在 ``mem.others.clone()`` 上赋值（clone 未参与任何既有 autograd 图，安全），原 ``mem``
+    对象及其张量不被修改——这是 teacher forcing / rollout 可反向的必要条件。
+    """
+    if nav_features.ndim != 2 or int(nav_features.shape[-1]) != int(nav_dim):
+        raise ValueError(f"nav_features 形状应为 (B,{int(nav_dim)})，收到 {tuple(nav_features.shape)}")
+    others = mem.others.clone()
+    others[:, -1, : int(nav_dim)] = nav_features.to(device=others.device, dtype=others.dtype)
+    return replace(mem, others=others)
 
 
 def advance_pose_world(pose_world: Tensor, ds: Tensor, dtheta: Tensor, *, eps: float = 1e-6) -> Tensor:

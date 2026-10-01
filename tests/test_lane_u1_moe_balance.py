@@ -415,10 +415,12 @@ def test_stage_b_two_phase_end_to_end_with_dagger(tmp_path: Path) -> None:
     for name in ("plan_head.moe.primary.0.weight", "plan_head.moe.primary.2.weight", "policy.net.0.weight"):
         if name in primary_ckpt and name in final_ckpt:
             assert torch.equal(primary_ckpt[name], final_ckpt[name]), f"phase 2 不应更新 {name}"
-    expert_names = [n for n in final_ckpt if n.startswith("plan_head.moe.experts.0.")]
+    expert_names = [n for n in final_ckpt if ".moe.experts." in n]
+    # v6 A1 新架构：top-2 路由可能不落 experts.0（实测落 experts.3/4，更新幅度同基线）→
+    # 断言放宽为"任一 expert 被更新"；primary/policy 的逐位冻结断言保持不变。
     assert any(
         not torch.equal(primary_ckpt[n], final_ckpt[n]) for n in expert_names if n in primary_ckpt
-    ), "phase 2 必须更新 experts"
+    ), "phase 2 必须更新 experts（任一 expert 即可）"
 
 
 # ------------------------------------------------- lane U4：DAgger 行 traj-aux 逐行掩码
