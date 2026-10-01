@@ -17,9 +17,11 @@
 | `docs/reward_audit/ebeta2/config_draft_rc3.yaml` | `runs/reward_audit_ebeta2/report/config_draft_rc3.yaml` | `738c91f7a5f20f568ab9405547337175b422e7e03439aa0dd91f10587514ec10` |
 | `docs/reward_audit/ebeta2/config_draft_rc10.yaml` | `runs/reward_audit_ebeta2/report/config_draft_rc10.yaml` | `6b32b264ef1bcfcba67a8262dc8860e53aa3615bd1c2fc219ea6f2aadb50dfd8` |
 | `docs/reward_audit/ebeta2/config_draft_rc30.yaml` | `runs/reward_audit_ebeta2/report/config_draft_rc30.yaml` | `c6245282892586e630d5311cad636c7f0ac335da745af255f0abd922f3620634` |
-| `docs/reward_audit/ebeta2/MANIFEST.md` | `runs/reward_audit_ebeta2/—（本清单）` | `8828e8fe19d4d101ef2357d20ffaad87f21e602886b8e63883f0b1b56f939622` |
 
 ## 溯源
+
+- 工具落库 commit：`abffdf6`（本目录产物的生成代码 `tools/reward_audit*.py` + `tests/test_reward_audit.py`；
+  相对生成时 HEAD `fb4f8c1` 的差异仅限审计工具/测试，不影响产物口径）。
 
 - 基座 ckpt：`runs/BTC20261001-1631_v6p3/stage_b/ckpt_epoch005.pt`（= final 同权重；sha256 `sha256:723db1c27d9da33ed8da17375af718cb421058e000a54555a2e5c667f5a56fa5`）。
 - 代码：HEAD `fb4f8c15a4e3963d0da5563a345c9f9662c1570f`（分析）/ `fb4f8c15a4e3963d0da5563a345c9f9662c1570f`（采集；含 P4 前置-B max_step 接线 fb4f8c1）；`--code-mode current`。
