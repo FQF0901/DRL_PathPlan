@@ -88,12 +88,18 @@ def _carl_reason(key: str) -> str:
 
 
 def default_terminal_values() -> dict[str, float]:
-    """默认终局 outcome 奖惩（到达 +10、碰撞/出界 -5、超时 -2、基建错误 -5）。"""
+    """默认终局 outcome 奖惩（v5 剖面 C；**provisional，P2 审计重解后定稿**）。
+
+    现行值（到达 +31、碰撞 −17、出界 −11、超时 −19、基建错误 −5）来自 Gate0 的 50 场景
+    重建反解（无归档，`docs/rl_reward_v5.md` §1/§3），**在 P2 奖励审计（完整 v5 项集重放）
+    完成前为临时值**；审计以 `tools/reward_audit.py` 按 rc 档（1.0 基准 / 3 / 10 / 30）
+    反解并回填。不得跨档复用（每档一套，见 §3）。
+    """
     return {
-        "arrive_dest": 10.0,
-        "collision": -5.0,
-        "out_of_road": -5.0,
-        "max_step": -2.0,
+        "arrive_dest": 31.0,
+        "collision": -17.0,
+        "out_of_road": -11.0,
+        "max_step": -19.0,
         "error": -5.0,
     }
 

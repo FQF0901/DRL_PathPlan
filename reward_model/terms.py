@@ -9,6 +9,8 @@
 - 车道保持（贴近边界罚，**默认关**）：``lane_boundary``（``lane_half_width_m − |d_lat|`` 小于
   阈值时线性罚；只罚"快出界"，不罚居中偏离）。
 - 效率：``speed_ratio``（``v / 车道限速`` 的截断收益，防爬行；超速交由合规项）。
+- 效率（低速蠕动，v5 默认启用）：``low_speed``（``v < 2 m/s`` 时按缺口线性罚，与评测 KPI
+  ``CRAWL_SPEED_MPS`` 同阈值）。
 - 合规：``solid_line``（连续实线跨越）/ ``speed_limit``（超速量）。
 - 达成：``route_completion``（势能塑形 ``γΦ(s') − Φ(s)``，策略序保持）。
 
@@ -36,6 +38,7 @@ __all__ = [
     "JerkPenalty",
     "LaneCenterPenalty",
     "LaneBoundaryPenalty",
+    "LowSpeedPenalty",
     "SpeedRatioTerm",
     "SolidLineCrossingPenalty",
     "SpeedLimitViolationPenalty",
@@ -58,6 +61,11 @@ CRASH_FLAGS: tuple[str, ...] = (
 #: 连续实线类线型 id（来源 ``env/obs/ld.py::LINE_TYPE_IDS``：2/3 白实线，6/7/8 黄实线；
 #: 1/4/5 为虚线）。只在本模块内使用，不 import env。
 SOLID_LINE_TYPE_IDS: frozenset[int] = frozenset({2, 3, 6, 7, 8})
+
+#: 低速蠕动阈值（m/s）：``low_speed`` 项的默认阈值，与评测 KPI
+#: ``pipeline.eval_runner.CRAWL_SPEED_MPS = 2.0``（``low_speed_step_ratio`` / ``crawl_seconds``）
+#: 对齐（本模块不 import pipeline，一致性由 ``tests/test_reward_terms.py`` 断言）。
+LOW_SPEED_THRESHOLD_MPS: float = 2.0
 
 
 def _truthy(value: Any) -> bool:
@@ -434,6 +442,45 @@ class SpeedRatioTerm(Term):
 
 
 @register_term
+class LowSpeedPenalty(Term, _WarnMissingInputMixin):
+    """效率（低速蠕动罚，v5 默认启用）：``v < 2 m/s`` 时按速度缺口线性罚。
+
+    定义
+    ----
+    ``raw = clamp(1 − v / threshold, 0, 1)``（默认 ``threshold = 2 m/s``，见
+    :data:`LOW_SPEED_THRESHOLD_MPS`；与评测 KPI ``CRAWL_SPEED_MPS`` 同阈值）：
+
+    - ``v = 0`` → raw 1.0（默认权重 −0.2 → 单步 −0.2）；``v = 1`` → 0.5（−0.1）；
+    - ``v = threshold`` 处连续为 0，``v > threshold`` 恒为 0（不奖励高速，只罚蠕动）；
+    - 负速度 / 异常值：``clamp`` 上界 1.0（不产生超过权重的发散惩罚）；
+    - 只读 ``step_ctx``；速度口径 = :func:`ego_speed_from_ctx`（``speed`` → ``velocity``）。
+
+    缺键：``speed`` / ``velocity`` 均缺失或非有限 → 0 且**只告警一次**（每实例）。
+    默认启用：在 :data:`DEFAULT_TERM_CONFIGS` 中（v5 剖面 C 的一部分）。
+    """
+
+    name: ClassVar[str] = "low_speed"
+
+    def __init__(
+        self, weight: float = -0.2, threshold: float = LOW_SPEED_THRESHOLD_MPS
+    ) -> None:
+        if threshold <= 0.0:
+            raise ValueError(f"low_speed threshold 必须 > 0，收到 {threshold}")
+        super().__init__(weight=weight, threshold=float(threshold))
+        self.threshold = float(threshold)
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        speed = ego_speed_from_ctx(step_ctx)
+        if speed is None:
+            self._warn_missing_input(
+                "low_speed: 缺少自车速度（speed|velocity）或值非法 → 该项记 0"
+                "（每个项实例只告警一次）"
+            )
+            return 0.0
+        return _clip(1.0 - speed / self.threshold, 0.0, 1.0)
+
+
+@register_term
 class SolidLineCrossingPenalty(Term):
     """合规：触碰/跨越连续实线（0/1 惩罚）。
 
@@ -527,10 +574,16 @@ class RouteCompletionShaping(Term):
         return self.gamma * current - previous
 
 
-#: 默认奖励项配置（权重为先验初值，最终调参在后续 lane；惩罚项权重为负）。
+#: 默认奖励项配置（v5 剖面 C 底座；惩罚项权重为负）。
+#: - ``speed_ratio`` 权重 = **0.4**（v5 §2 唯一改动权重的保持项）；
+#: - ``low_speed`` **默认启用**（v5 §4；阈值 2 m/s 与评测 KPI 对齐）；
+#: - ``route_completion`` 默认权重保持 1.0（基准档）；P4 rc 扫档 3/10/30 经 config
+#:   ``stages.C.reward.terms`` 或 CLI ``--reward-term-weight route_completion=<档>`` 覆盖，
+#:   各档终局值由 ``tools/reward_audit.py`` 反解（配置草案见审计报告）。
 DEFAULT_TERM_CONFIGS: tuple[dict[str, Any], ...] = (
     {"name": "route_completion", "weight": 1.0, "gamma": 1.0},
-    {"name": "speed_ratio", "weight": 1.0, "cap": 1.0},
+    {"name": "speed_ratio", "weight": 0.4, "cap": 1.0},
+    {"name": "low_speed", "weight": -0.2},
     {"name": "comfort_lon", "weight": -0.05, "deadband": 2.5},
     {"name": "comfort_lat", "weight": -0.05, "deadband": 2.0},
     {"name": "comfort_jerk", "weight": -0.005, "deadband": 5.0},
