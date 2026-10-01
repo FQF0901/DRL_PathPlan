@@ -44,10 +44,31 @@ others         ``others_hist`` / ``others_hist_mask`` ``(B,6,28)/(B,6)``；28 =
   注意力（6 帧 + ``hist_valid`` + 槽位掩码）；
 - **LD 不做时序**：直接用当前帧（``ld_hist[:, -1]``）。理由与前提见
   :meth:`MemEncoder.encode` 的 docstring。
+
+世界系 nav 重建（v3 / A4，供 rollout 与教师强制调用）
+----------------------------------------------------
+旧缺陷：rollout 全程复用 t0 的 ``nav_token``/``signal_token``，且 ``others`` mem 的前
+``NAV_DIM`` 维（nav 子向量）同样 t0 冻结（P0-3）。v3 obs 新增 ``ego_world``/``route_world``
+（见 ``env/obs/world.py``），本模块提供：
+
+- :func:`nav_features_from_world`：给定世界系位姿 + 世界系路线折线，重算 nav 特征
+  （2 checkpoint 自车系坐标 + 命令 one-hot + route_completion），与 ``env.obs.nav`` 同口径；
+- :func:`rebuild_nav_from_world`（**固定签名**）：重算并**同步写回** ``mem.others[:, -1]``
+  的 nav 子向量，返回 ``(nav_feats (B,11), nav_mask (B,1))`` 供 ``embed_nav`` 生成 token；
+- :func:`sync_others_nav_dims`：只做 mem 同步（返回 nav 特征）；
+- :func:`advance_pose_world`：世界系位姿按一步 ``(ds,dθ)`` 推进（与
+  ``net.model.arc_step``/``compose_pose`` 同口径，供 rollout/教师强制的位姿链复用）。
+
+回退（旧 ckpt/旧数据缺键）：``route_world``/``ego_world`` 缺失或路线不可用时，
+:func:`rebuild_nav_from_world` 返回 mem 里现存的 nav 子向量（= 旧行为：t0 冻结），
+并**一次性告警**。所有几何输入在函数内 ``detach``：nav 是上下文条件，不把梯度引回
+位姿链/路线（与 t0 nav 来自 obs 常量一致）。
 """
 
 from __future__ import annotations
 
+import math
+import warnings
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -58,11 +79,23 @@ from net.encoders import (
     EGO_MEM_DIM,
     H,
     LD_MEM_DIM,
+    NAV_DIM,
     OD_MEM_DIM,
     FrameEncoding,
     ObsEncoders,
 )
 from net.temporal import TemporalAttention
+
+#: 命令判定阈值（与 ``env.obs.nav.TURN_EPS_RAD`` 一致：两段航向差 < 10° 视为直行）
+_TURN_EPS_RAD = math.radians(10.0)
+#: 一次性回退告警（key -> 已告警）
+_NAV_FALLBACK_WARNED: set[str] = set()
+
+
+def _warn_nav_fallback(key: str, message: str) -> None:
+    if key not in _NAV_FALLBACK_WARNED:
+        _NAV_FALLBACK_WARNED.add(key)
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 #: 每个模态的历史键（env schema v2 规范键；不引入第二套别名）
 _HISTORY_KEYS: dict[str, tuple[str, ...]] = {
@@ -358,6 +391,220 @@ def mem_from_obs(obs: Mapping[str, Tensor], *, others_dim: int, history_frames: 
         others_mask=others_mask,
         others_valid=hist_valid,
         frames=frames,
+    )
+
+
+# ---------------------------------------------------------------------- 世界系 nav 重建
+def world_state_from_obs(obs: Mapping[str, object]) -> tuple[Tensor | None, Tensor | None, Tensor | None]:
+    """从 obs 提取 ``(ego_world, route_world, route_world_mask)``；缺键返回 ``(None, None, None)``。"""
+    if not isinstance(obs, Mapping):
+        return None, None, None
+    ego_world = obs.get("ego_world")
+    route_world = obs.get("route_world")
+    if not torch.is_tensor(ego_world) or not torch.is_tensor(route_world):
+        return None, None, None
+    route_mask = obs.get("route_world_mask")
+    return ego_world, route_world, route_mask if torch.is_tensor(route_mask) else None
+
+
+def _squeeze_pose(pose: Tensor) -> Tensor:
+    if pose.ndim == 3 and int(pose.shape[1]) == 1:
+        pose = pose[:, 0]
+    if pose.ndim != 2 or int(pose.shape[1]) < 3:
+        raise ValueError(f"ego_pose_world 形状应为 (B,3)（或 (B,1,3)），收到 {tuple(pose.shape)}")
+    return pose
+
+
+def _squeeze_route(route: Tensor) -> Tensor:
+    if route.ndim == 4 and int(route.shape[1]) == 1:
+        route = route[:, 0]
+    if route.ndim != 3 or int(route.shape[-1]) != 2:
+        raise ValueError(f"route_world 形状应为 (B,M,2)（或 (B,1,M,2)），收到 {tuple(route.shape)}")
+    return route
+
+
+def nav_features_from_world(
+    ego_pose_world: Tensor,
+    route_world: Tensor,
+    route_world_mask: Tensor | None = None,
+    *,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor]:
+    """按世界系位姿重投影世界系路线 → nav 特征 ``(B,NAV_DIM)`` + 有效掩码 ``(B,1)``。
+
+    与 ``env.obs.nav.NavChannel`` 同口径：
+
+    - checkpoint1/2 = 自车**前方**第 1/2 个路线顶点（顶点 = 路段终点，见
+      ``env.obs.world.route_world_polyline``）在自车系下的 (x,y)（x 前 / y 左，不裁剪距离）；
+    - 命令 = 当前所在路段弦向 vs 下一路段弦向（|Δ|<10° → forward，否则按叉积判 left/right，
+      与 :func:`env.obs.nav.navigation_command` 同一逻辑）；
+    - route_completion = 自车在折线上的投影弧长 / 折线总弧长（弦长近似；直线路段与上游
+      ``travelled/total`` 逐位一致，弯道有 <1% 量级的弧-弦差）。
+
+    输入一律 ``detach``（nav 是上下文条件，不向位姿链回传梯度）。``route_world_mask``
+    缺省时视全部点为真实顶点；含无效点的行返回 ``mask=0``。
+    """
+    pose = _squeeze_pose(ego_pose_world).detach()
+    route = _squeeze_route(route_world).detach()
+    batch, points = int(route.shape[0]), int(route.shape[1])
+    if int(pose.shape[0]) != batch:
+        raise ValueError(f"ego_pose_world batch {int(pose.shape[0])} != route_world batch {batch}")
+    if route_world_mask is None:
+        valid = torch.ones((batch, points), dtype=torch.bool, device=route.device)
+    else:
+        mask = route_world_mask
+        if mask.ndim == 3 and int(mask.shape[1]) == 1:
+            mask = mask[:, 0]
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0).expand(batch, -1)
+        if tuple(mask.shape) != (batch, points):
+            raise ValueError(f"route_world_mask 形状应为 (B,M)=({batch},{points})，收到 {tuple(mask.shape)}")
+        valid = mask.detach() > 0.5
+
+    feats = torch.zeros((batch, NAV_DIM), dtype=route.dtype, device=route.device)
+    nav_mask = torch.zeros((batch, 1), dtype=route.dtype, device=route.device)
+    if points < 2:
+        return feats, nav_mask
+
+    seg = route[:, 1:] - route[:, :-1]  # (B,S,2)
+    seg_len2 = (seg * seg).sum(dim=-1)
+    seg_ok = valid[:, 1:] & valid[:, :-1] & (seg_len2 > eps)
+    has_seg = seg_ok.any(dim=-1)  # (B,)
+    if not bool(has_seg.any()):
+        return feats, nav_mask
+
+    rel = pose[:, None, :2] - route[:, :-1]  # (B,S,2)
+    t = ((rel * seg).sum(dim=-1) / seg_len2.clamp(min=eps)).clamp(0.0, 1.0)
+    proj = route[:, :-1] + t.unsqueeze(-1) * seg
+    dist2 = ((proj - pose[:, None, :2]) ** 2).sum(dim=-1)
+    inf = torch.full_like(dist2, float("inf"))
+    best = torch.where(seg_ok, dist2, inf).argmin(dim=-1)  # (B,)
+
+    seg_len = seg_len2.clamp(min=0.0).sqrt()
+    cum = torch.cumsum(torch.where(seg_ok, seg_len, torch.zeros_like(seg_len)), dim=-1)  # (B,S)
+    cum_v = torch.cat([torch.zeros((batch, 1), dtype=route.dtype, device=route.device), cum], dim=1)  # (B,M)
+    gather_best = best.unsqueeze(1)
+    s_ego = cum_v.gather(1, gather_best).squeeze(1) + t.gather(1, gather_best).squeeze(1) * seg_len.gather(
+        1, gather_best
+    ).squeeze(1)
+    total = cum_v[:, -1]
+    route_completion = (s_ego / total.clamp(min=eps)).clamp(0.0, 1.0)
+
+    # 下一个 checkpoint = 弧长严格领先自车投影的第一个顶点（顶点 0 的弧长为 0）
+    ahead = (cum_v <= (s_ego.unsqueeze(1) + eps)).sum(dim=-1)  # (B,)
+    index1 = ahead.clamp(min=1, max=points - 1)
+    index2 = (index1 + 1).clamp(max=points - 1)
+    ck1 = route.gather(1, index1.view(batch, 1, 1).expand(batch, 1, 2)).squeeze(1)
+    ck2 = route.gather(1, index2.view(batch, 1, 1).expand(batch, 1, 2)).squeeze(1)
+
+    seg_dir = seg / seg_len.unsqueeze(-1).clamp(min=eps)
+    dir0 = seg_dir.gather(1, gather_best.unsqueeze(-1).expand(batch, 1, 2)).squeeze(1)
+    h0 = torch.atan2(dir0[:, 1], dir0[:, 0])
+    seg_index = index1.clamp(max=max(int(seg.shape[1]) - 1, 0))
+    dir1 = seg_dir.gather(1, seg_index.view(batch, 1, 1).expand(batch, 1, 2)).squeeze(1)
+    h1 = torch.atan2(dir1[:, 1], dir1[:, 0])
+    h1 = torch.where(seg_ok.gather(1, seg_index.unsqueeze(1)).squeeze(1), h1, h0)
+    delta = torch.atan2(torch.sin(h0 - h1), torch.cos(h0 - h1))
+    forward = delta.abs() < _TURN_EPS_RAD
+    turning_left = torch.sin(h1 - h0) > 0.0
+    command = torch.where(forward, torch.zeros_like(index1), torch.where(turning_left, torch.ones_like(index1), torch.full_like(index1, 2)))
+
+    cos_t, sin_t = torch.cos(pose[:, 2]), torch.sin(pose[:, 2])
+    for slot, ckpt in enumerate((ck1, ck2)):
+        delta_xy = ckpt - pose[:, :2]
+        feats[:, 2 * slot] = cos_t * delta_xy[:, 0] + sin_t * delta_xy[:, 1]
+        feats[:, 2 * slot + 1] = -sin_t * delta_xy[:, 0] + cos_t * delta_xy[:, 1]
+    feats.scatter_(1, (4 + command).unsqueeze(1), 1.0)
+    feats[:, 4 + 6] = route_completion
+    nav_mask[:, 0] = has_seg.to(route.dtype)
+    return feats, nav_mask
+
+
+def rebuild_nav_from_world(
+    mem: MemBank,
+    ego_pose_world: Tensor | None,
+    route_world: Tensor | None,
+    route_world_mask: Tensor | None = None,
+    *,
+    nav_dim: int = NAV_DIM,
+) -> tuple[Tensor, Tensor]:
+    """**固定签名 helper**：按世界系位姿重建 nav 并同步 ``mem.others`` 的 nav 子向量。
+
+    返回 ``(nav_feats (B,NAV_DIM), nav_mask (B,1))``——调用方用
+    ``model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask)`` 得 nav token。
+    **原地更新** ``mem.others[:, -1, 0:nav_dim]``（mem 必须是 rollout 隔离副本，见
+    :meth:`MemBank.clone`）。
+
+    向后兼容：``route_world``/``ego_world`` 缺失（旧 ckpt/旧数据）或整批路线不可用 →
+    返回 mem 里现存的 nav 子向量（旧行为：t0 冻结）+ 一次性 ``RuntimeWarning``；
+    逐行路线不可用时该行回退到旧值（mask=0）。
+    """
+    fallback_feats = mem.others[:, -1, : int(nav_dim)].detach()
+    fallback_mask = torch.ones((mem.batch, 1), dtype=mem.others.dtype, device=mem.others.device)
+    if ego_pose_world is None or route_world is None:
+        _warn_nav_fallback(
+            "rebuild_nav_from_world",
+            "obs 缺少 ego_world/route_world（旧数据/旧 ckpt）→ nav 回退 t0 冻结（A4 重建未启用）",
+        )
+        return fallback_feats, fallback_mask
+    if not torch.is_tensor(ego_pose_world) or not torch.is_tensor(route_world):
+        raise TypeError("ego_pose_world / route_world 必须是 torch.Tensor 或 None")
+    feats, mask = nav_features_from_world(ego_pose_world, route_world, route_world_mask)
+    valid_rows = mask.reshape(-1) > 0.5
+    if not bool(valid_rows.all()):
+        if not bool(valid_rows.any()):
+            _warn_nav_fallback(
+                "rebuild_nav_from_world",
+                "route_world 不可用（无真实顶点/折线退化）→ nav 回退 t0 冻结（A4 重建未启用）",
+            )
+        else:
+            _warn_nav_fallback(
+                "rebuild_nav_from_world_partial",
+                "route_world 仅部分 batch 行可用 → 不可用行回退 t0 nav（A4 逐行回退）",
+            )
+        feats = torch.where(
+            valid_rows.unsqueeze(1), feats, fallback_feats.to(device=feats.device, dtype=feats.dtype)
+        )
+    mem.others[:, -1, : int(nav_dim)] = feats.to(mem.others.dtype)
+    return feats, mask
+
+
+def sync_others_nav_dims(
+    mem: MemBank,
+    ego_pose_world: Tensor | None,
+    route_world: Tensor | None,
+    route_world_mask: Tensor | None = None,
+    *,
+    nav_dim: int = NAV_DIM,
+) -> Tensor:
+    """others-nav 维同步 helper：只写 ``mem.others[:, -1, :nav_dim]``，返回 nav 特征 ``(B,NAV_DIM)``。"""
+    feats, _ = rebuild_nav_from_world(
+        mem, ego_pose_world, route_world, route_world_mask, nav_dim=nav_dim
+    )
+    return feats
+
+
+def advance_pose_world(pose_world: Tensor, ds: Tensor, dtheta: Tensor, *, eps: float = 1e-6) -> Tensor:
+    """世界系位姿按一步策略动作 ``(ds,dθ)`` 推进（与 ``net.model.arc_step``+``compose_pose`` 同口径）。
+
+    ``(ds,dθ)`` 为**当前自车系**下的圆弧位移（恒曲率，y 左向）；返回 ``(B,3)`` 世界位姿。
+    rollout / 教师强制用同一函数累积位姿链，保证"同一步进语义"。
+    """
+    if pose_world.ndim == 3 and int(pose_world.shape[1]) == 1:
+        pose_world = pose_world[:, 0]
+    if pose_world.ndim != 2 or int(pose_world.shape[1]) != 3:
+        raise ValueError(f"pose_world 形状应为 (B,3)，收到 {tuple(pose_world.shape)}")
+    small = dtheta.abs() < eps
+    safe = torch.where(small, torch.ones_like(dtheta), dtheta)
+    radius = ds / safe
+    dx = torch.where(small, ds, radius * torch.sin(dtheta))
+    dy = torch.where(small, torch.zeros_like(ds), radius * (1.0 - torch.cos(dtheta)))
+    theta = pose_world[:, 2]
+    cos_t, sin_t = torch.cos(theta), torch.sin(theta)
+    new_theta = torch.atan2(torch.sin(theta + dtheta), torch.cos(theta + dtheta))
+    return torch.stack(
+        [pose_world[:, 0] + cos_t * dx - sin_t * dy, pose_world[:, 1] + sin_t * dx + cos_t * dy, new_theta],
+        dim=-1,
     )
 
 

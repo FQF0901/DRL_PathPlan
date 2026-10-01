@@ -8,6 +8,8 @@
     nav (1,11)         nav_mask (1,)       # 兼容保留（others 是规范输入）
     signal (1,4)       signal_mask (1,)    # 兼容保留
     others (1,16+K)    others_mask (1,)    # nav + speed_limit + signal + road_class one-hot(K)
+    ego_world (1,3)    ego_world_mask (1,) # v3：t0 世界系位姿 (x,y,θ)
+    route_world (64,2) route_world_mask (64,)  # v3：世界系路线折线（首段起点 + 各段终点）
 
     ego_hist (6,1,8)           ego_hist_mask (6,1)
     others_hist (6,1,16+K)     others_hist_mask (6,1)
@@ -53,8 +55,19 @@ from env.obs.nav import NavChannel
 from env.obs.od import ODChannel
 from env.obs.others import OthersChannel
 from env.obs.signal import SignalChannel
+from env.obs.world import EgoWorldChannel, RouteWorldChannel
 
-DEFAULT_CHANNELS: tuple[str, ...] = ("ego", "od", "ld", "nav", "signal", "others")
+DEFAULT_CHANNELS: tuple[str, ...] = (
+    "ego",
+    "od",
+    "ld",
+    "nav",
+    "signal",
+    "others",
+    # schema v3（A4）：世界系地图状态（rollout 逐步重算 nav 的输入；不进 6 帧历史）
+    "ego_world",
+    "route_world",
+)
 #: OD/LD 共用的默认盒式 scope（v2：前 150 / 后 50 / 左右 25）
 DEFAULT_SCOPE: dict[str, float] = {"front_m": 150.0, "rear_m": 50.0, "left_m": 25.0, "right_m": 25.0}
 _SCOPE_KEYS = ("front_m", "rear_m", "left_m", "right_m")
@@ -92,6 +105,8 @@ class ObservationBuilder:
             "nav": NavChannel(),
             "signal": SignalChannel(),
             "others": OthersChannel(**others_cfg),
+            "ego_world": EgoWorldChannel(),
+            "route_world": RouteWorldChannel(),
         }
         wanted = tuple(cfg.get("channels") or DEFAULT_CHANNELS)
         unknown = [name for name in wanted if name not in built_in]

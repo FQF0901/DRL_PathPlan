@@ -1,4 +1,4 @@
-"""obs schema v2 的**机器可读清单**（键 / 形状 / dtype / 语义 / 单位）。
+"""obs schema 的**机器可读清单**（键 / 形状 / dtype / 语义 / 单位）。
 
 单一出处：``tools/collect_expert.py`` 把 :func:`schema_manifest` 的返回值写进
 ``expert_bc.meta.json::schema``，下游（net / trainer lane）按契约开发时直接读它，
@@ -7,6 +7,9 @@
 为什么把 scope / 槽位策略 / others 布局也写进来：v2 的语义变化（OD 槽位 = track id、
 ``od_mask`` vs ``od_presence``、``hist_valid`` 按真实帧、road_class 顺序）都不是形状能表达的，
 必须成文，否则下游很容易按 v1 语义误用。
+
+v3（2026-10-01，A4 nav 修正）：新增 ``world`` 段 —— ``ego_world``（t0 世界系位姿）与
+``route_world``（世界系路线折线 + 逐点 mask），供 rollout / 教师强制按新位姿重算 nav。
 """
 
 from __future__ import annotations
@@ -18,8 +21,9 @@ from env.obs.ld import LDChannel
 from env.obs.nav import NUM_CHECKPOINTS, NUM_COMMANDS
 from env.obs.others import NAV_DIM, OTHERS_HEAD_DIM, SPEED_LIMIT_UNSET, road_class_labels
 from env.obs.signal import SIGNAL_DIM
+from env.obs.world import EGO_WORLD_DIM, ROUTE_WORLD_DIM, ROUTE_WORLD_MAX_POINTS
 
-__all__ = ["schema_manifest", "OD_SLOT_POLICY", "OTHERS_LAYOUT"]
+__all__ = ["schema_manifest", "OD_SLOT_POLICY", "OTHERS_LAYOUT", "WORLD_LAYOUT"]
 
 LD_DIM = LDChannel.feature_dim
 #: OD 特征维（见 env/obs/od.py）
@@ -79,6 +83,36 @@ OTHERS_LAYOUT: dict[str, Any] = {
 }
 
 
+#: 世界系地图状态布局（v3，A4 nav 修正）
+WORLD_LAYOUT: dict[str, Any] = {
+    "ego_world": {
+        "shape": [1, EGO_WORLD_DIM],
+        "dtype": "float32",
+        "feature_names": ["x", "y", "theta"],
+        "units": "m / m / rad（世界系，heading 为前进方向角）",
+        "semantics": "t0 自车世界位姿；rollout/教师强制的位姿链锚点（不做 SE(2) 对齐、不进历史）",
+    },
+    "ego_world_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = 自车存在"},
+    "route_world": {
+        "shape": [ROUTE_WORLD_MAX_POINTS, ROUTE_WORLD_DIM],
+        "dtype": "float32",
+        "feature_names": ["x", "y"],
+        "units": "m（世界系）",
+        "semantics": (
+            "世界系路线折线：顶点 = 首段起点 + 每个路段的 road 中心终点（与 get_checkpoints 的 "
+            "checkpoint 同口径）；覆盖整条路线（含已驶过部分）；不足 64 点用末点重复填充（mask=0）"
+        ),
+        "source": "navigation.checkpoints + map.road_network.graph（NodeNetworkNavigation）",
+        "downstream": "net.mem.rebuild_nav_from_world：按新 ego 位姿重算 checkpoint/命令/route_completion",
+    },
+    "route_world_mask": {
+        "shape": [ROUTE_WORLD_MAX_POINTS],
+        "dtype": "float32",
+        "semantics": "1 = 该折线点为真实顶点；0 = 补位（下游必须按 mask 过滤，补位点不得参与几何计算）",
+    },
+}
+
+
 def schema_manifest(
     *,
     num_slots: int = 16,
@@ -87,9 +121,9 @@ def schema_manifest(
     od_dim: int = OD_DIM,
     others_dim: int = OTHERS_HEAD_DIM + len(road_class_labels()),
 ) -> dict[str, Any]:
-    """返回 obs schema v2 清单（当前帧 + 6 帧历史 + 槽位策略 + others 布局）。"""
+    """返回 obs schema 清单（当前帧 + 6 帧历史 + 世界系状态 + 槽位策略 + others 布局）。"""
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "frame": {
             "ego": {
                 "shape": [1, EGO_DIM],
@@ -158,4 +192,5 @@ def schema_manifest(
         },
         "od_slot_policy": OD_SLOT_POLICY,
         "others_layout": OTHERS_LAYOUT,
+        "world_layout": WORLD_LAYOUT,
     }
