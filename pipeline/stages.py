@@ -595,6 +595,20 @@ def _resolve_stage_c_anchor_grad_probe(args: argparse.Namespace, train_cfg: Mapp
     return bool(value)
 
 
+def _resolve_stage_c_router_expert_norm_probe(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> bool:
+    """E1 专家输出范数探针开关（CLI ``--router-expert-norm-probe/--no-…`` 优先；
+    config ``train.ppo.router_expert_norm_probe``；默认 True = 开；只读、零数值影响）。
+    """
+    value = getattr(args, "router_expert_norm_probe", None)
+    if value is None:
+        value = (dict(train_cfg or {}).get("ppo") or {}).get("router_expert_norm_probe", True)
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return bool(value)
+
+
 def _resolve_stage_c_probe_interval(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
     """G4：drift 探针间隔（CLI ``--probe-interval`` 优先；config ``stages.C.probe_interval``）。
 
@@ -740,6 +754,8 @@ def _lane_frames_api() -> Optional[Any]:
 #: lane A FrameLookup 缓存（按 arrays 身份 + stride/episode/step 键；构造 O(N)，避免每 batch 重建）
 _FRAMES_LOOKUP_CACHE: Dict[Any, Tuple[Any, Any]] = {}
 _FRAMES_FALLBACK_WARNED: Dict[str, bool] = {}
+#: A4 nav 逐步重建的旧数据回退告警（一次性；key = 调用点）
+_WM_NAV_FALLBACK_WARNED: Dict[str, bool] = {}
 
 
 def _warn_frames_fallback(where: str, exc: BaseException) -> None:
@@ -1777,6 +1793,9 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         - **plan head/MoE 梯度（方案①）**：每步挤入 GT 帧**之前**，用同一教师强制 mem 跑
           plan head 得 ``ego_next_pred``（预测第 k 帧 ego 前 6 维，返回键 ``ego_next_pred``）。
           若只喂 GT ego 而不取该预测，plan head/MoE 在 Stage A 无任何梯度（旧 bug）。
+        - **A4 nav 逐步重建**：obs 含 ``ego_world``/``route_world`` 时，按 GT 动作链推进世界系
+          位姿并逐步重算 nav（同步 ``others`` 的 nav 维），与 ``net.model._rollout`` 同一步进
+          语义；缺键（旧数据集）→ 回退 t0 冻结 + 一次性告警。
         """
         encoded = model.encode(obs)
         mem = encoded["mem"].clone()
@@ -1790,6 +1809,29 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         ego_now = obs["ego"]
         if ego_now.ndim == 3:
             ego_now = ego_now[:, 0]
+        # A4：nav 逐步重建（世界系路线 + 位姿链）。缺 ego_world/route_world（旧数据）→ 旧行为。
+        from net.mem import advance_pose_world, rebuild_nav_from_world, world_state_from_obs
+
+        ego_world, route_world, route_world_mask = world_state_from_obs(obs)
+        nav_rebuild = ego_world is not None and route_world is not None
+        if nav_rebuild:
+            ego_world = ego_world.to(device=device, dtype=torch.float32)
+            if ego_world.ndim == 3 and int(ego_world.shape[1]) == 1:
+                ego_world = ego_world[:, 0]
+            route_world = route_world.to(device=device, dtype=torch.float32)
+            route_world_mask = (
+                route_world_mask.to(device=device, dtype=torch.float32)
+                if route_world_mask is not None
+                else None
+            )
+            pose_world = ego_world
+        elif not _WM_NAV_FALLBACK_WARNED.get("stageA"):
+            _WM_NAV_FALLBACK_WARNED["stageA"] = True
+            print(
+                "[stageA] WARN：obs 缺 ego_world/route_world（旧数据集）→ 教师强制 nav 回退 t0 冻结"
+                "（A4 逐步重建未启用；重新采集 BC 数据后自动生效）",
+                flush=True,
+            )
         predictions: Dict[str, List["torch.Tensor"]] = {
             "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": []
         }
@@ -1825,6 +1867,15 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 ego_frame = torch.cat([ego_now[:, :6], raw_action], dim=-1)
             ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步 GT 动作
             mem.shift_ego(ego_frame.detach())
+            if nav_rebuild:
+                # A4：位姿链用同一步进语义（与 rollout 一致）；nav 重算并同步 others 的 nav 维
+                pose_world = advance_pose_world(
+                    pose_world, raw_action[:, 0].detach(), raw_action[:, 1].detach()
+                )
+                nav_feats, nav_mask = rebuild_nav_from_world(
+                    mem, pose_world, route_world, route_world_mask
+                )
+                nav_token = model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask.reshape(-1, 1))
             enc_k = model.mem_encoder.encode(model.encoders, mem)
             od_pred_k, ld_pred_k, presence_k, entry_k = model.st_gnn(
                 ego_ctx=enc_k.ego_ctx,
@@ -3897,6 +3948,13 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         + ("（kl_anchor_coef>0 时记录 anchor_grad_norm/*；只读）" if anchor_grad_probe else ""),
         flush=True,
     )
+    # E1 专家输出范数探针：默认开（纯监控，no_grad hook；无 MoE 静默跳过）
+    router_expert_norm_probe = _resolve_stage_c_router_expert_norm_probe(args, train_cfg)
+    print(
+        f"[stageC] router_expert_norm_probe={'on' if router_expert_norm_probe else 'off'}"
+        + ("（每 update 记录 router_mean_output_norm/*；只读）" if router_expert_norm_probe else ""),
+        flush=True,
+    )
     # P0-1 A-hold：收集侧跟踪器参考口径（CLI 优先，config stages.C.plan_reference；默认 repeat_action）
     plan_reference = str(args.plan_reference or stage_cfg.get("plan_reference", "repeat_action"))
     updates = int(args.updates)
@@ -4085,6 +4143,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             target_kl=target_kl,
             group_probe_every=group_probe_every,
             anchor_grad_probe=anchor_grad_probe,
+            router_expert_norm_probe=router_expert_norm_probe,
             critic_warmup_updates=critic_warmup_updates,
             adv_norm=adv_norm,
             plan_reference=plan_reference,
@@ -4378,6 +4437,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C KL 锚梯度探针（默认取 config train.ppo.anchor_grad_probe=true）："
                              "kl_anchor_coef>0 时独立重算锚 loss 并记录其对 policy/value 参数与 "
                              "mu/logstd 的梯度范数（只读，不进优化器；--no-anchor-grad-probe 关闭）")
+    parser.add_argument("--router-expert-norm-probe", action=argparse.BooleanOptionalAction, default=None,
+                        help="E1 专家输出范数探针（默认取 config train.ppo.router_expert_norm_probe=true）："
+                             "update 期间以 no_grad forward hook 采集每 expert 输出 L2 范数并注入 router "
+                             "监控（只读、零训练数值影响；--no-router-expert-norm-probe 关闭）")
     parser.add_argument("--kl-anchor-coef", type=float, default=0.05, help="阶段 C KL 锚初始系数（默认 0.05）")
     parser.add_argument("--kl-anchor-final-coef", type=float, default=0.0, help="阶段 C KL 锚末值（默认 0）")
     parser.add_argument("--kl-anchor-decay", action=argparse.BooleanOptionalAction, default=True,

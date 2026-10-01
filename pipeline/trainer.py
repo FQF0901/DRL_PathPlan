@@ -639,6 +639,10 @@ class PPOConfig:
     anchor_grad_probe: bool = True
     #: ④ 锚梯度探针子批大小（固定取前 N 行；只影响探针开销/统计口径，不影响训练数值）。
     anchor_grad_probe_size: int = 128
+    #: E1 专家输出范数探针（默认 True）：update 期间给 ``plan_head.moe.experts[*]`` 挂
+    #: forward hook，把每 expert 输出 L2 范数注入 ``RouterMonitor``（修 ``expert_outputs_norm``
+    #: 死键）；只读、no_grad，零训练数值影响；无 MoE 的模型静默跳过。
+    router_expert_norm_probe: bool = True
     #: 前 N 个 update 只拟合 critic（value 头），策略/共享主干冻结（0 = 关闭，行为同旧版）。
     critic_warmup_updates: int = 0
     seed: int = 0
@@ -2437,7 +2441,10 @@ class BCDataset:
         self.count = int(len(arrays["episode_id"]))
         self.label_names = tuple(meta.get("label_names") or SUPERVISED_LABELS)
         self.alignments = _alignment_from_meta(meta)
-        self._obs_keys = [key for key in ("ego", "od", "ld", "nav", "signal", "others") if key in arrays]
+        self._obs_keys = [
+            key for key in ("ego", "od", "ld", "nav", "signal", "others", "ego_world", "route_world")
+            if key in arrays
+        ]
         self.history_stride = max(
             1,
             int(
@@ -2761,7 +2768,7 @@ def _to_device_obs(
 
 
 #: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``）
-SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "nav", "signal", "others")
+SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "nav", "signal", "others", "ego_world")
 
 
 def squeeze_single_slot(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -2877,6 +2884,10 @@ def bc_trajectory_loss(
     return loss, metrics
 
 
+#: A4 nav 逐步重建的旧数据回退告警（一次性；key = 调用点）
+_WM_NAV_FALLBACK_WARNED: Dict[str, bool] = {}
+
+
 def wm_teacher_forcing_predictions(
     model: "nn.Module",
     obs: Mapping[str, "torch.Tensor"],
@@ -2891,12 +2902,17 @@ def wm_teacher_forcing_predictions(
     - 每步先用当前编码 mem 跑 plan head 得 ``ego_next_pred``（第 k 帧 ego 特征预测）；
     - 再把**目标帧真实 ego**（``future["ego_fut"][:, k-1]``，无则解析运动学兜底）挤入 mem
       副本（``reserved`` 两维写第 k 个动作），合成帧一律 ``detach``；
-    - ST-GNN 单步推演得 t0 帧的 ``od_pred/ld_pred/presence/entry``。
+    - ST-GNN 单步推演得 t0 帧的 ``od_pred/ld_pred/presence/entry``；
+    - **A4 nav 逐步重建**：obs 含 ``ego_world``/``route_world`` 时按动作链推进世界系位姿并
+      逐步重算 nav（同步 ``others`` nav 维，与 ``net.model._rollout`` 同一步进语义）；
+      缺键（旧 replay 数据）→ 回退 t0 冻结。
 
     返回逐键堆叠 ``(B,K,...)``：``od_pred (B,K,16,5)`` / ``ld_pred (B,K,16,4)`` /
     ``presence_pred|entry_pred (B,K,16)`` / ``ego_next_pred (B,K,H6)``（ego 前 6 维）。
     """
     import torch
+
+    from net.mem import advance_pose_world, rebuild_nav_from_world, world_state_from_obs
 
     encoded = model.encode(obs)
     mem = encoded["mem"].clone()
@@ -2910,6 +2926,28 @@ def wm_teacher_forcing_predictions(
     if ego_now.ndim == 3:
         ego_now = ego_now[:, 0]
     horizon = int(actions.shape[1])
+    # A4：nav 逐步重建（与 net.model._rollout 同一步进语义）；缺键 → 旧行为 + 一次性告警。
+    ego_world, route_world, route_world_mask = world_state_from_obs(obs)
+    nav_rebuild = ego_world is not None and route_world is not None
+    if nav_rebuild:
+        device = actions.device
+        ego_world = ego_world.to(device=device, dtype=torch.float32)
+        if ego_world.ndim == 3 and int(ego_world.shape[1]) == 1:
+            ego_world = ego_world[:, 0]
+        route_world = route_world.to(device=device, dtype=torch.float32)
+        route_world_mask = (
+            route_world_mask.to(device=device, dtype=torch.float32)
+            if route_world_mask is not None
+            else None
+        )
+        pose_world = ego_world
+    elif not _WM_NAV_FALLBACK_WARNED.get("trainer"):
+        _WM_NAV_FALLBACK_WARNED["trainer"] = True
+        print(
+            "[trainer] WARN：obs 缺 ego_world/route_world（旧 replay 数据）→ 教师强制 nav 回退 "
+            "t0 冻结（A4 逐步重建未启用；重新采集后自动生效）",
+            flush=True,
+        )
     predictions: Dict[str, List["torch.Tensor"]] = {
         "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": []
     }
@@ -2941,6 +2979,13 @@ def wm_teacher_forcing_predictions(
             ego_frame = ego_frame[:, 0, :]
         ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步动作
         mem.shift_ego(ego_frame.detach())
+        if nav_rebuild:
+            # A4：位姿链 + nav 重建（同步 others 的 nav 维），与 rollout 同一步进语义
+            pose_world = advance_pose_world(
+                pose_world, raw_action[:, 0].detach(), raw_action[:, 1].detach()
+            )
+            nav_feats, nav_mask = rebuild_nav_from_world(mem, pose_world, route_world, route_world_mask)
+            nav_token = model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask.reshape(-1, 1))
         enc_k = model.mem_encoder.encode(model.encoders, mem)
         od_pred, ld_pred, presence, entry = model.st_gnn(
             ego_ctx=enc_k.ego_ctx,
@@ -4588,8 +4633,38 @@ def _term_key(loss_key: str) -> str:
 # MoE 路由监控
 # --------------------------------------------------------------------------- #
 
+def _top2_softmax_np(logits: np.ndarray) -> np.ndarray:
+    """``(B,E)`` logits → ``(B,E)`` top-2 softmax 权重（恰好 2 个非零、每行和为 1）。
+
+    与 ``net.moe.top_k_softmax`` 同口径（numpy 版，供监控在无 torch 上下文时使用）。
+    """
+    width = int(logits.shape[1])
+    k = min(2, width)
+    indices = np.argsort(-logits, axis=1)[:, :k]
+    picked = np.take_along_axis(logits, indices, axis=1)
+    picked = picked - picked.max(axis=1, keepdims=True)
+    exp = np.exp(picked)
+    weights = exp / exp.sum(axis=1, keepdims=True)
+    out = np.zeros_like(logits)
+    np.put_along_axis(out, indices, weights, axis=1)
+    return out
+
+
 class RouterMonitor:
-    """MoE 路由监控（负载均衡 / 熵 / 每 expert 权重、激活率与输出范数）。"""
+    """MoE 路由监控（负载均衡 / 熵 / 每 expert 权重、激活率与输出范数）。
+
+    口径（E1 修复，2026-10-01）：router 实际走 **top-2 softmax 混合**，旧实现用
+    ``sigmoid(logits)`` 统计是错误口径。现改为：
+
+    - 门控权重 = ``expert_weights``（top-2 混合权重，恰 2 个非零、每 token 和为 1）；
+      缺省时由 ``router_logits`` 现场算 top-2 softmax；
+    - ``router_mean_weight`` = 逐 expert top-2 权重均值（Σ=1）；``router_active_rate`` =
+      该 expert 进入 top-2 的 token 占比；``router_load_imbalance`` 由两者导出；
+    - ``router_effective_n`` / ``router_mean_entropy`` = 全专家 softmax 的困惑度 /
+      归一化熵（1 = 均匀；与 ``net.moe.load_stats`` 的 ``gate_entropy`` 同口径）；
+    - ``router_mean_output_norm`` = 逐 expert 输出 L2 范数均值（trainer 的专家范数探针
+      经 ``expert_outputs_norm`` 注入；无 MoE / 探针关闭时 None）。
+    """
 
     def __init__(self, num_experts: int = 8):
         self.num_experts = int(num_experts)
@@ -4606,21 +4681,31 @@ class RouterMonitor:
 
     @torch.no_grad() if torch is not None else (lambda fn: fn)
     def update(self, outputs: Mapping[str, Any]) -> None:
-        """累计一个 batch 的路由统计（只读输入，不参与梯度）。"""
+        """累计一个 batch 的路由统计（只读输入，不参与梯度；口径见类 docstring）。"""
         logits = outputs.get("router_logits")
         if logits is None or not hasattr(logits, "detach"):
             return
-        probs = torch.sigmoid(logits.detach()).double().cpu().numpy().reshape(-1, self.num_experts)
-        if probs.shape[0] == 0:
+        logits_t = logits.detach().double()
+        if logits_t.ndim == 1:
+            logits_t = logits_t.reshape(1, -1)
+        if logits_t.ndim != 2 or int(logits_t.shape[1]) != self.num_experts:
             return
-        self._count += probs.shape[0]
-        self._weight_sum += probs.sum(axis=0)
-        self._active_sum += (probs > 0.5).sum(axis=0)
-        clipped = np.clip(probs, 1e-6, 1.0 - 1e-6)
-        self._entropy_sum += float(
-            (-(clipped * np.log(clipped) - (1 - clipped) * np.log(1 - clipped))).sum(axis=1).mean()
-        )
-        self._effective_sum += float(probs.sum(axis=1).mean())
+        weights = outputs.get("expert_weights")
+        if weights is not None and hasattr(weights, "detach"):
+            gate = weights.detach().double().cpu().numpy().reshape(-1, self.num_experts)
+        else:
+            gate = _top2_softmax_np(logits_t.cpu().numpy())
+        if gate.shape[0] == 0:
+            return
+        self._count += gate.shape[0]
+        self._weight_sum += gate.sum(axis=0)
+        self._active_sum += (gate > 0.0).sum(axis=0)
+        # 全专家 softmax：有效专家数（困惑度）与归一化熵（监控面；与 net.moe.load_stats 同口径）
+        # 逐 token 求和累计，summary 再除以 token 数（多 batch 累计口径正确）
+        prob = np.clip(torch.softmax(logits_t, dim=-1).cpu().numpy(), 1e-12, 1.0)
+        entropy = -(prob * np.log(prob)).sum(axis=1)
+        self._entropy_sum += float(entropy.sum() / math.log(max(self.num_experts, 2)))
+        self._effective_sum += float(np.exp(entropy).sum())
         norms = outputs.get("expert_outputs_norm")
         if norms is not None and hasattr(norms, "detach"):
             norm_array = norms.detach().double().cpu().numpy().reshape(-1, self.num_experts)
@@ -4647,6 +4732,51 @@ class RouterMonitor:
             ),
             "router_load_imbalance": float((mean_weight.max() - mean_weight.min()) / (mean_weight.mean() + 1e-9)),
         }
+
+
+class _ExpertNormProbe:
+    """MoE 专家输出范数探针（E1，纯监控）：修 ``expert_outputs_norm`` 死键。
+
+    net 的 MoE aux 不暴露逐 expert 输出，``RouterMonitor`` 的该键此前恒为空。本探针给
+    ``model.plan_head.moe.experts[*]`` 挂 forward hook，读取前向输出并记录**每 expert 的
+    批内 L2 范数均值**（no_grad；只读，不改变数值/梯度）。由 :meth:`PPOTrainer.update`
+    在每 minibatch 前 ``reset()``、前向后经 ``RouterMonitor.update`` 注入；无 MoE 的模型
+    （如 smoke stub）静默跳过。``close()`` 摘除 hook。
+    """
+
+    def __init__(self, model: "nn.Module"):
+        self._latest: Dict[int, float] = {}
+        self._handles: List[Any] = []
+        moe = getattr(getattr(model, "plan_head", None), "moe", None)
+        experts = getattr(moe, "experts", None)
+        if not isinstance(experts, (torch.nn.ModuleList, list, tuple)) or len(experts) == 0:
+            return
+        for index, expert in enumerate(experts):
+            self._handles.append(expert.register_forward_hook(self._make_hook(index)))
+
+    def _make_hook(self, index: int):  # noqa: ANN202 - 返回 hook callable
+        def hook(module, inputs, output):  # noqa: ANN001
+            if torch.is_tensor(output) and output.ndim >= 2:
+                with torch.no_grad():
+                    self._latest[index] = float(output.detach().double().norm(dim=-1).mean())
+
+        return hook
+
+    def reset(self) -> None:
+        self._latest = {}
+
+    def norms(self) -> Optional["torch.Tensor"]:
+        """返回 ``(E,)`` 每 expert 输出范数（本 minibatch）；无采集 → None。"""
+        if not self._latest:
+            return None
+        count = max(self._latest) + 1
+        values = [float(self._latest.get(index, 0.0)) for index in range(count)]
+        return torch.tensor(values, dtype=torch.float32)
+
+    def close(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles = []
 
 
 # --------------------------------------------------------------------------- #
@@ -5873,6 +6003,8 @@ class PPOTrainer:
             )
         self.model.train()
         self.monitor.reset()
+        # E1：专家输出范数探针（默认开；只读 hook，close 在 finally）。无 MoE 模型 → 空探针。
+        expert_norm_probe = _ExpertNormProbe(self.model) if self.config.router_expert_norm_probe else None
         aggregates: Dict[str, List[float]] = {}
         batches = 0
         total = int(valid_indices.shape[0])
@@ -5915,7 +6047,13 @@ class PPOTrainer:
                     t_data += time.perf_counter() - t0
                     t1 = time.perf_counter()
                     # PPO 只需要 heads/router/logstd/value：走 cheap path（不跑 B1 rollout 与 WM 多步）
+                    if expert_norm_probe is not None:
+                        expert_norm_probe.reset()
                     out = self.model(obs_batch, rollout=False, world_model=False)
+                    if expert_norm_probe is not None:
+                        expert_norms = expert_norm_probe.norms()
+                        if expert_norms is not None:
+                            out = {**out, "expert_outputs_norm": expert_norms}
                     value = out["value"].reshape(-1)
                     if warmup:
                         # value-only：损失 = critic MSE（无 policy/entropy/router/KL/BC 项）
@@ -6034,6 +6172,8 @@ class PPOTrainer:
             if saved_requires is not None:
                 for parameter, flag in saved_requires:
                     parameter.requires_grad_(flag)
+            if expert_norm_probe is not None:
+                expert_norm_probe.close()
         metrics = {key: float(np.mean(values)) for key, values in aggregates.items()}
         metrics["critic_warmup"] = bool(warmup)
         metrics["batches"] = batches
