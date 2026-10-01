@@ -83,6 +83,7 @@ from pipeline.trainer import (  # noqa: E402
     SPEC_ROTATION_MODES,
     STAGE_C_DESIGN_PREFIXES,
     STAGE_C_TRAINABLE_SCOPES,
+    _POLICY_DT,
     apply_freeze_prefixes,
     apply_thread_limits,
     apply_trainable_allowlist,
@@ -118,6 +119,12 @@ __all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_b_phase3", "run_stag
            "build_model", "FrameWindows", "validate_bc_dataset"]
 
 _DEFAULT_MODEL_CFG = "config/model.yaml"
+
+#: P4/Gate4 **horizon 对齐**（2026-10-01）：Stage C 训练截断（策略步）。200 策略步 × ``_POLICY_DT``
+#: （0.5 s）= 100 s = 审计（``--max-steps 1000`` 物理步 × 0.1 s）与评测（``max_steps=1000``）口径；
+#: 旧默认 600 策略步 = 300 s = 审计 3×（max_step 的 dense 在训练口径被放大 ≈3× → 超时正收益）。
+#: CLI ``--max-episode-steps`` 优先；config ``stages.C.max_episode_steps`` 次之；本常量兜底。
+DEFAULT_STAGE_C_MAX_EPISODE_STEPS = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +487,25 @@ def _resolve_stage_c_ckpt_every(args: argparse.Namespace, stage_cfg: Mapping[str
     except (TypeError, ValueError):
         print(f"[stages] 无法解析 stage C ckpt_every={value!r} → 回退 25", flush=True)
         return 25
+
+
+def _resolve_stage_c_max_episode_steps(args: argparse.Namespace, stage_cfg: Mapping[str, Any]) -> int:
+    """阶段 C 训练截断（策略步）：CLI ``--max-episode-steps`` 优先 → config
+    ``stages.C.max_episode_steps`` → :data:`DEFAULT_STAGE_C_MAX_EPISODE_STEPS`（200）。
+
+    P4/Gate4 horizon 对齐：200 策略步 = 100 s，与审计/评测一致（审计/评测 1000 物理步 × 0.1 s）。
+    非正整数 fail-fast（截断语义依赖 ``LocalEnvPool._steps >= max_episode_steps``）。
+    """
+    value = getattr(args, "max_episode_steps", None)
+    if value is None:
+        value = dict(stage_cfg or {}).get("max_episode_steps", DEFAULT_STAGE_C_MAX_EPISODE_STEPS)
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"[stageC] 无法解析 max_episode_steps={value!r}（需正整数）") from None
+    if steps < 1:
+        raise SystemExit(f"[stageC] max_episode_steps 必须 ≥1（收到 {value!r}）")
+    return steps
 
 
 def _stage_c_periodic_updates(updates: int, ckpt_every: int) -> List[int]:
@@ -3932,6 +3958,13 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ``rollout=True, world_model=False`` 前向，记录 ``plan[:,1:6]`` 尾部 5 步与 ``action_mu`` 相对
     首次记录的 RMS 位移（``drift/*`` 指标 + ``metrics.json::drift`` 序列）。纯监控：no_grad，
     不参与 loss、不改动作、不写 buffer；探针批缺失时启动告警并跳过该探针。
+
+    P4/Gate4 **horizon 对齐**（2026-10-01）：``--max-episode-steps``（config
+    ``stages.C.max_episode_steps``，默认 200）——训练截断 = 200 策略步 × ``_POLICY_DT``（0.5 s）
+    = 100 s，与审计（``--max-steps 1000`` 物理步）/评测（``max_steps=1000``）同口径；旧默认
+    600 策略步 = 300 s = 3×。实际值记入 ``metrics.json``（``max_episode_steps`` / ``horizon_s``
+    / ``pool.max_episode_steps``，另记 ``rollout_steps``/``updates_requested``）供 driver 回读断言；
+    P4 driver 显式 pin ``--max-episode-steps 200``。
     """
     stage_cfg = _stage_section(config, "C")
     # R2/P0-6 冻结范围：CLI 优先，config stages.C.trainable_scope；默认 design（设计冻结）
@@ -4086,6 +4119,14 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         + ("（不钳制，旧行为）" if policy_logstd_max is None else "（采样/更新同一钳制后分布）"),
         flush=True,
     )
+    # P4/Gate4 horizon 对齐：训练截断 = 200 策略步（=100s，与审计/评测一致；旧 600 = 300s = 3×）
+    max_episode_steps = _resolve_stage_c_max_episode_steps(args, stage_cfg)
+    horizon_s = float(max_episode_steps) * float(_POLICY_DT)
+    print(
+        f"[stageC] max_episode_steps={max_episode_steps}（策略步 × {_POLICY_DT:g}s = {horizon_s:g}s；"
+        "horizon 对齐：200 策略步 = 100s = 审计/评测口径；旧 600 = 300s = 3×）",
+        flush=True,
+    )
     # W1（P1）：WM（ST-GNN）全期冻结。旧 ``--wm-freeze-updates`` 的"解冻"只是把参数重新
     # 加入优化器：PPO 更新走 rollout=False cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
     # 恒 None（P0 侦察 §B），故弃用旧解冻语义。
@@ -4144,6 +4185,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         kind=str(args.pool),
         num_envs=int(args.envs),
         tracker="lqr",
+        max_episode_steps=max_episode_steps,
         traffic_density=args.traffic_density,
         mem_floor_mb=args.mem_floor_mb,
         spec_rotation=spec_rotation,
@@ -4163,6 +4205,11 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             "W1": "wm_frozen",
         },
         "specs": len(specs),
+        # P4/Gate4 horizon 对齐：训练截断（策略步）/秒数 + 收集口径（driver 回读断言用）
+        "max_episode_steps": int(max_episode_steps),
+        "horizon_s": horizon_s,
+        "rollout_steps": int(args.rollout_steps),
+        "updates_requested": int(updates),
         "primary_lr_scale": primary_lr_scale,
         "value_lr_scale": value_lr_scale,
         "target_kl": target_kl,
@@ -4191,6 +4238,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             "kind": type(pool).__name__,
             "num_envs": int(getattr(pool, "num_envs", 1)),
             "tracker": str(getattr(pool, "tracker_kind", "kinematic")),
+            # LocalEnvPool 实际截断值（VectorPoolAdapter 不透传 worker → 回退解析值）
+            "max_episode_steps": int(getattr(pool, "max_episode_steps", max_episode_steps)),
         },
         "tracker": str(getattr(pool, "tracker_kind", "kinematic")),
     }
@@ -4540,6 +4589,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="阶段 C 策略分布 logstd 上界钳制（S2/v3 探索降噪；默认取 config "
                              "stages.C.policy_logstd_max=null）：采样与 update logprob 使用同一钳制后分布；"
                              "缺省/null=不钳制（行为逐位不变）")
+    parser.add_argument("--max-episode-steps", type=int, default=None, metavar="N",
+                        help="阶段 C 训练截断（策略步；P4/Gate4 horizon 对齐）：CLI 优先，否则取 "
+                             "config stages.C.max_episode_steps=200（=200 策略步 × 0.5s = 100s = "
+                             "审计/评测口径；旧默认 600 策略步 = 300s = 3×）")
     parser.add_argument("--probe-interval", type=int, default=None, metavar="N",
                         help="阶段 C drift 探针间隔（G4 必需项；默认取 config stages.C.probe_interval=25）："
                              "u1 记基准，之后每 N 个 update 在固定探针批上记录 plan[:,1:6]/action_mu 的 "

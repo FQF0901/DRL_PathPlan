@@ -88,11 +88,16 @@ def test_arm_reward_pairs_and_matches_draft(arm_name: str, spec: Dict[str, Any])
     draft_names = {term["name"] for term in draft["terms"]}
     extra = spec.get("extra")
     if extra is None:
-        assert set(weights) == draft_names, "非单变量臂的项集应与同档草案一致"
+        # Gate4 加固：不只看项名集合——逐参数（weight/gamma/deadband/cap/…）与同档草案全等
+        assert reward_cfg["terms"] == draft["terms"], "非单变量臂项集应与同档草案逐参数一致"
     else:
         name, weight = extra
         assert name not in draft_names, f"{name} 应为追加项（草案不含）"
         assert weights[name] == pytest.approx(weight)
+        # Gate4 加固：去掉 extra 项后的项集逐参数 == 同档草案（顺序亦一致）
+        rest = [term for term in reward_cfg["terms"] if str(term.get("name")) != name]
+        assert len(rest) == len(reward_cfg["terms"]) - 1, "臂项集应恰含一个 extra 项"
+        assert rest == draft["terms"], "去 extra 项集应与同档草案逐参数一致"
         assert set(weights) == draft_names | {name}
 
     if "lam" in spec:

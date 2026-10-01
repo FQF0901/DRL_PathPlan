@@ -51,8 +51,9 @@ reward = dense_positive_sum × carl_multiplier
 - **E-β″ 基座复算备注（P4 前置-C；2026-10-01）**：v6 基座（ckpt `723db1c2…`）四档定稿值见
   `docs/reward_audit/ebeta2/`——rc=1 **+29/−22/−14**、rc=3 +27/−23/−15、rc=10 +20/−28/−18、
   rc=30 +0/−41/−26（非 max_step 类两向 |Δ|≤5）；**max_step 采用 E-β″ 点估计
-  −46/−48/−54/−71**（n=8/向、不判通过；裁定 + horizon 显式接受见
-  `docs/v6_program_prereg.md` §7.1）。P4 臂配置从 `config/arms/`（源：
+  −46/−48/−54/−71**（n=8/向、不判通过；裁定 + **horizon 对齐 = 训练截断 200 策略步
+  （=100 s，与审计/评测一致；旧 600=300 s=3×）** 见 `docs/v6_program_prereg.md` §7.1/§7.4）。
+  P4 臂配置从 `config/arms/`（源：
   `docs/reward_audit/ebeta2/config_draft_rc*.yaml`）加载。
 - **训练侧 max_step 接线（P4 前置-B，2026-10-01 已实现 + 测试）**：截断（env timeout /
   `max_episode_steps`）且 info 无终局键时注入 `max_step=True`（`LocalEnvPool.step` 入

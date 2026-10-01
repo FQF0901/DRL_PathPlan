@@ -21,9 +21,10 @@
 - bundle 底座（arm0）= v5 奖励默认全量：`speed_ratio` 0.4 + `low_speed` 启用 + rc 选定档 +
   终局值定稿表；其余项参数不变。
 - 终局值来源：`docs/reward_audit/ebeta2/config_draft_rc*.yaml`（数值逐档一致，dry-run 单测锁定）。
-- **max_step 裁定（Orchestrator 2026-10-01）**：采用 E-β″ 点估计 −46/−48/−54/−71；
-  标注 **n=8/向、不判通过、首臂后复核、不扩采**；**horizon 显式接受**（训练截断 600 策略步
-  vs 审计/评测 1000 物理步）。见 `docs/v6_program_prereg.md` §7.1 与 ebeta2 `MANIFEST.md`。
+- **max_step 裁定（Orchestrator 2026-10-01；Gate4 修正）**：采用 E-β″ 点估计 −46/−48/−54/−71；
+  标注 **n=8/向、不判通过、首臂后复核、不扩采**；**horizon 对齐 = 训练截断 200 策略步**
+  （=100 s，与审计/评测一致；旧 600=300 s=3×）。见 `docs/v6_program_prereg.md` §7.1/§7.4
+  与 ebeta2 `MANIFEST.md`（后者"显式接受"已被本修正替代）。
 
 ## 加载语义（重要；`includes` 为**一层平铺合并**）
 
@@ -37,7 +38,8 @@
   （`trainable_scope` / `primary_lr_scale` / `plan_reference` / `ckpt_every` / `spec_rotation` /
   `policy_logstd_max` / `probe_interval` / `wm_loss_enabled`）回落代码默认——本提交已核对与
   `config/train.yaml` 逐键一致；P4 driver 的显式 CLI pins（同 v4 口径：`--spec/--pool/--envs/
-  --trainable-scope/--updates/--rollout-steps/--seed/--device/...`）照旧优先。
+  --trainable-scope/--updates/--rollout-steps/--max-episode-steps 200/--seed/--device/...`）照旧优先
+  （pin 表见 `docs/v6_program_prereg.md` §7.4）。
 - **arm4 例外**：显式钉住整段 `train`（值 = `config/train.yaml`，仅 `lam: 0.98`）——只写
   `train.ppo.lam` 会把 `train` 段其余键打回代码默认（如 threads cap 8→4），整段复制保证
   「λ 单变量、其余 pins 逐位一致」。

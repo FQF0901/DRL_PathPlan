@@ -110,14 +110,36 @@
      再复算；口径断言 `terminal_key=max_step`（终局值按复算档取值，当前代码默认基准档 −23）；
   6. **记录 HEAD commit sha + split seed**：复算报告 meta 必含（工具已支持），报告入库 tracked 路径
      （`docs/reward_audit/`；原始 `runs/` 路径 + sha256 对照见其 `MANIFEST.md`）。
-- **max_step 裁定 + horizon 显式接受（Orchestrator，2026-10-01；E-β″ 复算定稿后）**：
+- **max_step 裁定 + horizon 对齐（Orchestrator，2026-10-01；E-β″ 复算定稿后；Gate4 修正版）**：
   - **max_step 终局值采用 E-β″ 点估计**：rc=1 **−46** / rc=3 −48 / rc=10 −54 / rc=30 −71
     （落点 `docs/reward_audit/ebeta2/config_draft_rc*.yaml`）。依据：profile 一致性——rc=1 审计半区
     mean **−15.050**、Δ **−5.050**（边界；方向 B mean −4.750、Δ +5.250）；若沿用 P2 −23 则
     mean ≈ **+8.05**、Δ +18（= 超时正收益）。标注 **n=8/向、不判通过**（第 4 条）、
-    **首臂后复核**、**不扩采**（~5-6 h 超预算）。
-  - **horizon 显式接受**：训练截断 600 策略步 vs 审计/评测 1000 物理步；max_step 在训练侧更稀有；
-    终局值不变。
+    **首臂后复核**（见下）、**不扩采**（~5-6 h 超预算）。
+  - **horizon 单位更正（Gate4）**：审计 `--max-steps 1000` = 1000 物理步（dt=0.1 s）= 100 s
+    = **200 策略步**（策略步 dt=0.5 s）；训练 `LocalEnvPool.max_episode_steps=600` = **600 策略步
+    = 300 s = 审计/评测的 3×**（审计、训练两侧此前均误按"1000 步 vs 600 步"读，单位混淆）。
+    Gate4 实测 16 条 max_step episode：dense 均值 **+33.6**（0.168/策略步、**速率不衰减**、
+    均速比 0.434 = 巡航型 loiterer）⇒ **旧 600 步口径** dense ≈ +100（3×）→ 超时
+    total ≈ **+54** ≈ 到达（"超时正收益"在训练口径重现，−46 被稀释）。
+  - **horizon 对齐裁定**：**Stage C 训练截断对齐 200 策略步（=100 s，与审计/评测一致）**；
+    −46 在 200 步口径下即精确校准（审计 rc=1：dense +33.920 / terminating −2.970 / terminal
+    −46 → mean −15.050，Δ −5.050，边界 n=8）。实现（最简净路径）：`config/train.yaml::
+    stages.C.max_episode_steps=200`（代码默认同值）+ CLI `--max-episode-steps` 覆盖 +
+    `metrics.json` 记录（`max_episode_steps`/`horizon_s`/`pool.max_episode_steps`/`rollout_steps`）+
+    单测 `tests/test_stage_c_horizon.py`；审计/评测侧不变。**若将来改 `LocalEnvPool` 侧默认值，
+    必须先核查所有调用方**（本修订不动 `LocalEnvPool` 代码默认 600）。
+  - **首臂后复核（arm0 训练完成后、开 arm1 前）**：driver 自动读训练监视（legacy tags 逐 update
+    序列），人工按下表处置——这是 horizon 裁定的运行时验证：
+    | 读数 | 期望/阈值 | 处置 |
+    |---|---|---|
+    | `episodes/termination_counts/max_step`（n） | n ≥ 2 | n=0/1 → 训练窗口证据不足 → **300 s 探针**（100–200 episode；`tools/test.py --max-steps 3000`）后再裁 |
+    | `episodes/mean_return_by_reason/max_step`（R_max，按 count 加权） | **R_max ≤ 0 且 R_max ≤ 0.5 × `mean_return_by_reason/arrive_dest`** | **R_max > 0 或 > 0.5×arrive → 停批重裁**（horizon/终局值/奖励复审；不得继续 arm1） |
+    | `episodes/mean_steps_by_reason/max_step`（S_max） | ≈ 200 | 明显 ≠200 → 停批排查截断接线 |
+    | `train/reward/terminal`（终局结算均值） | 显著为负（−46 档生效） | 若 ≈0/为正 → 停批排查 terminal 键 |
+  - **非 max_step 类两向一致性（补冻结）**：E-β″ 复算 A/B 互换两向，**非 max_step 类各档
+    |Δ| ≤ 5 视为结论一致**（E-β″ 实测最大 ≈2.2）；max_step 类因 n<50 只报点估计、不判通过
+    （结构性不足，见 `docs/reward_audit/ebeta2/MANIFEST.md` §已知偏差）。
 - **顺序（每臂单变量，前臂通过再开下臂）**：
   1. **bundle 底座臂**（v5 奖励默认全量）；
   2. **rc 扫档 3 / 10 / 30**（固定剖面、终局值为因变量）；
@@ -125,13 +147,65 @@
   4. **`ttc` 臂**（**前置**：离线证伪，would-be 触发率 ≈ 0 则改项或不做——[`docs/rl_reward_v5.md`](rl_reward_v5.md) §5）；
   5. **`lane_boundary` 臂**；
   6. **`lane_center` 臂**（两文档口径一致：`docs/rl_reward_v5.md` §5 与本表同为 −0.1 / deadband 0.25 m）。
-- **预算（按 v4 实测外推）**：单臂 ≈ 训练（u200 ≈ 8 min）+ 双评测（clean500 + eval500 各 ≈ 3–8 min，实测 185–484 s）≈ **20–25 min**（典型）；keep-best 候选全量复评 ≈ 6–8 min/候选（**计入**）；P4 整批 ≤ **4 h**（串行）。
-- **止损**：每臂全轨迹监控；若 u25/u50 出现早崩（子集配对 net 低于 init 且 z 显著；具体阈值随该臂预注册冻结），提前停臂；末段崩解候选不采纳（keep-best 协议，§5）。
+- **预算实测（Gate4 修正）**：训练 u200/H256（`--updates 200 --rollout-steps 256`）实测 **≈19 min/臂**
+  （v6 架构；旧外推 8 min 为 v4 旧口径）；加 u50 sub150 闸（≈1–2 min）+ keep-best（8 候选 sub150
+  ≈12 min + top1–2 全量 clean500 复评 ≈5 min/候选）+ 终评 eval500 ≈3–8 min ⇒ **≈45–55 min/臂；
+  8 臂 ≈3.7–6.7 h > 4 h**。**截断优先级（冻结）**：**arm0–4 必跑**（bundle + rc 扫档 3/10/30 + λ，
+  ≈4 h 内）；**arm5–7（ttc / lane_boundary / lane_center）预算允许才后置**。driver 以 u1–u5
+  实跑外推 u200 成本，并在批级预算门（≤4 h）处截断。
+- **止损（Gate4 冻结）**：**u50 子集闸** = clean500 前 150 行（sub150；零点 64/150=0.4267）配对
+  **net < −20 或 offΔ ≥ +0.10 → 判 early-collapse**：跳过 keep-best 与终评、保留现场、继续下一臂。
+  arm0 另加**首臂后复核**（max_step 裁定块）。末段崩解候选不采纳（keep-best 协议，§5）。
 
 ### 7.2 λ 0.95 vs 0.98 对照（细则）
 
 - GAE λ：现行默认 **0.95**（`pipeline/trainer.py` gamma 0.99 / lam 0.95）vs **0.98** 对照臂。
 - 单变量：其余 pins 完全一致；GPU 串行（臂间可比）；记录 returns / EV / 崩解窗口。
+
+### 7.3 P4 终评判据 + keep-best 候选规则（Gate4 冻结）
+
+- **终评判据（全量 clean500 逐 (id,seed) 配对 vs E-β″ E3 零点；`net = fixed − broken`、
+  `z = |net| / √(fixed+broken)`）**：
+  - **net ≥ −10 = 不损伤**（可作"无损伤"结论；net ≥ 0 方可作"采纳"）；
+  - **net ≥ +20 且 z ≥ 1.96 = 正向**（增益结论）；
+  - **net < 0 = 不采纳**（−10 ≤ net < 0 = 不损伤但不采纳，记负向边缘）。
+  - eval500 用同阈值为**辅**（辅助一致性）；两集冲突（如 clean500 正向、eval500 < −10）记偏差、
+    不判正向。
+- **零点 pin（不得混用 E-β′；Gate4）**：clean500 `runs/BTC20261001-195447_v6p3_e3_clean500`
+  （**0.440**；`episodes.csv` sha256 `d63db75e…`）/ eval500 `runs/BTC20261001-200331_v6p3_e3_eval500`
+  （**0.440**；`episodes.csv` sha256 `3d949398…`）；训练 init = `runs/BTC20261001-1631_v6p3/
+  stage_b/ckpt_epoch005.pt`（sha256 `723db1c2…`）。
+- **keep-best 候选规则（禁止 sub150 直采）**：臂内候选 = 周期 ckpt `ckpt_u025…u200`
+  （`--ckpt-every 25`，**8 个**）→ **sub150 速评**（sub150 = E-β″ clean500 `episodes.csv` 前 150 行；
+  spec `/tmp/opencode/phase3_diag/exp/specs_val_only150.json`，canonical sha `6adbe0af…`；
+  零点 **64/150 = 0.4267**）→ 按子集配对 net 取 **top1–2** → **全量 clean500 复评** → 以**全量配对
+  net** 采纳最高者（并列取 z 高者）。**禁止 sub150 直采**（子集最优点对全量系统性偏乐观 2–4×，§5）。
+  采纳候选的全量 clean500 复评 = 该臂终评主读数（不另跑一次）；eval500 对采纳 ckpt 跑一次（辅）。
+
+### 7.4 P4 driver pin 表（Gate4 冻结；`/tmp/opencode/v6_p4_driver.py`，执行脚本不入 repo）
+
+| pin | 值（逐字） |
+|---|---|
+| `--config` | `config/arms/arm{0..7}_*.yaml`（rc 档 / λ / 追加项**仅由臂文件承载**） |
+| `--spec` | `env/specs/scenarios_train_dagger_r1.json`（500 条；raw sha256 `d204e803…`） |
+| `--ckpt` | `runs/BTC20261001-1631_v6p3/stage_b/ckpt_epoch005.pt`（sha256 `723db1c2…`；启动断言） |
+| `--pool` / `--envs` | `local` / `1`（tracker lqr） |
+| `--trainable-scope` / `--plan-reference` / `--adv-norm` | `design` / `repeat_action` / `global` |
+| `--updates` / `--rollout-steps` | `200` / `256` |
+| `--ppo-epochs` / `--minibatch-size` / `--seed` | `2` / `1024` / `0` |
+| `--critic-warmup-updates` | `0` |
+| `--kl-anchor-coef` / `--kl-anchor-final-coef` | `0.05` / `0.0` |
+| `--max-episode-steps` | `200`（horizon 对齐；收尾回读 `metrics.json` 断言） |
+| `--ckpt-every` / `--probe-interval` | `25` / `25` |
+| `--device` / 记录 | `cuda`；`--monitor --monitor-legacy-tags`；每臂独立 `<out>` + log |
+| **禁用** | `--lam`、`--reward-term-weight route_completion=…`（rc/λ 由臂文件承载；driver 启动断言拒绝） |
+| 零点/评测 pin | §7.3；clean500/sub150 spec 在 `/tmp` 易失 → driver 启动按 **sha256（raw + canonical）断言** |
+
+- **fail-closed 断言（driver 启动 + 收尾）**：启动——ckpt / spec / 零点 `episodes.csv` / spec 文件
+  sha256 逐项匹配，`specs=500`，臂 reward 权重与终局值逐档配对（`build_reward_adapter` 通过），
+  命令不含禁用 pin；收尾——`metrics.json` 回读 `reward_config` 逐键 = 臂配置、`specs=500`、
+  `rollout_steps=256`、`max_episode_steps=200`、`pool.kind=LocalEnvPool`，加**逐臂"extra 项均值 ≠ 0、
+  terminal 档位值生效"**断言。任一断言失败 → 停臂保留现场（不得继续下一臂）。
 
 ## 8. 数据扩量条件（P5；顺序约束）
 
