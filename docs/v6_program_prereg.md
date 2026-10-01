@@ -246,3 +246,4 @@
 
 - Gate2 P4 收尾（max_step 裁定 + horizon 显式接受 + P4 臂配置组装 `config/arms/` + dry-run 单测）内容 commit：`920395e`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - Gate4 修正集（horizon 对齐 200 策略步 + 首臂后复核/终评判据/keep-best/driver pin 表 + 测试加固）内容 commit：`0c725db`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- Gate4 终审补录（§9.1 复现判据三分法 + arm5 豁免 + arm1–4 措辞约束 + arm6/7 降级决定）内容 commit：`c5c3654`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
