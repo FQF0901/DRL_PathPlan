@@ -48,6 +48,16 @@ reward = dense_positive_sum × carl_multiplier
 - 配置草案（入库）：`docs/reward_audit/config_draft_rc{1,3,10,30}.yaml`（原始
   `runs/reward_audit/report/` 副本 + sha256 见 `docs/reward_audit/MANIFEST.md`；经
   `stages.C.reward.aggregation.terminal_values` 或对应 arm 配置启用）。
+- **训练侧 max_step 接线（P4 前置-B，2026-10-01 已实现 + 测试）**：截断（env timeout /
+  `max_episode_steps`）且 info 无终局键时注入 `max_step=True`（`LocalEnvPool.step` 入
+  `_record` 前；Vector 路径在 `collect_rollout` 统一兜底）→ 奖励侧 `terminal_key=max_step`、
+  终局值按档结算（rc=1 定稿 −23），与监视口径 `episode_termination_reason` 一致；修复前
+  truncated 不注入 ⇒ `terminal_value=0`（"超时"变正收益）。测试：`tests/test_max_step_wiring.py`
+  （含"不接线则 0"对照）。
+- **rc 档配对守卫（P4 前置-B，2026-10-01 已实现 + 测试）**：`route_completion` 权重 ≠ 1
+  （config terms / CLI `--reward-term-weight`）而 `aggregation.terminal_values` 缺省或仍为
+  rc=1 默认 → `build_reward_adapter` fail-fast（跨档复用，Gate2 发现④）；P4 各臂配置必须从
+  `docs/reward_audit/config_draft_rc*.yaml` 同档加载。测试：`tests/test_rc_tier_pairing.py`。
 
 ## 2. 权重
 

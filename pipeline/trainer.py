@@ -1215,6 +1215,32 @@ def episode_termination_reason(
     return "other"
 
 
+#: 终局 outcome 键（非 crash 类；与 ``reward_model.aggregation.TERMINAL_KEYS`` / eval 分类同序）
+_TERMINAL_INFO_KEYS: Tuple[str, ...] = ("arrive_dest", "collision", "out_of_road", "max_step", "error")
+
+
+def has_terminal_outcome(info: Mapping[str, Any]) -> bool:
+    """``info`` 是否已含任一终局 outcome 键（``crash*`` 任一视为 collision）。"""
+    info = info if isinstance(info, Mapping) else {}
+    if any(bool(info.get(key, False)) for key in _CRASH_KEYS):
+        return True
+    return any(bool(info.get(key, False)) for key in _TERMINAL_INFO_KEYS)
+
+
+def _mark_truncation_max_step(info: Dict[str, Any]) -> bool:
+    """**P4 前置-B max_step 接线**：截断且无终局键时注入 ``info["max_step"]=True``；返回是否注入。
+
+    Gate2 实锤：``LocalEnvPool`` 到 ``max_episode_steps`` 截断只置 ``truncated=True``、
+    ``info`` 无 ``max_step`` → 奖励侧 ``_terminal_key`` 解析为 None → ``terminal_value=0``
+    （"超时"变正收益），且与监视口径 :func:`episode_termination_reason`（按 truncated 报
+    max_step）自相矛盾。本函数只补标志位，不覆盖/不改变已存在的终局 outcome 键。
+    """
+    if not isinstance(info, dict) or has_terminal_outcome(info):
+        return False
+    info["max_step"] = True
+    return True
+
+
 def episode_window_metrics(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     """一个 update 窗口内的 episode 统计（⑤ v4 训练侧数据探针）。
 
@@ -1471,6 +1497,58 @@ class RewardAdapter:
         return float(result.reward), meta
 
 
+def _same_terminal_values(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """两组终局值是否逐键相等（缺键按 0；浮点容差 1e-9；非 Mapping 视为不等）。"""
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return False
+    for key in set(left) | set(right):
+        try:
+            a = float(left.get(key, 0.0))
+            b = float(right.get(key, 0.0))
+        except (TypeError, ValueError):
+            return False
+        if not math.isclose(a, b, rel_tol=0.0, abs_tol=1e-9):
+            return False
+    return True
+
+
+def _route_completion_weight(term_configs: Sequence[Mapping[str, Any]]) -> Optional[float]:
+    """生效的 ``route_completion`` 权重（项不在列表中 → None）。"""
+    for term in term_configs:
+        if str(term.get("name")) == "route_completion":
+            try:
+                return float(term.get("weight", 1.0))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _guard_rc_tier_pairing(
+    term_configs: Sequence[Mapping[str, Any]], aggregation: Mapping[str, Any]
+) -> None:
+    """**P4 前置-B rc 档配对守卫**（Gate2 发现④）：权重与终局值必须同档，否则 fail-fast。
+
+    ``route_completion`` 权重 ≠ 1（config terms 或 CLI ``--reward-term-weight`` 覆盖）而
+    ``aggregation.terminal_values`` 缺省/仍等于 rc=1 默认（:func:`default_terminal_values`）
+    → 只改权重不改终局值 = 跨档复用（Gate2 实测 rc=30 只改权重时 max_step 均值 +32.5）。
+    提示按同档配置草案加载 ``terminal_values``（``docs/reward_audit/config_draft_rc*.yaml``）。
+    """
+    weight = _route_completion_weight(term_configs)
+    if weight is None or math.isclose(weight, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        return
+    from reward_model import default_terminal_values  # type: ignore
+
+    rc1 = default_terminal_values()
+    configured = aggregation.get("terminal_values")
+    if configured is None or _same_terminal_values(configured, rc1):
+        raise ValueError(
+            f"[reward] rc 档配对失败：route_completion 权重={weight:g}（≠1）但终局值"
+            f"仍为 rc=1 默认（{rc1}）→ 跨档复用风险（Gate2 发现④）。请同时加载同档"
+            f" terminal_values：docs/reward_audit/config_draft_rc{weight:g}.yaml 的"
+            f" stages.C.reward.aggregation.terminal_values（P4 臂配置由该草案生成）。"
+        )
+
+
 def build_reward_adapter(
     config: Optional[Dict[str, Any]] = None,
     *,
@@ -1484,6 +1562,10 @@ def build_reward_adapter(
     在默认项/config 项的**私有副本**上生效（不改 :data:`DEFAULT_TERM_CONFIGS`）；名字未在任何
     term 列表里时：若已注册（如默认关的 ``lane_center``）→ 按给定权重**追加启用**，完全未注册
     → fail-fast（防消融配置拼错静默失效）。
+
+    **rc 档配对守卫（P4 前置-B）**：``route_completion`` 权重 ≠ 1 而终局值仍为 rc=1 默认 →
+    fail-fast（见 :func:`_guard_rc_tier_pairing`）；P4 臂须用 ``docs/reward_audit/
+    config_draft_rc*.yaml`` 的同档 ``terminal_values``。
     """
     overrides = {str(name): float(weight) for name, weight in dict(term_weights or {}).items()}
     factory: Optional[Callable[[], Any]] = None
@@ -1534,6 +1616,9 @@ def build_reward_adapter(
         source = f"{source}+term_weights"
         if appended:
             source = f"{source}+append({','.join(appended)})"
+    if factory is not None:
+        # P4 前置-B：rc 档配对守卫（只改 rc 权重、终局值仍 rc=1 默认 → fail-fast）
+        _guard_rc_tier_pairing(term_configs, aggregation)
     fallback = None if factory is not None else make_stub_reward()
     return RewardAdapter(factory=factory, fallback=fallback, dt=dt, logger=logger), source
 
@@ -5083,6 +5168,10 @@ class LocalEnvPool:
         时，跟踪器参考 = 该 6 动作序列（30 点 / 3 s），而不是单动作（单动作会退化为
         "瞄准参考终点"的 4–5 m 短前视 → 车道保持与速度都会退化）；第一个动作已被调用方
         替换为**实际执行的采样动作**，保证 PPO on-policy 口径一致。
+
+        P4 前置-B（Gate2）：截断（env timeout / ``max_episode_steps``）且 ``info`` 无终局
+        outcome 键时注入 ``info["max_step"]=True`` → 奖励侧 ``_terminal_key=max_step``、
+        终局值按档结算（rc=1 定稿 −23），与监视口径 ``episode_termination_reason`` 一致。
         """
         if self._env is None:
             raise RuntimeError("LocalEnvPool.step 前必须先 reset()")
@@ -5116,6 +5205,10 @@ class LocalEnvPool:
         self._current_info = info if isinstance(info, dict) else {}
         if not (terminated or truncated) and self._steps >= self.max_episode_steps:
             truncated = True
+        if truncated:
+            # P4 前置-B：截断（env timeout / max_episode_steps）且 info 无终局键 → 注入
+            # ``max_step``，奖励口径与监视口径（episode_termination_reason）对齐。
+            _mark_truncation_max_step(self._current_info)
         if terminated or truncated:
             # P0-2：终局 record 与 reset 分离。record 必须来自终局帧（obs/pose/info/labels）；
             # reset 后的新 episode 首帧只作为 next_obs 交回 trainer。
@@ -5795,6 +5888,11 @@ class PPOTrainer:
                 terminated = bool(record.get("terminated", False))
                 truncated = bool(record.get("truncated", False))
                 cut = bool(record.get("cut", False))
+                if truncated:
+                    # P4 前置-B：Vector/旧 stub 池的截断 record 无 ``max_step`` 键 → 统一兜底
+                    # 注入（LocalEnvPool 已在 step 内注入；已含终局键时为 no-op）。
+                    info = dict(info)
+                    _mark_truncation_max_step(info)
                 done = terminated or truncated or cut
                 reward, reward_meta = self._reward(
                     env_index, info, obs_current, done, float(record.get("reward", 0.0) or 0.0)

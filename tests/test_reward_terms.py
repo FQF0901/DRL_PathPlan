@@ -405,11 +405,14 @@ def test_v5_terminal_values_audited_table() -> None:
 
 
 def test_route_completion_tier_and_terminal_values_config_override_path() -> None:
-    """rc 档（3/10/30）与终局值的 config/CLI 覆盖路径（P4 臂入口）。"""
+    """rc 档（3/10/30）与终局值的 config/CLI 覆盖路径（P4 臂入口；**同档配对**）。"""
     from pipeline.trainer import build_reward_adapter
 
-    # CLI 路径：--reward-term-weight route_completion=10（build_reward_adapter 的 term_weights）
+    # CLI 路径：--reward-term-weight route_completion=10 + 同档终局值（rc10 草案）
+    rc10_values = {"arrive_dest": 22.0, "collision": -23.0, "out_of_road": -18.0,
+                   "max_step": -29.0, "error": -5.0}
     adapter, source = build_reward_adapter(
+        {"aggregation": {"terminal_values": rc10_values}},
         term_weights={"route_completion": 10.0},
     )
     assert source.endswith("+term_weights")
@@ -417,6 +420,11 @@ def test_route_completion_tier_and_terminal_values_config_override_path() -> Non
     assert weights["route_completion"] == pytest.approx(10.0)
     assert weights["speed_ratio"] == pytest.approx(0.4)
     assert weights["low_speed"] == pytest.approx(-0.2)
+    assert adapter.factory().step({"max_step": True}).reward == pytest.approx(-29.0)
+
+    # 只改权重、终局值仍 rc=1 默认 → rc 档配对守卫 fail-fast（P4 前置-B，Gate2 发现④）
+    with pytest.raises(ValueError, match="rc 档配对"):
+        build_reward_adapter(term_weights={"route_completion": 10.0})
 
     # config 路径：stages.C.reward = {terms, aggregation.terminal_values}
     config = {
