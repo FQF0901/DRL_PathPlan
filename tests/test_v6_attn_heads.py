@@ -11,7 +11,7 @@ import torch
 
 import net.model as net_model_module
 from net.encoders import NAV_DIM
-from net.mem import mem_from_obs
+from net.mem import advance_pose_world, mem_from_obs, nav_features_from_world
 from net.model import DrivingModel, arc_step, compose_pose
 from net.policy import CrossAttnHead, PolicyHead, ValueHead
 from net.st_gnn import SpatioTemporalGNN
@@ -339,6 +339,69 @@ def test_nav_rebuild_result_is_actually_used(monkeypatch: pytest.MonkeyPatch) ->
     assert not torch.allclose(baseline["plan"], changed["plan"], atol=1e-6)
 
 
+def test_rollout_switches_route_command_after_displacement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A4 验收（docs/v6_net_design.md §3）：**model.rollout 级** route-command 切换单测。
+
+    场景：路线顶点 (0,0)→(10,0)→(50,0)→(60,10)（分叉顶点 (10,0)；下一段 45° 左转）。
+    ego 起点 (6.43,0,0)：t0 命令 = forward；默认动作 ds=5 m/步 ⇒ 第 1 步位移跨过 (10,0)，
+    命令应切换为 left。断言（不只 helper 层）：
+
+    1. ``rebuild_nav_from_world`` 在 rollout 内被调用 6 次，第 1 次的世界位姿 = 起点 +5 m；
+    2. t0 特征命令 = forward、第 1 次重建特征命令 = left（位移触发切换）；
+    3. 第 1 次重建出的 nav 特征 → token 后**被策略头实际消费**（policy 第 2 次调用的
+       nav token 逐位 = ``embed_nav(重建特征)``），且与 t0 token 不同（命令切换生效）。
+    """
+    model = DrivingModel(hidden=16).eval()
+    obs = make_obs(batch=1, seed=0)
+    route = torch.zeros(1, 8, 2)
+    route[0, :4] = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [50.0, 0.0], [60.0, 10.0]], dtype=torch.float32
+    )
+    route_mask = torch.zeros(1, 8)
+    route_mask[0, :4] = 1.0
+    obs["route_world"] = route
+    obs["route_world_mask"] = route_mask
+    obs["ego_world"] = torch.tensor([[6.43, 0.0, 0.0]], dtype=torch.float32)
+    t0_feats, _ = nav_features_from_world(obs["ego_world"], route, route_mask)
+    obs["nav"] = t0_feats  # 真实 env 口径：t0 nav 由世界系重建得到（forward 命令）
+    obs["nav_mask"] = torch.ones(1, 1)
+
+    poses: list[torch.Tensor] = []
+    rebuilds: list[torch.Tensor] = []
+    real_rebuild = net_model_module.rebuild_nav_from_world
+
+    def rebuild_spy(mem: object, ego_pose_world: torch.Tensor, route_world: object, mask: object = None):
+        poses.append(ego_pose_world.detach().clone())
+        feats, nav_mask = real_rebuild(mem, ego_pose_world, route_world, mask)
+        rebuilds.append(feats.detach().clone())
+        return feats, nav_mask
+
+    nav_tokens: list[torch.Tensor] = []
+    real_policy_forward = model.policy.forward
+
+    def policy_spy(tokens: torch.Tensor, key_mask: torch.Tensor):
+        nav_tokens.append(tokens[:, 34].detach().clone())  # [OD16, LD16, others, ego, nav, ...]
+        return real_policy_forward(tokens, key_mask)
+
+    monkeypatch.setattr(net_model_module, "rebuild_nav_from_world", rebuild_spy)
+    monkeypatch.setattr(model.policy, "forward", policy_spy)
+    model.rollout(obs)
+
+    assert len(rebuilds) == 6, f"rollout 应逐步重建 6 次，实际 {len(rebuilds)}"
+    assert len(nav_tokens) == 6, f"策略头调用 6 次（t0 + rollout 5 步），实际 {len(nav_tokens)}"
+    # t0 命令 forward；位移 5 m（默认动作）后第 1 次重建跨过 (10,0) → 命令 left
+    assert float(t0_feats[0, 4]) == pytest.approx(1.0) and float(t0_feats[0, 4:7].sum()) == pytest.approx(1.0)
+    assert float(rebuilds[0][0, 5]) == pytest.approx(1.0) and float(rebuilds[0][0, 4:7].sum()) == pytest.approx(1.0)
+    advanced = advance_pose_world(obs["ego_world"], torch.tensor([5.0]), torch.tensor([0.0]))
+    assert torch.allclose(poses[0], advanced, atol=1e-6), "第 1 次重建必须用位移后的世界位姿"
+    # 切换后的 nav token 被策略头实际消费（t0 = forward 命令，第 1 步 = left 命令）
+    expected_t0 = model.encoders.embed_nav(t0_feats.unsqueeze(1), torch.ones(1, 1))[:, 0]
+    expected_step1 = model.encoders.embed_nav(rebuilds[0].unsqueeze(1), torch.ones(1, 1))[:, 0]
+    assert torch.equal(nav_tokens[0], expected_t0), "t0 nav token 必须来自 forward 命令特征"
+    assert torch.equal(nav_tokens[1], expected_step1), "第 1 步 nav token 必须来自切换后的 left 命令特征"
+    assert not torch.allclose(nav_tokens[0], nav_tokens[1]), "位移后 nav 不得停留在 t0（命令切换必须生效）"
+
+
 # ---------------------------------------------------------------- 信息充分性（toy）
 def test_policy_distinguishes_left_right_cutin_tokens() -> None:
     """去池化 smoke：同 ego/地图，cut-in 目标在左/右（仅 OD 槽 0 位置不同）→ policy 输出不同。
@@ -367,6 +430,125 @@ def test_policy_distinguishes_left_right_cutin_tokens() -> None:
     left = model(_with_target(3.5), rollout=False, world_model=False)["action_mu"]
     right = model(_with_target(-3.5), rollout=False, world_model=False)["action_mu"]
     assert float((left - right).abs().max()) > 1e-4, "左/右 cut-in 目标不可区分（去池化失效？）"
+
+
+# ---------------------------------------------------------------- 信息充分性：均值令牌消融对照
+def _mean_token_ablate(
+    tokens: torch.Tensor, key_mask: torch.Tensor, *, start: int = 0, stop: int = 16
+) -> torch.Tensor:
+    """均值令牌消融（池化基线口径）：把 OD 槽令牌 ``[start, stop)`` 替换为其掩码均值广播。
+
+    掩码均值 = ``Σ live 槽令牌 / live 槽数``；非 live 槽不参与（也不影响结果）。
+    """
+    ablated = tokens.clone()
+    slot_mask = key_mask[:, start:stop]
+    denom = slot_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+    mean = (tokens[:, start:stop] * slot_mask.unsqueeze(-1)).sum(dim=1, keepdim=True) / denom.unsqueeze(-1)
+    ablated[:, start:stop] = mean
+    return ablated
+
+
+def test_mean_token_ablation_removes_slot_distribution_distinguishability() -> None:
+    """Gate1 §6.1 信息充分性判据（本测试重定义/落地口径）——**均值令牌消融对照**。
+
+    扰动 = **掩码均值不变的 OD 槽位分布扰动**：3 个 live OD 槽，把 ``+δ/-δ`` 分别加到
+    槽 0/槽 1（均值逐位不变，token 集合改变）。判据：
+
+    1. **去池化头（原始令牌）**：该扰动可区分（``Δmu > 1e-4``）⇒ 逐槽分布/身份信息真实
+       进入头（与真机 cut_in 探针 §5 的镜像/置换对照互补）；
+    2. **均值令牌消融（池化基线）**：同一扰动 ``Δmu ≤ 1e-6`` 且 ``≤ 原始 Δmu 的 1e-3``
+       （预期不可区分）⇒ 池化只保留掩码均值、逐槽分布信息被抹平（消融对照有区分度）；
+    3. **消融有效性对照**：均值级扰动（live 槽整体取反 ⇒ 掩码均值取反）在消融后仍可区分
+       （``Δmu > 1e-4``）⇒ 消融不是常数函数，池化保留的是"均值级"信息。
+    """
+    torch.manual_seed(0)
+    policy = PolicyHead(hidden=H)
+    with torch.no_grad():
+        policy.mu.weight.normal_(0.0, 0.1)
+        policy.mu.bias.zero_()
+
+    torch.manual_seed(7)
+    tokens = torch.randn(1, TOKEN_LENGTH, H)
+    key_mask = torch.ones(1, TOKEN_LENGTH)
+    live = (0, 1, 2)
+    for slot in range(16):
+        if slot not in live:
+            key_mask[0, slot] = 0.0
+
+    delta = torch.zeros(H)
+    delta[0] = 0.5
+    moved = tokens.clone()
+    moved[0, live[0]] += delta
+    moved[0, live[1]] -= delta
+
+    with torch.no_grad():
+        mu_base = policy(tokens, key_mask)[0]
+        mu_moved = policy(moved, key_mask)[0]
+        delta_orig = float((mu_base - mu_moved).abs().max())
+
+        base_abl = _mean_token_ablate(tokens, key_mask)
+        moved_abl = _mean_token_ablate(moved, key_mask)
+        mean_gap = float((base_abl[:, :16] - moved_abl[:, :16]).abs().max())
+        mu_base_abl = policy(base_abl, key_mask)[0]
+        mu_moved_abl = policy(moved_abl, key_mask)[0]
+        delta_abl = float((mu_base_abl - mu_moved_abl).abs().max())
+        ablation_loss = float((mu_base - mu_base_abl).abs().max())
+
+        flipped = tokens.clone()
+        flipped[0, list(live)] *= -1.0  # 掩码均值 = -原均值（均值级扰动）
+        mu_flipped_abl = policy(_mean_token_ablate(flipped, key_mask), key_mask)[0]
+        delta_mean_level = float((mu_base_abl - mu_flipped_abl).abs().max())
+
+    assert delta_orig > 1e-4, f"原始令牌对均值不变的槽位分布扰动不可区分（Δmu={delta_orig:.3e}）"
+    assert mean_gap <= 1e-7, f"消融后两输入的掩码均值必须一致（gap={mean_gap:.3e}）"
+    assert delta_abl <= 1e-6 and delta_abl <= 1e-3 * delta_orig, (
+        f"均值令牌消融后不得保留槽位分布可区分性（Δmu_abl={delta_abl:.3e} vs Δmu_orig={delta_orig:.3e}）"
+    )
+    assert ablation_loss > 0.0, "消融必须实际改变头输入（逐槽令牌 ≠ 均值令牌）"
+    assert delta_mean_level > 1e-4, "消融后均值级扰动仍应可区分（消融不是常数函数）"
+
+
+def test_mirror_distinguishability_under_mean_token_ablation_on_model_obs() -> None:
+    """Gate1 §6.1 信息充分性判据（真机探针 §5 同款镜像扰动 + 均值令牌消融）。
+
+    在 ``make_obs`` 真实形状 obs（多 live OD 槽）上镜像全部 OD 槽（y/vy/sinθ 取反）：
+
+    1. **原始令牌**：``Δmu > 1e-4`` ⇒ 逐槽位置/身份信息进入头（与真机 cut_in 探针一致）；
+    2. **消融后**：镜像仍可区分（``Δmu_abl > 0``）——镜像改变 OD 掩码均值，池化基线仅剩
+       均值级可区分性；"池化不可区分"只对**均值不变**的槽位分布成立（见上一测试）；
+    3. **消融不是恒等**：消融前后头输出差 ``> 0``（逐槽令牌 ≠ 均值令牌）。
+    """
+    torch.manual_seed(0)
+    model = DrivingModel(hidden=H, expert_hidden=256).eval()
+    with torch.no_grad():
+        model.policy.mu.weight.normal_(0.0, 0.1)
+        model.policy.mu.bias.zero_()
+
+    base = make_obs(batch=2, seed=3)
+    mirrored = clone_obs(base)
+    for key in ("od", "od_hist"):
+        mirrored[key][..., 1] *= -1.0  # dy
+        mirrored[key][..., 3] *= -1.0  # vy
+        mirrored[key][..., 5] *= -1.0  # sinθ
+
+    with torch.no_grad():
+        encoded_base = model.encode(base)
+        encoded_mirror = model.encode(mirrored)
+        tokens_base, mask_base = encoded_base["tokens"], encoded_base["key_mask"]
+        tokens_mirror, mask_mirror = encoded_mirror["tokens"], encoded_mirror["key_mask"]
+
+        mu_base = model.policy(tokens_base, mask_base)[0]
+        mu_mirror = model.policy(tokens_mirror, mask_mirror)[0]
+        delta_orig = float((mu_base - mu_mirror).abs().max())
+
+        mu_base_abl = model.policy(_mean_token_ablate(tokens_base, mask_base), mask_base)[0]
+        mu_mirror_abl = model.policy(_mean_token_ablate(tokens_mirror, mask_mirror), mask_mirror)[0]
+        delta_abl = float((mu_base_abl - mu_mirror_abl).abs().max())
+        ablation_loss = float((mu_base - mu_base_abl).abs().max())
+
+    assert delta_orig > 1e-4, f"镜像 L/R 在真实形状 obs 上不可区分（Δmu={delta_orig:.3e}）"
+    assert delta_abl > 0.0, "镜像改变掩码均值 → 消融后仍应保留均值级可区分性（消融不是常数函数）"
+    assert ablation_loss > 0.0, "消融必须实际改变头输入（逐槽令牌 ≠ 均值令牌）"
 
 
 # ---------------------------------------------------------------- Stage C allowlist 命名契约
