@@ -565,6 +565,26 @@ def _resolve_stage_c_target_kl(args: argparse.Namespace, train_cfg: Mapping[str,
     return number
 
 
+def _resolve_stage_c_lam(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> float:
+    """阶段 C GAE λ（P2/P4 λ 对照；CLI ``--lam`` 优先；config ``train.ppo.lam``）。
+
+    默认 0.95（现行）；P4 预注册对照档 = 0.98（`docs/v6_program_prereg.md` §7.2）。
+    非法（非有限 / 不在 (0, 1]）fail-fast。
+    """
+    value = getattr(args, "lam", None)
+    if value is None:
+        value = (dict(train_cfg or {}).get("ppo") or {}).get("lam")
+    if value is None:
+        return 0.95
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"[stageC] 无法解析 lam={value!r}（需 (0, 1] 内浮点）") from None
+    if not math.isfinite(number) or not 0.0 < number <= 1.0:
+        raise SystemExit(f"[stageC] lam 必须在 (0, 1]，收到 {value!r}")
+    return number
+
+
 def _resolve_stage_c_group_probe_every(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> int:
     """③ v4 分组梯度/更新范数探针间隔（CLI ``--group-probe-every`` 优先；config
     ``train.ppo.group_probe_every``）。
@@ -3976,6 +3996,14 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                                  else f"{target_kl:g}（approx_kl 超阈值 → 跳过剩余 minibatch）"),
         flush=True,
     )
+    # P2/P4 λ 对照：CLI --lam > config train.ppo.lam > 0.95（现行；0.98 档见预注册 §7.2）
+    lam = _resolve_stage_c_lam(args, train_cfg)
+    print(
+        f"[stageC] lam={lam:g}"
+        + ("（现行默认 0.95；P4 对照档 0.98 经 --lam 0.98 / train.ppo.lam 切换）"
+           if lam == 0.95 else "（λ 对照档）"),
+        flush=True,
+    )
     # ③ 分参数组梯度/更新范数探针（v4）：默认每 update（0=关；纯监控）
     group_probe_every = _resolve_stage_c_group_probe_every(args, train_cfg)
     print(
@@ -4177,6 +4205,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         )
         ppo_cfg = PPOConfig(
             lr=float(args.lr),
+            lam=lam,
             epochs=int(args.ppo_epochs),
             minibatch_size=int(args.minibatch_size or (train_cfg.get("ppo", {}) or {}).get("minibatch_size") or 1024),
             kl_anchor_coef=kl_initial,
@@ -4464,6 +4493,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--updates", type=int, default=5)
     parser.add_argument("--rollout-steps", type=int, default=64)
     parser.add_argument("--ppo-epochs", type=int, default=2)
+    parser.add_argument("--lam", type=float, default=None, metavar="LAMBDA",
+                        help="阶段 C GAE λ（P2/P4 λ 对照；默认取 config/train.yaml "
+                             "train.ppo.lam=0.95）：P4 预注册对照档 0.98 = --lam 0.98；"
+                             "需在 (0, 1]（见 docs/v6_program_prereg.md §7.2）")
     parser.add_argument("--minibatch-size", type=int, default=None,
                         help="默认取 config/train.yaml train.ppo.minibatch_size（1024）")
     parser.add_argument("--value-lr-scale", type=float, default=None, metavar="SCALE",

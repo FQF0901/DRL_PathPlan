@@ -12,6 +12,8 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
     omp_num_threads: 1            # OMP/MKL 默认值（setdefault）；数据集型训练由 tools/train.sh 默认 8，
                                   # 此处的 1 保护 eval 多 worker spawn（避免每 worker 8 OMP 线程风暴）
   ppo:
+    lam: 0.95                     # P2/P4 GAE λ（CLI --lam 覆盖）：现行 0.95；P4 预注册对照档
+                                  # 0.98（docs/v6_program_prereg.md §7.2，单变量其余 pins 一致）
     minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU；与 --batch-size 独立）
     target_kl: null               # v4 ② KL 守门（CLI --target-kl）：某 minibatch approx_kl > 该值时
                                   # 跳过该 epoch 剩余 minibatch（并终止本 update 后续 epoch），
