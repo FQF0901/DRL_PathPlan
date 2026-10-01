@@ -49,6 +49,8 @@
 - 现状：`net/model.py::_rollout`（L369）逐步执行 `st_gnn`（6 步，t0 锚定 + 直接多步预测，见 `net/st_gnn.py` docstring）；但 Stage C 的 collect/update 走 `rollout=False` cheap path——**真实位置 `pipeline/trainer.py:5610`（collect）/ `5918`（update）**（`pipeline/stages.py:3961` 仅是 wm-freeze 弃用注释，不是调用点）；cheap path 与主路径的 heads 输出逐位等价已被 `tests/test_net_shapes.py:543-563` 覆盖。
 - **规格（Gate0 裁定）**：
   - **t0 帧单次 `st_gnn` 作为 encoder 一部分**：其对象级输出（OD/LD 节点特征）供注意力头消费；**collect 与 update 两条路径一致执行**；
+  - **A1/A3 衔接口径（Gate1 复核接受，2026-10-01）**：t0 头的 OD/LD 令牌用上述单次消息传递的**对象级输出**；rollout 各步的头令牌用**当步 `enc` 的逐槽特征**（`_head_tokens` 缺省路径），**不额外跑消息传递**——t0 pass 已在 `encode` 内，rollout 的 6 次 `st_gnn` 语义/成本原样不动。若改为每步头都额外跑 MP，实测成本 **+68–71%**（远超 P3 abort 线 +25%），不接受；
+  - **`no_grad` 副作用（Gate1 记录）**：t0 单次 pass 在 `no_grad` 下执行 ⇒ Stage B 的 **OD/LD encoder←action loss 通路变弱**（该 pass 的梯度不回传 encoder；WM 损失口径不变）；mini 重训须**监控 encoder 梯度范数与 BC 指标**，异常时按 Gate1 记录复核；
   - **6 步 rollout / WM 预测路径保持原样**（`_rollout` 与 Stage A 教师强制 `_wm_predictions` 的逐步 `st_gnn` 语义不变）；
   - **Stage C 中 `st_gnn` 冻结**（现无 WM loss，解冻无梯度，维持 W1 冻结）；**Stage A/B 按原 WM 损失训练**（`st_gnn` 在 A/B 可训，口径不变）；
   - **禁止**默认 cheap path 作为训练口径；cheap path 仅可作显式消融，且须证明与主路径逐位等价（或明确标注不可比）。

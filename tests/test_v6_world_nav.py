@@ -6,9 +6,11 @@
 1. ``env.obs.world``：``ego_world``/``route_world`` 键存在、形状、mask、世界系值正确；
 2. ``net.mem.nav_features_from_world``：checkpoint/命令/route_completion 与路线几何一致，
    **位移后 nav 不再陈旧**（对照探针：t0 vs 位移后必须不同且按几何前进）；
-3. ``rebuild_nav_from_world``：返回 nav 特征 + **同步写回 mem.others 的 nav 子向量**；
+3. ``rebuild_nav_from_world``：**纯函数**——返回 nav 特征、**不原地改写 mem**；others nav
+   子向量的同步由独立 helper ``sync_others_nav_dims`` 完成（返回新 MemBank，赋值式、可反向）；
    旧键缺失 → 回退 t0 + 一次性 RuntimeWarning；
-4. ``wm_teacher_forcing_predictions``：逐步重建 nav（与 rollout 同一步进语义）+ others 同步；
+4. ``wm_teacher_forcing_predictions``：逐步重建 nav（与 rollout 同一步进语义）+ others 同步
+   （经 ``sync_others_nav_dims`` 赋值式替换）；
 5. ``RolloutBuffer`` / ``_assemble_obs_batch``：collect→update 双路径携带新键。
 """
 
