@@ -132,6 +132,7 @@
 - 已裁定：st_gnn 在 Stage C **冻结**（无 WM loss 解冻无梯度）；Stage A/B 按原 WM 损失训练（[`docs/v6_net_design.md`](v6_net_design.md) §2）。
 - 开放项：rc 档默认档位（P4 臂后定）；清理候选清单待用户确认。
 
-## 11. 修订锚（Gate0 remediation）
+## 11. 修订锚（Gate0 remediation / Gate1 补证-A）
 
 - 三份冻结文档（本文件 + `docs/v6_net_design.md` + `docs/rl_reward_v5.md`）的 Gate0 修正版 commit：`d27395dd0e1590d2151c42830f6a930bb5aafd2c`（短 `d27395d`，2026-10-01，首次 commit）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- Gate1 补证-A（P3 数据窗口 v3 补采 + mini 闸 A4 断言 + abort/预算校准）内容 commit：`0863186`（2026-10-01）。本锚行由第二次小 commit 写入（不改动其余内容）。
