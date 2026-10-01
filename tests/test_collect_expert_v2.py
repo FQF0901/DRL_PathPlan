@@ -57,10 +57,12 @@ def _episode(
     off_lane: tuple[int, ...] = (),
     cut_unverified: tuple[int, ...] = (),
     ended_by_env: bool = False,
+    world: bool = False,
 ):
     """直线 episode：poses[i] = (0.05*i, 0, 0)（每 env step 0.05 m，运动学 round-trip 精确）。
 
     frames 只在策略步边界（每 5 step）记录；``bad_at`` 之后的窗口不再可用。
+    ``world=True`` 时逐帧带 schema v3 世界系键（``ego_world``/``route_world`` + mask）。
     """
     poses = [np.array([0.05 * i, 0.0, 0.0], dtype=np.float64) for i in range(n_steps + 1)]
     flags = [None] + [
@@ -81,6 +83,12 @@ def _episode(
             "ld_mask": np.zeros((16, ), dtype=np.float32),
         }
         obs["ego"][0, 0] = 0.5
+        if world:  # schema v3：A4 nav 逐步重建输入（世界系键 + 逐点 mask）
+            obs["ego_world"] = np.zeros((1, 3), dtype=np.float32)
+            obs["ego_world_mask"] = np.ones((1,), dtype=np.float32)
+            obs["route_world"] = np.zeros((64, 2), dtype=np.float32)
+            obs["route_world_mask"] = np.zeros((64,), dtype=np.float32)
+            obs["route_world_mask"][:4] = 1.0
         labels_raw = np.zeros(len(LABEL_ORDER), dtype=np.float32)
         if t in cut_unverified:
             labels_raw[LABEL_ORDER.index("cutin_active")] = 1.0
@@ -399,7 +407,7 @@ def test_shard_writer_skips_empty_chunk(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_save_dataset_v2_schema_roundtrip(tmp_path):
-    episode = _episode(80)
+    episode = _episode(80, world=True)  # v3：带上世界系键走完整 save_dataset 路径
     rows, _ = _extract(episode)
     balance = apply_balance(rows, mode="weights", ratio=3.0, seed=0)
     from env.obs.builder import ObservationBuilder
@@ -419,8 +427,10 @@ def test_save_dataset_v2_schema_roundtrip(tmp_path):
         arrays = {key: payload[key] for key in payload.files}
     for key in ("od_id", "od_id_hist", "od_presence", "od_presence_hist", "wm_valid", "train_weight",
                 "frame_usable", "hist_valid", "episode_id", "step", "pose", "action", "balance_weight",
-                "filter_reason"):
+                "filter_reason", "ego_world", "ego_world_mask", "route_world", "route_world_mask"):
         assert key in arrays, f"npz 缺少 {key}"
+    assert arrays["route_world"].shape == (len(rows), 64, 2)
+    assert arrays["route_world_mask"].shape == (len(rows), 64)
     np.testing.assert_allclose(arrays["balance_weight"], arrays["sample_weight"])
     assert set(np.unique(arrays["filter_reason"]).tolist()) <= {
         "", "terminal_window", "not_on_lane", "cut_label_unverified", "roundtrip_fail", "roundtrip_dense_fail",
@@ -445,11 +455,17 @@ def test_save_dataset_v2_schema_roundtrip(tmp_path):
     assert meta["schema"]["od_slot_policy"]["presence"].startswith("对象出盒")
     assert meta["dataset_schema"]["od_id"]["dtype"] == "int64"
     assert meta["dataset_schema"]["wm_valid"]["shape"][1] == 6
+    assert meta["dataset_schema"]["route_world"]["shape"] == ["<N>", 64, 2]
+    assert meta["dataset_schema"]["ego_world"]["shape"] == ["<N>", 1, 3]
+    assert meta["channel_shapes"]["route_world"] == [64, 2]
+    assert meta["channel_shapes"]["ego_world"] == [1, 3]
     assert "计数=行数" in meta["weight_semantics"]["effective_weight"] or "train_weight" in meta["weight_semantics"]["effective_weight"]
 
 
 def test_v2_constants_and_cli_defaults():
     assert "others" in CURRENT_CHANNELS
+    # v3（A4）：世界系键必须逐帧入库，否则 Stage A/B 缺 nav 重建输入
+    assert {"ego_world", "route_world"} <= set(CURRENT_CHANNELS)
     assert set(MEM_HISTORY_KEYS) == {"od_id_hist", "od_presence_hist"}
     assert INT64_KEYS == frozenset({"od_id", "od_id_hist"})
     args = _parse_args(["--specs", "x.json", "--out", "runs/x"])
@@ -458,3 +474,28 @@ def test_v2_constants_and_cli_defaults():
     manifest = _npz_schema_manifest(num_slots=16, frames=6, others_dim=28, label_count=8)
     assert manifest["train_weight"]["semantics"].startswith("过滤门")
     assert manifest["frame_usable"]["shape"] == ["<N>"]
+    # world 键的形状契约（非 OD/LD 槽位数）：ego_world (1,3) / route_world (64,2)
+    assert manifest["ego_world"]["shape"] == ["<N>", 1, 3]
+    assert manifest["ego_world_mask"]["shape"] == ["<N>", 1]
+    assert manifest["route_world"]["shape"] == ["<N>", 64, 2]
+    assert manifest["route_world_mask"]["shape"] == ["<N>", 64]
+
+
+def test_world_channels_are_stored_with_masks():
+    """v3：``_samples_to_arrays`` 逐帧存 ``ego_world``/``route_world`` + 逐点 mask。"""
+    episode = _episode(80, world=True)
+    rows, _ = _extract(episode)
+    arrays = _samples_to_arrays(rows)
+    assert arrays["ego_world"].shape == (len(rows), 1, 3)
+    assert arrays["ego_world_mask"].shape == (len(rows), 1)
+    assert arrays["route_world"].shape == (len(rows), 64, 2)
+    assert arrays["route_world_mask"].shape == (len(rows), 64)
+    assert float(arrays["ego_world_mask"].min()) == 1.0
+    assert float(arrays["route_world_mask"].sum(axis=1).min()) == 4.0
+
+
+def test_legacy_samples_without_world_channels_are_unchanged():
+    """旧 episode（无世界系键）→ 不新增 npz 键，逐位兼容旧数据集契约。"""
+    rows, _ = _extract(_episode(80))
+    arrays = _samples_to_arrays(rows)
+    assert "ego_world" not in arrays and "route_world" not in arrays

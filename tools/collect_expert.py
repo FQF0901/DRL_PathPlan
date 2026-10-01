@@ -140,8 +140,9 @@ PHYSICS_DT = 0.1  # env.step 步长（s）
 STEPS_PER_POLICY = 5  # POLICCY_DT / PHYSICS_DT
 WINDOW_POLICIES = 6  # 3 s 目标窗口 = 6 个策略步
 WINDOW_STEPS = WINDOW_POLICIES * STEPS_PER_POLICY  # 30 env steps
-#: 逐帧存储的当前帧通道（v2 增加 others；nav/signal 兼容保留）
-CURRENT_CHANNELS = ("ego", "od", "ld", "nav", "signal", "others")
+#: 逐帧存储的当前帧通道（v2 增加 others；v3 增加 ego_world/route_world 世界系键，
+#: 供 Stage A/B 的 A4 nav 逐步重建；nav/signal 兼容保留）
+CURRENT_CHANNELS = ("ego", "od", "ld", "nav", "signal", "others", "ego_world", "route_world")
 #: OD 槽位级伴随键（int64 / float32）
 COMPANION_KEYS = ("od_id", "od_presence")
 #: 每帧额外存的历史键（id/presence 历史不能靠行位置重建）
@@ -1392,10 +1393,11 @@ def _npz_schema_manifest(num_slots: int, frames: int, others_dim: int, label_cou
         "labels_raw": {"shape": [n, 9], "dtype": "float32", "semantics": "9 个原始标签（顺序=meta.raw_label_names）", "unit": "0/1"},
     }
     for channel in CURRENT_CHANNELS:
-        manifest[channel] = {"shape": [n, num_slots if channel not in ("ego", "nav", "signal", "others") else 1, _channel_dim(channel)],
+        slots = _channel_slots(channel, num_slots)
+        manifest[channel] = {"shape": [n, slots, _channel_dim(channel)],
                              "dtype": "float32", "semantics": "当前帧通道（见 meta.schema.frame）", "unit": "-"}
         manifest[f"{channel}_mask"] = {
-            "shape": [n, num_slots if channel not in ("ego", "nav", "signal", "others") else 1],
+            "shape": [n, slots],
             "dtype": "float32", "semantics": "当前帧掩码", "unit": "0/1",
         }
     manifest["od_id"] = {"shape": [n, num_slots], "dtype": "int64", "semantics": "OD track id（-1=空槽），episode 内稳定", "unit": "-"}
@@ -1405,6 +1407,17 @@ def _npz_schema_manifest(num_slots: int, frames: int, others_dim: int, label_cou
     return manifest
 
 
+def _channel_slots(channel: str, num_slots: int) -> int:
+    """当前帧通道的槽位数（与 builder 输出一致；OD/LD = 数据集槽位数，world 定长）。"""
+    from env.obs.world import ROUTE_WORLD_MAX_POINTS
+
+    if channel == "route_world":
+        return int(ROUTE_WORLD_MAX_POINTS)
+    if channel in ("ego", "nav", "signal", "others", "ego_world"):
+        return 1
+    return int(num_slots)
+
+
 def _channel_dim(channel: str) -> int:
     """当前帧通道的特征维（与 builder 输出一致）。"""
     from env.obs.ego import EGO_DIM
@@ -1412,6 +1425,7 @@ def _channel_dim(channel: str) -> int:
     from env.obs.nav import NavChannel
     from env.obs.others import OTHERS_HEAD_DIM, road_class_labels
     from env.obs.signal import SIGNAL_DIM
+    from env.obs.world import EGO_WORLD_DIM, ROUTE_WORLD_DIM
 
     dims = {
         "ego": EGO_DIM,
@@ -1420,6 +1434,8 @@ def _channel_dim(channel: str) -> int:
         "nav": NavChannel.feature_dim,
         "signal": SIGNAL_DIM,
         "others": OTHERS_HEAD_DIM + len(road_class_labels()),
+        "ego_world": EGO_WORLD_DIM,
+        "route_world": ROUTE_WORLD_DIM,
     }
     return int(dims[channel])
 
