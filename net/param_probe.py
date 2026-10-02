@@ -23,6 +23,7 @@ if str(_ROOT) not in sys.path:
 
 import torch
 
+from net.encoders import DEFAULT_OTHERS_DIM
 from net.model import DrivingModel
 
 #: 参数预算（p2-contract §2：实测探针须打印每模块参数，≤1.5M）
@@ -38,8 +39,10 @@ def count_parameters(module: torch.nn.Module) -> int:
     return sum(param.numel() for param in module.parameters())
 
 
-def make_dummy_obs(batch: int = SMOKE_BATCH, seed: int = 0, others_dim: int = 28) -> dict[str, torch.Tensor]:
-    """构造与 env schema v2 / trainer 组装后同形状的假观测（仅形状冒烟）。"""
+def make_dummy_obs(
+    batch: int = SMOKE_BATCH, seed: int = 0, others_dim: int = DEFAULT_OTHERS_DIM
+) -> dict[str, torch.Tensor]:
+    """构造与 env schema v4 / trainer 组装后同形状的假观测（仅形状冒烟）。"""
     generator = torch.Generator().manual_seed(seed)
     frames, od_slots, ld_slots = 6, 16, 16
 

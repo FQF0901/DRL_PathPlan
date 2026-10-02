@@ -13,9 +13,11 @@ OD             ``od_hist`` / ``od_hist_mask``   ``(B,6,16,9)/(B,6,16)``；槽位
                ``od_id_hist``                   ``(B,6,16)`` int64 轨道身份（-1=空槽）
                ``od_presence_hist``             ``(B,6,16)`` 对象本帧在盒内被观测
 LD             ``ld_hist`` / ``ld_hist_mask``   ``(B,6,16,7)``（只作输入）
-others         ``others_hist`` / ``others_hist_mask`` ``(B,6,28)/(B,6)``；28 =
+others         ``others_hist`` / ``others_hist_mask`` ``(B,6,33)/(B,6)``；33 =
                                                nav(11)+speed_limit(1)+signal(4)+
-                                               road_class one-hot(12)
+                                               static(5)+road_class one-hot(12)
+                                               （schema v4；旧 28 维数据自动重排 +
+                                               零填充 static 段 + 一次性告警）
 帧级有效性      ``hist_valid``                    ``(B,6)``（warmup 补位帧为 0）
 ============== =============================== ==============================
 
@@ -26,6 +28,8 @@ others         ``others_hist`` / ``others_hist_mask`` ``(B,6,28)/(B,6)``；28 =
 -------------------------------------------------
 - ``ego_hist``/``others_hist`` 缺失时用当前帧 ``ego``/``others`` 复制 6 帧（mask 由
   ``hist_valid`` 门控）；
+- 旧 others 布局（28 维，schema v2/v3）→ 按新布局重排（static 段补 0、road_class 平移到
+  [21,33)）+ **一次性告警**（v4 新特征在旧数据上"未知"，等价于无静态障碍）；
 - ``od_id_hist`` 缺失时用当前 ``od_id`` 广播（再缺则槽位下标占位）；
 - ``od_presence_hist`` 缺失时用当前 ``od_presence`` 广播（再缺则 ``od_hist_mask × hist_valid``）；
 - 单槽历史通道 ``(B,6,1,F)``（env builder 的原始形状）自动挤压为 ``(B,6,F)``。
@@ -83,6 +87,9 @@ from net.encoders import (
     LD_MEM_DIM,
     NAV_DIM,
     OD_MEM_DIM,
+    OTHERS_HEAD_LEGACY_DIM,
+    OTHERS_LEGACY_DIM,
+    OTHERS_STATIC_DIM,
     FrameEncoding,
     ObsEncoders,
 )
@@ -91,13 +98,46 @@ from net.temporal import TemporalAttention
 #: 命令判定阈值（与 ``env.obs.nav.TURN_EPS_RAD`` 一致：两段航向差 < 10° 视为直行）
 _TURN_EPS_RAD = math.radians(10.0)
 #: 一次性回退告警（key -> 已告警）
-_NAV_FALLBACK_WARNED: set[str] = set()
+_FALLBACK_WARNED: set[str] = set()
 
 
-def _warn_nav_fallback(key: str, message: str) -> None:
-    if key not in _NAV_FALLBACK_WARNED:
-        _NAV_FALLBACK_WARNED.add(key)
+def _warn_fallback(key: str, message: str) -> None:
+    if key not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(key)
         warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def _remap_legacy_others(tensor: Tensor, others_dim: int, name: str) -> Tensor:
+    """旧 others 布局（28 维）→ 新布局（v4，33 维）：static 段补 0、road_class 平移。
+
+    旧：``[nav(11), speed_limit(1), signal(4), road_class(12)]``；
+    新：``[nav(11), speed_limit(1), signal(4), static(5), road_class(12)]``。
+    维度已匹配时原样返回；其他维度不匹配立即报错（避免静默错位）。
+    旧数据的 static 段全 0 = "无静态障碍"（v4 新特征在旧数据上不可用，一次性告警）。
+    """
+    dim = int(tensor.shape[-1])
+    if dim == int(others_dim):
+        return tensor
+    if dim == OTHERS_LEGACY_DIM and int(others_dim) == OTHERS_LEGACY_DIM + OTHERS_STATIC_DIM:
+        _warn_fallback(
+            "others_legacy_layout",
+            "obs 的 others 为旧布局（28 维，schema v2/v3）→ 重排到 v4 布局（33 维）："
+            "static 段补 0（无静态障碍信息）、road_class 平移；重新采集数据后自动生效",
+        )
+        out = torch.zeros(
+            tuple(tensor.shape[:-1]) + (int(others_dim), ),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        out[..., :OTHERS_HEAD_LEGACY_DIM] = tensor[..., :OTHERS_HEAD_LEGACY_DIM]
+        out[..., OTHERS_HEAD_LEGACY_DIM + OTHERS_STATIC_DIM:] = tensor[..., OTHERS_HEAD_LEGACY_DIM:]
+        return out
+    raise ValueError(
+        f"obs[{name!r}] 特征维 {dim} != others_dim {int(others_dim)}"
+        f"（env schema v4 = nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12) = 33；"
+        f"旧布局 28 维会自动重排；如 env 改版请用 DrivingModel(others_dim=F_o) 构造）"
+    )
+
 
 #: 每个模态的历史键（env schema v2 规范键；不引入第二套别名）
 _HISTORY_KEYS: dict[str, tuple[str, ...]] = {
@@ -349,12 +389,8 @@ def mem_from_obs(obs: Mapping[str, Tensor], *, others_dim: int, history_frames: 
     if others_key is not None:
         others = _require_float(obs[others_key], others_key)
         others = _squeeze_dim(others, others_key, 2)
-        if int(others.shape[-1]) != int(others_dim):
-            raise ValueError(
-                f"obs[{others_key!r}] 特征维 {int(others.shape[-1])} != others_dim {int(others_dim)}"
-                f"（env schema v2 = nav(11)+speed_limit(1)+signal(4)+road_class(12) = 28；"
-                f"如 env 改版请用 DrivingModel(others_dim=F_o) 构造）"
-            )
+        # v4：旧 28 维布局 → 33 维（static 段补 0 + road_class 平移 + 一次性告警）
+        others = _remap_legacy_others(others, int(others_dim), str(others_key))
         _check_shape(others, others_key, (frames, int(others_dim)), batch)
         others_mask_key = f"{others_key}_mask"
         if others_mask_key in obs:
@@ -368,6 +404,7 @@ def mem_from_obs(obs: Mapping[str, Tensor], *, others_dim: int, history_frames: 
         others_now = obs.get("others")
         if torch.is_tensor(others_now):
             others_now = squeeze_batch_singletons(others_now.float(), 2, "others")
+            others_now = _remap_legacy_others(others_now, int(others_dim), "others")
             _check_shape(others_now, "others", (int(others_dim), ), batch)
             others = others_now.unsqueeze(1).expand(batch, frames, int(others_dim))
             others_mask = torch.ones((batch, frames), dtype=torch.float32, device=others.device)
@@ -544,7 +581,7 @@ def rebuild_nav_from_world(
     fallback_feats = mem.others[:, -1, : int(nav_dim)].detach()
     fallback_mask = torch.ones((mem.batch, 1), dtype=mem.others.dtype, device=mem.others.device)
     if ego_pose_world is None or route_world is None:
-        _warn_nav_fallback(
+        _warn_fallback(
             "rebuild_nav_from_world",
             "obs 缺少 ego_world/route_world（旧数据/旧 ckpt）→ nav 回退 t0 冻结（A4 重建未启用）",
         )
@@ -555,12 +592,12 @@ def rebuild_nav_from_world(
     valid_rows = mask.reshape(-1) > 0.5
     if not bool(valid_rows.all()):
         if not bool(valid_rows.any()):
-            _warn_nav_fallback(
+            _warn_fallback(
                 "rebuild_nav_from_world",
                 "route_world 不可用（无真实顶点/折线退化）→ nav 回退 t0 冻结（A4 重建未启用）",
             )
         else:
-            _warn_nav_fallback(
+            _warn_fallback(
                 "rebuild_nav_from_world_partial",
                 "route_world 仅部分 batch 行可用 → 不可用行回退 t0 nav（A4 逐行回退）",
             )

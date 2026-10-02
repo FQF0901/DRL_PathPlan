@@ -264,7 +264,7 @@ def test_rollout_without_world_inputs_keeps_t0_context(monkeypatch: pytest.Monke
 def test_step_context_uses_world_pose_and_syncs_others_nav(monkeypatch: pytest.MonkeyPatch) -> None:
     """_step_context：世界位姿直传 helper；重建结果重编码为 token 且写回 others 的 nav 维。"""
     model = DrivingModel(hidden=16).eval()
-    mem = mem_from_obs(make_obs(batch=2), others_dim=28, history_frames=6)
+    mem = mem_from_obs(make_obs(batch=2), others_dim=33, history_frames=6)
     pose_world = torch.tensor([[13.0, 5.0, 0.3], [20.0, -3.0, -0.2]])
     world = {
         "route_world": torch.zeros(2, 8, 2),

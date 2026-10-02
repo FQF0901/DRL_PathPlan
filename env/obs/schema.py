@@ -10,6 +10,10 @@
 
 v3（2026-10-01，A4 nav 修正）：新增 ``world`` 段 —— ``ego_world``（t0 世界系位姿）与
 ``route_world``（世界系路线折线 + 逐点 mask），供 rollout / 教师强制按新位姿重算 nav。
+
+v4（2026-10-02，P1-A 静态障碍可观测性）：``others`` 新增 ``static`` 段（present +
+gap_norm + 相对车道 one-hot）——收费站岗亭是 BaseBuilding，不在 OD/LD 里，必须扫描
+建筑补足（见 :mod:`env.obs.static` 与 triage 签名 S1–S4）。
 """
 
 from __future__ import annotations
@@ -19,11 +23,24 @@ from typing import Any
 from env.obs.ego import EGO_DIM
 from env.obs.ld import LDChannel
 from env.obs.nav import NUM_CHECKPOINTS, NUM_COMMANDS
-from env.obs.others import NAV_DIM, OTHERS_HEAD_DIM, SPEED_LIMIT_UNSET, road_class_labels
+from env.obs.others import (
+    NAV_DIM,
+    OTHERS_HEAD_DIM,
+    SPEED_LIMIT_UNSET,
+    STATIC_OFFSET,
+    road_class_labels,
+)
 from env.obs.signal import SIGNAL_DIM
+from env.obs.static import (
+    STATIC_DIM,
+    STATIC_LANE_SPAN,
+    STATIC_LAT_MARGIN_M,
+    STATIC_REL_BUCKETS,
+    STATIC_SCAN_RANGE_M,
+)
 from env.obs.world import EGO_WORLD_DIM, ROUTE_WORLD_DIM, ROUTE_WORLD_MAX_POINTS
 
-__all__ = ["schema_manifest", "OD_SLOT_POLICY", "OTHERS_LAYOUT", "WORLD_LAYOUT"]
+__all__ = ["schema_manifest", "OD_SLOT_POLICY", "OTHERS_LAYOUT", "STATIC_LAYOUT", "WORLD_LAYOUT"]
 
 LD_DIM = LDChannel.feature_dim
 #: OD 特征维（见 env/obs/od.py）
@@ -62,13 +79,18 @@ OD_SLOT_POLICY: dict[str, Any] = {
     "time_axis": "释放计时用 env.episode_step 的真实时间轴（采集每 5 env step build 一次）",
 }
 
-#: others 通道布局（v2 规范上下文输入）
+#: others 通道布局（schema v4 规范上下文输入）
 OTHERS_LAYOUT: dict[str, Any] = {
     "shape": [1, OTHERS_HEAD_DIM + len(road_class_labels())],
     "segments": {
         "nav": {"dims": [0, NAV_DIM], "unit": "m / one-hot / [0,1]", "source": "env.obs.nav.NavChannel 同口径"},
         "speed_limit": {"dims": [NAV_DIM, NAV_DIM + 1], "unit": "[0,1]（clamp(m/s,0,norm)/norm, norm=30 m/s）"},
-        "signal": {"dims": [NAV_DIM + 1, OTHERS_HEAD_DIM], "unit": "one-hot [green,yellow,red,unknown]，本项目恒 [0,0,0,1]"},
+        "signal": {"dims": [NAV_DIM + 1, STATIC_OFFSET], "unit": "one-hot [green,yellow,red,unknown]，本项目恒 [0,0,0,1]"},
+        "static": {
+            "dims": [STATIC_OFFSET, OTHERS_HEAD_DIM],
+            "unit": "0/1 + [0,1] + one-hot（见 static_layout）",
+            "source": "env.obs.static：BaseBuilding 走廊扫描（建筑/岗亭）",
+        },
         "road_class": {
             "dims": [OTHERS_HEAD_DIM, OTHERS_HEAD_DIM + len(road_class_labels())],
             "unit": "one-hot（ego 当前 lane 的 block 几何类别；未知/缺失 → 全 0）",
@@ -78,8 +100,31 @@ OTHERS_LAYOUT: dict[str, Any] = {
     "road_class_source": "behaviors.map_info(env).lane_block[ego.lane_index]（与 labels.compute_step_labels 同源）",
     "speed_limit_unset": SPEED_LIMIT_UNSET,
     "speed_limit_unset_semantics": ">= 1000（MetaDrive 未设置）→ 0.0",
-    "mask": "others_mask=1 ⇔ ego 存在；各分量有确定性回退（nav 0 / 限速 0 / 无灯 / road_class 全 0）",
+    "mask": "others_mask=1 ⇔ ego 存在；各分量有确定性回退（nav 0 / 限速 0 / 无灯 / 无静态障碍 / road_class 全 0）",
     "legacy": "旧 nav/signal 键保留以兼容，但 others 是规范输入",
+}
+
+
+#: others 的 static 段布局（v4，P1-A 静态障碍可观测性）
+STATIC_LAYOUT: dict[str, Any] = {
+    "shape": [STATIC_DIM],
+    "dtype": "float32",
+    "feature_names": ["present", "gap_norm", "rel_left", "rel_same", "rel_right"],
+    "units": "0/1; [0,1]（gap/scan_range）; one-hot",
+    "semantics": (
+        "自车当前车道走廊（中心线两侧 lane.width/2 + lat_margin + lane_span·lane.width，"
+        "默认覆盖左右各 1 条相邻车道）内前方最近静态障碍：present=1 ⇔ 在 scan_range 内；"
+        "gap_norm = clamp(gap,0,range)/range，gap = s_obj - s_ego - 0.5·L_obj"
+        "（自车中心→障碍近面，与 env/expert/pure_pursuit_idm.py::_static_blocker_gap 同口径）；"
+        "rel one-hot 顺序 = STATIC_REL_BUCKETS=(-1,0,+1)，+1 = 障碍在自车当前车道的左侧相邻车道"
+        "（y 左正）；无发现 → 全 0"
+    ),
+    "scan_range_m": STATIC_SCAN_RANGE_M,
+    "lat_margin_m": STATIC_LAT_MARGIN_M,
+    "lane_span": STATIC_LANE_SPAN,
+    "rel_buckets": list(STATIC_REL_BUCKETS),
+    "source": "env.obs.static.scan_static_blocker（engine.get_objects() 的 BaseBuilding，仿 IDM）",
+    "fallback": "metadrive 不可用 / ego 无 lane / 无建筑 → 全 0；旧数据（28 维 others）由 net 零填充 static 段",
 }
 
 
@@ -121,9 +166,9 @@ def schema_manifest(
     od_dim: int = OD_DIM,
     others_dim: int = OTHERS_HEAD_DIM + len(road_class_labels()),
 ) -> dict[str, Any]:
-    """返回 obs schema 清单（当前帧 + 6 帧历史 + 世界系状态 + 槽位策略 + others 布局）。"""
+    """返回 obs schema 清单（当前帧 + 6 帧历史 + 世界系状态 + 槽位策略 + others/static 布局）。"""
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "frame": {
             "ego": {
                 "shape": [1, EGO_DIM],
@@ -166,7 +211,7 @@ def schema_manifest(
             "nav_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = 导航可用"},
             "signal": {"shape": [1, SIGNAL_DIM], "dtype": "float32", "feature_names": list(SIGNAL_FEATURE_NAMES), "semantics": "恒 [0,0,0,1]（本项目无灯）"},
             "signal_mask": {"shape": [1], "dtype": "float32", "semantics": "恒 1"},
-            "others": {"shape": [1, others_dim], "dtype": "float32", "semantics": "规范上下文输入（nav+speed_limit+signal+road_class，见 others_layout）"},
+            "others": {"shape": [1, others_dim], "dtype": "float32", "semantics": "规范上下文输入（nav+speed_limit+signal+static+road_class，见 others_layout / static_layout）"},
             "others_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = ego 存在（通道整体可用）"},
         },
         "history": {
@@ -192,5 +237,6 @@ def schema_manifest(
         },
         "od_slot_policy": OD_SLOT_POLICY,
         "others_layout": OTHERS_LAYOUT,
+        "static_layout": STATIC_LAYOUT,
         "world_layout": WORLD_LAYOUT,
     }

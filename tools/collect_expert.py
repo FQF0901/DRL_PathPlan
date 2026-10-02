@@ -141,7 +141,8 @@ STEPS_PER_POLICY = 5  # POLICCY_DT / PHYSICS_DT
 WINDOW_POLICIES = 6  # 3 s 目标窗口 = 6 个策略步
 WINDOW_STEPS = WINDOW_POLICIES * STEPS_PER_POLICY  # 30 env steps
 #: 逐帧存储的当前帧通道（v2 增加 others；v3 增加 ego_world/route_world 世界系键，
-#: 供 Stage A/B 的 A4 nav 逐步重建；nav/signal 兼容保留）
+#: 供 Stage A/B 的 A4 nav 逐步重建；v4 的静态障碍段在 others 内（others 28→33 维），
+#: 无需新键即可被采集/透传；nav/signal 兼容保留）
 CURRENT_CHANNELS = ("ego", "od", "ld", "nav", "signal", "others", "ego_world", "route_world")
 #: OD 槽位级伴随键（int64 / float32）
 COMPANION_KEYS = ("od_id", "od_presence")

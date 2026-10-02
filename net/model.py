@@ -60,8 +60,10 @@ traj/ST-GNN 多步键，``action_mu/action_logstd/value`` 与完整前向逐位�
 --------
 - 输入契约（:func:`net.mem.mem_from_obs`）= env schema v2 规范键
   （``ego_hist/od_hist/od_id_hist/od_presence_hist/ld_hist/others_hist`` + masks +
-  ``hist_valid``；others 维默认 28）；缺失 ``ego_hist/others_hist`` 或
-  ``od_id_hist/od_presence_hist`` 时按模块 docstring 的回退规则处理（旧数据集可直接复用）；
+  ``hist_valid``；others 维默认 33 = schema v4：nav(11)+speed_limit(1)+signal(4)+
+  static(5)+road_class(12)；旧 28 维数据自动重排 + 零填充 static 段 + 一次性告警）；
+  缺失 ``ego_hist/others_hist`` 或 ``od_id_hist/od_presence_hist`` 时按模块 docstring
+  的回退规则处理（旧数据集可直接复用）；
 - ``nav/signal`` 键保留为可选上下文 token（v2 的规范上下文在 ``others`` 里）；
 - ``wm_detach`` 形参保留但**恒为 no-op**：v2 的合成帧 detach 语义是固定的（规格第 5 条），
   不提供消融开关。

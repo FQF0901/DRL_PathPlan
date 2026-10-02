@@ -263,19 +263,26 @@ def test_builder_output_keys_and_dtypes_match_schema_manifest():
     assert obs["od_id"].dtype == np.int64
     assert obs["od_id_hist"].dtype == np.int64
     assert obs["od_presence"].dtype == np.float32
-    assert obs["others"].shape == (1, 28)  # 11 + 1 + 4 + 12
-    assert obs["others_hist"].shape == (6, 1, 28)
+    assert obs["others"].shape == (1, 33)  # 11 + 1 + 4 + 5 + 12（v4 static 段）
+    assert obs["others_hist"].shape == (6, 1, 33)
     assert obs["hist_valid"].shape == (6, )
 
 
 def test_others_channel_layout_and_fallbacks():
-    """others = nav(11) + speed_limit(1) + signal(4) + road_class one-hot(12)（假 env 全回退）。"""
-    from env.obs.others import OTHERS_HEAD_DIM, road_class_labels
+    """others = nav(11) + speed_limit(1) + signal(4) + static(5) + road_class one-hot(12)（假 env 全回退）。"""
+    from env.obs.others import OTHERS_HEAD_DIM, STATIC_OFFSET, road_class_labels
+    from env.obs.static import STATIC_DIM
 
     env = FakeEnv(FakeEgo(), [], step=0)
     builder = _make_builder()
     obs = builder.build(env, None)
     assert obs["others"].shape == (1, OTHERS_HEAD_DIM + len(road_class_labels()))
+    assert obs["others"].shape == (1, 33)
     assert obs["others_mask"][0] == 1.0  # ego 存在即整体可用
     np.testing.assert_allclose(obs["others"][0, 11], 0.0)  # 限速未知 -> 0
     np.testing.assert_allclose(obs["others"][0, 12:16], [0, 0, 0, 1])  # 无灯占位
+    # v4 static 段：假 env 无 lane/建筑 → 全 0（present=0）
+    assert STATIC_OFFSET == 16 and STATIC_DIM == 5
+    np.testing.assert_allclose(obs["others"][0, STATIC_OFFSET:OTHERS_HEAD_DIM], 0.0)
+    # road_class 段：map_info 不可用 → 全 0
+    np.testing.assert_allclose(obs["others"][0, OTHERS_HEAD_DIM:], 0.0)

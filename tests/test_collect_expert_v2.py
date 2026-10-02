@@ -445,10 +445,10 @@ def test_save_dataset_v2_schema_roundtrip(tmp_path):
     meta = json.loads(open(paths["meta"], encoding="utf-8").read())
     assert meta["schema_version"] == 2
     assert meta["history_storage"] == "per_frame_v2"
-    # v3（A4 nav 修正）：obs_fingerprint 前缀随 OBS_SCHEMA_VERSION 升为 v3-（数据集 schema_version
-    # 是 collect_expert 自己的契约版本，保持 2）
-    assert meta["obs_fingerprint"].startswith("v3-")
-    assert meta["obs_schema_version"] == 3
+    # v4（P1-A 静态障碍可观测性）：obs_fingerprint 前缀随 OBS_SCHEMA_VERSION 升为 v4-（数据集
+    # schema_version 是 collect_expert 自己的契约版本，保持 2）
+    assert meta["obs_fingerprint"].startswith("v4-")
+    assert meta["obs_schema_version"] == 4
     manifest = schema_manifest()
     for key, spec in manifest["frame"].items():
         assert meta["schema"]["frame"][key]["dtype"] == spec["dtype"]
@@ -471,7 +471,7 @@ def test_v2_constants_and_cli_defaults():
     args = _parse_args(["--specs", "x.json", "--out", "runs/x"])
     assert args.balance == "weights"
     assert args.workers == 0  # 0 = auto（CPU 核数取半、上限 8）
-    manifest = _npz_schema_manifest(num_slots=16, frames=6, others_dim=28, label_count=8)
+    manifest = _npz_schema_manifest(num_slots=16, frames=6, others_dim=33, label_count=8)
     assert manifest["train_weight"]["semantics"].startswith("过滤门")
     assert manifest["frame_usable"]["shape"] == ["<N>"]
     # world 键的形状契约（非 OD/LD 槽位数）：ego_world (1,3) / route_world (64,2)

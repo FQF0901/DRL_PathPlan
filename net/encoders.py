@@ -8,8 +8,10 @@
 - ego 8 维：``[v, a_long, a_lat, yaw_rate, steer, curvature, reserved0, reserved1]``。
   **最后 2 维 reserved 承载上一策略步 (ds, dθ)**（p2-contract §8.4）：本模块按普通特征消费，
   不做任何特殊处理；采集侧负责写入，训练侧由此获得动作历史；
-- others ``F_o`` 维：**规范上下文向量** = nav(11) + speed_limit(1) + signal(4) + road_class one-hot(K)
-  （env schema v2，``env/obs/others.py`` 定义语义；net 只做投影，默认 F_o=28）；
+- others ``F_o`` 维：**规范上下文向量** = nav(11) + speed_limit(1) + signal(4) + static(5)
+  + road_class one-hot(K)（env schema v4，``env/obs/others.py`` / ``env/obs/static.py`` 定义
+  语义；net 只做投影，默认 F_o=33）。旧布局（schema v2/v3，28 维）由 ``net.mem.mem_from_obs``
+  零填充 static 段后消费（一次性告警）；
 - nav 11 维：2 个 checkpoint（自车系点）+ 6 命令 one-hot + route_completion；
 - signal 4 维：绿/黄/红/未知 one-hot（本项目恒为未知占位）。
 
@@ -46,9 +48,18 @@ HISTORY_FRAMES = 6
 EGO_MEM_DIM = EGO_DIM
 OD_MEM_DIM = OD_DIM
 LD_MEM_DIM = LD_DIM
-#: ``others_mem`` 的特征维 F_o（env schema v2：``nav(11)+speed_limit(1)+signal(4)+road_class(K=12)``）。
-#: 语义由 ``env/obs/others.py`` 定义；net 只做投影，构造 ``DrivingModel(others_dim=...)`` 可覆盖。
-DEFAULT_OTHERS_DIM = 28
+#: ``others_mem`` 的特征维 F_o（env schema v4：
+#: ``nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(K=12)`` = 33）。
+#: 语义由 ``env/obs/others.py`` / ``env/obs/static.py`` 定义；net 只做投影，
+#: 构造 ``DrivingModel(others_dim=...)`` 可覆盖。
+DEFAULT_OTHERS_DIM = 33
+#: 旧 others 布局（env schema v2/v3）：``nav(11)+speed_limit(1)+signal(4)+road_class(12)`` = 28；
+#: ``net.mem.mem_from_obs`` 对旧数据做"零填充 static 段"的重排（一次性告警）。
+OTHERS_LEGACY_DIM = 28
+#: 旧布局中 static 段之前的公共前缀维数（nav + speed_limit + signal）
+OTHERS_HEAD_LEGACY_DIM = 16
+#: v4 新增 static 段维数（present + gap_norm + 相对车道 one-hot(3)）
+OTHERS_STATIC_DIM = 5
 #: OD 轨道 id 的桶数（``id % ID_BUCKETS`` 查嵌入；避免未知 id 词表爆炸）。
 ID_BUCKETS = 64
 

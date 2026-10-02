@@ -7,12 +7,12 @@
     ld  (16,7)         ld_mask  (16,)
     nav (1,11)         nav_mask (1,)       # 兼容保留（others 是规范输入）
     signal (1,4)       signal_mask (1,)    # 兼容保留
-    others (1,16+K)    others_mask (1,)    # nav + speed_limit + signal + road_class one-hot(K)
+    others (1,21+K)    others_mask (1,)    # nav + speed_limit + signal + static + road_class one-hot(K)
     ego_world (1,3)    ego_world_mask (1,) # v3：t0 世界系位姿 (x,y,θ)
     route_world (64,2) route_world_mask (64,)  # v3：世界系路线折线（首段起点 + 各段终点）
 
     ego_hist (6,1,8)           ego_hist_mask (6,1)
-    others_hist (6,1,16+K)     others_hist_mask (6,1)
+    others_hist (6,1,21+K)     others_hist_mask (6,1)
     od_hist (6,16,9)           od_hist_mask (6,16)
     od_id_hist (6,16) int64    od_presence_hist (6,16)
     ld_hist (6,16,7)           ld_hist_mask (6,16)

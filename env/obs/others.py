@@ -1,6 +1,6 @@
-"""others 通道（schema v2 规范上下文输入，单槽）::
+"""others 通道（schema v4 规范上下文输入，单槽）::
 
-    others = [nav(11), speed_limit(1, 归一化), signal(4), road_class one-hot(K)]
+    others = [nav(11), speed_limit(1, 归一化), signal(4), static(5), road_class one-hot(K)]
 
 维度拆分（dim 索引）::
 
@@ -8,7 +8,14 @@
                   （与 :class:`env.obs.nav.NavChannel` 完全同口径，直接复用其 build）
     11     speed_limit：自车当前车道限速，**归一化**到 [0,1]
     12..15 signal：4 维灯态占位（本项目无灯 → [0,0,0,1]，未知/无灯）
-    16..15+K road_class one-hot(K)：自车当前 lane 所属地图 block 的几何类别
+    16..20 static：静态障碍（建筑/岗亭）走廊扫描段（schema v4，P1-A）::
+
+              16  present    1 = 当前车道走廊前方 scan_range 内有静态障碍
+              17  gap_norm   clamp(gap,0,range)/range（自车中心→障碍近面，IDM 口径）
+              18..20 rel one-hot（STATIC_REL_BUCKETS=(-1,0,+1)，+1=左侧相邻车道）
+
+           几何/扫描口径见 :mod:`env.obs.static`（走廊覆盖左右各 1 条相邻车道）。
+    21..20+K road_class one-hot(K)：自车当前 lane 所属地图 block 的几何类别
 
 road_class（K 与几何分类一致）
 ------------------------------
@@ -36,8 +43,8 @@ speed_limit 单位与归一化
 mask 语义
 ---------
 ``others_mask[0] = 1`` ⇔ 自车存在（通道整体可用）；各分量有确定性回退：nav 不可用 → 前 11 维 0、
-限速未知 → 0、无灯 → [0,0,0,1]、block 未知 → road_class 全 0。旧 ``nav`` / ``signal`` 通道
-仍保留在观测里以兼容旧消费者，但 **``others`` 是规范输入**。
+限速未知 → 0、无灯 → [0,0,0,1]、无静态障碍 → static 段全 0、block 未知 → road_class 全 0。
+旧 ``nav`` / ``signal`` 通道仍保留在观测里以兼容旧消费者，但 **``others`` 是规范输入**。
 """
 
 from __future__ import annotations
@@ -49,11 +56,20 @@ import numpy as np
 from env.obs.base import FrameAlignment, ObservationChannel, make_empty, safe_ego
 from env.obs.nav import NUM_CHECKPOINTS, NUM_COMMANDS, NavChannel
 from env.obs.signal import SIGNAL_DIM, SignalChannel
+from env.obs.static import (
+    STATIC_DIM,
+    STATIC_LANE_SPAN,
+    STATIC_LAT_MARGIN_M,
+    STATIC_SCAN_RANGE_M,
+    static_features,
+)
 
 #: nav 子向量维数（与 NavChannel.feature_dim 一致）
 NAV_DIM = 2 * NUM_CHECKPOINTS + NUM_COMMANDS + 1
-#: 归一化之前的分量之和 = nav + speed_limit + signal
-OTHERS_HEAD_DIM = NAV_DIM + 1 + SIGNAL_DIM
+#: static 段起始 dim（nav + speed_limit + signal）
+STATIC_OFFSET = NAV_DIM + 1 + SIGNAL_DIM
+#: road_class 段起始 dim（nav + speed_limit + signal + static）
+OTHERS_HEAD_DIM = STATIC_OFFSET + STATIC_DIM
 
 #: taxonomy 不可用时的几何标签兜底（顺序必须与 taxonomy.GEOMETRY_LABELS 一致）
 _FALLBACK_ROAD_CLASS_LABELS: tuple[str, ...] = (
@@ -159,14 +175,24 @@ def speed_limit_value(ego, norm_mps: float = DEFAULT_SPEED_LIMIT_NORM_MPS) -> fl
 
 
 class OthersChannel(ObservationChannel):
-    """规范上下文通道：nav + speed_limit + signal + road_class one-hot。"""
+    """规范上下文通道：nav + speed_limit + signal + static + road_class one-hot。"""
 
     name = "others"
     #: dim 0..3 是 nav 的两个 checkpoint（点），其余分量不随坐标系变化
     alignment = FrameAlignment(point_pairs=((0, 1), (2, 3)))
 
-    def __init__(self, *, speed_limit_norm_mps: float = DEFAULT_SPEED_LIMIT_NORM_MPS):
+    def __init__(
+        self,
+        *,
+        speed_limit_norm_mps: float = DEFAULT_SPEED_LIMIT_NORM_MPS,
+        static_scan_range_m: float = STATIC_SCAN_RANGE_M,
+        static_lat_margin_m: float = STATIC_LAT_MARGIN_M,
+        static_lane_span: int = STATIC_LANE_SPAN,
+    ):
         self.speed_limit_norm_mps = float(speed_limit_norm_mps)
+        self.static_scan_range_m = float(static_scan_range_m)
+        self.static_lat_margin_m = float(static_lat_margin_m)
+        self.static_lane_span = int(static_lane_span)
         self._nav = NavChannel()
         self._signal = SignalChannel()
 
@@ -187,7 +213,15 @@ class OthersChannel(ObservationChannel):
         feats[0, 0:NAV_DIM] = nav_feats[0]
         feats[0, NAV_DIM] = speed_limit_value(ego, self.speed_limit_norm_mps)
         signal_feats, _signal_mask = self._signal.build(env, spec)
-        feats[0, NAV_DIM + 1:OTHERS_HEAD_DIM] = signal_feats[0]
+        feats[0, NAV_DIM + 1:STATIC_OFFSET] = signal_feats[0]
+        # schema v4（P1-A）：静态障碍走廊扫描（建筑/岗亭）；无 lane/无建筑 → 全 0
+        feats[0, STATIC_OFFSET:OTHERS_HEAD_DIM] = static_features(
+            env,
+            ego,
+            scan_range_m=self.static_scan_range_m,
+            lat_margin_m=self.static_lat_margin_m,
+            lane_span=self.static_lane_span,
+        )
 
         index = road_class_index(env)
         if index is not None:

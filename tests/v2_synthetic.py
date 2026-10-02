@@ -59,12 +59,13 @@ def make_v2_arrays(
     ld_mask = np.ones((count, 16), dtype=np.float32)
     nav = rng.normal(size=(count, 1, 11)).astype(np.float32)
     signal = rng.normal(size=(count, 1, 4)).astype(np.float32)
-    # v2 规范上下文输入 others (1,28) = nav(11)+speed_limit(1)+signal(4)+road_class one-hot(12)
-    others = np.zeros((count, 1, 28), dtype=np.float32)
+    # v4 规范上下文输入 others (1,33) = nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12)
+    others = np.zeros((count, 1, 33), dtype=np.float32)
     others[:, 0, :11] = nav[:, 0, :]
     others[:, 0, 11] = 0.5
     others[:, 0, 12:16] = signal[:, 0, :]
-    others[:, 0, 16:28] = rng.normal(size=(count, 12)).astype(np.float32)
+    others[:, 0, 16:21] = 0.0  # static 段（无静态障碍）
+    others[:, 0, 21:33] = rng.normal(size=(count, 12)).astype(np.float32)
 
     od_id = np.tile(np.arange(1, 17, dtype=np.int64), (count, 1))
     od_presence = np.ones((count, 16), dtype=np.float32)

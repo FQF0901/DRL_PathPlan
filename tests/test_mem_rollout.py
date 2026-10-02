@@ -15,7 +15,7 @@ import torch
 
 from net.mem import MemBank, mem_from_obs
 from net.model import DrivingModel
-from tests.test_net_shapes import HISTORY, make_obs
+from tests.test_net_shapes import HISTORY, OTHERS_DIM, make_obs
 
 
 def _unblocked_model(seed: int = 0) -> DrivingModel:
@@ -42,7 +42,7 @@ def test_real_mem_is_never_written() -> None:
 def test_mem_bank_shift_is_copy_isolated() -> None:
     """``MemBank.shift_*`` 只生成新张量，不原地改写源 mem（滑动窗口拷贝隔离）。"""
     obs = make_obs(batch=2)
-    mem = mem_from_obs(obs, others_dim=28, history_frames=HISTORY)
+    mem = mem_from_obs(obs, others_dim=OTHERS_DIM, history_frames=HISTORY)
     snapshots = {
         "od": mem.od.clone(),
         "od_mask": mem.od_mask.clone(),

@@ -246,7 +246,7 @@ def test_rebuild_nav_is_pure_and_sync_returns_new_mem():
 
 
 def test_rebuild_nav_falls_back_when_world_keys_missing(monkeypatch):
-    monkeypatch.setattr(mem_module, "_NAV_FALLBACK_WARNED", set())
+    monkeypatch.setattr(mem_module, "_FALLBACK_WARNED", set())
     t0, _ = nav_features_from_world(_pose(6.43, 0.0, 0.0), _route_t())
     mem = _mem_with_others(t0.clone())
     with pytest.warns(RuntimeWarning, match="ego_world/route_world"):
@@ -265,7 +265,7 @@ def test_rebuild_nav_falls_back_when_world_keys_missing(monkeypatch):
 
 def test_rebuild_nav_degenerate_route_falls_back(monkeypatch):
     """全 0 路线（无有效线段）→ 回退 + 告警（不产生 NaN/错误 checkpoint）。"""
-    monkeypatch.setattr(mem_module, "_NAV_FALLBACK_WARNED", set())
+    monkeypatch.setattr(mem_module, "_FALLBACK_WARNED", set())
     t0, _ = nav_features_from_world(_pose(6.43, 0.0, 0.0), _route_t())
     mem = _mem_with_others(t0.clone())
     with pytest.warns(RuntimeWarning, match="route_world 不可用"):

@@ -37,7 +37,7 @@ HISTORY = 6
 VALID_FRAMES = 3  # 前 3 帧为 warmup 补位（复制最旧真实帧，mask=1）
 OD_SLOTS = 16
 LD_SLOTS = 16
-OTHERS_DIM = 28  # env schema v2：nav(11)+speed_limit(1)+signal(4)+road_class(12)
+OTHERS_DIM = 33  # env schema v4：nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12)
 
 
 # ---------------------------------------------------------------------- 工具
@@ -507,8 +507,8 @@ def test_param_budget_and_module_counts() -> None:
     model = DrivingModel()
     total = sum(param.numel() for param in model.parameters())
     assert total <= PARAM_BUDGET, f"参数超预算: {total}"
-    # others 维 = env schema v2 规范值 28（nav 11 + speed_limit 1 + signal 4 + road_class 12）
-    assert model.others_dim == 28
+    # others 维 = env schema v4 规范值 33（nav 11 + speed_limit 1 + signal 4 + static 5 + road_class 12）
+    assert model.others_dim == 33
     for module in (
         model.encoders,
         model.mem_encoder,
