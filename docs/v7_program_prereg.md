@@ -81,7 +81,7 @@
 
 ## 8. 修订锚（沿用 `docs/v6_program_prereg.md` §11 两段式体例）
 
-- v7-P0 建档（本文件 + `tools/paired_eval.py` + `tests/test_paired_eval.py`）内容 commit：由后续锚 commit 补录。本锚行由第二次小 commit 写入（不改动其余内容）。
+- v7-P0 建档（本文件 + `tools/paired_eval.py` + `tests/test_paired_eval.py`）内容 commit：`b711e5f`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 
 ## 变更记录
 
