@@ -79,7 +79,10 @@ v2 相对 v1 的变更（2026-09-26）
    crash / out_of_road / arrive_dest / 截断；
 2. **干净 3 s 窗口**：同上（合并入 1）；
 3. **on_lane + round-trip**：专家必须在自己车道内；且 6 个 ``(ds,dθ)`` 动作经运动学插值
-   得到的 6 个关键点与实测关键点误差在阈值内（阈值可配；dense 30 点误差一并报告）；
+   得到的 6 个关键点与实测关键点误差在阈值内（阈值可配；dense 30 点误差一并报告）。
+   **P1 iter2 变道放宽**：``|lane_lat| > --roundtrip-lc-lat``（默认 0.8 m）的执行帧在
+   首步误差 ≤ ``--roundtrip-lc-first-max`` 且 6 点均值 ≤ ``--roundtrip-lc-mean`` 时保留
+   （弧模型低速大转角误差 ~ |dθ|；原门丢 62% 变道帧）；
 4. **事件标签可核验**：``cutin_active`` / ``cutout_active`` 为 1 的帧，仅当其事件
    ``fired ∧ actor_alive`` 时 ``train_weight=1``；保留后核对每标签正样本数
    （``config/eval.yaml::dataset_gate.min_samples_per_category=50``）；
@@ -165,6 +168,14 @@ _MODEL_CONFIG_DEFAULT = "config/model.yaml"
 #: dataset_gate 口径（config/eval.yaml）
 DEFAULT_MIN_YIELD = 0.60
 DEFAULT_MIN_SAMPLES_PER_CATEGORY = 50
+#: 变道执行帧 roundtrip 放宽（P1 iter2，2026-10-02）：|lane_lat| > 该值视为变道/绕行执行帧。
+#: 依据：变道帧 62% 被原 6 点 roundtrip 门过滤（tollgate 829/1333），而弧模型误差与 |dθ|
+#: 高度相关（corr 0.96，低速大转角下侧偏本质）；BC 动作目标只是首步 (ds,dθ)。
+ROUNDTRIP_LC_LAT = 0.8
+#: 放宽门的首步关键点最大误差（m）——首步对应动作监督口径，必须仍是可信弧。
+ROUNDTRIP_LC_FIRST_MAX = 0.5
+#: 放宽门的 6 点平均误差上限（m）——限制 3 s 窗口整体发散，保持轨迹目标质量。
+ROUNDTRIP_LC_MEAN = 0.5
 #: 并行采集默认/上限：单 worker env RSS ≈0.65 GB（pipeline/vector_env.ENV_RSS_PER_WORKER_MB），
 #: 本机 15 GB → 建议 <=8 个 worker（超出只告警，不阻塞）。
 DEFAULT_WORKERS = 0  # 0 = auto：按 CPU 核数取半、上限 MAX_RECOMMENDED_WORKERS（默认吃满多核；内存 ≈1.3GB/worker）
@@ -485,6 +496,9 @@ def extract_samples(
     filter_counter: Counter,
     require_dense: bool = False,
     roundtrip_dense_mean: float = 0.5,
+    roundtrip_lc_lat: float = ROUNDTRIP_LC_LAT,
+    roundtrip_lc_first_max: float = ROUNDTRIP_LC_FIRST_MAX,
+    roundtrip_lc_mean: float = ROUNDTRIP_LC_MEAN,
 ) -> List[Dict[str, Any]]:
     """按 §8.2 规则 1–4 抽取**全部 policy 帧**（v2：命中过滤不删行，记 ``train_weight=0``）。
 
@@ -495,6 +509,10 @@ def extract_samples(
       ``pipeline.frames.lookup_from_arrays(usable_key="frame_usable")`` 复算未来掩码；
     - 未命中过滤的行也照常计算动作/轨迹字段；窗口不可算（超出记录范围）时置零，此时
       ``train_weight`` 必为 0（terminal_window），下游不得读取。
+    - **变道放宽（P1 iter2）**：6 点 roundtrip 门对 |lane_lat|>``roundtrip_lc_lat`` 的
+      变道/绕行执行帧放宽——首步误差 ≤ ``roundtrip_lc_first_max`` 且 6 点均值 ≤
+      ``roundtrip_lc_mean`` 时不再判 roundtrip_fail（弧模型在低速大转角下有本质误差，
+      原门丢弃了 ~62% 变道帧；动作目标只是首步，全窗发散由均值上限约束）。
     """
     poses, flags = episode["poses"], episode["flags"]
     frames: Dict[int, Dict[str, Any]] = episode["frames"]
@@ -567,7 +585,15 @@ def extract_samples(
             if reason is None and (
                 float(key_err.mean()) > roundtrip_key_mean or float(key_err.max()) > roundtrip_key_max
             ):
-                reason = "roundtrip_fail"
+                # P1 iter2：变道/绕行执行帧放宽（见 extract_samples docstring）。只改这一条
+                # 判据；其余帧的 roundtrip 行为与旧版逐位一致。
+                lane_change = abs(float(frame["lane_lat"])) > float(roundtrip_lc_lat)
+                if not (
+                    lane_change
+                    and float(key_err[0]) <= float(roundtrip_lc_first_max)
+                    and float(key_err.mean()) <= float(roundtrip_lc_mean)
+                ):
+                    reason = "roundtrip_fail"
             if reason is None and require_dense and float(dense_err.mean()) > roundtrip_dense_mean:
                 reason = "roundtrip_dense_fail"
 
@@ -640,6 +666,9 @@ def _collect_one_spec(
     roundtrip_key_max: float = 0.5,
     require_dense: bool = False,
     roundtrip_dense_mean: float = 0.5,
+    roundtrip_lc_lat: float = ROUNDTRIP_LC_LAT,
+    roundtrip_lc_first_max: float = ROUNDTRIP_LC_FIRST_MAX,
+    roundtrip_lc_mean: float = ROUNDTRIP_LC_MEAN,
     traffic_density: Optional[float] = None,
 ) -> Dict[str, Any]:
     """采集 + 过滤单个 spec，返回可跨进程传递的逐 spec 记录。
@@ -673,6 +702,9 @@ def _collect_one_spec(
             filter_counter=filter_counter,
             require_dense=bool(require_dense),
             roundtrip_dense_mean=float(roundtrip_dense_mean),
+            roundtrip_lc_lat=float(roundtrip_lc_lat),
+            roundtrip_lc_first_max=float(roundtrip_lc_first_max),
+            roundtrip_lc_mean=float(roundtrip_lc_mean),
         )
         candidates = len(episode["frames"])
         trainable = int(sum(1 for row in rows if row["train_weight"] > 0.0))
@@ -1663,6 +1695,18 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--roundtrip-key-max", type=float, default=0.5, help="6 关键点最大误差阈值（m）")
     parser.add_argument("--require-dense", action="store_true", help="额外要求 30 点平均误差 <= --roundtrip-dense-mean")
     parser.add_argument("--roundtrip-dense-mean", type=float, default=0.5, help="30 点平均误差阈值（m）")
+    parser.add_argument(
+        "--roundtrip-lc-lat", type=float, default=ROUNDTRIP_LC_LAT,
+        help="变道放宽：|lane_lat| 超过该值的执行帧走放宽门（默认 0.8 m）",
+    )
+    parser.add_argument(
+        "--roundtrip-lc-first-max", type=float, default=ROUNDTRIP_LC_FIRST_MAX,
+        help="变道放宽：首步关键点最大误差阈值（m，默认 0.5）",
+    )
+    parser.add_argument(
+        "--roundtrip-lc-mean", type=float, default=ROUNDTRIP_LC_MEAN,
+        help="变道放宽：6 点平均误差上限（m，默认 0.5）",
+    )
     parser.add_argument("--balance", choices=("weights", "cap", "none"), default="weights", help="配平模式（规则 5）")
     parser.add_argument("--balance-ratio", type=float, default=3.0, help="cap 模式下最大组/最小组样本比")
     parser.add_argument("--seed", type=int, default=0, help="工具随机种子（仅用于诊断）")
@@ -1716,6 +1760,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "roundtrip_key_max": float(args.roundtrip_key_max),
         "require_dense": bool(args.require_dense),
         "roundtrip_dense_mean": float(args.roundtrip_dense_mean),
+        "roundtrip_lc_lat": float(args.roundtrip_lc_lat),
+        "roundtrip_lc_first_max": float(args.roundtrip_lc_first_max),
+        "roundtrip_lc_mean": float(args.roundtrip_lc_mean),
         "traffic_density": args.traffic_density,
     }
     num_workers = _resolve_workers(args.workers)
@@ -1864,6 +1911,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "roundtrip_key_max": float(args.roundtrip_key_max),
             "require_dense": bool(args.require_dense),
             "roundtrip_dense_mean": float(args.roundtrip_dense_mean),
+            "roundtrip_lc_lat": float(args.roundtrip_lc_lat),
+            "roundtrip_lc_first_max": float(args.roundtrip_lc_first_max),
+            "roundtrip_lc_mean": float(args.roundtrip_lc_mean),
             "balance": str(args.balance),
             "balance_ratio": float(args.balance_ratio),
             "traffic_density": args.traffic_density,

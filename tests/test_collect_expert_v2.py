@@ -198,6 +198,29 @@ def test_roundtrip_failure_sets_weight_zero_without_dropping_rows():
     np.testing.assert_allclose(last["action"], 0.0)
 
 
+def test_lane_change_roundtrip_relaxation_keeps_execution_frames():
+    """P1 iter2：|lane_lat|>0.8 的执行帧在首步/均值合格时不被 roundtrip 门过滤。"""
+    episode = _episode(80)
+    for t in (10, 15):
+        episode["frames"][t]["lane_lat"] = 1.5
+
+    def offset_interpolate(seq, **kwargs):
+        out = np.array(arc_interpolate(seq, **kwargs), dtype=np.float64)
+        out[29, 1] += 0.6  # 末关键点偏 0.6 m：原 max 门失败（0.6>0.5）、6 点均值 0.1 通过
+        return out
+
+    rows, counter = _extract(episode, interpolate_fn=offset_interpolate)
+    by_step = {row["step"]: row for row in rows}
+    # 变道执行帧：放宽门（首步 0.0 <= 0.5 且均值 0.1 <= 0.5）保留
+    assert by_step[10]["train_weight"] == 1.0
+    assert by_step[10]["filter_reason"] == ""
+    assert by_step[15]["train_weight"] == 1.0
+    # 非变道帧：同一误差画像仍按原门过滤
+    assert by_step[5]["train_weight"] == 0.0
+    assert by_step[5]["filter_reason"] == "roundtrip_fail"
+    assert counter["roundtrip_fail"] == 9  # t=0,5,20,25,30,35,40,45,50
+
+
 def test_rows_carry_companions_and_mem_history():
     episode = _episode(30)
     rows, _ = _extract(episode)
