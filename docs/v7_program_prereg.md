@@ -59,7 +59,8 @@
 
 - **agent**：**≥5 个独立训练 seed（建议 8–10**；具体 seed 由 P1/P2 门冻结，均以阶段门冻结的 init/配方为起点）；每 run 完整训练 → 在**验证集选点**（§4）→ 测试集评估一次（§4）。
 - **IDM 基线**：主判据 **pin 单一 baseline run**（§2.5：`runs/BTC20260927-1839_eval500_baseline`）。基线稳定性用 **spec-seed 变体**：同 500 模板（id/几何不变）、不同 per-scenario `seed` 的 spec 副本，各评一次得 success 分布（mean±sd）；**同一 spec 重复评测 = 恒等重复（确定性）**，不得计为独立 run；变体 run 不进入主判据、不与 agent run 交叉配对（§2.5）。
-- 评测确定性：同 `(id, seed)` 下评测为确定性（v6 证据：`eval_runner` `deterministic=True`，动作 = `action_mu`）；run 间差异来自训练 seed / spec-seed 变体（同一 spec 重复评测无差异）。
+- 评测确定性（**fix-15 修正 2026-10-02**）：同 `(id, seed)` 评测**并非严格恒等**——全量复评 6 次出现 **1/500 success↔collision 翻转（id 299）+ 1–2/500 数值漂移**；单条 spec × `--workers 1` × fresh 进程 3/6 翻转 ⇒ **内禀逐 episode 熵**（已排除 PYTHONHASHSEED / numpy 全局 RNG / worker 调度 / reset seeding；锁定在 MetaDrive/Panda3D 内部，未到代码行）；量级 ≈ **±0.2pp**。配对协议（逐 `(id,seed)` 对）可吸收该噪声；**不得声称"同 spec 恒等重复"**；同 spec 重复 run 不计独立 run。
+- **IDM 现口径复测锚（fix-15）**：eval500 复测与历史锚 **逐条 500/500 一致**（0.756 / coll 0.144 / off 0.068 / rc 0.882 / sr 0.740；历史 manifest `dirty=1` 无实际影响）；**clean500 IDM 锚 = 0.742** [0.702, 0.778]（coll 0.174 / off 0.054 / rc 0.865 / sr 0.757）；spec-seed 变体（+1e5/+2e5）success 0.756/0.706/0.724 ⇒ mean **0.729、sd 2.5pp**（coll sd 2.9pp）；分层 seed 敏感度：hard 14.1pp / uturn 15.6pp / merge 13.0pp / t_intersection 11.1pp（n≈45，easy 4.4pp）⇒ **几何层读数必须携带该噪声量级**；per-id 三 seed 全过仅 268/500 ⇒ 基线必须逐 `(id,seed)` 配对。
 - 正向结论门槛：主判据（§2.2）+ ≥2/3 run 单 run 参考判据方向一致；单 run 仅方向性证据。
 - **方差控制优先（功效修复；不靠补 run）**：KL 锚末值 > 0（0.01–0.02）/慢衰减、加大 rollout/等效 batch、晚段 EV/entropy 监控（诊断用，非闸）。Gate A 实测双峰模型 n=5 功效反降（0.20）⇒ 补 run 不加功效。
 - 预算内复现顺序：**先 5 run**；方差闸未过或 CI 边界 → 先做方差控制（不改判据）再复跑；已过闸但 CI 下界 ≤ +1pt → 可加至 8–10 run 加宽证据（不改变判据，只加密）。
