@@ -9,6 +9,7 @@
 | `test.py` | 冻结 val 集评测：`--policy baseline|ckpt`、`--ckpt`、`--tracker exact|lqr`、`--limit N`、`--workers 2`、`--name` |
 | `collect_expert.py` | BC 采集：`--specs`、`--workers N`（峰值 ≈1.3GB/worker）、`--recycle-every 150`、过滤（终末截断/on_lane/round-trip）与 `--balance weights|cap|none` |
 | `baseline_eval.py` | 规则基线批量评测：`--specs`、`--workers`、`--out`、`--render`（调试，强制单进程） |
+| `paired_eval.py` | v7 配对评测：`--baseline`/`--agent` episodes.csv（同 spec、同 `(id, seed)`）→ 2×2、net/z、McNemar 精确 p、配对差 bootstrap 95% CI、几何×难度分层、分项（collision/off-road/max_step）、多 run 汇总；`--out-dir` 写 `paired_eval.{md,json}` |
 | `visualize.py` | 场景俯视图抽检：`--specs` + `--random N`/`--ids`/`--all-in-file`、`--policy baseline|idle`、`--frames/--steps` |
 | `debug_rollout_viz.py` | 失败场景回灌可视化（GT vs 模型推演）：`--ckpt`、`--spec-id`（eval500 episodes.csv 的 id）、`--out`；逐决策帧 PNG + ADE/FDE，`--device auto|cpu|cuda` |
 | `measure/smoke_env.py` | headless 冒烟：reset 耗时 / FPS / RSS（≥150 FPS 口径） |
