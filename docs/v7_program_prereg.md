@@ -104,6 +104,7 @@
 ## 8. 修订锚（沿用 `docs/v6_program_prereg.md` §11 两段式体例）
 
 - v7-P0 建档（本文件 + `tools/paired_eval.py` + `tests/test_paired_eval.py`）内容 commit：`b711e5f`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- v7-P0 修正集 #1（Gate A：预注册统计修正 + 评测 pin 表 + IDM spec-seed 变体 + Gate B/C 加固 + 安全闸量化 + `expert500val` 禁训 + `paired_eval` 方差闸/单 baseline fail-closed）内容 commit：`0454308`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 
 ## 变更记录
 
