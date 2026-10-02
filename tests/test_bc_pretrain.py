@@ -116,6 +116,32 @@ def test_pretrain_bc_action_loss_nonzero_and_immediate_action() -> None:
     assert np.isfinite(metrics["bc_action_loss"])
 
 
+def test_pretrain_bc_action_dim_weights_scale_dtheta_term() -> None:
+    """P1 iter2：``action_dim_weights=(1, w)`` 只放大 dθ 项（ds 项不变）。
+
+    lr=0 ⇒ 参数不动，损失可精确对账：初始 (5.0, 0)；目标 (3.0, 0.4)。
+    默认 (1,1)：0.5·(2² + 0.4²)/2 = 1.04；w=8.33：0.5·(2² + 8.33·0.4²)/2 ≈ 1.333。
+    """
+    torch.manual_seed(0)
+    dataset = _synthetic_dataset()
+    dataset.arrays["action"][:, 0, 1] = 0.4
+
+    def _loss(dim_weights):
+        torch.manual_seed(0)
+        model = DrivingModel()
+        config = BCConfig(
+            epochs=1, batch_size=BATCH, lr=0.0, device="cpu", shuffle=False,
+            action_dim_weights=dim_weights,
+        )
+        return pretrain_bc(model, dataset, config, logger=lambda _: None)["bc_action_loss"]
+
+    base = _loss((1.0, 1.0))
+    scaled = _loss((1.0, 8.33))
+    assert base == pytest.approx(1.04, abs=1e-4)
+    assert scaled == pytest.approx((4.0 + 8.33 * 0.16) / 4.0, abs=1e-4)
+    assert scaled > base
+
+
 # ---------------------------------------------------------------------- 缺陷 3：参数化
 def _tokens(batch: int = 5, hidden: int = 16, length: int = 37) -> tuple[torch.Tensor, torch.Tensor]:
     """v6 交叉注意力头的玩具令牌集合 + 全有效 key mask。"""

@@ -2829,6 +2829,9 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     action_weight = float(args.action_weight if args.action_weight is not None else bc_cfg.get("action_weight", 1.0))
     traj_weight = float(args.traj_aux_weight if args.traj_aux_weight is not None else bc_cfg.get("traj_aux_weight", 0.1))
     loss_type = str(args.loss_type if args.loss_type is not None else bc_cfg.get("loss_type", "l2"))
+    # P1 iter2：动作逐维权重（单变量；缺省 [1.0, 1.0] = 旧行为）
+    raw_dim_weights = bc_cfg.get("action_dim_weights", [1.0, 1.0]) or [1.0, 1.0]
+    action_dim_weights = (float(raw_dim_weights[0]), float(raw_dim_weights[1]))
     # lane U1：MoE 负载均衡 α + worst/mild 行权重（phase 2；CLI 优先，config 兜底）
     load_balance_coef = float(
         args.load_balance_coef
@@ -2905,6 +2908,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "lr": float(args.lr),
         "action_weight": action_weight,
         "traj_aux_weight": traj_weight,
+        "action_dim_weights": list(action_dim_weights),
         # lane U1：去聚类（无 cluster/router 监督）；MoE 负载均衡 + 权重化 specific
         "moe_phase1_enabled": False,
         "load_balance_coef": float(load_balance_coef),
@@ -3064,6 +3068,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             loss_type=loss_type,
             traj_weight=traj_weight,
             action_weight=action_weight,
+            action_dim_weights=action_dim_weights,
             seed=int(args.seed),
             device=device,
             max_batches=args.max_batches,

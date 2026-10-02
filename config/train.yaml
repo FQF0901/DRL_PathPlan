@@ -159,6 +159,14 @@ stages:
       hard_weight: 1.0          # lane U1：worst-50%（冻结 primary IL 误差）行权重倍率
       mild_weight: 0.1          # lane U1：其余 50% 行权重倍率（有效质量 = 0.55；全量曝光）
       loss_type: l2
+      action_dim_weights: [1.0, 69.4]  # P1 iter2 横向表达修复（单变量）：动作回归逐维权重
+                                  # (w_ds, w_dθ)。69.4 = (10/1.2)² = 动作界 span 比平方 → 两维
+                                  # 相对误差等权；原 (1,1) 时 dθ 项只占 ds 项的 0.85%（approach），
+                                  # sigmoid raw 梯度再差 8.33× → 横向学习信号 ~1%（TF corr 0.50）。
+                                  # 2-epoch TF 探针（v4.1 数据，train/留出 val 一致，T3 泛化）：
+                                  # approach dθ MAE 0.0341→0.0137（train）/0.0426→0.0254（val），
+                                  # corr 0.61→0.93 / 0.51→0.78；ds 与 traj 指标不回退。
+                                  # [1.0, 1.0] = 旧行为；证据 /tmp/opencode/v7_p1_iter2.md §4
       wm_detach: true           # v2 固定语义：合成帧恒 detach；该键为 no-op（兼容保留）
   C:
     name: ppo_rl                # 阶段名

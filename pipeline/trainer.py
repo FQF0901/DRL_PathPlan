@@ -725,6 +725,13 @@ class BCConfig:
     loss_type: str = "l2"  # l1 | l2
     traj_weight: float = 1.0
     action_weight: float = 0.5
+    #: 动作回归的逐维权重 ``(w_ds, w_dθ)``（P1 iter2，默认 (1,1) = 旧行为逐位一致）。
+    #: 动机：动作界 ds∈[0,10] / dθ∈[-0.6,0.6]（span 比 8.33），sigmoid 输出层 raw 梯度
+    #: 与损失量级都被 ds 主导（approach 帧 MAE 0.45 m vs 0.041 rad，dθ 项只占 0.85%）→
+    #: 横向 dθ 学得弱（TF corr 0.50、μ std 0.048 vs 专家 0.082）。train.yaml 取
+    #: ``(1.0, 69.4=(10/1.2)²)``（相对误差等权；TF 探针 train/val 一致最优，见
+    #: /tmp/opencode/v7_p1_iter2.md §4）。
+    action_dim_weights: Tuple[float, float] = (1.0, 1.0)
     grad_clip: float = 1.0
     seed: int = 0
     device: str = "auto"  # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
@@ -3167,6 +3174,10 @@ def pretrain_bc(
         )
     device = torch.device(resolve_device(config.device))
     model.to(device).train()
+    # P1 iter2：动作回归逐维权重（默认 (1,1) → 与旧 `.mean(dim=-1)` 逐位一致）
+    action_dim_weights = torch.as_tensor(
+        tuple(float(x) for x in config.action_dim_weights), dtype=torch.float32, device=device
+    ).reshape(1, 2)
     frozen = apply_freeze_prefixes(model, config.freeze_prefixes)
     optimizer = build_optimizer(model, config.lr)
     if config.optimizer_state:
@@ -3532,7 +3543,9 @@ def pretrain_bc(
                 target_action = targets["action"][:, 0, :]
                 if action_pred is not None and tuple(action_pred.shape) == tuple(target_action.shape):
                     diff = action_pred - target_action
-                    per_sample = (diff ** 2).mean(dim=-1) if config.loss_type == "l2" else diff.abs().mean(dim=-1)
+                    # P1 iter2：逐维权重（w=(1,1) 时与旧 mean 逐位一致）
+                    per_dim = diff ** 2 if config.loss_type == "l2" else diff.abs()
+                    per_sample = (per_dim * action_dim_weights).sum(dim=-1) / 2.0
                     action_loss = (per_sample * specific_weight).sum() / weight_sum * config.action_weight
                     action_term = action_loss
                     mu_num += float((action_pred[:, 0] * specific_weight).sum())
