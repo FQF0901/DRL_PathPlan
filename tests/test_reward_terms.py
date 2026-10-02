@@ -45,6 +45,7 @@ EXPECTED_TERMS = {
     "comfort_jerk",
     "lane_center",
     "lane_boundary",
+    "off_road_edge",
     "ttc",
     "lead_gap",
     "low_speed",
@@ -320,9 +321,68 @@ def test_lane_boundary_missing_keys_fallback_and_warn_once() -> None:
     assert term.compute({"d_lat": "bad", "lane_half_width_m": 1.75}) == 0.0
 
 
+def test_off_road_edge_bc_sac_shape_and_equivalence() -> None:
+    """off_road_edge：BC-SAC 形状 ``raw = clip(1 + d_edge/scale, 0, 2)``；weight=−1 时逐值等价原式。"""
+    term = make_term("off_road_edge", weight=-1.0)  # 默认 edge_scale_m=1.0
+    assert term.edge_scale_m == pytest.approx(1.0)
+    # d_edge: 负=界内。界内 >=1 m → 0；界上 → 1；越界 ≥1 m → 封顶 2（BC-SAC 数值逐点一致）
+    for d_edge, expected in ((-3.0, 0.0), (-1.0, 0.0), (-0.5, 0.5), (0.0, 1.0),
+                             (0.5, 1.5), (1.0, 2.0), (5.0, 2.0)):
+        assert term.compute({"d_edge": d_edge}) == pytest.approx(expected)
+        # weight=−1 时加权贡献 == BC-SAC 原式 clip(−1−d_edge, −2, 0)
+        assert term.weight * term.compute({"d_edge": d_edge}) == pytest.approx(
+            max(-2.0, min(0.0, -1.0 - d_edge))
+        )
+    # 连续 + 单调不减（越靠界/越界越大）
+    raws = [term.compute({"d_edge": v}) for v in (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0)]
+    assert all(later >= earlier for earlier, later in zip(raws, raws[1:]))
+    # 车道等效量：d_edge = |d_lat| − half；半量级权重 −0.5 → 界上 −0.5
+    half = 1.75
+    assert term.compute({"d_lat": 0.75, "lane_half_width_m": half}) == pytest.approx(0.0)
+    assert term.compute({"d_lat": -0.75, "lane_half_width_m": half}) == pytest.approx(0.0)
+    assert term.compute({"d_lat": half, "lane_half_width_m": half}) == pytest.approx(1.0)
+    assert term.compute({"d_lat": -2.0, "lane_half_width_m": half}) == pytest.approx(1.25)
+    half_weight = make_term("off_road_edge", weight=-0.5)
+    assert half_weight.weight * half_weight.compute(
+        {"d_lat": half, "lane_half_width_m": half}
+    ) == pytest.approx(-0.5)
+    # 显式 d_edge 优先于等效量；自定义 scale（0.5 m）：界上仍 1、半 m 越界封顶 2
+    assert term.compute({"d_edge": -2.0, "d_lat": half, "lane_half_width_m": half}) == pytest.approx(0.0)
+    narrow = make_term("off_road_edge", edge_scale_m=0.5)
+    assert narrow.compute({"d_edge": 0.0}) == pytest.approx(1.0)
+    assert narrow.compute({"d_edge": 0.25}) == pytest.approx(1.5)
+    assert narrow.compute({"d_edge": 0.5}) == pytest.approx(2.0)
+    # 参数非法 fail-fast；默认关
+    with pytest.raises(ValueError):
+        make_term("off_road_edge", edge_scale_m=0.0)
+    assert "off_road_edge" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
+
+
+def test_off_road_edge_fallback_and_warn_once() -> None:
+    """off_road_edge：左右边界距离回退；缺键 → 0 且只告警一次（每实例）。"""
+    term = make_term("off_road_edge", weight=-1.0)
+    # 回退：d_lat=(2.75−1.25)/2=0.75、half=(2.75+1.25)/2=2.0 → d_edge=−1.25 → raw 0（界内 ≥1 m）
+    assert term.compute({"dist_to_left_side": 2.75, "dist_to_right_side": 1.25}) == 0.0
+    # d_lat=−1.7、half=2.0 → d_edge=−0.3 → raw 0.7
+    assert term.compute(
+        {"d_lat": -1.7, "lane_half_width_m": 0.0, "dist_to_left_side": 3.7, "dist_to_right_side": 0.3}
+    ) == pytest.approx(0.7)
+    # 显式 d_edge 非有限 → 继续回退等效量（半宽 1.75、d_lat 1.75 → 界上 raw 1）
+    assert term.compute(
+        {"d_edge": float("nan"), "d_lat": 1.75, "lane_half_width_m": 1.75}
+    ) == pytest.approx(1.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({"speed": 5.0}) == 0.0  # d_lat 与半宽都缺
+        assert term.compute({"d_lat": 0.2}) == 0.0  # 有 d_lat 但缺半宽
+        assert term.compute({"lane_half_width_m": 1.75}) == 0.0  # 有半宽但缺 d_lat
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+
+
 def test_new_dense_terms_registered_and_default_list_frozen() -> None:
     """新项已注册（可经 config/CLI 启用）；DEFAULT_TERM_CONFIGS 逐项快照不变。"""
-    assert {"ttc", "lane_boundary", "lead_gap"} <= set(available_terms())
+    assert {"ttc", "lane_boundary", "lead_gap", "off_road_edge"} <= set(available_terms())
     assert [dict(config) for config in DEFAULT_TERM_CONFIGS] == [
         {"name": "route_completion", "weight": 1.0, "gamma": 1.0},
         {"name": "speed_ratio", "weight": 0.4, "cap": 1.0},  # v5 §2

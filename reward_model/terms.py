@@ -8,6 +8,9 @@
 - 车道保持（死区线性惩罚，**默认关**）：``lane_center``（偏离本车道中心线 ``|d_lat|``；无车道信息时为 0）。
 - 车道保持（贴近边界罚，**默认关**）：``lane_boundary``（``lane_half_width_m − |d_lat|`` 小于
   阈值时线性罚；只罚"快出界"，不罚居中偏离）。
+- 安全（离路距离型稠密，**默认关**）：``off_road_edge``（BC-SAC 式 ``clip(−1−d_edge,−2,0)`` 的
+  正罚等效：界内裕度不足 ``edge_scale_m`` 起线性罚、越界封顶；缺 ``d_edge`` 键时以车道边界
+  距离等效量替代，口径见 :func:`road_edge_distance_from_ctx`）。
 - 效率：``speed_ratio``（``v / 车道限速`` 的截断收益，防爬行；超速交由合规项）。
 - 效率（低速蠕动，v5 默认启用）：``low_speed``（``v < 2 m/s`` 时按缺口线性罚，与评测 KPI
   ``CRAWL_SPEED_MPS`` 同阈值）。
@@ -39,6 +42,7 @@ __all__ = [
     "JerkPenalty",
     "LaneCenterPenalty",
     "LaneBoundaryPenalty",
+    "OffRoadEdgePenalty",
     "LowSpeedPenalty",
     "SpeedRatioTerm",
     "SolidLineCrossingPenalty",
@@ -48,6 +52,7 @@ __all__ = [
     "ego_speed_from_ctx",
     "lane_lateral_offset_from_ctx",
     "lane_half_width_from_ctx",
+    "road_edge_distance_from_ctx",
 ]
 
 #: 任意一个为真即视为碰撞（MetaDrive ``info`` / P1a 契约 §0）
@@ -172,6 +177,34 @@ def lane_half_width_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
         return None
     half = 0.5 * (left + right)
     return half if half > 0.0 else None
+
+
+def road_edge_distance_from_ctx(step_ctx: Mapping[str, Any]) -> float | None:
+    """有符号离路/离车道边界距离 ``d_edge``（m；BC-SAC 口径：负 = 界内，正 = 越界）。
+
+    读取顺序（只读 ``step_ctx``，不 import env/metadrive）：
+
+    1. 显式键 ``d_edge`` / ``dist_to_road_edge`` / ``road_edge_distance``（未来 pipeline 注入时
+       优先；值语义须为"负 = 界内、正 = 界外"，与 BC-SAC 一致；非有限值按缺键继续回退）；
+    2. 车道边界**等效量**：``d_edge = |d_lat| − lane_half_width_m``。``d_lat`` / 半宽读取顺序
+       分别见 :func:`lane_lateral_offset_from_ctx` / :func:`lane_half_width_from_ctx`（左右边界
+       距离回退同源）。两者之差 = "到本车道边界的剩余裕度"取负：界内为负、压线为 0、越界为正。
+
+       **口径记录（v7 P2 预注册）**：本 repo 的 ``SpecMetaDriveEnv``（MetaDrive ``MetaDriveEnv``
+       子类）``out_of_road`` 触发面 = 出车道/压连续实线（``_is_out_of_road``：``not on_lane``
+       或 ``on_white/yellow_continuous_line``）⇒ "车道边界 = 离路触发面"，当前 ctx 下没有独立
+       road-edge 键，以本等效量替代 BC-SAC 的 ``d_edge``（原始 road-edge 语义不可得，已记录）。
+    3. 均缺失 / 非数值 / 非有限 → ``None``（调用方记 0 + 只告警一次）。
+    """
+    for key in ("d_edge", "dist_to_road_edge", "road_edge_distance"):
+        value = _optional_float(step_ctx.get(key))
+        if value is not None and math.isfinite(value):
+            return value
+    d_lat = lane_lateral_offset_from_ctx(step_ctx)
+    half_width = lane_half_width_from_ctx(step_ctx)
+    if d_lat is None or half_width is None or not math.isfinite(d_lat):
+        return None
+    return abs(d_lat) - half_width
 
 
 @register_term
@@ -461,6 +494,50 @@ class LaneBoundaryPenalty(Term, _WarnMissingInputMixin):
         margin = half_width - abs(d_lat)
         deficit = self.margin_threshold - max(margin, 0.0)
         return deficit if deficit > 0.0 else 0.0
+
+
+@register_term
+class OffRoadEdgePenalty(Term, _WarnMissingInputMixin):
+    """安全（离路距离型稠密罚，**默认关**）：BC-SAC 式离路距离罚的正罚等效。
+
+    BC-SAC（Waymo IROS'23）原式 ``R_off-road = clip(−1 − d_edge, −2, 0)``（``d_edge`` 为
+    有符号离路距离，负 = 路上、正 = 越界）。本项按 repo 约定返回**正罚原始值**（权重取负）：
+
+        raw = clip(1 + d_edge / edge_scale_m, 0, 2)
+
+    等价关系：``weight = −1`` 时加权贡献 = ``clip(−1 − d_edge/edge_scale_m, −2, 0)`` = BC-SAC 原式。
+
+    - ``edge_scale_m``（默认 1.0 m）= BC-SAC 的提前起罚裕度：界内距离 ≥ 1×scale → raw 0（不罚）；
+    界上（``d_edge = 0``）→ raw 1；越界 1×scale → raw 封顶 2（单步最差 = 2×|weight|）；
+    - 连续、单调：越靠近/越过边界 raw 越大（界内裕度不足 scale 即开始线性罚）；
+    - ``d_edge`` 读取顺序见 :func:`road_edge_distance_from_ctx`：显式键优先，缺键时以
+      **车道边界距离等效量**（``|d_lat| − lane_half_width_m``）替代并记录口径（当前
+      ctx 无独立 road-edge 键；等效量 = 本 repo ``out_of_road`` 的真实触发面，见 helper docstring）；
+    - 缺键 / 非有限 → 0 且**只告警一次**（每实例）。
+    - 权重建议：``−1.0``（BC-SAC 原量级）或 ``−0.5``（半量级，P2 首臂预注册经
+      ``config/arms/v7_arm1_offroad.yaml`` 承载；见 ``docs/v7_program_prereg.md`` §9）。
+
+    默认**不在** :data:`DEFAULT_TERM_CONFIGS`；启用：config ``stages.C.reward.terms`` 追加或
+    CLI ``--reward-term-weight off_road_edge=-1.0``。
+    """
+
+    name: ClassVar[str] = "off_road_edge"
+
+    def __init__(self, weight: float = -1.0, edge_scale_m: float = 1.0) -> None:
+        if edge_scale_m <= 0.0:
+            raise ValueError(f"off_road_edge edge_scale_m 必须 > 0，收到 {edge_scale_m}")
+        super().__init__(weight=weight, edge_scale_m=float(edge_scale_m))
+        self.edge_scale_m = float(edge_scale_m)
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        d_edge = road_edge_distance_from_ctx(step_ctx)
+        if d_edge is None:
+            self._warn_missing_input(
+                "off_road_edge: 缺少 d_edge / (d_lat|lane_lateral_offset + lane_half_width_m) "
+                "之一或值非法 → 该项记 0（每个项实例只告警一次）"
+            )
+            return 0.0
+        return _clip(1.0 + d_edge / self.edge_scale_m, 0.0, 2.0)
 
 
 @register_term

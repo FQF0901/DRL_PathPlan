@@ -107,7 +107,70 @@
 - v7-P0 建档（本文件 + `tools/paired_eval.py` + `tests/test_paired_eval.py`）内容 commit：`b711e5f`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - v7-P0 修正集 #1（Gate A：预注册统计修正 + 评测 pin 表 + IDM spec-seed 变体 + Gate B/C 加固 + 安全闸量化 + `expert500val` 禁训 + `paired_eval` 方差闸/单 baseline fail-closed）内容 commit：`0454308`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 
+## 9. P2 首臂预注册（2026-10-03；off-road 距离型奖励 + KL 锚；w1 起点）
+
+> 本 § 为 P2 首臂（arm1）**臂定义与判据**（经 §8 两段式立项）；P2 其余臂（奖励升档/算法/池/课程）不在本 § 范围，逐臂另行预注册。揭盲前冻结。
+
+### 9.1 基线与臂定义（逐字冻结）
+
+- **base = P1 DAgger w1 e005**（Gate B 覆盖：w1 为 4 窗 clean500 冠军 0.526；w4 降档案/fallback）：
+  `runs/BTC20261002-2329_v7p1dagger_w1/ckpt_epoch005.pt`，sha256 `fdfe0808…`（全 sha 见驱动 pin）；
+  clean500 参照 run `runs/BTC20261003-045912_v7p1dagger_w1_clean500`（0.526，episodes sha `042b63…`），
+  **期望锚 0.47–0.51**（0.526 为 4 窗上尾、sd 6.3pp；不按 0.526 承诺）。
+  eval500 参照（**探索性，仅报告**）：`runs/BTC20261003-061634_v7p1dagger_w1_eval500_exploratory` = 0.530。
+- **单变量主改 = `off_road_edge`**（BC-SAC 式离路距离型稠密项，`reward_model/terms.py`）：
+  `raw = clip(1 + d_edge / edge_scale_m, 0, 2)`，weight **−0.5**、`edge_scale_m` **1.0**（半量级）。
+  `d_edge` = 有符号离路距离（负 = 界内，正 = 越界）；ctx 无独立 road-edge 键时以**车道边界等效量**
+  `|d_lat| − lane_half_width_m` 替代（口径 = 本 repo `out_of_road` 真实触发面：出车道/压连续实线；
+  见 `terms.py::road_edge_distance_from_ctx`；校准见 §9.2）。臂文件
+  `config/arms/v7_arm1_offroad.yaml`（= arm0 v5 bundle + 该追加项；终局值 rc=1 逐位不变）。
+- **KL 锚（方差控制，§3 首选）**：`--kl-anchor-coef 0.05` → `--kl-anchor-final-coef 0.02`（线性慢衰减；
+  末值 > 0）。**BC-SAC 固定 1:8 IL:RL 更新比未实现**（现有 PPO 无交替更新机制；`--bc-anchor` 为 loss
+  coef 形式且本臂不启用）——如实记录，不作本臂判据。
+- **其余 pins 逐字不动**（v6 P4 arm0 口径，保臂间可比）：`--spec env/specs/scenarios_train_dagger_r1.json`
+  (500，sha `d204e803…`)、`--ckpt`(w1 e005)、`--pool local --envs 1 --trainable-scope design
+  --plan-reference repeat_action --adv-norm global --updates 200 --rollout-steps 256 --ppo-epochs 2
+  --minibatch-size 1024 --critic-warmup-updates 0 --max-episode-steps 200 --ckpt-every 25
+  --probe-interval 25 --device cuda`；**池/课程不动**（不扩量、不换池）。
+- **seeds = 0 与 11**（2 seeds 分布读数；单 seed 仅方向性，§6 Gate C 口径）。
+
+### 9.2 校准读数（离线；base 策略在 val 子集 24 条，非测试集）
+
+- 24 ep（clean150 前 24，w1 e005，LQR/plan 采集 ctx）：`d_edge` 均值 **−1.007 m**、**46% 步**在界内
+  1 m 内（触发率）；success 回合 raw 累计均值 ≈ **26**（@scale 1.0）；oob 触发步 `on_white_continuous_line=1`。
+- 触发物理：`out_of_road` = 车体（chassis）接触连续实线碰撞体（`on_white_continuous_line`，11/11
+  触发步命中），发生在**车中心 clearance ≈ 车半宽（0.8–1.0 m）**——BC-SAC 的 1 m 裕度与触发面
+  吻合（等效口径依据）。
+- weight 取 **−0.5**（半量级）理由：车道边界代理比 BC-SAC 路缘触发面高频（46% 步触发 vs 路缘罕见），
+  半量级补偿；**升档 −1.0（原量级）/降档 −0.25 留作后续臂**（不在本臂）。
+
+### 9.3 判据（本臂；判读口径）
+
+- **主判据（首要）**：`clean500` 配对 Δ（vs w1 e005 clean500，同协议 pinned 单一 baseline；配对工具
+  `tools/paired_eval.py`）：
+  - **期望带 +8–15pt 且方差可控**（2-seed mean/sd 记录）；
+  - 方向：Δ ≥ +3pt 且 z ≥ 1.96 = 单 run 方向正（§2.3）；**2 seeds 方向一致**才报"方向一致"；
+  - 反目标：Δ < 0 或训练崩解（u50+u100 双点触发）→ **记录并等编排决策**（不自行改判据/不加跑）。
+- **次判据**：`clean500` 配对 Δ vs P1-B e010（0.314；辅助对照）；`eval500` 配对（vs P1-B e010，
+  **每 seed 最终采纳 candidate 仅评一次**，禁止选点/择优）。
+- **辅助项（无命中条款）**：tg45 success（IDM 0.778 参照）与 T3 S1（9 锚）——奖励/方差实验，
+  tollgate 结构问题不在本臂判据内；只记录读数，不设命中门槛（避免多重比较）。
+- **安全闸（§5）**：collision / off-road 配对 Δ 与绝对率、rc / speed_ratio、max_step 逐项报告。
+- **止损（臂内，§6 双点口径）**：`u50` 与 `u100` **双点** sub150 闸（net < −20 **或** offΔ ≥ +0.10
+  vs w1 sub150，任一点触发记一次）；**两点均触发** → early-collapse，跳过 keep-best/终评、保留现场。
+  keep-best：8 候选（u25..u200）sub150 → top1–2 全量 clean500 复评 → **全量配对 net 采纳**
+  （禁 sub150 直采）。
+- **方差**：2 seed mean/sd；sd > 5pt 须标注"方差未达 §2.2 闸口径（n<5，不做主判据/不宣称超越）"。
+
+### 9.4 产物与记录
+
+- run 目录 `runs/BTC*_v7p2_*`（每臂独立）；配对报告 `tools/paired_eval.py`（json+md）；
+- 驱动 `/tmp/opencode/v7_p2_driver.py`（不入 repo；fail-closed pin 断言）；报告
+  `/tmp/opencode/v7_p2_arm1.md`；status `/tmp/opencode/v7_p2_status.txt`；
+- 证据：逐 run `episodes.csv` sha256、spec hash、HEAD commit、ckpt sha。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。
 - 2026-10-02：**Gate A 修正集 #1**（揭盲前）：主判据加**方差闸**（run sd ≤5pt 且 min Δ ≥−5pt；未过 = "稳定性未达标，不宣称超越"）+ **n ≥ 5（建议 8–10）** + 功效依据（σ≈15.8pt：n=3 功效 0.53；双峰 n=5 反降 0.20；方差控制才是功效修复）；**评测 pin 表**（`--eval-reference plan` + 一次性 `repeat_action` 诊断 / `--tracker lqr` / `max_steps=1000` / 单 baseline）；**IDM 多 run 改 spec-seed 变体**（同 500 模板、不同 per-scenario seed；同 spec 重复=恒等重复）；Gate B/C 加固（≥2–3 seed 或分布/方差读数）+ **u50+u100 双点止损 + keep-best**（u50 单点假阳性 3/4）；**安全闸量化**（collision 绝对 10% 不可达——IDM 自身 14.4% ⇒ 相对支路；off-road ≤10% 或 ≤IDM+2pt；speed_ratio ≥0.9×IDM）；**教师天花板**（tollgate IDM 0.778 评测 / 0.644 采集）+ `expert500val` 禁入训练（preflight 断言）；`tools/paired_eval.py` 方差闸字段（run sd/min Δ/判定）+ 单 baseline fail-closed；单测更新。
+- 2026-10-03：**P2 首臂预注册（§9，揭盲前）**：base = P1 DAgger **w1 e005**（Gate B 覆盖；clean500 0.526、期望锚 0.47–0.51）；主改 = **`off_road_edge`**（BC-SAC 式距离型稠密项，weight −0.5 / scale 1.0；缺 `d_edge` 键以车道边界等效量替代——口径 = `out_of_road` 真实触发面，含 24-ep 校准读数）+ **KL 锚 0.05→0.02**（方差控制）；其余 pins/池/课程不动；判据 = clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每 seed 采纳 candidate 一次，2 seeds 分布读数；实现 = `terms.py` + `config/arms/v7_arm1_offroad.yaml` + `tests/test_v7_p2_arm_config.py` + `tests/test_reward_terms.py` 更新。
