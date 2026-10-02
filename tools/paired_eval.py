@@ -32,8 +32,10 @@
     tools/venv-python tools/paired_eval.py --baseline RUN/episodes.csv \\
         --agent RUN_A/episodes.csv RUN_B/episodes.csv RUN_C/episodes.csv \\
         --out-dir runs/paired_eval/v7_p0
-    # --baseline 可给多个 run（基线多 evaluation seed），与每个 agent run 交叉配对；
-    # 多个 baseline 时主结论应 pin 单一 baseline run（交叉配对用于基线稳定性检查）。
+    # 主判据要求 pin 单一 baseline run（默认 fail-closed：多 baseline 交叉配对会被当独立样本
+    # = 伪重复）；仅作基线稳定性检查时显式 --allow-multi-baseline（报告标注"非独立"，主判据被阻断）。
+    # 多 run 汇总含方差闸（run sd ≤5pt 且 min Δ ≥−5pt）+ n≥5（建议 8–10）；未过 →
+    # "稳定性未达标，不宣称超越"（先做方差控制，见 v7 预注册 §2.2/§3）。
 """
 
 from __future__ import annotations
@@ -66,6 +68,12 @@ POSITIVE_Z = 1.96
 COLLISION_GATE_ABS = 0.10
 OFF_ROAD_GATE_ABS = 0.10
 OFF_ROAD_GATE_MARGIN_PP = 2.0
+#: 主判据方差闸（v7 预注册 §2.2，Gate A 修正集 #1）：run 级 sd ≤ 5pt 且 min Δ ≥ −5pt
+VARIANCE_SD_LIMIT_PP = 5.0
+VARIANCE_MIN_DELTA_PP = -5.0
+#: 主判据最小独立 run 数（≥5；建议 8–10）
+MIN_RUNS_MAIN = 5
+RECOMMENDED_RUNS = (8, 10)
 
 TRUTHY = frozenset({"true", "1", "yes", "y", "t"})
 FALSY = frozenset({"", "false", "0", "no", "n", "f", "none", "nan", "null"})
@@ -80,12 +88,19 @@ EVENTS: Dict[str, str] = {
 }
 
 __all__ = [
+    "COLLISION_GATE_ABS",
     "DEFAULT_ALPHA",
     "DEFAULT_BOOTSTRAP",
     "DEFAULT_MIN_STRATUM",
     "DEFAULT_SEED",
     "EVENTS",
     "Episode",
+    "MIN_RUNS_MAIN",
+    "OFF_ROAD_GATE_ABS",
+    "OFF_ROAD_GATE_MARGIN_PP",
+    "RECOMMENDED_RUNS",
+    "VARIANCE_MIN_DELTA_PP",
+    "VARIANCE_SD_LIMIT_PP",
     "aggregate_runs",
     "analyze",
     "analyze_pair",
@@ -352,6 +367,17 @@ def _median(values: Sequence[Optional[float]]) -> Optional[float]:
     return finite[mid] if n % 2 else (finite[mid - 1] + finite[mid]) / 2.0
 
 
+def _std(values: Sequence[Optional[float]]) -> Optional[float]:
+    """样本标准差（ddof=1；n < 2 → None，不伪造数值）。"""
+    finite = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    n = len(finite)
+    if n < 2:
+        return None
+    mean = sum(finite) / n
+    variance = sum((value - mean) ** 2 for value in finite) / (n - 1)
+    return math.sqrt(variance)
+
+
 def paired_stats(
     rows: Sequence[Tuple[Episode, Episode]],
     event: str,
@@ -557,6 +583,7 @@ def _aggregate_metric(
         "n": len(finite),
         "values": finite,
         "mean": _mean(finite),
+        "sd": _std(finite),
         "median": _median(finite),
         "iqm": iqm(finite),
         "min": min(finite) if finite else None,
@@ -571,8 +598,16 @@ def aggregate_runs(
     n_boot: int = DEFAULT_BOOTSTRAP,
     seed: int = DEFAULT_SEED,
     alpha: float = DEFAULT_ALPHA,
+    independent: bool = True,
 ) -> Dict[str, Any]:
-    """多 run 汇总：run 级指标 → 均值/中位数/IQM/min/max + bootstrap 95% CI（按 run 重采样）。"""
+    """多 run 汇总：run 级指标 → 均值/sd/中位数/IQM/min/max + bootstrap 95% CI（按 run 重采样）。
+
+    主判据（v7 预注册 §2.2）：
+    - **方差闸**：run 级 sd ≤ ``VARIANCE_SD_LIMIT_PP``（5pt）且 min Δ ≥ ``VARIANCE_MIN_DELTA_PP``
+      （−5pt）方可进入主判据；未过 → "稳定性未达标，不宣称超越"；
+    - **n ≥ ``MIN_RUNS_MAIN``（5；建议 8–10）** + CI 下界 > 0 + IQM > 0；
+    - ``independent=False``（多 baseline 交叉配对 = 伪重复）→ 主判据被阻断（``None``），不产生超越结论。
+    """
     metrics: Dict[str, Any] = {}
     for name, path in AGGREGATE_METRICS.items():
         values = [_dig(run_pair, path) for run_pair in run_pairs]
@@ -601,14 +636,57 @@ def aggregate_runs(
         }
 
     ci_lo = delta["ci95"][0]
+    ci_lower_gt_zero = bool(ci_lo is not None and ci_lo > 0.0)
+    iqm_positive = bool(delta["iqm"] is not None and delta["iqm"] > 0.0)
+    run_sd = delta["sd"]
+    min_delta = delta["min"]
+    variance_gate = {
+        "run_sd_pp": run_sd,
+        "min_delta_pp": min_delta,
+        "sd_limit_pp": VARIANCE_SD_LIMIT_PP,
+        "min_delta_limit_pp": VARIANCE_MIN_DELTA_PP,
+        "passed": (
+            None
+            if run_sd is None or min_delta is None
+            else bool(run_sd <= VARIANCE_SD_LIMIT_PP and min_delta >= VARIANCE_MIN_DELTA_PP)
+        ),
+    }
+    n_runs_gate = {
+        "n_runs": len(run_pairs),
+        "required": MIN_RUNS_MAIN,
+        "recommended": list(RECOMMENDED_RUNS),
+        "passed": bool(len(run_pairs) >= MIN_RUNS_MAIN),
+    }
+    if not independent:
+        main_criterion_passed: Optional[bool] = None
+        main_criterion_reasons = ["pseudo_replication_multi_baseline"]
+    else:
+        main_criterion_reasons: List[str] = []
+        if not n_runs_gate["passed"]:
+            main_criterion_reasons.append("n_runs_below_min")
+        if variance_gate["passed"] is not True:
+            main_criterion_reasons.append("stability_not_met")
+        if not ci_lower_gt_zero:
+            main_criterion_reasons.append("ci_lower_le_zero")
+        if not iqm_positive:
+            main_criterion_reasons.append("iqm_le_zero")
+        main_criterion_passed = not main_criterion_reasons
     verdict = {
         "n_runs": len(run_pairs),
+        "independent": bool(independent),
+        "pseudo_replication": not independent,
         "mean_delta_pp": delta["mean"],
         "median_delta_pp": delta["median"],
         "iqm_delta_pp": delta["iqm"],
+        "sd_delta_pp": run_sd,
+        "min_delta_pp": min_delta,
         "ci95_pp": delta["ci95"],
-        "primary_ci_lower_gt_zero": bool(ci_lo is not None and ci_lo > 0.0),
-        "primary_iqm_positive": bool(delta["iqm"] is not None and delta["iqm"] > 0.0),
+        "primary_ci_lower_gt_zero": ci_lower_gt_zero,
+        "primary_iqm_positive": iqm_positive,
+        "variance_gate": variance_gate,
+        "n_runs_gate": n_runs_gate,
+        "main_criterion_passed": main_criterion_passed,
+        "main_criterion_reasons": main_criterion_reasons,
         "positive_runs": sum(
             1
             for run_pair in run_pairs
@@ -636,8 +714,21 @@ def analyze(
     alpha: float = DEFAULT_ALPHA,
     min_stratum: int = DEFAULT_MIN_STRATUM,
     allow_mismatch: bool = False,
+    allow_multi_baseline: bool = False,
 ) -> Dict[str, Any]:
-    """入口：多 baseline run × 多 agent run 交叉配对 + 汇总（agent 外层遍历）。"""
+    """入口：baseline run × agent run 交叉配对 + 汇总（agent 外层遍历）。
+
+    主判据要求 **pin 单一 baseline run**：多 baseline 交叉配对会被当独立样本 = 伪重复，
+    默认 fail-closed；``allow_multi_baseline=True`` 仅用于显式标注的基线稳定性检查
+    （报告标注"非独立"，主判据被阻断）。
+    """
+    if len(baseline_runs) > 1 and not allow_multi_baseline:
+        raise SystemExit(
+            f"收到 {len(baseline_runs)} 个 baseline run：主判据要求 pin 单一 baseline run"
+            "（多 baseline 交叉配对会被当独立样本 = 伪重复）。"
+            "确需基线稳定性检查请显式 --allow-multi-baseline（报告标注非独立、主判据被阻断）。"
+        )
+    independent = len(baseline_runs) == 1
     run_pairs: List[Dict[str, Any]] = []
     for agent_run in agent_runs:
         for baseline_run in baseline_runs:
@@ -671,9 +762,16 @@ def analyze(
             "alpha": float(alpha),
             "min_stratum": int(min_stratum),
             "allow_mismatch": bool(allow_mismatch),
+            "baseline_pinned": bool(independent),
+            "pseudo_replication": bool(not independent),
+            "allow_multi_baseline": bool(allow_multi_baseline),
             "pairing": "同 (id, seed) 场景配对；同键 primary/difficulty/split 一致性校验（fail-closed）",
             "success_definition": "episodes.csv::success（= arrive_dest）",
             "net_z_definition": "net = fixed − broken；z = |net| / √(fixed + broken)（v6 §7.3）",
+            "main_criterion": (
+                "pin 单一 baseline + n≥5（建议 8–10）+ 方差闸（run sd ≤5pt 且 min Δ ≥−5pt）"
+                "+ 汇总配对差 95% CI 下界 > 0 + IQM > 0（v7 预注册 §2.2）"
+            ),
             "direction": dict(EVENTS),
             "baseline_runs": [
                 {
@@ -695,7 +793,9 @@ def analyze(
             ],
         },
         "run_pairs": run_pairs,
-        "aggregate": aggregate_runs(run_pairs, n_boot=n_boot, seed=seed, alpha=alpha),
+        "aggregate": aggregate_runs(
+            run_pairs, n_boot=n_boot, seed=seed, alpha=alpha, independent=independent
+        ),
     }
     return report
 
@@ -760,14 +860,45 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     )
     lines.append("## 0. 结论\n")
     verdict = aggregate["verdict"]
+    n_runs_gate = verdict["n_runs_gate"]
+    variance_gate = verdict["variance_gate"]
     lines.append(
         f"- 单 run 参考判据（Δ ≥ +3pt 且 z ≥ 1.96）：**{verdict['positive_runs']}/{verdict['n_runs']}** run 满足"
     )
     lines.append(
         f"- 多 run 汇总（n={verdict['n_runs']}）：配对差均值 **{_fmt(verdict['mean_delta_pp'], 2, sign=True)}pt**"
-        f"，95% CI **{_fmt_ci(verdict['ci95_pp'])}pt**，下界 > 0："
+        f"，sd **{_fmt(verdict['sd_delta_pp'], 2)}pt**，95% CI **{_fmt_ci(verdict['ci95_pp'])}pt**，下界 > 0："
         f"**{'是' if verdict['primary_ci_lower_gt_zero'] else '否'}**；IQM "
         f"{_fmt(verdict['iqm_delta_pp'], 2, sign=True)}pt（> 0：{'是' if verdict['primary_iqm_positive'] else '否'}）"
+    )
+    lines.append(
+        f"- 主判据 run 数（≥{n_runs_gate['required']}，建议 {n_runs_gate['recommended'][0]}–"
+        f"{n_runs_gate['recommended'][1]}）：n={verdict['n_runs']} → "
+        f"**{'达标' if n_runs_gate['passed'] else '不足'}**"
+    )
+    lines.append(
+        f"- 方差闸（主判据前置）：run sd {_fmt(variance_gate['run_sd_pp'], 2)}pt"
+        f"（≤{variance_gate['sd_limit_pp']:g}pt）/ min Δ "
+        f"{_fmt(variance_gate['min_delta_pp'], 2, sign=True)}pt（≥{variance_gate['min_delta_limit_pp']:g}pt）→ "
+        f"**{'通过' if variance_gate['passed'] else '未通过' if variance_gate['passed'] is False else '—'}**"
+    )
+    if verdict["pseudo_replication"]:
+        lines.append(
+            f"- ⚠️ 多 baseline（{len(meta['baseline_runs'])} 个）交叉配对 = 伪重复（非独立样本）："
+            "主判据被阻断，不产生超越结论（仅作基线稳定性参考）。"
+        )
+    main_passed = verdict["main_criterion_passed"]
+    if main_passed is None:
+        main_text = "被阻断（多 baseline 伪重复）"
+    elif main_passed:
+        main_text = "通过"
+    else:
+        main_text = "未通过（" + "、".join(verdict["main_criterion_reasons"]) + "）"
+        if "stability_not_met" in verdict["main_criterion_reasons"]:
+            main_text += "；稳定性未达标，不宣称超越（先做方差控制）"
+    lines.append(
+        f"- 主判据（单 baseline pin + n≥{n_runs_gate['required']} + 方差闸 + CI 下界 > 0 + IQM > 0）："
+        f"**{main_text}**"
     )
     collision_gate = verdict["collision_gate"]
     off_road_gate = verdict["off_road_gate"]
@@ -775,7 +906,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         f"- 安全闸：collision 均值 {_fmt(collision_gate['agent_rate_mean'])} / Δ "
         f"{_fmt(collision_gate['delta_pp_mean'], 2, sign=True)}pt → "
         f"**{'通过' if collision_gate['passed'] else '未通过' if collision_gate['passed'] is False else '—'}**"
-        f"（≤10% 或 Δ≤0）；off-road 均值 {_fmt(off_road_gate['agent_rate_mean'])} / Δ "
+        f"（绝对 ≤10% 或 Δ≤0；Gate A 实测 IDM 自身 14.4% ⇒ 操作性支路 = 相对 Δ≤0）；off-road 均值 "
+        f"{_fmt(off_road_gate['agent_rate_mean'])} / Δ "
         f"{_fmt(off_road_gate['delta_pp_mean'], 2, sign=True)}pt → "
         f"**{'通过' if off_road_gate['passed'] else '未通过' if off_road_gate['passed'] is False else '—'}**"
         f"（≤10% 或 Δ≤+2pt）"
@@ -842,13 +974,14 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 )
     lines.append("")
 
-    lines.append("## 4. 多 run 汇总（run 级；均值 / 中位数 / IQM / 区间）\n")
-    lines.append("| 指标 | n | mean | median | IQM | min | max | 95% CI |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("## 4. 多 run 汇总（run 级；均值 / sd / 中位数 / IQM / 区间）\n")
+    lines.append("| 指标 | n | mean | sd | median | IQM | min | max | 95% CI |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for name, stats in aggregate["metrics"].items():
         lines.append(
             f"| {name} | {stats['n']} | {_fmt(stats['mean'], 3, sign=True)} | "
-            f"{_fmt(stats['median'], 3, sign=True)} | {_fmt(stats['iqm'], 3, sign=True)} | "
+            f"{_fmt(stats['sd'], 3)} | {_fmt(stats['median'], 3, sign=True)} | "
+            f"{_fmt(stats['iqm'], 3, sign=True)} | "
             f"{_fmt(stats['min'], 3, sign=True)} | {_fmt(stats['max'], 3, sign=True)} | "
             f"{_fmt_ci(stats['ci95'], 3)} |"
         )
@@ -859,17 +992,28 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "- 配对完整性：默认 fail-closed（键集合必须一致、同键 primary/difficulty/split 一致）；"
         "`--allow-mismatch` 仅用于显式记录的交集配对。"
     )
-    if len(meta["baseline_runs"]) > 1 and len(meta["agent_runs"]) > 1:
+    if meta.get("pseudo_replication"):
         lines.append(
-            "- 多个 baseline run × 多个 agent run：run pair 为交叉配对；主结论应 pin 单一 baseline run"
-            "（交叉配对用于基线稳定性检查）。"
+            "- ⚠️ 多 baseline run × agent run 交叉配对 = 伪重复（非独立样本）⇒ 主判据被阻断；"
+            "主结论必须 pin 单一 baseline run（`--allow-multi-baseline` 仅用于显式标注的稳定性检查）。"
         )
+    else:
+        lines.append(
+            "- 单 baseline pin：主判据按单一 baseline run 与每个 agent run 逐 (id, seed) 配对；"
+            "基线稳定性用 spec-seed 变体（同 500 模板、不同 per-scenario seed）单独报告，不参与交叉配对。"
+        )
+    lines.append(
+        f"- 主判据前置：方差闸（run sd ≤{VARIANCE_SD_LIMIT_PP:g}pt 且 min Δ ≥"
+        f"{VARIANCE_MIN_DELTA_PP:g}pt）+ n≥{MIN_RUNS_MAIN}（建议 {RECOMMENDED_RUNS[0]}–{RECOMMENDED_RUNS[1]}）；"
+        "方差闸未过 → \"稳定性未达标，不宣称超越\"（功效修复 = 方差控制：KL 锚末值>0/慢衰减、"
+        "加大 rollout/等效 batch；不靠补 run——Gate A 实测双峰 n=5 功效反降 0.20）。"
+    )
     lines.append(
         "- 选点纪律（v7 预注册 §4）：测试集（eval500）每个最终 run 只评估一次；本报告只做评估，不参与选点。"
     )
     lines.append(
         "- 分层 n < 最小判定数只报不判（与 eval_runner `per_category_n_min` 同口径）；单 run 仅方向性，"
-        "主判据以多 run 汇总 95% CI 下界 > 0 为准。"
+        "主判据以多 run 汇总（单 baseline pin + 方差闸 + CI 下界 > 0 + IQM > 0）为准。"
     )
     lines.append("")
     return "\n".join(lines)
@@ -925,14 +1069,14 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="+",
         required=True,
         metavar="EPISODES.csv",
-        help="基线 run 的 episodes.csv（可多个：基线多 evaluation seed）",
+        help="基线 run 的 episodes.csv（主判据要求 pin 单一 run；多 baseline 默认 fail-closed）",
     )
     parser.add_argument(
         "--agent",
         nargs="+",
         required=True,
         metavar="EPISODES.csv",
-        help="agent run 的 episodes.csv（多 seed：≥3 个独立 run）",
+        help="agent run 的 episodes.csv（多 seed：≥5 个独立 run，建议 8–10）",
     )
     parser.add_argument("--baseline-labels", nargs="+", default=None, help="与 --baseline 一一对应的标签")
     parser.add_argument("--agent-labels", nargs="+", default=None, help="与 --agent 一一对应的标签")
@@ -949,6 +1093,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allow-mismatch",
         action="store_true",
         help="键集合不一致时取交集（默认 fail-closed 报错；缺失数记入报告）",
+    )
+    parser.add_argument(
+        "--allow-multi-baseline",
+        action="store_true",
+        help="显式放行多 baseline 交叉配对（伪重复：报告标注非独立、主判据被阻断；仅作稳定性检查）",
     )
     parser.add_argument("--out-dir", default=None, help="写 paired_eval.md / paired_eval.json 的目录")
     parser.add_argument("--quiet", action="store_true", help="不向 stdout 打印 markdown")
@@ -986,6 +1135,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         alpha=float(args.alpha),
         min_stratum=int(args.min_stratum),
         allow_mismatch=bool(args.allow_mismatch),
+        allow_multi_baseline=bool(args.allow_multi_baseline),
     )
     markdown = render_markdown(report)
     if not args.quiet:
@@ -999,10 +1149,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(f"[paired_eval] 报告 → {out_dir / 'paired_eval.md'} / {out_dir / 'paired_eval.json'}")
     verdict = report["aggregate"]["verdict"]
+    variance_gate = verdict["variance_gate"]
+    stability_text = (
+        "通过" if variance_gate["passed"] else "未通过" if variance_gate["passed"] is False else "—"
+    )
+    main_passed = verdict["main_criterion_passed"]
+    main_text = "通过" if main_passed else "未通过" if main_passed is False else "阻断(伪重复)"
     print(
         f"[paired_eval] runs={verdict['n_runs']} meanΔ={_fmt(verdict['mean_delta_pp'], 2, sign=True)}pt "
         f"CI95={_fmt_ci(verdict['ci95_pp'])} 下界>0={verdict['primary_ci_lower_gt_zero']} "
-        f"正向 run={verdict['positive_runs']}/{verdict['n_runs']}"
+        f"sdΔ={_fmt(verdict['sd_delta_pp'], 2)}pt minΔ={_fmt(verdict['min_delta_pp'], 2, sign=True)}pt "
+        f"方差闸={stability_text} 主判据={main_text} 正向 run={verdict['positive_runs']}/{verdict['n_runs']}"
     )
     return 0
 

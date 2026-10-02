@@ -3,6 +3,9 @@
 口径对齐：``net = fixed − broken``、``z = |net|/√(fixed+broken)``（v6 §7.3）；McNemar 精确
 检验与 scipy 交叉核对（可用时）；bootstrap 固定 seed 可复现。
 
+Gate A 修正集 #1：多 run 汇总含**方差闸**（run sd ≤5pt 且 min Δ ≥−5pt）+ **n≥5** +
+**单 baseline pin**（多 baseline 交叉配对 = 伪重复，默认 fail-closed）。
+
 运行：``tools/venv-python -m pytest tests/test_paired_eval.py -q``。
 """
 
@@ -311,6 +314,7 @@ def test_aggregate_runs_mean_median_iqm_ci() -> None:
     assert delta["median"] == pytest.approx(3.0)
     assert delta["iqm"] == pytest.approx(3.0)  # trim=1 → (2+3+4)/3
     assert delta["min"] == 1.0 and delta["max"] == 5.0
+    assert delta["sd"] == pytest.approx(math.sqrt(2.5))  # 样本 sd（ddof=1）
     assert delta["ci95"][0] > 0.0  # 全正 → 下界 > 0
     verdict = aggregate["verdict"]
     assert verdict["n_runs"] == 5
@@ -319,6 +323,63 @@ def test_aggregate_runs_mean_median_iqm_ci() -> None:
     assert verdict["positive_runs"] == 3  # Δ ≥ 3 的 run
     assert verdict["collision_gate"]["passed"] is True
     assert verdict["off_road_gate"]["passed"] is True
+    # Gate A 修正集 #1：方差闸 + n≥5 + 主判据
+    assert verdict["independent"] is True and verdict["pseudo_replication"] is False
+    assert verdict["variance_gate"] == {
+        "run_sd_pp": pytest.approx(math.sqrt(2.5)),
+        "min_delta_pp": 1.0,
+        "sd_limit_pp": pe.VARIANCE_SD_LIMIT_PP,
+        "min_delta_limit_pp": pe.VARIANCE_MIN_DELTA_PP,
+        "passed": True,
+    }
+    assert verdict["n_runs_gate"]["passed"] is True
+    assert verdict["n_runs_gate"]["required"] == pe.MIN_RUNS_MAIN == 5
+    assert verdict["main_criterion_passed"] is True
+    assert verdict["main_criterion_reasons"] == []
+
+
+def test_aggregate_runs_variance_gate_stability_not_met() -> None:
+    """run sd > 5pt 或 min Δ < −5pt → 方差闸未过：主判据 False，理由 stability_not_met。"""
+    runs = [_fake_run_pair(delta) for delta in (-10.0, 5.0, 6.0, 7.0, 8.0)]
+    verdict = pe.aggregate_runs(runs, n_boot=300, seed=5)["verdict"]
+    assert verdict["variance_gate"]["run_sd_pp"] > 5.0
+    assert verdict["variance_gate"]["min_delta_pp"] == -10.0
+    assert verdict["variance_gate"]["passed"] is False
+    assert verdict["n_runs_gate"]["passed"] is True
+    assert verdict["main_criterion_passed"] is False
+    assert "stability_not_met" in verdict["main_criterion_reasons"]
+
+    # 仅 min Δ < −5pt（sd 小）同样未过
+    runs = [_fake_run_pair(delta) for delta in (-6.0, -5.9, -5.8, -5.7, -5.6)]
+    verdict = pe.aggregate_runs(runs, n_boot=300, seed=5)["verdict"]
+    assert verdict["variance_gate"]["run_sd_pp"] <= 5.0
+    assert verdict["variance_gate"]["passed"] is False
+    assert verdict["main_criterion_passed"] is False
+
+
+def test_aggregate_runs_n_runs_gate_and_non_independent() -> None:
+    """n<5 → 主判据不足；independent=False（多 baseline 伪重复）→ 主判据被阻断（None）。"""
+    runs = [_fake_run_pair(delta) for delta in (1.0, 2.0, 3.0)]
+    verdict = pe.aggregate_runs(runs, n_boot=300, seed=5)["verdict"]
+    assert verdict["n_runs_gate"]["passed"] is False
+    assert verdict["variance_gate"]["passed"] is True
+    assert verdict["main_criterion_passed"] is False
+    assert "n_runs_below_min" in verdict["main_criterion_reasons"]
+
+    blocked = pe.aggregate_runs(runs, n_boot=300, seed=5, independent=False)["verdict"]
+    assert blocked["independent"] is False and blocked["pseudo_replication"] is True
+    assert blocked["main_criterion_passed"] is None
+    assert blocked["main_criterion_reasons"] == ["pseudo_replication_multi_baseline"]
+
+
+def test_aggregate_runs_sd_none_below_two_runs() -> None:
+    """n=1 → sd=None（不伪造数值），方差闸 passed=None，主判据不足。"""
+    verdict = pe.aggregate_runs([_fake_run_pair(2.0)], n_boot=100, seed=1)["verdict"]
+    assert verdict["sd_delta_pp"] is None
+    assert verdict["variance_gate"]["passed"] is None
+    assert verdict["main_criterion_passed"] is False
+    assert "n_runs_below_min" in verdict["main_criterion_reasons"]
+    assert "stability_not_met" in verdict["main_criterion_reasons"]
 
 
 def test_aggregate_runs_negative_and_gate_failure() -> None:
@@ -338,6 +399,12 @@ def test_aggregate_runs_negative_and_gate_failure() -> None:
     assert verdict["primary_iqm_positive"] is False
     assert verdict["collision_gate"]["passed"] is False  # 绝对 15% > 10% 且 Δ=+5pt > 0
     assert verdict["off_road_gate"]["passed"] is False  # 绝对 15% > 10% 且 Δ=+4pt > +2pt
+    # 方差闸未过（min Δ=−6 < −5）且 n<5：主判据 False 并给出理由
+    assert verdict["variance_gate"]["passed"] is False
+    assert verdict["main_criterion_passed"] is False
+    assert "n_runs_below_min" in verdict["main_criterion_reasons"]
+    assert "stability_not_met" in verdict["main_criterion_reasons"]
+    assert "ci_lower_le_zero" in verdict["main_criterion_reasons"]
 
 
 def test_aggregate_runs_deterministic() -> None:
@@ -389,12 +456,60 @@ def test_cli_end_to_end_multi_run(tmp_path: Path) -> None:
     assert code == 0
     markdown = (out_dir / "paired_eval.md").read_text(encoding="utf-8")
     assert "McNemar" in markdown and "多 run 汇总" in markdown
+    assert "方差闸" in markdown and "主判据" in markdown
     report = json.loads((out_dir / "paired_eval.json").read_text(encoding="utf-8"))
     assert report["aggregate"]["verdict"]["n_runs"] == 3
     assert report["meta"]["n_boot"] == 300 and report["meta"]["seed"] == 9
+    assert report["meta"]["baseline_pinned"] is True
+    assert report["meta"]["pseudo_replication"] is False
+    assert report["aggregate"]["verdict"]["variance_gate"]["passed"] is not None
+    # n=3 < 5：主判据不足（不因 CI 下界 > 0 就宣称）
+    assert report["aggregate"]["verdict"]["main_criterion_passed"] is False
+    assert "n_runs_below_min" in report["aggregate"]["verdict"]["main_criterion_reasons"]
     # 每个 run 的 success 配对键一致（同 spec 同 (id, seed)）
     assert report["run_pairs"][0]["pair"]["n_common"] == 20
     assert report["run_pairs"][0]["items"]["success"]["fixed"] > 0
+
+
+def test_cli_multi_baseline_fails_closed_by_default(tmp_path: Path) -> None:
+    """主判据 pin 单一 baseline：多 baseline 默认 fail-closed（伪重复防护）。"""
+    baseline_a = _write_csv(tmp_path / "base_a" / "episodes.csv", _scenario_episodes(0, set(range(0, 12))))
+    baseline_b = _write_csv(tmp_path / "base_b" / "episodes.csv", _scenario_episodes(0, set(range(0, 11))))
+    agent = _write_csv(tmp_path / "agent" / "episodes.csv", _scenario_episodes(0, set(range(0, 15))))
+    with pytest.raises(SystemExit, match="伪重复"):
+        pe.main(["--baseline", str(baseline_a), str(baseline_b), "--agent", str(agent), "--quiet"])
+
+
+def test_cli_multi_baseline_allow_flag_marks_non_independent(tmp_path: Path) -> None:
+    """--allow-multi-baseline：显式放行并标注"非独立"，主判据被阻断（None）。"""
+    baseline_a = _write_csv(tmp_path / "base_a" / "episodes.csv", _scenario_episodes(0, set(range(0, 12))))
+    baseline_b = _write_csv(tmp_path / "base_b" / "episodes.csv", _scenario_episodes(0, set(range(0, 11))))
+    agent = _write_csv(tmp_path / "agent" / "episodes.csv", _scenario_episodes(0, set(range(0, 15))))
+    out_dir = tmp_path / "report"
+    code = pe.main(
+        [
+            "--baseline",
+            str(baseline_a),
+            str(baseline_b),
+            "--agent",
+            str(agent),
+            "--bootstrap",
+            "200",
+            "--allow-multi-baseline",
+            "--out-dir",
+            str(out_dir),
+            "--quiet",
+        ]
+    )
+    assert code == 0
+    report = json.loads((out_dir / "paired_eval.json").read_text(encoding="utf-8"))
+    assert report["meta"]["pseudo_replication"] is True
+    assert report["meta"]["allow_multi_baseline"] is True
+    assert report["aggregate"]["verdict"]["independent"] is False
+    assert report["aggregate"]["verdict"]["main_criterion_passed"] is None
+    assert report["aggregate"]["verdict"]["main_criterion_reasons"] == ["pseudo_replication_multi_baseline"]
+    markdown = (out_dir / "paired_eval.md").read_text(encoding="utf-8")
+    assert "伪重复" in markdown and "主判据被阻断" in markdown
 
 
 def test_cli_strict_mismatch_fails_closed(tmp_path: Path) -> None:
