@@ -844,6 +844,10 @@ class Phase3Config:
     entry_weight: float = 0.1
     #: 轨迹辅助（监控口径保留；0 = 不进损失，见类 docstring）。
     traj_aux_weight: float = 0.0
+    #: bias 标定项（P1 DAgger 前置，2026-10-02）：逐维 signed-bias 惩罚——μ ``(ds,dθ)`` +
+    #: plan 尾链逐 step ``(ds,dθ)`` + 尾链横向位置（``traj_xy`` 对 ``traj6`` 的路径法向偏差）。
+    #: ``0.0``（默认）= 关闭 = 旧行为逐位不变；bias 监控指标（``bc_bias_*``）恒记录（前后对照）。
+    bias_calib_weight: float = 0.0
     load_balance_coef: float = 0.01
     moe_enabled: bool = True
 
@@ -2173,6 +2177,154 @@ def weighted_action_chain_loss(
             }
         )
     return total, per_horizon
+
+
+#: bias 标定项的逐维归一化尺度（P1 DAgger 前置）：动作界 span（ds=10 m / dθ=1.2 rad；
+#: 与 P1 iter2 的 ``action_dim_weights=(10/1.2)²`` 同源）→ μ/尾链 signed bias 以**相对量级**
+#: 进入同一惩罚（否则 ds 偏置会淹没 dθ）；尾链横向（米）用 :data:`BIAS_LATERAL_SCALE_M`
+#: 归一到可比量级。监控指标始终输出原始单位（m / rad）。
+BIAS_ACTION_SPANS: Tuple[float, float] = (10.0, 1.2)
+BIAS_LATERAL_SCALE_M: float = 0.5
+
+
+def _masked_signed_bias(
+    pred: "torch.Tensor",
+    target: "torch.Tensor",
+    weight: "torch.Tensor",
+    valid: Optional["torch.Tensor"] = None,
+) -> "torch.Tensor":
+    """逐维加权 signed mean error（``pred − target``；不 detach，调用方决定是否进损失）。
+
+    - ``pred/target``: ``(B,D)`` → 返回 ``(D,)``；``(B,K,D)`` → 返回 ``(K,D)``；
+    - ``weight``: ``(B,)`` 逐帧权重（如 ``train_weight``）；``valid``: ``(B,K)`` 逐帧逐 step
+      掩码（缺省全 1；0 的 step 不进分子/分母，避免 NaN 尾目标污染）。
+    """
+    import torch
+
+    w = weight.reshape(-1).to(dtype=pred.dtype, device=pred.device)
+    if pred.ndim == 2:
+        diff = pred - target
+        numerator = (diff * w.reshape(-1, 1)).sum(dim=0)
+        denominator = w.sum().clamp(min=1e-8)
+        return numerator / denominator
+    if pred.ndim != 3:
+        raise ValueError(f"signed bias 期望 (B,D) 或 (B,K,D)，收到 {tuple(pred.shape)}")
+    if valid is None:
+        valid_t = torch.ones(pred.shape[:2], dtype=pred.dtype, device=pred.device)
+    else:
+        valid_t = valid.to(dtype=pred.dtype, device=pred.device)
+        if tuple(valid_t.shape) != tuple(pred.shape[:2]):
+            raise ValueError(f"valid 形状 {tuple(valid_t.shape)} != (B,K)={tuple(pred.shape[:2])}")
+    wk = w.reshape(-1, 1) * valid_t  # (B,K)
+    numerator = ((pred - target) * wk.unsqueeze(-1)).sum(dim=0)  # (K,D)
+    denominator = wk.sum(dim=0).clamp(min=1e-8)  # (K,)
+    return numerator / denominator.unsqueeze(-1)
+
+
+def _lateral_signed_bias(
+    pred_traj: "torch.Tensor",
+    target_traj: "torch.Tensor",
+    weight: "torch.Tensor",
+    valid: Optional["torch.Tensor"] = None,
+) -> "torch.Tensor":
+    """逐 step 横向 signed bias（m）：``(pred − target)`` 在**目标路径左法向**上的投影加权均值。
+
+    - ``pred_traj/target_traj``: ``(B,K,2)``（t0 自车系；target = 教师链积分轨迹）；
+    - ``valid``: ``(B,K)``（缺省全 1；NaN 尾帧置 0）；返回 ``(K,)``。
+    - 法向 = 目标折线切向（末点复用上一段）左旋 90°；长度退化段用 1e-6 兜底。
+    """
+    import torch
+
+    if pred_traj.ndim != 3 or int(pred_traj.shape[-1]) != 2:
+        raise ValueError(f"lateral bias 期望 (B,K,2)，收到 {tuple(pred_traj.shape)}")
+    segments = target_traj[:, 1:] - target_traj[:, :-1]  # (B,K-1,2)
+    segments = torch.cat([segments, segments[:, -1:]], dim=1)  # (B,K,2)
+    unit = segments / segments.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    normal = torch.stack([-unit[..., 1], unit[..., 0]], dim=-1)  # 左法向
+    error = ((pred_traj - target_traj) * normal).sum(dim=-1)  # (B,K)
+    w = weight.reshape(-1).to(dtype=error.dtype, device=error.device)
+    if valid is None:
+        wk = w.reshape(-1, 1) * torch.ones_like(error)
+    else:
+        wk = w.reshape(-1, 1) * valid.to(dtype=error.dtype, device=error.device)
+    return (error * wk).sum(dim=0) / wk.sum(dim=0).clamp(min=1e-8)
+
+
+def phase3_bias_calibration(
+    out: Mapping[str, "torch.Tensor"],
+    targets: Mapping[str, "torch.Tensor"],
+    future_t: Mapping[str, "torch.Tensor"],
+    frame_weight: "torch.Tensor",
+    config: Phase3Config,
+) -> Tuple["torch.Tensor", Dict[str, float]]:
+    """phase 3 bias 标定（P1 DAgger 前置）：返回 ``(penalty, metrics)``。
+
+    观测口径（V2 探针，2026-10-02）：μ dθ 恒定欠转 bias ≈ −0.0043 rad/step；plan 尾链
+    横向 bias 随步数放大（右偏）。本项按**逐维 signed mean error**（不是绝对值）做最小校正：
+
+    - μ：``(action_mu − action[0])`` 逐维（ds, dθ）→ ``mean_d ((b_d/span_d)²)``；
+    - 尾链：``(plan[:,1:] − chain[:,1:])`` 逐 step/逐维（``action_chain_valid`` mask）→
+      ``mean_{k≥1,d} ((b/span_d)²)``（step 0 由 μ 项覆盖）；
+    - 横向：``(traj_xy − traj6)`` 在目标路径左法向的 signed mean（NaN 尾帧 mask）→
+      ``mean_k ((b_lat/BIAS_LATERAL_SCALE_M)²)``（米 → 相对量级）。
+
+    逐维用动作界 span 归一（``BIAS_ACTION_SPANS``）→ ds/dθ 以相对量级进入同一惩罚
+    （否则 ds 偏置淹没 dθ）；相对 bias 截断到 ±1（每项 ≤1）→ 失败窗口的米级横向偏差
+    不淹没主损失。监控指标 ``bc_bias_*`` 始终输出**原始单位**（m / rad）。
+
+    ``config.bias_calib_weight <= 0`` → penalty 恒 0（监控指标仍 detach 计算，前后对照）；
+    ``> 0`` → penalty 可回传（权重由调用方乘）。metrics 键 = ``bc_bias_*``（可直接进
+    epoch metrics / TB）。
+    """
+    import torch
+
+    weight = frame_weight.reshape(-1)
+    target_action = targets["action"]
+    mu = out["action_mu"]
+    plan = out["plan"]
+    chain = future_t["action_chain"]
+    chain_valid = future_t["action_chain_valid"]
+    traj_pred = out["traj_xy"]
+    traj_target = targets["traj6"]
+    # 教师链 NaN 尾（训练侧 labels 口径）→ 逐 (行,step) 有效掩码；traj 几何用前向填充，
+    # 缺失步的横向偏差不计入。
+    step_valid = torch.isfinite(target_action).all(dim=-1).to(dtype=traj_pred.dtype)
+
+    differentiable = float(getattr(config, "bias_calib_weight", 0.0) or 0.0) > 0.0
+    action_scale = torch.as_tensor(
+        BIAS_ACTION_SPANS, dtype=frame_weight.dtype, device=frame_weight.device
+    ).reshape(1, 2)
+
+    def _penalty_from(b_mu: "torch.Tensor", b_chain: "torch.Tensor", b_lat: "torch.Tensor") -> "torch.Tensor":
+        # 相对 bias 截断到 ±1（每项 ≤1）：失败窗口状态上的米级横向偏差不淹没主损失；
+        # 小偏差（目标区间）不受影响。
+        mu_term = (b_mu.reshape(1, -1) / action_scale).clamp(-1.0, 1.0).pow(2).mean()
+        chain_term = (b_chain[1:] / action_scale).clamp(-1.0, 1.0).pow(2).mean()
+        lat_term = (b_lat / float(BIAS_LATERAL_SCALE_M)).clamp(-1.0, 1.0).pow(2).mean()
+        return mu_term + chain_term + lat_term
+
+    if differentiable:
+        b_mu = _masked_signed_bias(mu, target_action[:, 0, :], weight)  # (2,)
+        b_chain = _masked_signed_bias(plan, chain, weight, chain_valid)  # (K,2)
+        b_lat = _lateral_signed_bias(traj_pred, traj_target, weight, step_valid)  # (K,)
+        penalty = _penalty_from(b_mu, b_chain, b_lat)
+    else:
+        with torch.no_grad():
+            b_mu = _masked_signed_bias(mu, target_action[:, 0, :], weight)
+            b_chain = _masked_signed_bias(plan, chain, weight, chain_valid)
+            b_lat = _lateral_signed_bias(traj_pred, traj_target, weight, step_valid)
+            penalty = torch.zeros((), device=frame_weight.device)
+    metrics: Dict[str, float] = {
+        "bc_bias_action_mu_ds": float(b_mu[0].detach()),
+        "bc_bias_action_mu_dtheta": float(b_mu[1].detach()),
+        "bc_bias_calib_penalty": float(penalty.detach()),
+    }
+    for k in range(1, int(b_chain.shape[0])):
+        metrics[f"bc_bias_chain_ds_h{k + 1}"] = float(b_chain[k, 0].detach())
+        metrics[f"bc_bias_chain_dtheta_h{k + 1}"] = float(b_chain[k, 1].detach())
+    for k in range(int(b_lat.shape[0])):
+        metrics[f"bc_bias_traj_lat_h{k + 1}"] = float(b_lat[k].detach())
+    return penalty, metrics
 
 
 def presence_entry_loss(
@@ -4045,6 +4197,8 @@ def _phase3_term_denominators(
     return {
         "action": float(weight.sum()),
         "action_chain": float((weight * chain_valid[:, 1:]).sum()),
+        # bias 标定项 = 逐 micro 均值惩罚（自归一），分母恒 1 → micro/macro 缩放因子 1。
+        "bias_calib": 1.0,
         "step": float(step_weight.sum()),
         "od": float((step_weight[:, :, None] * od_mask).sum()),
         "ld": float((step_weight[:, :, None] * ld_mask).sum()),
@@ -4131,6 +4285,8 @@ def _phase3_loss_terms(
         frame_weight=frame_weight,
         loss_type=config.loss_type,
     )
+    # P1 DAgger 前置：bias 标定（逐维 signed-bias 惩罚；weight=0 时 penalty=0、指标仍记录）
+    bias_penalty, bias_metrics = phase3_bias_calibration(out, targets, future_t, frame_weight, config)
     wm_active = any(
         float(getattr(config, f"{key}_weight")) > 0.0 for key in PHASE3_WM_LOSS_KEYS
     )
@@ -4182,14 +4338,16 @@ def _phase3_loss_terms(
     terms: Dict[str, Any] = {
         "action": config.action_weight * action_loss,
         "action_chain": config.action_chain_weight * chain_loss,
+        "bias_calib": config.bias_calib_weight * bias_penalty,
         "ego_next": config.ego_next_weight * ego_loss,
         "od": config.od_weight * od_loss,
         "ld": config.ld_weight * ld_loss,
         "presence": config.presence_weight * presence_terms["presence"],
         "entry": config.entry_weight * presence_terms["entry"],
         "load_balance": load_loss,
-        # 监控口径（不进梯度）：逐样本首步动作 L1
+        # 监控口径（不进梯度）：逐样本首步动作 L1 + bias 标定指标（前后对照）
         "action_err": action_err,
+        "bias_metrics": bias_metrics,
         "out": out,
     }
     return terms
@@ -4312,7 +4470,7 @@ def pretrain_bc_phase3(
             else ""
         )
     )
-    loss_keys = ("action", "action_chain", "ego_next", "od", "ld", "presence", "entry", "load_balance")
+    loss_keys = ("action", "action_chain", "bias_calib", "ego_next", "od", "ld", "presence", "entry", "load_balance")
     macro_size = max(1, int(config.batch_size))
     micro_size = (
         macro_size
@@ -4348,6 +4506,8 @@ def pretrain_bc_phase3(
         gate_entropy_num, gate_entropy_den = 0.0, 0.0
         load_count = 0
         batches = 0
+        bias_sums: Dict[str, float] = {}
+        bias_weight = 0.0
         data_seconds = forward_seconds = backward_seconds = 0.0
         for start in range(0, len(order), macro_size):
             if config.max_batches is not None and batches >= int(config.max_batches):
@@ -4415,6 +4575,7 @@ def pretrain_bc_phase3(
                 total = (
                     components["action"]
                     + components["action_chain"]
+                    + components["bias_calib"]
                     + components["ego_next"]
                     + components["od"]
                     + components["ld"]
@@ -4438,6 +4599,11 @@ def pretrain_bc_phase3(
                     (terms["out"]["action_mu"][:, 0] * frame_weight).sum()
                 )
                 macro_totals["mu_ds_den"] += weight_micro
+                batch_bias = terms.get("bias_metrics") or {}
+                if batch_bias:
+                    for key, value in batch_bias.items():
+                        bias_sums[key] = bias_sums.get(key, 0.0) + float(value) * weight_micro
+                    bias_weight += weight_micro
                 with torch.no_grad():
                     diff = terms["out"]["traj_xy"] - targets["traj6"]
                     traj_mse_values.append((diff ** 2).mean(dim=-1).detach().double().cpu().numpy())
@@ -4479,6 +4645,7 @@ def pretrain_bc_phase3(
             "bc_loss": totals["total"] / divisor,
             "bc_action_loss": totals["action"] / divisor,
             "bc_action_chain_loss": totals["action_chain"] / divisor,
+            "bc_bias_calib_loss": totals["bias_calib"] / divisor,
             "bc_ego_next_loss": totals["ego_next"] / divisor,
             "bc_od_loss": totals["od"] / divisor,
             "bc_ld_loss": totals["ld"] / divisor,
@@ -4508,6 +4675,11 @@ def pretrain_bc_phase3(
             "epoch_forward_seconds": forward_seconds,
             "epoch_backward_seconds": backward_seconds,
         }
+        # P1 DAgger 前置：bias 标定指标（逐维 signed bias / 横向 bias；权重加权平均）
+        epoch_update.update(
+            {key: value / max(bias_weight, 1e-12) for key, value in bias_sums.items()}
+        )
+        epoch_update["bc_bias_calib_weight"] = float(config.bias_calib_weight)
         if traj_mse_values and weight_values and len(traj_mse_values[0]) == len(weight_values[0]):
             mse_matrix = np.concatenate(traj_mse_values)
             mae_matrix = np.concatenate(traj_mae_values)
@@ -4579,6 +4751,7 @@ def pretrain_bc_phase3(
             f"chain={metrics['bc_action_chain_loss']:.4f} ego_next={metrics['bc_ego_next_loss']:.4f} "
             f"od={metrics['bc_od_loss']:.4f} ld={metrics['bc_ld_loss']:.4f} "
             f"presence={metrics['bc_presence_loss']:.4f} entry={metrics['bc_entry_loss']:.4f} "
+            f"bias={metrics.get('bc_bias_calib_loss', 0.0):.4f} "
             f"traj(monitor)={metrics['bc_traj_mae_m']:.3f}m "
             f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s"
             f"{val_text}"
@@ -4617,10 +4790,12 @@ def evaluate_bc_phase3(
     # lane P3-I：留出口径与训练侧同族 —— specific_only 降级项同样置 0
     effective_config, _ = phase3_effective_config(config)
     macro_size = max(1, int(config.batch_size))
-    loss_keys = ("action", "action_chain", "ego_next", "od", "ld", "presence", "entry")
+    loss_keys = ("action", "action_chain", "bias_calib", "ego_next", "od", "ld", "presence", "entry")
     numerator = {key: 0.0 for key in loss_keys}
     denominator = {key: 0.0 for key in loss_keys}
     load_sum, load_count = 0.0, 0
+    bias_sums: Dict[str, float] = {}
+    bias_weight = 0.0
     action_err_values: List[np.ndarray] = []
     weight_values: List[np.ndarray] = []
     traj_mse_values: List[np.ndarray] = []
@@ -4667,6 +4842,12 @@ def evaluate_bc_phase3(
         )
         action_err_values.append(terms["action_err"].double().cpu().numpy())
         weight_values.append(frame_weight.detach().double().cpu().numpy())
+        batch_bias = terms.get("bias_metrics") or {}
+        if batch_bias:
+            w_batch = float(den["action"])
+            for key, value in batch_bias.items():
+                bias_sums[key] = bias_sums.get(key, 0.0) + float(value) * w_batch
+            bias_weight += w_batch
     # 总损失 = 各加权损失项和（含权重系数）；逐项 = Σnum/Σden
     result: Dict[str, Any] = {
         "bc_load_balance_loss": load_sum / max(load_count, 1),
@@ -4679,6 +4860,7 @@ def evaluate_bc_phase3(
         {
             "bc_action_loss": numerator["action"] / max(denominator["action"], 1e-12),
             "bc_action_chain_loss": numerator["action_chain"] / max(denominator["action_chain"], 1e-12),
+            "bc_bias_calib_loss": numerator["bias_calib"] / max(denominator["bias_calib"], 1e-12),
             "bc_ego_next_loss": numerator["ego_next"] / max(denominator["ego_next"], 1e-12),
             "bc_od_loss": numerator["od"] / max(denominator["od"], 1e-12),
             "bc_ld_loss": numerator["ld"] / max(denominator["ld"], 1e-12),
@@ -4686,6 +4868,8 @@ def evaluate_bc_phase3(
             "bc_entry_loss": numerator["entry"] / max(denominator["entry"], 1e-12),
         }
     )
+    result.update({key: value / max(bias_weight, 1e-12) for key, value in bias_sums.items()})
+    result["bc_bias_calib_weight"] = float(config.bias_calib_weight)
     error_matrix = np.concatenate(action_err_values) if action_err_values else np.zeros(0)
     all_weights = np.concatenate(weight_values) if weight_values else np.zeros(0)
     weight_total = max(float(all_weights.sum()) if all_weights.size else 0.0, 1e-12)

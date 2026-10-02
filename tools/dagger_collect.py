@@ -31,9 +31,12 @@
      ``v_ref = v + throttle·scale``（``scale`` 取专家自身 ``accel/brake_action_scale``）→
      ``ds = max(v_ref, 0)·dt``。单测用 ``expand_policy_action`` 正算做 round-trip 校验。
    - ``(ds,dθ) → 轨迹`` 复用 ``tools/collect_expert.resolve_interpolate``（``env.tracking.interpolate``，
-     §8.5 单一真源）；6 点未来窗口无法从"空问"获得 → ``action[1:]`` = 首步**常量重复**、
-     ``traj6/traj30`` 由其插值生成，meta 显式标注 ``label_scope=first_step_only`` /
-     ``window_fill=constant_repeat``。
+     §8.5 单一真源）；**动作链目标（P1 DAgger 前置，2026-10-02）**：``action[k]`` = 策略帧
+     ``t+0.5·k s``（env step ``t+5k``）的专家空问标签——专家在**该帧学生状态**上的动作
+     （反事实近似：链只作监督目标、不改变状态演化）；``traj6/traj30`` = 该链的运动学积分。
+     episode 末端缺失的链步在 ``action`` 里置 **NaN**（训练侧按有限性 mask；``traj6/traj30``
+     用**前向填充链**插值，保持几何字段有限）。meta 显式标注
+     ``label_scope=action_chain_t0_t5`` / ``window_fill=teacher_chain_nan_tail``。
 6. **过滤**：``extract_samples`` 的 on-lane / terminal_window / cut_label_unverified（round-trip
    过滤对"空问标签"不适用 → 阈值置 ∞ 并记录），外加 lane T 病态规则 ``stuck``（< 0.5 m/s）/
    ``yaw_outlier``（|dθ| > 0.35 rad/0.5 s）；逐行 ``train_weight`` 置 0（不删行），统计进
@@ -134,6 +137,10 @@ DEFAULT_FAIL_TERMINATIONS: Tuple[str, ...] = ("collision", "out_of_road", "termi
 DEFAULT_WHEELBASE_M = 2.46894
 DEFAULT_MAX_STEER_RAD = math.radians(40.0)
 DEFAULT_ACCEL_SCALE = 2.0
+#: 动作链标签口径（P1 DAgger 前置）：训练侧 ``pipeline.stages`` 的 ``action_chain_source=auto``
+#: 按该字符串判定"逐行 action[0:6] 是真实教师链"（旧数据 = first_step_only → 回退未来行查表）。
+LABEL_SCOPE_ACTION_CHAIN = "action_chain_t0_t5"
+WINDOW_FILL_TEACHER_CHAIN = "teacher_chain_nan_tail"
 
 
 # --------------------------------------------------------------------------- #
@@ -337,31 +344,48 @@ def _interpolate(interpolate_fn: Any, actions: np.ndarray) -> np.ndarray:
 
 def _relabel_rows_with_expert(
     rows: Sequence[Dict[str, Any]], episode: Dict[str, Any], *, interpolate_fn: Any
-) -> int:
-    """把 ``extract_samples`` 的实测轨迹目标替换为**专家空问标签**（首步真标签 + 常量重复窗口）。
+) -> Dict[str, int]:
+    """把 ``extract_samples`` 的实测轨迹目标替换为**专家动作链标签**（P1 DAgger 前置）。
 
-    - ``action[0]`` = 专家首步 ``(ds, dθ)``；``action[1:]`` = 常量重复（meta 标注）；
-    - ``traj6/traj30`` = 上述窗口经 ``env.tracking.interpolate`` 的运动学轨迹；
+    - ``action[k]`` = 策略帧 ``step + k·STEPS_PER_POLICY`` 的专家空问标签（专家在当步学生
+      状态上的动作；反事实近似——链只作监督目标）；episode 末端无该帧标签 → ``NaN``
+      （训练侧按有限性 mask，见 ``pipeline.stages.phase3_action_chain_targets(source="labels")``）；
+    - ``traj6/traj30`` = **前向填充链**（缺失步用上一有效步填充）经 ``env.tracking.interpolate``
+      的运动学积分——保证几何字段有限；缺失尾部的 traj 是常量外推（meta 记录）；
     - ``roundtrip_*`` 置 NaN（对"空问标签"无意义；round-trip 过滤已按阈值 ∞ 关闭）；
     - ``traj30_measured``（学生实测未来位姿）保持不变，作为 roll-in 行为诊断。
-    返回被重标注的行数。
+
+    返回逐 spec 统计（``relabeled`` / ``chain_rows`` / ``full_chain_rows`` / ``tail_missing_steps``）；
+    当前帧无标签的行（理论不应出现）保持原样、不计入。
     """
     labels = episode.get("expert_labels") or {}
     key_indices = [index * STEPS_PER_POLICY - 1 for index in range(1, WINDOW_POLICIES + 1)]
-    relabeled = 0
+    stats = {"relabeled": 0, "chain_rows": 0, "full_chain_rows": 0, "tail_missing_steps": 0}
     for row in rows:
-        info = labels.get(int(row["step"]))
-        if info is None:
-            continue
-        window = np.repeat(np.asarray(info["action"], dtype=np.float64)[None, :], WINDOW_POLICIES, axis=0)
-        traj = _interpolate(interpolate_fn, window)
-        row["action"] = window.astype(np.float32)
+        step = int(row["step"])
+        chain = np.full((WINDOW_POLICIES, 2), np.nan, dtype=np.float64)
+        for k in range(WINDOW_POLICIES):
+            info = labels.get(step + k * STEPS_PER_POLICY)
+            if info is not None:
+                chain[k] = np.asarray(info["action"], dtype=np.float64).reshape(2)
+        if not np.isfinite(chain[0]).all():
+            continue  # 当前帧无专家标签（不应发生）→ 不重标注
+        fill = chain.copy()
+        for k in range(1, WINDOW_POLICIES):  # 前向填充：仅用于插值几何，NaN 仍保留在 action 里
+            if not np.isfinite(fill[k]).all():
+                fill[k] = fill[k - 1]
+        traj = _interpolate(interpolate_fn, fill)
+        row["action"] = chain.astype(np.float32)
         row["traj6"] = traj[key_indices, :2].astype(np.float32)
         row["traj30"] = traj[:, :2].astype(np.float32)
         row["roundtrip_key_err"] = float("nan")
         row["roundtrip_dense_err"] = float("nan")
-        relabeled += 1
-    return relabeled
+        valid_steps = int(np.isfinite(chain).all(axis=1).sum())
+        stats["relabeled"] += 1
+        stats["chain_rows"] += 1
+        stats["full_chain_rows"] += int(valid_steps == WINDOW_POLICIES)
+        stats["tail_missing_steps"] += int(WINDOW_POLICIES - valid_steps)
+    return stats
 
 
 # --------------------------------------------------------------------------- #
@@ -643,7 +667,7 @@ def _dagger_one_spec(
             require_dense=False,
             roundtrip_dense_mean=float("inf"),
         )
-        _relabel_rows_with_expert(rows, episode, interpolate_fn=interpolate_fn)
+        label_stats = _relabel_rows_with_expert(rows, episode, interpolate_fn=interpolate_fn)
         window_stats: Optional[Dict[str, Any]] = None
         if window_mode:
             rows, window_stats = _window_select_rows(
@@ -691,6 +715,7 @@ def _dagger_one_spec(
             "timing": timing,
             "window": window_stats,
             "expert_params": episode.get("labeler_params") or {},
+            "label_stats": label_stats,
             "report": {
                 "id": int(getattr(spec, "id", -1)),
                 "seed": int(getattr(spec, "seed", -1)),
@@ -706,6 +731,7 @@ def _dagger_one_spec(
                 "timing": dict(timing),
                 "window": window_stats,
                 "expert_params": episode.get("labeler_params") or {},
+                "label_stats": label_stats,
             },
         }
     except Exception as exc:  # noqa: BLE001 - 单条失败不中断整批（与 collect_expert 同口径）
@@ -1358,6 +1384,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         (entry["report"].get("expert_params") for entry in entries if entry["report"].get("expert_params")),
         None,
     )
+    label_stats_total = {
+        key: int(sum(int((entry["report"].get("label_stats") or {}).get(key, 0)) for entry in entries))
+        for key in ("relabeled", "chain_rows", "full_chain_rows", "tail_missing_steps")
+    }
     dagger = {
         "protocol": "dagger-lite: student(policy) roll-in + expert act() empty-query labels",
         "roll_in": True,
@@ -1370,9 +1400,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if str(args.labeler) == "pure_pursuit"
             else "idm: MetaDrive 原始 IDMPolicy 动作（IDM 加速度语义，换算前 clip 到 [-1,1]，仅冒烟对照）"
         ),
-        "label_scope": "first_step_only",
-        "window_fill": "constant_repeat(first_step)",
-        "traj_source": f"{kinematics_source} over repeated first step",
+        # P1 DAgger 前置：action[0:6] = t..t+5 教师动作链（专家在当步学生状态上的动作，
+        # 反事实近似）；缺失链步 NaN。旧数据 = first_step_only（常量重复），训练侧回退查表。
+        "label_scope": LABEL_SCOPE_ACTION_CHAIN,
+        "window_fill": WINDOW_FILL_TEACHER_CHAIN,
+        "chain_semantics": (
+            "action[k] = expert act() at policy frame t+0.5k s on the student state at that frame "
+            "(counterfactual approximation); missing episode-tail steps are NaN"
+        ),
+        "traj_source": f"{kinematics_source} over forward-filled teacher action chain (NaN tail → constant extrapolation)",
+        "label_stats": label_stats_total,
         "action_conversion": (
             "inverse of pipeline.trainer.expand_policy_action: "
             "dtheta=tan(steer*max_steer_rad)*max(v,0.5)/wheelbase*dt; ds=max(v+throttle*scale,0)*dt"
@@ -1415,6 +1452,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flush=True,
     )
     print(f"[dagger] filter counts (rows): {dict(filter_counter)}", flush=True)
+    print(
+        f"[dagger] 动作链标签（label_scope={LABEL_SCOPE_ACTION_CHAIN}）："
+        f"relabeled={label_stats_total['relabeled']} 行 · 全链（6/6 步）={label_stats_total['full_chain_rows']} 行 · "
+        f"缺失链步={label_stats_total['tail_missing_steps']} 步（NaN 尾；训练侧按有限性 mask）",
+        flush=True,
+    )
     print(
         f"[dagger] pathological: {pathological_total}"
         f"（stuck 阈值 {STUCK_SPEED_MPS} m/s / yaw {YAW_OUTLIER_RAD} rad；"

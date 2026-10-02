@@ -95,6 +95,12 @@ stages:
       spec_pool: env/specs/scenarios_train_5k.json  # 采集池（5k 覆盖整池；lane P3-A 产物）
       fail_target: 1000         # 每轮目标失败窗口数（采集侧语义；编排 lane 用）
       shuffle_seed_base: 20260928  # 轮内数据 shuffle 种子 = base + round（跨轮顺序不相关）
+      action_chain_source: auto   # P1 DAgger 前置（2026-10-02）：动作链目标来源（CLI
+                                  # --phase3-action-chain-source）。auto = 新 dagger 标签口径
+                                  # （meta dagger.label_scope=action_chain_t0_t5）用逐行 action[0:6]
+                                  # 真实教师链（窗口丢行不影响链步、NaN 尾 mask）；旧数据/专家集
+                                  # 回退未来行 action[0] 查表（旧行为）；labels/lookup 显式覆盖。
+                                  # 解析结果记 metrics.action_chain_source / 训练日志。
       collect:                  # 采集侧（编排 lane：tools/dagger_collect.py）
         workers: 16             # spawn worker 数（实测 16 workers ≈ 0.85 s/spec）
         window_s: 10            # 失败窗口 = 终止前 N 秒（--window-fail-before）
@@ -110,6 +116,13 @@ stages:
       losses:                   # 损失权重（CLI --phase3-*-weight / --load-balance-coef）
         action: 1.0             # ① 首步动作（action_mu vs 专家即时动作）
         action_chain: 0.2       # ①b 多步动作链（rollout plan 第 2..6 步 vs 未来专家首步标签）
+        bias_calib: 0.0         # ①c P1 DAgger 前置（2026-10-02）：逐维 signed-bias 标定项
+                                # （μ ds/dθ + plan 尾链逐 step + 尾链横向位置；V2 探针：i3 μ dθ
+                                # bias −0.0043 rad/step、尾链横向 bias 随步数放大）。逐维按动作界
+                                # span 归一（ds/10, dθ/1.2），横向按 0.5 m 归一，相对 bias 截断 ±1
+                                # → 失败窗口的米级横向偏差不淹没主损失。
+                                # 0=关闭=旧行为；bias 监控指标（bc_bias_*，原始单位）恒记录。
+                                # 建议起步 0.1–0.5（先看 bc_bias_calib_penalty 量级与 action 项对比）
         ego_next: 0.1           # ② plan head ego_next（未来 ego 特征；wm_valid 尾部 mask）
         od: 0.005               # ③ WM OD 直接多步（Huber + angle，与阶段 A 同构；方案1 量级归一，防 WM 主宰）
         ld: 0.002               # ③ WM LD 恢复监督（目标 = ld_fut/ld_mask；方案1：ld 原始量级≈4×od，按比例再降）

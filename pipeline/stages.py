@@ -1581,25 +1581,51 @@ def phase3_action_chain_targets(
     *,
     future: int = 6,
     stride: int = _BC_STEP_STRIDE,
+    source: str = "lookup",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """phase 3 多步动作链目标（lane P3-B）：``(action_chain (B,K,2), valid (B,K))``。
 
+    ``source="lookup"``（默认，旧行为）：
     - ``action_chain[:, k]`` = 同 episode ``(episode_id, step + stride·k)`` 帧的**专家首步
       动作标签**（``arrays["action"][row, 0, :]``；``k=0`` = 当前帧）——与 rollout
       ``plan[:, k]`` 时间对齐（``plan[:,0] = action_mu`` 已由首步动作损失监督，本项只吃 ``k≥1``）；
-    - ``valid``：目标帧存在（精确查表）→ 1；窗口末端/缺帧 → 0（逐帧 mask）；
-    - 动作 ``(ds, dθ)`` 是车体量，与 SE(2) 对齐无关（无需 t0 系重建）。
+    - ``valid``：目标帧存在（精确查表）→ 1；窗口末端/缺帧 → 0（逐帧 mask）。
 
+    ``source="labels"``（P1 DAgger 前置，2026-10-02）：
+    - ``action_chain = arrays["action"][idx, :K]`` **逐行教师动作链**（采集侧把
+      ``action[k]`` 标为策略帧 ``t+stride·k`` 的专家空问标签；缺帧 = NaN）；
+    - ``valid`` = 逐 (行,步) 有限性 mask；NaN 置 0 后返回（训练侧 mask 乘 0 前目标必须有限）。
+      与 lookup 的差异：窗口模式丢行不影响链步有效性（标签在采集时就已落在行内）、
+      且 episode 末端缺失步被显式 mask。
+
+    动作 ``(ds, dθ)`` 是车体量，与 SE(2) 对齐无关（无需 t0 系重建）。
     未来 LD/OD 目标由 :func:`build_future`（t0 自车系对齐）提供，本函数只补动作链标签。
     """
     idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    action = np.asarray(arrays["action"], dtype=np.float32)
+    horizon = max(1, int(future))
+    mode = str(source or "lookup").strip().lower()
+    if mode == "labels":
+        if action.ndim != 3:
+            raise ValueError(
+                f"action_chain_source='labels' 需要 action (N,K,2)，收到 {action.shape}"
+                "（旧数据集请用 source='lookup'）"
+            )
+        if int(action.shape[1]) < horizon:
+            raise ValueError(
+                f"action_chain_source='labels'：action 链宽 {action.shape[1]} < future={horizon}"
+            )
+        chain = action[idx, :horizon, :]
+        valid = np.isfinite(chain).all(axis=-1).astype(np.float32)
+        chain = np.where(np.isfinite(chain), chain, 0.0).astype(np.float32)
+        return chain, valid
+    if mode != "lookup":
+        raise ValueError(f"未知 action_chain_source={source!r}（auto | labels | lookup）")
     episode = np.asarray(arrays["episode_id"], dtype=np.int64)
     step = np.asarray(arrays["step"], dtype=np.int64)
-    action = np.asarray(arrays["action"], dtype=np.float32)
     if action.ndim == 2:  # 旧 schema：单步动作 (N,2) → (N,1,2)
         action = action[:, None, :]
     lookup = {(int(episode[i]), int(step[i])): i for i in range(len(episode))}
-    horizon = max(1, int(future))
     chain = np.zeros((idx.size, horizon, action.shape[-1]), dtype=np.float32)
     valid = np.zeros((idx.size, horizon), dtype=np.float32)
     for i, row in enumerate(idx):
@@ -1612,6 +1638,42 @@ def phase3_action_chain_targets(
                 chain[i, k] = action[target, 0]
                 valid[i, k] = 1.0
     return chain, valid
+
+
+#: 动作链标签口径（与 ``tools/dagger_collect.LABEL_SCOPE_ACTION_CHAIN`` 同一字符串；
+#: 该模块 import 会拉起 metadrive，故此处只重复常量值）。
+ACTION_CHAIN_LABEL_SCOPE = "action_chain_t0_t5"
+
+
+def _resolve_action_chain_source(dataset: BCDataset, requested: str) -> str:
+    """``action_chain_source`` 解析：``auto`` = 新 dagger 标签口径用 ``labels``，否则 ``lookup``。
+
+    - ``requested`` ∈ ``auto | labels | lookup``（非法 → ``SystemExit``）；
+    - ``auto``：数据集 meta ``dagger.label_scope == ACTION_CHAIN_LABEL_SCOPE``（新采集器落盘）
+      且 ``action`` 为 ``(N,K,2)`` → ``labels``；其余（旧 dagger 常量重复 / 专家集 / v1 schema）
+      → ``lookup``（向后兼容旧行为逐位不变）；
+    - 显式 ``labels`` 遇到 meta 标注 ``first_step_only``（旧 dagger 常量重复尾链）→ 拒绝
+      （静默用常量尾链当教师链会把断点固化）。
+    """
+    mode = str(requested or "auto").strip().lower()
+    if mode not in ("auto", "labels", "lookup"):
+        raise SystemExit(f"[stageB3] action_chain_source 非法：{requested!r}（auto | labels | lookup）")
+    meta = dataset.meta if isinstance(dataset.meta, Mapping) else {}
+    dagger = meta.get("dagger") if isinstance(meta.get("dagger"), Mapping) else {}
+    scope = str((dagger or {}).get("label_scope") or "")
+    action = dataset.arrays.get("action")
+    if mode == "labels":
+        if scope == "first_step_only":
+            raise SystemExit(
+                "[stageB3] action_chain_source=labels 但数据集 meta 标注 label_scope=first_step_only"
+                "（旧 dagger 常量重复尾链）→ 拒绝：请用新采集器重采，或显式 lookup"
+            )
+        return "labels"
+    if mode == "lookup":
+        return "lookup"
+    if scope == ACTION_CHAIN_LABEL_SCOPE and action is not None and np.asarray(action).ndim == 3:
+        return "labels"
+    return "lookup"
 
 
 def _grad_norms(model: Any, prefixes: Sequence[str]) -> Dict[str, float]:
@@ -3390,6 +3452,7 @@ def _phase3_future_fn(
     *,
     match_future_slots: bool = True,
     match_gate_m: float = 8.0,
+    action_chain_source: str = "auto",
 ) -> Any:
     """构造 phase 3 未来目标闭包：t0 系对齐 + id 匹配 + presence/entry + 多步动作链。
 
@@ -3398,6 +3461,9 @@ def _phase3_future_fn(
     **t0 自车系**，与 WM/rollout 的 t0 系预测语义一致），禁止直接取未来帧原始通道。
     """
     arrays = dataset.arrays
+    # P1 DAgger 前置：auto = 新 dagger 标签口径（真实教师链）用 labels，否则回退旧查表；
+    # labels/lookup 显式覆盖。解析结果挂在闭包属性上（训练侧记 metrics/日志）。
+    resolved_source = _resolve_action_chain_source(dataset, action_chain_source)
 
     def _future_targets(
         batch_indices: np.ndarray,
@@ -3419,11 +3485,12 @@ def _phase3_future_fn(
         presence_target, entry_target = presence_entry_targets(future)
         future["presence_target"] = presence_target
         future["entry_target"] = entry_target
-        chain, chain_valid = phase3_action_chain_targets(arrays, idx)
+        chain, chain_valid = phase3_action_chain_targets(arrays, idx, source=resolved_source)
         future["action_chain"] = chain
         future["action_chain_valid"] = chain_valid
         return future
 
+    _future_targets.action_chain_source = resolved_source  # type: ignore[attr-defined]
     return _future_targets
 
 
@@ -3441,6 +3508,11 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     - 损失 = 首步动作 + **多步动作链**（rollout ``plan`` 第 2..6 步 vs 未来专家首步标签）
       + plan head ``ego_next``（``ego_fut`` + ``wm_valid`` 尾部 mask）+ WM **OD/LD 教师强制**
       + presence/entry BCE + MoE 负载均衡 aux；``traj_*`` 只做监控（不进损失）；
+    - **动作链目标来源**（P1 DAgger 前置，``action_chain_source``）：``auto`` 默认新 dagger
+      标签口径用逐行 ``action[0:6]`` 真实教师链（窗口丢行/NaN 尾由有限性 mask 处理），
+      旧数据/显式 ``lookup`` 回退同 episode 未来行查表；
+    - **bias 标定**（P1 DAgger 前置，``losses.bias_calib``，默认 0 = 关）：逐维 signed-bias
+      惩罚（μ ds/dθ + 尾链逐 step + 尾链横向位置）；bias 监控指标恒记录（前后对照）；
     - LR 分组：base 主干 × ``lr_scale.base`` / experts+router+residual_scale × ``lr_scale.specific``；
     - 产出 ``<out>/final.pt`` + ``metrics.json`` + ``monitor/``（TB/CSV）+ 周期 ``ckpt_epoch{N}.pt``。
 
@@ -3617,6 +3689,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "presence": _loss_weight("presence", 0.1),
         "entry": _loss_weight("entry", 0.1),
         "traj_aux": _loss_weight("traj_aux", 0.0),
+        # P1 DAgger 前置：bias 标定项（逐维 signed-bias 惩罚；0.0 = 关闭 = 旧行为逐位不变）
+        "bias_calib": _loss_weight("bias_calib", 0.0),
         "load_balance": float(
             args.load_balance_coef if args.load_balance_coef is not None else losses_cfg.get("load_balance", 0.01)
         ),
@@ -3625,6 +3699,16 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         raise SystemExit(
             f"[stageB3] traj_aux={loss_weights['traj_aux']} 不支持：phase 3 的 traj 只做监控"
             "（失败窗口的 traj6 是常量外推合成值，不进损失；见设计定案）"
+        )
+    # P1 DAgger 前置：动作链目标来源（auto = 新 dagger 标签口径 labels / 旧数据 lookup）。
+    chain_source_raw = str(
+        args.phase3_action_chain_source
+        if getattr(args, "phase3_action_chain_source", None) is not None
+        else p3_cfg.get("action_chain_source", "auto")
+    ).strip().lower()
+    if chain_source_raw not in ("auto", "labels", "lookup"):
+        raise SystemExit(
+            f"[stageB3] action_chain_source 非法：{chain_source_raw!r}（auto | labels | lookup）"
         )
     # lane P3-I：冻结下无梯度的上游监督项自动降级（配置值置 0；原始值留档 metrics）
     configured_loss_weights = dict(loss_weights)
@@ -3676,7 +3760,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         f"[stageB3] round={round_index} · dagger={dagger_dir}（窗口 rows={dataset.count - anchor_rows_log}）· "
         f"起点={init_ckpt or resume_path} · epochs={epochs} · {freeze_text} · {anchor_text} · "
         f"lr={lr:.2e}（base×{lr_base_scale} · specific×{lr_specific_scale}）· "
-        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）"
+        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）· "
+        f"action_chain_source={chain_source_raw} · bias_calib={loss_weights['bias_calib']}"
         + (
             f" · 降级前权重：{degraded_loss_weights}"
             if degraded_loss_weights
@@ -3694,6 +3779,7 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         wm_valid_all,
         match_future_slots=bool(args.match_future_slots),
         match_gate_m=float(args.match_gate_m),
+        action_chain_source=chain_source_raw,
     )
     if use_materialized:
         obs_source = MaterializedBCDataset(dataset, include_targets=True)
@@ -3721,6 +3807,7 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             val_wm_valid,
             match_future_slots=bool(args.match_future_slots),
             match_gate_m=float(args.match_gate_m),
+            action_chain_source=chain_source_raw,
         )
 
     metrics: Dict[str, Any] = {
@@ -3759,6 +3846,20 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "losses": dict(loss_weights),
         "losses_configured": configured_loss_weights,
         "losses_degraded": degraded_loss_weights,
+        "action_chain_source": {
+            "requested": chain_source_raw,
+            "train": str(getattr(future_fn, "action_chain_source", chain_source_raw)),
+            "val": (
+                str(getattr(val_future_fn, "action_chain_source", ""))
+                if val_dataset is not None
+                else "same_as_train"
+            ),
+            "default": "auto",
+            "semantics": (
+                "labels = 逐行 action[0:6] 教师链（采集侧 label_scope=action_chain_t0_t5）；"
+                "lookup = 同 episode 未来行 action[0] 查表（旧行为）"
+            ),
+        },
         "anchor": dict(anchor_info),
         "loss_type": str(args.loss_type if args.loss_type is not None else "l2"),
         "traj_monitor_only": True,
@@ -3866,6 +3967,7 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         presence_weight=loss_weights["presence"],
         entry_weight=loss_weights["entry"],
         traj_aux_weight=loss_weights["traj_aux"],
+        bias_calib_weight=loss_weights["bias_calib"],
         load_balance_coef=loss_weights["load_balance"],
         moe_enabled=True,
         lr_base_scale=lr_base_scale,
@@ -4502,6 +4604,16 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-action-weight", type=float, default=None, help="首步动作损失权重（默认 1.0）")
     parser.add_argument("--phase3-action-chain-weight", type=float, default=None,
                         help="多步动作链权重（默认取 config stages.B.phase3.losses.action_chain=0.2）")
+    parser.add_argument("--phase3-action-chain-source", choices=("auto", "labels", "lookup"), default=None,
+                        help="动作链目标来源（P1 DAgger 前置；默认取 config "
+                             "stages.B.phase3.action_chain_source=auto）：auto = 新 dagger 标签口径"
+                             "（meta dagger.label_scope=action_chain_t0_t5）用逐行 action[0:6] 真实教师链，"
+                             "否则回退未来行查表（旧行为）；labels/lookup 显式覆盖")
+    parser.add_argument("--phase3-bias-calib-weight", type=float, default=None,
+                        help="bias 标定项权重（P1 DAgger 前置；默认取 config …losses.bias_calib=0.0=关闭）："
+                             "逐维 signed-bias 惩罚（μ ds/dθ + plan 尾链逐 step + 尾链横向位置；"
+                             "按动作界 span/0.5 m 归一并截断 ±1；建议起步 0.1–0.5）；"
+                             "0 = 旧行为逐位不变（bias 监控指标仍记录）")
     parser.add_argument("--phase3-ego-next-weight", type=float, default=None,
                         help="plan head ego_next 权重（默认取 config …losses.ego_next=0.1）")
     parser.add_argument("--phase3-od-weight", type=float, default=None,

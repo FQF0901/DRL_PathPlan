@@ -192,6 +192,9 @@ _HORIZON_RENAMES: Dict[str, Tuple[str, str]] = {
 #: Stage B 相位标量（``train|val/<phase>_bc_*``）；``{phase}`` 插值，val 命名空间加 ``val/`` 前缀。
 #: phase3（lane P3-B）走 :data:`_PHASE3_SCALAR_RENAMES`（上游监督命名，不做 ``{phase}`` 插值）。
 _BC_RE = re.compile(r"^(?P<phase>primary|specific|phase3)_(?P<key>.+)$")
+#: phase 3 bias 标定逐 step 指标（P1 DAgger 前置）：``bc_bias_chain_{ds|dtheta}_h{k}`` /
+#: ``bc_bias_traj_lat_h{k}`` → ``ego/bias/<family>/h{k}``（多线族）。
+_PHASE3_BIAS_RE = re.compile(r"^bc_bias_(chain_(?:ds|dtheta)|traj_lat)_h(\d+)$")
 _BC_SCALAR_RENAMES: Dict[str, str] = {
     "bc_loss": "loss/planner/{phase}/total",
     "bc_traj_loss": "loss/planner/{phase}/traj",
@@ -211,6 +214,10 @@ _PHASE3_SCALAR_RENAMES: Dict[str, str] = {
     "bc_loss": "loss/total",
     "bc_action_loss": "loss/action",
     "bc_action_chain_loss": "loss/action_chain",
+    # P1 DAgger 前置：bias 标定项与逐维 signed-bias 监控（前后对照）
+    "bc_bias_calib_loss": "loss/bias_calib",
+    "bc_bias_action_mu_ds": "ego/bias/action_mu_ds",
+    "bc_bias_action_mu_dtheta": "ego/bias/action_mu_dtheta",
     "bc_ego_next_loss": "loss/ego_next",
     "bc_od_loss": "loss/od",
     "bc_ld_loss": "loss/ld",
@@ -258,6 +265,9 @@ def _slim_tag(tag: str) -> Optional[str]:
         rename = _PHASE3_SCALAR_RENAMES.get(key)
         if rename is not None:
             return f"{prefix}{rename}"
+        bias_match = _PHASE3_BIAS_RE.match(key)
+        if bias_match is not None:
+            return f"{prefix}ego/bias/{bias_match.group(1)}/h{bias_match.group(2)}"
     elif key in _BC_SCALAR_RENAMES:
         return f"{prefix}{_BC_SCALAR_RENAMES[key].format(phase=phase)}"
     # lane U1：逐 expert 负载 → router/expert_load/e{i}（8 线一族；val/ 孪生自动分族）

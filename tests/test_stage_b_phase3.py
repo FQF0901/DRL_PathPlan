@@ -52,11 +52,14 @@ def _tiny_model():
     return DrivingModel(hidden=16, num_experts=8, expert_hidden=16)
 
 
-def _write_arrays(directory: Path, arrays) -> Path:
+def _write_arrays(directory: Path, arrays, meta: dict | None = None) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(directory / "expert_bc.npz", **{k: np.asarray(v) for k, v in arrays.items()})
+    payload = {"schema_version": 2, "history_stride": 5}
+    if meta:
+        payload.update(meta)
     (directory / "expert_bc.meta.json").write_text(
-        json.dumps({"schema_version": 2, "history_stride": 5}, ensure_ascii=False), encoding="utf-8"
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
     )
     return directory
 
@@ -195,6 +198,132 @@ def test_phase3_action_chain_targets_and_tail_mask() -> None:
     assert float(loss_changed) != pytest.approx(float(loss.detach()), rel=1e-6)
 
 
+# ------------------------------------- ④b 动作链：labels 源（P1 DAgger 前置）
+def test_phase3_action_chain_targets_labels_source_masks_nan_tail() -> None:
+    """``source="labels"``：逐行教师链直取；NaN 尾 → valid=0 且目标有限化（不污染损失）。"""
+    arrays = {
+        "episode_id": np.asarray([0, 0, 0], dtype=np.int64),
+        "step": np.asarray([0, 5, 15], dtype=np.int64),
+        "action": np.zeros((3, 6, 2), dtype=np.float32),
+    }
+    arrays["action"][:, :, 0] = [[1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+                                 [2.0, 2.1, 2.2, 2.3, 2.4, 2.5],
+                                 [3.0, 3.1, 3.2, 3.3, 3.4, 3.5]]
+    arrays["action"][0, 4:, :] = np.nan  # 末端缺失链步
+    chain, valid = phase3_action_chain_targets(arrays, np.asarray([0, 1]), future=6, source="labels")
+    assert np.isfinite(chain).all(), "NaN 目标必须先有限化（训练侧 mask 乘 0 前）"
+    np.testing.assert_allclose(chain[0, :4], arrays["action"][0, :4], atol=1e-6)
+    assert valid[0].tolist() == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    assert valid[1].tolist() == [1.0] * 6
+    assert float(np.abs(chain[0, 4:]).sum()) == 0.0
+    # lookup（默认）在同一数据上仍按未来行查表（旧行为不变）
+    chain_lookup, valid_lookup = phase3_action_chain_targets(arrays, np.asarray([0]), future=6)
+    assert valid_lookup[0, 1] == 1.0 and chain_lookup[0, 1, 0] == pytest.approx(2.0)
+    assert valid_lookup[0, 2] == 0.0, "step 10 缺行 → mask 0（lookup 口径）"
+    with pytest.raises(ValueError, match="action_chain_source"):
+        phase3_action_chain_targets(arrays, np.asarray([0]), source="nope")
+    legacy = {"episode_id": arrays["episode_id"], "step": arrays["step"], "action": np.zeros((3, 2), dtype=np.float32)}
+    with pytest.raises(ValueError, match="需要 action"):
+        phase3_action_chain_targets(legacy, np.asarray([0]), source="labels")
+
+
+def test_phase3_future_fn_auto_source_resolves_by_meta() -> None:
+    """``_phase3_future_fn`` auto：新 dagger meta → labels；旧 meta → lookup；显式覆盖生效。"""
+    arrays, _ = make_v2_arrays(episodes=2, steps_per_episode=6)
+    arrays = {key: np.array(value) for key, value in arrays.items()}
+    arrays["action"][0, 4:, :] = np.nan  # 模拟教师链 NaN 尾
+
+    def _build(meta: dict, requested: str):
+        dataset = BCDataset(arrays, {"schema_version": 2, "label_names": None, **meta})
+        windows = FrameWindows(
+            dataset.arrays, dataset.alignments, episode_key="episode_id", step_key="step",
+            keys=_bc_channel_keys(), step_stride=_BC_STEP_STRIDE,
+        )
+        wm_valid = np.asarray(dataset.arrays["wm_valid"], dtype=np.float32)
+        fn = _phase3_future_fn(dataset, windows, wm_valid, action_chain_source=requested)
+        future = fn(np.asarray([0]), dataset.build_obs_batch(np.asarray([0])))
+        return fn.action_chain_source, future
+
+    source, future = _build({"dagger": {"label_scope": "action_chain_t0_t5"}}, "auto")
+    assert source == "labels"
+    assert future["action_chain_valid"][0].tolist() == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    assert np.isfinite(future["action_chain"]).all()
+    source_old, future_old = _build({"dagger": {"label_scope": "first_step_only"}}, "auto")
+    assert source_old == "lookup"
+    assert future_old["action_chain_valid"][0, 0] == 1.0
+    source_forced, _ = _build({"dagger": {"label_scope": "action_chain_t0_t5"}}, "lookup")
+    assert source_forced == "lookup", "显式 lookup 必须覆盖 auto"
+
+
+# ------------------------------------- ④c bias 标定（P1 DAgger 前置）
+def test_phase3_bias_calibration_metrics_and_gradient_direction() -> None:
+    """逐维 signed-bias 惩罚：指标 = 原始 bias；梯度方向把预测推离偏置；weight=0 不进图。"""
+    from pipeline.trainer import phase3_bias_calibration
+
+    torch.manual_seed(0)
+    batch, horizon = 4, 6
+    target_action = torch.zeros((batch, horizon, 2))
+    target_action[:, :, 0] = 3.0
+    bias_mu = torch.tensor([0.0, -0.0043])
+    mu = target_action[:, 0, :] + bias_mu
+    chain_target = target_action.clone()  # 尾链教师目标（无偏置）
+    plan = target_action + bias_mu  # 模型 plan 尾链带同向偏置
+    chain_valid = torch.ones((batch, horizon))
+    traj_target = torch.zeros((batch, horizon, 2))
+    traj_target[:, :, 0] = torch.arange(1, horizon + 1).float()
+    traj_pred = traj_target.clone()
+    traj_pred[:, :, 1] = -0.02  # 持续右偏（左法向负）
+    frame_weight = torch.ones(batch)
+    targets = {"action": target_action, "traj6": traj_target}
+    future_t = {"action_chain": chain_target, "action_chain_valid": chain_valid}
+    out = {"action_mu": mu.clone().requires_grad_(True), "plan": plan.clone().requires_grad_(True),
+           "traj_xy": traj_pred.clone().requires_grad_(True)}
+    config = Phase3Config(bias_calib_weight=0.1)
+    penalty, metrics = phase3_bias_calibration(out, targets, future_t, frame_weight, config)
+    assert float(penalty) > 0.0
+    assert metrics["bc_bias_action_mu_ds"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["bc_bias_action_mu_dtheta"] == pytest.approx(-0.0043, abs=1e-6)
+    assert metrics["bc_bias_chain_dtheta_h2"] == pytest.approx(-0.0043, abs=1e-6)
+    assert metrics["bc_bias_traj_lat_h1"] == pytest.approx(-0.02, abs=1e-6)
+    penalty.backward()
+    assert out["action_mu"].grad is not None
+    assert float(out["action_mu"].grad[0, 1]) < 0.0, "负 dθ bias → 梯度向下（更新后 dθ 增大）"
+    assert float(out["traj_xy"].grad[0, 0, 1]) < 0.0, "右偏（负横向）→ 梯度向下（更新后左移）"
+    # weight=0：penalty 恒 0、无图，但监控指标仍记录
+    off = Phase3Config(bias_calib_weight=0.0)
+    penalty_off, metrics_off = phase3_bias_calibration(
+        {key: value.detach().clone() for key, value in out.items()}, targets, future_t, frame_weight, off
+    )
+    assert float(penalty_off) == 0.0 and not penalty_off.requires_grad
+    assert metrics_off["bc_bias_action_mu_dtheta"] == pytest.approx(-0.0043, abs=1e-6)
+    assert metrics_off["bc_bias_traj_lat_h1"] == pytest.approx(-0.02, abs=1e-6)
+
+
+def test_phase3_bias_calib_loss_wiring_zero_and_active(tmp_path: Path) -> None:
+    """训练接线：weight=0 → 项恒 0、指标仍记录；weight>0 → 项>0、反传无 NaN。"""
+    base, _ = make_v2_arrays(episodes=4, steps_per_episode=6)
+    directory = _write_arrays(tmp_path / "bias", base)
+
+    def _run(weight: float) -> dict:
+        dataset = BCDataset.load(str(directory))
+        cfg = Phase3Config(
+            epochs=1, batch_size=8, micro_batch_size=4, device="cpu", shuffle=False, seed=0,
+            bias_calib_weight=weight,
+        )
+        return pretrain_bc_phase3(
+            _tiny_model(), dataset, cfg, logger=lambda _: None, future_fn=_future_fn_for(dataset)
+        )
+
+    off = _run(0.0)
+    assert off["bc_bias_calib_loss"] == pytest.approx(0.0, abs=1e-12)
+    for key in ("bc_bias_action_mu_ds", "bc_bias_action_mu_dtheta",
+                "bc_bias_chain_dtheta_h2", "bc_bias_traj_lat_h1"):
+        assert np.isfinite(off[key]), f"weight=0 也必须记录 {key}（前后对照）"
+    on = _run(0.1)
+    assert np.isfinite(on["bc_bias_calib_loss"]) and on["bc_bias_calib_loss"] > 0.0
+    assert np.isfinite(on["bc_loss"])
+
+
 # ------------------------------------------------ ⑤ LD 损失形状/回传/mask
 def test_phase3_ld_loss_shapes_backprop_and_mask() -> None:
     torch.manual_seed(0)
@@ -301,6 +430,13 @@ def test_phase3_entry_smoke_dagger_only_and_monitor(tmp_path: Path) -> None:
                 "bc_ld_loss", "bc_presence_loss", "bc_entry_loss"):
         assert np.isfinite(metrics[key]), f"缺少损失项 {key}"
     assert metrics["traj_monitor_only"] is True and metrics["losses"]["traj_aux"] == 0.0
+    # P1 DAgger 前置：动作链来源 auto 解析（合成数据无 dagger 标签口径 → lookup）与 bias 监控
+    assert metrics["action_chain_source"]["requested"] == "auto"
+    assert metrics["action_chain_source"]["train"] == "lookup"
+    assert metrics["action_chain_source"]["val"] == "same_as_train"
+    assert metrics["losses"]["bias_calib"] == 0.0
+    assert np.isfinite(metrics["bc_bias_calib_loss"]) and metrics["bc_bias_calib_loss"] == 0.0
+    assert np.isfinite(metrics["bc_bias_action_mu_dtheta"])
     assert metrics["frozen_params"] == 0 and metrics["trainable_params"] > 0
     assert metrics["phase3_rounds"] == 7 and metrics["fail_target"] == 1000
     assert metrics["spec_pool"] == "env/specs/scenarios_train_5k.json"
@@ -314,10 +450,41 @@ def test_phase3_entry_smoke_dagger_only_and_monitor(tmp_path: Path) -> None:
     for tag in (
         "loss/total", "loss/action", "loss/action_chain", "loss/ego_next", "loss/od",
         "loss/ld", "loss/presence", "loss/entry", "loss/load_balance",
+        "loss/bias_calib", "ego/bias/action_mu_dtheta", "ego/bias/chain_dtheta/h2",
+        "ego/bias/traj_lat/h1",
         "ego/traj/err", "ego/traj/mse_m2", "ego/traj/mae_m", "ego/traj/fde_m", "ego/traj/mae_m/h1",
         "val/loss/action_chain", "val/loss/ld", "val/ego/traj/mae_m",
     ):
         assert tag in tags, f"phase 3 监控序列缺失：{tag}"
+
+
+# --------------------- ①b 入口 smoke：新标签口径（labels）+ bias 标定（P1 DAgger 前置）
+def test_phase3_entry_smoke_labels_source_and_bias_calib(tmp_path: Path) -> None:
+    """``action_chain_source=auto`` + 新 dagger meta → labels；bias_calib>0 → 项>0 且无 NaN。"""
+    arrays, _ = make_v2_arrays(episodes=3, steps_per_episode=6)
+    arrays = {key: np.array(value) for key, value in arrays.items()}
+    arrays["action"] = arrays["action"].astype(np.float32)
+    arrays["action"][0, 4:, :] = np.nan  # 教师链 NaN 尾（新采集器口径）
+    dagger = _write_arrays(
+        tmp_path / "BTC_test_dagger_chain", arrays,
+        meta={"dagger": {"label_scope": "action_chain_t0_t5"}},
+    )
+    out_dir = tmp_path / "stage_b_chain"
+    cfg = {"stages": {"B": {"phase3": {"action_chain_source": "auto"}}}}
+    args = _parse_args([
+        "--phase3", str(dagger), "--ckpt", str(_init_ckpt(tmp_path)), "--out", str(out_dir),
+        "--model-config", str(_model_cfg(tmp_path)), "--device", "cpu", "--seed", "0",
+        "--phase3-epochs", "1", "--batch-size", "8", "--val-frac", "0",
+        "--phase3-bias-calib-weight", "0.1",
+    ])
+    metrics = run_stage_b_phase3(args, cfg)
+    assert metrics["action_chain_source"]["requested"] == "auto"
+    assert metrics["action_chain_source"]["train"] == "labels", "新 dagger meta 必须解析为 labels"
+    assert metrics["losses"]["bias_calib"] == pytest.approx(0.1)
+    assert np.isfinite(metrics["bc_loss"]) and np.isfinite(metrics["bc_bias_calib_loss"])
+    assert metrics["bc_bias_calib_loss"] > 0.0
+    assert np.isfinite(metrics["bc_bias_action_mu_dtheta"])
+    assert (out_dir / "final.pt").exists()
 
 
 # ------------------------------------------------ tools/train.py CLI 入口

@@ -173,7 +173,12 @@ def _obs_frame(step: float) -> dict:
     }
 
 
-def _synthetic_episode(frames_steps=(0, 5, 10, 15), total_steps: int = 40, label=(2.5, 0.05)) -> dict:
+def _synthetic_episode(
+    frames_steps=(0, 5, 10, 15),
+    total_steps: int = 40,
+    label=(2.5, 0.05),
+    labels: dict | None = None,
+) -> dict:
     poses = [np.array([0.5 * i, 0.0, 0.0], dtype=np.float64) for i in range(total_steps + 1)]
     frames = {
         step: {
@@ -190,6 +195,9 @@ def _synthetic_episode(frames_steps=(0, 5, 10, 15), total_steps: int = 40, label
         }
         for step in frames_steps
     }
+    per_step = {int(step): np.asarray(label, dtype=np.float64) for step in frames_steps}
+    if labels:
+        per_step.update({int(step): np.asarray(value, dtype=np.float64) for step, value in labels.items()})
     return {
         "frames": frames,
         "poses": poses,
@@ -197,30 +205,45 @@ def _synthetic_episode(frames_steps=(0, 5, 10, 15), total_steps: int = 40, label
         "termination": "max_step",
         "steps": total_steps,
         "ended_by_env": False,
-        "expert_labels": {step: {"action": np.array(label), "raw_action": np.array([0.1, 0.5])} for step in frames_steps},
+        "expert_labels": {
+            step: {"action": value, "raw_action": np.array([0.1, 0.5])} for step, value in per_step.items()
+        },
         "labeler_params": {"kind": "test"},
     }
 
 
-def test_relabel_rows_uses_expert_first_step_and_constant_window() -> None:
+def test_relabel_rows_uses_teacher_chain_t0_t5_with_nan_tail() -> None:
+    """P1 DAgger 前置：``action[k]`` = 策略帧 ``t+5k`` 的教师标签；末端缺失 → NaN；traj 有限。"""
     from tools.collect_expert import extract_samples, resolve_interpolate
 
     interpolate_fn, _ = resolve_interpolate()
     label_order = ("cutin_active", "cutout_active", "crowded", "car_following",
                    "on_curve", "merging", "roundabout_near", "near_intersection")
+    per_frame = {0: (1.0, 0.01), 5: (2.0, 0.02), 10: (3.0, 0.03), 15: (4.0, 0.04)}
+    episode = _synthetic_episode(labels=per_frame)
     rows = extract_samples(
-        _synthetic_episode(), None, episode_id=0, label_order=label_order, interpolate_fn=interpolate_fn,
+        episode, None, episode_id=0, label_order=label_order, interpolate_fn=interpolate_fn,
         on_lane_frac=0.5, on_lane_margin=0.3, roundtrip_key_mean=float("inf"), roundtrip_key_max=float("inf"),
         filter_counter=Counter(),
     )
     assert len(rows) == 4
-    relabeled = dg._relabel_rows_with_expert(rows, _synthetic_episode(), interpolate_fn=interpolate_fn)
-    assert relabeled == 4
+    stats = dg._relabel_rows_with_expert(rows, episode, interpolate_fn=interpolate_fn)
+    assert stats == {"relabeled": 4, "chain_rows": 4, "full_chain_rows": 0, "tail_missing_steps": 14}
+    expected_tail_missing = {0: 2, 5: 3, 10: 4, 15: 5}
     for row in rows:
-        np.testing.assert_allclose(row["action"][0], [2.5, 0.05], atol=1e-6)
-        np.testing.assert_allclose(row["action"], np.repeat(np.asarray(row["action"][0])[None, :], 6, axis=0))
-        assert row["action"].shape == (6, 2) and row["traj6"].shape == (6, 2) and row["traj30"].shape == (30, 2)
-        assert np.isfinite(row["traj6"]).all()
+        step = int(row["step"])
+        valid = 6 - expected_tail_missing[step]
+        for k in range(valid):
+            np.testing.assert_allclose(row["action"][k], per_frame[step + 5 * k], atol=1e-6)
+        assert np.isnan(row["action"][valid:]).all(), "缺失链步必须 NaN"
+        assert np.isfinite(row["traj6"]).all() and np.isfinite(row["traj30"]).all()
+        # 几何一致性：traj6 = 前向填充链插值的关键点（t=0.5..3.0 s）
+        fill = np.asarray(row["action"], dtype=np.float64).copy()
+        for k in range(1, 6):
+            if not np.isfinite(fill[k]).all():
+                fill[k] = fill[k - 1]
+        interp = interpolate_fn(fill, dt=0.5, hz=10)
+        np.testing.assert_allclose(row["traj6"], interp[[4, 9, 14, 19, 24, 29], :2], atol=1e-6)
         assert np.isnan(row["roundtrip_key_err"]) and np.isnan(row["roundtrip_dense_err"])
     # 前三帧窗口完整（t+30 ≤ limit=40），最后一帧命中 terminal_window
     assert [row["train_weight"] for row in rows] == [1.0, 1.0, 1.0, 0.0]
@@ -294,6 +317,48 @@ def test_rows_save_and_load_with_dagger_meta(tmp_path: Path) -> None:
     )
     assert dataset.arrays["roundtrip_key_err"].shape == (len(rows),)
     assert np.isnan(dataset.arrays["roundtrip_key_err"]).all()
+
+
+def test_teacher_chain_nan_tail_roundtrip_save_load_and_auto_source(tmp_path: Path) -> None:
+    """P1 DAgger 前置：NaN 尾链落盘/读取往返保留；meta label_scope 驱动训练侧 auto=labels。"""
+    from env.obs.builder import ObservationBuilder
+    from pipeline.stages import _resolve_action_chain_source
+    from pipeline.trainer import BCDataset
+    from tools.collect_expert import extract_samples, resolve_interpolate, save_dataset
+
+    interpolate_fn, kinematics = resolve_interpolate()
+    label_order = ("cutin_active", "cutout_active", "crowded", "car_following",
+                   "on_curve", "merging", "roundabout_near", "near_intersection")
+    per_frame = {0: (1.0, 0.01), 5: (2.0, 0.02), 10: (3.0, 0.03), 15: (4.0, 0.04)}
+    episode = _synthetic_episode(labels=per_frame)
+    rows = extract_samples(
+        episode, None, episode_id=0, label_order=label_order, interpolate_fn=interpolate_fn,
+        on_lane_frac=0.5, on_lane_margin=0.3, roundtrip_key_mean=float("inf"), roundtrip_key_max=float("inf"),
+        filter_counter=Counter(),
+    )
+    dg._relabel_rows_with_expert(rows, episode, interpolate_fn=interpolate_fn)
+    out = tmp_path / "BTC_test_dagger_chain"
+    paths = save_dataset(
+        out, rows, label_order=label_order, builder=ObservationBuilder({}),
+        config={"max_steps": 40}, report={"kinematics_source": kinematics},
+        sample_weight=np.ones(len(rows), dtype=np.float32),
+        balance_group=np.asarray(["easy/curve"] * len(rows), dtype="U64"),
+    )
+    dg._augment_meta(Path(paths["meta"]), {"label_scope": dg.LABEL_SCOPE_ACTION_CHAIN, "roll_in": True})
+    dataset = BCDataset.load(str(out))
+    assert dataset.count == len(rows)
+    assert np.isnan(dataset.arrays["action"][0, 4:, :]).all(), "NaN 尾链必须原样落盘"
+    assert np.isfinite(dataset.arrays["traj6"]).all(), "几何字段必须有限（前向填充链插值）"
+    assert np.isnan(dataset.arrays["action"][3, 1:, :]).all()
+    # 训练侧 auto 解析：新 meta → labels；旧 meta/专家集 → lookup
+    assert _resolve_action_chain_source(dataset, "auto") == "labels"
+    assert _resolve_action_chain_source(dataset, "lookup") == "lookup"
+    legacy = BCDataset(dataset.arrays, {})
+    assert _resolve_action_chain_source(legacy, "auto") == "lookup"
+    old_scope = BCDataset(dataset.arrays, {"dagger": {"label_scope": "first_step_only"}})
+    assert _resolve_action_chain_source(old_scope, "auto") == "lookup"
+    with pytest.raises(SystemExit, match="first_step_only"):
+        _resolve_action_chain_source(old_scope, "labels")
 
 
 # --------------------------------------------------- 6. 场景池（lane U5：--specs 必填 + 隔离守卫）
