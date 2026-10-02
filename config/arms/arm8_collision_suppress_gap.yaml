@@ -1,0 +1,41 @@
+# P4 arm8-B（碰撞抑制候选 B，后备）— 近碰 dense `lead_gap` 项（相对 arm0 bundle 单变量：
+#   terms 末尾追加 {name: lead_gap, weight: -1.0, gap_ref: 6.0, cap: 1.0}；其余 term 与
+#   终局值逐位同 arm0（rc=1：+29/−22/−14，max_step −46））。
+# 用途：§7.5 后备臂——在临界前 ~2–4 个策略步对"近距/短头距"本身计罚（不要求接近速度，
+#   语义区别于 ttc；arm5 实测 ttc 训练激活 ≈ −0.001/update，不能承担碰撞抑制）。
+# 依据（E-β″ 归档 2500 ep would-be，脚本 /tmp/opencode/v6_collision_gap_sizing.py）：
+#   collision ep（n=146）终止前 5 s 窗口覆盖 60.3%、窗内均 −1.46 / p50 −1.18；
+#   全局畸变 −0.0022/步；arrive ep 全程均值 −0.05（窗内 0）——选择性 ≈ 38×。
+# 风险：lead-only 视野（~40% 碰撞窗内无 <6 m 前车不覆盖）；信号量级弱（窗内中位 ~−1.2 vs
+#   终局 Δ10）；近距罚或诱发跟车退缩/爬行（arm4 λ0.98 前例）→ 监控 low_speed/crawl/max_step。
+# 加载：tools/train.py --stage C --config config/arms/arm8_collision_suppress_gap.yaml ...
+# 顺序：A（term）→（A′ 条件升级）→ B；A 主判据失败才启用 B（§7.5）。
+# 注：includes 平铺合并语义（stages 段整体替换）见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+        - {name: lead_gap, weight: -1.0, gap_ref: 6.0, cap: 1.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -22
+          out_of_road: -14
+          max_step: -46
+          error: -5

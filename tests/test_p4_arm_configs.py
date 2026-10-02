@@ -7,6 +7,9 @@
 - 终局值与 ``docs/reward_audit/ebeta2/config_draft_rc*.yaml`` 逐档一致；
 - 单变量：arm1–3 rc 档、arm4 ``train.ppo.lam=0.98``、arm5 ``ttc``、arm6 ``lane_boundary``、
   arm7 ``lane_center``；``speed_ratio`` 0.4 / ``low_speed`` 启用为 bundle 公共项；
+- **arm8 碰撞抑制（§7.5）**：arm8-A/A′ 仅 ``terminal_values.collision`` 单变量偏离
+  （−32 / −46；其余终局值逐位同 rc=1 草案）；arm8-B 仅追加 ``lead_gap`` dense 项
+  （−1.0 / gap_ref 6.0 / cap 1.0；终局值同 rc=1 草案）；
 - ``max_step`` 经适配器实际结算（``terminal_key=max_step``）。
 """
 
@@ -35,7 +38,8 @@ _INCLUDES = [
     "config/eval.yaml",
 ]
 
-#: 臂文件 → 期望（tier=rc 档；lam=λ 单变量；extra=追加项 (name, weight)）
+#: 臂文件 → 期望（tier=rc 档；lam=λ 单变量；extra=追加项 (name, weight)；
+#: terminal_override=相对同档草案的终局值单变量偏离，仅 arm8 碰撞抑制使用）
 _ARM_CASES: Dict[str, Dict[str, Any]] = {
     "arm0_bundle_rc1.yaml": {"tier": 1.0},
     "arm1_rc3.yaml": {"tier": 3.0},
@@ -45,6 +49,13 @@ _ARM_CASES: Dict[str, Dict[str, Any]] = {
     "arm5_ttc.yaml": {"tier": 1.0, "extra": ("ttc", -0.5)},
     "arm6_lane_boundary.yaml": {"tier": 1.0, "extra": ("lane_boundary", -0.2)},
     "arm7_lane_center.yaml": {"tier": 1.0, "extra": ("lane_center", -0.1)},
+    "arm8_collision_suppress_term.yaml": {
+        "tier": 1.0, "terminal_override": {"collision": -32.0},
+    },
+    "arm8_collision_suppress_term46.yaml": {
+        "tier": 1.0, "terminal_override": {"collision": -46.0},
+    },
+    "arm8_collision_suppress_gap.yaml": {"tier": 1.0, "extra": ("lead_gap", -1.0)},
 }
 
 
@@ -82,7 +93,9 @@ def test_arm_reward_pairs_and_matches_draft(arm_name: str, spec: Dict[str, Any])
 
     draft = _draft_reward(spec["tier"])
     values = reward_cfg["aggregation"]["terminal_values"]
-    assert values == draft["aggregation"]["terminal_values"], "终局值必须与 E-β″ 草案逐档一致"
+    expected_values = dict(draft["aggregation"]["terminal_values"])
+    expected_values.update(spec.get("terminal_override", {}))
+    assert values == expected_values, "终局值必须与 E-β″ 草案逐档一致（arm8 仅预注册单变量偏离）"
     assert _max_step_terminal_value(adapter) == pytest.approx(values["max_step"])
 
     draft_names = {term["name"] for term in draft["terms"]}
@@ -146,3 +159,11 @@ def test_extra_term_params() -> None:
     center_term = {term.name: term for term in center.factory().terms}["lane_center"]
     assert center_term.deadband == pytest.approx(0.25)
     assert center_term.clamp == pytest.approx(3.0)
+
+    gap = build_reward_adapter(
+        _load_arm("arm8_collision_suppress_gap.yaml")["stages"]["C"]["reward"]
+    )[0]
+    gap_term = {term.name: term for term in gap.factory().terms}["lead_gap"]
+    assert gap_term.weight == pytest.approx(-1.0)
+    assert gap_term.gap_ref == pytest.approx(6.0)
+    assert gap_term.cap == pytest.approx(1.0)

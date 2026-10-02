@@ -33,6 +33,7 @@ __all__ = [
     "CrashPenalty",
     "OutOfRoadPenalty",
     "TTCLeadPenalty",
+    "LeadGapPenalty",
     "LongitudinalAccelPenalty",
     "LateralAccelPenalty",
     "JerkPenalty",
@@ -286,6 +287,49 @@ class TTCLeadPenalty(Term, _WarnMissingInputMixin):
         ttc = gap / closing
         raw = 1.0 / max(ttc, self.ttc_floor) - self.inverse_threshold
         return raw if raw > 0.0 else 0.0
+
+
+@register_term
+class LeadGapPenalty(Term, _WarnMissingInputMixin):
+    """安全（稠密近碰/车距罚，**默认关**）：前车净距低于参考距时线性罚。
+
+    定义
+    ----
+    ``raw = clamp((gap_ref − gap) / gap_ref, 0, cap)``（``gap = lead_gap_m``）：
+
+    - 连续：``gap = gap_ref`` 处 raw 恰为 0，更大恒为 0；``gap → 0`` 时 raw → 1；
+    - 单调：``gap`` 越小 → raw 越大；与接近速度**无关**（不需要 ``closing > 0``）——
+      这是与 :class:`TTCLeadPenalty` 的语义区别：本项罚"近距/短头距"本身，
+      在等速跟车（TTC = ∞）与减速接近时同样触发，属更早的安全裕度信号；
+    - ``gap <= 0``（含 −1 哨兵）= 无前车 → 0（正常语义、不告警）；
+    - 只读 ``step_ctx``；不消费自车速度 / 前车速度键（区别于 ttc 的输入面）。
+
+    输入键：``lead_gap_m``（m；pipeline 侧注入，同 ttc）。必需键缺失 / 非有限值 →
+    0 且**只告警一次**（每实例）。默认**不在** :data:`DEFAULT_TERM_CONFIGS`；P4 预注册臂
+    （``docs/v6_program_prereg.md`` §7.5 候选 B）经 config 启用。
+    """
+
+    name: ClassVar[str] = "lead_gap"
+
+    def __init__(self, weight: float = -1.0, gap_ref: float = 8.0, cap: float = 1.0) -> None:
+        if gap_ref <= 0.0:
+            raise ValueError(f"lead_gap gap_ref 必须 > 0，收到 {gap_ref}")
+        if cap <= 0.0:
+            raise ValueError(f"lead_gap cap 必须 > 0，收到 {cap}")
+        super().__init__(weight=weight, gap_ref=float(gap_ref), cap=float(cap))
+        self.gap_ref = float(gap_ref)
+        self.cap = float(cap)
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        gap = _optional_float(step_ctx.get("lead_gap_m"))
+        if gap is None or not math.isfinite(gap):
+            self._warn_missing_input(
+                "lead_gap: 缺少 lead_gap_m 或值非法 → 该项记 0（每个项实例只告警一次）"
+            )
+            return 0.0
+        if gap <= 0.0:  # 无前车（PP/IDM 约定：非正净距含 −1 哨兵）
+            return 0.0
+        return _clip((self.gap_ref - gap) / self.gap_ref, 0.0, self.cap)
 
 
 @register_term

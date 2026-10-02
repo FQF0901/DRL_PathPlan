@@ -17,6 +17,9 @@
 | arm5 | `arm5_ttc.yaml` | 追加 `ttc`（−0.5 / 2.0 s / 0.5 s） | rc=1（同 arm0） | 前置离线证伪已完成（collision 触发率 67.6%）→ 保留本臂、阈值 2.0 s |
 | arm6 | `arm6_lane_boundary.yaml` | 追加 `lane_boundary`（−0.2 / margin 0.5 m） | rc=1（同 arm0） | 覆盖出界类（口径同 `rl_reward_v5.md` §5） |
 | arm7 | `arm7_lane_center.yaml` | 追加 `lane_center`（−0.1 / deadband 0.25 m） | rc=1（同 arm0） | 车道中心偏离罚（口径同 §5） |
+| arm8-A | `arm8_collision_suppress_term.yaml` | `aggregation.terminal_values.collision` −22→−32 | rc=1 其余同 arm0 | §7.5 碰撞抑制首选：碰撞/出界分离 6.4→16.4（救援盈亏门槛 9.0%→20.2%） |
+| arm8-A′ | `arm8_collision_suppress_term46.yaml` | `collision` −22→−46 | rc=1 其余同 arm0 | §7.5 条件升级（A 主判据过、辅助闸未过且 A 碰撞率 ≤15.0% 才跑） |
+| arm8-B | `arm8_collision_suppress_gap.yaml` | 追加 `lead_gap`（−1.0 / gap_ref 6.0 / cap 1.0） | rc=1（同 arm0） | §7.5 后备：近碰 dense（ttc 近零激活的替代；A 主判据失败才启用） |
 
 - bundle 底座（arm0）= v5 奖励默认全量：`speed_ratio` 0.4 + `low_speed` 启用 + rc 选定档 +
   终局值定稿表；其余项参数不变。
@@ -25,6 +28,10 @@
   标注 **n=8/向、不判通过、首臂后复核、不扩采**；**horizon 对齐 = 训练截断 200 策略步**
   （=100 s，与审计/评测一致；旧 600=300 s=3×）。见 `docs/v6_program_prereg.md` §7.1/§7.4
   与 ebeta2 `MANIFEST.md`（后者"显式接受"已被本修正替代）。
+- **arm8（碰撞抑制，§7.5；Gate4 终审立项）**：开跑前置 = arm0 seed=11 复现闭环；顺序
+  A →（A′ 条件）→ B；判据 = §7.3 主判据 + 辅助碰撞闸（collΔ ≤ +3pt 或 ≤10%，相对 E-β″ 零点）。
+  诊断/推导见 `/tmp/opencode/v6_collision_arm_design.md`（产物脚本
+  `v6_collision_diag.py` / `v6_collision_split.py` / `v6_collision_gap_sizing.py`，不入 repo）。
 
 ## 加载语义（重要；`includes` 为**一层平铺合并**）
 
@@ -49,9 +56,11 @@
 ## 验证（CPU dry-run；`tests/test_p4_arm_configs.py`）
 
 - 逐臂：`load_config(arm)` → `stages.C.reward` → `build_reward_adapter` 通过（含 rc 档配对守卫）；
-- 终局值与 `docs/reward_audit/ebeta2/config_draft_rc*.yaml` 逐档一致；
-- 权重/参数：`speed_ratio` 0.4、`low_speed` 启用、各臂单变量项（ttc/lane_boundary/lane_center）
-  与 arm4 `train.ppo.lam=0.98`；
+- 终局值与 `docs/reward_audit/ebeta2/config_draft_rc*.yaml` 逐档一致（**arm8-A/A′ 仅
+  `collision` 单变量偏离 −32/−46**，其余逐位同 rc=1 草案）；
+- 权重/参数：`speed_ratio` 0.4、`low_speed` 启用、各臂单变量项
+  （ttc/lane_boundary/lane_center/lead_gap）与 arm4 `train.ppo.lam=0.98`；
+- `lead_gap` 项参数（−1.0 / gap_ref 6.0 / cap 1.0）经适配器逐项断言；
 - `max_step` 终局值经适配器实际结算（`terminal_key=max_step`）逐档断言。
 
 ## 使用示例

@@ -46,6 +46,7 @@ EXPECTED_TERMS = {
     "lane_center",
     "lane_boundary",
     "ttc",
+    "lead_gap",
     "low_speed",
     "speed_ratio",
     "solid_line",
@@ -234,6 +235,43 @@ def test_ttc_enablement_and_aggregation_components() -> None:
     assert step.reward == pytest.approx(0.4 * 0.5 + 0.1 - 0.25)
 
 
+def test_lead_gap_boundary_monotone_and_default_off() -> None:
+    """lead_gap（§7.5 候选 B）：gap_ref 处连续为 0、随 gap 单调、无需速度键、默认关。"""
+    term = make_term("lead_gap", weight=-1.0, gap_ref=6.0, cap=1.0)
+    assert term.gap_ref == pytest.approx(6.0)
+    assert term.cap == pytest.approx(1.0)
+    # 边界连续：gap = gap_ref → raw 恰为 0；更大恒为 0
+    assert term.compute({"lead_gap_m": 6.0}) == 0.0
+    assert term.compute({"lead_gap_m": 30.0}) == 0.0
+    # 单调：gap 越小 raw 越大（不需要 velocity / lead_speed 键——与 ttc 的语义区别）
+    raws = [term.compute({"lead_gap_m": gap}) for gap in (5.0, 4.0, 3.0, 2.0, 1.0)]
+    assert all(later >= earlier for earlier, later in zip(raws, raws[1:]))
+    assert raws[0] == pytest.approx(1.0 / 6.0)  # (6−5)/6
+    assert raws[-1] == pytest.approx(5.0 / 6.0)
+    # gap → 0 逼近 raw → 1（cap 封顶）；给出 speed 别名也不改变数值（速度无关）
+    assert term.compute({"lead_gap_m": 0.1, "velocity": 10.0}) == pytest.approx(5.9 / 6.0)
+    assert term.compute({"lead_gap_m": 0.1, "speed": 10.0}) == pytest.approx(5.9 / 6.0)
+    # 无前车（含 −1 哨兵）→ 0 且不告警
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert term.compute({"lead_gap_m": -1.0}) == 0.0
+        assert term.compute({"lead_gap_m": 0.0}) == 0.0
+        assert caught == []
+    # 缺键 / 非有限值 → 0 且只告警一次
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({"velocity": 10.0}) == 0.0
+        assert term.compute({"lead_gap_m": float("nan")}) == 0.0
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+    with pytest.raises(ValueError):
+        make_term("lead_gap", gap_ref=0.0)
+    with pytest.raises(ValueError):
+        make_term("lead_gap", cap=0.0)
+    # 默认关
+    assert "lead_gap" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
+
+
 def test_lane_boundary_margin_threshold_and_default_off() -> None:
     """lane_boundary：居中 → 0、贴线 → 罚、压线封顶、单调、默认关（与 lane_center 互补）。"""
     term = make_term("lane_boundary", weight=-0.2)
@@ -284,7 +322,7 @@ def test_lane_boundary_missing_keys_fallback_and_warn_once() -> None:
 
 def test_new_dense_terms_registered_and_default_list_frozen() -> None:
     """新项已注册（可经 config/CLI 启用）；DEFAULT_TERM_CONFIGS 逐项快照不变。"""
-    assert {"ttc", "lane_boundary"} <= set(available_terms())
+    assert {"ttc", "lane_boundary", "lead_gap"} <= set(available_terms())
     assert [dict(config) for config in DEFAULT_TERM_CONFIGS] == [
         {"name": "route_completion", "weight": 1.0, "gamma": 1.0},
         {"name": "speed_ratio", "weight": 0.4, "cap": 1.0},  # v5 §2

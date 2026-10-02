@@ -1,0 +1,39 @@
+# P4 arm8-A（碰撞抑制候选 A，首选）— 碰撞终局罚上调（相对 arm0 bundle 单变量：
+#   aggregation.terminal_values.collision −22 → −32，Δ=+10；其余项与终局值逐位同 arm0）。
+# 用途：§7.5 碰撞抑制臂——把碰撞从"仅比出界差 6.4"抬成显著更差的终局：
+#   依据 E-β″ rc=1 审计碰撞总罚 −21.40 vs 出界 −15.00（分离 6.4）；救援成功概率的盈亏
+#   平衡门槛 p* = Δ/(arrive−coll) 由 9.0% 抬到 20.2%（−46 档 32.0%），直接作用于 eval500
+#   中 55/249 base-OOR"救援而撞"的决策边界（净多撞 +52、交换率 1.83 成功/撞；
+#   诊断见 /tmp/opencode/v6_collision_arm_design.md）。
+# 判据：§7.5——主判据 §7.3（net ≥ +20 且 z ≥ 1.96）+ 辅助碰撞闸（collΔ ≤ +3pt 或 ≤10%）。
+# 加载：tools/train.py --stage C --config config/arms/arm8_collision_suppress_term.yaml ...
+# 单变量：碰撞终局值 collision −22 → −32（Δ=+10，X 推导/敏感性见 §7.5）。
+# 终局值：E-β″ rc=1 定稿 +29/−22/−14 / max_step −46 之上仅改 collision（有意的剖面偏离）。
+# 注：includes 平铺合并语义（stages 段整体替换）见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -32
+          out_of_road: -14
+          max_step: -46
+          error: -5
