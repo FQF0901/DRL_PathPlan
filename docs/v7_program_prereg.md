@@ -108,6 +108,7 @@
 - v7-P0 修正集 #1（Gate A：预注册统计修正 + 评测 pin 表 + IDM spec-seed 变体 + Gate B/C 加固 + 安全闸量化 + `expert500val` 禁训 + `paired_eval` 方差闸/单 baseline fail-closed）内容 commit：`0454308`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - v7-P2 首臂预注册（§9：off-road 距离型奖励 + KL 锚；base = w1 e005；2 seeds；u50+u100 双点止损）内容 commit：`2ddfa22`（2026-10-03）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - v7-P2 arm2/arm3 预注册（§10：KL 锚与 off_road_edge 隔离；base = w1 e005；各 2 seeds；u50+u100 双点止损）内容 commit：`a1b6950`（2026-10-05）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- v7 结构迭代 A（Lane A）——obs v5：LD 远场 {20,40,60,80} m + 当前车道块 `lane`（1×17）+ TTC 上下文 token `ttc`（1×12，与 nav 同组）+ schema v5（`env/obs`/`net` 令牌接线/`collect_expert` 透传/测试 654 passed/GPU 冒烟；报告 `/tmp/opencode/v7_struct_a_obs_v5.md`）内容 commit：`0291f3a`（2026-10-05）。本锚行由第二次小 commit 写入（不改动其余内容）。
 
 ## 9. P2 首臂预注册（2026-10-03；off-road 距离型奖励 + KL 锚；w1 起点）
 
