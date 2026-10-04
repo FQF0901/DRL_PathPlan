@@ -1,0 +1,50 @@
+# v7 P2 arm2 — v5 bundle + KL 锚（无 off_road_edge；隔离 KL 锚）
+# 用途：v7 预注册 §10（P2 第二臂）：在 w1 e005 RL 起点上做单变量隔离——
+#   本臂 = arm1（v7_arm1_offroad.yaml）**去 off_road_edge**、保留 KL 锚 0.05→0.02；
+#   与 arm3（bundle only、KL 关）之差 = KL 增量；与 arm1 之差 = off_road_edge 增量。
+# 臂定义：项集/终局值 = v5 bundle（rc=1 档，arm0_bundle_rc1.yaml 逐参数一致）+ KL 锚；
+#   不含 off_road_edge。
+# 基线/池/课程/PPO pins 不动（v6 P4 arm0 口径）：spec=scenarios_train_dagger_r1.json(500) /
+#   envs=1 / updates=200 / rollout=256 / micro 无（cheap path）/ max-episode-steps=200；
+#   base = w1 e005（runs/BTC20261002-2329_v7p1dagger_w1/ckpt_epoch005.pt，经 CLI --ckpt 传入）。
+# KL 锚（方差控制；v7 预注册 §3）：初始 0.05 → 末值 0.02（线性慢衰减）。
+#   **执行路径注意**：Stage C 代码只读 CLI（--kl-anchor-coef/--kl-anchor-final-coef；
+#   stages.C 段整体替换 → 非 reward 键不被本文件承载），driver 按本文件值传 CLI 并 fail-closed
+#   断言（/tmp/opencode/v7_p2_driver.py）。本文件中的 kl_anchor_* 键为记录/预注册一致性用途。
+# 终局值：E-β″ 定稿 rc=1（+29/−22/−14；max_step −46），同 arm0。
+# 加载：tools/train.py --stage C --config config/arms/v7_arm2_bundle_kl.yaml ...
+# 注：includes 平铺合并语义（stages 段整体替换）见 config/arms/README.md「加载语义」。
+# includes 说明：训练侧 pipeline.stages.load_config 只解析一层（不递归）——单写 config/default.yaml
+# 只会带入其 project 元数据而丢失 train/data/run 等段（dry-run 实测）；故同时列出 default.yaml 的
+# 四个叶子子配置，保证平铺合并结果 = 解析 config/default.yaml；递归加载器（eval_runner.load_config）
+# 下两种写法等价。详见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -22
+          out_of_road: -14
+          max_step: -46
+          error: -5
+    # KL 锚（记录用；driver CLI 实际生效；见文件头「执行路径注意」）
+    kl_anchor_coef: 0.05
+    kl_anchor_final_coef: 0.02

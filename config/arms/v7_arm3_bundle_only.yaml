@@ -1,0 +1,45 @@
+# v7 P2 arm3 — v5 bundle only（无 off_road_edge、KL 关；≈ v6 arm0 原配方在强基座上的对照）
+# 用途：v7 预注册 §10（P2 第三臂）：在 w1 e005 RL 起点上做单变量隔离——
+#   本臂 = v5 bundle（rc=1 档）原配方；与 arm2（bundle + KL）之差 = KL 增量。
+# **与 config/arms/arm0_bundle_rc1.yaml 的差异仅记录（stages.C payload 与其逐参数一致）**：
+#   (1) 起点 base = P1 DAgger w1 e005
+#       （runs/BTC20261002-2329_v7p1dagger_w1/ckpt_epoch005.pt，sha256 fdfe0808…）经 CLI --ckpt
+#       传入（arm0 = v6 P3 stage_b ckpt）；
+#   (2) KL 锚关：driver 显式传 --kl-anchor-coef 0（arm0 = 0.05→0.0 慢衰减；Stage C 默认 0.05，
+#       不显式传 0 不会关）；off_road_edge 不存在（arm0 亦无）。
+# 基线/池/课程/PPO pins 不动（v6 P4 arm0 口径）：spec=scenarios_train_dagger_r1.json(500) /
+#   envs=1 / updates=200 / rollout=256 / micro 无（cheap path）/ max-episode-steps=200。
+# 终局值：E-β″ 定稿 rc=1（+29/−22/−14；max_step −46），同 arm0。
+# 加载：tools/train.py --stage C --config config/arms/v7_arm3_bundle_only.yaml ...
+# 注：includes 平铺合并语义（stages 段整体替换）见 config/arms/README.md「加载语义」。
+# includes 说明：训练侧 pipeline.stages.load_config 只解析一层（不递归）——单写 config/default.yaml
+# 只会带入其 project 元数据而丢失 train/data/run 等段（dry-run 实测）；故同时列出 default.yaml 的
+# 四个叶子子配置，保证平铺合并结果 = 解析 config/default.yaml；递归加载器（eval_runner.load_config）
+# 下两种写法等价。详见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -22
+          out_of_road: -14
+          max_step: -46
+          error: -5

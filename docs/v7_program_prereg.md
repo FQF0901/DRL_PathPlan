@@ -170,8 +170,77 @@
   `/tmp/opencode/v7_p2_arm1.md`；status `/tmp/opencode/v7_p2_status.txt`；
 - 证据：逐 run `episodes.csv` sha256、spec hash、HEAD commit、ckpt sha。
 
+## 10. P2 arm2/arm3 预注册（2026-10-05；KL 锚与 off_road_edge 隔离；w1 起点）
+
+> 本 § 为 P2 第二/三臂（arm2/arm3）**臂定义与判据**（经 §8 两段式立项）；与 §9 同 base / 同 pins /
+> 同判据口径，唯一变化 = 奖励组件取舍，用于**单变量归因**。立项依据 = arm1 seed0 已揭盲读数
+> （报告 `/tmp/opencode/v7_p2_arm1.md`）；arm1 seed11 在途，不引用其读数。揭盲前冻结。
+
+### 10.1 立项依据（arm1 seed0 的隔离需求）
+
+- arm1（bundle + `off_road_edge` + KL）seed0 终局：clean500 **0.536** vs w1 配对 **Δ+1.0pp（ns，
+  z=0.38）**；collision **+3.6pp（p=0.0153，显著劣化）**；off_road **−5.4pp（p=0.057，改善）**
+  ⇒ 净持平，但两个改动（`off_road_edge`、KL 锚）**未隔离**，无法归因。
+- 本 § 立项两臂做单变量隔离（同 base / 同 spec / 同 pins；每臂 2 seeds=0/11）：
+  - **arm2 = bundle + KL（去 `off_road_edge`）**：与 arm3 差 = KL 锚一项；与 arm1 差 = `off_road_edge` 一项。
+  - **arm3 = bundle only（去 `off_road_edge` 与 KL）**：≈ v6 P4 arm0 原配方在强基座（w1 e005）上的对照。
+
+### 10.2 基线与臂定义（逐字冻结）
+
+- **base = P1 DAgger w1 e005**（同 §9.1）：`runs/BTC20261002-2329_v7p1dagger_w1/ckpt_epoch005.pt`，
+  sha256 `fdfe080818eb355b388692269454538eed8b5cc318a9eb4e73b206f8cbd688d9`；**经 CLI `--ckpt`
+  传入**（臂配置不承载 ckpt）。clean500 参照 run `runs/BTC20261003-045912_v7p1dagger_w1_clean500`
+  （0.526，episodes sha `042b63…`）；**期望锚 0.47–0.51**（同 §9.1）。
+- **arm2 = `config/arms/v7_arm2_bundle_kl.yaml`**：v5 bundle（rc=1 档；`arm0_bundle_rc1.yaml`
+  项集/终局值逐参数一致）+ **KL 锚 0.05→0.02**；**不含 `off_road_edge`**。
+- **arm3 = `config/arms/v7_arm3_bundle_only.yaml`**：v5 bundle（rc=1）only；**不含 `off_road_edge`、
+  KL 关**。与 `config/arms/arm0_bundle_rc1.yaml` 的差异**仅记录**（文件 `stages.C` payload 与其逐位
+  一致）：(1) base = w1 e005（arm0 = v6 P3 stage_b ckpt）；(2) KL 关 = driver 显式
+  `--kl-anchor-coef 0`（arm0 = 0.05→0.0 慢衰减；Stage C 默认 0.05 ⇒ 不显式传 0 不算关）。
+- **KL 锚（arm2）**：`--kl-anchor-coef 0.05` → `--kl-anchor-final-coef 0.02`（线性慢衰减；同 §9.1）。
+  arm3 不启用（显式 `--kl-anchor-coef 0`）。
+- **其余 pins 逐字不动**（v6 P4 arm0 口径，保臂间可比；同 §9.1）：
+  `--spec env/specs/scenarios_train_dagger_r1.json`(500，sha `d204e803…`)、`--pool local --envs 1
+  --trainable-scope design --plan-reference repeat_action --adv-norm global --updates 200
+  --rollout-steps 256 --ppo-epochs 2 --minibatch-size 1024 --critic-warmup-updates 0
+  --max-episode-steps 200 --ckpt-every 25 --probe-interval 25 --device cuda`；
+  池/课程不动（不扩量、不换池）。
+- **seeds = 0 与 11**（每臂 2 seeds 分布读数；单 seed 仅方向性，§6 Gate C 口径）。
+
+### 10.3 判据（两臂同口径；揭盲前冻结）
+
+- **主判据（首要）**：各臂 `clean500` 配对 Δ vs w1 e005（同协议 pinned 单一 baseline；配对工具
+  `tools/paired_eval.py`；clean500 spec = `/tmp/opencode/phase3_diag/exp/specs_val_only500.json`，
+  canon sha `d7573673…`）：
+  - 方向：Δ ≥ +3pt 且 z ≥ 1.96 = 单 run 方向正（§2.3）；**2 seeds 方向一致**才报"方向一致"；
+  - 预期（记录性）：两臂为**归因臂**，不做"超越 IDM"宣称；首要期望 = 不崩解（u50+u100 双点不触发）
+    且 2-seed 分布可读；方向读数按 §2.3 记录，不设新承诺带；
+  - 反目标：Δ < 0 或训练崩解（u50+u100 双点触发）→ 记录并等编排决策（不自行改判据/不加跑）。
+- **隔离读数（本 § 核心；跨臂描述性）**：**KL 增量 = arm2 − arm3**（固定 bundle、无 `off_road_edge`）；
+  **`off_road_edge` 增量 = arm1 − arm2**（固定 bundle + KL；arm1 于 §9 口径）。两两差为跨 run 描述量
+  （各臂 2 seeds，无共享配对单元）——只报均值/极差与逐 seed 明细，不作独立显著性宣称（避免伪重复）。
+- **次判据**：`clean500` 配对 Δ vs P1-B e010（0.314；辅助对照）；`eval500` 配对（vs P1-B e010，
+  **每臂每 seed 最终采纳 candidate 仅评一次**，禁止选点/择优）。
+- **辅助项（无命中条款）**：tg45 success（IDM 0.778 参照）与 T3 S1（9 锚）——只记录读数，不设命中
+  门槛（避免多重比较）。
+- **安全闸（§5）**：collision / off-road 配对 Δ 与绝对率、rc / speed_ratio、max_step 逐项报告。
+- **止损（臂内，§6 双点口径）**：`u50` 与 `u100` **双点** sub150 闸（net < −20 **或** offΔ ≥ +0.10
+  vs w1 sub150，任一点触发记一次）；**两点均触发** → early-collapse，跳过 keep-best/终评、保留现场。
+  keep-best：8 候选（u25..u200）sub150 → top1–2 全量 clean500 复评 → **全量配对 net 采纳**
+  （禁 sub150 直采）。
+- **方差**：各臂 2 seed mean/sd；sd > 5pt 须标注"方差未达 §2.2 闸口径（n<5，不做主判据/不宣称超越）"。
+
+### 10.4 产物与记录
+
+- 每臂独立 run 目录 `runs/BTC*_v7p2_s{0,11}_arm{2,3}`；配对报告 `tools/paired_eval.py`（json+md）；
+- 驱动 `/tmp/opencode/v7_p2_driver*.py`（不入 repo；fail-closed pin 断言：arm2 KL 0.05→0.02、
+  arm3 `--kl-anchor-coef 0`、两臂均无 `off_road_edge`）；报告 `/tmp/opencode/v7_p2_arm2.md` /
+  `v7_p2_arm3.md`（或合并臂报告）；status 同 §9.4；臂间顺序按 §6 GPU 串行（编排授权后接力）。
+- 证据：逐 run `episodes.csv` sha256、spec hash、HEAD commit、ckpt sha。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。
 - 2026-10-02：**Gate A 修正集 #1**（揭盲前）：主判据加**方差闸**（run sd ≤5pt 且 min Δ ≥−5pt；未过 = "稳定性未达标，不宣称超越"）+ **n ≥ 5（建议 8–10）** + 功效依据（σ≈15.8pt：n=3 功效 0.53；双峰 n=5 反降 0.20；方差控制才是功效修复）；**评测 pin 表**（`--eval-reference plan` + 一次性 `repeat_action` 诊断 / `--tracker lqr` / `max_steps=1000` / 单 baseline）；**IDM 多 run 改 spec-seed 变体**（同 500 模板、不同 per-scenario seed；同 spec 重复=恒等重复）；Gate B/C 加固（≥2–3 seed 或分布/方差读数）+ **u50+u100 双点止损 + keep-best**（u50 单点假阳性 3/4）；**安全闸量化**（collision 绝对 10% 不可达——IDM 自身 14.4% ⇒ 相对支路；off-road ≤10% 或 ≤IDM+2pt；speed_ratio ≥0.9×IDM）；**教师天花板**（tollgate IDM 0.778 评测 / 0.644 采集）+ `expert500val` 禁入训练（preflight 断言）；`tools/paired_eval.py` 方差闸字段（run sd/min Δ/判定）+ 单 baseline fail-closed；单测更新。
 - 2026-10-03：**P2 首臂预注册（§9，揭盲前）**：base = P1 DAgger **w1 e005**（Gate B 覆盖；clean500 0.526、期望锚 0.47–0.51）；主改 = **`off_road_edge`**（BC-SAC 式距离型稠密项，weight −0.5 / scale 1.0；缺 `d_edge` 键以车道边界等效量替代——口径 = `out_of_road` 真实触发面，含 24-ep 校准读数）+ **KL 锚 0.05→0.02**（方差控制）；其余 pins/池/课程不动；判据 = clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每 seed 采纳 candidate 一次，2 seeds 分布读数；实现 = `terms.py` + `config/arms/v7_arm1_offroad.yaml` + `tests/test_v7_p2_arm_config.py` + `tests/test_reward_terms.py` 更新。
+- 2026-10-05：**P2 arm2/arm3 预注册（§10，揭盲前）**：依据 arm1 seed0（flat：clean500 0.536 / Δ+1.0pp ns；collision +3.6pp 显著）立项**单变量隔离**——arm2 = bundle + KL（去 `off_road_edge`）、arm3 = bundle only（去 `off_road_edge` 与 KL；≈ v6 P4 arm0 原配方在 w1 e005 强基座上的对照，差异仅记录：base/KL 关）；同 base / 同 pins / 同判据口径（clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每臂每 seed 采纳 candidate 一次，每臂 2 seeds=0/11；隔离读数 = arm2−arm3 与 arm1−arm2，跨臂描述性）；实现 = `config/arms/v7_arm2_bundle_kl.yaml` + `config/arms/v7_arm3_bundle_only.yaml` + `tests/test_v7_p2_arm_config.py` 更新。
