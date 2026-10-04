@@ -24,7 +24,7 @@ H = 128
 POLICY_PARAMS = 83_716  # ≈83.7k
 VALUE_PARAMS = 83_329  # ≈83.3k
 PARAM_RANGE = (60_000, 100_000)
-TOKEN_LENGTH = 37  # OD16 + LD16 + others1 + ego1 + nav1 + signal1 + latent1
+TOKEN_LENGTH = 39  # v5：OD16 + LD16 + lane1 + others1 + ego1 + nav1 + ttc1 + signal1 + latent1
 
 
 def _tokens(batch: int = 4, hidden: int = H) -> tuple[torch.Tensor, torch.Tensor]:
@@ -128,7 +128,7 @@ def test_key_mask_gates_tokens() -> None:
 
 # ---------------------------------------------------------------- A3：t0 单次 st_gnn 主路径
 def test_encode_runs_single_t0_st_gnn_message_passing() -> None:
-    """encode() 对 t0 帧跑单次 st_gnn 消息传递；令牌集合 T=37 且 ego/latent 恒有效。"""
+    """encode() 对 t0 帧跑单次 st_gnn 消息传递；令牌集合 T=39 且 ego/latent 恒有效。"""
     model = DrivingModel(hidden=16).eval()
     counter = {"n": 0}
     handle = model.st_gnn.spatial.register_forward_hook(
@@ -140,8 +140,8 @@ def test_encode_runs_single_t0_st_gnn_message_passing() -> None:
     assert counter["n"] == 1, "encode 必须恰好执行一次 st_gnn 消息传递（A3）"
     assert tuple(encoded["tokens"].shape) == (2, TOKEN_LENGTH, 16)
     assert tuple(encoded["key_mask"].shape) == (2, TOKEN_LENGTH)
-    assert encoded["key_mask"][:, 33].all(), "ego_ctx token 恒有效"
-    assert encoded["key_mask"][:, 36].all(), "plan_head 融合 latent token 恒有效"
+    assert encoded["key_mask"][:, 34].all(), "ego_ctx token 恒有效"
+    assert encoded["key_mask"][:, 38].all(), "plan_head 融合 latent token 恒有效"
     # §5 #4：nav/signal mask 随 token 一起返回
     assert tuple(encoded["nav_mask"].shape) == (2, 1) and tuple(encoded["signal_mask"].shape) == (2, 1)
 
@@ -380,7 +380,7 @@ def test_rollout_switches_route_command_after_displacement(monkeypatch: pytest.M
     real_policy_forward = model.policy.forward
 
     def policy_spy(tokens: torch.Tensor, key_mask: torch.Tensor):
-        nav_tokens.append(tokens[:, 34].detach().clone())  # [OD16, LD16, others, ego, nav, ...]
+        nav_tokens.append(tokens[:, 35].detach().clone())  # [OD16, LD16, lane, others, ego, nav, ttc, ...]
         return real_policy_forward(tokens, key_mask)
 
     monkeypatch.setattr(net_model_module, "rebuild_nav_from_world", rebuild_spy)

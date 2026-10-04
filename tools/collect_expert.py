@@ -63,6 +63,14 @@ v2 相对 v1 的变更（2026-09-26）
    ``report["weighted"]``）；per-label 统计同时给出行数与加权和，dataset_gate 用行数口径
    （保守下界），加权口径用于损失贡献分析。
 
+v3/v4/v5 相对 v2 的增量
+-----------------------
+- v3（A4）：逐帧加 ``ego_world``/``route_world``（+ 逐点 mask），供 rollout/教师强制重算 nav；
+- v4（P1-A）：静态障碍段并入 ``others``（28→33 维），无新键；
+- v5（2026-10-05，结构迭代 A）：逐帧加 ``lane``（当前车道块，1×17）与 ``ttc``（OD 槽位 TTC
+  上下文 token，1×12）——LD offset 改远场 {20,40,60,80}，近场由 ``lane`` 补偿；OD 槽序/
+  字段/排序策略不动。``obs_fingerprint`` 前缀随 ``OBS_SCHEMA_VERSION`` 升为 ``v5-``。
+
 产出（``--out`` 目录）
 ----------------------
 - ``expert_bc.npz``：按帧存（**不存 6 帧堆叠**）的 BC 样本 + ``od_id``/``od_presence`` 及其历史；
@@ -145,8 +153,20 @@ WINDOW_POLICIES = 6  # 3 s 目标窗口 = 6 个策略步
 WINDOW_STEPS = WINDOW_POLICIES * STEPS_PER_POLICY  # 30 env steps
 #: 逐帧存储的当前帧通道（v2 增加 others；v3 增加 ego_world/route_world 世界系键，
 #: 供 Stage A/B 的 A4 nav 逐步重建；v4 的静态障碍段在 others 内（others 28→33 维），
-#: 无需新键即可被采集/透传；nav/signal 兼容保留）
-CURRENT_CHANNELS = ("ego", "od", "ld", "nav", "signal", "others", "ego_world", "route_world")
+#: 无需新键即可被采集/透传；v5 增加 lane（当前车道块）/ttc（OD 槽位 TTC 上下文 token），
+#: 见 env/obs/lane.py、env/obs/ttc.py；nav/signal 兼容保留）
+CURRENT_CHANNELS = (
+    "ego",
+    "od",
+    "ld",
+    "lane",
+    "nav",
+    "signal",
+    "others",
+    "ttc",
+    "ego_world",
+    "route_world",
+)
 #: OD 槽位级伴随键（int64 / float32）
 COMPANION_KEYS = ("od_id", "od_presence")
 #: 每帧额外存的历史键（id/presence 历史不能靠行位置重建）
@@ -1446,7 +1466,7 @@ def _channel_slots(channel: str, num_slots: int) -> int:
 
     if channel == "route_world":
         return int(ROUTE_WORLD_MAX_POINTS)
-    if channel in ("ego", "nav", "signal", "others", "ego_world"):
+    if channel in ("ego", "lane", "nav", "signal", "others", "ttc", "ego_world"):
         return 1
     return int(num_slots)
 
@@ -1454,19 +1474,23 @@ def _channel_slots(channel: str, num_slots: int) -> int:
 def _channel_dim(channel: str) -> int:
     """当前帧通道的特征维（与 builder 输出一致）。"""
     from env.obs.ego import EGO_DIM
+    from env.obs.lane import LANE_DIM
     from env.obs.ld import LDChannel
     from env.obs.nav import NavChannel
     from env.obs.others import OTHERS_HEAD_DIM, road_class_labels
     from env.obs.signal import SIGNAL_DIM
+    from env.obs.ttc import TTC_DIM
     from env.obs.world import EGO_WORLD_DIM, ROUTE_WORLD_DIM
 
     dims = {
         "ego": EGO_DIM,
         "od": 9,
         "ld": LDChannel.feature_dim,
+        "lane": LANE_DIM,
         "nav": NavChannel.feature_dim,
         "signal": SIGNAL_DIM,
         "others": OTHERS_HEAD_DIM + len(road_class_labels()),
+        "ttc": TTC_DIM,
         "ego_world": EGO_WORLD_DIM,
         "route_world": ROUTE_WORLD_DIM,
     }

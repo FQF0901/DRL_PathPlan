@@ -1,5 +1,10 @@
 """LD 通道：当前 / 相邻 / 下一参考车道的中心线采样 top-16 点。
 
+v5（2026-10-05，结构迭代 A）：采样 offset 由近场 ``{5,10,15,20,30} m`` 改为**远场**
+``{20,40,60,80} m``（4 档）——近场横向锚定不再依赖本通道的槽位竞争，改由
+:mod:`env.obs.lane` 的"当前车道块"显式提供（d_lat / 航向误差 / 近场中心线点），
+因此车道多/槽位被裁时近场信息仍然可得。
+
 采样与选取规则
 --------------
 - 候选车道（去重，优先级从高到低）：
@@ -10,13 +15,18 @@
   4. 同路相邻车道（``road_network.graph[from][to]`` 去掉当前车道，按 |Δlane_id| 排序，左侧优先）。
 
 - 沿每条候选车道中心线按 ``s = clamp(ego 投影 long, 0, length) + offset`` 采样，
-  offset ∈ {5,10,15,20,30} m（配置可改）；``s`` 超出车道末端或投影失败的点**丢弃**（mask=0），
-  因此车道数不足 / 车道很短时通道自动降级——这就是"对少车道鲁棒"的机制。
-- 16 个槽位的分配（固定预算下兼顾"自车前视"与"多车道近场"）：
+  offset ∈ :data:`LD_OFFSETS_M` = {20,40,60,80} m（配置可改）；``s`` 超出车道末端或投影
+  失败的点**丢弃**（mask=0），因此车道数不足 / 车道很短时通道自动降级——这就是"对少车道
+  鲁棒"的机制。
+- 16 个槽位的分配（固定预算下"自车前视 + 多车道远场"）：
 
-  1. **自车当前车道**优先占满 5 个 offset（保证 5..30 m 前视，弯道/限速提前量）；
-  2. 其余候选车道按"环优先"填充：先 5 m 环（所有车道），再 10 m、15 m、…，
-     环内按车道优先级。车道多时远端环被裁掉，但每条车道都有近场几何。
+  1. **自车当前车道**优先占满 4 个 offset（保证 20..80 m 前视，弯道/限速提前量）；
+  2. 其余候选车道按"环优先"填充：先 20 m 环（所有车道），再 40 m、60 m、80 m，
+     环内按车道优先级。车道多时远端环被裁掉，但每条车道都有 20 m 远场几何。
+
+  v5 的代价：当前车道 < 20 m 的近场几何不再出现在 LD（由 lane 通道补偿）；
+  其余车道的近场（<20 m）也不可见（本迭代接受的取舍——横向控制主要关心自车车道，
+  相邻车道近场对象由 OD 覆盖；后续如需可加回近场环）。
 
 特征（7 维，自车系 x 前向 / y 左向）::
 
@@ -59,6 +69,10 @@ LINE_TYPE_IDS: dict[str, int] = {
     MetaDriveType.GUARDRAIL: 12,
 }
 LINE_TYPE_ID_UNKNOWN = 0
+
+#: v5 默认采样 offset（m）：远场 4 档。近场（<20 m）由 :mod:`env.obs.lane` 显式补偿；
+#: 顺序即"当前车道 primary 槽位顺序"，也是其余车道的环填充顺序。
+LD_OFFSETS_M: tuple[float, ...] = (20.0, 40.0, 60.0, 80.0)
 
 _EPS = 1e-6
 
@@ -170,7 +184,7 @@ class LDChannel(ObservationChannel):
         self,
         *,
         num_slots: int = 16,
-        offsets: Sequence[float] = (5.0, 10.0, 15.0, 20.0, 30.0),
+        offsets: Sequence[float] = LD_OFFSETS_M,
         front_m: float = 150.0,
         rear_m: float = 50.0,
         left_m: float = 25.0,
@@ -238,7 +252,7 @@ class LDChannel(ObservationChannel):
                 )
                 (primary if lane_priority == 0 else secondary).append((offset_idx, lane_priority, lane_order, row))
 
-        primary.sort(key=lambda item: item[0])  # 当前车道：5 → 30 m
+        primary.sort(key=lambda item: item[0])  # 当前车道：20 → 80 m
         secondary.sort(key=lambda item: (item[0], item[1], item[2]))  # 其余：环优先，环内按车道优先级
         for slot, (_, _, _, row) in enumerate((primary + secondary)[: self.num_slots]):
             feats[slot] = row

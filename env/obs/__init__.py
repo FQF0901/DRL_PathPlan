@@ -1,4 +1,4 @@
-"""``env.obs`` 观测通道包（schema v4）。
+"""``env.obs`` 观测通道包（schema v5）。
 
 ``obs_fingerprint``：观测实现（``env/obs/*.py`` 内容 + schema 版本）的短指纹。BC 专家数据集
 在 meta 里记录采集时的指纹；训练侧加载时比对——**观测 scope/特征语义改动后必须重新采集
@@ -15,6 +15,12 @@ v3（2026-10-01，A4 nav 修正）变更：新增世界系键 ``ego_world (1,3)`
 v4（2026-10-02，P1-A 静态障碍可观测性）变更：``others`` 新增 static 段（静态障碍/岗亭
 走廊扫描：present + gap_norm + 相对车道 one-hot，``others`` 28 → 33 维），供策略在
 tollgate 上游 25–39 m 观测到被占车道；指纹前缀升为 ``v4-``（旧数据由 net 零填充 static 段）。
+
+v5（2026-10-05，结构迭代 A）变更：LD offset 改远场 ``{20,40,60,80} m``（当前车道 4 primary
+槽 + 其余车道环填充，总槽位 16 不变）；新增 ``lane (1,17)`` 当前车道块（d_lat/航向误差/
+车道宽 + 5/15/60 m 中心线摘要，近场横向锚定显式化、与 LD 环填充解耦）与 ``ttc (1,12)``
+OD 槽位 TTC 上下文 token（恒速自车系：min-TTC、<3 s 计数、责任槽位相对位置/速度；OD 槽序/
+字段/排序策略不动）；指纹前缀升为 ``v5-``（旧数据由 net 全 0 + mask=0 + 一次性告警回退）。
 """
 
 from __future__ import annotations
@@ -25,11 +31,11 @@ from pathlib import Path
 __all__ = ["obs_fingerprint", "OBS_SCHEMA_VERSION"]
 
 #: 观测 schema 版本（数据结构契约版本，独立于内容哈希）
-OBS_SCHEMA_VERSION = 4
+OBS_SCHEMA_VERSION = 5
 
 
 def obs_fingerprint() -> str:
-    """返回 ``v4-<内容哈希 12 hex>``；目录缺失时返回空串。"""
+    """返回 ``v5-<内容哈希 12 hex>``；目录缺失时返回空串。"""
     directory = Path(__file__).resolve().parent
     if not directory.is_dir():
         return ""

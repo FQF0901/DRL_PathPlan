@@ -17,7 +17,7 @@ import pytest
 import torch
 import yaml
 
-from net.encoders import EGO_MEM_DIM, H, LD_MEM_DIM, OD_MEM_DIM
+from net.encoders import EGO_MEM_DIM, H, LANE_DIM, LD_MEM_DIM, OD_MEM_DIM, TTC_DIM
 from net.mem import mem_from_obs
 from net.moe import MoEBlock, top_k_softmax
 from net.model import (
@@ -55,11 +55,13 @@ def make_obs(
     with_companions: bool = True,
     with_ego_hist: bool = True,
     with_others_hist: bool = True,
+    with_struct_context: bool = True,
 ) -> dict[str, torch.Tensor]:
-    """构造与 env schema v2 同形状的观测（含 warmup 复制帧语义 + 伴随数组）。
+    """构造与 env schema 同形状的观测（含 warmup 复制帧语义 + 伴随数组）。
 
     默认贴近 trainer 组装后的形状：单槽历史 ``(B,6,1,F)``、od/ld ``(B,6,S,F)``；
-    ``with_companions=False`` 时省略 ``od_id_hist/od_presence_hist``（测回退路径）。
+    ``with_companions=False`` 时省略 ``od_id_hist/od_presence_hist``（测回退路径）；
+    ``with_struct_context=False`` 时省略 v5 的 ``lane``/``ttc``（测旧数据回退路径）。
     """
     generator = torch.Generator().manual_seed(seed)
 
@@ -109,6 +111,12 @@ def make_obs(
         obs["od_id_hist"] = (rand(batch, HISTORY, OD_SLOTS).abs() * 10).long() + 1
         obs["od_presence_hist"] = presence
         obs["od_id"] = obs["od_id_hist"][:, -1].clone()
+    if with_struct_context:
+        # v5（结构迭代 A）：当前车道块 + TTC 上下文 token（trainer 挤压后的 (B,F) 形状）
+        obs["lane"] = rand(batch, LANE_DIM)
+        obs["lane_mask"] = torch.ones(batch, 1)
+        obs["ttc"] = rand(batch, TTC_DIM)
+        obs["ttc_mask"] = torch.ones(batch, 1)
     return obs
 
 

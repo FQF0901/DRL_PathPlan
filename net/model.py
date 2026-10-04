@@ -38,6 +38,17 @@ v6 增补（docs/v6_net_design.md，冻结）
   的 nav 子向量（:func:`rebuild_nav_from_world` / :func:`sync_others_nav` /
   :func:`advance_signal`；无 ``route_world``/``ego_world`` 键时回退 t0 冻结，逐位兼容旧输入）。
 
+v5 增补（结构迭代 A，仅令牌集合接线）
+------------------------------------
+- ``lane``（当前车道块，17 维）与 ``ttc``（OD 槽位 TTC 上下文，12 维）由
+  :func:`net.mem.context_features_from_obs` 从当前帧 obs 读出并编码为 token；
+  令牌集合变为 ``[OD 16, LD 16, lane 1, others 1, ego 1, nav 1, ttc 1, signal 1, latent 1]``
+  （T=39；lane 与 LD 主块并列、ttc 与 nav 相邻）。旧 schema v4 数据缺键 → 全 0 + mask=0 +
+  一次性告警（A4/v4 模式），不参与注意力、逐位兼容。
+- lane/ttc token 为 **t0 上下文**：rollout 逐步复用（TTC 的逐步重算属后续 Lane B 的
+  plan/rollout 路径；本迭代只做令牌集合接线）。
+- ``plan_head`` 融合路径与 ST-GNN 空间节点（[ego, OD, LD]）**不动**（Lane B）。
+
 动作与运动学
 ------------
 动作 ``(ds, dθ)`` = 下一个 0.5 s 的弧长 + 航向变化；:func:`arc_step` 是 net 内部唯一
@@ -80,13 +91,22 @@ from net.encoders import (
     DEFAULT_OTHERS_DIM,
     H,
     HISTORY_FRAMES,
+    LANE_DIM,
     LD_SLOTS,
     NAV_DIM,
     OD_SLOTS,
     SIGNAL_DIM,
+    TTC_DIM,
     ObsEncoders,
 )
-from net.mem import EncodedMem, MemBank, MemEncoder, mem_from_obs, squeeze_batch_singletons
+from net.mem import (
+    EncodedMem,
+    MemBank,
+    MemEncoder,
+    context_features_from_obs,
+    mem_from_obs,
+    squeeze_batch_singletons,
+)
 
 try:  # A4：env lane 在 net/mem.py 提供实现（签名见本模块 rebuild_nav_from_world）；未就绪用占位
     from net.mem import advance_pose_world as _mem_advance_pose_world
@@ -491,6 +511,20 @@ class DrivingModel(nn.Module):
             device=obs["hist_valid"].device,
         )
 
+    def _struct_context_tokens(
+        self, obs: Mapping[str, Tensor], batch: int
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """v5：当前车道块（``lane``）与 TTC token（``ttc``）→ token+mask 四元组。
+
+        ``lane``/``ttc`` 是当前帧上下文通道（不进 6 帧历史）；缺键（旧 schema v4 数据）→
+        全 0 + mask=0 + 一次性告警（见 :func:`net.mem.context_features_from_obs`）。
+        """
+        lane_feat, lane_mask = context_features_from_obs(obs, "lane", LANE_DIM, batch=batch)
+        ttc_feat, ttc_mask = context_features_from_obs(obs, "ttc", TTC_DIM, batch=batch)
+        lane_token = self.encoders.embed_lane(lane_feat.unsqueeze(1), lane_mask)[:, 0]
+        ttc_token = self.encoders.embed_ttc(ttc_feat.unsqueeze(1), ttc_mask)[:, 0]
+        return lane_token, lane_mask, ttc_token, ttc_mask
+
     # ---------------------------------------------------------------- 编码/规划
     def _plan(
         self, encoded: EncodedMem, nav_token: Tensor, signal_token: Tensor
@@ -534,13 +568,18 @@ class DrivingModel(nn.Module):
         signal_token: Tensor,
         signal_mask: Tensor,
         latent: Tensor,
+        lane_token: Tensor,
+        lane_mask: Tensor,
+        ttc_token: Tensor,
+        ttc_mask: Tensor,
         od_obj: Tensor | None = None,
         ld_obj: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """A1：交叉注意力头的令牌集合 + key mask（v6 §1.2，T ≤ 37）。
+        """A1：交叉注意力头的令牌集合 + key mask（v6 §1.2；v5 结构迭代 A 扩到 T ≤ 39）。
 
-        顺序 = ``[OD 16, LD 16, others 1, ego 1, nav 1, signal 1, 融合 latent 1]``；
-        mask = ``[od_live, ld_live, 1, 1, nav_mask, signal_mask, 1]``（ego/latent 恒有效）。
+        顺序 = ``[OD 16, LD 16, lane 1, others 1, ego 1, nav 1, ttc 1, signal 1, 融合 latent 1]``；
+        mask = ``[od_live, ld_live, lane_mask, 1, 1, nav_mask, ttc_mask, signal_mask, 1]``
+        （ego/latent 恒有效）。``lane`` 与 LD 主块并列、``ttc`` 与 nav 相邻（v5）。
         ``od_obj/ld_obj`` = t0 单次 st_gnn 消息传递后的对象级特征（t0 头用）；
         缺省（rollout 步）直接用 ``encoded.od_ctx/ld_ctx``。
         """
@@ -551,16 +590,19 @@ class DrivingModel(nn.Module):
             [
                 od_tokens,
                 ld_tokens,
+                lane_token.unsqueeze(1),
                 encoded.others_ctx.unsqueeze(1),
                 encoded.ego_ctx.unsqueeze(1),
                 nav_token.unsqueeze(1),
+                ttc_token.unsqueeze(1),
                 signal_token.unsqueeze(1),
                 latent.unsqueeze(1),
             ],
             dim=1,
         )
         key_mask = torch.cat(
-            [encoded.od_live, encoded.ld_live, ones, ones, nav_mask, signal_mask, ones], dim=1
+            [encoded.od_live, encoded.ld_live, lane_mask, ones, ones, nav_mask, ttc_mask, signal_mask, ones],
+            dim=1,
         )
         return tokens, key_mask
 
@@ -603,11 +645,24 @@ class DrivingModel(nn.Module):
         """
         mem = self._mem_from_obs(obs)
         nav_token, nav_mask, signal_token, signal_mask = self._context_tokens(obs, mem.batch)
+        # v5（结构迭代 A）：当前车道块 + TTC 上下文 token（旧数据缺键 → 0 token + mask=0）
+        lane_token, lane_mask, ttc_token, ttc_mask = self._struct_context_tokens(obs, mem.batch)
         encoded = self.mem_encoder.encode(self.encoders, mem)
         latent, ego_next, moe_aux = self._plan(encoded, nav_token, signal_token)
         od_obj, ld_obj = self._t0_object_features(encoded)  # A3：单次消息传递（no_grad）
         tokens, key_mask = self._head_tokens(
-            encoded, nav_token, nav_mask, signal_token, signal_mask, latent, od_obj, ld_obj
+            encoded,
+            nav_token,
+            nav_mask,
+            signal_token,
+            signal_mask,
+            latent,
+            lane_token,
+            lane_mask,
+            ttc_token,
+            ttc_mask,
+            od_obj,
+            ld_obj,
         )
         # A4 世界系输入（route_world/ego_world/route_world_mask；缺省 None ⇒ rollout 回退 t0 冻结）
         ego_world, route_world, route_world_mask = world_state_from_obs(obs)
@@ -638,6 +693,10 @@ class DrivingModel(nn.Module):
             "nav_mask": nav_mask,
             "signal_token": signal_token,
             "signal_mask": signal_mask,
+            "lane_token": lane_token,
+            "lane_mask": lane_mask,
+            "ttc_token": ttc_token,
+            "ttc_mask": ttc_mask,
             "tokens": tokens,
             "key_mask": key_mask,
             "route_world": route_world,
@@ -680,6 +739,11 @@ class DrivingModel(nn.Module):
         nav_mask: Tensor = encoded["nav_mask"]
         signal_token: Tensor = encoded["signal_token"]
         signal_mask: Tensor = encoded["signal_mask"]
+        # v5（结构迭代 A）：lane/ttc 是 t0 上下文 token（逐步复用；重算属 Lane B）
+        lane_token: Tensor = encoded["lane_token"]
+        lane_mask: Tensor = encoded["lane_mask"]
+        ttc_token: Tensor = encoded["ttc_token"]
+        ttc_mask: Tensor = encoded["ttc_mask"]
         world = {
             "route_world": encoded.get("route_world"),
             "route_world_mask": encoded.get("route_world_mask"),
@@ -755,7 +819,16 @@ class DrivingModel(nn.Module):
                 enc = self.mem_encoder.encode(self.encoders, mem)
                 latent, ego_next, _ = self._plan(enc, nav_token, signal_token)
                 tokens, key_mask = self._head_tokens(
-                    enc, nav_token, nav_mask, signal_token, signal_mask, latent
+                    enc,
+                    nav_token,
+                    nav_mask,
+                    signal_token,
+                    signal_mask,
+                    latent,
+                    lane_token,
+                    lane_mask,
+                    ttc_token,
+                    ttc_mask,
                 )
                 action, _ = self.policy(tokens, key_mask)
 

@@ -468,10 +468,10 @@ def test_save_dataset_v2_schema_roundtrip(tmp_path):
     meta = json.loads(open(paths["meta"], encoding="utf-8").read())
     assert meta["schema_version"] == 2
     assert meta["history_storage"] == "per_frame_v2"
-    # v4（P1-A 静态障碍可观测性）：obs_fingerprint 前缀随 OBS_SCHEMA_VERSION 升为 v4-（数据集
-    # schema_version 是 collect_expert 自己的契约版本，保持 2）
-    assert meta["obs_fingerprint"].startswith("v4-")
-    assert meta["obs_schema_version"] == 4
+    # v4/v5（P1-A / 结构迭代 A）：obs_fingerprint 前缀随 OBS_SCHEMA_VERSION 升为 v5-
+    # （数据集 schema_version 是 collect_expert 自己的契约版本，保持 2）
+    assert meta["obs_fingerprint"].startswith("v5-")
+    assert meta["obs_schema_version"] == 5
     manifest = schema_manifest()
     for key, spec in manifest["frame"].items():
         assert meta["schema"]["frame"][key]["dtype"] == spec["dtype"]
