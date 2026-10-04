@@ -107,6 +107,7 @@
 - v7-P0 建档（本文件 + `tools/paired_eval.py` + `tests/test_paired_eval.py`）内容 commit：`b711e5f`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - v7-P0 修正集 #1（Gate A：预注册统计修正 + 评测 pin 表 + IDM spec-seed 变体 + Gate B/C 加固 + 安全闸量化 + `expert500val` 禁训 + `paired_eval` 方差闸/单 baseline fail-closed）内容 commit：`0454308`（2026-10-02）。本锚行由第二次小 commit 写入（不改动其余内容）。
 - v7-P2 首臂预注册（§9：off-road 距离型奖励 + KL 锚；base = w1 e005；2 seeds；u50+u100 双点止损）内容 commit：`2ddfa22`（2026-10-03）。本锚行由第二次小 commit 写入（不改动其余内容）。
+- v7-P2 arm2/arm3 预注册（§10：KL 锚与 off_road_edge 隔离；base = w1 e005；各 2 seeds；u50+u100 双点止损）内容 commit：`a1b6950`（2026-10-05）。本锚行由第二次小 commit 写入（不改动其余内容）。
 
 ## 9. P2 首臂预注册（2026-10-03；off-road 距离型奖励 + KL 锚；w1 起点）
 
