@@ -44,15 +44,32 @@ def _others_dim() -> int:
         return 28
 
 
+def _struct_dims() -> tuple[int, int]:
+    """v5 单槽上下文通道特征维 ``(lane, ttc)``（缺 env 依赖时退回常量 17/12）。"""
+    try:
+        from env.obs.lane import LANE_DIM
+        from env.obs.ttc import TTC_DIM
+
+        return int(LANE_DIM), int(TTC_DIM)
+    except Exception:  # noqa: BLE001 - 极端环境（缺 env 依赖）下退回 v5 常量
+        return 17, 12
+
+
+_LANE_DIM, _TTC_DIM = _struct_dims()
+
 #: 与 ``env/obs/builder.ObservationBuilder`` 默认输出一致的通道形状（含槽位维）：
-#: ego(1,8) / od(16,9) / ld(16,7) / nav(1,11) / signal(1,4) / others(1,28)。
+#: ego(1,8) / od(16,9) / ld(16,7) / lane(1,17) / nav(1,11) / signal(1,4) / others(1,28) / ttc(1,12)。
+#: lane/ttc 为 v5 当前帧上下文通道（不进 6 帧历史；obs 缺键时 :meth:`RolloutBuffer.add_step`
+#: 填 0，net 侧按缺键回退语义处理）。
 DEFAULT_CHANNELS: dict[str, tuple[int, ...]] = {
     "ego": (1, 8),
     "od": (16, 9),
     "ld": (16, 7),
+    "lane": (1, _LANE_DIM),
     "nav": (1, 11),
     "signal": (1, 4),
     "others": (1, _others_dim()),
+    "ttc": (1, _TTC_DIM),
 }
 #: 默认重建历史的通道（与 ``config/env.yaml`` / FrameMemory 一致）
 DEFAULT_HISTORY_CHANNELS: tuple[str, ...] = ("ego", "others", "od", "ld")
@@ -163,7 +180,7 @@ class RolloutBuffer:
     ) -> int:
         """写入一帧（当前帧通道 + 掩码 + 伴随数组 + 位姿 + 动作/回报等元信息），返回帧下标。
 
-        ``obs`` 只取**当前帧**通道（``ego/od/ld/nav/signal/others`` 与 ``*_mask``）与伴随数组
+        ``obs`` 只取**当前帧**通道（``ego/od/ld/lane/nav/signal/others/ttc`` 与 ``*_mask``）与伴随数组
         （``od_id``/``od_presence``），``*_hist`` 之类的键被忽略。``episode``/``step`` 缺省时按
         "上一帧终局则新 episode、步号自增"自动维护。``spec_id`` = 该帧所属场景（spec.id，
         未知/旧调用方缺省 -1），供 ``per_scenario`` 优势归一化分组。

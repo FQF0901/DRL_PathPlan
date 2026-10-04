@@ -2685,8 +2685,23 @@ class BCDataset:
         self.count = int(len(arrays["episode_id"]))
         self.label_names = tuple(meta.get("label_names") or SUPERVISED_LABELS)
         self.alignments = _alignment_from_meta(meta)
+        # 顺序与 tools/collect_expert.py::CURRENT_CHANNELS / env.obs.builder.DEFAULT_CHANNELS 一致；
+        # v5 的 lane/ttc 为当前帧上下文通道（不进 6 帧历史；net 侧由 _struct_context_tokens 消费）。
+        # 旧 schema（<v5）缺 lane/ttc 键 → 自动跳过，net 走缺键回退（0 token + mask=0，逐位兼容）。
         self._obs_keys = [
-            key for key in ("ego", "od", "ld", "nav", "signal", "others", "ego_world", "route_world")
+            key
+            for key in (
+                "ego",
+                "od",
+                "ld",
+                "lane",
+                "nav",
+                "signal",
+                "others",
+                "ttc",
+                "ego_world",
+                "route_world",
+            )
             if key in arrays
         ]
         self.history_stride = max(
@@ -3011,8 +3026,8 @@ def _to_device_obs(
     return to_device_tensors(batch, device, dtype=torch.float32, pin=pin)
 
 
-#: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``）
-SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "nav", "signal", "others", "ego_world")
+#: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``；含 v5 的 lane/ttc）
+SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "lane", "nav", "signal", "others", "ttc", "ego_world")
 
 
 def squeeze_single_slot(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
