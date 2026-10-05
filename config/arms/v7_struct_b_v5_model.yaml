@@ -1,0 +1,68 @@
+# 网络结构：时序编码 → 空间消息传递 → MoE → 世界模型 → 策略头
+hidden_dim: 128                   # 主干隐藏维 H=128（2026-09-25 放大：GPU 化后余量充足）
+param_budget_estimate: 585000     # H=96 时期的历史估算；H=128 预算以 net/param_probe.py 与
+                                  # root config 构建的实测参数量为准（≤1.5M）
+
+temporal:
+  type: gru                       # 时序编码器：GRU
+  input: obs_history              # 输入 6 帧历史观测
+  hidden_dim: 128                 # 隐藏维（与 hidden_dim 一致）
+  layers: 1                       # 层数
+
+spatial:
+  type: message_passing           # 空间编码：消息传递
+  layers: 2                       # 2 层
+  hidden_dim: 128                 # 隐藏维（与 hidden_dim 一致）
+
+moe:
+  primary:
+    enabled: true                 # 主专家常开
+    router_gated: false           # 不参与路由门控
+  experts:
+    count: 8                      # 8 个专用专家（保持 8）
+    hidden_dim: 256               # 结构 128 → 256 → 128
+    init: zero_residual           # 零初始化，输出作为残差
+  router:
+    type: top2_softmax           # top-2 softmax 混合（net.moe.top_k_softmax；恰 2 个非零权重、和为 1）
+    top_k: 2                     # 每 token 取 top-2 logits 后在被选 logits 上 softmax
+    supervision: load_balance    # lane U1：router 无监督标签（去聚类）；训练侧只加 Switch 式
+                                 # 负载均衡 aux α·E·Σ f_i·P_i（α = stages.B.bc.load_balance_coef）
+    # 数据集标签顺序（仅用于数据契约/切片分析；router 不再用标签 BCE/聚类 CE 监督）
+    # Gate 3 定案：受监督标签 8 个（固定顺序）；
+    # 名义标签 lane_change / zipper_merge / maneuver(turns) 退出监督与 KPI（无脚本、运行期不可核验）；
+    # in_intersection 与 near_intersection 语义重叠 → 只保留 near_intersection。
+    supervised_labels:
+      - cutin_active
+      - cutout_active
+      - crowded
+      - car_following
+      - on_curve
+      - merging
+      - roundabout_near
+      - near_intersection
+
+world_model:
+  enabled: true                   # 启用世界模型
+  conditioned_on: ego             # ego 条件化的 OD/LD 动力学
+  rollout_steps: 6                # 展开 6 步
+  loss: direct_multi_step         # 直接多步损失
+
+policy:
+  type: autoregressive_rollout    # 策略 rollout：自回归（方案 B1）
+  rollout_steps: 6                # ×6 步
+  action:
+    space: [ds, dtheta]           # 动作 = 弧长 + 航向变化
+    dt: 0.5                       # 作用于下一个 0.5 s
+    bounded: true                 # 动作有界
+    smooth: true                  # 动作平滑约束
+
+# v7 结构迭代 B：K-anchor 计划头（fix-3 方案 A：形状锚 + 连续速度 + WTA + 选择头；
+# 车道系对齐；预注册见 docs/v7_program_prereg.md §11）。enabled=false（默认）= 完全关闭：
+# num_anchors=0 → 无新参数/新输出，模型与旧版逐位一致（旧 ckpt 严格加载不受影响）。
+plan_anchor:
+  enabled: true                   # 单变量开关：开 = plan 尾段由锚混合驱动（step0 仍 = action_mu）
+                                  # [v7 struct B v5 链] 相对 config/model.yaml 的唯一改动（false→true）
+  num_anchors: 6                  # K=6（fix-3 形状锚 silhouette 0.72–0.77；K=8 不再提升）
+  path: config/plan_anchors_k6.json  # 锚字典（tools/fit_plan_anchors.py 拟合；缺失回退内置默认）
+  temperature: 1.0                # 软混合温度 τ（softmax(logits/τ)；推理可 hard=argmax）
+  hard: false                     # true = 推理 argmax（one-hot 选择）

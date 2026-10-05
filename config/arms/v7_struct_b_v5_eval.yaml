@@ -1,0 +1,11 @@
+# v7 结构迭代 B（v5 重训链）评测配置（tools/test.py --config）
+# 单变量（相对 config/default.yaml 的合并结果）：plan_anchor.enabled false→true
+#   （K-anchor 计划头；评测模型必须带锚头，否则 _filter_checkpoint_state 会把锚权重记为
+#    unexpected 并丢弃 → plan 路径退化为无锚；见 /tmp/opencode/v7_struct_b_kanchor.md 未决 #6）。
+# 加载语义：tools/test.py 走 pipeline.eval_runner.load_config（**递归 deep merge**），
+#   本文件顶层 plan_anchor 与 config/model.yaml 的 plan_anchor 深合并（其余键保持 model.yaml 值）。
+# 用途：Stage B / phase3 ckpt 的全部评测（screening / clean500 / eval500 / tg45）。
+includes:
+  - config/default.yaml
+plan_anchor:
+  enabled: true

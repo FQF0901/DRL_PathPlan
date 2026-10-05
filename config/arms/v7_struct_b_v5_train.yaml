@@ -1,0 +1,120 @@
+# v7 结构迭代 B（v5 重训链）Stage B 训练臂配置（可执行 run config）
+# 单变量（相对 config/train.yaml）：stages.B.bc.anchor_ce_weight 0.0→1.0 且 anchor_wta_weight 0.0→1.0
+#   （K-anchor 选择 CE + WTA 残差回归；预注册 docs/v7_program_prereg.md §11）。
+#   stages 段为 config/train.yaml 的完整拷贝（只改上述两键；本加载器 includes 为顶层平铺合并，
+#   stages 必须整段携带，见 config/arms/README.md「加载语义」）。
+# 模型侧开关在 config/arms/v7_struct_b_v5_model.yaml（plan_anchor.enabled=true）；
+#   本链 Stage B/phase3 训练以 --config 本文件 + --model-config 该模型文件组合使用。
+# 生成：tools/venv-python 脚本从 config/train.yaml 复制（2026-10-05；逐键 diff 仅上述两处）。
+includes:
+- config/default.yaml
+- config/env.yaml
+- config/model.yaml
+- config/train.yaml
+- config/eval.yaml
+stages:
+  A:
+    name: world_model_teacher_forcing
+    epochs: 20
+    batch: 1024
+    micro: 256
+    world_model:
+      epochs: 20
+      ego_condition: expert_gt_actions
+      targets: future_od_ld_lookup
+      slot_matching: nearest_neighbor_t0
+      loss: direct_multi_step
+      noise: ego_plan
+      ego_next_coef: 0.1
+      ld_coef: 0.0
+      presence_coef: 0.1
+      entry_coef: 0.1
+      trainable:
+      - encoders
+      - mem_encoder
+      - plan_head
+      - st_gnn
+  B:
+    name: planner_bc
+    epochs: 20
+    batch: 1024
+    micro: 512
+    traj_aux_weight: 0.1
+    phase3:
+      rounds: 5
+      spec_pool: env/specs/scenarios_train_5k.json
+      fail_target: 1000
+      shuffle_seed_base: 20260928
+      action_chain_source: auto
+      collect:
+        workers: 16
+        window_s: 10
+      init_ckpt: runs/BTC20260929-0425_fixA_nold/stage_b/final.pt
+      epochs: 5
+      batch: 1024
+      micro: 256
+      lr_scale:
+        base: 0.25
+        specific: 0.5
+      losses:
+        action: 1.0
+        action_chain: 0.2
+        bias_calib: 0.0
+        ego_next: 0.1
+        od: 0.005
+        ld: 0.002
+        presence: 0.1
+        entry: 0.1
+        traj_aux: 0.0
+        anchor_ce: 0.0
+        anchor_wta: 0.0
+        anchor_temperature: 1.0
+        load_balance: 0.01
+      freeze: specific_only
+      anchor:
+        enabled: false
+        bc_dir: auto
+        mild_weight: 0.1
+      gpu:
+        min_free_mib: 6144
+      eval:
+        spec: env/specs/scenarios_eval500.json
+        workers: 6
+      guard:
+        stop_on_overall_drop: 0.05
+        stop_on_easy_drop: 0.1
+        mode: base
+        stop_on_base_drop: 0.01
+    bc:
+      epochs: 20
+      primary_phase_split: 0.5
+      action_weight: 1.0
+      traj_aux_weight: 0.1
+      load_balance_coef: 0.01
+      hard_weight: 1.0
+      mild_weight: 0.1
+      loss_type: l2
+      action_dim_weights:
+      - 1.0
+      - 69.4
+      wm_detach: true
+      anchor_ce_weight: 1.0
+      anchor_wta_weight: 1.0
+      anchor_temperature: 1.0
+  C:
+    name: ppo_rl
+    tracker: mpc_lqr
+    router_supervision: none
+    kl_anchor: true
+    kl_anchor_coef: 0.05
+    kl_anchor_final_coef: 0.0
+    wm_freeze_updates: null
+    wm_loss_enabled: false
+    plan_reference: repeat_action
+    trainable_scope: design
+    spec_rotation: episode
+    max_episode_steps: 200
+    policy_logstd_max: null
+    primary_lr_scale: 0.1
+    probe_interval: 25
+    ckpt_every: 25
