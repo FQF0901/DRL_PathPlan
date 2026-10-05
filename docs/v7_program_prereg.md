@@ -348,6 +348,78 @@
   配对（vs w1 0.526/0.530、arm1-s11 0.668/0.646、IDM 0.742/0.756、P1-B 0.314/0.312；tg45 vs
   IDM/P1-B）。**不承诺**任何数值增益；本修订只修崩塌、验证 0.26 可保持性。
 
+## 12. P4-extra 预注册（2026-10-05；s11 + 碰撞抑制单变量；收尾后定向尝试）
+
+> 本 § 为 v7 收尾（`v7-close-20261006`；报告 `v7_program_report.md`）后的 **P4-extra 定向尝试**：
+> 在程序最佳 RL 产物 arm1-s11 u150（clean500 0.668 / eval500 0.646）上以**单变量**碰撞抑制
+> 修复安全闸（§5：collision ≤ IDM）。范围 = `config/arms/v7_arm1_collision_suppress.yaml`（新）+
+> `docs/`；**不碰 net/env/reward 代码语义**（唯一改动 = 臂配置中一个终局值）。揭盲前冻结。
+
+### 12.1 立项依据
+
+- **s11 安全闸缺口（v7 报告 §2.2/§2.4）**：collision clean500 **0.182**（IDM 锚 0.174，+0.8pp）/
+  eval500 **0.202**（IDM 锚 0.144，+5.8pp）；success 0.668/0.646 为程序最佳。目标 = 保持 success
+  （≥ s11 −3pp）前提下把 collision 压回闸内（判据见 §12.3）。
+- **设计参照 = v6 §7.5 候选 A（arm8-A）**：碰撞终局罚 `aggregation.terminal_values.collision`
+  −22 → −32（Δ=+10）。机理：碰撞总罚（`crash` −10 + terminal −22 = −32）相对出界总罚
+  （`out_of_road` −8 + terminal −14 = −22）的分离由 10 → 20，压低低成功率"冒险救援"的边际收益
+  （v6 口径盈亏门槛 p* 9.0% → 20.2%；v6 诊断 `/tmp/opencode/v6_collision_arm_design.md`）。
+  v7 arm1 沿用同档终局值（−22），故该单变量可直接平移（v7 报告 §3.2："v6 arm8 立项逻辑在 v7
+  未落地"）；v6 arm8-A 本身未跑（v6 收尾），本臂是其**在 v7 最佳产物上的落地尝试**。
+- **风险（如实）**：s11 的碰撞画像未做 v6 式"救援撞 vs 成功转撞"分解——若碰撞主因不是冒险救援，
+  本臂可能只回吐 success 而不降碰撞。KL 锚（0.05→0.02）+ 短程（u100）+ keep-best 限制漂移。
+
+### 12.2 臂定义（逐字冻结）
+
+- **起点**：`runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt`（sha256
+  `a7cc091fcbda670b25c396a43e18dc39abe089053e50aa292b5fc0f19164ba2e`）。
+- **配方 = `config/arms/v7_arm1_offroad.yaml` 逐位不变 + 单变量**：terms（rc 1 / speed_ratio 0.4 /
+  low_speed −0.2 / comfort_* / solid_line −2 / speed_limit −5 / **crash −10** / **out_of_road −8** /
+  off_road_edge −0.5·scale 1.0）、其余终局值（arrive +29 / out_of_road −14 / max_step −46 /
+  error −5）、KL 锚 0.05→0.02、λ=0.95、rc=1 均不动；**唯一改动 =
+  `aggregation.terminal_values.collision`: −22 → −32**。
+- **配置**：`config/arms/v7_arm1_collision_suppress.yaml`；driver fail-closed 断言该单变量与其余
+  生效值逐位配对（terminal collision −32，其余同 §9 pin 表）。
+- **训练**：2 seeds（0/11）；updates=100（短程；ckpt_every=25 → 候选 u25/50/75/100）；pins 同 §9
+  （spec `scenarios_train_dagger_r1.json` 500 / envs 1 / rollout 256 / ppo_epochs 2 /
+  minibatch 1024 / max-episode-steps 200 / trainable-scope design / plan-reference repeat_action /
+  adv-norm global / critic-warmup 0 / probe-interval 25 / device cuda）。
+- **执行环境（pre-v5 worktree；v7 事故①纪律）**：主树已推进 v5（obs schema 与 pre-v5 ckpt 不兼容）
+  ⇒ 在 `/tmp/opencode/v7_pre_v5`（@ `2f4450e`，与 s11 同代码期）以主树 venv 绝对解释器 +
+  `LD_LIBRARY_PATH` 运行；worktree `runs`/`datasets`/`env/specs` 符号链接主树；**训练/评测期间
+  禁改代码**；GPU 串行（≤3000 MiB 且无 train/test 进程才开跑）。
+
+### 12.3 判据（揭盲前冻结）
+
+- **主判据（双读数；clean500 + eval500 各判）**：
+  1. **collision ≤ IDM**：clean500 ≤ **0.174**；eval500 ≤ **0.144**；
+  2. **success ≥ s11 −3pp**：clean500 ≥ **0.638**（0.668−0.03）；eval500 ≥ **0.616**（0.646−0.03）。
+  - **PASS = clean500 与 eval500 四条全过**；仅一侧过 → 记 **partial** 并如实报告（不宣称过闸）。
+- **配对（描述性）**：vs s11 首要（success net/z/CI95 + collision/off_road delta）；vs w1
+  （clean 0.526 / eval 0.530）与 vs IDM（clean 0.742 / eval 0.756）参照；clean500 全量 + eval500
+  各配对一次。安全闸辅助：off-road（≤IDM+2pt）、speed_ratio（≥0.9×IDM=0.666）、rc 只报告
+  （s11 已知未过，本臂不承诺修复）。
+- **辅助无命中条款**：tg45（s11 0.0；IDM 0.778）/ T3（s11 0/9）只记录。
+- **止损（u50+u100 双点；v6 §7.5 修订口径）**：每点 u∈{50,100} 在 clean500 子集150（sub150）上
+  与 s11 sub150（succ **0.640** / coll **0.200**）配对：
+  `trip = (success net < −10) or (collision delta ≥ +0.05)`；
+  **两点均 trip → early-collapse 停臂**（保留现场）；单点 trip 继续（v6 u50 单点假阳性 3/4 教训）。
+- **keep-best（禁止 sub150 直采）**：候选 u25/50/75/100 按 sub150 排名——① 合格 = sub150 success
+  ≥ **0.61**（= s11 sub150 −3pp）；② 合格中 collision 最低优先；③ 平手取 success 高者，再平手取
+  更早 update；无合格者 → 取 success 最高并标注 `no-eligible`。top1–2 全量 clean500 复评 →
+  **采纳 = 全量 success ≥ 0.638 者中 collision 最低**；无合格者 → 取 success 最高（判据大概率
+  fail，如实记录）。采纳 candidate 仅 eval500 一次（§9 纪律）。
+- **口径说明**：单 run（每 seed）判读 + 2 seeds 描述性分布（n=2 不设方差闸结论）；任何 PASS 声明
+  须以**每 seed 独立**满足主判据为准。
+
+### 12.4 产物与记录
+
+- 臂配置 `config/arms/v7_arm1_collision_suppress.yaml`；预注册本 §（内容+锚两段式）；
+- driver `/tmp/opencode/v7_p4extra_driver.py`（不入 repo；fail-closed pin 断言：ckpt sha /
+  arm 配置 sha / 单变量生效值 / spec+参照 episodes sha）；报告 `/tmp/opencode/v7_p4extra_collision.md`；
+  status `/tmp/opencode/v7_p4extra_status.txt`；逐 run `episodes.csv` sha256 / metrics / ckpt sha。
+- 约束：主树 repo 只加 `docs/`/`config/` 变更；worktree 内跑训练；GPU 串行；期间禁改代码。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。
