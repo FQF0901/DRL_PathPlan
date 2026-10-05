@@ -165,11 +165,19 @@ def build_model(config: Mapping[str, Any]) -> Any:
     moe = dict(section.get("moe", {}) or {})
     experts = dict(moe.get("experts", {}) or {})
     world_model = dict(section.get("world_model", {}) or {})
+    plan_anchor = dict(section.get("plan_anchor", {}) or {})
+    # v7 结构迭代 B：K-anchor 计划头（enabled=false → num_anchors=0 → 模型与旧版逐位一致）
+    anchor_enabled = bool(plan_anchor.get("enabled", False))
+    num_anchors = int(plan_anchor.get("num_anchors", 6)) if anchor_enabled else 0
     kwargs = {
         "hidden": int(section.get("hidden_dim", 128)),
         "num_experts": int(experts.get("count", 8)),
         "expert_hidden": int(experts.get("hidden_dim", 256)),
         "wm_steps": int(world_model.get("rollout_steps", 6)),
+        "num_anchors": num_anchors,
+        "anchor_path": plan_anchor.get("path") if anchor_enabled else None,
+        "anchor_temperature": float(plan_anchor.get("temperature", 1.0)),
+        "anchor_hard": bool(plan_anchor.get("hard", False)),
     }
     return DrivingModel(**kwargs)
 
@@ -2894,6 +2902,10 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     # P1 iter2：动作逐维权重（单变量；缺省 [1.0, 1.0] = 旧行为）
     raw_dim_weights = bc_cfg.get("action_dim_weights", [1.0, 1.0]) or [1.0, 1.0]
     action_dim_weights = (float(raw_dim_weights[0]), float(raw_dim_weights[1]))
+    # v7 结构迭代 B：K-anchor WTA 目标（config only；0.0 = 关 = 旧行为逐位不变）
+    anchor_ce_weight = float(bc_cfg.get("anchor_ce_weight", 0.0))
+    anchor_wta_weight = float(bc_cfg.get("anchor_wta_weight", 0.0))
+    anchor_temperature = float(bc_cfg.get("anchor_temperature", 1.0))
     # lane U1：MoE 负载均衡 α + worst/mild 行权重（phase 2；CLI 优先，config 兜底）
     load_balance_coef = float(
         args.load_balance_coef
@@ -3148,6 +3160,9 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             mild_weight=float(mild_weight),
             val_worst_flags=val_worst_flags,
             traj_aux_valid=traj_aux_valid,
+            anchor_ce_weight=anchor_ce_weight,
+            anchor_wta_weight=anchor_wta_weight,
+            anchor_temperature=anchor_temperature,
             epoch_callback=_on_epoch,
             start_epoch=int(start_epoch),
             optimizer_state=optimizer_state,
@@ -3549,7 +3564,17 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     if freeze_mode not in ("all", "specific_only"):
         raise SystemExit(f"[stageB3] freeze 非法：{freeze_mode!r}（all | specific_only）")
     freeze_prefixes: Tuple[str, ...] = () if freeze_mode == "all" else _SPECIFIC_PHASE_FREEZE
-    frozen_loss_keys: Tuple[str, ...] = () if freeze_mode == "all" else PHASE3_WM_LOSS_KEYS
+    # specific_only 下冻结的 plan head 主干含 K-anchor 头 → anchor_ce/anchor_wta 同规则降级
+    # （仅在权重 > 0 = 实际启用时列入清单；默认关不产生日志噪声）。
+    _pre_losses = dict(p3_cfg.get("losses", {}) or {})
+    _anchor_degrade = tuple(
+        key
+        for key in ("anchor_ce", "anchor_wta")
+        if float(_pre_losses.get(key, 0.0) or 0.0) > 0.0
+    )
+    frozen_loss_keys: Tuple[str, ...] = (
+        () if freeze_mode == "all" else PHASE3_WM_LOSS_KEYS + _anchor_degrade
+    )
     anchor_enabled = (
         bool(args.phase3_anchor)
         if getattr(args, "phase3_anchor", None) is not None
@@ -3691,6 +3716,9 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "traj_aux": _loss_weight("traj_aux", 0.0),
         # P1 DAgger 前置：bias 标定项（逐维 signed-bias 惩罚；0.0 = 关闭 = 旧行为逐位不变）
         "bias_calib": _loss_weight("bias_calib", 0.0),
+        # v7 结构迭代 B：K-anchor WTA 目标（0.0 = 关闭 = 旧行为逐位不变；specific_only 下自动降级）
+        "anchor_ce": _loss_weight("anchor_ce", 0.0),
+        "anchor_wta": _loss_weight("anchor_wta", 0.0),
         "load_balance": float(
             args.load_balance_coef if args.load_balance_coef is not None else losses_cfg.get("load_balance", 0.01)
         ),
@@ -3968,6 +3996,9 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         entry_weight=loss_weights["entry"],
         traj_aux_weight=loss_weights["traj_aux"],
         bias_calib_weight=loss_weights["bias_calib"],
+        anchor_ce_weight=loss_weights["anchor_ce"],
+        anchor_wta_weight=loss_weights["anchor_wta"],
+        anchor_temperature=float(losses_cfg.get("anchor_temperature", 1.0)),
         load_balance_coef=loss_weights["load_balance"],
         moe_enabled=True,
         lr_base_scale=lr_base_scale,

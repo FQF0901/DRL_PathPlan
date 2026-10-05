@@ -241,9 +241,83 @@
   `v7_p2_arm3.md`（或合并臂报告）；status 同 §9.4；臂间顺序按 §6 GPU 串行（编排授权后接力）。
 - 证据：逐 run `episodes.csv` sha256、spec hash、HEAD commit、ckpt sha。
 
+## 11. 结构迭代 B 预注册（2026-10-05；K-anchor 计划头：形状锚 + 连续速度 + WTA 选择；方案 A）
+
+> 本 § 为结构迭代 B（计划表示层）**臂定义与判据**（经 §8 两段式立项）。范围 = `net/plan_head.py` /
+> `net/model.py`（plan 路径）/ `pipeline/trainer.py`+`pipeline/stages.py`（损失接线）/ `config/` /
+> `tests/` / `docs/`；**不动 `env/`**。依据：fix-3 可行性报告 `/tmp/opencode/v7_kanchor_feasibility.md`
+> 与 fix-5 选择头探针 `/tmp/opencode/v7_struct_a2_wiring_probe.md`（探针报告不入 repo，读数引用如下）。
+> 揭盲前冻结。
+
+### 11.1 立项依据（fix-3 / fix-5 读数）
+
+- **形状锚可分、速度不宜进锚**：expert `cumdtheta` K=6 silhouette **0.72–0.77**，簇 × nav 命令
+  Cramér's V=0.57；expert 路径 95.4% 方差在 PC1（速度），首步动作对后续 dθ 的 R² ≤ 0.095
+  ⇒ **因子化 = 形状锚（dθ 剖面）+ 连续速度头（ds）**。
+- **失败窗口存在模式级偏移**：tollgate 失败窗口 64% / merge 43% 落在 C2"左转回正"（expert tollgate
+  仅 4%）；锚分布 JSD tollgate 0.32 / merge 0.29（curve 0.10 = 非模式问题，锚预期收益低）。
+- **选择头可学**：留出 expert 上 latent 线性/MLP 探针 balanced acc 0.473/0.528（chance 0.167，
+  多数类 macro-F1≈0.14）；失败窗口 C1/C2 召回 0.72/0.69（乐观口径）。
+- **PPO 兼容（方案 A）**：soft-mixture 锚 + 连续残差保持 2 维高斯动作空间 → `sample_action` /
+  `logprob_from_action` / entropy / KL 零改动；tracker `plan (6,2)` 接口不变。
+
+### 11.2 臂定义（逐字冻结）
+
+- **锚字典（K=6）**：`tools/fit_plan_anchors.py` 拟合（`datasets/BTC20261002-0941_expert5k_v41`；
+  `train_weight>0` 且 action 链有限；moving = 6 步积分路径 ≥1 m；120k 子样 seed=0；
+  `cumdtheta` KMeans `n_init=10, random_state=0`）。簇大小 **`[92519, 7823, 3012, 8461, 4515, 3670]`
+  与 fix-3 逐位一致**；产物 `config/plan_anchors_k6.json`（sha256
+  `79829ef705285c79a60252e9db6ac58d1b1e48830a4fe4d32327a1fa0f3873bf`）；文件缺失回退内置默认
+  （同源，截断精度 ≤5e-4）。
+- **模型开关**：`config/model.yaml::plan_anchor.enabled=true`（`num_anchors=6`、`path`、
+  `temperature=1.0`、`hard=false`）。**关闭（默认 false）= `num_anchors=0` = 无新参数/新输出**，
+  旧行为与旧 ckpt 严格加载逐位不变（可回退的单变量开关）。
+- **表示与车道系对齐**：锚/残差 dθ 在 **lane 帧**表达；ego 系回投 = lane 帧 dθ + "沿车道跟随"
+  剖面（`dθ_0 = Δψ + κ·ds_0`、`dθ_i = κ·ds_i`，`Δψ = lane.heading_err`（dim 1）、
+  `κ = lane.curvature`（dim 3）；拟合侧对 `ld` 槽位 0 做 `−κ·5 m` 曲率修正）；
+  `valid = lane_mask × near_valid`，车道无效 → 恒等（旧数据兼容）。
+- **前向/输出**：`plan[:,0] = action_mu`（输出契约不变）；`plan[:,1:] = Σ_k p_k·(anchor_k + residual_k)`
+  （`p = softmax(logits/τ)`；`anchor_k` 的 ds 维由连续速度头承担）；t0 一次算出的锚计划驱动
+  rollout 尾段（`traj_xy`/`plan` 一致）；额外输出 `anchor_logits/probs/plan/speed/residual/ctx`；
+  推理可 `hard=true`（argmax 诊断）。
+- **损失（单变量开关 = `anchor_ce_weight`/`anchor_wta_weight`，默认 0 = 旧行为逐位不变）**：
+  - **Stage B（BC）**：`stages.B.bc.anchor_ce_weight=1.0` + `anchor_wta_weight=1.0`（其余 BC 超参/
+    数据/pins 不动）。WTA 分配 = lane 帧累积 dθ 最近锚；CE = `CE(logits/τ, index)`；回归 = 被分配锚的
+    `(anchor+residual)` 链 vs 教师链（逐 step mask；NaN 尾 mask）；连续速度头与残差头同梯度。
+  - **phase3**：`freeze=specific_only`（默认）下锚头随 plan head 主干冻结 →
+    `anchor_ce/anchor_wta` **自动降级为 0**（`phase3_effective_config`）；本臂 phase3 **不启用**锚损失
+    （保持默认 0）——单变量 = 计划表示 + Stage B 目标，避免与"all 解冻必崩"历史配方纠缠。
+  - **Stage C**：`trainable_scope=design`（默认）allowlist 不含锚头 → plan head（含锚头）冻结；
+    PPO 路径零改（`plan_reference=repeat_action` 训练不消费 plan；评测 `--eval-reference plan`
+    消费冻结的锚计划）。
+- **pins**：Stage B/C 其余 pins 与现行 v7 流水线一致（数据 v5、评测 §2.5 表）；本臂不改
+  spec/池/课程/奖励。
+
+### 11.3 判据（揭盲前冻结）
+
+- **主判据（表示层；训练内/离线，首要）**：
+  1. 选择头 CE 收敛：训练末 `bc_anchor_ce_loss ≤ 0.5·ln 6 ≈ 0.896`（初始 ≈ ln 6 = 1.792）；
+  2. 分配非坍缩：`bc_anchor_assign_frac_0 < 0.90`（fix-3 straight 77% 参照）且 C1–C5 各 > 0；
+  3. WTA 收敛：训练末 `bc_anchor_wta_loss` < 首 epoch 的 50%；`bc_anchor_plan_ade_m` 记录。
+- **次判据（闭环，描述性方向）**：`eval500`/`clean500` 配对 vs 基座（w1 e005，同 pins；§2.3 单 run
+  口径）。**明确不承诺** tollgate 0/45 修复（fix-3 §6 风险①：锚是表示不是修复，可能同时是跟踪/地图
+  几何问题）；tg45 只记录，不设命中条款。
+- **安全闸（§5）**：collision / off-road / rc / speed_ratio 配对报告。
+- **止损（§9 口径）**：u50+u100 双点 + keep-best；反目标 = CE 不降 / 分配坍缩 / 闭环显著劣化
+  （Δ < 0 且 z ≥ 1.96）→ 记录并回退（单变量开关可关回旧行为）。
+- **口径说明**：主判据阈值按 Stage B 训练分布（expert 5k + 现行 BC 流程）预设；若实际分布更杂
+  （如混入大量失败窗口），只记录实际值与 acc，由编排按 §8 修订锚复审，**不自行改判据**。
+
+### 11.4 产物与记录
+
+- 锚文件 `config/plan_anchors_k6.json` + 拟合脚本 `tools/fit_plan_anchors.py`（可复现）；
+- 测试 `tests/test_plan_anchor.py`（锚加载/WTA/软混合几何/车道往返/模型集成/损失接线/PPO 兼容）；
+- 报告 `/tmp/opencode/v7_struct_b_kanchor.md`（设计/改动/测试/GPU 冒烟/未决）。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。
 - 2026-10-02：**Gate A 修正集 #1**（揭盲前）：主判据加**方差闸**（run sd ≤5pt 且 min Δ ≥−5pt；未过 = "稳定性未达标，不宣称超越"）+ **n ≥ 5（建议 8–10）** + 功效依据（σ≈15.8pt：n=3 功效 0.53；双峰 n=5 反降 0.20；方差控制才是功效修复）；**评测 pin 表**（`--eval-reference plan` + 一次性 `repeat_action` 诊断 / `--tracker lqr` / `max_steps=1000` / 单 baseline）；**IDM 多 run 改 spec-seed 变体**（同 500 模板、不同 per-scenario seed；同 spec 重复=恒等重复）；Gate B/C 加固（≥2–3 seed 或分布/方差读数）+ **u50+u100 双点止损 + keep-best**（u50 单点假阳性 3/4）；**安全闸量化**（collision 绝对 10% 不可达——IDM 自身 14.4% ⇒ 相对支路；off-road ≤10% 或 ≤IDM+2pt；speed_ratio ≥0.9×IDM）；**教师天花板**（tollgate IDM 0.778 评测 / 0.644 采集）+ `expert500val` 禁入训练（preflight 断言）；`tools/paired_eval.py` 方差闸字段（run sd/min Δ/判定）+ 单 baseline fail-closed；单测更新。
 - 2026-10-03：**P2 首臂预注册（§9，揭盲前）**：base = P1 DAgger **w1 e005**（Gate B 覆盖；clean500 0.526、期望锚 0.47–0.51）；主改 = **`off_road_edge`**（BC-SAC 式距离型稠密项，weight −0.5 / scale 1.0；缺 `d_edge` 键以车道边界等效量替代——口径 = `out_of_road` 真实触发面，含 24-ep 校准读数）+ **KL 锚 0.05→0.02**（方差控制）；其余 pins/池/课程不动；判据 = clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每 seed 采纳 candidate 一次，2 seeds 分布读数；实现 = `terms.py` + `config/arms/v7_arm1_offroad.yaml` + `tests/test_v7_p2_arm_config.py` + `tests/test_reward_terms.py` 更新。
 - 2026-10-05：**P2 arm2/arm3 预注册（§10，揭盲前）**：依据 arm1 seed0（flat：clean500 0.536 / Δ+1.0pp ns；collision +3.6pp 显著）立项**单变量隔离**——arm2 = bundle + KL（去 `off_road_edge`）、arm3 = bundle only（去 `off_road_edge` 与 KL；≈ v6 P4 arm0 原配方在 w1 e005 强基座上的对照，差异仅记录：base/KL 关）；同 base / 同 pins / 同判据口径（clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每臂每 seed 采纳 candidate 一次，每臂 2 seeds=0/11；隔离读数 = arm2−arm3 与 arm1−arm2，跨臂描述性）；实现 = `config/arms/v7_arm2_bundle_kl.yaml` + `config/arms/v7_arm3_bundle_only.yaml` + `tests/test_v7_p2_arm_config.py` 更新。
+- 2026-10-05：**结构迭代 B 预注册（§11，揭盲前）**：依据 fix-3（形状锚 K=6 sil 0.72–0.77、因子化结论、tollgate/merge 模式偏移 JSD 0.32/0.29）与 fix-5（latent 选择头可学：expert balanced acc 0.47–0.53、失败窗 C1/C2 召回 0.69–0.72）立项 **K-anchor 计划头（方案 A：soft-mixture 锚 + 连续速度 + WTA + 选择 CE；车道系对齐）**；单变量开关（`plan_anchor.enabled` + Stage B `anchor_ce/anchor_wta` 权重，默认 0 = 旧行为逐位不变）；Stage B 训练锚头（CE=WTA=1.0）、phase3 specific_only 自动降级、Stage C design 冻结且 PPO 路径零改；判据 = 表示层三项（CE ≤ 0.5·ln6、分配非坍缩、WTA 收敛）+ 闭环描述性方向 + 安全闸 + 双点止损，明确不承诺 tollgate 0/45 修复；实现 = `net/anchor.py` + `net/plan_head.py`/`net/model.py` plan 路径 + `pipeline/trainer.py`/`stages.py` 损失接线 + `config/model.yaml`/`train.yaml` + `tools/fit_plan_anchors.py` + `config/plan_anchors_k6.json` + `tests/test_plan_anchor.py`。

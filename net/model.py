@@ -49,6 +49,21 @@ v5 增补（结构迭代 A，仅令牌集合接线）
   plan/rollout 路径；本迭代只做令牌集合接线）。
 - ``plan_head`` 融合路径与 ST-GNN 空间节点（[ego, OD, LD]）**不动**（Lane B）。
 
+v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 = 旧行为逐位不变）
+---------------------------------------------------------------------------------------
+- :class:`net.plan_head.PlanHead` 增加**选择头**（latent → K 锚 logits）、**连续速度头**
+  （latent → 6 步 ds）与**逐锚 6×2 残差头**；方案 A 软混合
+  ``plan = Σ_k p_k·(anchor_k + residual_k)``（``p = softmax(logits/τ)``；推理可 argmax），
+  见 :mod:`net.anchor` 与 ``docs/v7_program_prereg.md`` §11。
+- **车道系**：锚/残差 dθ 以 lane 帧表达，经 ``lane.heading_err``/``curvature`` 的
+  "沿车道跟随"剖面回投 ego 帧（车道无效 → 恒等）。
+- **rollout**：t0 一次算出的锚计划驱动尾段（step0 仍 = ``action_mu``，输出契约
+  ``plan[:,0] == action_mu`` 不变；``traj_xy`` 与 ``plan`` 一致）；额外输出
+  ``anchor_logits/anchor_probs/anchor_plan/anchor_speed/anchor_residual/anchor_ctx``。
+- **PPO 兼容**：policy/PPO 路径（``action_mu/action_logstd/value/sample/logprob``）零改动；
+  阶段 C 的 ``trainable_scope=design`` allowlist 不含锚头 → 计划头随阶段 B/phase3 训练后
+  在 Stage C 默认冻结（WTA/CE 损失项在 ``freeze_mode=specific_only`` 下自动降级为 0）。
+
 动作与运动学
 ------------
 动作 ``(ds, dθ)`` = 下一个 0.5 s 的弧长 + 航向变化；:func:`arc_step` 是 net 内部唯一
@@ -117,6 +132,7 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
     _mem_nav_features_from_world = None
     _mem_world_state_from_obs = None
 
+from net.anchor import anchor_lane_context, load_anchor_dictionary
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
 from net.spatial import wrap_angle
@@ -377,6 +393,10 @@ class DrivingModel(nn.Module):
         log_std_init: float = -1.0,
         attn_heads: int = 4,
         attn_layers: int = 1,
+        num_anchors: int = 0,
+        anchor_path: str | None = None,
+        anchor_temperature: float = 1.0,
+        anchor_hard: bool = False,
     ):
         super().__init__()
         self.hidden = int(hidden)
@@ -386,10 +406,26 @@ class DrivingModel(nn.Module):
         self.others_dim = int(others_dim)
         self.rollout_steps = int(wm_steps)
         self.dt = float(wm_dt)
+        #: v7 结构迭代 B：K-anchor 计划头（0 = 关闭 = 旧行为逐位不变）
+        self.num_anchors = int(num_anchors)
 
         self.encoders = ObsEncoders(hidden, od_slots, ld_slots, others_dim=others_dim)
         self.mem_encoder = MemEncoder(hidden)
-        self.plan_head = PlanHead(hidden, num_experts, expert_hidden, router_hidden, top_k=moe_top_k)
+        self.plan_head = PlanHead(
+            hidden,
+            num_experts,
+            expert_hidden,
+            router_hidden,
+            top_k=moe_top_k,
+            num_anchors=self.num_anchors,
+            anchor_temperature=anchor_temperature,
+            anchor_hard=anchor_hard,
+        )
+        if self.num_anchors > 0:
+            # 锚字典：文件优先，缺失 → 内置默认（K=6 fix-3 原型）；非法文件直接报错。
+            self.plan_head.set_anchors(
+                load_anchor_dictionary(anchor_path, expected_k=self.num_anchors)
+            )
         self.st_gnn = SpatioTemporalGNN(
             hidden, od_slots, ld_slots, steps=self.rollout_steps, dt=self.dt,
             spatial_layers=spatial_layers, od_knn=od_knn,
@@ -513,17 +549,18 @@ class DrivingModel(nn.Module):
 
     def _struct_context_tokens(
         self, obs: Mapping[str, Tensor], batch: int
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """v5：当前车道块（``lane``）与 TTC token（``ttc``）→ token+mask 四元组。
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """v5：当前车道块（``lane``）与 TTC token（``ttc``）→ token+mask 四元组 + lane 原始块。
 
         ``lane``/``ttc`` 是当前帧上下文通道（不进 6 帧历史）；缺键（旧 schema v4 数据）→
         全 0 + mask=0 + 一次性告警（见 :func:`net.mem.context_features_from_obs`）。
+        第 5 个返回值 = lane 原始特征 ``(B,17)``（K-anchor 计划头的 lane 系上下文）。
         """
         lane_feat, lane_mask = context_features_from_obs(obs, "lane", LANE_DIM, batch=batch)
         ttc_feat, ttc_mask = context_features_from_obs(obs, "ttc", TTC_DIM, batch=batch)
         lane_token = self.encoders.embed_lane(lane_feat.unsqueeze(1), lane_mask)[:, 0]
         ttc_token = self.encoders.embed_ttc(ttc_feat.unsqueeze(1), ttc_mask)[:, 0]
-        return lane_token, lane_mask, ttc_token, ttc_mask
+        return lane_token, lane_mask, ttc_token, ttc_mask, lane_feat
 
     # ---------------------------------------------------------------- 编码/规划
     def _plan(
@@ -646,9 +683,17 @@ class DrivingModel(nn.Module):
         mem = self._mem_from_obs(obs)
         nav_token, nav_mask, signal_token, signal_mask = self._context_tokens(obs, mem.batch)
         # v5（结构迭代 A）：当前车道块 + TTC 上下文 token（旧数据缺键 → 0 token + mask=0）
-        lane_token, lane_mask, ttc_token, ttc_mask = self._struct_context_tokens(obs, mem.batch)
+        lane_token, lane_mask, ttc_token, ttc_mask, lane_feat = self._struct_context_tokens(
+            obs, mem.batch
+        )
         encoded = self.mem_encoder.encode(self.encoders, mem)
         latent, ego_next, moe_aux = self._plan(encoded, nav_token, signal_token)
+        # v7 结构迭代 B：K-anchor 计划（lane 系上下文 → 方案 A 软混合；关闭时不计算）
+        anchor: dict[str, Tensor] | None = None
+        if self.num_anchors > 0:
+            anchor = self.plan_head.plan_anchors(
+                latent, anchor_lane_context(lane_feat, lane_mask)
+            )
         od_obj, ld_obj = self._t0_object_features(encoded)  # A3：单次消息传递（no_grad）
         tokens, key_mask = self._head_tokens(
             encoded,
@@ -702,6 +747,7 @@ class DrivingModel(nn.Module):
             "route_world": route_world,
             "route_world_mask": route_world_mask,
             "ego_world": ego_world,
+            "anchor": anchor,
         }
 
     def plan_step(
@@ -751,6 +797,9 @@ class DrivingModel(nn.Module):
         }
         pose_world = encoded.get("ego_world")  # A4 世界系位姿锚点（t0）；每步 advance_pose_world
         action = action0  # 第 1 个计划动作 = action_mu（与 cheap path 逐位一致）
+        # v7 结构迭代 B：K-anchor 计划（t0 一次性软混合；step0 仍由 action_mu 钉住 → 输出契约不变）
+        anchor = encoded.get("anchor")
+        anchor_plan: Tensor | None = anchor.get("plan") if isinstance(anchor, dict) else None
 
         # t0 锚定状态（t0 帧；来自真实 obs，不 detach —— 检测任务）
         od_anchor = self.st_gnn.od_state_from_features(enc.od_now, enc.od_live)
@@ -818,19 +867,23 @@ class DrivingModel(nn.Module):
             if k < self.rollout_steps:
                 enc = self.mem_encoder.encode(self.encoders, mem)
                 latent, ego_next, _ = self._plan(enc, nav_token, signal_token)
-                tokens, key_mask = self._head_tokens(
-                    enc,
-                    nav_token,
-                    nav_mask,
-                    signal_token,
-                    signal_mask,
-                    latent,
-                    lane_token,
-                    lane_mask,
-                    ttc_token,
-                    ttc_mask,
-                )
-                action, _ = self.policy(tokens, key_mask)
+                if anchor_plan is None:
+                    tokens, key_mask = self._head_tokens(
+                        enc,
+                        nav_token,
+                        nav_mask,
+                        signal_token,
+                        signal_mask,
+                        latent,
+                        lane_token,
+                        lane_mask,
+                        ttc_token,
+                        ttc_mask,
+                    )
+                    action, _ = self.policy(tokens, key_mask)
+                else:
+                    # K-anchor 方案 A：尾段计划由 t0 锚混合一次性给出（action/pose 链保持可微）
+                    action = anchor_plan[:, k, :]
 
         return {
             "traj_xy": torch.stack(xy, dim=1),
@@ -884,6 +937,15 @@ class DrivingModel(nn.Module):
         }
         if "load_balance_loss" in moe_aux:
             out["load_balance_loss"] = moe_aux["load_balance_loss"]
+        # v7 结构迭代 B：K-anchor 计划输出（num_anchors=0 时不存在 → 旧契约逐位不变）
+        anchor = encoded.get("anchor")
+        if isinstance(anchor, dict):
+            out["anchor_logits"] = anchor["logits"]
+            out["anchor_probs"] = anchor["probs"]
+            out["anchor_plan"] = anchor["plan"]
+            out["anchor_speed"] = anchor["speed_ds"]
+            out["anchor_residual"] = anchor["residual"]
+            out["anchor_ctx"] = anchor["ctx"]
         if not rollout:
             if world_model:
                 raise ValueError("world_model=True 需要 rollout=True（多步预测是 rollout 的产物）")

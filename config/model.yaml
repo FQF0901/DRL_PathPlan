@@ -55,3 +55,13 @@ policy:
     dt: 0.5                       # 作用于下一个 0.5 s
     bounded: true                 # 动作有界
     smooth: true                  # 动作平滑约束
+
+# v7 结构迭代 B：K-anchor 计划头（fix-3 方案 A：形状锚 + 连续速度 + WTA + 选择头；
+# 车道系对齐；预注册见 docs/v7_program_prereg.md §11）。enabled=false（默认）= 完全关闭：
+# num_anchors=0 → 无新参数/新输出，模型与旧版逐位一致（旧 ckpt 严格加载不受影响）。
+plan_anchor:
+  enabled: false                  # 单变量开关：开 = plan 尾段由锚混合驱动（step0 仍 = action_mu）
+  num_anchors: 6                  # K=6（fix-3 形状锚 silhouette 0.72–0.77；K=8 不再提升）
+  path: config/plan_anchors_k6.json  # 锚字典（tools/fit_plan_anchors.py 拟合；缺失回退内置默认）
+  temperature: 1.0                # 软混合温度 τ（softmax(logits/τ)；推理可 hard=argmax）
+  hard: false                     # true = 推理 argmax（one-hot 选择）

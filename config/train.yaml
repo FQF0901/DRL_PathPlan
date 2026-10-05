@@ -129,6 +129,11 @@ stages:
         presence: 0.1           # ③ presence BCE（id 轴目标）
         entry: 0.1              # ③ entry BCE
         traj_aux: 0.0           # traj 仅监控不进损失（fail-window traj6 是常量外推合成值）
+        # v7 结构迭代 B：K-anchor WTA 目标（0.0 = 关闭 = 旧行为逐位不变）。freeze=specific_only
+        # 下 plan head 主干（含锚头）冻结 → 本两项自动降级为 0（见 phase3_effective_config）。
+        anchor_ce: 0.0          # 选择头 CE 权重（WTA 最近锚标签；目标 = action_chain）
+        anchor_wta: 0.0         # WTA 残差回归权重（被分配锚的 anchor+residual 链）
+        anchor_temperature: 1.0 # 锚混合温度 τ（CE/混合共用）
         load_balance: 0.01      # MoE Switch 式负载均衡 aux α（沿用阶段 B 口径）
       freeze: specific_only     # lane P3-I：冻结配方（CLI --phase3-freeze）——specific_only（新默认）=
                                 # 只训 experts/router/residual_scale（复用 phase 2 冻结清单）；WM od/ld/presence/entry
@@ -181,6 +186,13 @@ stages:
                                   # corr 0.61→0.93 / 0.51→0.78；ds 与 traj 指标不回退。
                                   # [1.0, 1.0] = 旧行为；证据 /tmp/opencode/v7_p1_iter2.md §4
       wm_detach: true           # v2 固定语义：合成帧恒 detach；该键为 no-op（兼容保留）
+      # v7 结构迭代 B：K-anchor WTA 目标（单变量开关；0.0 = 关闭 = 旧行为逐位不变）。
+      # 目标 = 教师动作链（新 dagger labels / expert action[0:6]；NaN 尾 mask）；
+      # 锚选择 CE + 被分配锚的 (anchor+residual) 链回归（连续速度头同梯度）。
+      # 需同时开 config/model.yaml::plan_anchor.enabled=true（模型侧）。
+      anchor_ce_weight: 0.0     # 选择头 CE 权重（WTA 最近锚标签）
+      anchor_wta_weight: 0.0    # WTA 残差回归权重
+      anchor_temperature: 1.0   # 锚混合温度 τ（CE/混合共用）
   C:
     name: ppo_rl                # 阶段名
     tracker: mpc_lqr            # 环境内 MPC/LQR 跟踪器

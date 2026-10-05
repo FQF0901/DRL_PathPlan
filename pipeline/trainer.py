@@ -781,6 +781,13 @@ class BCConfig:
     traj_aux_valid: Optional[np.ndarray] = None
     #: 独立留出数据集（``--val-dir``；None = 用主数据集 + ``val_indices`` 的旧口径）。
     val_dataset: Optional[Any] = None
+    # ---- v7 结构迭代 B：K-anchor WTA 目标（单变量开关；0.0 = 关闭 = 旧行为逐位不变）----
+    #: 选择头 CE 权重（WTA 最近锚标签；目标 = ``action (B,6,2)`` 教师链）。
+    anchor_ce_weight: float = 0.0
+    #: WTA 残差回归权重（被分配锚的 ``(anchor+residual)`` 链 vs 教师链；含连续速度头）。
+    anchor_wta_weight: float = 0.0
+    #: 锚混合温度 τ（``softmax(logits/τ)``；CE/混合共用）。
+    anchor_temperature: float = 1.0
 
 
 @dataclass
@@ -850,6 +857,10 @@ class Phase3Config:
     bias_calib_weight: float = 0.0
     load_balance_coef: float = 0.01
     moe_enabled: bool = True
+    #: v7 结构迭代 B：K-anchor WTA 目标（0.0 = 关闭 = 旧行为逐位不变；见 :class:`BCConfig`）。
+    anchor_ce_weight: float = 0.0
+    anchor_wta_weight: float = 0.0
+    anchor_temperature: float = 1.0
 
     # ---- LR 分组（config stages.B.phase3.lr_scale.*）----
     lr_base_scale: float = 0.25
@@ -2177,6 +2188,94 @@ def weighted_action_chain_loss(
             }
         )
     return total, per_horizon
+
+
+def anchor_wta_loss(
+    out: Mapping[str, "torch.Tensor"],
+    chain: "torch.Tensor",
+    chain_valid: "torch.Tensor",
+    anchor_dth: "torch.Tensor",
+    frame_weight: "torch.Tensor",
+    *,
+    temperature: float = 1.0,
+    loss_type: str = "l2",
+) -> Tuple["torch.Tensor", "torch.Tensor", Dict[str, float]]:
+    """K-anchor WTA 目标（v7 结构迭代 B）：选择 CE + 被分配锚的链回归。
+
+    - ``out``：模型前向输出，需含 ``anchor_logits (B,K)``/``anchor_speed (B,6)``/
+      ``anchor_residual (B,K,6,2)``/``anchor_ctx (B,3)``（``num_anchors>0`` 时由
+      :class:`net.model.DrivingModel` 提供；缺失 → ``KeyError`` 提示开关未开）。
+    - ``chain``：教师动作链 ``(B,6,2)``（ego 系；NaN 尾由 ``chain_valid`` 掩码，内部先置 0）；
+      ``chain_valid (B,6)`` = 逐 (行,step) 有效性。
+    - **分配**：形状空间（lane 帧累积 dθ）最近锚（:func:`net.anchor.assign_anchors`）；
+      **CE** = ``CE(logits/τ, index)``（行权重 × 行有效）。
+    - **WTA 回归**：被分配锚的 ``Σ(anchor+residual)`` 计划 vs 教师链（逐 step mask；
+      ``loss_type`` l2/l1）；连续速度头与残差头同梯度。
+    - 返回 ``(ce_loss, wta_loss, metrics)``：两个**未加权**标量（调用方按权重组合/缩放）；
+      metrics 为诊断，键 ``anchor_*``（进 epoch/TB）。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    from net.anchor import assign_anchors, assigned_plan
+
+    for key in ("anchor_logits", "anchor_speed", "anchor_residual", "anchor_ctx"):
+        if key not in out:
+            raise KeyError(
+                f"anchor_wta_loss 需要模型输出 {key!r}（模型需 num_anchors>0；见 net/model.py）"
+            )
+    logits = out["anchor_logits"]
+    speed = out["anchor_speed"]
+    residual = out["anchor_residual"]
+    ctx = out["anchor_ctx"]
+    heading_err, curvature, lane_valid = ctx[:, 0], ctx[:, 1], ctx[:, 2]
+    if chain.ndim != 3 or int(chain.shape[-1]) != 2:
+        raise ValueError(f"chain 应为 (B,6,2)，收到 {tuple(chain.shape)}")
+    if tuple(chain_valid.shape) != tuple(chain.shape[:2]):
+        raise ValueError(
+            f"chain_valid 形状 {tuple(chain_valid.shape)} != (B,6)={tuple(chain.shape[:2])}"
+        )
+    chain = torch.where(torch.isfinite(chain), chain, torch.zeros_like(chain))
+    valid = chain_valid.to(dtype=chain.dtype, device=chain.device)
+    weight = frame_weight.reshape(-1).to(dtype=chain.dtype, device=chain.device)
+    assignment = assign_anchors(chain, anchor_dth, valid, heading_err, curvature, lane_valid)
+    row_valid = assignment["row_valid"]
+    index = assignment["index"]
+    row_weight = weight * row_valid.to(weight.dtype)
+    ce = F.cross_entropy(
+        logits / max(float(temperature), 1e-6), index, reduction="none"
+    )
+    ce_loss = (ce * row_weight).sum() / row_weight.sum().clamp(min=1e-8)
+    plan_k = assigned_plan(index, residual, anchor_dth, speed, heading_err, curvature, lane_valid)
+    diff = plan_k - chain
+    per_step = (diff ** 2).mean(dim=-1) if loss_type == "l2" else diff.abs().mean(dim=-1)
+    step_weight = weight.unsqueeze(-1) * valid
+    wta_loss = (per_step * step_weight).sum() / step_weight.sum().clamp(min=1e-8)
+    # 诊断：软混合计划 ADE（m；只作监控，不进梯度路径决策）
+    metrics: Dict[str, float] = {
+        "anchor_ce_loss": float(ce_loss.detach()),
+        "anchor_wta_loss": float(wta_loss.detach()),
+        "anchor_assign_dist": float(
+            (assignment["dist"] * row_weight).sum() / row_weight.sum().clamp(min=1e-8)
+        ),
+        "anchor_assign_margin": float(
+            (assignment["margin"] * row_weight).sum() / row_weight.sum().clamp(min=1e-8)
+        ),
+    }
+    plan_mix = out.get("anchor_plan")
+    if plan_mix is not None:
+        mix_err = torch.linalg.norm(plan_mix - chain, dim=-1)  # (B,6)
+        metrics["anchor_plan_ade_m"] = float(
+            (mix_err * step_weight).sum() / step_weight.sum().clamp(min=1e-8)
+        )
+    counts = torch.zeros(int(logits.shape[1]), dtype=weight.dtype, device=weight.device)
+    if bool(row_valid.any()):
+        counts = torch.bincount(
+            index[row_valid], minlength=int(logits.shape[1])
+        ).to(weight.dtype)
+    for k in range(int(logits.shape[1])):
+        metrics[f"anchor_assign_frac_{k}"] = float(counts[k] / row_valid.sum().clamp(min=1))
+    return ce_loss, wta_loss, metrics
 
 
 #: bias 标定项的逐维归一化尺度（P1 DAgger 前置）：动作界 span（ds=10 m / dθ=1.2 rad；
@@ -3556,6 +3655,17 @@ def pretrain_bc(
             f"[bc] 梯度累积：宏 batch={macro_size} · micro batch={micro_size}"
             f"（phase={config.phase}；损失按宏口径精确缩放）"
         )
+    # v7 结构迭代 B：K-anchor WTA 目标（权重全 0 或模型未启用锚 → 关闭 = 旧行为逐位不变）
+    anchor_active = (
+        float(config.anchor_ce_weight) > 0.0 or float(config.anchor_wta_weight) > 0.0
+    ) and int(getattr(model.plan_head, "num_anchors", 0) or 0) > 0
+    anchor_metric_sums: Dict[str, float] = {}
+    if anchor_active:
+        logger(
+            f"[bc] K-anchor WTA：K={model.plan_head.num_anchors} · "
+            f"ce_weight={float(config.anchor_ce_weight)} · wta_weight={float(config.anchor_wta_weight)} · "
+            f"τ={float(config.anchor_temperature)}"
+        )
     for epoch in range(start_epoch, int(config.epochs)):
         order = indices.copy()
         if config.shuffle:
@@ -3574,11 +3684,13 @@ def pretrain_bc(
             },
             "load": _load_snapshot(),
         }
+        anchor_epoch_start = dict(anchor_metric_sums)
         totals = {
             "loss": 0.0,
             "traj": 0.0,
             "action": 0.0,
             "load_balance": 0.0,
+            "anchor": 0.0,
             "mu_ds": 0.0,
             # 轨迹度量（2026-09-26 单位修正）：加权 MSE(m²)/MAE(m) + 未加权诊断
             "traj_mse": 0.0,
@@ -3629,6 +3741,7 @@ def pretrain_bc(
                 "traj": 0.0,
                 "action": 0.0,
                 "load_balance": 0.0,
+                "anchor": 0.0,
                 "traj_mse": 0.0,
                 "traj_mae": 0.0,
                 "traj_mae_all": 0.0,
@@ -3754,6 +3867,28 @@ def pretrain_bc(
                         load_count += n_rows
                 if out.get("load_balance_loss") is not None:
                     load_term = out["load_balance_loss"]
+                # v7 结构迭代 B：K-anchor WTA 目标（选择 CE + 被分配锚链回归；权重 0 → 跳过）
+                anchor_term = torch.zeros((), device=device)
+                if anchor_active:
+                    chain_target = targets["action"]
+                    chain_valid_t = torch.isfinite(chain_target).all(dim=-1).to(dtype=torch.float32)
+                    anchor_ce, anchor_wta, anchor_metrics = anchor_wta_loss(
+                        out,
+                        chain_target,
+                        chain_valid_t,
+                        model.plan_head.anchor_dth,
+                        specific_weight,
+                        temperature=float(config.anchor_temperature),
+                        loss_type=config.loss_type,
+                    )
+                    anchor_term = (
+                        float(config.anchor_ce_weight) * anchor_ce
+                        + float(config.anchor_wta_weight) * anchor_wta
+                    )
+                    for key, value in anchor_metrics.items():
+                        anchor_metric_sums[key] = (
+                            anchor_metric_sums.get(key, 0.0) + float(value) * scale_rows
+                        )
                 forward_seconds += time.perf_counter() - forward_started
                 # 组合缩放后的宏 batch 损失：Σ_m s_m·L_m = L_macro（micro == macro 时 s=1）
                 # router CE 现为**加权均值**（Σw·ce/Σw）→ 与 traj/action 同用权重比缩放
@@ -3761,6 +3896,7 @@ def pretrain_bc(
                     traj_term * scale_traj      # lane U4：traj 项按掩码后的宏权重缩放
                     + action_term * scale_weight
                     + load_term * scale_rows
+                    + anchor_term * scale_weight  # K-anchor：加权均值项 → 权重比缩放
                 )
                 backward_started = time.perf_counter()
                 loss.backward()
@@ -3769,6 +3905,7 @@ def pretrain_bc(
                 totals_micro["traj"] += float(traj_term.detach()) * scale_traj
                 totals_micro["action"] += float(action_term.detach()) * scale_weight
                 totals_micro["load_balance"] += float(load_term.detach()) * scale_rows
+                totals_micro["anchor"] += float(anchor_term.detach()) * scale_weight
                 # 轨迹度量：加权口径按 W_m/W_macro、未加权诊断口径按 n_m/n_macro 缩放
                 totals_micro["traj_mse"] += traj_metrics["traj_mse_weighted"] * scale_weight
                 totals_micro["traj_mae"] += traj_metrics["traj_mae_weighted_m"] * scale_weight
@@ -3805,6 +3942,15 @@ def pretrain_bc(
             "bc_batches_count": int(batches),
             "last_epoch": epoch + 1,
         }
+        if anchor_active:
+            # 关闭时不新增指标键 → 旧 metrics 逐位兼容
+            epoch_update["bc_anchor_loss"] = totals["anchor"] / divisor
+            epoch_update.update(
+                {
+                    f"bc_{key}": (value - anchor_epoch_start.get(key, 0.0)) / divisor
+                    for key, value in anchor_metric_sums.items()
+                }
+            )
         if epoch == start_epoch:
             # 阶段常量只记一次（监控降噪；完整值在 metrics.json phase 结果里）
             epoch_update.update(
@@ -3981,6 +4127,12 @@ def evaluate_bc(
     mu_ds_batch_sum = 0.0
     batch_count = 0
     batch_traj_loss = batch_action_loss = batch_load_loss = 0.0
+    # v7 结构迭代 B：K-anchor val 孪生（权重 0 或模型未启用锚 → 关闭）
+    anchor_active = (
+        float(config.anchor_ce_weight) > 0.0 or float(config.anchor_wta_weight) > 0.0
+    ) and int(getattr(model.plan_head, "num_anchors", 0) or 0) > 0
+    batch_anchor_loss = 0.0
+    anchor_metric_sums: Dict[str, float] = {}
     # lane U1：MoE 负载 val 孪生累计（行数加权）
     worst_all = (
         None
@@ -4076,6 +4228,25 @@ def evaluate_bc(
                 if bool(np.any(mask)):
                     slice_err_values[name]["err"].append(action_err_point[mask])
                     slice_err_values[name]["weight"].append(sample_weight[mask])
+        # v7 结构迭代 B：K-anchor val 孪生（与训练侧同函数；no_grad 由本函数装饰器提供）
+        if anchor_active:
+            chain_target = targets["action"]
+            chain_valid_t = torch.isfinite(chain_target).all(dim=-1).to(dtype=torch.float32)
+            anchor_ce, anchor_wta, anchor_metrics = anchor_wta_loss(
+                out,
+                chain_target,
+                chain_valid_t,
+                model.plan_head.anchor_dth,
+                specific_weight,
+                temperature=float(config.anchor_temperature),
+                loss_type=config.loss_type,
+            )
+            batch_anchor_loss += float(
+                float(config.anchor_ce_weight) * anchor_ce
+                + float(config.anchor_wta_weight) * anchor_wta
+            )
+            for key, value in anchor_metrics.items():
+                anchor_metric_sums[key] = anchor_metric_sums.get(key, 0.0) + float(value)
         # lane U1：MoE 负载 val 孪生（行数加权；与训练侧同公式）
         if out.get("expert_weights") is not None and config.moe_enabled:
             logits = out.get("router_logits")
@@ -4108,7 +4279,10 @@ def evaluate_bc(
     weighted_fde = weighted_stats(fde_sample, all_weights, prefix="")
     result: Dict[str, Any] = {
         "bc_loss": (
-            batch_traj_loss / divisor + batch_action_loss / divisor + batch_load_loss / divisor
+            batch_traj_loss / divisor
+            + batch_action_loss / divisor
+            + batch_load_loss / divisor
+            + batch_anchor_loss / divisor
         ),
         "bc_traj_loss": batch_traj_loss / divisor,
         "bc_action_loss": batch_action_loss / divisor,
@@ -4122,6 +4296,9 @@ def evaluate_bc(
         "bc_action_mu_ds_mean": mu_ds_batch_sum / divisor,
         "bc_action_mu_ds_weighted_mean": mu_ds_num / mu_ds_den if mu_ds_den > 0 else float("nan"),
     }
+    if anchor_active:
+        result["bc_anchor_loss"] = batch_anchor_loss / divisor
+        result.update({f"bc_{key}": value / divisor for key, value in anchor_metric_sums.items()})
     result.update(weighted_stats(error_matrix, all_weights, prefix="bc_action_err_"))
     per_horizon: Dict[str, Dict[str, float]] = {}
     legacy_matrix = mse_matrix if config.loss_type == "l2" else mae_matrix
@@ -4200,7 +4377,9 @@ def _phase3_term_denominators(
     - ``action_chain``：``Σ w·chain_valid[:,1:]``（第 2..6 步；第 1 步由 action 项监督）；
     - ``step``：``Σ w·wm_valid``（ego_next / 逐帧项）；
     - ``od``/``ld``：``Σ w·wm_valid·mask``（槽位级）；
-    - ``presence``：``Σ w·wm_valid × slots``（BCE 分母 = 帧权重和 × 槽位数）。
+    - ``presence``：``Σ w·wm_valid × slots``（BCE 分母 = 帧权重和 × 槽位数）；
+    - ``anchor_ce``：``Σ w·row_valid``（K-anchor 选择 CE 分母；row_valid = 链有任一有效 step）；
+    - ``anchor_wta``：``Σ w·chain_valid``（K-anchor WTA 回归分母，逐 step）。
     """
     valid = np.asarray(future["wm_valid"], dtype=np.float64)
     weight = np.asarray(frame_weight_np, dtype=np.float64).reshape(-1, 1)
@@ -4208,6 +4387,7 @@ def _phase3_term_denominators(
     od_mask = np.asarray(future["od_mask"], dtype=np.float64)
     ld_mask = np.asarray(future["ld_mask"], dtype=np.float64)
     chain_valid = np.asarray(future["action_chain_valid"], dtype=np.float64)
+    chain_row_valid = (chain_valid > 0.5).any(axis=1).astype(np.float64)
     slots = int(od_mask.shape[-1]) if od_mask.ndim >= 2 else 0
     return {
         "action": float(weight.sum()),
@@ -4218,6 +4398,8 @@ def _phase3_term_denominators(
         "od": float((step_weight[:, :, None] * od_mask).sum()),
         "ld": float((step_weight[:, :, None] * ld_mask).sum()),
         "presence": float(step_weight.sum()) * float(slots),
+        "anchor_ce": float((weight.reshape(-1) * chain_row_valid).sum()),
+        "anchor_wta": float((weight * chain_valid).sum()),
     }
 
 
@@ -4248,12 +4430,18 @@ def phase3_effective_config(config: Phase3Config) -> "tuple[Phase3Config, Tuple[
 
     ``freeze_mode="specific_only"`` 时上层监督项（:data:`PHASE3_WM_LOSS_KEYS`：WM 教师强制
     ``od/ld/presence/entry`` + ``ego_next``）在冻结主干下无梯度 → 权重强制置 0（规格：自动
-    降级；保留 action/action_chain/load_balance）。返回 ``(effective_config, 被置零键)``；
-    ``freeze_mode="all"`` 原样返回 ``(config, ())``。
+    降级；保留 action/action_chain/load_balance）。**K-anchor WTA/CE 同属冻结的 plan head
+    主干** → 同规则置 0（锚头在 specific_only 下不训练；``freeze_mode="all"`` 时正常训练）。
+    返回 ``(effective_config, 被置零键)``；``freeze_mode="all"`` 原样返回 ``(config, ())``。
     """
     if config.freeze_mode != "specific_only":
         return config, ()
-    zeroed = PHASE3_WM_LOSS_KEYS
+    # K-anchor 项只在权重 > 0（确实启用）时才列入降级清单，避免默认关时日志噪声。
+    zeroed = PHASE3_WM_LOSS_KEYS + tuple(
+        key
+        for key in ("anchor_ce", "anchor_wta")
+        if float(getattr(config, f"{key}_weight", 0.0) or 0.0) > 0.0
+    )
     return replace(config, **{f"{key}_weight": 0.0 for key in zeroed}), zeroed
 
 
@@ -4300,6 +4488,22 @@ def _phase3_loss_terms(
         frame_weight=frame_weight,
         loss_type=config.loss_type,
     )
+    # v7 结构迭代 B：K-anchor WTA 目标（选择 CE + 被分配锚链回归；权重 0 或未启用锚 → 跳过）
+    anchor_ce_loss = anchor_wta_value = torch.zeros((), device=device)
+    anchor_metrics: Dict[str, float] = {}
+    anchor_active = (
+        float(config.anchor_ce_weight) > 0.0 or float(config.anchor_wta_weight) > 0.0
+    ) and int(getattr(model.plan_head, "num_anchors", 0) or 0) > 0
+    if anchor_active:
+        anchor_ce_loss, anchor_wta_value, anchor_metrics = anchor_wta_loss(
+            out,
+            future_t["action_chain"],
+            future_t["action_chain_valid"],
+            model.plan_head.anchor_dth,
+            frame_weight,
+            temperature=float(config.anchor_temperature),
+            loss_type=config.loss_type,
+        )
     # P1 DAgger 前置：bias 标定（逐维 signed-bias 惩罚；weight=0 时 penalty=0、指标仍记录）
     bias_penalty, bias_metrics = phase3_bias_calibration(out, targets, future_t, frame_weight, config)
     wm_active = any(
@@ -4354,15 +4558,18 @@ def _phase3_loss_terms(
         "action": config.action_weight * action_loss,
         "action_chain": config.action_chain_weight * chain_loss,
         "bias_calib": config.bias_calib_weight * bias_penalty,
+        "anchor_ce": config.anchor_ce_weight * anchor_ce_loss,
+        "anchor_wta": config.anchor_wta_weight * anchor_wta_value,
         "ego_next": config.ego_next_weight * ego_loss,
         "od": config.od_weight * od_loss,
         "ld": config.ld_weight * ld_loss,
         "presence": config.presence_weight * presence_terms["presence"],
         "entry": config.entry_weight * presence_terms["entry"],
         "load_balance": load_loss,
-        # 监控口径（不进梯度）：逐样本首步动作 L1 + bias 标定指标（前后对照）
+        # 监控口径（不进梯度）：逐样本首步动作 L1 + bias 标定指标 + 锚诊断（前后对照）
         "action_err": action_err,
         "bias_metrics": bias_metrics,
+        "anchor_metrics": anchor_metrics,
         "out": out,
     }
     return terms
@@ -4485,7 +4692,19 @@ def pretrain_bc_phase3(
             else ""
         )
     )
-    loss_keys = ("action", "action_chain", "bias_calib", "ego_next", "od", "ld", "presence", "entry", "load_balance")
+    loss_keys = (
+        "action",
+        "action_chain",
+        "bias_calib",
+        "anchor_ce",
+        "anchor_wta",
+        "ego_next",
+        "od",
+        "ld",
+        "presence",
+        "entry",
+        "load_balance",
+    )
     macro_size = max(1, int(config.batch_size))
     micro_size = (
         macro_size
@@ -4523,6 +4742,8 @@ def pretrain_bc_phase3(
         batches = 0
         bias_sums: Dict[str, float] = {}
         bias_weight = 0.0
+        anchor_sums: Dict[str, float] = {}
+        anchor_weight = 0.0
         data_seconds = forward_seconds = backward_seconds = 0.0
         for start in range(0, len(order), macro_size):
             if config.max_batches is not None and batches >= int(config.max_batches):
@@ -4591,6 +4812,8 @@ def pretrain_bc_phase3(
                     components["action"]
                     + components["action_chain"]
                     + components["bias_calib"]
+                    + components["anchor_ce"]
+                    + components["anchor_wta"]
                     + components["ego_next"]
                     + components["od"]
                     + components["ld"]
@@ -4619,6 +4842,11 @@ def pretrain_bc_phase3(
                     for key, value in batch_bias.items():
                         bias_sums[key] = bias_sums.get(key, 0.0) + float(value) * weight_micro
                     bias_weight += weight_micro
+                batch_anchor = terms.get("anchor_metrics") or {}
+                if batch_anchor:
+                    for key, value in batch_anchor.items():
+                        anchor_sums[key] = anchor_sums.get(key, 0.0) + float(value) * weight_micro
+                    anchor_weight += weight_micro
                 with torch.no_grad():
                     diff = terms["out"]["traj_xy"] - targets["traj6"]
                     traj_mse_values.append((diff ** 2).mean(dim=-1).detach().double().cpu().numpy())
@@ -4695,6 +4923,13 @@ def pretrain_bc_phase3(
             {key: value / max(bias_weight, 1e-12) for key, value in bias_sums.items()}
         )
         epoch_update["bc_bias_calib_weight"] = float(config.bias_calib_weight)
+        # v7 结构迭代 B：K-anchor 诊断（分配 margin/dist/软混合 ADE/逐簇占比；权重加权平均）
+        if float(effective_config.anchor_ce_weight) > 0.0 or float(effective_config.anchor_wta_weight) > 0.0:
+            epoch_update["bc_anchor_ce_loss"] = totals["anchor_ce"] / divisor
+            epoch_update["bc_anchor_wta_loss"] = totals["anchor_wta"] / divisor
+            epoch_update.update(
+                {f"bc_{key}": value / max(anchor_weight, 1e-12) for key, value in anchor_sums.items()}
+            )
         if traj_mse_values and weight_values and len(traj_mse_values[0]) == len(weight_values[0]):
             mse_matrix = np.concatenate(traj_mse_values)
             mae_matrix = np.concatenate(traj_mae_values)
@@ -4805,12 +5040,25 @@ def evaluate_bc_phase3(
     # lane P3-I：留出口径与训练侧同族 —— specific_only 降级项同样置 0
     effective_config, _ = phase3_effective_config(config)
     macro_size = max(1, int(config.batch_size))
-    loss_keys = ("action", "action_chain", "bias_calib", "ego_next", "od", "ld", "presence", "entry")
+    loss_keys = (
+        "action",
+        "action_chain",
+        "bias_calib",
+        "anchor_ce",
+        "anchor_wta",
+        "ego_next",
+        "od",
+        "ld",
+        "presence",
+        "entry",
+    )
     numerator = {key: 0.0 for key in loss_keys}
     denominator = {key: 0.0 for key in loss_keys}
     load_sum, load_count = 0.0, 0
     bias_sums: Dict[str, float] = {}
     bias_weight = 0.0
+    anchor_sums: Dict[str, float] = {}
+    anchor_weight = 0.0
     action_err_values: List[np.ndarray] = []
     weight_values: List[np.ndarray] = []
     traj_mse_values: List[np.ndarray] = []
@@ -4863,6 +5111,12 @@ def evaluate_bc_phase3(
             for key, value in batch_bias.items():
                 bias_sums[key] = bias_sums.get(key, 0.0) + float(value) * w_batch
             bias_weight += w_batch
+        batch_anchor = terms.get("anchor_metrics") or {}
+        if batch_anchor:
+            w_batch = float(den["action"])
+            for key, value in batch_anchor.items():
+                anchor_sums[key] = anchor_sums.get(key, 0.0) + float(value) * w_batch
+            anchor_weight += w_batch
     # 总损失 = 各加权损失项和（含权重系数）；逐项 = Σnum/Σden
     result: Dict[str, Any] = {
         "bc_load_balance_loss": load_sum / max(load_count, 1),
@@ -4885,6 +5139,12 @@ def evaluate_bc_phase3(
     )
     result.update({key: value / max(bias_weight, 1e-12) for key, value in bias_sums.items()})
     result["bc_bias_calib_weight"] = float(config.bias_calib_weight)
+    if float(effective_config.anchor_ce_weight) > 0.0 or float(effective_config.anchor_wta_weight) > 0.0:
+        result["bc_anchor_ce_loss"] = numerator["anchor_ce"] / max(denominator["anchor_ce"], 1e-12)
+        result["bc_anchor_wta_loss"] = numerator["anchor_wta"] / max(denominator["anchor_wta"], 1e-12)
+        result.update(
+            {f"bc_{key}": value / max(anchor_weight, 1e-12) for key, value in anchor_sums.items()}
+        )
     error_matrix = np.concatenate(action_err_values) if action_err_values else np.zeros(0)
     all_weights = np.concatenate(weight_values) if weight_values else np.zeros(0)
     weight_total = max(float(all_weights.sum()) if all_weights.size else 0.0, 1e-12)
