@@ -521,6 +521,91 @@
 - 约束：主树 repo 只加 `reward_model/`（新项 + reset 钩子）/`config/`/`docs/`/`tests/`；
   net/env 不动；worktree 内跑训练（同步文件 sha 校验）；GPU 串行；期间禁改代码。
 
+## 14. P4-extra-2 预注册（2026-10-06；s11 + `ttc` 稠密近失罚单变量；直击"自车追尾"根因）
+
+> 本 § 为 §12 之后的第二定向尝试：在程序最佳 RL 产物 arm1-s11 u150（clean500 0.668 / eval500 0.646）
+> 上以**单变量**加入 `ttc`（`TTCLeadPenalty` 默认：weight −0.5 / threshold 2.0 / floor 0.5），
+> 针对 fix-3 碰撞分类的**自车追尾前车 63.4%** 根因。范围 = `config/arms/v7_arm1_ttc.yaml`（新）+
+> `docs/`；**不碰 net/env/reward 代码语义**（`ttc` 项已在 `reward_model/terms.py`，默认关）。
+> 揭盲前冻结。
+
+### 14.1 立项依据
+
+- **fix-3 碰撞分类（s11 eval500 101 条仪器化重放，101/101 复现）**：自车追尾前车 **64/101 = 63.4%**
+  （primary：curve 13 / straight 12 / ramp_out 10 / ramp_in 8 / split 7 / tollgate 8 …）；追尾案例共性
+  `ego_a_lon_2s ≈ −0.4~−0.9`（减速过缓）、**`brake_frac = 0.00`（64/64 从不刹车）**、前车 2s 加速
+  （>0.5 m/s²）39/64、前车 2s 历史缺失（新生成）15/64 ⇒ **缺"保持距离/提前减速"的稠密激励**。
+- **arm1 bundle 不含 `lead_gap`/`ttc`**（§9.1 terms 逐字）；§12/§13 的单变量（terminal collision、
+  `edge_scale_m`、`speed_deficit`、`comfort_jerk_win`）均为终止/边缘/速度塑形，不直接激励跟车减速。
+- **v6 `ttc` 证伪报告（`/tmp/opencode/v6_ttc_falsification.md`）**：追尾碰撞最后 ~2.5 s 触发率
+  **67.6%（23/34）**（"空烧"假设被证伪；触发 episode 终止帧前车净距 ≤0.166 m）；全量步触发率
+  0.167%（≈1.67 帧/1000 步）、贡献量级 ~−1 raw/episode；建议保留默认阈值 2.0 s。
+  **v6 arm5（E-β″+ttc）终评 +77/+59**（clean500 0.440→0.594、z 7.59；eval500 0.440→0.558、
+  z 5.93；同臂 offΔ −0.274 / collΔ +0.122 的 trade-off 如实记录）。
+- **风险（如实）**：s11 追尾根因也可能是感知/反应延迟而非激励缺失——`ttc` 只在 `closing > 0` 且
+  `ttc < 2 s` 时触发，若策略在触发窗口外已决定不减速，稠密罚可能只回吐 success；s11 高 speed_ratio
+  的"快"吸引子与 `ttc` 的减速激励存在对冲。KL 锚（0.05→0.02）+ 短程（u100）+ keep-best 限制漂移。
+
+### 14.2 臂定义（逐字冻结）
+
+- **起点**：`runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt`（sha256
+  `a7cc091fcbda670b25c396a43e18dc39abe089053e50aa292b5fc0f19164ba2e`）。
+- **配方 = `config/arms/v7_arm1_offroad.yaml` 逐位不变 + 单变量**：terms 追加
+  `{name: ttc, weight: -0.5, ttc_threshold: 2.0, ttc_floor: 0.5}`（`TTCLeadPenalty` 默认值；
+  raw = `max(0, 1/max(ttc, 0.5) − 1/2.0)`；无前车/缺键 = 0；单步最差 −0.75）；其余 terms（rc 1 /
+  speed_ratio 0.4 / low_speed −0.2 / comfort_* / solid_line −2 / speed_limit −5 / crash −10 /
+  out_of_road −8 / off_road_edge −0.5·scale 1.0）、终局值（arrive +29 / collision −22 /
+  out_of_road −14 / max_step −46 / error −5）、KL 锚 0.05→0.02、λ=0.95、rc=1 均不动。
+- **配置**：`config/arms/v7_arm1_ttc.yaml`；driver fail-closed 断言该单变量与其余生效值逐位配对
+  （ttc 三项默认值 + terminal collision −22 + 无 §13 新项）。
+- **训练**：2 seeds（0/11）；updates=100（短程；ckpt_every=25 → 候选 u25/50/75/100）；pins 同 §12
+  （spec `scenarios_train_dagger_r1.json` 500 / envs 1 / rollout 256 / ppo_epochs 2 /
+  minibatch 1024 / max-episode-steps 200 / trainable-scope design / plan-reference repeat_action /
+  adv-norm global / critic-warmup 0 / probe-interval 25 / device cuda）。
+- **执行环境同 §12/§13**：pre-v5 worktree `/tmp/opencode/v7_pre_v5`（@ `2f4450e`）+ 主树 venv 绝对
+  解释器；worktree tracked 改动白名单 = §13 已同步的 3 个 `reward_model/` 文件（sha256 逐文件校验；
+  `ttc` 类在 `2f4450e` 已存在且未被 §13 改动）；新臂配置同步进 worktree 并以 sha256 校验；
+  **训练/评测期间禁改代码**；GPU 串行（≤3000 MiB 且无 train/test 进程才开跑）。
+
+### 14.3 判据（揭盲前冻结）
+
+- **主判据（每 seed 独立；双读数）**：
+  1. **collision 再降（至少一侧）**：clean500 侧 = collision ≤ **0.162**（同时满足 ≤ IDM 锚 0.174
+     与相对 s11 0.182 降幅 ≥ 2pp）；eval500 侧 = collision ≤ **0.144**（= IDM 锚；相对 s11 0.202
+     降幅 5.8pp ≥ 2pp）。**口径说明**：题面"clean ≤0.174 或 eval ≤0.144 至少一侧再降 ≥2pp"按
+     两条件同时满足操作化——clean 侧 0.174 本身仅比 s11 低 0.8pp，故操作阈值取 ≤0.162；
+     宽松读法（clean ≤0.174 即算）作为副读数记录，不构成 PASS 依据；如需按宽松读法判定，
+     须在揭盲前经 §8 修订锚修订。
+  2. **success 保持**：通过 collision 判据的同一侧 success ≥ s11 −3pp（clean ≥ **0.638** /
+     eval ≥ **0.616**）；**或** clean500 配对 success Δ ≥ **+3pt**（§2.3 口径；记录 z）。
+  3. **PASS = 1 且 2**；仅一项 → **partial**；两项均不满足 → **fail**（不宣称过闸）。
+- **臂级**：2 seeds 均 PASS = **PASS**；1 seed = **partial**；0 = **fail**。
+- **配对（描述性）**：vs s11 首要（success/collision/off_road net/z/CI95；clean500 + eval500）；
+  **vs §12 P4-extra 采纳 ckpt**（s0 u75 / s11 u50；clean500 + eval500）参照；vs w1（clean 0.526 /
+  eval 0.530）与 vs IDM（clean 0.742 / eval 0.756）参照。安全闸辅助：off-road ≤IDM+2pt、
+  speed_ratio ≥0.9×IDM=0.666、rc 只报告（s11 已知未过，本臂不承诺修复）。
+- **辅助无命中条款**：tg45（s11 0.0；IDM 0.778）/ T3（s11 0/9）只记录。
+- **止损（u50+u100 双点；同 §12/§13 口径）**：每点 u∈{50,100} 在 sub150 上与 s11 sub150
+  （succ **0.640** / coll **0.200**）配对：`trip = (success net < −10) or (collision delta ≥ +0.05)`；
+  **两点均 trip → early-collapse 停臂**（保留现场）；单点 trip 继续。
+- **keep-best（同 §12；禁止 sub150 直采）**：候选 u25/50/75/100 按 sub150 排名——① 合格 =
+  sub150 success ≥ **0.61**；② 合格中 collision 最低优先；③ 平手取 success 高者，再平手取更早
+  update；无合格者 → 取 success 最高并标注 `no-eligible`。top1–2 全量 clean500 复评 →
+  **采纳 = 全量 success ≥ 0.638 者中 collision 最低**；无合格者 → 取 success 最高。采纳
+  candidate 仅 eval500 一次（§9 纪律）。
+- **口径说明**：单 run（每 seed）判读 + 2 seeds 描述性分布（n=2 不设方差闸结论）。
+- **时间允许的补充（非判据）**：对新增 collision 用 fix-3 仪器化脚本
+  （`/tmp/opencode/v7_q6q2/collision_replay.py`）复测分类，验证"追尾占比"是否下降（描述性）。
+
+### 14.4 产物与记录
+
+- 臂配置 `config/arms/v7_arm1_ttc.yaml`；预注册本 §（内容+锚两段式）；
+- driver `/tmp/opencode/v7_s14_ttc_driver.py`（不入 repo；fail-closed pin 断言：ckpt sha /
+  arm 配置 sha / 单变量生效值 / worktree 同步白名单 sha / spec+参照 episodes sha / s11 指标 pin）；
+- 报告 `/tmp/opencode/v7_s14_ttc.md`；status `/tmp/opencode/v7_s14_ttc_status.txt`；逐 run
+  `episodes.csv` sha256 / metrics / ckpt sha。
+- 约束：主树 repo 只加 `docs/`/`config/` 变更；worktree 内跑训练；GPU 串行；期间禁改代码。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。
@@ -531,3 +616,4 @@
 - 2026-10-05：**§11 修订锚（fix-11：phase3 安全配方重跑；内容 commit `55adf90`，揭盲前）**：依据根因诊断 `/tmp/opencode/v7_struct_fail_diag.md`（specific experts/router 训练 = 决定性破坏项：`p3+b10锚头 --moe-off`=0.260≡b10、MoE 开=0.013；`_SPECIFIC_PHASE_FREEZE` 漏 4 个锚头前缀 → 锚头误训：`b10+p3锚头`=0.0）；**契约修复** = 锚头加入 specific_only 冻结清单（测试断言两 ckpt 锚头权重逐位不变）+ 新 `freeze=trunk_only` 安全配方（只训共享主干；冻结 specific experts/router/residual_scale + 锚头 + WM/value；锚 CE/WTA 1.0/1.0 保留塑形共享特征；WM/ego_next 保守降级）+ epoch 级 clean150 守护（`--phase3-guard-*`，min_success=0.13 = 入口 b10 0.260 的 50%，崩塌/评测不可得即中止 fail-closed）+ keep-best（入口 b10 + 各 epoch 守护读数 → clean500/tg45/T3/eval500 一次 + 配对）。
 - 2026-10-05：**P4-extra 预注册（§12，揭盲前；收尾后定向尝试）**：base = arm1-s11 u150（clean500 0.668 / eval500 0.646；collision 0.182/0.202 超 IDM 0.174/0.144）；单变量 = v6 §7.5 候选 A（arm8-A）口径 `aggregation.terminal_values.collision` −22→−32（其余逐位同 arm1：terms/终局值/KL 锚 0.05→0.02/λ 0.95/rc 1）；2 seeds（0/11）短程 u100（ckpt_every 25 → 候选 u25–u100）+ sub150 keep-best；判据 = **collision ≤ IDM 且 success ≥ s11 −3pp**（clean500/eval500 双读数；PASS = 四条全过）；止损 = u50+u100 双点（succ net <−10 或 collΔ ≥+0.05；两点均触发 → early-collapse）；tg45/T3 无命中条款；pre-v5 worktree（`2f4450e`）执行（v7 事故①纪律：期间禁改代码、GPU 串行）；实现 = `config/arms/v7_arm1_collision_suppress.yaml` + 本 §。
 - 2026-10-05：**奖励单变量臂队列预注册（§13，揭盲前）**：base = arm1-s11 u150（clean500 0.668 / eval500 0.646）；三臂单变量 = A `off_road_edge.edge_scale_m` 1.0→2.5（提前 2.5 m 起罚；weight −0.5 不变）/ B 追加 `speed_deficit` −0.3（raw=clip(1−v/speed_limit_mps,0,1)；限速缺失→0+一次告警）/ C 追加 `comfort_jerk_win` −0.1（最近 20 步 |jerk| 均值超 deadband 5.0 的软罚；episode reset 钩子清窗）；判据（clean500 主读数、每 seed 独立；eval500 每 seed 采纳 candidate 一次为第二读数）A：配对 ≥+3pt 且 z≥1.96，或 off_road ↓≥3pt 且 collision 劣化 ≤+3pt；B：speed_ratio ↑≥0.05 且 collision 劣化 ≤+3pt，或 success ≥ s11−3pt；C：jerk_p95 ↓≥20% 且 success ≥ s11−3pt；每臂 2 seeds（0/11）短程 u100 + u50+u100 双点止损 + sub150 keep-best（同 §12）；执行顺序 A→B→C（预算 ~6h，C 1–2 seeds 时间允许）；实现 = `reward_model/terms.py` 新项 + `Term.reset` 钩子（registry/aggregation）+ 三臂配置 + 本 §（内容 commit `db98501`）。
+

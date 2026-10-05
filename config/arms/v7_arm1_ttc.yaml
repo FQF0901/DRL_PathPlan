@@ -1,0 +1,47 @@
+# v7 P4-extra-2（arm1-ttc）— s11 起点 + ttc 稠密近失罚单变量（预注册 §14）
+# 用途：v7 预注册 §14：在程序最佳 RL 产物 arm1-s11 u150（clean500 0.668 / eval500 0.646）上，
+#   单变量追加 ttc 项（TTCLeadPenalty 默认：weight −0.5 / ttc_threshold 2.0 s / ttc_floor 0.5 s），
+#   直击 fix-3 碰撞分类根因（自车追尾前车 63.4%；brake_frac=0.00；v6 证伪报告追尾末段触发率 67.6%）。
+# 单变量：terms 追加 {name: ttc, ...}；其余 = v7_arm1_offroad.yaml 逐位不变
+#   （rc 1 / speed_ratio 0.4 / low_speed −0.2 / comfort_* / solid_line −2 / speed_limit −5 /
+#    crash −10 / out_of_road −8 / off_road_edge −0.5·scale 1.0；终局值 +29/−22/−14/−46/−5；KL 0.05→0.02）。
+# 基线/池/课程/PPO pins 不动（v6 P4 arm0 口径）：spec=scenarios_train_dagger_r1.json(500) /
+#   envs=1 / updates=100 / rollout=256 / max-episode-steps=200。
+# 加载：tools/train.py --stage C --config config/arms/v7_arm1_ttc.yaml ...
+# 注：includes 平铺合并语义（stages 段整体替换）见 config/arms/README.md「加载语义」。
+# includes 说明：训练侧 pipeline.stages.load_config 只解析一层（不递归）——单写 config/default.yaml
+# 只会带入其 project 元数据而丢失 train/data/run 等段（dry-run 实测）；故同时列出 default.yaml 的
+# 四个叶子子配置，保证平铺合并结果 = 解析 config/default.yaml；递归加载器（eval_runner.load_config）
+# 下两种写法等价。详见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+        - {name: off_road_edge, weight: -0.5, edge_scale_m: 1.0}
+        - {name: ttc, weight: -0.5, ttc_threshold: 2.0, ttc_floor: 0.5}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -22
+          out_of_road: -14
+          max_step: -46
+          error: -5
+    # KL 锚（记录用；driver CLI 实际生效；见 v7_arm1_offroad.yaml 文件头「执行路径注意」）
+    kl_anchor_coef: 0.05
+    kl_anchor_final_coef: 0.02
