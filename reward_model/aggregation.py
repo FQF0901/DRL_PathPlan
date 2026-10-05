@@ -254,9 +254,11 @@ class RewardAggregator:
         self._step_index = 0
 
     def reset(self) -> None:
-        """episode 边界重置（清空上一进度、步计数）。"""
+        """episode 边界重置（清空上一进度、步计数，并调用各奖励项的 ``reset`` 钩子）。"""
         self._prev_route_completion = None
         self._step_index = 0
+        for term in self.terms:
+            term.reset()
 
     def step(self, step_ctx: Mapping[str, Any], *, step_index: int | None = None) -> StepReward:
         """聚合单步。

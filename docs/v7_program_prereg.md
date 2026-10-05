@@ -420,6 +420,107 @@
   status `/tmp/opencode/v7_p4extra_status.txt`；逐 run `episodes.csv` sha256 / metrics / ckpt sha。
 - 约束：主树 repo 只加 `docs/`/`config/` 变更；worktree 内跑训练；GPU 串行；期间禁改代码。
 
+## 13. 奖励单变量臂队列预注册（2026-10-05；s11 + A/B/C 奖励单变量；按序短程筛查）
+
+> 本 § 为 v7 收尾后的**奖励塑形单变量筛查队列**：在程序最佳 RL 产物 arm1-s11 u150
+> （clean500 0.668 / eval500 0.646）上，逐臂检验三个**单变量**奖励改动——A 出界距离罚提前
+> （edge_scale 1.0→2.5）/ B 限速缺口显式罚（`speed_deficit` −0.3）/ C 窗口化舒适罚
+> （`comfort_jerk_win` −0.1）。范围 = `reward_model/terms.py`（新项，默认关 + reset 钩子）+
+> `config/arms/v7_reward_{A,B,C}.yaml`（新）+ `docs/` + `tests/`；**不碰 net/env**。揭盲前冻结。
+
+### 13.1 立项依据
+
+- **s11 画像（clean500）**：success 0.668 / collision 0.182 / off_road 0.138 /
+  speed_ratio_mean **0.474** / jerk_abs_p95 **30.07**（eval500：0.646 / 0.202）。三臂各攻一个
+  画像缺口，均以"单变量 + 其余逐位同 arm1"隔离因果。
+- **A（off_road_edge 提前起罚）**：arm1 的 `off_road_edge`（weight −0.5 / `edge_scale_m` 1.0）
+  只在距车道边界 1 m 内起线性罚；scale 1.0→2.5 把提前起罚裕度放大到 2.5 m（"提前 2.5 m 起罚"，
+  界内 2.5 m 起罚、界上 raw 1、越界 ≥2.5 m 封顶 2），目标 off_road ↓（更早远离 `out_of_road`
+  触发面）或 success ↑。**风险**：罚区扩大可能压制贴边通行/变道 → success 回吐。
+- **B（speed_deficit 显式罚）**：现行 `speed_ratio`（weight 0.4）对低于限速只"少赚"；
+  `low_speed` 只罚 v<2 m/s 蠕动。`speed_deficit = −0.3·clip(1 − v/speed_limit_mps, 0, 1)`
+  把"低于限速"从"少赚"变为**显式被罚**（全速度区间），目标 speed_ratio_mean ↑≥0.05。
+  **风险**：限速源缺失帧（lane 缺失/终局掩码回退）记 0 + 一次性告警，不误罚；但可能诱发
+  超速/激进 → collision 劣化闸。
+- **C（comfort_jerk_win 窗口化舒适）**：`comfort_jerk` 为逐帧二次罚（deadband 5.0），对持续
+  中等颠簸（每帧 5–7）几乎不罚、对孤立尖峰重罚；`comfort_jerk_win` 取**最近 2 s（20 步）**
+  |jerk| 均值超 deadband 后的软罚 `clamp((mean_win − deadband)/deadband, 0, 1)`，对持续颠簸
+  持续触发，目标 jerk_abs_p95 ↓≥20%。**风险**：窗口均值罚可能压制必要的紧急机动 → success 闸。
+
+### 13.2 臂定义（逐字冻结）
+
+- **起点**：`runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt`（sha256
+  `a7cc091fcbda670b25c396a43e18dc39abe089053e50aa292b5fc0f19164ba2e`）。
+- **配方 = `config/arms/v7_arm1_offroad.yaml` 逐位不变 + 每臂恰一个单变量**：
+  - **A**（`config/arms/v7_reward_A.yaml`）：`off_road_edge.edge_scale_m` **1.0 → 2.5**
+    （weight −0.5 不变）；
+  - **B**（`config/arms/v7_reward_B.yaml`）：terms 追加 `{name: speed_deficit, weight: -0.3}`
+    （raw = `clip(1 − v/speed_limit_mps, 0, 1)`；限速缺失/非法 → 0 + 一次告警）；
+  - **C**（`config/arms/v7_reward_C.yaml`）：terms 追加
+    `{name: comfort_jerk_win, weight: -0.1, deadband: 5.0, window_steps: 20}`
+    （raw = `clamp((mean_win − deadband)/deadband, 0, 1)`；`mean_win` = 最近 20 步 |jerk| 均值，
+    窗口未满按已有样本；episode 边界经聚合器 `reset` 钩子清窗）。
+- **实现（主树）**：`reward_model/terms.py` 新项（默认关，不在 `DEFAULT_TERM_CONFIGS`）+
+  `Term.reset` episode 钩子（`registry.py` no-op + `aggregation.py::RewardAggregator.reset`
+  调用；既有项逐位不变、默认行为不变）+ 单测（`tests/test_reward_terms.py` /
+  `tests/test_v7_reward_arms.py`）。
+- **训练**：2 seeds（0/11）；updates=100（短程；ckpt_every=25 → 候选 u25/50/75/100）；pins 同
+  §12（spec `scenarios_train_dagger_r1.json` 500 / envs 1 / rollout 256 / ppo_epochs 2 /
+  minibatch 1024 / max-episode-steps 200 / trainable-scope design / plan-reference repeat_action /
+  adv-norm global / critic-warmup 0 / probe-interval 25 / KL 锚 0.05→0.02 / device cuda）。
+- **执行环境同 §12**：pre-v5 worktree `/tmp/opencode/v7_pre_v5`（@ `2f4450e`）+ 主树 venv 绝对
+  解释器；新 terms/configs 同步进 worktree 并以 sha256 逐文件校验；**训练/评测期间禁改代码**；
+  GPU 串行（≤3000 MiB 且无 train/test 进程才开跑）。
+
+### 13.3 判据（揭盲前冻结）
+
+- **主读数 = clean500（每 seed 独立判定；vs s11）**：
+  - **A**：路径① 配对 success net ≥ **+3pt** 且 z ≥ **1.96**（McNemar 口径，
+    `tools/paired_eval.py`）；**或**路径② `off_road_rate` 相对 s11 ↓ ≥ **3pt**（Δ ≤ −0.03）且
+    `collision_rate` 劣化 ≤ **+3pt**（Δ ≤ +0.03）。
+  - **B**：路径① `speed_ratio_mean` 相对 s11 ↑ ≥ **0.05** 且 `collision_rate` 劣化 ≤ +3pt；
+    **或**路径② success ≥ s11 −3pt（**0.638**）。
+  - **C**：`jerk_abs_p95` ≤ 0.8 × s11（↓ ≥ **20%**）且 success ≥ s11 −3pt（**0.638**）。
+- **第二读数 = eval500（每 seed 采纳 candidate 一次）**：同口径复读（配对 vs s11 + 指标），
+  记录为稳健性读数；主判据判定仅基于 clean500；若 eval500 与主判据反向（主指标恶化），
+  标注"单侧/存疑"并如实报告。
+- **每臂 PASS = 2 seeds 均独立满足主判据**；仅 1 seed → **partial**；0 → **fail**（不宣称过闸）。
+- **辅助无命中条款**：tg45 / T3 只记录（同 §12）。
+- **止损（u50+u100 双点；同 §12 口径）**：每点 u∈{50,100} 在 sub150 上与 s11 sub150
+  （succ **0.640** / coll **0.200**）配对：`trip = (success net < −10) or (collision delta ≥ +0.05)`；
+  **两点均 trip → early-collapse 停臂**（保留现场）；单点 trip 继续。
+- **keep-best（同 §12；禁止 sub150 直采）**：候选 u25/50/75/100 按 sub150 排名——① 合格 =
+  sub150 success ≥ **0.61**；② 合格中 collision 最低优先；③ 平手取 success 高者，再平手取更早
+  update；无合格者 → 取 success 最高并标注 `no-eligible`。top1–2 全量 clean500 复评 →
+  **采纳 = 全量 success ≥ 0.638 者中 collision 最低**；无合格者 → 取 success 最高。采纳
+  candidate 仅 eval500 一次。**已知局限（如实记录）**：C 臂目标为 jerk，但选择规则与 §12 一致
+  （succ 合格线 + collision 最低），未以 jerk 为选择目标；该偏差对 C 的影响在报告中说明。
+- **口径说明**：单 run（每 seed）判读 + 2 seeds 描述性分布（n=2 不设方差闸结论）。
+
+### 13.4 优先级 / 预算 / 止损
+
+- **执行顺序与预算（~6 h 墙钟，自队列开跑起）**：**A（2 seeds）→ B（2 seeds）→ C（1–2 seeds，
+  时间允许）**；每臂完成即写阶段小结（报告 `/tmp/opencode/v7_p4extra_rewards.md` 逐臂追加）。
+- 超预算即停：未开跑臂/seed 标 **not-run** 并如实记录（不追补、不跳臂抢跑）。
+- **C seed 11 仅在 A/B 完成后剩余预算 ≥ 1.5× 单 seed 实测墙钟（估算 ~70 min）时执行**；
+  否则 C 只跑 seed 0 并记录"预算限制"。
+- **GPU 排队（勿抢）**：等待 `v7_p4extra_done`、`v7_q6q2_diag_done` 两标志存在且无
+  `tools/(train|test).py` 进程后开跑；每步仍以 driver `wait_gpu_free`（≤3000 MiB 且无
+  train/test 进程）守卫。
+
+### 13.5 产物与记录
+
+- 新项 `speed_deficit` / `comfort_jerk_win`（`reward_model/terms.py`，默认关 + 单测）+
+  `Term.reset` episode 钩子（`registry.py` / `aggregation.py`，no-op 兼容）；
+- 臂配置 `config/arms/v7_reward_A.yaml` / `v7_reward_B.yaml` / `v7_reward_C.yaml`；测试
+  `tests/test_v7_reward_arms.py`（新）+ `tests/test_reward_terms.py`（更新）；
+- driver `/tmp/opencode/v7_reward_arms_driver.py`（不入 repo；fail-closed pin 断言：ckpt sha /
+  各臂配置 sha / worktree 同步文件 sha / 单变量生效值 / spec+参照 episodes sha / s11 指标 pin）；
+- 报告 `/tmp/opencode/v7_p4extra_rewards.md`；status `/tmp/opencode/v7_p4extra_rewards_status.txt`；
+  逐 run `episodes.csv` sha256 / metrics / ckpt sha。
+- 约束：主树 repo 只加 `reward_model/`（新项 + reset 钩子）/`config/`/`docs/`/`tests/`；
+  net/env 不动；worktree 内跑训练（同步文件 sha 校验）；GPU 串行；期间禁改代码。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。

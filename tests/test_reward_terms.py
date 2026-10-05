@@ -43,6 +43,7 @@ EXPECTED_TERMS = {
     "comfort_lon",
     "comfort_lat",
     "comfort_jerk",
+    "comfort_jerk_win",
     "lane_center",
     "lane_boundary",
     "off_road_edge",
@@ -50,6 +51,7 @@ EXPECTED_TERMS = {
     "lead_gap",
     "low_speed",
     "speed_ratio",
+    "speed_deficit",
     "solid_line",
     "speed_limit",
     "route_completion",
@@ -382,7 +384,8 @@ def test_off_road_edge_fallback_and_warn_once() -> None:
 
 def test_new_dense_terms_registered_and_default_list_frozen() -> None:
     """新项已注册（可经 config/CLI 启用）；DEFAULT_TERM_CONFIGS 逐项快照不变。"""
-    assert {"ttc", "lane_boundary", "lead_gap", "off_road_edge"} <= set(available_terms())
+    assert {"ttc", "lane_boundary", "lead_gap", "off_road_edge",
+            "speed_deficit", "comfort_jerk_win"} <= set(available_terms())
     assert [dict(config) for config in DEFAULT_TERM_CONFIGS] == [
         {"name": "route_completion", "weight": 1.0, "gamma": 1.0},
         {"name": "speed_ratio", "weight": 0.4, "cap": 1.0},  # v5 §2
@@ -480,6 +483,77 @@ def test_low_speed_missing_key_warn_once_and_default_enabled() -> None:
     step = aggregator.step({"speed_ratio": 0.5})
     assert step.components["low_speed"] == 0.0
     assert step.reward == pytest.approx(0.2)
+
+
+def test_speed_deficit_shape_warn_once_and_default_off() -> None:
+    """v7 §13 臂 B：``raw = clamp(1 − v/limit, 0, 1)``；限速缺失 → 0 且只告警一次；默认关。"""
+    term = make_term("speed_deficit", weight=-0.3)
+    assert term.weight == pytest.approx(-0.3)
+    # 规格样例：v=0 → 1.0；v=limit/2 → 0.5；v=limit → 0；超速不罚（合规项负责）
+    assert term.compute({"speed": 0.0, "speed_limit_mps": 8.0}) == pytest.approx(1.0)
+    assert term.compute({"speed": 4.0, "speed_limit_mps": 8.0}) == pytest.approx(0.5)
+    assert term.compute({"speed": 8.0, "speed_limit_mps": 8.0}) == pytest.approx(0.0)
+    assert term.compute({"speed": 12.0, "speed_limit_mps": 8.0}) == pytest.approx(0.0)
+    # speed/velocity 与 speed_limit_mps/speed_limit 同口径；加权样例
+    assert term.compute({"velocity": 2.0, "speed_limit": 8.0}) == pytest.approx(0.75)
+    assert term.weight * term.compute({"speed": 4.0, "speed_limit_mps": 8.0}) == pytest.approx(-0.15)
+    # 单调：v 越小 raw 越大；负速度封顶 1.0
+    raws = [term.compute({"speed": v, "speed_limit_mps": 8.0}) for v in (0.0, 2.0, 4.0, 8.0)]
+    assert all(later <= earlier for earlier, later in zip(raws, raws[1:]))
+    assert term.compute({"speed": -1.0, "speed_limit_mps": 8.0}) == pytest.approx(1.0)
+    # 缺限速 / 非法限速 / 缺速度 → 0 且只告警一次（每实例）
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({"speed": 5.0}) == 0.0
+        assert term.compute({"speed": 5.0, "speed_limit_mps": 0.0}) == 0.0
+        assert term.compute({"speed": 5.0, "speed_limit_mps": float("nan")}) == 0.0
+        assert term.compute({"speed_limit_mps": 8.0}) == 0.0
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+    # 默认关（不在默认 term 列表）
+    assert "speed_deficit" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
+
+
+def test_comfort_jerk_window_shape_reset_hook_and_default_off() -> None:
+    """v7 §13 臂 C：最近 20 步 |jerk| 均值超 deadband 软罚；reset 钩子清窗；默认关。"""
+    term = make_term("comfort_jerk_win", weight=-0.1)
+    assert term.weight == pytest.approx(-0.1)
+    assert term.deadband == pytest.approx(5.0)
+    assert term.window_steps == 20
+    # 缺 jerk → 0 且只告警一次；该帧不进窗口
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            assert term.compute({}) == 0.0
+        assert len(caught) == 1 and issubclass(caught[0].category, UserWarning)
+    # 形状：mean=deadband → 0；mean=2×deadband → 封顶 1；单调
+    assert term.compute({"jerk": 5.0}) == pytest.approx(0.0)
+    assert term.compute({"jerk": -15.0}) == pytest.approx(1.0)  # |−15|；均值 (5+15)/2=10 → 1.0
+    term.reset()
+    assert term.compute({"jerk": 7.5}) == pytest.approx(0.5)  # (7.5−5)/5
+    term.reset()
+    assert term.compute({"jerk": 25.0}) == pytest.approx(1.0)  # 封顶
+    # 窗口语义：20 步 10 后 1 步 5 → 窗口 19×10+5 均值 9.75 → 0.95；reset 后单步 5 → 0
+    term.reset()
+    for _ in range(20):
+        term.compute({"jerk": 10.0})
+    assert term.compute({"jerk": 5.0}) == pytest.approx(0.95)
+    term.reset()
+    assert term.compute({"jerk": 5.0}) == pytest.approx(0.0)
+    # 聚合器 reset 钩子：episode 终局 done 后窗口清空（等价 episode 边界）
+    aggregator = RewardAggregator(build_terms([{"name": "comfort_jerk_win", "weight": -0.1}]))
+    for _ in range(20):
+        step = aggregator.step({"jerk": 10.0})
+    assert step.components["comfort_jerk_win"] == pytest.approx(-0.1)
+    aggregator.reset()
+    step = aggregator.step({"jerk": 5.0})
+    assert step.raw_components["comfort_jerk_win"] == pytest.approx(0.0)
+    # 参数非法 fail-fast；默认关
+    with pytest.raises(ValueError):
+        make_term("comfort_jerk_win", deadband=0.0)
+    with pytest.raises(ValueError):
+        make_term("comfort_jerk_win", window_steps=0)
+    assert "comfort_jerk_win" not in {config["name"] for config in DEFAULT_TERM_CONFIGS}
 
 
 def test_v5_terminal_values_audited_table() -> None:

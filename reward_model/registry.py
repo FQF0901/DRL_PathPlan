@@ -55,6 +55,13 @@ class Term(ABC):
     def compute(self, step_ctx: Mapping[str, Any]) -> float:
         """返回未加权原始值（惩罚 >= 0；势能塑形可为负）。"""
 
+    def reset(self) -> None:
+        """episode 边界重置钩子（默认 no-op；有跨步状态的项覆盖）。
+
+        由 :meth:`reward_model.aggregation.RewardAggregator.reset` 在每个 episode 终局
+        调用一次（``RewardAdapter`` 在 ``done`` 步先算奖励再 reset）。无状态项无需覆盖。
+        """
+
     @property
     def terminating(self) -> bool:
         """是否终止型项（``kind == "terminating"`` 的便捷属性）。"""

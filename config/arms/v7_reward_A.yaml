@@ -1,0 +1,41 @@
+# v7 奖励单变量臂队列 A（§13）— off_road_edge 起罚裕度 1.0 → 2.5 m（提前 2.5 m 起罚）
+# 用途：v7 预注册 §13 臂 A：base = arm1-s11 u150（clean500 0.668 / eval500 0.646）；配方 =
+#   config/arms/v7_arm1_offroad.yaml 逐位不变 + **单变量** off_road_edge.edge_scale_m
+#   1.0 → 2.5（weight 保持 −0.5；raw = clip(1 + d_edge/scale, 0, 2)，界内裕度 < 2.5 m 起
+#   线性罚、界上 1、越界 ≥2.5 m 封顶 2）。其余 terms/终局值/KL 锚/λ/rc 均不动。
+# 判据（§13.3）：clean500 配对 success ≥ +3pt 且 z ≥ 1.96，或 off_road ↓ ≥3pt 且
+#   collision 劣化 ≤ +3pt；每臂 2 seeds（0/11）、u50+u100 双点止损、sub150 keep-best。
+# 加载：tools/train.py --stage C --config config/arms/v7_reward_A.yaml ...
+# includes 说明：训练侧 pipeline.stages.load_config 只解析一层（不递归），故同时列出
+#   default.yaml 的四个叶子子配置；语义见 config/arms/README.md「加载语义」。
+includes:
+  - config/default.yaml
+  - config/env.yaml
+  - config/model.yaml
+  - config/train.yaml
+  - config/eval.yaml
+stages:
+  C:
+    reward:
+      terms:
+        - {name: route_completion, weight: 1, gamma: 1.0}
+        - {name: speed_ratio, weight: 0.4, cap: 1.0}
+        - {name: low_speed, weight: -0.2}
+        - {name: comfort_lon, weight: -0.05, deadband: 2.5}
+        - {name: comfort_lat, weight: -0.05, deadband: 2.0}
+        - {name: comfort_jerk, weight: -0.005, deadband: 5.0}
+        - {name: solid_line, weight: -2.0}
+        - {name: speed_limit, weight: -5.0, tolerance: 0.05}
+        - {name: crash, weight: -10.0}
+        - {name: out_of_road, weight: -8.0}
+        - {name: off_road_edge, weight: -0.5, edge_scale_m: 2.5}
+      aggregation:
+        terminal_values:
+          arrive_dest: 29
+          collision: -22
+          out_of_road: -14
+          max_step: -46
+          error: -5
+    # KL 锚（记录用；driver CLI 实际生效；见 v7_arm1_offroad.yaml 文件头「执行路径注意」）
+    kl_anchor_coef: 0.05
+    kl_anchor_final_coef: 0.02

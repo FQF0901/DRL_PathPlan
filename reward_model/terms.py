@@ -5,6 +5,9 @@
 - 安全（终止型）：``crash``（任意 ``crash*`` 标志）/ ``out_of_road``。
 - 安全（稠密近失，**默认关**）：``ttc``（前车时距危险度；无前车 / 缺键 = 0）。
 - 舒适（死区二次软惩罚）：``comfort_lon`` / ``comfort_lat`` / ``comfort_jerk``。
+- 舒适（最近窗口 |jerk| 均值超死区软罚，**默认关**）：``comfort_jerk_win``（窗口默认 20 步 /
+  deadband 5.0；``clamp((mean_win − deadband)/deadband, 0, 1)``；项自带窗口状态，episode
+  边界由聚合器 ``reset`` 钩子清空）。
 - 车道保持（死区线性惩罚，**默认关**）：``lane_center``（偏离本车道中心线 ``|d_lat|``；无车道信息时为 0）。
 - 车道保持（贴近边界罚，**默认关**）：``lane_boundary``（``lane_half_width_m − |d_lat|`` 小于
   阈值时线性罚；只罚"快出界"，不罚居中偏离）。
@@ -14,6 +17,8 @@
 - 效率：``speed_ratio``（``v / 车道限速`` 的截断收益，防爬行；超速交由合规项）。
 - 效率（低速蠕动，v5 默认启用）：``low_speed``（``v < 2 m/s`` 时按缺口线性罚，与评测 KPI
   ``CRAWL_SPEED_MPS`` 同阈值）。
+- 效率（限速缺口显式罚，**默认关**）：``speed_deficit``（``clip(1 − v / speed_limit_mps, 0, 1)``；
+  把"低于限速"从"少赚"变为"被罚"；限速缺失/非法 → 0 且只告警一次）。
 - 合规：``solid_line``（连续实线跨越）/ ``speed_limit``（超速量）。
 - 达成：``route_completion``（势能塑形 ``γΦ(s') − Φ(s)``，策略序保持）。
 
@@ -25,6 +30,8 @@ from __future__ import annotations
 
 import math
 import warnings
+
+from collections import deque
 
 from typing import Any, ClassVar, Mapping
 
@@ -40,11 +47,13 @@ __all__ = [
     "LongitudinalAccelPenalty",
     "LateralAccelPenalty",
     "JerkPenalty",
+    "ComfortJerkWindowPenalty",
     "LaneCenterPenalty",
     "LaneBoundaryPenalty",
     "OffRoadEdgePenalty",
     "LowSpeedPenalty",
     "SpeedRatioTerm",
+    "SpeedDeficitPenalty",
     "SolidLineCrossingPenalty",
     "SpeedLimitViolationPenalty",
     "RouteCompletionShaping",
@@ -415,6 +424,66 @@ class JerkPenalty(Term):
 
 
 @register_term
+class ComfortJerkWindowPenalty(Term, _WarnMissingInputMixin):
+    """舒适（最近窗口 |jerk| 均值超死区软罚，**默认关**）。
+
+    定义
+    ----
+    维护最近 ``window_steps``（默认 20 = 2 s @ 0.1 s 策略步）步 ``|jerk|`` 的滑动窗口，
+    对窗口均值施加线性软罚（封顶 1）：
+
+        raw = clamp((mean_win − deadband) / deadband, 0, 1)
+
+    - ``mean_win`` = 窗口内 ``|jerk|`` 的算术均值；窗口未满时按**已有样本**均值
+      （episode 冷启动的前若干步用可得样本，不补零）；
+    - ``mean_win ≤ deadband``（默认 5.0 m/s³）→ 0；``mean_win = 2×deadband`` → 封顶 1
+      （默认权重 −0.1 → 单步最差 −0.1）；
+    - 连续、单调：窗口均值越大 raw 越大；与逐帧 :class:`JerkPenalty` 的区别 = 对**持续**
+      中等颠簸（每帧 5–7）也持续触发，对孤立尖峰则被窗口稀释（语义即"最近 2 s 的颠簸水平"）；
+    - 缺 ``jerk`` / 非有限值 → 0 且**只告警一次**（每实例）；该帧不进窗口；
+    - **episode 边界**：项自带窗口状态，``RewardAggregator.reset()``（每 episode 终局由
+      ``RewardAdapter`` 调用）经 :meth:`reset` 钩子清空窗口，episode 间不串窗；
+      单独调用 ``compute``（无聚合器）时窗口跨调用累积，测试可用 :meth:`reset` 显式清空。
+
+    输入键：``jerk``（m/s³；pipeline 侧由相邻策略步 ``a_lon`` 差分 / ``dt`` 注入，见
+    ``pipeline/trainer.py::RewardAdapter``）。默认**不在** :data:`DEFAULT_TERM_CONFIGS`；
+    启用：config ``stages.C.reward.terms`` 追加，或 CLI
+    ``--reward-term-weight comfort_jerk_win=-0.1``（窗口/deadband 经 config 参数）。
+    """
+
+    name: ClassVar[str] = "comfort_jerk_win"
+
+    def __init__(
+        self, weight: float = -0.1, deadband: float = 5.0, window_steps: int = 20
+    ) -> None:
+        if deadband <= 0.0:
+            raise ValueError(f"comfort_jerk_win deadband 必须 > 0，收到 {deadband}")
+        if int(window_steps) < 1:
+            raise ValueError(f"comfort_jerk_win window_steps 必须 >= 1，收到 {window_steps}")
+        super().__init__(
+            weight=weight, deadband=float(deadband), window_steps=int(window_steps)
+        )
+        self.deadband = float(deadband)
+        self.window_steps = int(window_steps)
+        self._jerk_window: deque[float] = deque(maxlen=self.window_steps)
+
+    def reset(self) -> None:
+        """episode 边界：清空 jerk 窗口（聚合器 ``reset`` 时调用）。"""
+        self._jerk_window.clear()
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        value = _optional_float(step_ctx.get("jerk"))
+        if value is None or not math.isfinite(value):
+            self._warn_missing_input(
+                "comfort_jerk_win: 缺少 jerk 或值非法 → 该项记 0（每个项实例只告警一次）"
+            )
+            return 0.0
+        self._jerk_window.append(abs(value))
+        mean_win = sum(self._jerk_window) / len(self._jerk_window)
+        return _clip((mean_win - self.deadband) / self.deadband, 0.0, 1.0)
+
+
+@register_term
 class LaneCenterPenalty(Term):
     """车道保持：偏离本车道中心线的**线性死区**惩罚 ``max(0, min(|d_lat|, clamp) − deadband)``。
 
@@ -599,6 +668,52 @@ class LowSpeedPenalty(Term, _WarnMissingInputMixin):
             )
             return 0.0
         return _clip(1.0 - speed / self.threshold, 0.0, 1.0)
+
+
+@register_term
+class SpeedDeficitPenalty(Term, _WarnMissingInputMixin):
+    """效率（限速缺口显式罚，**默认关**）：把"低于限速"从"少赚"变为"被罚"。
+
+    定义
+    ----
+    ``raw = clamp(1 − v / speed_limit_mps, 0, 1)``：
+
+    - ``v ≥ 限速`` → 0（超速交由 :class:`SpeedLimitViolationPenalty`，本项不罚超速）；
+    - ``v = 限速/2`` → 0.5；``v = 0`` → 1.0（默认权重 −0.3 → 单步最差 −0.3）；
+    - 连续、单调：速度越低 raw 越大；与 :class:`SpeedRatioTerm`（正向收益，权重 0.4）互补——
+      后者对缺口只"少给收益"，本项直接扣分；
+    - 与 :class:`LowSpeedPenalty`（``v < 2 m/s`` 蠕动罚）互补：本项对**全速度区间**的限速缺口
+      生效（如限速 8 m/s、实际 5 m/s 时 low_speed = 0，本项 = 0.375）。
+
+    输入键
+    ------
+    - 自车速度：``speed`` → ``velocity``（:func:`ego_speed_from_ctx`）；
+    - 限速（m/s）：``speed_limit_mps`` → ``speed_limit``（与 :func:`speed_ratio_from_ctx`
+      同读取顺序与单位口径）。
+
+    速度或限速缺失 / 非有限 / 限速 ≤ 0 → 0 且**只告警一次**（每实例；限速缺失路径见
+    ``pipeline/trainer.py::RewardAdapter`` 的一次性告警）。默认**不在**
+    :data:`DEFAULT_TERM_CONFIGS`；启用：config ``stages.C.reward.terms`` 追加（v7 §13 臂 B：
+    weight −0.3），或 CLI ``--reward-term-weight speed_deficit=-0.3``。
+    """
+
+    name: ClassVar[str] = "speed_deficit"
+
+    def __init__(self, weight: float = -0.3) -> None:
+        super().__init__(weight=weight)
+
+    def compute(self, step_ctx: Mapping[str, Any]) -> float:
+        speed = ego_speed_from_ctx(step_ctx)
+        limit = _optional_float(step_ctx.get("speed_limit_mps"))
+        if limit is None:
+            limit = _optional_float(step_ctx.get("speed_limit"))
+        if speed is None or limit is None or not math.isfinite(limit) or limit <= 0.0:
+            self._warn_missing_input(
+                "speed_deficit: 缺少自车速度（speed|velocity）或限速（speed_limit_mps|"
+                "speed_limit）之一/值非法 → 该项记 0（每个项实例只告警一次）"
+            )
+            return 0.0
+        return _clip(1.0 - speed / limit, 0.0, 1.0)
 
 
 @register_term
