@@ -1694,6 +1694,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "hidden_dim": config.get("hidden_dim", 128),
                 "moe": dict(config.get("moe") or {}),
                 "world_model": dict(config.get("world_model") or {}),
+                # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
+                # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划——见
+                # /tmp/opencode/v7_struct_b_kanchor.md 未决 #6）
+                "plan_anchor": dict(config.get("plan_anchor") or {}),
             },
             "obs_config": dict(env_cfg.get("obs") or {}),
             "tracker_config": dict(env_cfg.get("tracking") or {}),

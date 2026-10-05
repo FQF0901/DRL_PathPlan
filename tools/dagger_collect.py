@@ -1285,6 +1285,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "hidden_dim": config.get("hidden_dim", 128),
         "moe": dict(config.get("moe") or {}),
         "world_model": dict(config.get("world_model") or {}),
+        # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → num_anchors=0，旧行为逐位不变；
+        # 学生 ckpt 带锚头时必须透传，否则锚权重被丢弃、roll-in 退化为无锚计划）
+        "plan_anchor": dict(config.get("plan_anchor") or {}),
     }
     env_cfg = dict(config.get("env") or {})
     device = resolve_device(args.device, config)
