@@ -315,6 +315,39 @@
 - 测试 `tests/test_plan_anchor.py`（锚加载/WTA/软混合几何/车道往返/模型集成/损失接线/PPO 兼容）；
 - 报告 `/tmp/opencode/v7_struct_b_kanchor.md`（设计/改动/测试/GPU 冒烟/未决）。
 
+### 11.5 修订锚（fix-11：phase3 安全配方重跑；2026-10-05）
+
+> 依据根因诊断 `/tmp/opencode/v7_struct_fail_diag.md`（决定性证据）：v5+K-anchor 链 phase3
+> 崩 0.0 的直接原因 = ① **phase3 训练的 specific experts/router（决定性破坏项）**：权重交换
+> `p3+b10锚头 --moe-off` = 0.260（与 b10 逐 spec 一致 150/150）、MoE 开 = 0.013；②
+> **`_SPECIFIC_PHASE_FREEZE` 漏 4 个锚头前缀 → 锚头被误训（叠加项）**：`b10+p3锚头` = 0.0。
+> 契约修复（内容 commit `55adf90`）= 锚头加入 `specific_only` 冻结清单（实现与 §11.2
+> "锚头随 plan head 主干冻结"一致）；并新增 `freeze=trunk_only` 安全配方。揭盲前冻结本修订。
+
+- **冻结配方（重跑单组变更）**：`--phase3-freeze trunk_only` = 只训**共享主干**
+  （encoders/mem_encoder/plan_head fusion/norm/ego_next/primary/policy）；冻结 WM(st_gnn)/value +
+  specific experts/router/residual_scale（决定性项）+ K-anchor 锚头（叠加项）。损失 =
+  action 1.0 + action_chain 0.2 + **anchor_ce 1.0 + anchor_wta 1.0（保留，梯度经冻结锚头塑形
+  共享特征）** + load_balance 0.01；WM/ego_next 上游监督保守降级为 0（与失败轮口径一致）。
+  锚行 `mild_weight=1.0`（与失败轮同值；不引入第二个变量）。
+- **契约修复（实现层）**：`_SPECIFIC_PHASE_FREEZE` 加入 `plan_head.anchor_head.`/
+  `plan_head.speed_head.`/`plan_head.residual_head.`/`plan_head.anchor_embed`；测试断言
+  "phase3 后锚头权重逐位不变（两 ckpt 比对）"（`tests/test_phase3_safe_recipe.py`）。
+- **epoch 级 clean150 守护**（新 CLI `--phase3-guard-spec/--phase3-guard-config/
+  --phase3-guard-workers/--phase3-guard-min-success`）：每 epoch 末评测 clean150
+  （`/tmp/opencode/phase3_diag/exp/specs_val_only150.json`，sha256 `81f0f958…`；LQR +
+  `--eval-reference plan`）；`overall.success_rate < 0.13`（= 入口 b10 clean150 0.260 的 50%）
+  或评测不可得 → 立即中止（fail-closed；`guard/guard.json` 逐 epoch 留档）。
+- **重跑 pin**：起点 `runs/BTC20261005-0856_v7struct_v5/stage_b/ckpt_epoch010.pt`
+  （sha256 `2f463a2186e4…`）；窗口 `datasets/BTC20261005-0856_phase3_dagger_v5`（20,080 行）+
+  锚 `datasets/BTC20261005-0814_expert5k_v5`（360,572 行）；5 epoch、micro 256、`ckpt_every=1`；
+  epoch 训练段墙钟 > 270s → abort（200s × 1.35 同口径）。评测 config =
+  `config/arms/v7_struct_b_v5_eval.yaml`（plan_anchor.enabled=true，锚头 174/174 载入）。
+- **评测（keep-best 口径）**：候选 = 入口 b10（clean150 0.260）+ 各 epoch 守护读数；按
+  clean150 取最优（平手取更早/入口）→ clean500 / tg45 / T3 / eval500（**仅最终候选一次**）+
+  配对（vs w1 0.526/0.530、arm1-s11 0.668/0.646、IDM 0.742/0.756、P1-B 0.314/0.312；tg45 vs
+  IDM/P1-B）。**不承诺**任何数值增益；本修订只修崩塌、验证 0.26 可保持性。
+
 ## 变更记录
 
 - 2026-10-02：建档（v7-P0：评测协议升级——配对 McNemar / bootstrap CI / 多 seed 汇总 / 选点纪律；工具 + 单测 + 本预注册）。
@@ -322,3 +355,4 @@
 - 2026-10-03：**P2 首臂预注册（§9，揭盲前）**：base = P1 DAgger **w1 e005**（Gate B 覆盖；clean500 0.526、期望锚 0.47–0.51）；主改 = **`off_road_edge`**（BC-SAC 式距离型稠密项，weight −0.5 / scale 1.0；缺 `d_edge` 键以车道边界等效量替代——口径 = `out_of_road` 真实触发面，含 24-ep 校准读数）+ **KL 锚 0.05→0.02**（方差控制）；其余 pins/池/课程不动；判据 = clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每 seed 采纳 candidate 一次，2 seeds 分布读数；实现 = `terms.py` + `config/arms/v7_arm1_offroad.yaml` + `tests/test_v7_p2_arm_config.py` + `tests/test_reward_terms.py` 更新。
 - 2026-10-05：**P2 arm2/arm3 预注册（§10，揭盲前）**：依据 arm1 seed0（flat：clean500 0.536 / Δ+1.0pp ns；collision +3.6pp 显著）立项**单变量隔离**——arm2 = bundle + KL（去 `off_road_edge`）、arm3 = bundle only（去 `off_road_edge` 与 KL；≈ v6 P4 arm0 原配方在 w1 e005 强基座上的对照，差异仅记录：base/KL 关）；同 base / 同 pins / 同判据口径（clean500 配对 vs w1 首要、vs P1-B 次，tg45/T3 辅助无命中条款，u50+u100 双点止损 + keep-best，eval500 每臂每 seed 采纳 candidate 一次，每臂 2 seeds=0/11；隔离读数 = arm2−arm3 与 arm1−arm2，跨臂描述性）；实现 = `config/arms/v7_arm2_bundle_kl.yaml` + `config/arms/v7_arm3_bundle_only.yaml` + `tests/test_v7_p2_arm_config.py` 更新。
 - 2026-10-05：**结构迭代 B 预注册（§11，揭盲前）**：依据 fix-3（形状锚 K=6 sil 0.72–0.77、因子化结论、tollgate/merge 模式偏移 JSD 0.32/0.29）与 fix-5（latent 选择头可学：expert balanced acc 0.47–0.53、失败窗 C1/C2 召回 0.69–0.72）立项 **K-anchor 计划头（方案 A：soft-mixture 锚 + 连续速度 + WTA + 选择 CE；车道系对齐）**；单变量开关（`plan_anchor.enabled` + Stage B `anchor_ce/anchor_wta` 权重，默认 0 = 旧行为逐位不变）；Stage B 训练锚头（CE=WTA=1.0）、phase3 specific_only 自动降级、Stage C design 冻结且 PPO 路径零改；判据 = 表示层三项（CE ≤ 0.5·ln6、分配非坍缩、WTA 收敛）+ 闭环描述性方向 + 安全闸 + 双点止损，明确不承诺 tollgate 0/45 修复；实现 = `net/anchor.py` + `net/plan_head.py`/`net/model.py` plan 路径 + `pipeline/trainer.py`/`stages.py` 损失接线 + `config/model.yaml`/`train.yaml` + `tools/fit_plan_anchors.py` + `config/plan_anchors_k6.json` + `tests/test_plan_anchor.py`。
+- 2026-10-05：**§11 修订锚（fix-11：phase3 安全配方重跑；内容 commit `55adf90`，揭盲前）**：依据根因诊断 `/tmp/opencode/v7_struct_fail_diag.md`（specific experts/router 训练 = 决定性破坏项：`p3+b10锚头 --moe-off`=0.260≡b10、MoE 开=0.013；`_SPECIFIC_PHASE_FREEZE` 漏 4 个锚头前缀 → 锚头误训：`b10+p3锚头`=0.0）；**契约修复** = 锚头加入 specific_only 冻结清单（测试断言两 ckpt 锚头权重逐位不变）+ 新 `freeze=trunk_only` 安全配方（只训共享主干；冻结 specific experts/router/residual_scale + 锚头 + WM/value；锚 CE/WTA 1.0/1.0 保留塑形共享特征；WM/ego_next 保守降级）+ epoch 级 clean150 守护（`--phase3-guard-*`，min_success=0.13 = 入口 b10 0.260 的 50%，崩塌/评测不可得即中止 fail-closed）+ keep-best（入口 b10 + 各 epoch 守护读数 → clean500/tg45/T3/eval500 一次 + 配对）。
