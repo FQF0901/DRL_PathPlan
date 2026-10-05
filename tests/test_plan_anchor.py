@@ -289,7 +289,13 @@ def test_model_anchor_outputs_and_plan_contract() -> None:
     # 输出契约：step0 仍 = action_mu；尾段 = 锚计划（traj/plan 一致）
     assert torch.equal(out["plan"][:, 0], out["action_mu"])
     assert torch.allclose(out["plan"][:, 1:], out["anchor_plan"][:, 1:], atol=1e-6)
-    assert torch.allclose(out["traj_xy"], out["plan"].cumsum(dim=1), atol=1e-5) or True
+    # traj 与 plan 一致：首点 = arc_step(action_mu)
+    from net.model import arc_step
+
+    dx, dy = arc_step(out["action_mu"][:, 0], out["action_mu"][:, 1])
+    assert torch.allclose(
+        out["traj_xy"][:, 0], torch.stack([dx, dy], dim=-1), atol=1e-5
+    )
 
 
 def test_anchor_model_disabled_has_no_new_keys() -> None:
