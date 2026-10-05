@@ -556,7 +556,9 @@ def build_phase3_optimizer(
 
     ``freeze_mode="all"``（旧行为）：要求两组齐全（模型无 MoE / 未解冻 → ``ValueError``，拒绝静默退化）；
     ``freeze_mode="specific_only"``（lane P3-I）：base 组为空是**预期**（主干已冻结），只返回 specific 组；
-    此时 specific 组为空仍 ``ValueError``（experts/router/residual_scale 必须有可训参数）。
+    此时 specific 组为空仍 ``ValueError``（experts/router/residual_scale 必须有可训参数）；
+    ``freeze_mode="trunk_only"``（fix-11 安全配方）：specific 组为空是**预期**（experts/router/anchor 头
+    冻结），只返回 base 组；specific 组非空 → ``ValueError``（冻结契约被绕过，拒绝静默带病训练）。
     """
     base: List["torch.Tensor"] = []
     specific: List["torch.Tensor"] = []
@@ -564,7 +566,13 @@ def build_phase3_optimizer(
         if not parameter.requires_grad:
             continue
         (specific if name.startswith(_PHASE3_SPECIFIC_PREFIXES) else base).append(parameter)
-    if not specific or (not base and freeze_mode != "specific_only"):
+    if freeze_mode == "trunk_only":
+        if not base or specific:
+            raise ValueError(
+                f"phase 3 trunk_only 冻结契约不符：base={len(base)} · specific={len(specific)}"
+                "（安全配方要求 specific experts/router/residual_scale 全部冻结、共享主干可训）"
+            )
+    elif not specific or (not base and freeze_mode != "specific_only"):
         raise ValueError(
             f"phase 3 LR 分组为空：base={len(base)} · specific={len(specific)}"
             "（all 模式要求全参数解冻且两组齐全；specific_only 模式要求模型含 MoE "
@@ -573,7 +581,8 @@ def build_phase3_optimizer(
     groups: List[Dict[str, Any]] = []
     if base:
         groups.append({"name": "base", "params": base, "lr": float(lr) * float(base_scale)})
-    groups.append({"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)})
+    if specific:
+        groups.append({"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)})
     return torch.optim.Adam(groups, lr=float(lr))
 
 
@@ -798,13 +807,18 @@ class Phase3Config:
 
     - **数据**：单一 dagger 目录（无 worst/mild 权重 / 无 mining）；lane P3-I 可选 5k 锚行
       由 stages 层合并（``anchor``），本类只消费合并后的行权重；
-    - **冻结配方**（``freeze_mode``，lane P3-I）：``all`` = 全参数解冻（旧行为，含 WM）/
-      ``specific_only`` = 只训 experts/router/residual_scale（冻结前缀由 stages 传入）；
+    - **冻结配方**（``freeze_mode``，lane P3-I / fix-11）：``all`` = 全参数解冻（旧行为，含 WM）/
+      ``specific_only`` = 只训 experts/router/residual_scale（冻结前缀由 stages 传入）/
+      ``trunk_only`` = 安全配方（fix-11）：只训共享主干（encoders/mem_encoder/plan_head
+      fusion/norm/ego_next/primary/policy），冻结 WM/value + specific experts/router/residual_scale
+      + K-anchor 锚头（冻结前缀由 stages 传入；锚 CE/WTA 保留 → 梯度经冻结锚头塑形共享特征）；
     - **损失组合**（上游三层监督 + 监控）：首步动作 + 多步动作链 + plan head ``ego_next`` +
       WM OD/LD + presence/entry BCE + MoE 负载均衡；``traj`` **只做监控**（不进损失，
       ``traj_aux_weight`` 默认 0 —— dagger 的 ``traj6`` 是常量外推合成值）。
-      ``freeze_mode="specific_only"`` 时上游监督项（:data:`PHASE3_WM_LOSS_KEYS`）无梯度 →
-      **自动降级为 0**（权重置 0 + 跳过 WM 教师强制前向，见 :func:`phase3_effective_config`）。
+      ``freeze_mode="specific_only"`` 时上游监督项（:data:`PHASE3_WM_LOSS_KEYS`）与锚 CE/WTA
+      无梯度 → **自动降级为 0**；``freeze_mode="trunk_only"`` 时上游 WM/ego_next 监督按安全配方
+      保守降级为 0、**锚 CE/WTA 保留**（权重置 0 + 跳过 WM 教师强制前向，见
+      :func:`phase3_effective_config`）。
     """
 
     epochs: int = 5
@@ -818,9 +832,11 @@ class Phase3Config:
     shuffle: bool = True
     max_batches: Optional[int] = None
     phase: str = "phase3"
-    #: 冻结模式（lane P3-I）：``all`` = 全参数解冻（旧行为）/ ``specific_only`` = 只训
+    #: 冻结模式（lane P3-I / fix-11）：``all`` = 全参数解冻（旧行为）/ ``specific_only`` = 只训
     #: experts/router/residual_scale（``freeze_prefixes`` 由 stages 层给 phase-2 冻结清单，
-    #: 且 :data:`PHASE3_WM_LOSS_KEYS` 自动降级为 0）。
+    #: 且 :data:`PHASE3_WM_LOSS_KEYS` + 锚 CE/WTA 自动降级为 0）/ ``trunk_only`` = 安全配方
+    #: （只训共享主干；``freeze_prefixes`` 由 stages 层给 fix-11 清单，上游 WM/ego_next 监督
+    #: 降级、锚 CE/WTA 保留）。
     freeze_mode: str = "all"
     #: 冻结参数前缀（``apply_freeze_prefixes``；``all`` 模式为空 = 全参数可训）。
     freeze_prefixes: Tuple[str, ...] = ()
@@ -867,8 +883,10 @@ class Phase3Config:
     lr_specific_scale: float = 0.5
 
     def __post_init__(self) -> None:
-        if self.freeze_mode not in ("all", "specific_only"):
-            raise ValueError(f"freeze_mode 非法：{self.freeze_mode!r}（all | specific_only）")
+        if self.freeze_mode not in ("all", "specific_only", "trunk_only"):
+            raise ValueError(
+                f"freeze_mode 非法：{self.freeze_mode!r}（all | specific_only | trunk_only）"
+            )
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -4426,17 +4444,26 @@ def _phase3_future_tensors(
 
 
 def phase3_effective_config(config: Phase3Config) -> "tuple[Phase3Config, Tuple[str, ...]]":
-    """冻结降级的**有效损失配置**（lane P3-I）。
+    """冻结降级的**有效损失配置**（lane P3-I / fix-11）。
 
-    ``freeze_mode="specific_only"`` 时上层监督项（:data:`PHASE3_WM_LOSS_KEYS`：WM 教师强制
-    ``od/ld/presence/entry`` + ``ego_next``）在冻结主干下无梯度 → 权重强制置 0（规格：自动
-    降级；保留 action/action_chain/load_balance）。**K-anchor WTA/CE 同属冻结的 plan head
-    主干** → 同规则置 0（锚头在 specific_only 下不训练；``freeze_mode="all"`` 时正常训练）。
-    返回 ``(effective_config, 被置零键)``；``freeze_mode="all"`` 原样返回 ``(config, ())``。
+    - ``freeze_mode="specific_only"``：上层监督项（:data:`PHASE3_WM_LOSS_KEYS`：WM 教师强制
+      ``od/ld/presence/entry`` + ``ego_next``）在冻结主干下无梯度 → 权重强制置 0（规格：自动
+      降级；保留 action/action_chain/load_balance）。**K-anchor WTA/CE 同属冻结的 plan head
+      主干** → 同规则置 0（锚头在 specific_only 下不训练）。
+    - ``freeze_mode="trunk_only"``（fix-11 安全配方）：WM/ego_next 上游监督按配方保守降级为 0
+      （st_gnn 冻结；与失败轮口径一致，保持单组变更）；**锚 CE/WTA 保留**（锚头冻结但梯度经其
+      塑形可训共享主干）。
+    - ``freeze_mode="all"``：原样返回。
+
+    返回 ``(effective_config, 被置零键)``。
     """
-    if config.freeze_mode != "specific_only":
+    if config.freeze_mode == "all":
         return config, ()
-    # K-anchor 项只在权重 > 0（确实启用）时才列入降级清单，避免默认关时日志噪声。
+    if config.freeze_mode == "trunk_only":
+        return replace(
+            config, **{f"{key}_weight": 0.0 for key in PHASE3_WM_LOSS_KEYS}
+        ), PHASE3_WM_LOSS_KEYS
+    # specific_only：K-anchor 项只在权重 > 0（确实启用）时才列入降级清单，避免默认关时日志噪声。
     zeroed = PHASE3_WM_LOSS_KEYS + tuple(
         key
         for key in ("anchor_ce", "anchor_wta")
@@ -4611,11 +4638,13 @@ def pretrain_bc_phase3(
 
     - LR 分组（base/specific，见 :func:`build_phase3_optimizer`）：``freeze_mode="all"`` 时
       全参数可训（``freeze_prefixes`` 为空 = 旧行为）；``"specific_only"`` 时只留 specific 组；
+      ``"trunk_only"``（fix-11 安全配方）时只留 base 组（specific 必须全冻结）；
     - 数据 = 单一 dagger 目录（或 stages 层合并 5k 锚后的行）；无 worst/mild 权重、无 mining
       （权重 = ``train_weight``）；
-    - 冻结配方 ``freeze_mode``（lane P3-I）：``all`` = 全参数解冻（旧行为）/
-      ``specific_only`` = 只训 experts/router/residual_scale，且 :func:`phase3_effective_config`
-      把上游监督项（WM ``od``/``ld``/``presence``/``entry`` + ``ego_next``）权重置 0（自动降级）；
+    - 冻结配方 ``freeze_mode``（lane P3-I / fix-11）：``all`` = 全参数解冻（旧行为）/
+      ``specific_only`` = 只训 experts/router/residual_scale /
+      ``trunk_only`` = 只训共享主干，且 :func:`phase3_effective_config` 按配方把无梯度/保守
+      降级项（specific_only：上游 + 锚 CE/WTA；trunk_only：上游 WM/ego_next）权重置 0；
     - 损失 = 首步动作 + **动作链多步** + plan head ``ego_next`` + WM ``od``/``ld``
       （教师强制）+ ``presence``/``entry`` BCE + MoE 负载均衡；``traj`` 只监控；
     - ``future_source``（物化）/``future_fn``（逐 batch）必须提供

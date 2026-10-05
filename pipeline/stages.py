@@ -56,6 +56,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -2656,8 +2657,20 @@ _PRIMARY_PHASE_FREEZE: Tuple[str, ...] = (
     "plan_head.moe.experts.",
     "plan_head.moe.router.",
 )
-#: specific 段冻结（lane U1 用户定稿）：**只训 experts + gate（router）+ residual_scale**；
-#: 主干/primary 策略头/专家/policy 全冻（primary 输出保持 phase 1 结束时的口径）。
+#: K-anchor 计划头参数前缀（v7 结构迭代 B；fix-11 契约修复）：预注册 §11 要求 phase3
+#: ``specific_only`` 下锚头随 plan head 主干冻结；实现曾遗漏这 4 个前缀，使 13 个锚头参数
+#: 落入 base 组被训练（唯一监督 = chain L2）→ 锚计划系统性左偏（根因诊断
+#: ``/tmp/opencode/v7_struct_fail_diag.md`` §3：``b10+p3锚头`` = 0.0）。
+_PHASE3_ANCHOR_HEAD_PREFIXES: Tuple[str, ...] = (
+    "plan_head.anchor_head.",
+    "plan_head.speed_head.",
+    "plan_head.residual_head.",
+    "plan_head.anchor_embed",
+)
+
+#: specific 段冻结（lane U1 用户定稿；2026-10-05 fix-11 契约修复加入 K-anchor 锚头前缀）：
+#: **只训 experts + gate（router）+ residual_scale**；主干/primary 策略头/专家/policy/锚头全冻
+#: （primary 输出保持 phase 1 结束时的口径）。
 _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
     "st_gnn.",
     "value.",
@@ -2668,7 +2681,19 @@ _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
     "plan_head.ego_next.",
     "plan_head.moe.primary.",
     "policy.",
-)
+) + _PHASE3_ANCHOR_HEAD_PREFIXES
+
+#: phase3 **安全配方**（fix-11）冻结清单：只训共享主干（encoders/mem_encoder/plan_head
+#: fusion/norm/ego_next/primary/policy）；冻结 = WM(st_gnn)/value + specific experts/router/
+#: residual_scale（决定性破坏项）+ K-anchor 锚头（叠加破坏项）。锚 CE/WTA 损失保留 →
+#: 梯度经冻结锚头塑形共享特征（见 ``phase3_effective_config``）。
+_PHASE3_SAFE_FREEZE: Tuple[str, ...] = (
+    "st_gnn.",
+    "value.",
+    "plan_head.moe.experts.",
+    "plan_head.moe.router.",
+    "plan_head.moe.residual_scale",
+) + _PHASE3_ANCHOR_HEAD_PREFIXES
 
 
 def _action_mu_stats(
@@ -3509,6 +3534,83 @@ def _phase3_future_fn(
     return _future_targets
 
 
+# --------------------------------------------------------------------------- #
+# phase3 epoch 级 clean150 守护（fix-11 安全配方）
+# --------------------------------------------------------------------------- #
+
+class Phase3GuardCollapse(RuntimeError):
+    """epoch 级 clean150 守护判定崩塌（或守护评测不可得）→ 立即中止训练（fail-closed）。"""
+
+
+def _phase3_guard_decision(success: Optional[float], min_success: float) -> "tuple[bool, str]":
+    """纯函数：clean150 守护判定。``success=None``（评测缺失）→ ``(False, "missing")``。
+
+    调用方对 ``missing`` 必须 fail-closed（中止），本函数只做数值判定（``success < min`` → 崩塌）。
+    """
+    if success is None:
+        return False, "missing"
+    value = float(success)
+    threshold = float(min_success)
+    if not math.isfinite(value) or not math.isfinite(threshold):
+        return False, "non_finite"
+    if value < threshold:
+        return True, f"clean150={value:.4f} < {threshold:.4f}"
+    return False, ""
+
+
+def _phase3_guard_argv(
+    *,
+    ckpt: Path,
+    spec: Path,
+    config: str,
+    out_root: Path,
+    name: str,
+    workers: int,
+    device: Optional[str],
+) -> List[str]:
+    """守护评测 argv（``tools/test.py``；口径与 §2.5 pin 表一致：LQR + eval-reference plan）。"""
+    argv = [
+        sys.executable, "tools/test.py",
+        "--policy", "ckpt",
+        "--ckpt", str(ckpt),
+        "--spec", str(spec),
+        "--out", str(out_root),
+        "--name", str(name),
+        "--workers", str(int(workers)),
+        "--tracker", "lqr",
+        "--config", str(config),
+        "--eval-reference", "plan",
+    ]
+    if device:
+        argv += ["--device", str(device)]
+    return argv
+
+
+def _phase3_guard_run(argv: Sequence[str], log_path: Path) -> int:
+    """运行守护评测子进程（cwd=仓库根；stdout/stderr 流到控制台 + ``log_path`` append）。
+
+    独立函数便于测试注入（测试桩可写假 metrics 并返回 rc）。
+    """
+    handle = Path(log_path).open("a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            [str(item) for item in argv],
+            cwd=_PROJECT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            handle.write(line)
+            handle.flush()
+        return int(proc.wait())
+    finally:
+        handle.close()
+
+
 def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
     """阶段 B phase 3：**迭代恢复训练**（单轮；lane P3-B，lane P3-I 配方开关）。
 
@@ -3518,8 +3620,15 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     - 起点 = ``--ckpt``（缺省读 config ``stages.B.phase3.init_ckpt``）；
     - **冻结配方** ``freeze``（lane P3-I，默认由 config 定）：
       ``specific_only`` = 只训 experts/router(gate)/residual_scale（复用 phase-2 冻结清单
-      :data:`_SPECIFIC_PHASE_FREEZE`），WM/ego_next 无梯度 → 损失自动置 0（降级）；
-      ``all`` = 全参数解冻（含 WM；旧行为）；
+      :data:`_SPECIFIC_PHASE_FREEZE`；fix-11 起含 K-anchor 锚头），WM/ego_next 无梯度 →
+      损失自动置 0（降级）；``trunk_only`` = **安全配方**（fix-11）：只训共享主干
+      （encoders/mem_encoder/plan_head fusion/norm/ego_next/primary/policy），冻结 WM/value +
+      specific experts/router + 锚头，锚 CE/WTA 保留（塑形共享特征）；``all`` = 全参数解冻
+      （含 WM；旧行为）；
+    - **epoch 级 clean150 守护**（fix-11，``--phase3-guard-spec`` 给出即启用）：每 epoch 保存
+      ``guard/epochNNN.pt`` → 子进程评测 clean150 → ``overall.success_rate <
+      --phase3-guard-min-success``（或评测不可得）→ 抛 :class:`Phase3GuardCollapse` 立即中止
+      （fail-closed）；逐 epoch 记录写 ``guard/guard.json``；
     - 损失 = 首步动作 + **多步动作链**（rollout ``plan`` 第 2..6 步 vs 未来专家首步标签）
       + plan head ``ego_next``（``ego_fut`` + ``wm_valid`` 尾部 mask）+ WM **OD/LD 教师强制**
       + presence/entry BCE + MoE 负载均衡 aux；``traj_*`` 只做监控（不进损失）；
@@ -3561,20 +3670,34 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         else p3_cfg.get("freeze")
     )
     freeze_mode = str(freeze_raw or "all").strip().lower()
-    if freeze_mode not in ("all", "specific_only"):
-        raise SystemExit(f"[stageB3] freeze 非法：{freeze_mode!r}（all | specific_only）")
-    freeze_prefixes: Tuple[str, ...] = () if freeze_mode == "all" else _SPECIFIC_PHASE_FREEZE
-    # specific_only 下冻结的 plan head 主干含 K-anchor 头 → anchor_ce/anchor_wta 同规则降级
-    # （仅在权重 > 0 = 实际启用时列入清单；默认关不产生日志噪声）。
+    if freeze_mode not in ("all", "specific_only", "trunk_only"):
+        raise SystemExit(
+            f"[stageB3] freeze 非法：{freeze_mode!r}（all | specific_only | trunk_only）"
+        )
+    if freeze_mode == "all":
+        freeze_prefixes: Tuple[str, ...] = ()
+    elif freeze_mode == "specific_only":
+        freeze_prefixes = _SPECIFIC_PHASE_FREEZE
+    else:  # trunk_only（fix-11 安全配方：只训共享主干）
+        freeze_prefixes = _PHASE3_SAFE_FREEZE
+    # 降级清单：specific_only 下锚头已冻结（fix-11 契约修复）→ 锚 CE/WTA 无梯度、同规则降级
+    # （仅在权重 > 0 = 实际启用时列入清单；默认关不产生日志噪声）；trunk_only 下锚 CE/WTA
+    # **保留**（梯度经冻结锚头塑形共享主干），仅 WM/ego_next 上游监督按配方保守降级。
     _pre_losses = dict(p3_cfg.get("losses", {}) or {})
+
+    def _pre_loss_weight(key: str, default: float) -> float:
+        cli = getattr(args, f"phase3_{key}_weight", None)
+        return float(cli if cli is not None else _pre_losses.get(key, default))
+
     _anchor_degrade = tuple(
-        key
-        for key in ("anchor_ce", "anchor_wta")
-        if float(_pre_losses.get(key, 0.0) or 0.0) > 0.0
+        key for key in ("anchor_ce", "anchor_wta") if _pre_loss_weight(key, 0.0) > 0.0
     )
-    frozen_loss_keys: Tuple[str, ...] = (
-        () if freeze_mode == "all" else PHASE3_WM_LOSS_KEYS + _anchor_degrade
-    )
+    if freeze_mode == "all":
+        frozen_loss_keys: Tuple[str, ...] = ()
+    elif freeze_mode == "specific_only":
+        frozen_loss_keys = PHASE3_WM_LOSS_KEYS + _anchor_degrade
+    else:  # trunk_only
+        frozen_loss_keys = PHASE3_WM_LOSS_KEYS
     anchor_enabled = (
         bool(args.phase3_anchor)
         if getattr(args, "phase3_anchor", None) is not None
@@ -3598,6 +3721,45 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
                 f"[stageB3] anchor 数据集不存在：{anchor_bc_dir}"
                 "（--phase3-anchor-bc-dir / config stages.B.phase3.anchor.bc_dir；auto=最新 datasets/BTC*_expert*）"
             )
+
+    # ---- fix-11：epoch 级 clean150 守护（可选；给出 --phase3-guard-spec 即启用，fail-closed）----
+    guard_cfg: Optional[Dict[str, Any]] = None
+    guard_spec_raw = str(getattr(args, "phase3_guard_spec", "") or "").strip()
+    if guard_spec_raw:
+        guard_spec = Path(guard_spec_raw)
+        if not guard_spec.is_file():
+            raise SystemExit(f"[stageB3][guard] guard spec 不存在：{guard_spec}")
+        guard_min_success_raw = getattr(args, "phase3_guard_min_success", None)
+        if guard_min_success_raw is None:
+            raise SystemExit(
+                "[stageB3][guard] 给出 --phase3-guard-spec 时必须给 --phase3-guard-min-success"
+                "（fail-closed：崩塌阈值不可缺省）"
+            )
+        guard_min_success = float(guard_min_success_raw)
+        if not math.isfinite(guard_min_success):
+            raise SystemExit(f"[stageB3][guard] min_success 非有限：{guard_min_success_raw!r}")
+        guard_eval_config = str(
+            getattr(args, "phase3_guard_config", None) or getattr(args, "config", "") or ""
+        )
+        if not Path(guard_eval_config).is_file():
+            raise SystemExit(f"[stageB3][guard] guard 评测 config 不存在：{guard_eval_config!r}")
+        guard_workers = int(getattr(args, "phase3_guard_workers", None) or 6)
+        if guard_workers < 1:
+            raise SystemExit(f"[stageB3][guard] workers 必须 ≥1：{guard_workers}")
+        guard_dir = Path(str(getattr(args, "phase3_guard_out", None) or (out_dir / "guard")))
+        guard_cfg = {
+            "spec": guard_spec,
+            "config": guard_eval_config,
+            "workers": guard_workers,
+            "min_success": guard_min_success,
+            "dir": guard_dir,
+        }
+        print(
+            f"[stageB3][guard] 启用 epoch 级 clean150 守护：spec={guard_spec} · "
+            f"min_success={guard_min_success:g} · workers={guard_workers} · "
+            f"config={guard_eval_config} · dir={guard_dir}（崩塌即中止，fail-closed）",
+            flush=True,
+        )
 
     # ---- 起点权重：--ckpt 优先，否则 config stages.B.phase3.init_ckpt；缺失 = 拒绝静默随机初始化 ----
     model = build_model(_load_yaml(args.model_config))
@@ -3772,12 +3934,19 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             "（配置快照已变，续跑结果可能不可比）",
             flush=True,
         )
-    freeze_text = (
-        "全参数解冻（含 WM；freeze=all）"
-        if freeze_mode == "all"
-        else f"冻结配方=specific_only（只训 experts/router/residual_scale；"
-        f"降级置 0：{', '.join(frozen_loss_keys)}）"
-    )
+    if freeze_mode == "all":
+        freeze_text = "全参数解冻（含 WM；freeze=all）"
+    elif freeze_mode == "specific_only":
+        freeze_text = (
+            "冻结配方=specific_only（只训 experts/router/residual_scale；锚头已冻结；"
+            f"降级置 0：{', '.join(frozen_loss_keys)}）"
+        )
+    else:
+        freeze_text = (
+            "冻结配方=trunk_only/安全配方（只训共享主干 encoders/mem_encoder/plan_head 主干/policy；"
+            "冻结 WM/value/specific experts/router/锚头；"
+            f"降级置 0：{', '.join(frozen_loss_keys)}；锚 CE/WTA 保留）"
+        )
     anchor_rows_log = int(anchor_info.get("anchor_rows") or 0) if anchor_enabled else 0
     anchor_text = (
         f"锚={anchor_bc_dir}（锚行={anchor_rows_log} · mild_weight={anchor_mild_weight:g}）"
@@ -3874,6 +4043,18 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "losses": dict(loss_weights),
         "losses_configured": configured_loss_weights,
         "losses_degraded": degraded_loss_weights,
+        # fix-11：epoch 级 clean150 守护留档（None = 未启用）
+        "guard_clean150": (
+            {
+                "spec": str(guard_cfg["spec"]),
+                "config": str(guard_cfg["config"]),
+                "workers": int(guard_cfg["workers"]),
+                "min_success": float(guard_cfg["min_success"]),
+                "dir": str(guard_cfg["dir"]),
+            }
+            if guard_cfg is not None
+            else None
+        ),
         "action_chain_source": {
             "requested": chain_source_raw,
             "train": str(getattr(future_fn, "action_chain_source", chain_source_raw)),
@@ -3920,6 +4101,102 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         )
 
     state: Dict[str, Any] = {}
+    guard_records: List[Dict[str, Any]] = []
+
+    def _run_epoch_guard(global_epoch: int, guard_model: Any) -> None:
+        """fix-11：epoch 级 clean150 守护（评测当前权重；崩塌/不可得 → 立即中止）。"""
+        import gc
+
+        assert guard_cfg is not None
+        guard_dir = Path(guard_cfg["dir"])
+        guard_dir.mkdir(parents=True, exist_ok=True)
+        guard_ckpt = guard_dir / f"epoch{global_epoch:03d}.pt"
+        save_checkpoint(
+            guard_ckpt,
+            guard_model,
+            meta={
+                "stage": "B", "phase": "phase3", "round": round_index,
+                "epoch": global_epoch, "epochs": epochs, "guard": True,
+            },
+            epoch=global_epoch,
+        )
+        metrics_path = guard_dir / f"epoch{global_epoch:03d}" / "metrics.json"
+        log_path = guard_dir / f"epoch{global_epoch:03d}.log"
+        argv = _phase3_guard_argv(
+            ckpt=guard_ckpt,
+            spec=Path(guard_cfg["spec"]),
+            config=str(guard_cfg["config"]),
+            out_root=guard_dir.parent,
+            name=f"{guard_dir.name}/epoch{global_epoch:03d}",
+            workers=int(guard_cfg["workers"]),
+            device=device,
+        )
+        print(
+            f"[stageB3][guard] epoch {global_epoch} start（ckpt={guard_ckpt}；"
+            f"min_success={float(guard_cfg['min_success']):g}）",
+            flush=True,
+        )
+        gc.collect()
+        if torch.device(device).type == "cuda":
+            torch.cuda.empty_cache()
+        started = time.perf_counter()
+        rc = int(_phase3_guard_run(argv, log_path))
+        duration = time.perf_counter() - started
+        success: Optional[float] = None
+        if rc == 0 and metrics_path.is_file():
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            overall = payload.get("overall") if isinstance(payload, Mapping) else None
+            if isinstance(overall, Mapping) and overall.get("success_rate") is not None:
+                success = float(overall["success_rate"])
+        collapsed, reason = _phase3_guard_decision(success, float(guard_cfg["min_success"]))
+        record = {
+            "epoch": int(global_epoch),
+            "ckpt": str(guard_ckpt),
+            "metrics": str(metrics_path),
+            "log": str(log_path),
+            "rc": int(rc),
+            "success": success,
+            "min_success": float(guard_cfg["min_success"]),
+            "collapsed": bool(collapsed),
+            "reason": str(reason),
+            "duration_s": round(duration, 1),
+        }
+        guard_records.append(record)
+        guard_json = guard_dir / "guard.json"
+        tmp = guard_json.with_name(guard_json.name + ".tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "kind": "phase3_clean150_guard",
+                    "spec": str(guard_cfg["spec"]),
+                    "min_success": float(guard_cfg["min_success"]),
+                    "workers": int(guard_cfg["workers"]),
+                    "config": str(guard_cfg["config"]),
+                    "records": guard_records,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, guard_json)
+        print(
+            f"[stageB3][guard] epoch {global_epoch} done rc={rc} "
+            f"success={('%.4f' % success) if success is not None else 'missing'} "
+            f"({duration:.0f}s) → {'COLLAPSE' if collapsed else 'ok'}",
+            flush=True,
+        )
+        if rc != 0 or success is None:
+            raise Phase3GuardCollapse(
+                f"epoch {global_epoch} 守护评测不可得（rc={rc}；log={log_path}；"
+                f"metrics={metrics_path}）→ fail-closed 中止"
+            )
+        if collapsed:
+            raise Phase3GuardCollapse(
+                f"epoch {global_epoch} clean150 {reason}（min_success="
+                f"{float(guard_cfg['min_success']):g}）→ 立即中止"
+            )
 
     def _on_checkpoint(
         epoch_index: int,
@@ -3932,20 +4209,21 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         state["val_metrics"] = dict(ckpt_val_metrics or {})
         state["rng"] = ckpt_rng
         global_epoch = epoch_index + 1
-        if ckpt_every <= 0 or global_epoch % ckpt_every != 0:
-            return
-        ckpt_path = _periodic_ckpt_path(out_dir, global_epoch)
-        save_checkpoint(
-            ckpt_path,
-            ckpt_model,
-            meta={"stage": "B", "phase": "phase3", "round": round_index, "epoch": global_epoch, "epochs": epochs},
-            optimizer=ckpt_optimizer,
-            epoch=global_epoch,
-            val_metrics=ckpt_val_metrics,
-            rng_state=capture_rng_state(ckpt_rng),
-            config_hash=config_hash,
-        )
-        print(f"[stageB3] ckpt → {ckpt_path}（round={round_index} · epoch {global_epoch}/{epochs}）", flush=True)
+        if ckpt_every > 0 and global_epoch % ckpt_every == 0:
+            ckpt_path = _periodic_ckpt_path(out_dir, global_epoch)
+            save_checkpoint(
+                ckpt_path,
+                ckpt_model,
+                meta={"stage": "B", "phase": "phase3", "round": round_index, "epoch": global_epoch, "epochs": epochs},
+                optimizer=ckpt_optimizer,
+                epoch=global_epoch,
+                val_metrics=ckpt_val_metrics,
+                rng_state=capture_rng_state(ckpt_rng),
+                config_hash=config_hash,
+            )
+            print(f"[stageB3] ckpt → {ckpt_path}（round={round_index} · epoch {global_epoch}/{epochs}）", flush=True)
+        if guard_cfg is not None:
+            _run_epoch_guard(global_epoch, ckpt_model)
 
     def _on_epoch(epoch_index: int, train_metrics: Mapping[str, Any], val_metrics: Mapping[str, Any]) -> None:
         if monitor is None:
@@ -4658,10 +4936,13 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-traj-aux-weight", type=float, default=None,
                         help="轨迹辅助权重（默认 0.0：traj 只做监控，不进损失）")
     # ---- lane P3-I：配方开关（冻结 / 5k 锚）----
-    parser.add_argument("--phase3-freeze", choices=("all", "specific_only"), default=None,
+    parser.add_argument("--phase3-freeze", choices=("all", "specific_only", "trunk_only"), default=None,
                         help="phase 3 冻结配方（默认取 config stages.B.phase3.freeze）："
-                             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单；"
-                             "WM od/ld/presence/entry 与 ego_next 无梯度 → 损失自动置 0）；"
+                             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单，"
+                             "fix-11 起含 K-anchor 锚头；WM od/ld/presence/entry 与 ego_next、锚 CE/WTA "
+                             "无梯度 → 损失自动置 0）；"
+                             "trunk_only = 安全配方（fix-11）：只训共享主干，冻结 WM/value/specific "
+                             "experts/router/锚头；锚 CE/WTA 保留（塑形共享特征）；"
                              "all = 全参数解冻（含 WM；旧行为）")
     parser.add_argument("--phase3-anchor", action=argparse.BooleanOptionalAction, default=None,
                         help="phase 3 5k 锚（默认取 config stages.B.phase3.anchor.enabled=false）："
@@ -4670,6 +4951,25 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="锚数据集目录（默认 config …anchor.bc_dir；auto = 最新 datasets/BTC*_expert*）")
     parser.add_argument("--phase3-anchor-mild-weight", type=float, default=None,
                         help="锚行权重倍率（默认取 config …anchor.mild_weight=0.1）")
+    parser.add_argument("--phase3-anchor-ce-weight", type=float, default=None,
+                        help="K-anchor 选择头 CE 权重（默认取 config …losses.anchor_ce=0.0=关）；"
+                             "trunk_only 安全配方下保留（梯度经冻结锚头塑形共享主干）")
+    parser.add_argument("--phase3-anchor-wta-weight", type=float, default=None,
+                        help="K-anchor WTA 残差回归权重（默认取 config …losses.anchor_wta=0.0=关）")
+    parser.add_argument("--phase3-guard-spec", type=str, default=None,
+                        help="fix-11 epoch 级 clean150 守护 spec（给出即启用；缺省关）：每 epoch 末"
+                             "保存 guard/epochNNN.pt → 子进程评测 → success < min-success（或评测"
+                             "不可得）→ 立即中止（fail-closed）；逐 epoch 记录写 guard/guard.json")
+    parser.add_argument("--phase3-guard-config", type=str, default=None,
+                        help="守护评测 config（默认 = 训练 --config；注意：需与训练模型口径一致，"
+                             "K-anchor 链应传评测 config，如 config/arms/v7_struct_b_v5_eval.yaml）")
+    parser.add_argument("--phase3-guard-workers", type=int, default=6,
+                        help="守护评测 workers（默认 6；训练进程持物化数据时建议 ≤4 控制主机内存）")
+    parser.add_argument("--phase3-guard-min-success", type=float, default=None,
+                        help="守护崩塌阈值：clean150 overall.success_rate 严格低于该值 → 中止"
+                             "（给出 --phase3-guard-spec 时必填，fail-closed）")
+    parser.add_argument("--phase3-guard-out", type=str, default=None,
+                        help="守护产物目录（默认 <out>/guard；含 guard.json/epochNNN.pt/epochNNN.log）")
     parser.add_argument("--phase3-lr-base-scale", type=float, default=None,
                         help="base 主干（encoders/mem_encoder/plan_head/st_gnn/WM/policy/value）LR 缩放"
                              "（默认取 config stages.B.phase3.lr_scale.base=0.25）")
