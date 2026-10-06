@@ -184,3 +184,113 @@
 
 - 本报告随 v7 收尾 commit 入库；`git tag -a v7-close-20261006` 指向该 commit（`git show v7-close-20261006` 查看 tag 说明）。
 - 前置 commit 链（收尾时 HEAD）：`1ea339d`（§11 修订锚 fix-11）← `55adf90`（freeze 契约修复 + trunk_only + guard）← `0065264`（结构 B 重训臂配置）← `3ac92d7`/`583efee`（K-anchor 透传/断言）← `489091b`/`f42d648`（结构 B K-anchor）← `326c260`/`fcf047e`（A2 接线）← `aa4c69c`/`0291f3a`（A obs v5）← `2f4450e`/`a1b6950`（arm2/3 预注册）← `c37acbb`/`2ddfa22`（P2 arm1 预注册+奖励）← `4a46c5e`（DAgger 前置）← `2e13dfa`/`386b091`（P1 iter2）← `ee763f4`（fix-15）← `b99e127`（obs v4）← `f5f0dc3`/`0454308`（P0 修正集 #1）← `b711e5f`（P0 工具+预注册）。
+- **增补（2026-10-06）**：§8（夜间/今晨结果：碰撞抑制 / 碰撞类型 / tollgate 图 / 奖励臂 A-C / §14）+ tag `v7-close-2-20261006`。
+
+## 8. 增补（2026-10-06；夜间/今晨定向结果：碰撞抑制、碰撞类型、tollgate 可视化、奖励臂 A/B/C、§14 ttc）
+
+> 本节为主报告收尾后的增补（§0–§7 保持 2026-10-05 原文）；新增预注册 §12–§14 见 `docs/v7_program_prereg.md`。所有数字已从盘上产物独立复算：`runs/*/episodes.csv` 逐 `(id,seed)`（success/collision/off_road/speed_ratio/jerk 与 Δpp），配对 p/z 取 `tools/paired_eval.py` 输出 JSON（`/tmp/opencode/v7_p4extra_paired/`、`/tmp/opencode/v7_s14_paired/`）；ckpt/config sha256 对盘复核一致。
+
+### 8.1 P4-extra（§12）：s11 + `terminal_values.collision` −22→−32（单变量；seeds 0/11）
+
+Base = s11 u150（`a7cc091f…`）；臂 `config/arms/v7_arm1_collision_suppress.yaml`（`b8697d54…` = arm1 逐位不变 + collision −32）；预注册内容 `eec0abe` / 锚 `ee1ee49`；pre-v5 worktree `2f4450e`。
+
+| seed | 采纳 | clean500 succ / coll | eval500 succ / coll | 判定 |
+|---|---|---|---|---|
+| 0 | u75 | **0.678 / 0.154** | **0.652 / 0.164** | partial（clean 过；eval coll ✗） |
+| 11 | u50 | 0.654 / 0.160 | 0.646 / 0.154 | partial（同上） |
+| s11（基线） | u150 | 0.668 / 0.182 | 0.646 / 0.202 | — |
+| IDM（锚） | — | 0.742 / 0.174 | 0.756 / 0.144 | — |
+
+- 配对 vs s11：clean coll **−2.8pp**（z 2.06，p 0.054）/ **−2.2pp**（z 1.46，p 0.185）；eval coll **−3.8pp**（z 2.47，p 0.018）/ **−4.8pp**（z 3.05，p 0.0032）；success 全 ns（clean +1.0 / −1.4pp；eval +0.6 / 0.0pp）。
+- 判据（§12.3，PASS = 四条全过）：clean500 coll ≤0.174 且 succ ≥0.638 **四条全过**；eval500 仅 collision 未过（0.164 / 0.154 vs 0.144，差 +2.0 / +1.0pp）⇒ **partial 2/2**（不宣称过安全闸）。
+- 分布（n=2）：clean Δcoll mean −2.5pp / sd 0.4pt；eval Δcoll mean −4.3pp / sd 0.7pt；u50+u100 双点闸 2/2 未触发、无 void。
+- 采纳 ckpt sha256：s0 u75 `4217abe0d67cc231e48b1fe783c3d2fbd87dac5022a091c71d7b1cf4f54dd342`；s11 u50 `711e96a711c1d96b758520dfc76f9dfb78e89eed21106e7a3b0894136bfd387e`。
+
+### 8.2 碰撞类型（Q6）：s11 eval500 101 条碰撞仪器化重放（101/101 复现）
+
+- 重放协议：`env/specs/scenarios_eval500.json` 101 条 collision；pre-v5 `2f4450e`；tracker=lqr / plan / max_steps=1000；termination+steps 与冻结 CSV 逐条一致（`csv_mismatch=[]`）。
+
+| 类别 | n | 占比 |
+|---|---|---|
+| **自车追尾前车（ego_rear_ends_lead）** | **64** | **63.4%** |
+| 撞静态建筑（岗亭/建筑，static_building；17/17 全 tollgate） | 17 | 16.8% |
+| 侧碰/cut-in（side_cutin 8 + side 6） | 14 | 13.9% |
+| 后车撞自车（rear_by_follower；5/5 对手 IDMPolicy） | 5 | 5.0% |
+| 撞路缘/人行道（static_sidewalk） | 1 | 1.0% |
+
+- 按 primary：tollgate 25（17 撞亭 + 8 追尾）、curve 14、straight 14、ramp_out 13、ramp_in 10、split 9、t_intersection 7（4 后车撞）、merge 5、roundabout 2、uturn 1、intersection 1。
+- **追尾证据（64 条）**：自车 2s 内 brake_frac>0 = **0 条**（从不刹车）、平均 a_lon −0.56 m/s²（减速过缓）；前车加速（>0.5 m/s²）39 条、2s 急刹（<−2）0 条、2s 历史缺失（新生成）15 条 ⇒ 无"保持距离/提前减速"激励，动作分布上根本没有刹车。
+- 结论：**碰撞主因是自车追尾（63.4%）且"几乎不刹车"**；后车撞自车仅 5%。修复方向应是纵向直接机制（近失/间距/刹车动作），而非横向。
+
+### 8.3 tollgate 双面板（Q2，spec 34 / s11 u150）
+
+- 图 ×4（2100px；桌面 app 打开）：`/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_A_first_sighting_step0821.png`、`…B_decision_zone_39m_step0869.png`、`…C_gate_entry_step0929.png`、`…D_final_crash_step0961.png`。
+- 运行时度量（JSON `/tmp/opencode/v7_q6q2/tollgate_viz.json`）：
+  - 岗亭 lane_id=1（奇数车道正中，lat≈0，宽 3.5 m）；`$` block 实测限速 **5.6 m/s**；
+  - `others.static` 首次 present=1：step 821 / **54.71 m**（早于 IDM 首扫 43.819 m / step 362）；
+  - `road_class=tollgate` 首次=1：step 930 / **16.995 m**（进入 `$` block step 929 / 17.257 m 之后——变道决策点 25–39 m 时仍为 0，**信号迟到**）；
+  - IDM 首次变道 step 378 / **34.653 m**（成功 arrive_dest @458）；s11 不变道、撞亭时 ego_v **0.45 m/s**（throttle 0.86 / a_lon −1.21，仍为 building 碰撞）。
+- 结论：**信号在（static 54.7m）而行为不在**——LD 16 槽只编码车道中心线（岗亭是 BaseBuilding，不在 LD，无专用 tollgate 特征）；static 信号已在却未触发变道 ⇒ tollgate 是"决策/结构"问题，非感知缺失。注：s11 冻结协议 LD offset={5,10,15,20,30}（pre-v5）；{20,40,60,80} 属已关闭的 v5 结构线。
+
+### 8.4 奖励单变量臂 A/B/C（§13；base = s11 u150）
+
+臂 `v7_reward_{A,B,C}.yaml`（`32b57bb1…` / `704de4f2…` / `d817110f…`）；预注册内容 `db98501` / 锚 `23ae105`。
+
+| 臂 | 单变量 | seed | clean succ / coll / off | eval succ / coll | 判定 |
+|---|---|---|---|---|---|
+| A | `off_road_edge.edge_scale_m` 1.0→2.5 | 0 | 0.646 / 0.158 / 0.192 | 0.614 / 0.180 | fail |
+| A | 同上 | 11 | 0.668 / 0.152 / 0.146 | 0.644 / 0.162 | fail |
+| B | 追加 `speed_deficit`（weight −0.3） | 0 | 0.658 / 0.138 / 0.144 | 0.638 / 0.142 | 弱 pass（仅替代条款） |
+| B | 同上 | 11 | 0.666 / 0.166 / 0.156 | 0.626 / 0.178 | 弱 pass（仅替代条款） |
+| C | 追加 `comfort_jerk_win`（−0.1） | 0 | 0.654 / 0.138 / 0.148 | 0.660 / 0.130 | fail |
+
+- **A fail（2/2）**：off_road 反向 **+5.4pp**（z 4.02，p 6.6e−05）/ +0.8pp（判据要求 ≤−3pt）；collision −2.4 / −3.0pp（顺带降低）；success −2.2 / 0.0pp。
+- **B 弱 pass（2/2，仅替代条款）**：success 0.658 / 0.666 ≥ s11−3pp（0.638）→ 判据路径②过；但 **speed_ratio Δ −0.053 / −0.013**（路径①要求 ≥+0.05）未达 ⇒"不提速"，机制目标未实现。
+- **C fail**：jerk_p95 29.08（**仅 −3.3%**，判据 ≥20% 降幅）；seed11 未跑（§13.4 预算，not-run）。
+- 结论：三臂均未产生目标机制改善（A 甚至反向）；B 说明 **speed_ratio 收益项对策略约束力不足**（risk 项主导），速度机制需更直接手段（更强罚 / 进度×速度耦合 / 直接动作机制）。
+
+### 8.5 §14：s11 + `ttc`（TTCLeadPenalty −0.5 / 2.0 / 0.5；seeds 0/11）
+
+臂 `config/arms/v7_arm1_ttc.yaml`（`8d68b3b3…` = arm1 逐位不变 + ttc 稠密近失罚，terminal collision 保持 −22）；预注册内容 `7bf18d1` / 锚 `5db385e`。
+
+| seed | 采纳 | clean500 succ / coll | eval500 succ / coll | 判定 |
+|---|---|---|---|---|
+| 0 | u75 | 0.648 / 0.194 | 0.620 / 0.194 | **fail**（clean coll +1.2pp 反向；succ −2.0pp） |
+| 11 | u25 | **0.672 / 0.152** | 0.648 / **0.156** | **PASS**（clean coll −3.0pp p=0.04；eval −4.6pp） |
+
+- seed11：clean coll 配对 **−3.0pp**（z 2.19，p 0.040）；eval coll 0.156（vs s11 0.202，−4.6pp）；success 持平（clean +0.4 / eval +0.2pp，ns）。
+- **臂判定：混合（1 fail / 1 PASS）→ 未达 2/2 PASS**；ttc 是首个直击"追尾"主因的奖励项，但 seed 间不一致（seed0 反向）。
+- 采纳 ckpt sha256：s11 u25 `229bbc1e37c6e6fbfbfcdcc96fa6426c6fd0f9f86412d78cecd1c2f088e29b7f`；s0 u75 `0225c2d35f957f3ed960026c59eca21dc25e81dc7b159ed41e7eebebd8e4b9d6`。
+
+### 8.6 增补结论
+
+1. **碰撞抑制 = 可复现的确定性收益**：`terminal collision −32` 在 2/2 seeds 上 clean500 coll −2.2~−2.8pp（≤IDM 0.174）、eval500 −3.8~−4.8pp（显著，p≤0.02），**success 不降**（ns）；距 eval500 IDM 闸（0.144）仍差 1–2pp ⇒ 按预注册记 partial，但已是 v7 内**首个"安全改善 + 性能保持"的可采纳产物**（s0u75 / s11u50；§14 s11u25 为同类单点证据）。
+2. **追尾 63.4% 是主因且"几乎不刹车"**（brake_frac=0.00）⇒ 纵向直接机制（刹车 / 间距 / 近失）是碰撞面的第一杠杆；后车撞自车（5.0%）不构成主因。
+3. **tollgate：信号在（static 54.7m，早于 IDM 43.8m）而行为不在**（LD 无专用特征、road_class 17.0m 才置位、s11 不变道撞亭）⇒ 属决策/结构缺陷；本夜仅可视化定论，未修复。
+4. **奖励臂 A/C 无效、B 弱**（速度机制需更直接手段）；§14 ttc 混合（1/2 PASS）。
+5. **主目标（超越 IDM 0.756）仍未达**：本轮成功读数最高为 P4-extra s0 u75（clean **0.678** / eval **0.652**，均略高于 s11 的 0.668/0.646），但其 eval collision 0.164 未过 IDM 闸（0.144），按预注册记 partial——安全与成功仍未同闸通过（距 IDM：clean −6.4pp / eval −10.4pp）。
+
+### 8.7 资产清单增补
+
+- **ckpt sha256（盘上复核）**：
+
+| 资产 | 路径 | sha256 |
+|---|---|---|
+| **P4-extra s0 u75（安全改善版）** | `runs/BTC20261005-2138_v7p4extra_s0_colls/ckpt_u075.pt` | `4217abe0d67cc231e48b1fe783c3d2fbd87dac5022a091c71d7b1cf4f54dd342` |
+| **P4-extra s11 u50（安全改善版）** | `runs/BTC20261005-2243_v7p4extra_s11_colls/ckpt_u050.pt` | `711e96a711c1d96b758520dfc76f9dfb78e89eed21106e7a3b0894136bfd387e` |
+| §14 s11 u25（单点 PASS） | `runs/BTC20261006-0711_v7s14_s11_ttc/ckpt_u025.pt` | `229bbc1e37c6e6fbfbfcdcc96fa6426c6fd0f9f86412d78cecd1c2f088e29b7f` |
+| §14 s0 u75（fail 参照） | `runs/BTC20261006-0615_v7s14_s0_ttc/ckpt_u075.pt` | `0225c2d35f957f3ed960026c59eca21dc25e81dc7b159ed41e7eebebd8e4b9d6` |
+| 奖励 A s0 u25 / s11 u100 | `runs/BTC20261006-0027_v7reward_A_s0/ckpt_u025.pt` / `runs/BTC20261006-0127_v7reward_A_s11/ckpt_u100.pt` | `0806c224…` / `b5b63e78…` |
+| 奖励 B s0 u25 / s11 u25 | `runs/BTC20261006-0233_v7reward_B_s0/ckpt_u025.pt` / `runs/BTC20261006-0342_v7reward_B_s11/ckpt_u025.pt` | `f795a3d3…` / `43c896af…` |
+| 奖励 C s0 u25 | `runs/BTC20261006-0445_v7reward_C_s0/ckpt_u025.pt` | `b4557630…` |
+
+- **配置**：`config/arms/v7_arm1_collision_suppress.yaml`（`b8697d54…`）、`v7_arm1_ttc.yaml`（`8d68b3b3…`）、`v7_reward_A/B/C.yaml`（`32b57bb1…` / `704de4f2…` / `d817110f…`）。
+- **预注册**：`docs/v7_program_prereg.md` §12（内容 `eec0abe` / 锚 `ee1ee49`）、§13（`db98501` / `23ae105`）、§14（`7bf18d1` / `5db385e`）。
+- **runs/ 关键路径**：P4-extra `runs/BTC20261005-2138_v7p4extra_s0_colls` / `runs/BTC20261005-2243_v7p4extra_s11_colls`（clean/eval/tg45 子 run 见 §8.1）；§14 `runs/BTC20261006-0615_v7s14_s0_ttc` / `runs/BTC20261006-0711_v7s14_s11_ttc`；奖励 `runs/BTC20261006-{0027,0127,0233,0342,0445}_v7reward_{A_s0,A_s11,B_s0,B_s11,C_s0}`。
+- **报告/证据档（`/tmp/opencode/`，不入 repo）**：`v7_p4extra_collision.md`、`v7_q6_collision_types.md`、`v7_q2_tollgate_figure.md`、`v7_p4extra_rewards.md`、`v7_s14_ttc.md`、`v7_morning_brief.md`、`v7_night_watch.log`；JSON `v7_q6q2/collision_replay.json`、`v7_q6q2/tollgate_viz.json`；配对目录 `v7_p4extra_paired/`、`v7_s14_paired/`。
+- **图**：`/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_{A_first_sighting_step0821,B_decision_zone_39m_step0869,C_gate_entry_step0929,D_final_crash_step0961}.png`（×4）。
+
+### 8.8 版本与 tag（增补）
+
+- 本节随增补 commit 入库；`git tag -a v7-close-2-20261006` 指向该 commit（`git show v7-close-2-20261006` 查看说明；含夜间结果与"安全改善版"产物清单）。
+- 增补期 commit 链：`5db385e`（§14 锚）← `7bf18d1`（§14 ttc 臂）← `23ae105`（§13 锚）← `db98501`（奖励臂 A/B/C）← `ee1ee49`（§12 锚）← `eec0abe`（P4-extra 碰撞抑制臂）← `9635591`（v7 收尾报告 + tag `v7-close-20261006`）。
