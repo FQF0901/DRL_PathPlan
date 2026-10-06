@@ -1,7 +1,7 @@
 # v7 证据/报告档（in-repo 存档）
 
 > 来源：v7 程序执行期证据档原写于 `/tmp/opencode/`（不入 repo）。2026-10-06 锁版清理时按保留清单**先复制后删除**入仓；本目录为权威副本，sha256 为入仓副本实测值（`sha256sum` 可复验）。
-> 原 `/tmp/opencode/` 其余工作档（一次性脚本/日志/JSON/中间报告）已随同日清理删除；个别未决项暂留 `/tmp/opencode/KEEP/`（见文末）。索引用途：主报告 `docs/v7_program_report.md` 的 §4.4 / §8.7 引用。
+> 原 `/tmp/opencode/` 其余工作档（一次性脚本/日志/JSON/中间报告）已随同日清理删除；原未决 KEEP 项已于同日清理 B 复核入仓（见 §7）。索引用途：主报告 `docs/v7_program_report.md` 的 §4.4 / §8.7 引用。
 
 ## 1. 报告（24 项）
 
@@ -70,15 +70,30 @@
 - **pre-v5 worktree 已移除**（原 `/tmp/opencode/v7_pre_v5` @ `2f4450e`；移除前 dirty 文件与主树逐位一致，无独有改动）。如需复现 P3 s1/s2 与 P4-extra/奖励/§14 臂（同代码期）：`git worktree add <dir> 2f4450e`（主树 venv 绝对解释器 + `runs`/`datasets` 软链主树）。
 - 原 `/tmp/opencode/` 下的驱动脚本/日志/JSON 已删除；一次性复现口径见各报告正文与 `docs/v7_program_prereg.md`。
 
-## 6. 未决项（暂留 `/tmp/opencode/KEEP/`，待复核）
+## 6. 未决项（原暂留 `/tmp/opencode/KEEP/`）——**已于 2026-10-06 清理 B 解决**
 
-以下文件**不在原保留清单**，但被入仓报告直接引用（含 sha256），删除后引用将悬空，故暂存 KEEP：
+以下文件曾因不在原保留清单、但被入仓报告直接引用而暂存 `/tmp/opencode/KEEP/`；清理 B 已逐项复核并搬入本目录（见 §7），`/tmp/opencode/KEEP/` 已清空：
 
-| 文件 | 大小 | 引用处 | 建议 |
+| 文件 | 大小 | 引用处 | 处理 |
 |---|---|---|---|
-| `v7_struct_retrain_v5.md` | 11 KB | 主报告 §3 表示层主判据行、§4.4 | 建议入仓 `docs/v7_reports/`（否则 §3 行来源悬空） |
-| `v7_p0_specs/scenarios_eval500_seedA.json` | 398 KB | `v7_p0_idm_baseline.md`（sha `e31a87b2…`） | 建议入仓 `docs/v7_reports/specs/p0_variants/` |
+| `v7_struct_retrain_v5.md` | 11 KB | 主报告 §3 表示层主判据行、§4.4 | 入仓 `docs/v7_reports/` |
+| `v7_p0_specs/scenarios_eval500_seedA.json` | 398 KB | `v7_p0_idm_baseline.md`（sha `e31a87b2…`） | 入仓 `docs/v7_reports/specs/p0_variants/` |
 | `v7_p0_specs/scenarios_eval500_seedB.json` | 398 KB | `v7_p0_idm_baseline.md`（sha `fa644eb4…`） | 同上 |
 | `v7_p0_specs/variants_manifest.json` | 1 KB | `v7_p0_idm_baseline.md`（sha `489326e8…`） | 同上 |
 | `v7_p0_specs/determinism_probe8.json`、`probe_299.json` | 7 KB | `v7_p0_idm_baseline.md` 异常深挖段 | 同上 |
-| `v7_q6q2/collision_replay.json`、`tollgate_viz.json` | 245 KB / 9 KB | 主报告 §8.3/§8.7、`v7_q6_collision_types.md`、`v7_q2_tollgate_figure.md` | 建议入仓 `docs/v7_reports/evidence/`（生成脚本已清理，不可原地重生成） |
+| `v7_q6q2/collision_replay.json`、`tollgate_viz.json` | 245 KB / 9 KB | 主报告 §8.3/§8.7、`v7_q6_collision_types.md`、`v7_q2_tollgate_figure.md` | 入仓 `docs/v7_reports/evidence/` |
+
+## 7. KEEP 复核入仓（2026-10-06 清理 B；8 文件；sha256 = 入仓副本实测）
+
+| # | 原路径 | 新路径 | sha256 | 说明 |
+|---|---|---|---|---|
+| 1 | `/tmp/opencode/KEEP/v7_struct_retrain_v5.md` | `docs/v7_reports/v7_struct_retrain_v5.md` | `1b0b6194ae8c9d70f0a47e71832593f9e4f11aacf2132a6e53148191135d9149` | v5 重训链 Stage B 读数来源（主报告 §3 表示层主判据行、§4.4） |
+| 2 | `/tmp/opencode/KEEP/v7_p0_specs/scenarios_eval500_seedA.json` | `docs/v7_reports/specs/p0_variants/scenarios_eval500_seedA.json` | `e31a87b232777ccc6f565e44a1d83e85ad2cdb5b909ed9e093098b029d2b6635` | P0 fix-15 spec-seed 变体 A |
+| 3 | `/tmp/opencode/KEEP/v7_p0_specs/scenarios_eval500_seedB.json` | `docs/v7_reports/specs/p0_variants/scenarios_eval500_seedB.json` | `fa644eb49d85999c1a651e44fc7ecab6b33dc259a2fbddacc8d8b645ace5e7dc` | P0 fix-15 spec-seed 变体 B |
+| 4 | `/tmp/opencode/KEEP/v7_p0_specs/variants_manifest.json` | `docs/v7_reports/specs/p0_variants/variants_manifest.json` | `489326e8a8f1ecb5a5a70e2c391b6389bd45168fa4e8ff5ec4b7c3d93963625f` | 变体 manifest（seed 偏移 +100000/+200000） |
+| 5 | `/tmp/opencode/KEEP/v7_p0_specs/determinism_probe8.json` | `docs/v7_reports/specs/p0_variants/determinism_probe8.json` | `f548cb02f6881baab02b68d8c315825f31199ee64306241c4408ad2d88260777` | 8 条确定性探针子集 |
+| 6 | `/tmp/opencode/KEEP/v7_p0_specs/probe_299.json` | `docs/v7_reports/specs/p0_variants/probe_299.json` | `62e6b73656bc2f1075fc2ebdb373ea955890ccd11055afbfa6549fb7d54a07bd` | id 299 单条探针 |
+| 7 | `/tmp/opencode/KEEP/v7_q6q2/collision_replay.json` | `docs/v7_reports/evidence/collision_replay.json` | `8413de0baff9473b1fb9eef7258d82bf37914d0ec1eb51d9b7487cfafdbcf8ab` | 101 条碰撞仪器化重放原始 JSON（生成脚本已清理，不可原地重生成） |
+| 8 | `/tmp/opencode/KEEP/v7_q6q2/tollgate_viz.json` | `docs/v7_reports/evidence/tollgate_viz.json` | `55d09fda13618d8e415963981c00ad4037d3a3ff4a7d84becec751b6d8d1a91b` | tollgate 运行时度量 JSON（同上） |
+
+> 清理记录存档：`docs/v7_reports/cleanup/`（CLEANUP_PLAN / DELETED_MANIFEST / CLEANUP_A_REPORT / CLEANUP_B_REPORT / KEEP_README）；/tmp 引用映射总说明：`docs/v7_reports/MIGRATION_NOTE.md`。

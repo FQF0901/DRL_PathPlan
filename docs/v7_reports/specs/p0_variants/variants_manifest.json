@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-10-02T09:22:30+08:00",
+  "script": "/tmp/opencode/v7_p0_make_variants.py",
+  "base_spec": "/workspace/01_Proj/DRL_PathPlan/env/specs/scenarios_eval500.json",
+  "base_sha256": "98856105eca17461bbdabbf88f203102be7b585fd3de82820b17460358dd4595",
+  "base_count": 500,
+  "invariant": "id/geometry/blocks/traffic(除seed)/limits/nav/ego/difficulty/labels 逐条不变",
+  "variants": {
+    "seedA": {
+      "path": "/tmp/opencode/v7_p0_specs/scenarios_eval500_seedA.json",
+      "seed_offset": 100000,
+      "seed_min": 5100004,
+      "seed_max": 5100999,
+      "sha256": "e31a87b232777ccc6f565e44a1d83e85ad2cdb5b909ed9e093098b029d2b6635",
+      "count": 500
+    },
+    "seedB": {
+      "path": "/tmp/opencode/v7_p0_specs/scenarios_eval500_seedB.json",
+      "seed_offset": 200000,
+      "seed_min": 5200004,
+      "seed_max": 5200999,
+      "sha256": "fa644eb49d85999c1a651e44fc7ecab6b33dc259a2fbddacc8d8b645ace5e7dc",
+      "count": 500
+    }
+  }
+}
