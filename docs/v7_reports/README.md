@@ -54,7 +54,7 @@
 
 **与 `env/specs/` 生成物的关系**（均为 repo 冻结文件的离线派生，`env/` 未改动、未新增）：
 
-- `specs_val_only500.json` = `env/specs/scenarios_val.json`（1000）− `env/specs/scenarios_eval500.json`（500），按 (id,seed) 差集、保序；provenance 内嵌。sha256 与 `docs/rl_stage_c_experiments.md` 的 clean500 记录一致（`087db3f5…`）。
+- `specs_val_only500.json` = `env/specs/scenarios_val.json`（1000）− `env/specs/scenarios_eval500.json`（500），按 (id,seed) 差集、保序；provenance 内嵌。sha256 与 `docs/archive/rl_stage_c_experiments.md` 的 clean500 记录一致（`087db3f5…`）。
 - `specs_val_only150.json` = 上述前 150 条（`provenance.subset.parent_raw_sha256 = 087db3f5…`）。sha256 与 `docs/v7_program_prereg.md` §12 记录一致（`81f0f958…`）。
 - `specs_tollgate45.json` = `env/specs/scenarios_eval500.json` 中 tollgate 45 条（provenance 含 id 列表：34, 76, …924）。sha256 与 `docs/v7_reports/v7_p1_probe_v1v2.md` 记录一致（`27010b0e…c523e6`）。
 - 复现注意：`env/specs/` **不含** clean500/tg45 派生件，复算/重跑须使用本目录三个文件（sha256 逐位核对）。
@@ -96,4 +96,4 @@
 | 7 | `/tmp/opencode/KEEP/v7_q6q2/collision_replay.json` | `docs/v7_reports/evidence/collision_replay.json` | `8413de0baff9473b1fb9eef7258d82bf37914d0ec1eb51d9b7487cfafdbcf8ab` | 101 条碰撞仪器化重放原始 JSON（生成脚本已清理，不可原地重生成） |
 | 8 | `/tmp/opencode/KEEP/v7_q6q2/tollgate_viz.json` | `docs/v7_reports/evidence/tollgate_viz.json` | `55d09fda13618d8e415963981c00ad4037d3a3ff4a7d84becec751b6d8d1a91b` | tollgate 运行时度量 JSON（同上） |
 
-> 清理记录存档：`docs/v7_reports/cleanup/`（CLEANUP_PLAN / DELETED_MANIFEST / CLEANUP_A_REPORT / CLEANUP_B_REPORT / KEEP_README）；/tmp 引用映射总说明：`docs/v7_reports/MIGRATION_NOTE.md`。
+> 清理记录存档：`docs/v7_reports/cleanup/`（CLEANUP_PLAN / DELETED_MANIFEST / CLEANUP_A_REPORT / CLEANUP_B_REPORT / KEEP_README / **CLEANUP_C_REPORT / CLEANUP_C_DELETED / CLEANUP_C_WILL_DELETE**）；/tmp 引用映射总说明：`docs/v7_reports/MIGRATION_NOTE.md`。

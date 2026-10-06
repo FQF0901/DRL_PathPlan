@@ -60,3 +60,10 @@
 - **pre-v5 worktree 已移除**（原 `/tmp/opencode/v7_pre_v5` @ `2f4450e`）：如需复现 P3 s1/s2 与 P4-extra/奖励/§14 臂（同代码期）→ `git worktree add <dir> 2f4450e`（主树 venv 绝对解释器 + `runs`/`datasets` 软链主树）。
 - **规格文件**：clean500/tg45 派生件只在 `docs/v7_reports/specs/`（`env/specs/` 不含），复算须用该目录三文件（sha256 逐位核对）。
 - 最佳产物 ckpt 仍在 `runs/`（保留链）：w1 `runs/BTC20261002-2329_v7p1dagger_w1/ckpt_epoch005.pt`、s11 `runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt`、p4e s0u75 `runs/BTC20261005-2138_v7p4extra_s0_colls/ckpt_u075.pt`、s14 s11u25 `runs/BTC20261006-0711_v7s14_s11_ttc/ckpt_u025.pt`。
+
+## 7. 清理 C（2026-10-06）：runs/datasets 进一步瘦身 + docs 归档
+
+- `runs/`：删 **63 目录 / 772.9 MB** + **142 中间 ckpt / 902.6 MB** + logs/monitor（60.2 MB）→ 3,625,662,343 B → 1,903,488,549 B（**−1.60 GiB，−47.5%**）；最佳链与报告引用 ckpt 全保留（sha256 复核）。
+- `datasets/`：删 **4 项 / 46.3 MB**（`BTC20260927-1734_expert500val`、`BTC20260928-{1006,1109,1154}_dagger_r{1,2,3}`；v2/v3 代已关线）→ −44.2 MiB；其余 16 项为现行硬依赖/引用（清单见 C 报告 §5）。
+- `docs/`：6 项 v3/v4 代归档 → `docs/archive/`（`design-v1.2`、`dataset_stats`、`metrics`、`phase3_rootcause_analysis`、`rl_stage_c_experiments`、`rl_stage_c_v4_report`）；引用路径已机械更新。
+- 逐项记录：`docs/v7_reports/cleanup/CLEANUP_C_REPORT.md`、`CLEANUP_C_DELETED.txt`、`CLEANUP_C_WILL_DELETE.md`。

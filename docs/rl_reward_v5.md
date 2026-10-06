@@ -16,7 +16,7 @@ reward = dense_positive_sum × carl_multiplier
 ```
 
 - 每 **0.5 s 策略步**结算一次；稠密项按该帧贡献符号拆分（实现与理由见 `reward_model/aggregation.py` 模块 docstring）。
-- **CaRL 已修**：违规帧只清零**正向**稠密和，负向罚分保留（旧式 `dense_sum × 0` 会抹掉同帧 `solid_line` 等已发生代价）——commit `514a834`，见 `runs/reward_viz/README.md` §0.1（#1）与 `docs/rl_stage_c_v4_report.md` §0 ⑥。
+- **CaRL 已修**：违规帧只清零**正向**稠密和，负向罚分保留（旧式 `dense_sum × 0` 会抹掉同帧 `solid_line` 等已发生代价）——commit `514a834`，见 `runs/reward_viz/README.md` §0.1（#1）与 `docs/archive/rl_stage_c_v4_report.md` §0 ⑥。
 - 不变量：无违规帧（`multiplier == 1`）时逐位退化为旧口径。
 
 ## 1. 终局值（剖面 C；**P2 审计重解定稿**）
@@ -139,7 +139,7 @@ reward = dense_positive_sum × carl_multiplier
   - 终局帧掩码回退（`6ab70b3` ⑥b；§0.1 #3）；
   - ctx 新键 `lead_gap_m` / `lead_speed_mps` / `lane_half_width_m`（`3268cc7` ⑦）；
   - CaRL 正向清零（`514a834`；§0.1 #1）。
-  - 汇总：`docs/rl_stage_c_v4_report.md` §0、`runs/reward_viz/README.md` §0.1、`runs/reward_viz/INDEX.md`。
+  - 汇总：`docs/archive/rl_stage_c_v4_report.md` §0、`runs/reward_viz/README.md` §0.1、`runs/reward_viz/INDEX.md`。
 
 ## 7. 奖励审计工具规格（Gate2；P3 后/P4 前复算）
 

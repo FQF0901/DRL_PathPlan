@@ -3,7 +3,7 @@
 > **路径注记（2026-10-06 锁版清理 B）**：本文中 `/tmp/opencode/...` 为历史工作路径；关键证据报告已入仓 `docs/v7_reports/`，其余一次性工作档已清理删除——映射总说明见 `docs/v7_reports/MIGRATION_NOTE.md`（正文未改）。
 > **状态：冻结（2026-10-02；v7-P0 + Gate A 修正集 #1）**。目标：在冻结评测协议上，**IL+RL 闭环 success 显著超过 IDM 规则基线**。
 > 上游：`.slim/deepwork/v7-beat-idm.md`（P0 计划 + 外部研究 §2.5）；工具：`tools/paired_eval.py`（配对 McNemar + bootstrap CI + 多 run 汇总；单测 `tests/test_paired_eval.py`）。
-> 关联：[`docs/experiments.md`](experiments.md) §4（IDM 锚）、[`docs/v6_program_prereg.md`](v6_program_prereg.md) §7.3（配对口径）、[`docs/rl_stage_c_experiments.md`](rl_stage_c_experiments.md)（历史 fixed/broken/net/z 记录）。
+> 关联：[`docs/experiments.md`](experiments.md) §4（IDM 锚）、[`docs/v6_program_prereg.md`](v6_program_prereg.md) §7.3（配对口径）、[`docs/archive/rl_stage_c_experiments.md`](archive/rl_stage_c_experiments.md)（历史 fixed/broken/net/z 记录）。
 
 ## 0. 锚点与口径（冻结）
 

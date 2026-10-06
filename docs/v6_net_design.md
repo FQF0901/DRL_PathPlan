@@ -2,7 +2,7 @@
 
 > **状态：冻结（2026-10-01）**。P1 实现以本文件为唯一架构规格；与现行代码/文档冲突处，以本文件为准。
 > 关联：[`docs/v6_program_prereg.md`](v6_program_prereg.md)（阶段/Oracle 门/E3 硬闸）、[`docs/rl_reward_v5.md`](rl_reward_v5.md)（奖励 v5）。
-> 上游依据：`.slim/deepwork/v6-net-retrain.md`（已锁决策）；现行基线：`docs/design-v1.2.md`、`.slim/deepwork/p2-contract.md`。未提及处沿用现行契约。
+> 上游依据：`.slim/deepwork/v6-net-retrain.md`（已锁决策）；现行基线：`docs/archive/design-v1.2.md`、`.slim/deepwork/p2-contract.md`。未提及处沿用现行契约。
 
 ## 0. 冻结常量（不变项）
 
@@ -22,7 +22,7 @@
 
 ### 1.1 现状（被替换）
 - `net/model.py::_masked_mean`（L212–214）把 OD/LD 逐槽令牌**掩码均值池化**为单 token（`DrivingModel._plan`，L331–332），再交 `net/plan_head.py` 的 `fusion`（6H→H）。
-- 问题：逐槽空间信息（左右邻车/车道线位置）被池化抹平；plan head 池化审计已列为待办（`docs/rl_stage_c_v4_report.md` §5.3）。
+- 问题：逐槽空间信息（左右邻车/车道线位置）被池化抹平；plan head 池化审计已列为待办（`docs/archive/rl_stage_c_v4_report.md` §5.3）。
 
 ### 1.2 规格
 新增 **CrossAttnHead**（策略/价值各一份，**不共享权重**；落点 P1 定：`net/policy.py` 扩展或新 `net/attn_head.py`；**模块命名须保 `model.policy.*` / `model.value.*`**，见 §5 #7）：

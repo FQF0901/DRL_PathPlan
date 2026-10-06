@@ -1,6 +1,7 @@
 # v6 程序级预注册（Net 重构 → 重训 → 奖励 v5 → RL → 扩量）
 
 > **路径注记（2026-10-06 锁版清理 B）**：本文中 `/tmp/opencode/...` 为历史工作路径；关键证据报告已入仓 `docs/v6_reports/`（v7 侧见 `docs/v7_reports/`），其余一次性工作档已清理删除——映射总说明见 `docs/v7_reports/MIGRATION_NOTE.md`（正文未改）。
+> **路径注记（2026-10-06 锁版清理 C）**：本文引用的 `docs/rl_stage_c_experiments.md`、`docs/rl_stage_c_v4_report.md`、`docs/phase3_rootcause_analysis.md` 已归档至 `docs/archive/`（同名文件）；映射见 `docs/archive/README.md` 与 `docs/v7_reports/cleanup/CLEANUP_C_REPORT.md`（正文未改）。
 > **状态：冻结（2026-10-01；Gate0 复核修正版）**。6 阶段（P0–P5）、每阶段 Oracle 门；Oracle 评审总额 = **6 次初评 + 每门 ≤ 2 次重审**。
 > 关联：[`docs/v6_net_design.md`](v6_net_design.md)（架构规格）、[`docs/rl_reward_v5.md`](rl_reward_v5.md)（奖励规格）。
 > 上游：`.slim/deepwork/v6-net-retrain.md`；目标 = **RL 大幅提升基座闭环性能**。
