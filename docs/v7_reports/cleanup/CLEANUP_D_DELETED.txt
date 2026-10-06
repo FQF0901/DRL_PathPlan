@@ -1,0 +1,15 @@
+# CLEANUP D 删除清单（2026-10-06）
+# 范围：tests/ 废弃测试（被测对象已死：生产零调用且无兼容/差分职责）
+# 判定方法：AST 提取测试 import 的生产符号 → 全仓（排除 tests）引用/调用检索 → 零调用即候选；再复核兼容与测试职责
+# 基线：694 passed → 删除后 693 passed（.venv/bin/python -m pytest tests/ -q）
+#
+# 逐项（1 用例；0 文件）：
+TEST	tests/test_collect_expert_v2.py::test_label_statistics_count_and_weighted_conventions	被测对象 tools/collect_expert.py::label_statistics 生产零调用（报告统计已改内联向量化；全仓唯一引用=该用例）；同步移除该文件对 label_statistics 的 import
+#
+# 保留边界项（判定为"非死"，未删；理由见 CLEANUP_D_REPORT.md §2/§4）：
+#   tests/test_collect_expert_v2.py::test_balance_weights_use_trainable_rows_only          apply_balance=live balance_from_specs 的差分参考实现（手算 ground truth）
+#   tests/test_collect_expert_v2.py::test_balance_cap_zeroes_weights_without_deleting_rows  同上（cap 档语义）
+#   tests/test_collect_expert_v2.py::test_save_dataset_v2_schema_roundtrip                 save_dataset 标注"测试用"；用例锁定 live _write_dataset 的 v2 schema 契约
+#   v5 结构线 / v6 未跑臂 / 默认关旧开关 全部测试                                             被测符号仍被生产 import/调用（默认开或默认关+配置）
+#
+# 汇总：删除 1 用例；测试文件数不变（74）；pytest 693 passed。

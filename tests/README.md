@@ -4,7 +4,7 @@
 
 运行：
 
-    tools/venv-python -m pytest tests/ -q      # 当前 240 passed
+    tools/venv-python -m pytest tests/ -q      # 当前 693 passed
 
 裸 `pytest` 可能解析到系统 Python（无 metadrive），一律用 `tools/venv-python`（venv + system-site-packages）。
 
@@ -24,3 +24,7 @@
 | `test_run_paths.py` | 入口布局契约：run 根/`stage_a|b`/日志命名、共戳与 resume auto 取值、`tb_spec` run 名与 `--profile tb`、三个入口脚本 ≤30 行 + `bash -n` |
 
 约定：断言以契约为准（形状、门控、因果链、判定逻辑），非快照式回归。
+
+> 2026-10-06 清理 D 全量审计（74 文件 / 693 用例；分类 a 现行 / b 遗留兼容 / c 废弃 / d 噪声）见
+> `docs/v7_reports/cleanup/CLEANUP_D_REPORT.md`；生产 dead-code 候选见 `CLEANUP_D_DEADCODE.md`。
+> 本表只列早期核心契约，其余文件见该报告 §3。

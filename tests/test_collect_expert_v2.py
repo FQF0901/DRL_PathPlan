@@ -32,7 +32,6 @@ from tools.collect_expert import (
     arc_interpolate,
     balance_from_specs,
     extract_samples,
-    label_statistics,
     save_dataset,
 )
 from env.scenario.labels import LABEL_ORDER
@@ -248,22 +247,6 @@ def _fake_sample(group, label_index, train_weight=1.0):
         "labels": labels,
         "train_weight": float(train_weight),
     }
-
-
-def test_label_statistics_count_and_weighted_conventions():
-    samples = [
-        _fake_sample(("easy", "straight"), 0, 1.0),
-        _fake_sample(("easy", "straight"), 0, 1.0),
-        _fake_sample(("hard", "curve"), 2, 0.0),  # 过滤行：两套口径都不计
-        _fake_sample(("hard", "curve"), 2, 1.0),
-    ]
-    for sample in samples:
-        sample["sample_weight"] = 2.0 if sample["difficulty"] == "hard" else 0.5
-    counts, weighted = label_statistics(samples, SUPERVISED_LABELS)
-    assert counts["cutin_active"] == 2  # 行数口径
-    assert weighted["cutin_active"] == pytest.approx(2 * 1.0 * 0.5)  # 权重和口径
-    assert counts["crowded"] == 1  # train_weight=0 的行不计
-    assert weighted["crowded"] == pytest.approx(2.0)
 
 
 def test_balance_weights_use_trainable_rows_only():
