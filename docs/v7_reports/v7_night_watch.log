@@ -1,0 +1,557 @@
+===== 2026-10-05 23:24:07 (tick 1/24) =====
+-- markers --
+-- p4extra status --
+seed=0 terminal:partial adopted=u75 clean: succ=0.678 coll=0.154 | eval500: succ=0.652 coll=0.164 | verdict=partial
+seed=11 training adopted=None clean: succ=None coll=None | eval500: succ=None coll=None | verdict=None
+batch={"started_at": "2026-10-05T21:38:35+0800", "seeds": [0, 11], "arms": {"0": {"status": "terminal:partial", "verdict": "partial"}}}
+-- diag status --
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+50904 bash /tmp/opencode/v7_p4extra_launch.sh 0,11
+50955 bash -c python3 /tmp/opencode/v7_p4extra_driver.py --batch --seeds 0,11 >> /tmp/opencode/v7_p4extra_launch.log 2>&1; echo $? > /tmp/opencode/v7_p4extra_done
+50967 python3 /tmp/opencode/v7_p4extra_driver.py --batch --seeds 0,11
+109295 bash /tmp/opencode/v7_q6q2/driver.sh
+-- gpu --
+1808 MiB, 99 %
+
+===== 2026-10-05 23:44:07 (tick 2/24) =====
+-- markers --
+-- p4extra status --
+seed=0 terminal:partial adopted=u75 clean: succ=0.678 coll=0.154 | eval500: succ=0.652 coll=0.164 | verdict=partial
+seed=11 training adopted=u50 clean: succ=0.654 coll=0.16 | eval500: succ=None coll=None | verdict=None
+batch={"started_at": "2026-10-05T21:38:35+0800", "seeds": [0, 11], "arms": {"0": {"status": "terminal:partial", "verdict": "partial"}}}
+-- diag status --
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+50904 bash /tmp/opencode/v7_p4extra_launch.sh 0,11
+50955 bash -c python3 /tmp/opencode/v7_p4extra_driver.py --batch --seeds 0,11 >> /tmp/opencode/v7_p4extra_launch.log 2>&1; echo $? > /tmp/opencode/v7_p4extra_done
+50967 python3 /tmp/opencode/v7_p4extra_driver.py --batch --seeds 0,11
+109295 bash /tmp/opencode/v7_q6q2/driver.sh
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 00:04:07 (tick 3/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+244875 timeout 2400 tools/venv-python /tmp/opencode/v7_q6q2/collision_replay.py --workers 6 --device cuda --ckpt /workspace/01_Proj/DRL_PathPlan/runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt --run-dir /workspace/01_Proj/DRL_PathPlan/runs/BTC20261005-074755_v7p2_s11_eval500_clean --out /tmp/opencode/v7_q6q2/collision_replay.json --md /tmp/opencode/v7_q6_collision_types.md
+244877 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_q6q2/collision_replay.py --workers 6 --device cuda --ckpt /workspace/01_Proj/DRL_PathPlan/runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt --run-dir /workspace/01_Proj/DRL_PathPlan/runs/BTC20261005-074755_v7p2_s11_eval500_clean --out /tmp/opencode/v7_q6q2/collision_replay.json --md /tmp/opencode/v7_q6_collision_types.md
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 00:24:07 (tick 4/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+259850 /bin/bash -c sleep 720; echo "=== $(date -Is) ==="; tail -12 /tmp/opencode/v7_reward_arms_chain.log; echo "--- smoke results ---"; for a in B C; do ls /tmp/opencode/v7_reward_smoke_${a}_u2.json 2>/dev/null && /workspace/01_Proj/DRL_PathPlan/.venv/bin/python -c "import json;d=json.load(open('/tmp/opencode/v7_reward_smoke_${a}_u2.json'));print('$a',d['verdict'],d['train'].get('rc'),d['train'].get('wall_s'),(d.get('readback') or {}).get('problems'))"; done
+-- gpu --
+431 MiB, 24 %
+
+===== 2026-10-06 00:44:07 (tick 5/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+297777 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0027_v7reward_A_s0/ckpt_u025.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only150.json --out runs --name v7reward_A_s0_u025_sub150 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1794 MiB, 99 %
+
+===== 2026-10-06 01:04:07 (tick 6/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+321862 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0027_v7reward_A_s0/ckpt_u100.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7reward_A_s0_u100_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 01:24:07 (tick 7/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+338905 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0027_v7reward_A_s0/ckpt_u025.pt --spec env/specs/scenarios_eval500.json --out runs --name v7reward_A_s0_eval500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 01:44:07 (tick 8/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+371402 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0127_v7reward_A_s11/ckpt_u100.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only150.json --out runs --name v7reward_A_s11_u100_sub150 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1789 MiB, 99 %
+
+===== 2026-10-06 02:04:07 (tick 9/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+387014 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0127_v7reward_A_s11/ckpt_u100.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7reward_A_s11_u100_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 02:24:07 (tick 10/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+421413 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0127_v7reward_A_s11/ckpt_u100.pt --spec env/specs/scenarios_eval500.json --out runs --name v7reward_A_s11_eval500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1789 MiB, 99 %
+
+===== 2026-10-06 02:44:07 (tick 11/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+451649 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0233_v7reward_B_s0/ckpt_u050.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only150.json --out runs --name v7reward_B_s0_u050_sub150 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1794 MiB, 99 %
+
+===== 2026-10-06 03:04:07 (tick 12/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+472466 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0233_v7reward_B_s0/ckpt_u025.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7reward_B_s0_u025_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 03:24:07 (tick 13/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+490097 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0233_v7reward_B_s0/ckpt_u100.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7reward_B_s0_u100_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 03:44:07 (tick 14/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+525264 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/train.py --stage C --config config/arms/v7_reward_B.yaml --ckpt runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt --spec env/specs/scenarios_train_dagger_r1.json --pool local --envs 1 --trainable-scope design --plan-reference repeat_action --adv-norm global --updates 100 --rollout-steps 256 --ppo-epochs 2 --minibatch-size 1024 --seed 11 --critic-warmup-updates 0 --kl-anchor-coef 0.05 --kl-anchor-final-coef 0.02 --ckpt-every 25 --probe-interval 25 --device cuda --monitor --monitor-legacy-tags --out runs/BTC20261006-0342_v7reward_B_s11 --max-episode-steps 200
+-- gpu --
+1450 MiB, 7 %
+
+===== 2026-10-06 04:04:07 (tick 15/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+552097 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0342_v7reward_B_s11/ckpt_u075.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only150.json --out runs --name v7reward_B_s11_u075_sub150 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1794 MiB, 98 %
+
+===== 2026-10-06 04:24:07 (tick 16/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+572652 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0342_v7reward_B_s11/ckpt_u100.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7reward_B_s11_u100_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 04:44:07 (tick 17/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+589500 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0342_v7reward_B_s11/ckpt_u025.pt --spec env/specs/scenarios_eval500.json --out runs --name v7reward_B_s11_eval500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 05:04:07 (tick 18/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+626736 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0445_v7reward_C_s0/ckpt_u025.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only150.json --out runs --name v7reward_C_s0_u025_sub150 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 05:24:07 (tick 19/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+653263 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0445_v7reward_C_s0/ckpt_u025.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7reward_C_s0_u025_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1794 MiB, 99 %
+
+===== 2026-10-06 05:44:07 (tick 20/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 执行环境：pre-v5 worktree `/tmp/opencode/v7_pre_v5` @ `2f4450e`（detached）；主树 venv `/workspace/01_Proj/DRL_PathPlan/.venv/bin/python`；`runs`/`datasets`/`env/specs` 符号链接主树；同步白名单 ['config/arms/v7_reward_A.yaml', 'config/arms/v7_reward_B.yaml', 'config/arms/v7_reward_C.yaml', 'reward_model/aggregation.py', 'reward_model/registry.py', 'reward_model/terms.py']（sha256 校验）。
+- 主树预注册：内容 `db98501` / 锚 `23ae105`；主树仅 reward_model/config/docs/tests 变更。
+- 事件：见 status `/tmp/opencode/v7_p4extra_rewards_status.txt` 与逐 seed 日志 `/tmp/opencode/v7_reward_{a,b,c}_s{0,11}.log`（异常如实追加于本节）。
+
+-- procs --
+276715 bash /tmp/opencode/v7_reward_arms_chain.sh
+277071 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_reward_arms_driver.py --batch --wait --arms A,B,C --seeds 0,11 --deadline-min 360
+673739 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0445_v7reward_C_s0/ckpt_u025.pt --spec env/specs/scenarios_eval500.json --out runs --name v7reward_C_s0_eval500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1785 MiB, 99 %
+
+===== 2026-10-06 06:04:07 (tick 21/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 00:14 smoke B 首跑失败（**环境问题，非代码**：chain 未导出 `LD_LIBRARY_PATH` → panda3d `getPipeTypes()` 空列表 IndexError，MetaDrive 引擎初始化失败）；补 `LD_LIBRARY_PATH=<venv>/gl/usr/lib/x86_64-linux-gnu` 后 00:26 smoke B / 00:27 smoke C （u2）通过；新项在训练循环内非零（speed_deficit mean20 −0.208 / comfort_jerk_win mean20 −0.00073；断言 ok）。
+- batch 实跑 **326.0 min**（A s0/s11 60/66min、B s0/s11 63/66min、C s0 68min）；C seed 11 按 §13.4 预算规则跳过（remaining 34min < 1.5×66min 实测单 seed 墙钟），标 **not-run**（如实记录，不追补）。
+- 逐 run `episodes.csv` sha256 / metrics / ckpt sha 见各 seed 明细；事件日志 `/tmp/opencode/v7_reward_arms_chain.log` / `v7_reward_{a,b,c}_s{0,11}.log`。
+
+-- procs --
+-- gpu --
+433 MiB, 31 %
+
+===== 2026-10-06 06:24:07 (tick 22/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 00:14 smoke B 首跑失败（**环境问题，非代码**：chain 未导出 `LD_LIBRARY_PATH` → panda3d `getPipeTypes()` 空列表 IndexError，MetaDrive 引擎初始化失败）；补 `LD_LIBRARY_PATH=<venv>/gl/usr/lib/x86_64-linux-gnu` 后 00:26 smoke B / 00:27 smoke C （u2）通过；新项在训练循环内非零（speed_deficit mean20 −0.208 / comfort_jerk_win mean20 −0.00073；断言 ok）。
+- batch 实跑 **326.0 min**（A s0/s11 60/66min、B s0/s11 63/66min、C s0 68min）；C seed 11 按 §13.4 预算规则跳过（remaining 34min < 1.5×66min 实测单 seed 墙钟），标 **not-run**（如实记录，不追补）。
+- 逐 run `episodes.csv` sha256 / metrics / ckpt sha 见各 seed 明细；事件日志 `/tmp/opencode/v7_reward_arms_chain.log` / `v7_reward_{a,b,c}_s{0,11}.log`。
+
+-- procs --
+730934 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0615_v7s14_s0_ttc/ckpt_u050.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only150.json --out runs --name v7s14_s0_u050_sub150 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1792 MiB, 99 %
+
+===== 2026-10-06 06:44:07 (tick 23/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 00:14 smoke B 首跑失败（**环境问题，非代码**：chain 未导出 `LD_LIBRARY_PATH` → panda3d `getPipeTypes()` 空列表 IndexError，MetaDrive 引擎初始化失败）；补 `LD_LIBRARY_PATH=<venv>/gl/usr/lib/x86_64-linux-gnu` 后 00:26 smoke B / 00:27 smoke C （u2）通过；新项在训练循环内非零（speed_deficit mean20 −0.208 / comfort_jerk_win mean20 −0.00073；断言 ok）。
+- batch 实跑 **326.0 min**（A s0/s11 60/66min、B s0/s11 63/66min、C s0 68min）；C seed 11 按 §13.4 预算规则跳过（remaining 34min < 1.5×66min 实测单 seed 墙钟），标 **not-run**（如实记录，不追补）。
+- 逐 run `episodes.csv` sha256 / metrics / ckpt sha 见各 seed 明细；事件日志 `/tmp/opencode/v7_reward_arms_chain.log` / `v7_reward_{a,b,c}_s{0,11}.log`。
+
+-- procs --
+742195 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0615_v7s14_s0_ttc/ckpt_u075.pt --spec /tmp/opencode/phase3_diag/exp/specs_val_only500.json --out runs --name v7s14_s0_u075_clean500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1792 MiB, 99 %
+
+===== 2026-10-06 07:04:08 (tick 24/24) =====
+-- markers --
+/tmp/opencode/v7_p4extra_done
+/tmp/opencode/v7_q6q2_diag_done
+-- p4extra status --
+- success vs s11: 全部 ns（-1.4..+1.0pp）；u50+u100 双点闸未触发；无 void
+- 采纳: s0 u75 (sha 4217abe0…), s11 u50 (sha 711e96a7…)
+- report: /tmp/opencode/v7_p4extra_collision.md
+-- diag status --
+finished_at=Mon Oct  5 23:52:18 CST 2026
+q6_md=/tmp/opencode/v7_q6_collision_types.md
+q2_md=/tmp/opencode/v7_q2_tollgate_figure.md
+-- rewards status --
+- 00:14 smoke B 首跑失败（**环境问题，非代码**：chain 未导出 `LD_LIBRARY_PATH` → panda3d `getPipeTypes()` 空列表 IndexError，MetaDrive 引擎初始化失败）；补 `LD_LIBRARY_PATH=<venv>/gl/usr/lib/x86_64-linux-gnu` 后 00:26 smoke B / 00:27 smoke C （u2）通过；新项在训练循环内非零（speed_deficit mean20 −0.208 / comfort_jerk_win mean20 −0.00073；断言 ok）。
+- batch 实跑 **326.0 min**（A s0/s11 60/66min、B s0/s11 63/66min、C s0 68min）；C seed 11 按 §13.4 预算规则跳过（remaining 34min < 1.5×66min 实测单 seed 墙钟），标 **not-run**（如实记录，不追补）。
+- 逐 run `episodes.csv` sha256 / metrics / ckpt sha 见各 seed 明细；事件日志 `/tmp/opencode/v7_reward_arms_chain.log` / `v7_reward_{a,b,c}_s{0,11}.log`。
+
+-- procs --
+760009 /workspace/01_Proj/DRL_PathPlan/.venv/bin/python /tmp/opencode/v7_pre_v5/tools/test.py --policy ckpt --ckpt runs/BTC20261006-0615_v7s14_s0_ttc/ckpt_u075.pt --spec env/specs/scenarios_eval500.json --out runs --name v7s14_s0_eval500 --workers 6 --tracker lqr --config config/default.yaml --eval-reference plan --device cuda
+-- gpu --
+1770 MiB, 99 %
+
+NIGHT WATCH END 2026-10-06 07:24:08

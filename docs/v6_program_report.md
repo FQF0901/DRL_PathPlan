@@ -87,7 +87,7 @@
 | §9.1 判定 | terminal:positive | **失败（< −10）⇒ 停线归因** |
 
 - 终局差 **158 counts**（+99 vs −59）= 批内混沌标尺（22–32）的 5–7×；2-seed clean500 均值 ≈ **+20**，方差主导。
-- seed11 u175 clean500 的 post-hoc 复评写作时进行中（快照 `/tmp/opencode/v6_p4_seed11_posthoc_status.txt`）；不改变失败分支与归因结论。
+- seed11 u175 clean500 的 post-hoc 复评写作时进行中（快照原 `/tmp/opencode/v6_p4_seed11_posthoc_status.txt`，已清理）；不改变失败分支与归因结论。
 
 ### 2.5 碰撞代价（arm0 行为构成；§7.5 立项依据）
 
@@ -104,7 +104,7 @@
 
 ### 3.1 seed 分叉归因：轨迹混沌 + 亚稳吸引子分叉
 
-- **时间线**（数值见 `/tmp/opencode/v6_seed11_attribution.md`）：权重自 u1 即分叉（单 seed 改变 rollout 采样；u25 交叉距离 1.24% rel L2）；第一处显著行为分离 **u46–62**（确定性探针 ds@2–4 最大差 1.43 m/s，u50 闸窗正落其中）；u65–100 部分回敛；**持久分叉自 u101–105**（ds@4–8 / ds@8+ / ds_std / ds mean 依次分离且不再回敛）；logstd u135、returns/EV u140–172 跟进；**终局 u150 前后锁定**（post-hoc u150 sub150 已 −30）。
+- **时间线**（数值见 `docs/v6_reports/v6_seed11_attribution.md`）：权重自 u1 即分叉（单 seed 改变 rollout 采样；u25 交叉距离 1.24% rel L2）；第一处显著行为分离 **u46–62**（确定性探针 ds@2–4 最大差 1.43 m/s，u50 闸窗正落其中）；u65–100 部分回敛；**持久分叉自 u101–105**（ds@4–8 / ds@8+ / ds_std / ds mean 依次分离且不再回敛）；logstd u135、returns/EV u140–172 跟进；**终局 u150 前后锁定**（post-hoc u150 sub150 已 −30）。
 - **排除系统性不稳定**：无 NaN/Inf；grad norm 峰值相当（142.6 vs 121.1）；approx_kl 除 u1 外 <0.05；value_loss / advantage / router 无爆炸或漂移；权重交叉距离近似线性增长（u200 5.43%），与各 run 自身漂移同量级，分歧方向 cos 仅 0.43（共享梯度漂移 + 独立混沌分量）——**不是"某通道爆炸 / 熵塌 / 基线漂移"型故障**。
 - **吸引子证据**：两 run 落入定性不同的晚段吸引子——seed0 快 / 低熵 / value EV↑；seed11 慢 / 高熵 / EV≈0。arm5 在 u100–140 与 seed11 同向（4–8 档下行、entropy 上行）但 u150 后部分恢复并终局正向 ⇒ 系统存在**放大窗口**且至少两个晚段吸引子（"快/锐化"与"慢/探索"）；arm0 与 arm5 落前者、seed11 落后者。
 - **KL 锚衰减窗重合**：u100 时锚系数 ≈0.025、u150 ≈0.013；三条轨迹都在锚弱化后分叉 ⇒ v7 方差控制首选「KL 锚末值 > 0（0.01–0.02）或更慢衰减」。
@@ -158,11 +158,11 @@
 - `config/arms/`：`arm0_bundle_rc1` / `arm1_rc3` / `arm2_rc10` / `arm3_rc30` / `arm4_lam098` / `arm5_ttc` / `arm6_lane_boundary` / `arm7_lane_center` / `arm8_collision_suppress_{term,term46,gap}` + `README.md`。
 - `docs/reward_audit/ebeta2/`：`MANIFEST.md`、`reward_audit.{md,json}`、`reward_audit_swap.json`、`ab_comparison.{md,json}`、`config_draft_rc{1,3,10,30}.yaml`（E-β″ 定稿：rc=1 +29/−22/−14/−46/−5；rc=3 +27/−23/−15/−48；rc=10 +20/−28/−18/−54；rc=30 +0/−41/−26/−71）。
 
-### 5.4 证据/报告档（`/tmp/opencode/`，不入 repo；仅引用路径）
+### 5.4 证据/报告档（已入仓 `docs/v6_reports/`；索引/sha256 见 `docs/v6_reports/README.md`）
 
-- 执行报告：`v6_p3_report.md`、`v6_p4_report.md`、`v6_p4_results.{md,json}`、`v6_p4_incident.md`、`v6_p4_recheck.md`、`v6_p4_seed11_report.md`、`v6_p4_seed11_posthoc.{json,md,status}`、`v6_seed11_attribution.md`、`v6_collision_arm_design.md`。
-- 门/专项：`v6_gate4_fixes.md`、`v6_p1_validation.md`、`v6_reward_audit.md`、`v6_reward_audit_ebeta2.md`、`v6_ttc_falsification.md`、`v6_p3_data.md`、`v6_cleanup_report.md`、`v6_stageA_cost.md`。
-- 驱动/脚本（不入 repo）：`v6_p4_driver.py`（补丁后 sha `32928a6c…`）、`v6_p4_seed11.py`、`v6_p4_recheck.py`、`v6_collision_diag.py` 等。
+- 执行报告（入仓）：`docs/v6_reports/v6_p3_report.md`、`docs/v6_reports/v6_p4_report.md`、`docs/v6_reports/v6_p4_incident.md`、`docs/v6_reports/v6_p4_recheck.md`、`docs/v6_reports/v6_seed11_attribution.md`、`docs/v6_reports/v6_collision_arm_design.md`；`v6_p4_results.{md,json}`、`v6_p4_seed11_report.md`、`v6_p4_seed11_posthoc.{json,md,status}`（未入仓，已随 2026-10-06 `/tmp` 清理删除）。
+- 门/专项：`docs/v6_reports/v6_cleanup_report.md`（入仓）；`v6_gate4_fixes.md`、`v6_p1_validation.md`、`v6_reward_audit.md`、`v6_reward_audit_ebeta2.md`、`v6_ttc_falsification.md`、`v6_p3_data.md`、`v6_stageA_cost.md`（未入仓，已清理；部分内容由 `docs/reward_audit/`、`docs/v6_net_design.md` 承接）。
+- 驱动/脚本（不入 repo；已随 2026-10-06 清理删除）：`v6_p4_driver.py`（补丁后 sha `32928a6c…`）、`v6_p4_seed11.py`、`v6_p4_recheck.py`、`v6_collision_diag.py` 等。
 
 ### 5.5 文档（repo tracked）
 
@@ -173,7 +173,7 @@
 - **本报告 §2 关键数字已由 fixer 从盘上 `episodes.csv` / `metrics.json` 独立复算**（脚本口径 `net=fixed−broken`、`z=|net|/√(fixed+broken)`）：
   - E-β″ vs E-β′ 配对（−3/+2）；arm0/arm5 终评（+99/+91、+77/+59）；seed11 u200 clean500（−59，fixed/broken=40/99）；u50 全臂（−6/−24/−20/−26/−64/−6、seed11 −16）；u200 复检（+32/+30/−29/+3）；E-β″ E3 零点 0.440/0.440、E-β′ 零点 0.446/0.436 逐位复核。
   - collΔ/offΔ 独立复算与驱动 JSON 一致（舍入差 ≤0.0001）。
-- **复算入口**：`runs/*/episodes.csv`（逐 (id,seed) 配对）；`runs/*/metrics.json`（overall）；`sha256sum` 核对 §5.1；seed11 归因复算命令见 `/tmp/opencode/v6_seed11_attribution.md` §10。
+- **复算入口**：`runs/*/episodes.csv`（逐 (id,seed) 配对）；`runs/*/metrics.json`（overall）；`sha256sum` 核对 §5.1；seed11 归因复算命令见 `docs/v6_reports/v6_seed11_attribution.md` §10。
 - **未跑/未决（如实）**：arm6/7 未跑（预算门）；arm8 碰撞抑制臂未跑（已立项 + 预注册）；seed11 u175 clean500 post-hoc 写作时进行中；P5 阻断；跨代比较不可消（E-β′ 无法在新代码复评，missing=20）；rc 默认档位仍为开放项（§10）。
 - **tag**：`v6-p4-closed-20261002`（指向本报告入库 commit；tag 说明含 E-β″ 基线 + P4 臂批结论 + 单 seed 限定）。
 

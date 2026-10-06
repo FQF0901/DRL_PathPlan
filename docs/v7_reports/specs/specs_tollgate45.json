@@ -1,0 +1,3725 @@
+{
+ "schema_version": 1,
+ "count": 45,
+ "provenance": {
+  "source": "env/specs/scenarios_eval500.json",
+  "rule": "labels.geometry == tollgate",
+  "tollgate_n": 45,
+  "ids": [
+   34,
+   76,
+   84,
+   85,
+   101,
+   131,
+   147,
+   164,
+   166,
+   183,
+   199,
+   217,
+   239,
+   243,
+   273,
+   293,
+   296,
+   324,
+   325,
+   343,
+   353,
+   358,
+   379,
+   418,
+   419,
+   469,
+   476,
+   486,
+   520,
+   547,
+   607,
+   644,
+   658,
+   706,
+   741,
+   753,
+   771,
+   781,
+   785,
+   808,
+   851,
+   863,
+   895,
+   906,
+   924
+  ]
+ },
+ "specs": [
+  {
+   "id": 34,
+   "seed": 5000034,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.13,
+    "patterns": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 56,
+      "duration_steps": 32,
+      "gap_m": 12.6,
+      "speed_mps": 8.4
+     }
+    ],
+    "seed": 5000034,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.67,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 76,
+   "seed": 5000076,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.122,
+    "patterns": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 78,
+      "duration_steps": 52,
+      "gap_m": 14.9,
+      "speed_mps": 9.5
+     }
+    ],
+    "seed": 5000076,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.33,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 84,
+   "seed": 5000084,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.033,
+    "patterns": [],
+    "events": [],
+    "seed": 5000084,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.89,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 85,
+   "seed": 5000085,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.129,
+    "patterns": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 110,
+      "duration_steps": 43,
+      "gap_m": 12.1,
+      "speed_mps": 9.8
+     }
+    ],
+    "seed": 5000085,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.29,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 101,
+   "seed": 5000101,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.271,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 70,
+      "duration_steps": 43,
+      "gap_m": 9.7,
+      "speed_mps": 10.7
+     }
+    ],
+    "seed": 5000101,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.87,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 131,
+   "seed": 5000131,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.208,
+    "patterns": [
+     "cut_in",
+     "cut_out",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 48,
+      "duration_steps": 36,
+      "gap_m": 6.7,
+      "speed_mps": 10.6
+     },
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 115,
+      "duration_steps": 49,
+      "gap_m": 8.7,
+      "speed_mps": 10.3
+     }
+    ],
+    "seed": 5000131,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.2,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "cut_out",
+     "crowded"
+    ],
+    "control": "cut_in_cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 147,
+   "seed": 5000147,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.029,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 50,
+      "duration_steps": 51,
+      "gap_m": 29.1,
+      "speed_mps": 6.6
+     }
+    ],
+    "seed": 5000147,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.66,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 164,
+   "seed": 5000164,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.203,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 77,
+      "duration_steps": 43,
+      "gap_m": 8.0,
+      "speed_mps": 11.9
+     }
+    ],
+    "seed": 5000164,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.31,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 166,
+   "seed": 5000166,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.083,
+    "patterns": [
+     "cut_in",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 84,
+      "duration_steps": 48,
+      "gap_m": 15.7,
+      "speed_mps": 7.9
+     }
+    ],
+    "seed": 5000166,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.4,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 183,
+   "seed": 5000183,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.024,
+    "patterns": [],
+    "events": [],
+    "seed": 5000183,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.27,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 199,
+   "seed": 5000199,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.091,
+    "patterns": [
+     "cut_in"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 108,
+      "duration_steps": 44,
+      "gap_m": 12.1,
+      "speed_mps": 9.7
+     }
+    ],
+    "seed": 5000199,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.72,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 217,
+   "seed": 5000217,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.084,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 65,
+      "duration_steps": 32,
+      "gap_m": 12.5,
+      "speed_mps": 9.4
+     }
+    ],
+    "seed": 5000217,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.87,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 239,
+   "seed": 5000239,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.256,
+    "patterns": [
+     "cut_in",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 65,
+      "duration_steps": 41,
+      "gap_m": 8.4,
+      "speed_mps": 10.3
+     }
+    ],
+    "seed": 5000239,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.84,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 243,
+   "seed": 5000243,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.049,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 80,
+      "duration_steps": 67,
+      "gap_m": 20.3,
+      "speed_mps": 6.6
+     }
+    ],
+    "seed": 5000243,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.67,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 273,
+   "seed": 5000273,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.054,
+    "patterns": [],
+    "events": [],
+    "seed": 5000273,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.86,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 293,
+   "seed": 5000293,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.257,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 31,
+      "duration_steps": 31,
+      "gap_m": 11.9,
+      "speed_mps": 12.5
+     }
+    ],
+    "seed": 5000293,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.38,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 296,
+   "seed": 5000296,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.16,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 86,
+      "duration_steps": 35,
+      "gap_m": 12.0,
+      "speed_mps": 11.5
+     }
+    ],
+    "seed": 5000296,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.27,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 324,
+   "seed": 5000324,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.046,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 88,
+      "duration_steps": 61,
+      "gap_m": 22.0,
+      "speed_mps": 6.6
+     }
+    ],
+    "seed": 5000324,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.18,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 325,
+   "seed": 5000325,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.136,
+    "patterns": [
+     "cut_in",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 85,
+      "duration_steps": 55,
+      "gap_m": 13.5,
+      "speed_mps": 9.8
+     }
+    ],
+    "seed": 5000325,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.08,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 343,
+   "seed": 5000343,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.086,
+    "patterns": [
+     "cut_in"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 46,
+      "duration_steps": 35,
+      "gap_m": 12.3,
+      "speed_mps": 9.8
+     }
+    ],
+    "seed": 5000343,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.13,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 353,
+   "seed": 5000353,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.163,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 60,
+      "duration_steps": 33,
+      "gap_m": 9.7,
+      "speed_mps": 10.9
+     },
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 164,
+      "duration_steps": 45,
+      "gap_m": 7.5,
+      "speed_mps": 10.0
+     }
+    ],
+    "seed": 5000353,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.09,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 358,
+   "seed": 5000358,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.103,
+    "patterns": [
+     "cut_in",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 84,
+      "duration_steps": 30,
+      "gap_m": 13.0,
+      "speed_mps": 7.8
+     }
+    ],
+    "seed": 5000358,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 5.76,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 379,
+   "seed": 5000379,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.09,
+    "patterns": [
+     "cut_in"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 56,
+      "duration_steps": 57,
+      "gap_m": 14.0,
+      "speed_mps": 9.8
+     }
+    ],
+    "seed": 5000379,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.78,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 418,
+   "seed": 5000418,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.102,
+    "patterns": [
+     "cut_out",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 64,
+      "duration_steps": 38,
+      "gap_m": 17.6,
+      "speed_mps": 8.4
+     }
+    ],
+    "seed": 5000418,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.39,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 419,
+   "seed": 5000419,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.175,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 54,
+      "duration_steps": 33,
+      "gap_m": 10.8,
+      "speed_mps": 12.7
+     }
+    ],
+    "seed": 5000419,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.3,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 469,
+   "seed": 5000469,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.116,
+    "patterns": [
+     "cut_out",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 44,
+      "duration_steps": 56,
+      "gap_m": 16.2,
+      "speed_mps": 8.8
+     }
+    ],
+    "seed": 5000469,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.75,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 476,
+   "seed": 5000476,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.217,
+    "patterns": [
+     "cut_in",
+     "cut_out",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 44,
+      "duration_steps": 36,
+      "gap_m": 11.0,
+      "speed_mps": 10.7
+     },
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 120,
+      "duration_steps": 47,
+      "gap_m": 8.0,
+      "speed_mps": 10.7
+     }
+    ],
+    "seed": 5000476,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.92,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "cut_out",
+     "crowded"
+    ],
+    "control": "cut_in_cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 486,
+   "seed": 5000486,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.034,
+    "patterns": [],
+    "events": [],
+    "seed": 5000486,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.52,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 520,
+   "seed": 5000520,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.137,
+    "patterns": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 70,
+      "duration_steps": 43,
+      "gap_m": 16.7,
+      "speed_mps": 9.6
+     }
+    ],
+    "seed": 5000520,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.55,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 547,
+   "seed": 5000547,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.106,
+    "patterns": [
+     "cut_out",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 94,
+      "duration_steps": 56,
+      "gap_m": 15.8,
+      "speed_mps": 9.0
+     }
+    ],
+    "seed": 5000547,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.12,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out",
+     "lane_change"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 607,
+   "seed": 5000607,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.121,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 44,
+      "duration_steps": 39,
+      "gap_m": 13.4,
+      "speed_mps": 7.9
+     }
+    ],
+    "seed": 5000607,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.73,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 644,
+   "seed": 5000644,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.255,
+    "patterns": [
+     "cut_in",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 60,
+      "duration_steps": 45,
+      "gap_m": 7.2,
+      "speed_mps": 10.6
+     },
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 151,
+      "duration_steps": 50,
+      "gap_m": 6.1,
+      "speed_mps": 10.8
+     }
+    ],
+    "seed": 5000644,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.22,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 658,
+   "seed": 5000658,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.08,
+    "patterns": [
+     "cut_in"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 98,
+      "duration_steps": 31,
+      "gap_m": 15.6,
+      "speed_mps": 8.5
+     }
+    ],
+    "seed": 5000658,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.47,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 706,
+   "seed": 5000706,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.103,
+    "patterns": [
+     "cut_in",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 110,
+      "duration_steps": 45,
+      "gap_m": 12.7,
+      "speed_mps": 9.5
+     }
+    ],
+    "seed": 5000706,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.51,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 741,
+   "seed": 5000741,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.053,
+    "patterns": [],
+    "events": [],
+    "seed": 5000741,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.72,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 753,
+   "seed": 5000753,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.033,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 71,
+      "duration_steps": 50,
+      "gap_m": 27.5,
+      "speed_mps": 6.6
+     }
+    ],
+    "seed": 5000753,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.82,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 771,
+   "seed": 5000771,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.027,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 33,
+      "duration_steps": 44,
+      "gap_m": 25.1,
+      "speed_mps": 6.6
+     }
+    ],
+    "seed": 5000771,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.57,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 781,
+   "seed": 5000781,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.132,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 66,
+      "duration_steps": 36,
+      "gap_m": 15.8,
+      "speed_mps": 9.7
+     }
+    ],
+    "seed": 5000781,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.35,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 785,
+   "seed": 5000785,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.277,
+    "patterns": [
+     "cut_in",
+     "cut_out",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "right",
+      "trigger_step": 44,
+      "duration_steps": 29,
+      "gap_m": 8.1,
+      "speed_mps": 11.3
+     },
+     {
+      "type": "cut_out",
+      "side": "right",
+      "trigger_step": 116,
+      "duration_steps": 45,
+      "gap_m": 11.9,
+      "speed_mps": 10.5
+     }
+    ],
+    "seed": 5000785,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.28,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "cut_out",
+     "crowded"
+    ],
+    "control": "cut_in_cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 808,
+   "seed": 5000808,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.112,
+    "patterns": [
+     "cut_out"
+    ],
+    "events": [
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 67,
+      "duration_steps": 34,
+      "gap_m": 13.8,
+      "speed_mps": 9.4
+     }
+    ],
+    "seed": 5000808,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.95,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_out"
+    ],
+    "control": "cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 851,
+   "seed": 5000851,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.231,
+    "patterns": [
+     "cut_in",
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 32,
+      "duration_steps": 30,
+      "gap_m": 6.4,
+      "speed_mps": 10.6
+     },
+     {
+      "type": "cut_out",
+      "side": "left",
+      "trigger_step": 146,
+      "duration_steps": 32,
+      "gap_m": 9.4,
+      "speed_mps": 11.7
+     }
+    ],
+    "seed": 5000851,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.17,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "cut_out",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in_cut_out",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 863,
+   "seed": 5000863,
+   "split": "val",
+   "blocks": "S$S",
+   "geometry": [
+    "straight",
+    "tollgate",
+    "straight"
+   ],
+   "traffic": {
+    "density": 0.263,
+    "patterns": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 45,
+      "duration_steps": 25,
+      "gap_m": 9.7,
+      "speed_mps": 10.5
+     }
+    ],
+    "seed": 5000863,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.17,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 11.1
+   },
+   "difficulty": "hard",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded",
+     "lane_change"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "hard"
+   }
+  },
+  {
+   "id": 895,
+   "seed": 5000895,
+   "split": "val",
+   "blocks": "CS$",
+   "geometry": [
+    "curve",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.139,
+    "patterns": [
+     "cut_in",
+     "crowded"
+    ],
+    "events": [
+     {
+      "type": "cut_in",
+      "side": "left",
+      "trigger_step": 78,
+      "duration_steps": 46,
+      "gap_m": 17.2,
+      "speed_mps": 8.9
+     }
+    ],
+    "seed": 5000895,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "C": 8.3,
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 6.29,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 8.3
+   },
+   "difficulty": "medium",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [
+     "cut_in",
+     "crowded"
+    ],
+    "control": "cut_in",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "medium"
+   }
+  },
+  {
+   "id": 906,
+   "seed": 5000906,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.048,
+    "patterns": [],
+    "events": [],
+    "seed": 5000906,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 7.33,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  },
+  {
+   "id": 924,
+   "seed": 5000924,
+   "split": "val",
+   "blocks": "SS$",
+   "geometry": [
+    "straight",
+    "straight",
+    "tollgate"
+   ],
+   "traffic": {
+    "density": 0.05,
+    "patterns": [],
+    "events": [],
+    "seed": 5000924,
+    "random_traffic": false
+   },
+   "limits": {
+    "speed_limit_mps": 5.6,
+    "by_char": {
+     "S": 13.9,
+     "$": 5.6
+    }
+   },
+   "nav": {
+    "turns": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "junction_blocks": [],
+    "candidates": [
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ],
+     [
+      "straight"
+     ]
+    ],
+    "source": "block_sequence"
+   },
+   "ego": {
+    "spawn_lane_index": [
+     ">",
+     ">>",
+     1
+    ],
+    "spawn_longitude": 4.06,
+    "spawn_lateral": 0.0,
+    "spawn_velocity": 6.0
+   },
+   "difficulty": "easy",
+   "labels": {
+    "geometry": "tollgate",
+    "traffic": [],
+    "control": "none",
+    "maneuver": [
+     "straight",
+     "straight",
+     "straight"
+    ],
+    "difficulty": "easy"
+   }
+  }
+ ]
+}

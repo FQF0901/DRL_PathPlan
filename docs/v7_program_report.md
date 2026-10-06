@@ -17,11 +17,11 @@
 
 | 阶段 | 内容 | 裁定 | 处置 / 关键证据 |
 |---|---|---|---|
-| **P0 锚定与差距解剖** | IDM 现口径复测（eval500/clean500/tg45）+ v6 best RL 差距分解 + 配对工具 + 预注册（含 Gate A 修正集 #1） | **Gate A：需修正+需补证 → 修正集 #1 后解剖通过** | 需修正 7 项（方差闸/n≥5、pin 表、IDM spec-seed 变体、Gate B/C 加固、安全闸量化、`expert500val` 禁训、`paired_eval` fail-closed）全部落文；内容 commit `b711e5f`（工具+prereg）、`0454308`+锚 `f5f0dc3`（修正集；611 passed）、`ee763f4`（fix-15：评测非严格恒等 ±0.2pp + IDM 锚复测）；差距报告 `/tmp/opencode/v7_p0_gap_decomposition.md` |
-| **P1 IL 底座** | AB-only 三轮（obs v4 / roundtrip 过滤 / 横向权重）+ 探针 V1+V2 + DAgger 闭环重标注 cycle（4 窗口 × 15ep）+ Gate B 覆盖 base | **Gate B：需修正+需补证（低成本）→ 修后放行 P2；数值线 0.55–0.60 未达** | `b99e127`（obs v4 static）、`386b091`（过滤放宽）+`2e13dfa`（`action_dim_weights`；iter3 0.260/0.274）、`4a46c5e`（链标签+标定；630 passed）；cycle 四窗 top1 clean500 0.526/0.428/0.472/0.378（vs P1-B +21.2/+11.4/+15.8/+6.4pp）；报告 `/tmp/opencode/v7_p1_dagger_cycle.md`、`v7_p1_probe_v1v2.md` |
-| **P2 RL arm1** | w1 e005 + v5 bundle(rc=1) + `off_road_edge`(−0.5 / scale 1.0) + KL 锚 0.05→0.02；seeds 0/11（后补 1/2） | 单臂；seed0 flat / seed11 strong；u50+u100 双点闸无 early-collapse | 预注册 §9 内容 `2ddfa22` / 锚 `c37acbb`；`config/arms/v7_arm1_offroad.yaml`；报告 `/tmp/opencode/v7_p2_arm1.md` |
-| **P3 n=4 分布** | seeds 0/11/1/2 全量 clean500 + tg45/T3 + 每 seed 一次 eval500（keep-best 全量配对采纳） | clean500 **mean +8.1pp / sd 5.6pp / 4/4 正（3/4 显著）**；§2.2 方差闸未过；碰撞上升、安全闸未过 | 报告 `/tmp/opencode/v7_p3_arm1_seeds.md`；s11 洁净复验 `/tmp/opencode/v7_p2_s11_verify.md`；s1/s2 于 pre-v5 worktree（`2f4450e`）复跑保代码可比 |
-| **结构迭代（用户定向；非原 Gate）** | Lane A obs v5（`0291f3a`）→ A2 lane/ttc 接线（`fcf047e`）→ B K-anchor 计划头（`f42d648`）→ v5 重训链 → 崩 → 根因诊断 → fix-11 补救（`55adf90`/锚 `1ea339d`） | **失败关闭（不具竞争力）**：补救后 clean500 0.328 / eval500 0.324 / tg45 0.178，仍远低于 w1 0.526/0.530 | `0065264`（重训臂配置）；报告 `/tmp/opencode/v7_struct_retrain_v5.md`、`v7_struct_fail_diag.md`、`v7_p3fix_retry.md`；可行性/接线 `/tmp/opencode/v7_kanchor_feasibility.md`、`v7_struct_a_obs_v5.md`、`v7_struct_a2_wiring_probe.md`、`v7_struct_b_kanchor.md` |
+| **P0 锚定与差距解剖** | IDM 现口径复测（eval500/clean500/tg45）+ v6 best RL 差距分解 + 配对工具 + 预注册（含 Gate A 修正集 #1） | **Gate A：需修正+需补证 → 修正集 #1 后解剖通过** | 需修正 7 项（方差闸/n≥5、pin 表、IDM spec-seed 变体、Gate B/C 加固、安全闸量化、`expert500val` 禁训、`paired_eval` fail-closed）全部落文；内容 commit `b711e5f`（工具+prereg）、`0454308`+锚 `f5f0dc3`（修正集；611 passed）、`ee763f4`（fix-15：评测非严格恒等 ±0.2pp + IDM 锚复测）；差距报告 `docs/v7_reports/v7_p0_gap_decomposition.md` |
+| **P1 IL 底座** | AB-only 三轮（obs v4 / roundtrip 过滤 / 横向权重）+ 探针 V1+V2 + DAgger 闭环重标注 cycle（4 窗口 × 15ep）+ Gate B 覆盖 base | **Gate B：需修正+需补证（低成本）→ 修后放行 P2；数值线 0.55–0.60 未达** | `b99e127`（obs v4 static）、`386b091`（过滤放宽）+`2e13dfa`（`action_dim_weights`；iter3 0.260/0.274）、`4a46c5e`（链标签+标定；630 passed）；cycle 四窗 top1 clean500 0.526/0.428/0.472/0.378（vs P1-B +21.2/+11.4/+15.8/+6.4pp）；报告 `docs/v7_reports/v7_p1_dagger_cycle.md`、`docs/v7_reports/v7_p1_probe_v1v2.md` |
+| **P2 RL arm1** | w1 e005 + v5 bundle(rc=1) + `off_road_edge`(−0.5 / scale 1.0) + KL 锚 0.05→0.02；seeds 0/11（后补 1/2） | 单臂；seed0 flat / seed11 strong；u50+u100 双点闸无 early-collapse | 预注册 §9 内容 `2ddfa22` / 锚 `c37acbb`；`config/arms/v7_arm1_offroad.yaml`；报告 `docs/v7_reports/v7_p2_arm1.md` |
+| **P3 n=4 分布** | seeds 0/11/1/2 全量 clean500 + tg45/T3 + 每 seed 一次 eval500（keep-best 全量配对采纳） | clean500 **mean +8.1pp / sd 5.6pp / 4/4 正（3/4 显著）**；§2.2 方差闸未过；碰撞上升、安全闸未过 | 报告 `docs/v7_reports/v7_p3_arm1_seeds.md`；s11 洁净复验 `docs/v7_reports/v7_p2_s11_verify.md`；s1/s2 于 pre-v5 worktree（`2f4450e`）复跑保代码可比 |
+| **结构迭代（用户定向；非原 Gate）** | Lane A obs v5（`0291f3a`）→ A2 lane/ttc 接线（`fcf047e`）→ B K-anchor 计划头（`f42d648`）→ v5 重训链 → 崩 → 根因诊断 → fix-11 补救（`55adf90`/锚 `1ea339d`） | **失败关闭（不具竞争力）**：补救后 clean500 0.328 / eval500 0.324 / tg45 0.178，仍远低于 w1 0.526/0.530 | `0065264`（重训臂配置）；报告 `docs/v7_reports/v7_struct_fail_diag.md`、`docs/v7_reports/v7_p3fix_retry.md`（`v7_struct_retrain_v5.md` 未入仓，暂留 `/tmp/opencode/KEEP/`，见 `docs/v7_reports/README.md` 未决项）；可行性/接线 `docs/v7_reports/v7_kanchor_feasibility.md`、`docs/v7_reports/v7_struct_a_obs_v5.md`、`docs/v7_reports/v7_struct_a2_wiring_probe.md`、`docs/v7_reports/v7_struct_b_kanchor.md` |
 | **P4 收尾** | 终版报告 + tag + 资产清单 | 目标未达如实记录；最佳产物 arm1-s11 归档 | 本报告；tag `v7-close-20261006`（§6） |
 
 - **未跑/降级（如实）**：arm2（bundle+KL）/ arm3（bundle only）已预注册（§10，内容 `a1b6950` / 锚 `2f4450e`；配置 `config/arms/v7_arm2_bundle_kl.yaml`、`v7_arm3_bundle_only.yaml`）但**未运行**——用户定向重排（Lane A/B 优先）后降级为后备；Gate D（≥5 seed 主判据）未启动。
@@ -75,7 +75,7 @@
 | 配对（clean500） | vs w1 **−19.8pp**（net −99，z 8.17）；vs P1-B +1.4pp（net 7，z 0.74，ns）；vs IDM −41.4pp（z 12.91） | `tools/paired_eval.py`（p3fix 配对） |
 | 配对（eval500） | vs w1 **−20.6pp**（net −103，z 8.33）；vs P1-B +1.2pp（net 6，z 0.65，ns）；vs IDM −43.2pp（z 13.72） | 同上 |
 | 配对（tg45） | vs IDM −60.0pp（0.178 vs 0.778，z 5.2；coll 0.0 是唯一亮点） | 同上 |
-| 表示层主判据 | CE 0.588→**0.309**（≤0.896 ✓）；分配 c0 **0.751**（<0.90 ✓，C1–C5 各 >0）；WTA 0.162→**0.105**（<50% 未达 ✗）；plan ADE 0.327→0.243 m | `/tmp/opencode/v7_struct_retrain_v5.md` §Stage B |
+| 表示层主判据 | CE 0.588→**0.309**（≤0.896 ✓）；分配 c0 **0.751**（<0.90 ✓，C1–C5 各 >0）；WTA 0.162→**0.105**（<50% 未达 ✗）；plan ADE 0.327→0.243 m | `v7_struct_retrain_v5.md` §Stage B（未入仓，暂留 KEEP；见 `docs/v7_reports/README.md` 未决项） |
 | 安全/行为 | clean500 coll 0.044 / off 0.520；eval500 coll 0.034 / off 0.534；tg45 off 0.600 | `metrics.json` |
 
 ### 2.4 安全闸（§5）与事件率
@@ -143,7 +143,7 @@
 - **P1**：DAgger 四窗口数据 `datasets/BTC20261002-2329_v7p1dagger_w{1..4}`、训练 `runs/BTC20261002-2329_v7p1dagger_w{1..4}`、冠军 clean500 `runs/BTC20261003-045912_v7p1dagger_w1_clean500`、eval500 探索 `runs/BTC20261003-061634_v7p1dagger_w1_eval500_exploratory`；P1-B 链 `runs/BTC20261002-0941_v7p1b`。
 - **P2/P3**：arm1 `runs/BTC20261003-0641_v7p2_s0_arm1` / `runs/BTC20261005-0601_v7p2_s11_arm1` / `runs/BTC20261005-1732_v7p2_s1_arm1` / `runs/BTC20261005-1856_v7p2_s2_arm1`；s11 洁净复验 `runs/BTC20261005-073128_v7p2_s11_u150_clean500_clean` / `…-074755…eval500_clean` / `…-075959…tg45_clean`；sub150 闸与 keep-best 曲线见各 run 日志。
 - **结构**：`runs/BTC20261005-0856_v7struct_v5`（A/B）、`runs/BTC20261005-0856_v7struct_v5_p3`（失败 phase3）、`runs/BTC20261005-0856_v7struct_v5_p3fix`（fix-11）、终评 `runs/BTC20261005-161813_v7p3fix_best_clean500` / `…-163040…tg45` / `…-163243…eval500`。
-- **pre-v5 复验 worktree**：`/tmp/opencode/v7_pre_v5`（@ `2f4450e`；`runs` 软链主树，s1/s2 与 s11 复验用）。
+- **pre-v5 复验 worktree（已移除，2026-10-06）**：原 `/tmp/opencode/v7_pre_v5` @ `2f4450e`；如需复现 s1/s2/s11 与 P4-extra/奖励/§14 臂（同代码期），重建：`git worktree add <dir> 2f4450e`（`runs`/`datasets` 软链主树）。
 
 ### 4.3 数据 / 配置 / 工具 / 预注册
 
@@ -152,13 +152,13 @@
 - **工具**：`tools/paired_eval.py` + `tests/test_paired_eval.py`（配对 McNemar/bootstrap CI/方差闸/单 baseline fail-closed）、`tools/dagger_collect.py`（闭环重标注 + `assert_no_eval_val_overlap`）、`tools/fit_plan_anchors.py`。
 - **预注册**：`docs/v7_program_prereg.md`（§0–§11：§9 arm1、§10 arm2/3、§11 K-anchor + §11.5 fix-11 修订锚）；`docs/experiments.md` §4（IDM 锚）；`.slim/deepwork/v7-beat-idm.md`（执行计划）。
 
-### 4.4 证据/报告档（`/tmp/opencode/`，不入 repo；仅引用路径）
+### 4.4 证据/报告档（已入仓 `docs/v7_reports/`；索引/sha256 见 `docs/v7_reports/README.md`）
 
-- P0：`v7_p0_gap_decomposition.md`、`v7_p0_gap_tables.md`、`v7_p0_idm_analysis.md`、`v7_p0_idm_baseline.md`、`v7_p0_strat_{clean500,eval500}.md`。
-- P1：`v7_p1_dagger_cycle.md`、`v7_p1_probe_v1v2.md`、`v7_p1b_report.md`、`v7_p1b_failure_diag.md`、`v7_p1_iter2.md`、`v7_p1_iter3.md`、`v7_p1a_obs_static.md`、`v7_p1_tollgate_triage.md`、`v7_p1_dagger_fix.md`。
-- P2/P3：`v7_p2_arm1.md`、`v7_p3_arm1_seeds.md`、`v7_p2_s11_verify.md`、`v7_p2_status.txt`、`v7_p3_status.txt`。
-- 结构：`v7_kanchor_feasibility.md`、`v7_struct_a_obs_v5.md`、`v7_struct_a2_wiring_probe.md`、`v7_struct_b_kanchor.md`、`v7_struct_retrain_v5.md`、`v7_struct_fail_diag.md`、`v7_p3fix_retry.md`、`v7_struct_retrain_chain.log`。
-- 驱动/脚本（不入 repo）：`v7_p2_driver.py`、`v7_p3_driver_pre_v5.py`、`v7_struct_retrain_chain.py`、`v7_p3fix_driver2.py`、`v7_p0_gap_decomp.py`。
+- P0：`docs/v7_reports/v7_p0_gap_decomposition.md`、`docs/v7_reports/v7_p0_idm_baseline.md`（入仓）；`v7_p0_gap_tables.md`、`v7_p0_idm_analysis.md`、`v7_p0_strat_{clean500,eval500}.md`（未入仓，已随 2026-10-06 `/tmp` 清理删除）。
+- P1：`docs/v7_reports/v7_p1_dagger_cycle.md`、`docs/v7_reports/v7_p1_probe_v1v2.md`、`docs/v7_reports/v7_p1b_failure_diag.md`、`docs/v7_reports/v7_p1_iter2.md`、`docs/v7_reports/v7_p1_iter3.md`（入仓）；`v7_p1b_report.md`、`v7_p1a_obs_static.md`、`v7_p1_tollgate_triage.md`、`v7_p1_dagger_fix.md`（已清理）。
+- P2/P3：`docs/v7_reports/v7_p2_arm1.md`、`docs/v7_reports/v7_p3_arm1_seeds.md`、`docs/v7_reports/v7_p2_s11_verify.md`（入仓）；`v7_p2_status.txt`、`v7_p3_status.txt`（已清理）。
+- 结构：`docs/v7_reports/v7_kanchor_feasibility.md`、`docs/v7_reports/v7_struct_a_obs_v5.md`、`docs/v7_reports/v7_struct_a2_wiring_probe.md`、`docs/v7_reports/v7_struct_b_kanchor.md`、`docs/v7_reports/v7_struct_fail_diag.md`、`docs/v7_reports/v7_p3fix_retry.md`（入仓）；`v7_struct_retrain_v5.md`（未入仓，暂留 `/tmp/opencode/KEEP/`，见 README 未决项）、`v7_struct_retrain_chain.log`（已清理）。
+- 驱动/脚本（不入 repo；已随 2026-10-06 清理删除）：`v7_p2_driver.py`、`v7_p3_driver_pre_v5.py`、`v7_struct_retrain_chain.py`、`v7_p3fix_driver2.py`、`v7_p0_gap_decomp.py`。
 
 ## 5. 未决与后续建议
 
@@ -176,7 +176,7 @@
   - arm1 四 seed clean500 Δ（+1.0/+14.2/+6.6/+10.4）与 eval500（0.512/0.646/0.550/0.622）逐位复核；mean/sd（+8.1/5.6、+5.3/6.2）复算一致；
   - 结构线 0.328/0.324/0.178 与配对（−19.8/−20.6/−60.0 vs w1/IDM）逐位复核；
   - arm0 vs IDM −13.4pt、w1 vs E-β″ +8.6/+9.0、w1 vs P1-B +21.2/+21.8 复算一致。
-- **复算入口**：`runs/*/episodes.csv`（配对）+ `runs/*/metrics.json`（overall）+ `tools/paired_eval.py --baseline <b>/episodes.csv --agent <a>/episodes.csv --out-dir <dir>`；配对报告副本 `/tmp/opencode/v7_p2_paired/`、`/tmp/opencode/v7_struct_retrain_paired/`、`/tmp/opencode/v7_finalcheck/`。
+- **复算入口**：`runs/*/episodes.csv`（配对）+ `runs/*/metrics.json`（overall）+ `tools/paired_eval.py --baseline <b>/episodes.csv --agent <a>/episodes.csv --out-dir <dir>`；配对报告副本原在 `/tmp/opencode/v7_p2_paired/`、`/tmp/opencode/v7_struct_retrain_paired/`、`/tmp/opencode/v7_finalcheck/`（已清理，可由上述命令重生成）。
 - **未跑/未决（如实）**：arm2/arm3 未跑（预注册在案）；Gate D（≥5 seed 主判据）未启动；结构线关闭（补救版保留在盘）；seed11 tg45 0.0 / T3 0/9 为洁净复验值（原 dirty 期 void）；tg45 上 IDM 教师天花板 0.778（评测口径）未被任何 v7 候选接近。
 - **tag**：`v7-close-20261006`（指向本报告入库 commit；tag 说明含"目标未达"的诚实陈述与最佳产物清单：w1 e005 / arm1 s11 u150）。
 
@@ -188,7 +188,7 @@
 
 ## 8. 增补（2026-10-06；夜间/今晨定向结果：碰撞抑制、碰撞类型、tollgate 可视化、奖励臂 A/B/C、§14 ttc）
 
-> 本节为主报告收尾后的增补（§0–§7 保持 2026-10-05 原文）；新增预注册 §12–§14 见 `docs/v7_program_prereg.md`。所有数字已从盘上产物独立复算：`runs/*/episodes.csv` 逐 `(id,seed)`（success/collision/off_road/speed_ratio/jerk 与 Δpp），配对 p/z 取 `tools/paired_eval.py` 输出 JSON（`/tmp/opencode/v7_p4extra_paired/`、`/tmp/opencode/v7_s14_paired/`）；ckpt/config sha256 对盘复核一致。
+> 本节为主报告收尾后的增补（§0–§7 保持 2026-10-05 原文）；新增预注册 §12–§14 见 `docs/v7_program_prereg.md`。所有数字已从盘上产物独立复算：`runs/*/episodes.csv` 逐 `(id,seed)`（success/collision/off_road/speed_ratio/jerk 与 Δpp），配对 p/z 取 `tools/paired_eval.py` 输出 JSON（原 `/tmp/opencode/v7_p4extra_paired/`、`/tmp/opencode/v7_s14_paired/`，已清理、可重生成）；ckpt/config sha256 对盘复核一致。
 
 ### 8.1 P4-extra（§12）：s11 + `terminal_values.collision` −22→−32（单变量；seeds 0/11）
 
@@ -224,8 +224,8 @@ Base = s11 u150（`a7cc091f…`）；臂 `config/arms/v7_arm1_collision_suppress
 
 ### 8.3 tollgate 双面板（Q2，spec 34 / s11 u150）
 
-- 图 ×4（2100px；桌面 app 打开）：`/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_A_first_sighting_step0821.png`、`…B_decision_zone_39m_step0869.png`、`…C_gate_entry_step0929.png`、`…D_final_crash_step0961.png`。
-- 运行时度量（JSON `/tmp/opencode/v7_q6q2/tollgate_viz.json`）：
+- 图 ×4（2100px；桌面 app 打开；已入仓 `docs/v7_reports/figures/`）：`tollgate_spec34_A_first_sighting_step0821.png`、`…B_decision_zone_39m_step0869.png`、`…C_gate_entry_step0929.png`、`…D_final_crash_step0961.png`。
+- 运行时度量（原 JSON `/tmp/opencode/v7_q6q2/tollgate_viz.json`，已清理、暂留 `/tmp/opencode/KEEP/v7_q6q2/`）：
   - 岗亭 lane_id=1（奇数车道正中，lat≈0，宽 3.5 m）；`$` block 实测限速 **5.6 m/s**；
   - `others.static` 首次 present=1：step 821 / **54.71 m**（早于 IDM 首扫 43.819 m / step 362）；
   - `road_class=tollgate` 首次=1：step 930 / **16.995 m**（进入 `$` block step 929 / 17.257 m 之后——变道决策点 25–39 m 时仍为 0，**信号迟到**）；
@@ -287,8 +287,8 @@ Base = s11 u150（`a7cc091f…`）；臂 `config/arms/v7_arm1_collision_suppress
 - **配置**：`config/arms/v7_arm1_collision_suppress.yaml`（`b8697d54…`）、`v7_arm1_ttc.yaml`（`8d68b3b3…`）、`v7_reward_A/B/C.yaml`（`32b57bb1…` / `704de4f2…` / `d817110f…`）。
 - **预注册**：`docs/v7_program_prereg.md` §12（内容 `eec0abe` / 锚 `ee1ee49`）、§13（`db98501` / `23ae105`）、§14（`7bf18d1` / `5db385e`）。
 - **runs/ 关键路径**：P4-extra `runs/BTC20261005-2138_v7p4extra_s0_colls` / `runs/BTC20261005-2243_v7p4extra_s11_colls`（clean/eval/tg45 子 run 见 §8.1）；§14 `runs/BTC20261006-0615_v7s14_s0_ttc` / `runs/BTC20261006-0711_v7s14_s11_ttc`；奖励 `runs/BTC20261006-{0027,0127,0233,0342,0445}_v7reward_{A_s0,A_s11,B_s0,B_s11,C_s0}`。
-- **报告/证据档（`/tmp/opencode/`，不入 repo）**：`v7_p4extra_collision.md`、`v7_q6_collision_types.md`、`v7_q2_tollgate_figure.md`、`v7_p4extra_rewards.md`、`v7_s14_ttc.md`、`v7_morning_brief.md`、`v7_night_watch.log`；JSON `v7_q6q2/collision_replay.json`、`v7_q6q2/tollgate_viz.json`；配对目录 `v7_p4extra_paired/`、`v7_s14_paired/`。
-- **图**：`/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_{A_first_sighting_step0821,B_decision_zone_39m_step0869,C_gate_entry_step0929,D_final_crash_step0961}.png`（×4）。
+- **报告/证据档（已入仓 `docs/v7_reports/`，索引见 `docs/v7_reports/README.md`）**：`v7_p4extra_collision.md`、`v7_q6_collision_types.md`、`v7_q2_tollgate_figure.md`、`v7_p4extra_rewards.md`、`v7_s14_ttc.md`、`v7_morning_brief.md`、`v7_night_watch.log`；JSON `v7_q6q2/collision_replay.json`、`v7_q6q2/tollgate_viz.json`（原 /tmp 档已清理，暂留 `/tmp/opencode/KEEP/v7_q6q2/`）；配对目录 `v7_p4extra_paired/`、`v7_s14_paired/`（已清理；可由 `runs/*/episodes.csv` + `tools/paired_eval.py` 重生成）。
+- **图（已入仓）**：`docs/v7_reports/figures/tollgate_spec34_{A_first_sighting_step0821,B_decision_zone_39m_step0869,C_gate_entry_step0929,D_final_crash_step0961}.png`（×4）。
 
 ### 8.8 版本与 tag（增补）
 
