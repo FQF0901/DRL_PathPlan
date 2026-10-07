@@ -25,7 +25,76 @@
 
 ---
 
-## 1. 主数据流图（前向）
+## 1. 全信息流程图（主图）
+
+> 单图含：obs 维度/物理意义、模块实现、数据流、输出契约、执行闭环。监督总图见 §5.0。
+
+```mermaid
+flowchart TB
+    subgraph OBS["① obs 输入（env/obs/builder.py；单环境形状；策略帧 0.5 s = 5 个物理步）"]
+        direction TB
+        H["历史 6 帧 @0.5 s，SE(2) 对齐到当前帧<br/>ego_hist(6,1,8) · od_hist(6,16,9) · ld_hist(6,16,7) · others_hist(6,1,33)<br/>od_id_hist(6,16) int64 · od_presence_hist(6,16) · hist_valid(6)"]
+        E["ego(1,8)：v m/s · a_long/a_lat m/s² · yaw_rate rad/s · steer 归一化 · curvature 1/m<br/>prev_ds/prev_dθ = 上一策略步动作 m/rad"]
+        O["od(16,9)：dx,dy m · vx,vy 相对 m/s · cosθ,sinθ · L,W m · type_id<br/>槽 = track id；scope 前150/后50/左右25 m<br/>od_mask(16) 槽有效 · od_id(16) · od_presence(16) 在盒内被观测"]
+        L["ld(16,7)：dx,dy m · heading_rel rad · curvature 1/m · speed_limit m/s · 左/右线型 id<br/>远场 offset 20/40/60/80 m；当前车道 4 主槽 + 其余车道环填充"]
+        LA["lane(1,17)：d_lat m 正=ego 偏左 · heading_err rad · lane_width m · curvature 1/m · speed_limit m/s<br/>near/mid/far 中心线点 5/15/60 m（dx,dy,heading_rel）+ 3 个 valid"]
+        T["ttc(1,12)：min_ttc_x/min_ttc_path s · n_lt3_x/n_lt3_path 计数<br/>resp_index/dx/dy/vx/vy/ttc/is_path · valid<br/>ttc_path = 恒速进入自车碰撞圆 2.5 m 的最小正根"]
+        N["nav(1,11) 兼容保留：ckpt0/1 dx,dy m · cmd one-hot 直/左/右 · route_completion 0..1"]
+        S["signal(1,4)：绿/黄/红/未知 one-hot（本项目恒 unknown）"]
+        OT["others(1,33) 规范上下文：nav(11) + speed_limit(1 归一化) + signal(4)<br/>+ static(5) present/gap_norm/rel_left/same/right（建筑/岗亭）<br/>+ road_class one-hot(12) ego 当前 lane block 类别"]
+        W["world：ego_world(1,3) 世界系位姿 x,y,θ · route_world(64,2) 世界系路线顶点 · route_world_mask(64)"]
+    end
+
+    subgraph NET["② 前向（net/model.py::DrivingModel；H=128）"]
+        direction TB
+        MB["mem_from_obs → MemBank（net 只读；rollout 先 clone）<br/>ego(B,6,8) · od(B,6,16,9) · ld(B,6,16,7) · others(B,6,33) + masks + hist_valid"]
+        ENC["ObsEncoders：逐通道 Linear(F→128) + 类型嵌入(7) + LayerNorm<br/>OD 加 id 桶嵌入；mask=0 严格清零；权重跨帧共享"]
+        TMP["MemEncoder + TemporalAttention：单查询注意力池化 key_dim=32 + 帧龄嵌入 + 掩码<br/>OD/Ego/Others 6 帧池化；LD 不做时序（当前帧）"]
+        CTX["ego_ctx(B,128) · od_ctx(B,16,128) · ld_ctx(B,16,128) · others_ctx(B,128)<br/>od_live = od_mask 且 od_presence · ld_live<br/>FrameEncoding：节点(B,33,128) + pose(B,33,3) + type_ids"]
+        PH["PlanHead：fusion(6×128→128→128) + MoE<br/>primary 128→256→128；8 专家同构且输出层零初始化；router 128→64→8 → top-2 softmax<br/>latent = LN(fused + residual_scale·Σ gᵢEᵢ)(B,128) · ego_next(B,6) 下一帧 ego 前 6 维"]
+        TOK["_head_tokens：T=39 + key_mask(B,39)<br/>OD16 · LD16 · lane · others · ego · nav · ttc · signal · latent<br/>t0 头用 st_gnn 单次消息传递对象特征（no_grad）；rollout 步用当步编码"]
+        POL["PolicyHead：K=1 查询 × 4 头 × 1 层交叉注意力 pre-LN+残差<br/>raw_mu(B,2) → sigmoid 压缩 ds∈[0,10] m、dθ∈[-0.6,0.6] rad<br/>action_mu(B,2) · action_logstd(B,2) clamp[-5,0]"]
+        VAL["ValueHead：同构交叉注意力 → V(B,1)"]
+        ST["SpatioTemporalGNN + SpatialEncoder：33 节点 ego+16OD+16LD 2 层消息传递<br/>邻接 OD↔ego · LD↔ego · LD 槽相邻 · OD 4-NN；边特征 5 维<br/>t0 锚定：OD 匀速先验 p0+k·0.5v / LD 静止先验 + 零初始化残差头<br/>od_pred(B,16,5) dx,dy,vx,vy,heading · ld_pred(B,16,4) dx,dy,heading,κ · presence/entry logits(B,16)"]
+        ANC["（可选，默认关）K-anchor：K=6 形状锚 + 选择头 + 速度头 + 逐锚残差头<br/>plan = Σ pₖ(anchorₖ+residualₖ)，lane 帧→ego 帧回投"]
+    end
+
+    subgraph ROLL["③ 递归 rollout（6 步 × 0.5 s；net/model.py::_rollout）"]
+        direction TB
+        R1["每步：可微位姿链 arc_step+compose_pose → A4 世界系 nav 逐步重建 → ego 合成帧 = ego_next+action（detach）入 mem 副本<br/>→ ST-GNN(step k) → SE(2) 反变换到当前位姿系（detach）入 mem 副本 → 重编码→PlanHead→PolicyHead→下一步动作（自回归）"]
+        R2["detach 语义：真实帧不 detach（检测任务）；合成帧 detach（状态链切断）；action/pose 链保持可微（动作链训练）"]
+    end
+
+    subgraph OUT["④ 输出契约 forward"]
+        direction TB
+        O1["action_mu/action_logstd(B,2) · value(B,1) · latent(B,128)<br/>router_logits(B,8) · expert_weights(B,8) · ego_next(B,6) · load_balance_loss 标量"]
+        O2["traj_xy(B,6,2) t=0.5..3.0 s 端点（t0 自车系） · traj_theta(B,6) · plan(B,6,2) 首列=action_mu<br/>od_pred(B,6,16,5) · ld_pred(B,6,16,4) · od_presence_pred(B,6,16) · od_entry_pred(B,6,16)"]
+    end
+
+    subgraph EXEC["⑤ 执行闭环"]
+        TRK["env/tracking.py：ExactTracker 数据采集 / LqrTracker RL 与评测<br/>0.5 s 参考 → 0.1 s 子步 → steer,throttle"]
+        ENVV["MetaDrive（物理 10 Hz）"]
+        OBSB["ObservationBuilder（每 5 个 env step）"]
+    end
+
+    OBS --> MB --> ENC --> TMP --> CTX
+    CTX --> PH --> TOK
+    TOK --> POL
+    TOK --> VAL
+    PH -. "t0 单次消息传递（no_grad）" .-> ST
+    CTX --> ST
+    ST -. "od_obj/ld_obj" .-> TOK
+    POL --> O1
+    VAL --> O1
+    PH --> ROLL
+    POL --> ROLL
+    ST --> ROLL
+    ROLL --> O2
+    POL -- "action_mu / 采样动作" --> TRK
+    TRK --> ENVV --> OBSB --> OBS
+```
+
+### 1.1 简化前向图（速览）
 
 ```mermaid
 flowchart TB
@@ -246,6 +315,51 @@ flowchart LR
 ---
 
 ## 5. 监督（训练信号，代码口径）
+
+### 5.0 监督总图
+
+```mermaid
+flowchart TB
+    subgraph SRC["数据源"]
+        EXP["专家离线数据（tools/collect_expert.py）<br/>PurePursuitIDMPolicy + ExactTracker<br/>每策略帧：obs + 专家动作 ds,dθ + traj6/traj30 + labels + train_weight"]
+        DAG["DAgger 失败窗口（tools/dagger_collect.py）<br/>学生 LQR roll-in → 失败 episode 终止前 N 秒窗口<br/>专家空问标签 + action_chain t0..t5（末端 NaN）+ train_weight"]
+        RLR["Stage C 在线 rollout（trainer.collect_rollout）<br/>reward v5 + GAE γ0.99 λ0.95"]
+    end
+    subgraph SA["Stage A：世界模型教师强制（stages.py；20 ep）"]
+        A1["可训：除 policy/value 外全部（encoders/mem_encoder/plan_head/st_gnn）；MoE 关<br/>机制：每步挤入 GT ego_fut（detach）+ GT 动作链；st_gnn(step k) 直接多步；先跑 plan head 取 ego_next_pred"]
+        A2["损失：od 1.0 smooth_l1 前4维/4 + 1−cosΔθ（目标 od_fut；权重 od_mask×wm_valid×frame_weight）<br/>+ ego_next 0.1（目标 ego_fut 前 6 维）<br/>+ presence 0.1 + entry 0.1（id 轴 BCE：未来帧同 id 在盒内 / 新 id 出现）<br/>+ ld 0.0（仅监控）"]
+    end
+    subgraph SB["Stage B：planner BC（stages.py::run_stage_b；20 ep）"]
+        B1["phase1 前 50% epoch：冻结 st_gnn/value/experts/router；MoE 关<br/>训 encoders/mem_encoder/plan_head primary+policy"]
+        B2["phase2：只训 experts/router/residual_scale；MoE 开<br/>worst-50% 行权 1.0 / 其余 0.1（全量曝光）"]
+        B3["损失：action 1.0（action_mu vs 专家即时动作；L2 逐维权重 1.0/69.4）<br/>+ traj_aux 0.1（traj_xy vs traj6）<br/>+ WM 小权重 od 0.005 / ld 0.002 / presence 0.1 / entry 0.1 / ego_next 0.1<br/>+ load_balance 0.01（Switch 式 α·E·ΣfᵢPᵢ）"]
+    end
+    subgraph P3["phase3：Stage B 的迭代子阶段（train.py --phase3；入口 stages.py::run_stage_b_phase3；编排 phase3_loop.py）"]
+        C1["数据 = 当轮 DAgger 失败窗口；起点 = running student（--ckpt）<br/>冻结 specific_only：只训 experts/router/residual_scale；WM/ego_next/锚项自动置 0"]
+        C2["损失：action 1.0（action_mu vs 专家首步）<br/>+ action_chain 0.2（plan 第 2..6 步 vs 教师链；chain_valid 掩码）<br/>+ bias_calib 0（可选逐维 signed-bias）+ load_balance 0.01"]
+    end
+    subgraph SC["Stage C：PPO RL（stages.py::run_stage_c；trainer.py::PPOTrainer）"]
+        D1["冻结 design：只训 policy/value/experts/residual_scale（router 冻结）<br/>collect 走 cheap path；跟踪参考 = repeat(a_t)（plan_reference 默认）"]
+        D2["损失：−min(r·A, clip(r,1±0.2)·A) + 0.5·MSE(V, returns) − 0.01·H<br/>+ KL 锚 0.05→0（对 Stage B 快照 raw mu/logstd）；梯度裁剪 0.5；lr 3e-4"]
+        D3["奖励 v5 每 0.5 s：dense_pos×CaRL + dense_neg + terminating + carl_penalty + terminal_value<br/>dense：route_completion 1.0 γ1.0 · speed_ratio 0.4 cap1.0 · low_speed −0.2<br/>comfort_lon/lat/jerk −0.05/−0.05/−0.005 · solid_line −2 · speed_limit −5 · crash −10 · out_of_road −8<br/>终局 rc=1：arrive +30 · collision −19 · out_of_road −15 · max_step −23 · error −5"]
+    end
+    subgraph GRAD["损失→可训模块"]
+        G1["A：WM 项 → encoders/mem_encoder/plan_head（MoE 关）/st_gnn"]
+        G2["B：BC+WM 项 → phase1 主干+policy；phase2 experts/router/residual_scale"]
+        G3["phase3：action/chain → experts/router/residual_scale（梯度穿过冻结主干）"]
+        G4["C：PPO+KL 锚 → policy/value/experts/residual_scale"]
+    end
+    EXP --> SA
+    EXP --> SB
+    DAG --> P3
+    SB --> P3
+    P3 --> SC
+    RLR --> SC
+    SA --> GRAD
+    SB --> GRAD
+    P3 --> GRAD
+    SC --> GRAD
+```
 
 ### 5.1 阶段 / 可训范围 / 损失一览
 
