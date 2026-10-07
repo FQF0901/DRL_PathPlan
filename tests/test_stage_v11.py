@@ -174,7 +174,7 @@ def test_trajectory_loss_does_not_reach_st_gnn() -> None:
 
 
 def test_prediction_loss_trains_st_gnn_but_not_policy() -> None:
-    """v8 口径：物理解码 loss 训练 ST-GNN / encoder（真实帧检测），不训练 policy。"""
+    """v2 detach：预测 loss 训练 ST-GNN / encoder（真实帧检测），不训练 policy。"""
     model = _model_with_unsaturated_policy()
     obs = make_obs(batch=2)
     out = model(obs, rollout=True, world_model=True)
@@ -185,43 +185,6 @@ def test_prediction_loss_trains_st_gnn_but_not_policy() -> None:
     assert any(g is not None and float(g.abs().sum()) > 0.0 for g in enc_grads), "编码器应收到检测梯度"
     policy_grads = [p.grad for name, p in model.named_parameters() if name.startswith("policy.")]
     assert all(g is None or float(g.abs().sum()) == 0.0 for g in policy_grads), "预测 loss 不得训练 policy"
-
-
-def test_latent_consistency_trains_st_gnn_transitions_not_policy() -> None:
-    """v8 latent 监督口径：latent consistency 训练 st_gnn 转移头/编码器，不训练 policy。
-
-    - ``z_*_pred`` 的损失回传 st_gnn（转移头；零初始化 ⇒ 首个 backward 至少输出层有梯度）；
-    - policy 不在状态链上（图位姿/状态均 detach）→ 无梯度；
-    - **状态链切断**：``z_od_pred[:,3]`` 不得回传到 ``z_od_pred[:,0]``（下一步输入前 detach）。
-    """
-    import torch.nn.functional as F
-
-    model = _model_with_unsaturated_policy()
-    obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=True)
-    # 目标 = 预测 detach 后平移（smooth_l1 在 diff=0 处梯度为 0，必须给非零残差）
-    loss = F.smooth_l1_loss(out["z_od_pred"], out["z_od_pred"].detach() + 1.0) + F.smooth_l1_loss(
-        out["z_ld_pred"], out["z_ld_pred"].detach() - 1.0
-    )
-    loss.backward()
-    transition_grad = sum(
-        float(p.grad.abs().sum())
-        for name, p in model.named_parameters()
-        if name.startswith("st_gnn.") and p.grad is not None
-    )
-    assert transition_grad > 0.0, "latent consistency 未回传 st_gnn"
-    assert any(
-        p.grad is not None and float(p.grad.abs().sum()) > 0.0
-        for name, p in model.named_parameters()
-        if name.startswith(("st_gnn.od_transition.", "st_gnn.ld_transition."))
-    ), "latent 转移头未收到梯度"
-    policy_grads = [p.grad for name, p in model.named_parameters() if name.startswith("policy.")]
-    assert all(g is None or float(g.abs().sum()) == 0.0 for g in policy_grads), "latent 监督不得训练 policy"
-    # 状态链切断：step-k（k≥2）的 latent 预测不得回传到 step-1 预测
-    grad = torch.autograd.grad(
-        out["z_od_pred"][:, 3].pow(2).mean(), out["z_od_pred"][:, 0], allow_unused=True, retain_graph=True
-    )[0]
-    assert grad is None or float(grad.abs().sum()) == 0.0, "梯度跨状态链回传到 step-1 latent"
 
 
 def test_wm_detach_kwarg_is_accepted_noop() -> None:

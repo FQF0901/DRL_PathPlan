@@ -2,15 +2,20 @@
 
 阶段语义（2026-09-26 schema v2 修订）
 ------------------------------------
-- **A = world model 训练（latent 教师强制）**：ego 条件 = 专家 GT 动作序列（推进累积位姿链
-  + A4 nav 逐步重建）；目标 = ``(episode_id, base+5k)`` 精确查表的未来 OD/LD 帧
-  （对齐到 t0、``od_id`` 身份匹配、``wm_valid`` 门控）。**latent consistency 主损失**
-  （v8 B3：``z_*`` 逐步 vs ``embed_od/ld/ego(future).detach()``，掩码加权 smooth_l1，
-  权重 1.0）+ **物理小解码（诊断）**（od 0.1 / ld 0.02，先验+残差）+ **plan head
-  ``ego_next`` 监督**（方案①，权重 0.1）+ **presence/entry BCE + AUC**（id 轴，权重 0.1）。
-  监控（Tier-1，lane B）：``loss/wm|latent|od|ld|ego_next|presence|entry`` +
+- **A = world model 训练（教师强制）**：ego 条件 = 专家 GT 动作序列 + **目标帧真实 ego**
+  （``build_future.ego_fut``，退回解析运动学）；目标 = ``(episode_id, base+5k)`` 精确查表
+  的未来 OD 帧（对齐到 t0、``od_id`` 身份匹配、``wm_valid`` 门控）。
+  **直接多步 OD 损失**（``train_weight × wm_valid`` 显式加权）+ **未来 LD 直接多步损失**
+  （``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid`` 掩码，与 OD 同构；权重
+  ``stages.A.world_model.ld_coef`` **默认 0.0**（2026-09-30 拍板）——LD 损失仅监控、不监督 LD 头；
+  可经配置/``--wm-ld-coef`` 开启）+ **plan head ``ego_next``
+  监督**（方案①：每步挤入 GT 帧前用同一 mem 预测第 k 帧 ego 前 6 维，plan head/MoE 因此在
+  A 阶段有梯度，design-v1.2 §2.3）+ **presence/entry BCE + AUC（id 轴，见
+  :func:`presence_entry_targets`）**。
+  监控（Tier-1，lane B）：``loss/wm|od|ld|ego_next|presence|entry``（训练目标分解，宏 batch 均值）+
   OD KPI ``val/od/ade_m|fde_m/h*``（含 ``cv_h*`` 匀速基线）+ ``val/od/presence_auc|entry_auc`` +
-  ego KPI ``val/ego/action/err_weighted`` / ``val/ego/traj/mae_m/h*`` / ``val/ego/traj/fde_m``。
+  ego KPI ``val/ego/action/err_weighted`` / ``val/ego/traj/mae_m/h*`` / ``val/ego/traj/fde_m``；
+  val 口径 loss 曲线/有效样本计数等已移除（``docs/metrics.md``）。
   可训练：encoders/mem-encoder/plan head/MoE/ST-GNN；policy/value 头不参与。
 - **B = planner BC**：可训练 backbone+MoE+policy head，**primary→specific** 两段。
   损失 = **首步动作**（``action_mu`` vs 专家即时动作，权重感知）+ **6 点 rollout 轨迹辅助**
@@ -107,7 +112,6 @@ from pipeline.trainer import (  # noqa: E402
     to_device_tensors,
     trainable_param_groups,
     trim_memory,
-    weighted_latent_consistency_loss,
     weighted_ld_multi_step_loss,
     weighted_od_multi_step_loss,
 )
@@ -1855,18 +1859,11 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         if args.wm_ego_next_coef is not None
         else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ego_next_coef", 0.1)
     )
-    # v8（B3）WM 损失权重（spec 冻结）：latent consistency 1.0（主监督）+ 物理 od 0.1 /
-    # ld 0.02（诊断，先验+残差）+ presence/entry 0.1 + ego_next 0.1。
-    # 旧 config 键 ``stages.A.world_model.ld_coef``（2026-09-30 的 0.0 口径）不再读取——
-    # v8 起物理 LD 项固定 0.02（CLI --wm-ld-coef 覆盖）。
-    latent_coef = float(
-        args.wm_latent_coef if getattr(args, "wm_latent_coef", None) is not None else 1.0
-    )
-    od_phys_coef = float(
-        args.wm_od_coef if getattr(args, "wm_od_coef", None) is not None else 0.1
-    )
-    ld_phys_coef = float(
-        args.wm_ld_coef if getattr(args, "wm_ld_coef", None) is not None else 0.02
+    # lane P3-F：未来 LD 监督恢复（LD 属 WM，应在 A 学会）——权重与 od 同量级（od 隐式 1.0）
+    ld_coef = float(
+        args.wm_ld_coef
+        if args.wm_ld_coef is not None
+        else dict(_stage_section(config, "A").get("world_model", {}) or {}).get("ld_coef", 0.0)
     )
     presence_state = {"available": 0.0, "warning": False}
 
@@ -1948,41 +1945,40 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         *,
         noise: bool,
     ) -> Dict[str, "torch.Tensor"]:
-        """WM 前向（v8 latent 版）：latent 自回归教师强制 + **latent consistency 目标**。
+        """WM 前向：mem + ST-GNN 教师强制 + **plan head ``ego_next`` 监督**（net v2 唯一路径）。
 
-        教师强制（design-v1.2 §2.3 + v8 B3）：
+        教师强制（design-v1.2 §2.3）：
 
-        - t0：``model.encode(obs)`` → latent 状态 ``z_ego/z_od/z_ld`` + t0 静态上下文；
-        - 每步先用当前状态跑 plan head 得 ``ego_next_pred``（第 k 帧 ego 特征预测；plan
-          head/MoE 的唯一梯度来源，权重见 ``ego_next_coef``）；
-        - 动作条件 = GT 专家链（``plan``；可加噪声）：推进累积位姿链 + A4 nav 逐步重建
-          （与 ``net.model._rollout`` 同一步进语义；缺键 → 回退 t0 冻结 + 一次性告警）；
-        - ``model.st_gnn``（step k）得 next latents（**下一步输入前 detach**，状态链切断）
-          与 t0 帧物理解码 ``od_pred/ld_pred/presence/entry``（诊断）；
-        - 目标 latent（latent consistency 主损失）：``embed_od/ld/ego(future).detach()``
-          （``od_id_fut`` 存在时 OD 目标带轨道身份桶嵌入）。
+        - 每步把**目标帧真实 ego**（``ego_fut``）挤入 mem 副本（无 ``ego_fut`` 时用
+          ``ego_next_features`` 解析构造），reserved 两维写入专家 GT 动作（可加噪声）；
+        - 合成/教师帧一律 ``detach``（state 切），但 st_gnn 输出到 encoder 的梯度保留；
+        - 每步调用 ``model.st_gnn(step_index=k)`` 得 t0 帧预测（直接多步，无递归误差累积）；
+        - **plan head/MoE 梯度（方案①）**：每步挤入 GT 帧**之前**，用同一教师强制 mem 跑
+          plan head 得 ``ego_next_pred``（预测第 k 帧 ego 前 6 维，返回键 ``ego_next_pred``）。
+          若只喂 GT ego 而不取该预测，plan head/MoE 在 Stage A 无任何梯度（旧 bug）。
+        - **A4 nav 逐步重建**：obs 含 ``ego_world``/``route_world`` 时，按 GT 动作链推进世界系
+          位姿并逐步重算 nav（同步 ``others`` 的 nav 维），与 ``net.model._rollout`` 同一步进
+          语义；缺键（旧数据集）→ 回退 t0 冻结 + 一次性告警。
         """
         encoded = model.encode(obs)
-        mem = encoded["mem"]  # 只读（nav 回退锚点）；v8 不再拷贝/滑动 raw mem
+        mem = encoded["mem"].clone()
         enc0 = encoded["encoded"]
-        frame = encoded["frame"]
-        z_ego = encoded["z_ego"]
-        z_od = encoded["z_od"]
-        z_ld = encoded["z_ld"]
-        od_live = enc0.od_live
-        ld_live = enc0.ld_live
-        others_ctx = encoded["others_ctx"]
         nav_token = encoded["nav_token"]
         signal_token = encoded["signal_token"]
-        anchor_od = model.st_gnn.od_state_from_features(enc0.od_now, od_live)
-        anchor_ld = model.st_gnn.ld_state_from_features(enc0.ld_now, ld_live)
-        node_mask = frame.node_mask
-        od_pose_t0 = frame.pose[:, 1 : 1 + int(z_od.shape[1])]
-        ld_pose_t0 = frame.pose[:, 1 + int(z_od.shape[1]) :]
-        od_velocity = enc0.od_now[..., 2:4] * od_live.unsqueeze(-1)  # (B,S,2) t0 相对速度
+        anchor_od = model.st_gnn.od_state_from_features(enc0.od_now, enc0.od_live)
+        anchor_ld = model.st_gnn.ld_state_from_features(enc0.ld_now, enc0.ld_live)
+        ego_fut = future.get("ego_fut")
         horizon = int(plan.shape[1])
+        ego_now = obs["ego"]
+        if ego_now.ndim == 3:
+            ego_now = ego_now[:, 0]
         # A4：nav 逐步重建（世界系路线 + 位姿链）。缺 ego_world/route_world（旧数据）→ 旧行为。
-        from net.mem import advance_pose_world, rebuild_nav_from_world, world_state_from_obs
+        from net.mem import (
+            advance_pose_world,
+            rebuild_nav_from_world,
+            sync_others_nav_dims,
+            world_state_from_obs,
+        )
 
         ego_world, route_world, route_world_mask = world_state_from_obs(obs)
         nav_rebuild = ego_world is not None and route_world is not None
@@ -2004,73 +2000,59 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "（A4 逐步重建未启用；重新采集 BC 数据后自动生效）",
                 flush=True,
             )
-        # ---- latent consistency 目标（未来帧 raw 特征编码，detach）----
-        od_fut = future.get("od_fut")
-        ld_fut = future.get("ld_fut")
-        od_mask_fut = future.get("od_mask")
-        ld_mask_fut = future.get("ld_mask")
-        od_id_fut = future.get("od_id_fut")
-        latent_target_od = (
-            model.encoders.embed_od(
-                _tensor(od_fut),
-                _tensor(od_mask_fut),
-                ids=_tensor(od_id_fut, dtype=torch.long) if od_id_fut is not None else None,
-            ).detach()
-            if od_fut is not None and od_mask_fut is not None
-            else None
-        )
-        latent_target_ld = (
-            model.encoders.embed_ld(_tensor(ld_fut), _tensor(ld_mask_fut)).detach()
-            if ld_fut is not None and ld_mask_fut is not None
-            else None
-        )
-        ego_fut = future.get("ego_fut")
-        if ego_fut is not None:
-            ego_fut_t = _tensor(ego_fut)
-            if ego_fut_t.ndim == 3 and int(ego_fut_t.shape[1]) == 1:
-                ego_fut_t = ego_fut_t[:, 0]
-            latent_target_ego = model.encoders.embed_ego(
-                ego_fut_t, torch.ones_like(ego_fut_t[..., 0])
-            ).detach()
-        else:
-            latent_target_ego = None
         predictions: Dict[str, List["torch.Tensor"]] = {
-            "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": [],
-            "z_ego_pred": [], "z_od_pred": [], "z_ld_pred": [],
+            "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": []
         }
-        pose = torch.zeros((int(z_ego.shape[0]), 3), dtype=z_ego.dtype, device=z_ego.device)
+        analytic_ego = None
+        if ego_fut is None:
+            try:
+                from net.model import ego_next_features  # type: ignore
+
+                analytic_ego = ego_next_features
+            except Exception:  # noqa: BLE001
+                analytic_ego = None
+        enc_plan = enc0  # plan head 视角：mem 含 ≤ k-1 帧（第 k 帧挤入前）
         for k in range(1, horizon + 1):
             # (i) plan head 预测第 k 帧 ego 特征（唯一梯度来源，权重见 ego_next_coef）
-            _, ego_next_pred, _ = model.plan_step(
-                z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token
-            )
+            _, ego_next_pred, _ = model.plan_step(enc_plan, nav_token, signal_token)
             predictions["ego_next_pred"].append(ego_next_pred)
-            # (ii) 动作条件：GT 动作链（可加噪声）→ 累积位姿链 + A4 nav 重建
+            # (ii) 教师强制：挤入目标帧真实 ego（detach），ST-GNN 单步推演
             raw_action = plan[:, k - 1]
             if noise and bool(args.plan_noise) and float(args.plan_noise_p) > 0.0:
                 hit = (torch.rand_like(raw_action) < float(args.plan_noise_p)).to(raw_action.dtype)
                 raw_action = raw_action + torch.randn_like(raw_action) * noise_std * hit
-            ds, dtheta = raw_action[:, 0], raw_action[:, 1]
-            pose = advance_pose_world(pose, ds.detach(), dtheta.detach())
+            if ego_fut is not None:
+                ego_frame = torch.as_tensor(
+                    np.asarray(ego_fut)[:, k - 1], dtype=torch.float32, device=device
+                )
+                if ego_frame.ndim == 3 and ego_frame.shape[1] == 1:
+                    ego_frame = ego_frame[:, 0, :]
+            elif analytic_ego is not None:
+                ego_frame = analytic_ego(
+                    ego_now, raw_action[:, 0], raw_action[:, 1], dt=float(model.dt), prev_speed=ego_now[:, 0]
+                )
+            else:  # 兜底：复制当前帧 + GT 动作（无 ego 历史时仍保留动作条件）
+                ego_frame = torch.cat([ego_now[:, :6], raw_action], dim=-1)
+            ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步 GT 动作
+            mem.shift_ego(ego_frame.detach())
             if nav_rebuild:
-                pose_world = advance_pose_world(pose_world, ds.detach(), dtheta.detach())
+                # A4：位姿链用同一步进语义（与 rollout 一致）；nav 重算并同步 others 的 nav 维。
+                # 纯函数路径：sync 返回新 MemBank（赋值式，避免 autograd inplace 报错）。
+                pose_world = advance_pose_world(
+                    pose_world, raw_action[:, 0].detach(), raw_action[:, 1].detach()
+                )
                 nav_feats, nav_mask = rebuild_nav_from_world(
                     mem, pose_world, route_world, route_world_mask
                 )
+                mem = sync_others_nav_dims(mem, nav_feats)
                 nav_token = model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask.reshape(-1, 1))
-            # (iii) 图位姿（t0 帧）：ego = 累积位姿；OD = t0 + k·dt·v_t0；LD 静止
-            offset = float(k) * float(model.dt)
-            od_pose_k = torch.cat(
-                [od_pose_t0[..., :2] + od_velocity * offset, od_pose_t0[..., 2:]], dim=-1
-            )
-            pose_k = torch.cat([pose.unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
-            # (iv) latent 自回归转移 + 物理解码（t0 帧，直接多步无递归误差累积）
-            z_ego_next, z_od_next, z_ld_next, od_pred_k, ld_pred_k, presence_k, entry_k = model.st_gnn(
-                z_ego=z_ego,
-                z_od=z_od,
-                z_ld=z_ld,
-                node_mask=node_mask,
-                pose=pose_k,
+            enc_k = model.mem_encoder.encode(model.encoders, mem)
+            od_pred_k, ld_pred_k, presence_k, entry_k = model.st_gnn(
+                ego_ctx=enc_k.ego_ctx,
+                od_ctx=enc_k.od_ctx,
+                ld_ctx=enc_k.ld_ctx,
+                node_mask=enc_k.frame.node_mask,
+                pose=enc_k.frame.pose,
                 step_index=k,
                 od_anchor=anchor_od,
                 ld_anchor=anchor_ld,
@@ -2079,19 +2061,10 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             predictions["ld_pred"].append(ld_pred_k)
             predictions["presence_pred"].append(presence_k)
             predictions["entry_pred"].append(entry_k)
-            predictions["z_ego_pred"].append(z_ego_next)
-            predictions["z_od_pred"].append(z_od_next)
-            predictions["z_ld_pred"].append(z_ld_next)
-            # (v) 状态链切断：预测 latent detach 后作为下一步输入（自回归教师强制）
-            z_ego, z_od, z_ld = z_ego_next.detach(), z_od_next.detach(), z_ld_next.detach()
-        stacked = {key: torch.stack(values, dim=1) for key, values in predictions.items()}
-        if latent_target_od is not None:
-            stacked["latent_target_od"] = latent_target_od
-        if latent_target_ld is not None:
-            stacked["latent_target_ld"] = latent_target_ld
-        if latent_target_ego is not None:
-            stacked["latent_target_ego"] = latent_target_ego
-        return stacked
+            enc_plan = enc_k  # 下一轮 plan head 看到 ≤ k 帧
+        return {
+            key: torch.stack(values, dim=1) for key, values in predictions.items()
+        }
 
     def _term_denominators(
         future: Mapping[str, np.ndarray], frame_weight_np: np.ndarray
@@ -2101,7 +2074,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         - ``od``：``Σ w·valid·od_mask``（= ``weighted_od_multi_step_loss`` 的分母）；
         - ``ld``：``Σ w·valid·ld_mask``（= ``weighted_ld_multi_step_loss`` 的分母；lane P3-F）；
         - ``step``：``Σ w·valid``（= ``ego_next`` 的 ``step_weight`` 分母）；
-        - ``latent``：``od + ld + step``（v8 latent consistency 联合分母，三路加权均值）；
         - ``presence``：``step × 槽位数``（= presence/entry BCE 的分母口径）。
         """
         wm_valid = np.asarray(future["wm_valid"], dtype=np.float64)
@@ -2112,15 +2084,11 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         ld_weight = ld_mask * wm_valid[:, :, None] * weight[:, :, None]
         step_weight = weight * wm_valid
         slots = int(od_mask.shape[-1]) if od_mask.ndim >= 2 else 0
-        od_den = float(od_weight.sum())
-        ld_den = float(ld_weight.sum())
-        step_den = float(step_weight.sum())
         return {
-            "od": od_den,
-            "ld": ld_den,
-            "step": step_den,
-            "latent": od_den + ld_den + step_den,
-            "presence": step_den * float(slots),
+            "od": float(od_weight.sum()),
+            "ld": float(ld_weight.sum()),
+            "step": float(step_weight.sum()),
+            "presence": float(step_weight.sum()) * float(slots),
         }
 
     def _scale_factors(
@@ -2204,26 +2172,11 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             frame_weight=frame_weight,
             valid=wm_valid,
         )
-        # v8（B3）**latent consistency（主监督）**：z_* 逐步 vs 未来帧编码目标（detach）
-        latent_loss, latent_per_horizon = weighted_latent_consistency_loss(
-            predictions["z_od_pred"],
-            predictions["latent_target_od"],
-            _tensor(future["od_mask"]),
-            predictions["z_ld_pred"],
-            predictions["latent_target_ld"],
-            _tensor(future["ld_mask"]),
-            predictions.get("z_ego_pred"),
-            predictions.get("latent_target_ego"),
-            frame_weight=frame_weight,
-            valid=wm_valid,
-        )
         terms: Dict[str, Any] = {
             "od": od_loss,
             "ld": ld_loss,
-            "latent": latent_loss,
             "per_horizon": od_per_horizon,
             "ld_per_horizon": ld_per_horizon,
-            "latent_per_horizon": latent_per_horizon,
             "od_pred": od_pred,
             "future": future,
             "frame_weight": frame_weight,
@@ -2295,7 +2248,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             # 梯度累积：把 micro 损失缩放到宏 batch 口径（MicroNum/MacroDen = L_micro·(Den_micro/Den_macro)）
             terms["od"] = terms["od"] * float(scales["od"])
             terms["ld"] = terms["ld"] * float(scales["ld"])
-            terms["latent"] = terms["latent"] * float(scales["latent"])
             if "ego_next" in terms:
                 terms["ego_next"] = terms["ego_next"] * float(scales["step"])
             if "presence" in terms:
@@ -2303,8 +2255,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 terms["entry"] = terms["entry"] * float(scales["presence"])
                 terms["presence_auc"] = float("nan")
                 terms["entry_auc"] = float("nan")
-        # v8（B3）总损失组合：latent consistency（主）+ 物理解码（诊断）+ ego_next + presence/entry
-        total = latent_coef * terms["latent"] + od_phys_coef * terms["od"] + ld_phys_coef * terms["ld"]
+        total = terms["od"] + ld_coef * terms["ld"]
         if "ego_next" in terms:
             total = total + ego_next_coef * terms["ego_next"]
         if "presence" in terms:
@@ -2355,7 +2306,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         ]
         per_horizon: Dict[str, Dict[str, float]] = {}
         ego_next_per_horizon = terms.get("ego_next_per_horizon")
-        latent_per_horizon = terms.get("latent_per_horizon")
         for k in range(horizon):
             w_k = weight[:, k, :]
             model_ade_k, model_fde_k = _ade_fde(od_pred[:, k, :, 0:2], od_target[:, k], w_k)
@@ -2367,11 +2317,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "ld_loss": (
                     float(terms["ld_per_horizon"][k]["loss"].detach())
                     if float(terms["ld_per_horizon"][k]["weight"]) > 0.0
-                    else float("nan")
-                ),
-                "latent_loss": (
-                    float(latent_per_horizon[k]["loss"].detach())
-                    if latent_per_horizon is not None and k < len(latent_per_horizon)
                     else float("nan")
                 ),
                 "model_ade": float(model_ade_k),
@@ -2393,7 +2338,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             "eval_loss": float(terms["total"]),
             "eval_od_loss": float(terms["od"]),
             "eval_ld_loss": float(terms["ld"]),
-            "eval_latent_loss": float(terms["latent"]),
             "ego_next_loss": float(terms["ego_next"]) if "ego_next" in terms else float("nan"),
             "ego_next_available": bool(terms.get("ego_next_available", False)),
             "presence_loss": float(terms["presence"]) if "presence" in terms else float("nan"),
@@ -2451,12 +2395,9 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "presence_coef": presence_coef,
         "entry_coef": entry_coef,
         "ego_next_coef": ego_next_coef,
-        # v8（B3）：latent consistency 主损失 + 物理解码诊断权重
-        "latent_coef": latent_coef,
-        "od_coef": od_phys_coef,
-        "ld_coef": ld_phys_coef,
+        "ld_coef": ld_coef,
         "presence_entry_axis": "id",
-        # v8（B3）：WM 监督 = latent consistency（主）+ 物理解码（诊断）
+        # lane P3-F：未来 LD 监督恢复（LD 属 WM；目标 = ld_fut 前 4 维，与 od 同构直接多步）
         "ld_loss": "direct_multi_step",
         "materialize": bool(obs_source is not None),
         "fast_data": bool(obs_source is not None and future_source is not None),
@@ -2500,8 +2441,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     for epoch in range(start_epoch, epochs):
         order = rng.permutation(train_idx)
         totals: Dict[str, float] = {
-            "total": 0.0, "od": 0.0, "ld": 0.0, "latent": 0.0,
-            "presence": 0.0, "entry": 0.0, "ego_next": 0.0,
+            "total": 0.0, "od": 0.0, "ld": 0.0, "presence": 0.0, "entry": 0.0, "ego_next": 0.0
         }
         batches = 0
         data_seconds = forward_seconds = backward_seconds = 0.0
@@ -2527,7 +2467,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 totals["total"] += float(terms["total"].detach())
                 totals["od"] += float(terms["od"].detach())
                 totals["ld"] += float(terms["ld"].detach())
-                totals["latent"] += float(terms["latent"].detach())
                 if "ego_next" in terms:
                     totals["ego_next"] += float(terms["ego_next"].detach())
                 if "presence" in terms:
@@ -2566,7 +2505,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                     totals["total"] += float(terms_m["total"].detach())
                     totals["od"] += float(terms_m["od"].detach())
                     totals["ld"] += float(terms_m["ld"].detach())
-                    totals["latent"] += float(terms_m["latent"].detach())
                     if "ego_next" in terms_m:
                         totals["ego_next"] += float(terms_m["ego_next"].detach())
                     if "presence" in terms_m:
@@ -2597,7 +2535,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             {
                 "last_epoch": epoch + 1,
                 "wm_loss": train_loss,
-                "wm_loss_latent": totals["latent"] / max(1, batches),
                 "wm_loss_od": totals["od"] / max(1, batches),
                 "wm_loss_ld": totals["ld"] / max(1, batches),
                 "wm_loss_ego_next": totals["ego_next"] / max(1, batches),
@@ -2609,7 +2546,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 "grad_norms_last_batch": dict(grad_probe_last),
                 "loss_curve": list(loss_curve),
                 "val_loss": eval_metrics["eval_loss"],
-                "val_loss_latent": eval_metrics["eval_latent_loss"],
                 "val_loss_od": eval_metrics["eval_od_loss"],
                 "val_loss_ld": eval_metrics["eval_ld_loss"],
                 "presence_available": float(presence_state["available"]),
@@ -2638,7 +2574,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         if monitor is not None:
             train_payload: Dict[str, Any] = {
                 "wm_loss": train_loss,
-                "wm_loss_latent": metrics["wm_loss_latent"],
                 "wm_loss_od": metrics["wm_loss_od"],
                 "wm_loss_ld": metrics["wm_loss_ld"],
                 "wm_loss_ego_next": metrics["wm_loss_ego_next"],
@@ -3948,8 +3883,6 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "ego_next": _loss_weight("ego_next", 0.1),
         "od": _loss_weight("od", 1.0),
         "ld": _loss_weight("ld", 1.0),
-        # v8（B3）：latent consistency 主监督（phase3 权重 0.01；specific_only 下自动降级）
-        "latent": _loss_weight("latent", 0.01),
         "presence": _loss_weight("presence", 0.1),
         "entry": _loss_weight("entry", 0.1),
         "traj_aux": _loss_weight("traj_aux", 0.0),
@@ -4347,7 +4280,6 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         ego_next_weight=loss_weights["ego_next"],
         od_weight=loss_weights["od"],
         ld_weight=loss_weights["ld"],
-        latent_weight=loss_weights["latent"],
         presence_weight=loss_weights["presence"],
         entry_weight=loss_weights["entry"],
         traj_aux_weight=loss_weights["traj_aux"],
@@ -4945,13 +4877,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--wm-ego-next-coef", type=float, default=None,
                         help="阶段 A plan head ego_next 监督权重（默认取 config "
                              "stages.A.world_model.ego_next_coef=0.1；plan head/MoE 的唯一梯度来源）")
-    parser.add_argument("--wm-latent-coef", type=float, default=None,
-                        help="阶段 A latent consistency 权重（v8 主监督；默认 1.0："
-                             "z_* 逐步 vs 未来帧编码目标，掩码加权 smooth_l1）")
-    parser.add_argument("--wm-od-coef", type=float, default=None,
-                        help="阶段 A 物理 OD 直接多步损失权重（v8 诊断项；默认 0.1，先验+残差）")
     parser.add_argument("--wm-ld-coef", type=float, default=None,
-                        help="阶段 A 物理 LD 直接多步损失权重（v8 诊断项；默认 0.02）")
+                        help="阶段 A 未来 LD 直接多步损失权重（默认取 config "
+                             "stages.A.world_model.ld_coef=0.0；2026-09-30 拍板：LD 损失仅监控、不监督 LD 头）")
     # ---- 阶段 B ----
     parser.add_argument("--bc-epochs", type=int, default=None, help="阶段 B 总轮数（默认 config/stages.B.bc.epochs=10）")
     parser.add_argument("--bc-phase-split", type=float, default=None,
@@ -5011,8 +4939,6 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="WM OD 直接多步损失权重（默认 1.0）")
     parser.add_argument("--phase3-ld-weight", type=float, default=None,
                         help="WM LD 恢复监督权重（默认 1.0）")
-    parser.add_argument("--phase3-latent-weight", type=float, default=None,
-                        help="WM latent consistency 权重（v8 主监督；默认 0.01）")
     parser.add_argument("--phase3-presence-weight", type=float, default=None,
                         help="presence BCE 权重（默认 0.1）")
     parser.add_argument("--phase3-entry-weight", type=float, default=None,

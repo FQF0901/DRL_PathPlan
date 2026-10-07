@@ -344,18 +344,12 @@ class _StubStGNN:
         return None
 
     def __call__(self, **kwargs):  # noqa: ANN003
-        z_ego = kwargs["z_ego"]
-        z_od = kwargs["z_od"]
-        z_ld = kwargs["z_ld"]
-        batch = int(z_ego.shape[0])
+        batch = kwargs["ego_ctx"].shape[0]
         return (
-            z_ego,  # z_ego_next
-            z_od,   # z_od_next
-            z_ld,   # z_ld_next
-            torch.zeros(batch, 16, 5),   # od_pred
-            torch.zeros(batch, 16, 4),   # ld_pred
-            torch.zeros(batch, 16),      # presence
-            torch.zeros(batch, 16),      # entry
+            torch.zeros(batch, 16, 5),
+            torch.zeros(batch, 16, 4),
+            torch.zeros(batch, 16),
+            torch.zeros(batch, 16),
         )
 
 
@@ -373,34 +367,24 @@ class _StubModel:
         nav = obs["nav"]
         if nav.ndim == 3:
             nav = nav[:, 0]
-        encoded = _StubEncoded(mem.batch)
         return {
             "mem": mem,
-            "encoded": encoded,
-            "frame": encoded.frame,
-            "z_ego": torch.zeros(mem.batch, H_STUB),
-            "z_od": torch.zeros(mem.batch, 16, H_STUB),
-            "z_ld": torch.zeros(mem.batch, 16, H_STUB),
-            "od_pool": torch.zeros(mem.batch, H_STUB),
-            "ld_pool": torch.zeros(mem.batch, H_STUB),
-            "others_ctx": torch.zeros(mem.batch, H_STUB),
+            "encoded": _StubEncoded(mem.batch),
             "nav_token": nav[:, :H_STUB],
             "signal_token": torch.zeros(mem.batch, H_STUB),
         }
 
-    def plan_step(self, z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token):  # noqa: ANN001
+    def plan_step(self, encoded, nav_token, signal_token):  # noqa: ANN001
         self.seen_nav.append(nav_token.detach().clone())
         return None, torch.zeros(nav_token.shape[0], 6), {}
 
 
-def test_teacher_forcing_rebuilds_nav_step_by_step():
-    """v8：教师强制逐步重建 nav（6 次）；不再回写 others（t0 静态上下文）。"""
+def test_teacher_forcing_rebuilds_nav_step_by_step_and_syncs_others():
     model = _StubModel()
     obs = _teacher_obs(with_world=True)
     actions = torch.tensor(
         [[[5.0, 0.05], [5.0, 0.05], [5.0, 0.05], [5.0, 0.05], [5.0, 0.05], [5.0, 0.05]]] * _B
     )
-    mem_before = mem_from_obs(obs, others_dim=28, history_frames=6).others.clone()
     wm_teacher_forcing_predictions(model, obs, {}, actions)
 
     assert len(model.seen_nav) == 6, "教师强制 6 步各跑一次 plan head"
@@ -415,9 +399,14 @@ def test_teacher_forcing_rebuilds_nav_step_by_step():
         expected, _ = nav_features_from_world(pose, obs["route_world"], obs["route_world_mask"])
         if k + 1 < 6:
             assert torch.allclose(model.seen_nav[k + 1], expected[:, :H_STUB]), f"第 {k + 2} 步 nav 不同步"
-    # v8：mem.others 不得被逐步改写（others 上下文 = t0 静态；nav 由独立 token 承载）
-    after = mem_from_obs(obs, others_dim=28, history_frames=6).others
-    assert torch.equal(after, mem_before), "教师强制不得改写 raw mem 的 others"
+    # others 同步：每次 mem_encoder.encode（教师强制 6 步）前，others nav 维 = 该步位姿的 nav
+    assert len(model.mem_encoder.synced_nav) == 6
+    for k in range(6):
+        pose_k = obs["ego_world"].clone()
+        for j in range(k + 1):
+            pose_k = advance_pose_world(pose_k, actions[:, j, 0], actions[:, j, 1])
+        expected_k, _ = nav_features_from_world(pose_k, obs["route_world"], obs["route_world_mask"])
+        assert torch.allclose(model.mem_encoder.synced_nav[k], expected_k), f"others nav@{k + 1} 不同步"
 
 
 def test_teacher_forcing_without_world_keys_keeps_t0_nav():
@@ -431,50 +420,79 @@ def test_teacher_forcing_without_world_keys_keeps_t0_nav():
         assert torch.allclose(token, obs["nav"][:, :H_STUB]), "缺世界系键时必须保持 t0 nav"
 
 
+class _GradStubMemEncoder:
+    """``encode`` 依赖 ``mem.others`` 的可微投影（复现 in-place 写 mem 导致的 backward 崩溃）。"""
+
+    def __init__(self):
+        self.proj = torch.nn.Linear(28, H_STUB)
+        self.synced_nav: List[torch.Tensor] = []
+
+    def encode(self, encoders, mem: MemBank) -> _StubEncoded:
+        self.synced_nav.append(mem.others[:, -1, :11].detach().clone())
+        encoded = _StubEncoded(mem.batch)
+        encoded.others_ctx = self.proj(mem.others[:, -1])  # 图依赖 mem.others
+        return encoded
+
+
 class _GradStubModel(_StubModel):
-    """带可微 others/nav 通路的 teacher forcing stub（用于 backward 回归）。"""
+    """带可微 others 通路的 teacher forcing stub（用于 backward 回归）。"""
 
     def __init__(self):
         super().__init__()
+        self.mem_encoder = _GradStubMemEncoder()
         self.head = torch.nn.Linear(H_STUB, 6)
 
-    def plan_step(self, z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token):  # noqa: ANN001
+    def plan_step(self, encoded, nav_token, signal_token):  # noqa: ANN001
         self.seen_nav.append(nav_token.detach().clone())
-        ego_next = self.head(others_ctx + nav_token)
+        ego_next = self.head(encoded.others_ctx + nav_token)
         return None, ego_next, {}
 
 
 def test_teacher_forcing_backward_survives_nav_rebuild():
-    """回归：nav 重建不得破坏 teacher forcing 反向（v8：不写 mem；nav/others 通路可微）。"""
+    """回归：nav 重建/同步不得原地写 ``mem.others``（否则 teacher forcing backward 崩）。
+
+    旧实现 ``rebuild_nav_from_world`` 直接 ``mem.others[:, -1, :11] = feats``；第 2 步
+    backward 会因"a variable needed for gradient computation has been modified by an
+    inplace operation"失败。现实现 = 纯 rebuild + 赋值式 sync（返回新 MemBank）。
+    """
     model = _GradStubModel()
     obs = _teacher_obs(with_world=True)
     actions = torch.full((_B, 6, 2), 0.1)
     predictions = wm_teacher_forcing_predictions(model, obs, {}, actions)
     loss = sum(tensor.float().mean() for tensor in predictions.values())
-    loss.backward()
-    grads = [parameter.grad for parameter in model.head.parameters()]
-    assert all(grad is not None for grad in grads), "plan head 参数必须收到梯度"
+    loss.backward()  # 旧实现在此抛 RuntimeError(inplace)
+    grads = [parameter.grad for parameter in model.mem_encoder.proj.parameters()]
+    assert all(grad is not None for grad in grads), "others 投影参数必须收到梯度"
     assert any(float(grad.abs().sum()) > 0.0 for grad in grads), "梯度不得为全 0"
-    assert len(model.seen_nav) == 6
+    # others 同步仍逐步发生（synced_nav[0] = 第 1 步位姿，纯函数路径不得破坏同步语义）
+    assert len(model.mem_encoder.synced_nav) == 6
+    pose = obs["ego_world"].clone()
+    pose = advance_pose_world(pose, actions[:, 0, 0], actions[:, 0, 1])
+    expected, _ = nav_features_from_world(pose, obs["route_world"], obs["route_world_mask"])
+    assert torch.allclose(model.mem_encoder.synced_nav[0], expected)
 
 
-def test_teacher_forcing_does_not_write_mem_others(monkeypatch):
-    """v8 对照：教师强制不得调用 ``sync_others_nav_dims``（不写 raw mem 的 others）。"""
+def test_old_inplace_sync_would_break_backward(monkeypatch):
+    """对照探针：旧实现（原地写 ``mem.others``）在同一路径上确实 backward 崩溃。
+
+    证明 :func:`test_teacher_forcing_backward_survives_nav_rebuild` 有区分度：把
+    ``sync_others_nav_dims`` 换成 in-place 版本后，第二次 encode 之前改写了此前 autograd
+    图引用的张量 → backward 抛 inplace RuntimeError。
+    """
     import net.mem as mem_module
 
-    called: List[int] = []
+    def _inplace_sync(mem: MemBank, nav_features: torch.Tensor, *, nav_dim: int = 11) -> MemBank:
+        mem.others[:, -1, :nav_dim] = nav_features.to(mem.others.dtype)
+        return mem
 
-    def _detect(*args, **kwargs):  # noqa: ANN002, ANN003
-        called.append(1)
-        raise AssertionError("v8：教师强制不得写回 mem.others")
-
-    monkeypatch.setattr(mem_module, "sync_others_nav_dims", _detect)
+    monkeypatch.setattr(mem_module, "sync_others_nav_dims", _inplace_sync)
     model = _GradStubModel()
     obs = _teacher_obs(with_world=True)
     actions = torch.full((_B, 6, 2), 0.1)
-    wm_teacher_forcing_predictions(model, obs, {}, actions)
-    assert not called, "v8：教师强制不得写回 mem.others"
-    assert len(model.seen_nav) == 6
+    predictions = wm_teacher_forcing_predictions(model, obs, {}, actions)
+    loss = sum(tensor.float().mean() for tensor in predictions.values())
+    with pytest.raises(RuntimeError, match="inplace|modified"):
+        loss.backward()
 
 
 # --------------------------------------------------------------------------- #

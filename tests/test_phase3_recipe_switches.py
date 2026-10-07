@@ -117,19 +117,12 @@ def test_phase3_specific_only_freezes_backbone_and_degrades_wm_losses() -> None:
 
     assert metrics["freeze_mode"] == "specific_only"
     assert tuple(metrics["frozen_loss_keys"]) == PHASE3_WM_LOSS_KEYS
-    assert tuple(PHASE3_WM_LOSS_KEYS) == ("ego_next", "od", "ld", "presence", "entry", "latent")
+    assert tuple(PHASE3_WM_LOSS_KEYS) == ("ego_next", "od", "ld", "presence", "entry")
     assert metrics["frozen_params"] > 0 and metrics["trainable_params"] > 0
     assert metrics["trainable_param_groups"] == ["specific"], "specific_only 只应有 specific 优化器组"
 
     # 损失自动降级：WM/ego_next 全 0；action/action_chain/load_balance 保留
-    for key in (
-        "bc_ego_next_loss",
-        "bc_od_loss",
-        "bc_ld_loss",
-        "bc_latent_loss",
-        "bc_presence_loss",
-        "bc_entry_loss",
-    ):
+    for key in ("bc_ego_next_loss", "bc_od_loss", "bc_ld_loss", "bc_presence_loss", "bc_entry_loss"):
         assert float(metrics[key]) == 0.0, f"{key} 应降级为 0"
         assert float(metrics["val"][key]) == 0.0, f"val/{key} 应降级为 0"
     for key in ("bc_action_loss", "bc_action_chain_loss", "bc_load_balance_loss"):

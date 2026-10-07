@@ -1,7 +1,7 @@
-"""v6/v8 net 验收：交叉注意力头（A1/A2）、A4 nav 逐步重建、Stage C allowlist 命名契约（§5 #7）。
+"""v6 net 验收：交叉注意力头（A1/A2）、t0 单次 st_gnn 主路径（A3）、nav 逐步重建（A4）、
+Stage C allowlist 命名契约（§5 #7）。
 
-规格：``docs/v6_net_design.md``（冻结，@031cc1c）§1/§2/§3/§5 #7；**v8 修订**（参数再分配 +
-latent 重构）覆盖其中被取代的口径（t0 单次 MP 进头、参数预算、令牌组成）。纯 CPU、固定种子。
+规格：``docs/v6_net_design.md``（冻结，@031cc1c）§1/§2/§3/§5 #7。纯 CPU、固定种子。
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ from pipeline.trainer import STAGE_C_DESIGN_PREFIXES, apply_trainable_allowlist
 from tests.test_net_shapes import clone_obs, make_obs
 
 H = 128
-#: v8 参数再分配后的精确参数算式（config/model.yaml 口径；见 tests/test_net_shapes.py）
-POLICY_PARAMS = 108_452  # ≈108.5k
-VALUE_PARAMS = 99_969  # ≈100.0k
-PARAM_RANGE = (60_000, 120_000)
-TOKEN_LENGTH = 39  # v8：z_od16 + z_ld16 + od_pool + ld_pool + others + z_ego + nav + signal + latent
+#: 冻结规格的精确参数算式（docs/v6_net_design.md §1.2；默认 1 层、d=128）
+POLICY_PARAMS = 83_716  # ≈83.7k
+VALUE_PARAMS = 83_329  # ≈83.3k
+PARAM_RANGE = (60_000, 100_000)
+TOKEN_LENGTH = 39  # v5：OD16 + LD16 + lane1 + others1 + ego1 + nav1 + ttc1 + signal1 + latent1
 
 
 def _tokens(batch: int = 4, hidden: int = H) -> tuple[torch.Tensor, torch.Tensor]:
@@ -34,13 +34,13 @@ def _tokens(batch: int = 4, hidden: int = H) -> tuple[torch.Tensor, torch.Tensor
 
 # ---------------------------------------------------------------- 形状/参数量（config 口径）
 def test_config_model_hidden_and_expert_hidden_are_frozen_values() -> None:
-    """H=128 落点 = config/model.yaml（不得用 net/encoders.py 默认 96）；expert_hidden=76（v8）。"""
+    """H=128 落点 = config/model.yaml（不得用 net/encoders.py 默认 96）；expert_hidden 维持 256。"""
     config = _load_yaml("config/model.yaml")
     model = build_model(config)
     assert int(config["hidden_dim"]) == H
-    assert int(config["moe"]["experts"]["hidden_dim"]) == 76
+    assert int(config["moe"]["experts"]["hidden_dim"]) == 256
     assert model.hidden == H
-    assert model.plan_head.moe.experts[0][0].out_features == 76
+    assert model.plan_head.moe.experts[0][0].out_features == 256
     assert model.plan_head.moe.num_experts == 8 and model.plan_head.moe.top_k == 2
     # 新头按 H=128 构造（4 头 → head_dim=32）
     assert model.policy.hidden == H and model.policy.num_heads == 4 and model.policy.num_layers == 1
@@ -48,7 +48,7 @@ def test_config_model_hidden_and_expert_hidden_are_frozen_values() -> None:
 
 
 def test_attn_head_param_budget_matches_frozen_formula() -> None:
-    """policy ≈108.5k / value ≈100.0k（v8 参数再分配；config/ckpt 口径 H=128）。"""
+    """policy ≈83.7k / value ≈83.3k（[60k,100k]）——按 config/ckpt 口径（H=128）。"""
     model = build_model(_load_yaml("config/model.yaml"))
     policy_params = sum(p.numel() for p in model.policy.parameters())
     value_params = sum(p.numel() for p in model.value.parameters())
@@ -126,9 +126,9 @@ def test_key_mask_gates_tokens() -> None:
     assert torch.allclose(baseline, policy(corrupted, key_mask)[0], atol=0.0)
 
 
-# ---------------------------------------------------------------- v8：令牌集合（无 t0 MP）
-def test_encode_builds_t39_tokens_without_t0_message_passing() -> None:
-    """encode() 不跑 st_gnn 消息传递（v8 B3）；令牌集合 T=39 且池化/ego/nav/signal/latent 恒有效。"""
+# ---------------------------------------------------------------- A3：t0 单次 st_gnn 主路径
+def test_encode_runs_single_t0_st_gnn_message_passing() -> None:
+    """encode() 对 t0 帧跑单次 st_gnn 消息传递；令牌集合 T=39 且 ego/latent 恒有效。"""
     model = DrivingModel(hidden=16).eval()
     counter = {"n": 0}
     handle = model.st_gnn.spatial.register_forward_hook(
@@ -137,18 +137,13 @@ def test_encode_builds_t39_tokens_without_t0_message_passing() -> None:
     encoded = model.encode(make_obs(batch=2))
     handle.remove()
 
-    assert counter["n"] == 0, "v8：encode 不得执行 st_gnn 消息传递（t0 单次 MP 进头已删除）"
+    assert counter["n"] == 1, "encode 必须恰好执行一次 st_gnn 消息传递（A3）"
     assert tuple(encoded["tokens"].shape) == (2, TOKEN_LENGTH, 16)
     assert tuple(encoded["key_mask"].shape) == (2, TOKEN_LENGTH)
-    # [z_od16, z_ld16, od_pool, ld_pool, others, z_ego, nav, signal, latent]
-    assert encoded["key_mask"][:, 32:].all(), "池化/others/z_ego/nav/signal/latent 恒有效"
+    assert encoded["key_mask"][:, 34].all(), "ego_ctx token 恒有效"
     assert encoded["key_mask"][:, 38].all(), "plan_head 融合 latent token 恒有效"
     # §5 #4：nav/signal mask 随 token 一起返回
     assert tuple(encoded["nav_mask"].shape) == (2, 1) and tuple(encoded["signal_mask"].shape) == (2, 1)
-    # latent 状态（v8）：当前帧编码
-    assert tuple(encoded["z_ego"].shape) == (2, 16)
-    assert tuple(encoded["z_od"].shape) == (2, 16, 16)
-    assert tuple(encoded["z_ld"].shape) == (2, 16, 16)
 
 
 # ---------------------------------------------------------------- A3：st_gnn 公共委托
@@ -266,12 +261,10 @@ def test_rollout_without_world_inputs_keeps_t0_context(monkeypatch: pytest.Monke
     assert calls == [], "缺少 route_world/ego_world 时不得触发 nav 重建"
 
 
-def test_step_context_uses_world_pose_and_rebuilds_nav(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_step_context：世界位姿直传 helper；重建结果重编码为 nav token（v8：不再同步 others）。"""
+def test_step_context_uses_world_pose_and_syncs_others_nav(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_step_context：世界位姿直传 helper；重建结果重编码为 token 且写回 others 的 nav 维。"""
     model = DrivingModel(hidden=16).eval()
-    obs = make_obs(batch=2)
-    mem = mem_from_obs(obs, others_dim=33, history_frames=6)
-    others_before = mem.others.clone()
+    mem = mem_from_obs(make_obs(batch=2), others_dim=33, history_frames=6)
     pose_world = torch.tensor([[13.0, 5.0, 0.3], [20.0, -3.0, -0.2]])
     world = {
         "route_world": torch.zeros(2, 8, 2),
@@ -296,8 +289,7 @@ def test_step_context_uses_world_pose_and_rebuilds_nav(monkeypatch: pytest.Monke
         1,
     )
     assert torch.allclose(seen[0], pose_world, atol=1e-6), "世界位姿必须原样传给重建 helper"
-    # v8：others 上下文为 t0 静态（不再回写 nav 维；nav 由独立 token 承载）
-    assert torch.equal(mem.others, others_before), "others 不得被逐步改写"
+    assert torch.allclose(mem.others[:, -1, :NAV_DIM], torch.zeros(2, NAV_DIM)), "others nav 维未同步重建"
     assert tuple(nav_token.shape) == (2, 16) and tuple(nav_mask.shape) == (2, 1)
     assert tuple(signal_token.shape) == (2, 16) and tuple(signal_mask.shape) == (2, 1)
 
@@ -388,7 +380,7 @@ def test_rollout_switches_route_command_after_displacement(monkeypatch: pytest.M
     real_policy_forward = model.policy.forward
 
     def policy_spy(tokens: torch.Tensor, key_mask: torch.Tensor):
-        nav_tokens.append(tokens[:, 36].detach().clone())  # [z_od16, z_ld16, od_pool, ld_pool, others, z_ego, nav, ...]
+        nav_tokens.append(tokens[:, 35].detach().clone())  # [OD16, LD16, lane, others, ego, nav, ttc, ...]
         return real_policy_forward(tokens, key_mask)
 
     monkeypatch.setattr(net_model_module, "rebuild_nav_from_world", rebuild_spy)

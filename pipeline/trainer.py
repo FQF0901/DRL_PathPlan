@@ -813,8 +813,7 @@ class Phase3Config:
       fusion/norm/ego_next/primary/policy），冻结 WM/value + specific experts/router/residual_scale
       + K-anchor 锚头（冻结前缀由 stages 传入；锚 CE/WTA 保留 → 梯度经冻结锚头塑形共享特征）；
     - **损失组合**（上游三层监督 + 监控）：首步动作 + 多步动作链 + plan head ``ego_next`` +
-      WM latent consistency（v8 主监督）+ WM OD/LD 物理解码（诊断）+ presence/entry BCE +
-      MoE 负载均衡；``traj`` **只做监控**（不进损失，
+      WM OD/LD + presence/entry BCE + MoE 负载均衡；``traj`` **只做监控**（不进损失，
       ``traj_aux_weight`` 默认 0 —— dagger 的 ``traj6`` 是常量外推合成值）。
       ``freeze_mode="specific_only"`` 时上游监督项（:data:`PHASE3_WM_LOSS_KEYS`）与锚 CE/WTA
       无梯度 → **自动降级为 0**；``freeze_mode="trunk_only"`` 时上游 WM/ego_next 监督按安全配方
@@ -863,8 +862,6 @@ class Phase3Config:
     od_weight: float = 1.0
     #: WM LD 恢复监督（smooth_l1 + angle，4 维预测空间）。
     ld_weight: float = 1.0
-    #: v8 WM latent consistency（主监督）：三路 latent 掩码加权 smooth_l1（联合分母）。
-    latent_weight: float = 0.01
     #: presence/entry BCE（id 轴目标；stage A 同系数口径）。
     presence_weight: float = 0.1
     entry_weight: float = 0.1
@@ -2157,93 +2154,6 @@ def weighted_ld_multi_step_loss(
     return total, per_horizon
 
 
-def weighted_latent_consistency_loss(
-    od_pred: "torch.Tensor",
-    od_target: "torch.Tensor",
-    od_mask: "torch.Tensor",
-    ld_pred: "torch.Tensor",
-    ld_target: "torch.Tensor",
-    ld_mask: "torch.Tensor",
-    ego_pred: Optional["torch.Tensor"] = None,
-    ego_target: Optional["torch.Tensor"] = None,
-    *,
-    frame_weight: Optional["torch.Tensor"] = None,
-    valid: Optional["torch.Tensor"] = None,
-    beta: float = 1.0,
-) -> Tuple["torch.Tensor", List[Dict[str, float]]]:
-    """v8 WM **latent consistency**（主监督）：三路 latent 的掩码加权 smooth_l1。
-
-    目标 = 未来帧 raw 特征的编码（``embed_od/embed_ld/embed_ego(future).detach()``；
-    由调用方计算并传入）。三路（OD/LD/ego）**联合加权均值**：
-
-    - ``od_pred/od_target (B,K,S,H)``、``ld_pred/ld_target (B,K,L,H)``、
-      ``ego_pred/ego_target (B,K,H)``（ego 为 ``None`` → 只算 od/ld，旧数据回退）；
-    - 权重 = ``slot_mask × valid × frame_weight``（od/ld 用各自槽位掩码；ego 掩码恒 1）；
-    - **联合分母** = ``Σ od_w + Σ ld_w + Σ ego_w``（宏/micro 梯度累积缩放与
-      :func:`_phase3_term_denominators` / stages 的 ``latent`` 分母同口径，缩放精确）；
-    - ``smooth_l1`` 逐元素 → 对 H 维取均值（每槽位/帧一个标量）。
-
-    返回 ``(total, per_horizon)``：``per_horizon[k]`` 含 ``loss/weight/count/frames``
-    （联合口径）与逐路 ``od_loss/ld_loss/ego_loss``（诊断）。
-    """
-    import torch
-    import torch.nn.functional as F
-
-    if valid is None:
-        valid = torch.ones(od_mask.shape[:2], dtype=od_mask.dtype, device=od_mask.device)
-    if frame_weight is None:
-        frame_weight = torch.ones(od_mask.shape[0], dtype=od_mask.dtype, device=od_mask.device)
-    frame_weight = frame_weight.to(dtype=od_mask.dtype, device=od_mask.device).reshape(-1)
-    valid = valid.to(dtype=od_mask.dtype, device=od_mask.device)
-    frame_weight_3d = frame_weight.reshape(-1, 1, 1)
-
-    err_od = F.smooth_l1_loss(od_pred, od_target, beta=beta, reduction="none").mean(dim=-1)
-    err_ld = F.smooth_l1_loss(ld_pred, ld_target, beta=beta, reduction="none").mean(dim=-1)
-    w_od = od_mask * valid.unsqueeze(-1) * frame_weight_3d
-    w_ld = ld_mask * valid.unsqueeze(-1) * frame_weight_3d
-    numerator = (err_od * w_od).sum() + (err_ld * w_ld).sum()
-    denominator = w_od.sum() + w_ld.sum()
-
-    err_ego = None
-    w_ego = None
-    if ego_pred is not None and ego_target is not None:
-        err_ego = F.smooth_l1_loss(ego_pred, ego_target, beta=beta, reduction="none").mean(dim=-1)
-        w_ego = valid * frame_weight.reshape(-1, 1)
-        numerator = numerator + (err_ego * w_ego).sum()
-        denominator = denominator + w_ego.sum()
-
-    total = numerator / denominator.clamp(min=1e-8)
-    per_horizon: List[Dict[str, float]] = []
-    for k in range(int(od_mask.shape[1])):
-        wk_od, wk_ld = w_od[:, k, :], w_ld[:, k, :]
-        num_k = (err_od[:, k, :] * wk_od).sum() + (err_ld[:, k, :] * wk_ld).sum()
-        den_k = wk_od.sum() + wk_ld.sum()
-        if err_ego is not None and w_ego is not None:
-            num_k = num_k + (err_ego[:, k] * w_ego[:, k]).sum()
-            den_k = den_k + w_ego[:, k].sum()
-        den_safe = den_k.clamp(min=1e-8)
-        slot_active = wk_od.gt(0) | wk_ld.gt(0)
-        frame_active = slot_active.any(dim=1)
-        if w_ego is not None:
-            frame_active = frame_active | w_ego[:, k].gt(0)
-        per_horizon.append(
-            {
-                "loss": num_k / den_safe,
-                "weight": float(den_k.detach()),
-                "count": float(slot_active.sum().detach()),
-                "frames": float(frame_active.sum().detach()),
-                "od_loss": float(((err_od[:, k, :] * wk_od).sum() / wk_od.sum().clamp(min=1e-8)).detach()),
-                "ld_loss": float(((err_ld[:, k, :] * wk_ld).sum() / wk_ld.sum().clamp(min=1e-8)).detach()),
-                "ego_loss": (
-                    float(((err_ego[:, k] * w_ego[:, k]).sum() / w_ego[:, k].sum().clamp(min=1e-8)).detach())
-                    if err_ego is not None and w_ego is not None
-                    else float("nan")
-                ),
-            }
-        )
-    return total, per_horizon
-
-
 def weighted_action_chain_loss(
     plan: "torch.Tensor",
     action_target: "torch.Tensor",
@@ -2893,16 +2803,19 @@ class BCDataset:
         self.label_names = tuple(meta.get("label_names") or SUPERVISED_LABELS)
         self.alignments = _alignment_from_meta(meta)
         # 顺序与 tools/collect_expert.py::CURRENT_CHANNELS / env.obs.builder.DEFAULT_CHANNELS 一致；
-        # v8（obs v6）：lane/ttc 上下文通道已删除（env 侧移除；net 侧无对应 token）。
+        # v5 的 lane/ttc 为当前帧上下文通道（不进 6 帧历史；net 侧由 _struct_context_tokens 消费）。
+        # 旧 schema（<v5）缺 lane/ttc 键 → 自动跳过，net 走缺键回退（0 token + mask=0，逐位兼容）。
         self._obs_keys = [
             key
             for key in (
                 "ego",
                 "od",
                 "ld",
+                "lane",
                 "nav",
                 "signal",
                 "others",
+                "ttc",
                 "ego_world",
                 "route_world",
             )
@@ -3230,8 +3143,8 @@ def _to_device_obs(
     return to_device_tensors(batch, device, dtype=torch.float32, pin=pin)
 
 
-#: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``；v8 obs v6 已删 lane/ttc）
-SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "nav", "signal", "others", "ego_world")
+#: 单槽通道（net ``_validate_obs`` 期望 ``(B,F)`` 而非 ``(B,1,F)``；含 v5 的 lane/ttc）
+SINGLE_SLOT_CHANNELS: Tuple[str, ...] = ("ego", "lane", "nav", "signal", "others", "ttc", "ego_world")
 
 
 def squeeze_single_slot(batch: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -3357,51 +3270,42 @@ def wm_teacher_forcing_predictions(
     future: Mapping[str, Any],
     actions: "torch.Tensor",
 ) -> Dict[str, "torch.Tensor"]:
-    """WM 教师强制多步前向（v8 latent 版；stage A ``_wm_predictions`` 的 trainer 版）。
+    """WM 教师强制多步前向（stage A ``_wm_predictions`` 的 trainer 版；lane P3-B）。
 
-    与 stage A 同一机制（lane P3-B），但 action 条件来自调用方（phase 3 = rollout ``plan``
-    的动作链，**已在调用方 detach**）：
+    与 stage A 同一机制，但 action 条件来自调用方（phase 3 = rollout ``plan`` 的动作链，
+    **已在调用方 detach**）：
 
-    - t0：``model.encode(obs)`` → latent 状态 ``z_ego/z_od/z_ld`` + t0 静态上下文；
-    - 每步先用当前状态跑 plan head 得 ``ego_next_pred``（第 k 帧 ego 特征预测）；
-    - **latent 自回归转移**：``model.st_gnn``（step k）得 next latents（下一步输入前 detach，
-      状态链切断）与 t0 帧物理解码 ``od_pred/ld_pred/presence/entry``（诊断）；
-    - 动作条件 = GT/调用方动作链：用于 A4 nav 逐步重建与图位姿链（ego 累积位姿；
-      OD = t0 位姿 + k·dt·v_t0、LD 静止）；缺 ``ego_world``/``route_world`` → 回退 t0 冻结；
-    - 目标 latent（供 latent consistency 损失）：``embed_od/ld/ego(future).detach()``
-      （``future["ego_fut"]`` 缺失时 ego 目标键缺席）。
+    - 每步先用当前编码 mem 跑 plan head 得 ``ego_next_pred``（第 k 帧 ego 特征预测）；
+    - 再把**目标帧真实 ego**（``future["ego_fut"][:, k-1]``，无则解析运动学兜底）挤入 mem
+      副本（``reserved`` 两维写第 k 个动作），合成帧一律 ``detach``；
+    - ST-GNN 单步推演得 t0 帧的 ``od_pred/ld_pred/presence/entry``；
+    - **A4 nav 逐步重建**：obs 含 ``ego_world``/``route_world`` 时按动作链推进世界系位姿并
+      逐步重算 nav（同步 ``others`` nav 维，与 ``net.model._rollout`` 同一步进语义）；
+      缺键（旧 replay 数据）→ 回退 t0 冻结。
 
     返回逐键堆叠 ``(B,K,...)``：``od_pred (B,K,16,5)`` / ``ld_pred (B,K,16,4)`` /
-    ``presence_pred|entry_pred (B,K,16)`` / ``ego_next_pred (B,K,H6)`` /
-    ``z_ego_pred (B,K,H)`` / ``z_od_pred|z_ld_pred (B,K,16,H)`` +
-    ``latent_target_od (B,K,16,H)`` / ``latent_target_ld`` / ``latent_target_ego (B,K,H)``。
+    ``presence_pred|entry_pred (B,K,16)`` / ``ego_next_pred (B,K,H6)``（ego 前 6 维）。
     """
     import torch
 
     from net.mem import (
         advance_pose_world,
         rebuild_nav_from_world,
+        sync_others_nav_dims,
         world_state_from_obs,
     )
 
     encoded = model.encode(obs)
-    mem = encoded["mem"]  # 只读（nav 回退锚点）；v8 不再拷贝/滑动 raw mem
+    mem = encoded["mem"].clone()
     enc = encoded["encoded"]
-    frame = encoded["frame"]
-    z_ego = encoded["z_ego"]
-    z_od = encoded["z_od"]
-    z_ld = encoded["z_ld"]
-    od_live = enc.od_live
-    ld_live = enc.ld_live
-    others_ctx = encoded["others_ctx"]
     nav_token = encoded["nav_token"]
     signal_token = encoded["signal_token"]
-    od_anchor = model.st_gnn.od_state_from_features(enc.od_now, od_live)
-    ld_anchor = model.st_gnn.ld_state_from_features(enc.ld_now, ld_live)
-    node_mask = frame.node_mask
-    od_pose_t0 = frame.pose[:, 1 : 1 + int(z_od.shape[1])]
-    ld_pose_t0 = frame.pose[:, 1 + int(z_od.shape[1]) :]
-    od_velocity = enc.od_now[..., 2:4] * od_live.unsqueeze(-1)  # (B,S,2) t0 相对速度
+    anchor_od = model.st_gnn.od_state_from_features(enc.od_now, enc.od_live)
+    anchor_ld = model.st_gnn.ld_state_from_features(enc.ld_now, enc.ld_live)
+    ego_fut = future.get("ego_fut")
+    ego_now = obs["ego"]
+    if ego_now.ndim == 3:
+        ego_now = ego_now[:, 0]
     horizon = int(actions.shape[1])
     # A4：nav 逐步重建（与 net.model._rollout 同一步进语义）；缺键 → 旧行为 + 一次性告警。
     ego_world, route_world, route_world_mask = world_state_from_obs(obs)
@@ -3425,97 +3329,64 @@ def wm_teacher_forcing_predictions(
             "t0 冻结（A4 逐步重建未启用；重新采集后自动生效）",
             flush=True,
         )
-    # ---- latent consistency 目标（未来帧 raw 特征编码，detach）----
-    def _as_tensor(value: Any, *, dtype: "torch.dtype") -> "torch.Tensor":
-        if torch.is_tensor(value):
-            return value.to(device=actions.device, dtype=dtype)
-        return torch.as_tensor(np.asarray(value), dtype=dtype, device=actions.device)
-
-    od_fut = future.get("od_fut")
-    ld_fut = future.get("ld_fut")
-    od_mask_fut = future.get("od_mask")
-    ld_mask_fut = future.get("ld_mask")
-    od_id_fut = future.get("od_id_fut")
-    if od_fut is not None and od_mask_fut is not None:
-        od_fut_t = _as_tensor(od_fut, dtype=torch.float32)
-        od_mask_t = _as_tensor(od_mask_fut, dtype=torch.float32)
-        od_id_t = _as_tensor(od_id_fut, dtype=torch.long) if od_id_fut is not None else None
-        latent_target_od = model.encoders.embed_od(od_fut_t, od_mask_t, ids=od_id_t).detach()
-    else:
-        latent_target_od = None
-    if ld_fut is not None and ld_mask_fut is not None:
-        ld_fut_t = _as_tensor(ld_fut, dtype=torch.float32)
-        ld_mask_t = _as_tensor(ld_mask_fut, dtype=torch.float32)
-        latent_target_ld = model.encoders.embed_ld(ld_fut_t, ld_mask_t).detach()
-    else:
-        latent_target_ld = None
-    ego_fut = future.get("ego_fut")
-    if ego_fut is not None:
-        ego_fut_t = _as_tensor(ego_fut, dtype=torch.float32)
-        if ego_fut_t.ndim == 3 and int(ego_fut_t.shape[1]) == 1:
-            ego_fut_t = ego_fut_t[:, 0]
-        ego_target_mask = torch.ones(
-            (int(ego_fut_t.shape[0]), int(ego_fut_t.shape[1])),
-            dtype=torch.float32,
-            device=actions.device,
-        )
-        latent_target_ego = model.encoders.embed_ego(ego_fut_t, ego_target_mask).detach()
-    else:
-        latent_target_ego = None
-
     predictions: Dict[str, List["torch.Tensor"]] = {
-        "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": [],
-        "z_ego_pred": [], "z_od_pred": [], "z_ld_pred": [],
+        "od_pred": [], "ld_pred": [], "presence_pred": [], "entry_pred": [], "ego_next_pred": []
     }
-    pose = torch.zeros((int(z_ego.shape[0]), 3), dtype=z_ego.dtype, device=z_ego.device)
+    analytic_ego = None
+    if ego_fut is None:
+        try:
+            from net.model import ego_next_features  # type: ignore
+
+            analytic_ego = ego_next_features
+        except Exception:  # noqa: BLE001
+            analytic_ego = None
     for k in range(1, horizon + 1):
-        # (i) plan head：当前状态 → 第 k 帧 ego 特征预测（plan head/MoE 的梯度源）
-        _, ego_next_pred, _ = model.plan_step(
-            z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token
-        )
+        _, ego_next_pred, _ = model.plan_step(enc, nav_token, signal_token)
         predictions["ego_next_pred"].append(ego_next_pred)
-        # (ii) 动作条件：累积 GT 位姿链 + A4 nav 重建（与 rollout 同一步进语义）
         raw_action = actions[:, k - 1]
-        ds, dtheta = raw_action[:, 0], raw_action[:, 1]
-        pose = advance_pose_world(pose, ds.detach(), dtheta.detach())
+        if ego_fut is not None:
+            ego_frame = ego_fut[:, k - 1]
+            if not torch.is_tensor(ego_frame):
+                ego_frame = torch.as_tensor(
+                    np.asarray(ego_frame), dtype=torch.float32, device=raw_action.device
+                )
+        elif analytic_ego is not None:
+            ego_frame = analytic_ego(
+                ego_now, raw_action[:, 0], raw_action[:, 1], dt=float(model.dt), prev_speed=ego_now[:, 0]
+            )
+        else:  # 兜底：复制当前帧 + 动作条件
+            ego_frame = torch.cat([ego_now[:, :6], raw_action], dim=-1)
+        if ego_frame.ndim == 3 and ego_frame.shape[1] == 1:
+            ego_frame = ego_frame[:, 0, :]
+        ego_frame = torch.cat([ego_frame[..., :6], raw_action], dim=-1)  # reserved 维 = 该步动作
+        mem.shift_ego(ego_frame.detach())
         if nav_rebuild:
-            pose_world = advance_pose_world(pose_world, ds.detach(), dtheta.detach())
+            # A4：位姿链 + nav 重建（同步 others 的 nav 维），与 rollout 同一步进语义。
+            # 纯函数路径：rebuild 只算特征；sync 返回**新** MemBank（赋值式，避免 autograd
+            # inplace 报错——teacher forcing 要反向）。
+            pose_world = advance_pose_world(
+                pose_world, raw_action[:, 0].detach(), raw_action[:, 1].detach()
+            )
             nav_feats, nav_mask = rebuild_nav_from_world(mem, pose_world, route_world, route_world_mask)
+            mem = sync_others_nav_dims(mem, nav_feats)
             nav_token = model.encoders.embed_nav(nav_feats.unsqueeze(1), nav_mask.reshape(-1, 1))
-        # (iii) 图位姿（t0 帧）：ego = 累积位姿；OD = t0 + k·dt·v_t0；LD 静止
-        offset = float(k) * float(model.dt)
-        od_pose_k = torch.cat(
-            [od_pose_t0[..., :2] + od_velocity * offset, od_pose_t0[..., 2:]], dim=-1
-        )
-        pose_k = torch.cat([pose.unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
-        # (iv) latent 自回归转移 + 物理解码（t0 帧）
-        z_ego_next, z_od_next, z_ld_next, od_pred, ld_pred, presence, entry = model.st_gnn(
-            z_ego=z_ego,
-            z_od=z_od,
-            z_ld=z_ld,
-            node_mask=node_mask,
-            pose=pose_k,
+        enc_k = model.mem_encoder.encode(model.encoders, mem)
+        od_pred, ld_pred, presence, entry = model.st_gnn(
+            ego_ctx=enc_k.ego_ctx,
+            od_ctx=enc_k.od_ctx,
+            ld_ctx=enc_k.ld_ctx,
+            node_mask=enc_k.frame.node_mask,
+            pose=enc_k.frame.pose,
             step_index=k,
-            od_anchor=od_anchor,
-            ld_anchor=ld_anchor,
+            od_anchor=anchor_od,
+            ld_anchor=anchor_ld,
         )
         predictions["od_pred"].append(od_pred)
         predictions["ld_pred"].append(ld_pred)
         predictions["presence_pred"].append(presence)
         predictions["entry_pred"].append(entry)
-        predictions["z_ego_pred"].append(z_ego_next)
-        predictions["z_od_pred"].append(z_od_next)
-        predictions["z_ld_pred"].append(z_ld_next)
-        # (v) 状态链切断：预测 latent detach 后作为下一步输入（自回归教师强制）
-        z_ego, z_od, z_ld = z_ego_next.detach(), z_od_next.detach(), z_ld_next.detach()
-    stacked = {key: torch.stack(values, dim=1) for key, values in predictions.items()}
-    if latent_target_od is not None:
-        stacked["latent_target_od"] = latent_target_od
-    if latent_target_ld is not None:
-        stacked["latent_target_ld"] = latent_target_ld
-    if latent_target_ego is not None:
-        stacked["latent_target_ego"] = latent_target_ego
-    return stacked
+        enc = enc_k  # 下一轮 plan head 看到 ≤ k 帧
+    return {key: torch.stack(values, dim=1) for key, values in predictions.items()}
 
 
 @_with_safe_od_pose
@@ -4496,7 +4367,7 @@ def evaluate_bc(
 #: phase 3 **上游监督项**（WM 教师强制 ``od/ld/presence/entry`` + plan head ``ego_next``）。
 #: ``freeze_mode="specific_only"`` 下主干/WM 冻结 → 无梯度（规格：损失自动降级为 0，见
 #: :func:`phase3_effective_config`）；权重全 0 时 :func:`_phase3_loss_terms` 跳过教师强制前向。
-PHASE3_WM_LOSS_KEYS: Tuple[str, ...] = ("ego_next", "od", "ld", "presence", "entry", "latent")
+PHASE3_WM_LOSS_KEYS: Tuple[str, ...] = ("ego_next", "od", "ld", "presence", "entry")
 
 #: phase 3 损失/监控所需的目标键（future_fn/物化源必须全部提供）。
 PHASE3_FUTURE_KEYS: Tuple[str, ...] = (
@@ -4504,7 +4375,6 @@ PHASE3_FUTURE_KEYS: Tuple[str, ...] = (
     "ld_fut",
     "od_mask",
     "ld_mask",
-    "od_id_fut",
     "wm_valid",
     "ego_fut",
     "presence_target",
@@ -4525,8 +4395,6 @@ def _phase3_term_denominators(
     - ``action_chain``：``Σ w·chain_valid[:,1:]``（第 2..6 步；第 1 步由 action 项监督）；
     - ``step``：``Σ w·wm_valid``（ego_next / 逐帧项）；
     - ``od``/``ld``：``Σ w·wm_valid·mask``（槽位级）；
-    - ``latent``：``od + ld + step``（v8 latent consistency 联合分母：三路加权均值；
-      ego 路掩码恒 1 ⇒ 分母为 ``Σ w·wm_valid``）；
     - ``presence``：``Σ w·wm_valid × slots``（BCE 分母 = 帧权重和 × 槽位数）；
     - ``anchor_ce``：``Σ w·row_valid``（K-anchor 选择 CE 分母；row_valid = 链有任一有效 step）；
     - ``anchor_wta``：``Σ w·chain_valid``（K-anchor WTA 回归分母，逐 step）。
@@ -4539,18 +4407,14 @@ def _phase3_term_denominators(
     chain_valid = np.asarray(future["action_chain_valid"], dtype=np.float64)
     chain_row_valid = (chain_valid > 0.5).any(axis=1).astype(np.float64)
     slots = int(od_mask.shape[-1]) if od_mask.ndim >= 2 else 0
-    od_den = float((step_weight[:, :, None] * od_mask).sum())
-    ld_den = float((step_weight[:, :, None] * ld_mask).sum())
     return {
         "action": float(weight.sum()),
         "action_chain": float((weight * chain_valid[:, 1:]).sum()),
         # bias 标定项 = 逐 micro 均值惩罚（自归一），分母恒 1 → micro/macro 缩放因子 1。
         "bias_calib": 1.0,
         "step": float(step_weight.sum()),
-        "od": od_den,
-        "ld": ld_den,
-        # v8 latent consistency：三路联合分母（与 weighted_latent_consistency_loss 同口径）
-        "latent": od_den + ld_den + float(step_weight.sum()),
+        "od": float((step_weight[:, :, None] * od_mask).sum()),
+        "ld": float((step_weight[:, :, None] * ld_mask).sum()),
         "presence": float(step_weight.sum()) * float(slots),
         "anchor_ce": float((weight.reshape(-1) * chain_row_valid).sum()),
         "anchor_wta": float((weight * chain_valid).sum()),
@@ -4570,15 +4434,10 @@ def _phase3_scale_factors(
 def _phase3_future_tensors(
     future_np: Mapping[str, np.ndarray], device: Any, *, pin: bool = False
 ) -> Dict[str, "torch.Tensor"]:
-    """future 目标 numpy → device 张量（只转损失所需键；``od_id_fut`` 保 int64，其余 float32）。"""
+    """future 目标 numpy → device 张量（只转损失所需键；float32）。"""
     _require_torch()
     return {
-        key: to_device_tensor(
-            np.asarray(future_np[key]),
-            device,
-            dtype=torch.int64 if key == "od_id_fut" else torch.float32,
-            pin=pin,
-        )
+        key: to_device_tensor(np.asarray(future_np[key]), device, dtype=torch.float32, pin=pin)
         for key in PHASE3_FUTURE_KEYS
         if key in future_np
     }
@@ -4694,20 +4553,6 @@ def _phase3_loss_terms(
             frame_weight=frame_weight,
             valid=future_t["wm_valid"],
         )
-        # ③ latent consistency（v8 主监督）：三路 latent 掩码加权 smooth_l1（联合分母；
-        # 目标 = 未来帧 raw 特征编码，见 wm_teacher_forcing_predictions）
-        latent_loss, _ = weighted_latent_consistency_loss(
-            predictions["z_od_pred"],
-            predictions["latent_target_od"],
-            future_t["od_mask"],
-            predictions["z_ld_pred"],
-            predictions["latent_target_ld"],
-            future_t["ld_mask"],
-            predictions.get("z_ego_pred"),
-            predictions.get("latent_target_ego"),
-            frame_weight=frame_weight,
-            valid=future_t["wm_valid"],
-        )
         # ② plan head ego_next：目标 = 未来 ego 特征前 H6 维；尾部按 wm_valid mask
         ego_next_pred = predictions["ego_next_pred"]
         ego_target = future_t["ego_fut"][..., : int(ego_next_pred.shape[-1])]
@@ -4731,7 +4576,7 @@ def _phase3_loss_terms(
         )
     else:
         zero = torch.zeros((), device=device)
-        od_loss = ld_loss = ego_loss = latent_loss = zero
+        od_loss = ld_loss = ego_loss = zero
         presence_terms = {"presence": zero, "entry": zero}
     load_loss = out.get("load_balance_loss")
     if load_loss is None:
@@ -4745,7 +4590,6 @@ def _phase3_loss_terms(
         "ego_next": config.ego_next_weight * ego_loss,
         "od": config.od_weight * od_loss,
         "ld": config.ld_weight * ld_loss,
-        "latent": config.latent_weight * latent_loss,
         "presence": config.presence_weight * presence_terms["presence"],
         "entry": config.entry_weight * presence_terms["entry"],
         "load_balance": load_loss,
@@ -4886,7 +4730,6 @@ def pretrain_bc_phase3(
         "ego_next",
         "od",
         "ld",
-        "latent",
         "presence",
         "entry",
         "load_balance",
@@ -5003,7 +4846,6 @@ def pretrain_bc_phase3(
                     + components["ego_next"]
                     + components["od"]
                     + components["ld"]
-                    + components["latent"]
                     + components["presence"]
                     + components["entry"]
                     + components["load_balance"]
@@ -5079,7 +4921,6 @@ def pretrain_bc_phase3(
             "bc_ego_next_loss": totals["ego_next"] / divisor,
             "bc_od_loss": totals["od"] / divisor,
             "bc_ld_loss": totals["ld"] / divisor,
-            "bc_latent_loss": totals["latent"] / divisor,
             "bc_presence_loss": totals["presence"] / divisor,
             "bc_entry_loss": totals["entry"] / divisor,
             "bc_load_balance_loss": totals["load_balance"] / divisor,
@@ -5237,7 +5078,6 @@ def evaluate_bc_phase3(
         "ego_next",
         "od",
         "ld",
-        "latent",
         "presence",
         "entry",
     )
@@ -5322,7 +5162,6 @@ def evaluate_bc_phase3(
             "bc_ego_next_loss": numerator["ego_next"] / max(denominator["ego_next"], 1e-12),
             "bc_od_loss": numerator["od"] / max(denominator["od"], 1e-12),
             "bc_ld_loss": numerator["ld"] / max(denominator["ld"], 1e-12),
-            "bc_latent_loss": numerator["latent"] / max(denominator["latent"], 1e-12),
             "bc_presence_loss": numerator["presence"] / max(denominator["presence"], 1e-12),
             "bc_entry_loss": numerator["entry"] / max(denominator["entry"], 1e-12),
         }

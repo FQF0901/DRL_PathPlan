@@ -2,9 +2,8 @@
 
 覆盖交付项：
 
-- Stage A：latent consistency 主监督 + 物理解码诊断（v8）、``train_weight × wm_valid`` 加权、
-  逐 horizon loss/ADE + 匀速基线（``val/od/*``，val 子集口径）、presence/entry BCE + AUC、
-  Tier-1 监控落盘；
+- Stage A：多步直接监督（LD 移除）、``train_weight × wm_valid`` 加权、逐 horizon
+  loss/ADE + 匀速基线（``val/od/*``，val 子集口径）、presence/entry BCE + AUC、Tier-1 监控落盘；
 - Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ MoE 负载均衡（lane U1），动作加权误差
   （``ego/action/err_weighted``）+ 逐 horizon ego 轨迹 MAE（``ego/traj/mae_m``）+
   MoE 负载 KPI；median/p95/slice/label 已按监控瘦身移除（``docs/metrics.md``）。
@@ -70,18 +69,11 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["val_valid_samples"] > 0
     assert metrics["val_valid_weight_sum"] > 0.0
 
-    # v8（B3）：latent consistency 主损失（coef=1.0）+ 物理解码诊断（od 0.1 / ld 0.02）；
-    # presence/entry 可用
+    # 规格（2026-09-30 拍板）：LD 损失保留（direct_multi_step，与 OD 同构）但 coef=0（仅监控，不监督 LD 头）；presence/entry 可用
     assert metrics["ld_loss"] == "direct_multi_step"
-    assert metrics["latent_coef"] == 1.0
-    assert metrics["od_coef"] == 0.1
-    assert metrics["ld_coef"] == 0.02
-    assert np.isfinite(metrics["wm_loss_latent"]) and metrics["wm_loss_latent"] > 0.0
-    assert np.isfinite(metrics["val_loss_latent"]) and metrics["val_loss_latent"] > 0.0
+    assert metrics["ld_coef"] == 0.0
     assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0
     assert np.isfinite(metrics["val_loss_ld"])
-    for name, item in per_horizon.items():
-        assert "latent_loss" in item and np.isfinite(item["latent_loss"]), f"{name} 缺 latent_loss"
     assert metrics["presence_available"] == 1.0
     assert np.isfinite(metrics["presence_auc"]) or np.isnan(metrics["presence_auc"])
     assert np.isfinite(metrics["presence_pos_rate"])
@@ -92,8 +84,7 @@ def test_stage_a_v2_smoke_per_horizon_presence_and_weights(tmp_path: Path) -> No
     assert metrics["dataset/weight_min"] == 0.0
 
     tags = _csv_tags(out_dir)
-    for tag in ("loss/wm", "loss/latent", "loss/od", "loss/ld", "loss/ego_next", "loss/presence",
-                "loss/entry",
+    for tag in ("loss/wm", "loss/od", "loss/ld", "loss/ego_next", "loss/presence", "loss/entry",
                 "val/od/ade_m/h1", "val/od/fde_m/h1", "val/od/ade_m/cv_h1", "val/od/fde_m/cv_h1",
                 "val/ego/action/err_weighted", "val/ego/traj/mae_m/h1", "val/ego/traj/fde_m"):
         assert tag in tags, f"Stage A 监控序列缺失：{tag}"

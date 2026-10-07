@@ -1,49 +1,51 @@
-"""``DrivingModel``：mem-bank 输入 → 注意力聚合 → plan head(MoE) → latent 自回归 rollout。
+"""``DrivingModel``：mem-bank 输入 → 注意力聚合 → plan head(MoE) → 递归 rollout + ST-GNN。
 
-v8（B3）数据流（latent 世界模型）
---------------------------------
+v2 数据流（mem-bank + 递归 rollout + plan-head MoE）
+---------------------------------------------------
 1. **输入**：4 个 per-modality 真 mem（``ego_hist/od_hist/ld_hist/others_hist`` + mask、
    ``od_id_hist/od_presence_hist``，见 :mod:`net.mem`）。**net 只读**；真 mem 的更新只由 env 完成。
 2. **编码**：:class:`net.mem.MemEncoder` 把 6 帧 mem 编码成"编码 mem"——OD / Ego /
    Others 各做掩码注意力池化，**LD 不做时序**（直接用当前帧，理由见该模块 docstring）。
-3. **状态 latent**（t0）：``z_ego/z_od/z_ld`` = **当前帧编码**（``embed_ego(ego_now)`` /
-   ``embed_od(od_now, od_live)`` / ``embed_ld(ld_now, ld_live)``；单帧，非时序聚合）。
-4. **Plan head**：``[z_ego, mean(z_od), mean(z_ld), others_ctx, nav, signal]`` → MLP 融合 →
-   **MoE**（primary 常开 + 8 个 specific 专家、top-2 软混合）→ 产出**下一时刻 ego 特征**
-   与策略/价值 latent；``router_logits(8)``/``expert_weights(8)`` 原样输出。
-5. **ST-GNN（latent 转移）**：节点 = ``[z_ego + step_embed(k), z_od, z_ld]``，MP 2 层 →
-   ``z_*_next = z_* + head([h_*, z_*])``（3 个 ``2H→H→H`` 头）+ presence/entry logits +
-   **物理小解码头**（od 5 维 / ld 4 维，先验 + 零初始化残差，t0 帧口径；诊断/旧消费者）。
-6. **rollout（6 步，不再滑动 raw mem）**：每步 plan head/policy 用**当前步 latents**；
-   st_gnn 得 next latents，**作为下一步输入前 detach**（状态链切断）；A4 nav 逐步重建
-   （nav 是上下文，允许 raw→encode）。真 mem 绝不被写入。
-7. **detach 语义（规格第 5 条，固定不可配）**：来自真实 obs 的 t0 状态**不 detach**
-   ——第一步预测/轨迹的梯度直达编码器（检测任务）；rollout 合成的后续状态在进入下一步
-   前 detach（预测任务不回传状态链）。被切的是"状态（latent）"，**action/pose 链保持可微**：
-   ``traj_xy`` 的梯度沿 pose 链训练 plan head 的动作链。
+3. **Plan head**：4 个 mem 聚合 + nav/signal → MLP 融合 → **MoE**（primary 常开 + 8 个
+   specific 专家、top-2 软混合）→ 产出**下一时刻 ego 特征**与策略/价值 latent；
+   ``router_logits(8)``/``expert_weights(8)`` 原样输出。OD/LD 的**掩码均值池化只保留在
+   这条融合路径**（v6 §1.2 去池化）。
+4. **ST-GNN**：以"更新后的 ego mem + od/ld mem"为条件推演下一时刻 OD/LD（t0 帧预测
+   空间），并给出 ``od_presence_pred``/``od_entry_pred``。
+5. **递归 rollout（6 步）**：每次从真 mem **拷贝 4 份**，逐步：
+   plan head(mem 副本) → 下一 ego 特征 → 挤入 ego 副本并弹出最老帧；
+   ST-GNN → 下一 OD/LD 预测 → **逆变换到当前累积位姿系** → 重编码/携带静态属性 →
+   挤入各自副本并弹出最老帧。重复 6 次（下次 rollout 重新拷贝）。
+   真 mem 绝不被写入（``MemBank.clone`` 隔离；有断言测试）。
+6. **detach 语义（规格第 5 条，固定不可配）**：来自真实 obs 的帧（step0）**不 detach**
+   ——第一步预测/轨迹的梯度直达编码器（检测任务）；rollout 合成的后续 5 帧在**挤入
+   mem 副本前 detach**（预测任务不回传状态链）。被切的是"帧（状态）"，
+   **action/pose 链保持可微**：``traj_xy`` 的梯度沿 pose 链训练 plan head 的动作链。
+7. **坐标**：ST-GNN 在 **t0 帧**预测；``od_pred_to_features``/``ld_pred_to_features``
+   做 SE(2) 逆变换到当前累积位姿系，再重编码挤入 mem（既有正确实现，规格第 6 条）。
 
-v6 增补（docs/v6_net_design.md；A1/A2 去池化仍有效）
---------------------------------------------------
+v6 增补（docs/v6_net_design.md，冻结）
+-------------------------------------
 - **A1/A2 去池化**：policy/value 不再吃池化 token，改为**交叉注意力头**
-  （:class:`net.policy.CrossAttnHead`）直吃令牌集合（OD/LD 逐槽 + 池化 + others + ego +
-  nav + signal + plan_head 融合 latent；``_head_tokens``）；池化仅保留在 plan head 融合路径。
-- **A4 nav 修正**：``_rollout`` 内逐步按**世界系** ego 位姿重建 nav/signal
-  （:func:`rebuild_nav_from_world` / :func:`advance_signal`；无 ``route_world``/``ego_world``
-  键时回退 t0 冻结，逐位兼容旧输入）。v8：others 上下文为 t0 静态 token，不再逐步同步
-  others mem 的 nav 维（rollout 不重编码 raw mem）。
+  （:class:`net.policy.CrossAttnHead`）直吃令牌集合（OD/LD 逐槽 + others + ego + nav +
+  signal + plan_head 融合 latent；``_head_tokens``）；池化仅保留在 plan head 融合路径。
+- **A3 t0 单次 st_gnn 消息传递**：``encode`` 对 t0 帧跑**一次** ``st_gnn.spatial``
+  消息传递（对象级 OD/LD 节点特征供注意力头；见 :meth:`DrivingModel._t0_object_features`）。
+  cheap path（``rollout=False``）与完整前向**都**经过 ``encode`` ⇒ collect/update 一致；
+  6 步 rollout 内的逐步 st_gnn 语义原样不动。该 t0 pass 在 ``no_grad`` 下执行：
+  st_gnn 的训练信号保持 WM 损失口径（traj/policy 损失不回传 st_gnn，既有测试锁定）。
+- **A4 nav 修正**：``_rollout`` 内逐步按**世界系** ego 位姿重建 nav/signal 与 others mem
+  的 nav 子向量（:func:`rebuild_nav_from_world` / :func:`sync_others_nav` /
+  :func:`advance_signal`；无 ``route_world``/``ego_world`` 键时回退 t0 冻结，逐位兼容旧输入）。
 
-v8 增补（参数再分配 + lane/ttc 移除 + WM latent 重构）
------------------------------------------------------
+v8 增补（参数再分配 + lane/ttc 移除）
+------------------------------------
 - 参数再分配：MoE ``primary/experts/router`` 与 policy trunk / value net 的隐藏维由
   ``config/model.yaml`` 新键控制（见 :class:`net.moe.MoEBlock` / :class:`net.policy.PolicyHead`）；
 - **lane/ttc 移除**：obs v6 删除 ``lane``/``ttc`` 通道 → 编码器线性层/类型嵌入与
   ``net.mem.context_features_from_obs`` 一并删除（``NUM_NODE_TYPES`` 7→5）。
-- **头令牌集合 T=39**：``[z_od 16, z_ld 16, od_pool 1, ld_pool 1, others 1, z_ego 1, nav 1,
-  signal 1, latent 1]``（``od_pool/ld_pool`` = t0 上下文 ``masked_mean(od_ctx/ld_ctx)``）；
-  **去掉 t0 单次 MP 进头**（``_t0_object_features`` 保留供诊断，不再接入令牌）。
-- **监督口径**：WM 主损失 = **latent consistency**（``z_k`` vs 未来帧编码目标，掩码加权
-  smooth_l1，见 ``pipeline.trainer.weighted_latent_consistency_loss``）；物理小解码与
-  presence/entry/ego_next 为辅助/诊断项。
+  头令牌集合保持 **T=39**：``[OD 16, LD 16, od_pool 1, ld_pool 1, others 1, ego 1, nav 1,
+  signal 1, latent 1]``（lane/ttc 槽位由 OD/LD 掩码均值池化与 ego token 取代）；
 - K-anchor 保留（默认关）：``plan_anchors`` 的 ``lane_ctx`` 传 ``zeros(B,3)``（valid=0 →
   恒等变换）；``net.anchor.anchor_lane_context`` 保留但不再接线。
 
@@ -53,6 +55,8 @@ v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 =
   （latent → 6 步 ds）与**逐锚 6×2 残差头**；方案 A 软混合
   ``plan = Σ_k p_k·(anchor_k + residual_k)``（``p = softmax(logits/τ)``；推理可 argmax），
   见 :mod:`net.anchor` 与 ``docs/v7_program_prereg.md`` §11。
+- **车道系**：锚/残差 dθ 以 lane 帧表达，经 ``lane.heading_err``/``curvature`` 的
+  "沿车道跟随"剖面回投 ego 帧（车道无效 → 恒等）。
 - **rollout**：t0 一次算出的锚计划驱动尾段（step0 仍 = ``action_mu``，输出契约
   ``plan[:,0] == action_mu`` 不变；``traj_xy`` 与 ``plan`` 一致）；额外输出
   ``anchor_logits/anchor_probs/anchor_plan/anchor_speed/anchor_residual/anchor_ctx``。
@@ -71,12 +75,12 @@ v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 =
 ``action_mu/action_logstd (B,2)``、``value (B,1)``、``traj_xy (B,6,2)``、``plan (B,6,2)``
 （rollout 实际执行的 6 个动作，``plan[:,0] == action_mu``）、``router_logits (B,8)``、
 ``expert_weights (B,8)``、``latent (B,H)``；另含 ``od_pred (B,6,16,5)``、
-``ld_pred (B,6,16,4)``（物理解码，诊断 + 未来 LD 监督）、``od_presence_pred (B,6,16)``、
-``od_entry_pred (B,6,16)``（logits）、``traj_theta (B,6)``、``z_*_pred``（latent 诊断）。
+``ld_pred (B,6,16,4)``（LD 预测作 rollout 输入/诊断 + **未来 LD 监督已恢复**：stage A
+``direct_multi_step``（``ld_fut`` 前 4 维；lane P3-F），stage B phase 3 亦监督）、
+``od_presence_pred (B,6,16)``、``od_entry_pred (B,6,16)``（logits）、``traj_theta (B,6)``。
 
 ``forward(..., rollout=False, world_model=False)`` 是 PPO cheap path：省略
-traj/rollout 多步键（不跑 st_gnn 消息传递），``action_mu/action_logstd/value`` 与完整前向
-逐位一致。
+traj/ST-GNN 多步键，``action_mu/action_logstd/value`` 与完整前向逐位一致。
 
 向后兼容
 --------
@@ -87,7 +91,7 @@ traj/rollout 多步键（不跑 st_gnn 消息传递），``action_mu/action_logs
   缺失 ``ego_hist/others_hist`` 或 ``od_id_hist/od_presence_hist`` 时按模块 docstring
   的回退规则处理（旧数据集可直接复用）；
 - ``nav/signal`` 键保留为可选上下文 token（v2 的规范上下文在 ``others`` 里）；
-- ``wm_detach`` 形参保留但**恒为 no-op**：v8 的 latent 状态链 detach 语义是固定的，
+- ``wm_detach`` 形参保留但**恒为 no-op**：v2 的合成帧 detach 语义是固定的（规格第 5 条），
   不提供消融开关。
 """
 
@@ -194,6 +198,59 @@ def interpolate_actions(actions: Tensor, dt: float = 0.5, hz: float = 10.0) -> T
     return torch.stack(poses, dim=1)
 
 
+# ------------------------------------------------------------- rollout 特征重建
+def od_pred_to_features(od_pred: Tensor, pose: Tensor, carry: Tensor, mask: Tensor) -> Tensor:
+    """t0 帧 OD 预测 ``(B,16,5)`` → ``pose`` 自车系下的原始 9 维特征。
+
+    ``L/W/type_id`` 是静态属性，沿用 ``carry``（上一帧原始特征）；掩码外清零。
+    """
+    px, py, theta = pose[:, 0:1], pose[:, 1:2], pose[:, 2:3]
+    cos_t, sin_t = torch.cos(theta), torch.sin(theta)
+    dx = od_pred[..., 0] - px
+    dy = od_pred[..., 1] - py
+    heading = wrap_angle(od_pred[..., 4] - theta)
+    features = torch.stack(
+        [
+            cos_t * dx + sin_t * dy,
+            -sin_t * dx + cos_t * dy,
+            cos_t * od_pred[..., 2] + sin_t * od_pred[..., 3],
+            -sin_t * od_pred[..., 2] + cos_t * od_pred[..., 3],
+            torch.cos(heading),
+            torch.sin(heading),
+            carry[..., 6],
+            carry[..., 7],
+            carry[..., 8],
+        ],
+        dim=-1,
+    )
+    return features * mask.unsqueeze(-1)
+
+
+def ld_pred_to_features(ld_pred: Tensor, pose: Tensor, carry: Tensor, mask: Tensor) -> Tensor:
+    """t0 帧 LD 预测 ``(B,16,4)`` → ``pose`` 自车系下的原始 7 维特征。
+
+    ``speed_limit/线型`` 是静态属性，沿用 ``carry``；掩码外清零。
+    """
+    px, py, theta = pose[:, 0:1], pose[:, 1:2], pose[:, 2:3]
+    cos_t, sin_t = torch.cos(theta), torch.sin(theta)
+    dx = ld_pred[..., 0] - px
+    dy = ld_pred[..., 1] - py
+    heading = wrap_angle(ld_pred[..., 2] - theta)
+    features = torch.stack(
+        [
+            cos_t * dx + sin_t * dy,
+            -sin_t * dx + cos_t * dy,
+            heading,
+            ld_pred[..., 3],
+            carry[..., 4],
+            carry[..., 5],
+            carry[..., 6],
+        ],
+        dim=-1,
+    )
+    return features * mask.unsqueeze(-1)
+
+
 def ego_next_features(
     ego_prev: Tensor, ds: Tensor, dtheta: Tensor, *, dt: float, prev_speed: Tensor
 ) -> Tensor:
@@ -249,8 +306,10 @@ def rebuild_nav_from_world(
 ) -> tuple[Tensor, Tensor]:
     """A4：世界系 route + ego 世界位姿 → 重建 nav ``(nav_features (B,NAV_DIM), nav_mask (B,1))``。
 
-    **纯函数版**（不原地改写 ``mem.others``；v8 起 others 上下文为 t0 静态 token，
-    nav 由独立 token 承载，不再回写 others）。
+    **纯函数版**（不原地改写 ``mem.others``；调用方用 :func:`sync_others_nav` 赋值回写）。
+    为什么不用 ``net.mem.rebuild_nav_from_world`` 的原地版本：rollout/教师强制的 ``mem``
+    是 autograd 图中的 clone，原地写 ``mem.others`` 会在 backward 触发
+    "modified by an inplace operation"（该张量已被 encoder 保存）；赋值新张量则安全。
     这里用 ``net.mem.nav_features_from_world``（其纯函数内核）+ 相同回退语义：路线不可用
     行回退到 mem 当前帧的 nav（t0 冻结值），mask=0 行由调用方掩码。helper 未就绪时回退
     占位实现 = mem 当前帧 nav（t0 冻结语义）。
@@ -280,6 +339,20 @@ def advance_pose_world(pose_world: Tensor, ds: Tensor, dtheta: Tensor) -> Tensor
     dx, dy = arc_step(ds, dtheta)
     return compose_pose(pose_world, dx, dy, dtheta)
 
+
+def sync_others_nav(others: Tensor, nav_features: Tensor) -> Tensor:
+    """A4：把 others mem **当前帧（末帧）** 的 nav 子向量（0..NAV_DIM）替换为重建值。
+
+    历史帧保持各自时刻的 nav（rollout 不滑动 others mem，只更新"当前"任务条件）；
+    返回新张量（拷贝隔离，不原地改写）。
+    """
+    if others.ndim != 3 or int(others.shape[-1]) < NAV_DIM:
+        raise ValueError(f"others 应为 (B,T,F) 且 F>={NAV_DIM}，收到 {tuple(others.shape)}")
+    if nav_features.ndim != 2 or int(nav_features.shape[-1]) != NAV_DIM:
+        raise ValueError(f"nav_features 应为 (B,{NAV_DIM})，收到 {tuple(nav_features.shape)}")
+    updated = others.clone()
+    updated[:, -1, :NAV_DIM] = nav_features.to(updated.dtype)
+    return updated
 
 
 def advance_signal(
@@ -482,29 +555,21 @@ class DrivingModel(nn.Module):
         )
 
     # ---------------------------------------------------------------- 编码/规划
-    def plan_step(
-        self,
-        z_ego: Tensor,
-        z_od: Tensor,
-        z_ld: Tensor,
-        od_live: Tensor,
-        ld_live: Tensor,
-        others_ctx: Tensor,
-        nav_token: Tensor,
-        signal_token: Tensor,
+    def _plan(
+        self, encoded: EncodedMem, nav_token: Tensor, signal_token: Tensor
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-        """**公开单步 plan head 入口**（rollout / Stage A/B 教师强制共用）。
+        """plan head 融合路径（v6：OD/LD 池化只在这里）。
 
-        v8（B3）：融合输入 = ``[z_ego_k, mean(z_od_k), mean(z_ld_k), others, nav, signal]``
-        （状态 latent 掩码均值池化 + t0 静态 others 上下文；nav 可为逐步重建 token）。
-        返回 ``(latent, ego_next, moe_aux)``；``ego_next`` 监督"下一 ego 特征"，
-        让 plan head/MoE 在教师强制路径中保持梯度（design-v1.2 §2.3 方案①）。
+        nav/signal token 兼容 ``(B,H)`` 与 ``(B,1,H)``（A4 调用点常直接传
+        ``encoders.embed_nav(...)`` 的 (B,1,H) 输出）。
         """
         nav_token = squeeze_batch_singletons(nav_token, 2, "nav_token")
         signal_token = squeeze_batch_singletons(signal_token, 2, "signal_token")
-        od_pool = _masked_mean(z_od, od_live)
-        ld_pool = _masked_mean(z_ld, ld_live)
-        return self.plan_head(z_ego, od_pool, ld_pool, others_ctx, nav_token, signal_token)
+        od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
+        ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
+        return self.plan_head(
+            encoded.ego_ctx, od_pool, ld_pool, encoded.others_ctx, nav_token, signal_token
+        )
 
     def _t0_object_features(self, encoded: EncodedMem) -> tuple[Tensor, Tensor]:
         """A3：t0 帧**单次 st_gnn 消息传递** → 对象级特征 ``(od (B,S,H), ld (B,L,H))``。
@@ -514,7 +579,7 @@ class DrivingModel(nn.Module):
         在 ``no_grad`` 下执行：st_gnn 的训练信号保持 WM 损失口径（traj/policy 损失不得
         回传 st_gnn；tests/test_stage_v11.py 锁定），本 pass 只提供"当前权重下的特征"。
 
-        v8（B3）：**不再接入令牌集合**（头令牌改为 latent 状态）；保留供诊断/外部调用。
+        v8 B2：不再接入令牌集合（头令牌改为 latent 状态）；保留供诊断/外部调用。
         """
         with torch.no_grad():
             return self.st_gnn.node_features(
@@ -528,37 +593,37 @@ class DrivingModel(nn.Module):
 
     def _head_tokens(
         self,
-        z_ego: Tensor,
-        z_od: Tensor,
-        z_ld: Tensor,
-        od_live: Tensor,
-        ld_live: Tensor,
-        od_pool: Tensor,
-        ld_pool: Tensor,
-        others_ctx: Tensor,
+        encoded: EncodedMem,
         nav_token: Tensor,
         nav_mask: Tensor,
         signal_token: Tensor,
         signal_mask: Tensor,
         latent: Tensor,
+        od_obj: Tensor | None = None,
+        ld_obj: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """交叉注意力头的令牌集合 + key mask（v8 B3，T=39）。
+        """A1：交叉注意力头的令牌集合 + key mask（v8 令牌集合，T=39）。
 
-        顺序 = ``[z_od 16, z_ld 16, od_pool 1, ld_pool 1, others 1, z_ego 1, nav 1, signal 1,
+        顺序 = ``[OD 16, LD 16, od_pool 1, ld_pool 1, others 1, ego 1, nav 1, signal 1,
         融合 latent 1]``；mask = ``[od_live, ld_live, 1, 1, 1, 1, nav_mask, signal_mask, 1]``
-        （池化/others/z_ego/nav/signal/latent 中 nav/signal 按各自 mask，其余恒有效）。
-        ``z_*`` = 当前步 latent 状态（rollout 逐步迭代；t0 = 当前帧编码）；
-        ``od_pool/ld_pool`` = **t0 上下文**（``masked_mean(od_ctx/ld_ctx)``）。
+        （others/ego/池化/latent 恒有效）。v8：``lane``/``ttc`` token 已删除，位置由
+        OD/LD 掩码均值池化（od_pool/ld_pool）与 ego token 取代。
+        ``od_obj/ld_obj`` = t0 单次 st_gnn 消息传递后的对象级特征（t0 头用）；
+        缺省（rollout 步）直接用 ``encoded.od_ctx/ld_ctx``。
         """
-        ones = torch.ones((int(z_ego.shape[0]), 1), dtype=z_ego.dtype, device=z_ego.device)
+        od_tokens = encoded.od_ctx if od_obj is None else od_obj
+        ld_tokens = encoded.ld_ctx if ld_obj is None else ld_obj
+        ones = torch.ones((int(encoded.ego_ctx.shape[0]), 1), dtype=encoded.ego_ctx.dtype, device=encoded.ego_ctx.device)
+        od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
+        ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
         tokens = torch.cat(
             [
-                z_od,
-                z_ld,
+                od_tokens,
+                ld_tokens,
                 od_pool.unsqueeze(1),
                 ld_pool.unsqueeze(1),
-                others_ctx.unsqueeze(1),
-                z_ego.unsqueeze(1),
+                encoded.others_ctx.unsqueeze(1),
+                encoded.ego_ctx.unsqueeze(1),
                 nav_token.unsqueeze(1),
                 signal_token.unsqueeze(1),
                 latent.unsqueeze(1),
@@ -566,7 +631,7 @@ class DrivingModel(nn.Module):
             dim=1,
         )
         key_mask = torch.cat(
-            [od_live, ld_live, ones, ones, ones, ones, nav_mask, signal_mask, ones],
+            [encoded.od_live, encoded.ld_live, ones, ones, ones, ones, nav_mask, signal_mask, ones],
             dim=1,
         )
         return tokens, key_mask
@@ -582,12 +647,11 @@ class DrivingModel(nn.Module):
         signal_mask: Tensor,
         step_index: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """A4：rollout/教师强制单步重建 nav/signal（others 上下文保持 t0 静态）。
+        """A4：rollout 单步重建 nav/signal（+ others mem 的 nav 维同步）。
 
         ``pose_world`` = 世界系 ego 位姿（每步由 :func:`advance_pose_world` 推进，与
         教师强制同一步进语义）。无 ``route_world``/``ego_world`` 时原样返回 t0 上下文
-        （旧输入逐位兼容）。v8（B3）：不再回写 others mem 的 nav 维（others 上下文是 t0
-        静态 token，nav 由独立 token 承载；且 rollout 不再重编码 raw mem）。
+        （旧输入逐位兼容）。
         """
         route_world = world.get("route_world")
         route_world_mask = world.get("route_world_mask")
@@ -596,54 +660,39 @@ class DrivingModel(nn.Module):
         nav_feat, nav_mask = rebuild_nav_from_world(
             mem, pose_world, route_world, route_world_mask
         )
+        # others mem 的 nav 子向量（0..NAV_DIM）同步重建（不得只改独立 nav token）
+        mem.others = sync_others_nav(mem.others, nav_feat)
         nav_token = self.encoders.embed_nav(nav_feat.unsqueeze(1), nav_mask.reshape(-1, 1))[:, 0]
         signal_token, signal_mask = advance_signal(signal_token, signal_mask, int(step_index))
         return nav_token, nav_mask, signal_token, signal_mask
 
     def encode(self, obs: Mapping[str, Tensor]) -> dict[str, object]:
-        """观测 → mem/编码 mem/**latent 状态**/plan-head latent/头令牌集合（不跑 rollout）。
+        """观测 → mem/编码 mem/plan-head latent/头令牌集合（不跑递归 rollout）。
 
-        v8（B3）：状态 latent = **当前帧编码**（``embed_ego(ego_now)`` / ``embed_od(od_now,
-        od_live)`` / ``embed_ld(ld_now, ld_live)``）；上下文 token = t0 静态
-        （``od_pool/ld_pool = masked_mean(od_ctx/ld_ctx)``、``others_ctx``、nav/signal）。
-        另携带 A4 的世界系输入（``route_world``/``ego_world``，缺失时 rollout 回退 t0 冻结 nav）
-        与 rollout 图位姿模板（``frame``）。
+        v6：本方法含 **t0 帧单次 st_gnn 消息传递**（A3）——cheap path 与完整前向都经此，
+        collect/update 一致执行；另携带 A4 的世界系输入（``route_world``/``ego_world``，
+        缺失时 rollout 回退 t0 冻结 nav）。
         """
         mem = self._mem_from_obs(obs)
         nav_token, nav_mask, signal_token, signal_mask = self._context_tokens(obs, mem.batch)
         encoded = self.mem_encoder.encode(self.encoders, mem)
-        # v8（B3）：状态 latent = 当前帧编码（单帧，非时序聚合）
-        ones = torch.ones((mem.batch, ), dtype=encoded.ego_now.dtype, device=encoded.ego_now.device)
-        z_ego = self.encoders.embed_ego(encoded.ego_now, ones)
-        z_od = self.encoders.embed_od(encoded.od_now, encoded.od_live, ids=encoded.od_id_now)
-        z_ld = self.encoders.embed_ld(encoded.ld_now, encoded.ld_live)
-        # 上下文 token（t0 静态）：池化来自时序聚合 ctx
-        od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
-        ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
-        latent, ego_next, moe_aux = self.plan_step(
-            z_ego, z_od, z_ld, encoded.od_live, encoded.ld_live, encoded.others_ctx,
-            nav_token, signal_token,
-        )
+        latent, ego_next, moe_aux = self._plan(encoded, nav_token, signal_token)
         # v7 结构迭代 B：K-anchor 计划（v8：lane 通道已删除 → lane_ctx 恒为 zeros(B,3)，
         # valid=0 → 锚混合恒等变换；anchor_lane_context 保留但不再接线）
         anchor: dict[str, Tensor] | None = None
         if self.num_anchors > 0:
             lane_ctx = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
             anchor = self.plan_head.plan_anchors(latent, lane_ctx)
+        od_obj, ld_obj = self._t0_object_features(encoded)  # A3：单次消息传递（no_grad）
         tokens, key_mask = self._head_tokens(
-            z_ego,
-            z_od,
-            z_ld,
-            encoded.od_live,
-            encoded.ld_live,
-            od_pool,
-            ld_pool,
-            encoded.others_ctx,
+            encoded,
             nav_token,
             nav_mask,
             signal_token,
             signal_mask,
             latent,
+            od_obj,
+            ld_obj,
         )
         # A4 世界系输入（route_world/ego_world/route_world_mask；缺省 None ⇒ rollout 回退 t0 冻结）
         ego_world, route_world, route_world_mask = world_state_from_obs(obs)
@@ -667,13 +716,6 @@ class DrivingModel(nn.Module):
             "mem": mem,
             "encoded": encoded,
             "frame": encoded.frame,
-            # v8（B3）：latent 状态 + t0 静态上下文
-            "z_ego": z_ego,
-            "z_od": z_od,
-            "z_ld": z_ld,
-            "od_pool": od_pool,
-            "ld_pool": ld_pool,
-            "others_ctx": encoded.others_ctx,
             "latent": latent,
             "ego_next": ego_next,
             "moe_aux": moe_aux,
@@ -689,35 +731,37 @@ class DrivingModel(nn.Module):
             "anchor": anchor,
         }
 
+    def plan_step(
+        self,
+        encoded_mem: EncodedMem,
+        nav_token: Tensor,
+        signal_token: Tensor,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        """**公开单步 plan head 入口**（rollout / Stage A 教师强制共用）。
+
+        ``encoded_mem`` 为 :meth:`MemEncoder.encode` 的输出（mem 当前帧，可含教师强制帧）。
+        返回 ``(latent, ego_next, moe_aux)``；Stage A 用 ``ego_next`` 监督"下一 ego 特征"，
+        让 plan head/MoE 在教师强制路径中保持梯度（design-v1.2 §2.3 方案①）。
+        """
+        return self._plan(encoded_mem, nav_token, signal_token)
+
     # ---------------------------------------------------------------- rollout
     def _rollout(self, encoded: dict[str, object], action0: Tensor) -> dict[str, Tensor]:
-        """6 步 **latent 自回归** rollout（状态链 detach + action/pose 链可微）。
+        """6 步递归 rollout（拷贝隔离 + 合成帧 detach + action/pose 链可微）。
 
         ``action0`` = 传入的 ``action_mu``（第 1 个计划动作；与 cheap path 同一计算）。
-        返回：``traj_xy/traj_theta/plan``（位姿链）、``od_pred/ld_pred/
-        od_presence_pred/od_entry_pred``（t0 帧物理解码，诊断/旧消费者）与
-        ``z_ego_pred/z_od_pred/z_ld_pred``（latent 状态诊断）。
+        返回：``traj_xy/traj_theta/plan``（位姿链）与 ``od_pred/ld_pred/
+        od_presence_pred/od_entry_pred``（t0 帧预测，逐步堆叠）。
 
-        v8（B3）：**不再拷贝/滑动 raw mem** —— 直接迭代 latent 状态；每步 ``st_gnn`` 得
-        next latents，**作为下一步输入前 detach**（状态链切断；动作/位姿链保持可微，与旧
-        语义一致）；每步头令牌用当前步 latents，plan head 融合输入 =
-        ``[z_ego_k, mean(z_od_k), mean(z_ld_k), others, nav, signal]``，policy 自回归出后续
-        动作（step0 = action_mu 契约不变）。
-        A4：每步按世界系 ego 位姿重建 nav（``_step_context``；others 上下文保持 t0 静态）；
+        A4：每步按世界系 ego 位姿重建 nav/signal 与 others mem 的 nav 维（``_step_context``）；
         无 ``route_world``/``ego_world`` 输入时回退 t0 冻结上下文（旧行为逐位兼容）。
+        A1：rollout 步的注意力头令牌用当步 ``enc`` 的逐槽特征（不额外跑消息传递——t0 单次
+        pass 已在 ``encode`` 内；rollout 的 6 次 st_gnn 语义/成本原样不动）。
         """
-        mem: MemBank = encoded["mem"]  # 只读（nav 回退锚点）；不再拷贝/滑动
+        mem: MemBank = encoded["mem"].clone()  # 拷贝隔离：真 mem 绝不写回
         enc: EncodedMem = encoded["encoded"]
-        frame = encoded["frame"]
-        z_ego: Tensor = encoded["z_ego"]
-        z_od: Tensor = encoded["z_od"]
-        z_ld: Tensor = encoded["z_ld"]
-        od_live: Tensor = enc.od_live
-        ld_live: Tensor = enc.ld_live
-        od_pool: Tensor = encoded["od_pool"]
-        ld_pool: Tensor = encoded["ld_pool"]
-        others_ctx: Tensor = encoded["others_ctx"]
         latent: Tensor = encoded["latent"]
+        ego_next: Tensor = encoded["ego_next"]
         nav_token: Tensor = encoded["nav_token"]
         nav_mask: Tensor = encoded["nav_mask"]
         signal_token: Tensor = encoded["signal_token"]
@@ -733,13 +777,9 @@ class DrivingModel(nn.Module):
         anchor = encoded.get("anchor")
         anchor_plan: Tensor | None = anchor.get("plan") if isinstance(anchor, dict) else None
 
-        # t0 锚定状态与图位姿模板（t0 帧；来自真实 obs，不 detach —— 检测任务）
-        od_anchor = self.st_gnn.od_state_from_features(enc.od_now, od_live)
-        ld_anchor = self.st_gnn.ld_state_from_features(enc.ld_now, ld_live)
-        node_mask: Tensor = frame.node_mask
-        od_pose_t0 = frame.pose[:, 1 : 1 + self.od_slots]
-        ld_pose_t0 = frame.pose[:, 1 + self.od_slots :]
-        od_velocity = enc.od_now[..., 2:4] * od_live.unsqueeze(-1)  # (B,S,2) t0 相对速度
+        # t0 锚定状态（t0 帧；来自真实 obs，不 detach —— 检测任务）
+        od_anchor = self.st_gnn.od_state_from_features(enc.od_now, enc.od_live)
+        ld_anchor = self.st_gnn.ld_state_from_features(enc.ld_now, enc.ld_live)
 
         pose = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
         xy: list[Tensor] = []
@@ -749,9 +789,6 @@ class DrivingModel(nn.Module):
         ld_steps: list[Tensor] = []
         presence_steps: list[Tensor] = []
         entry_steps: list[Tensor] = []
-        z_ego_steps: list[Tensor] = []
-        z_od_steps: list[Tensor] = []
-        z_ld_steps: list[Tensor] = []
         for k in range(1, self.rollout_steps + 1):
             # (a) 位姿链：action/pose 不 detach（6 点轨迹目标训练 plan head 的动作链）
             ds, dtheta = action[:, 0], action[:, 1]
@@ -768,53 +805,47 @@ class DrivingModel(nn.Module):
                 mem, pose_world, world, nav_token, nav_mask, signal_token, signal_mask, k
             )
 
-            # (b) 图位姿（t0 帧）：ego = 累积位姿（detach：WM 输出不回传动作/策略链）；
-            #     OD = t0 位姿 + k·dt·v_t0；LD 静止
-            offset = float(k) * self.dt
-            od_pose_k = torch.cat(
-                [od_pose_t0[..., :2] + od_velocity * offset, od_pose_t0[..., 2:]], dim=-1
-            )
-            pose_k = torch.cat([pose.detach().unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
+            # (b) plan head 产出的下一 ego 特征 → 挤入 ego mem 副本（合成帧 detach）
+            ego_frame = torch.cat([ego_next, action], dim=-1)  # reserved 维 = 执行动作
+            mem.shift_ego(ego_frame.detach())
 
-            # (c) latent 自回归转移 + 物理解码（t0 帧预测，逐步堆叠）
-            z_ego_next, z_od_next, z_ld_next, od_pred, ld_pred, presence_logit, entry_logit = (
-                self.st_gnn(
-                    z_ego=z_ego,
-                    z_od=z_od,
-                    z_ld=z_ld,
-                    node_mask=node_mask,
-                    pose=pose_k,
-                    step_index=k,
-                    od_anchor=od_anchor,
-                    ld_anchor=ld_anchor,
-                )
+            # (c) ST-GNN：更新后的 ego mem + od/ld mem → t0 帧的下一 OD/LD 预测
+            enc_k = self.mem_encoder.encode(self.encoders, mem)
+            node_mask = enc_k.frame.node_mask
+            od_pred, ld_pred, presence_logit, entry_logit = self.st_gnn(
+                ego_ctx=enc_k.ego_ctx,
+                od_ctx=enc_k.od_ctx,
+                ld_ctx=enc_k.ld_ctx,
+                node_mask=node_mask,
+                pose=enc_k.frame.pose,
+                step_index=k,
+                od_anchor=od_anchor,
+                ld_anchor=ld_anchor,
             )
             od_steps.append(od_pred)
             ld_steps.append(ld_pred)
             presence_steps.append(presence_logit)
             entry_steps.append(entry_logit)
-            z_ego_steps.append(z_ego_next)
-            z_od_steps.append(z_od_next)
-            z_ld_steps.append(z_ld_next)
 
-            # (d) 状态链切断：预测 latent detach 后作为下一步输入（动作/位姿链不受影响）
-            z_ego, z_od, z_ld = z_ego_next.detach(), z_od_next.detach(), z_ld_next.detach()
+            # (d) SE(2) 逆变换到当前累积位姿系 → detach → 挤入 od/ld mem 副本
+            presence_prob = torch.sigmoid(presence_logit)
+            entry_prob = torch.sigmoid(entry_logit)
+            od_push_mask = (
+                (presence_prob > 0.5) & ((enc_k.od_live > 0.5) | (entry_prob > 0.5))
+            ).to(enc_k.od_now.dtype)
+            od_body = od_pred_to_features(od_pred, pose, enc_k.od_now, od_push_mask).detach()
+            ld_body = ld_pred_to_features(ld_pred, pose, enc_k.ld_now, enc_k.ld_live).detach()
+            mem.shift_od_ld(
+                od_body, od_push_mask, enc_k.od_id_now, presence_prob.detach(), ld_body, enc_k.ld_live
+            )
 
             # (e) 下一轮 plan head + 注意力头（最后一步之后不需要）
             if k < self.rollout_steps:
-                latent, _, _ = self.plan_step(
-                    z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token
-                )
+                enc = self.mem_encoder.encode(self.encoders, mem)
+                latent, ego_next, _ = self._plan(enc, nav_token, signal_token)
                 if anchor_plan is None:
                     tokens, key_mask = self._head_tokens(
-                        z_ego,
-                        z_od,
-                        z_ld,
-                        od_live,
-                        ld_live,
-                        od_pool,
-                        ld_pool,
-                        others_ctx,
+                        enc,
                         nav_token,
                         nav_mask,
                         signal_token,
@@ -834,9 +865,6 @@ class DrivingModel(nn.Module):
             "ld_pred": torch.stack(ld_steps, dim=1),
             "od_presence_pred": torch.stack(presence_steps, dim=1),
             "od_entry_pred": torch.stack(entry_steps, dim=1),
-            "z_ego_pred": torch.stack(z_ego_steps, dim=1),
-            "z_od_pred": torch.stack(z_od_steps, dim=1),
-            "z_ld_pred": torch.stack(z_ld_steps, dim=1),
         }
 
     # ---------------------------------------------------------------- 前向
@@ -848,17 +876,17 @@ class DrivingModel(nn.Module):
         world_model: bool = True,
         wm_detach: bool | None = None,
     ) -> dict[str, Tensor]:
-        """完整前向：策略/价值/路由 + （可选）latent 自回归 rollout 与 t0 帧物理解码。
+        """完整前向：策略/价值/路由 + （可选）递归 rollout 与 t0 帧 OD/LD 预测。
 
-        ``rollout=False, world_model=False`` 时走廉价路径：只做编码（**不再跑任何 st_gnn
-        消息传递**）+ plan head + 策略/价值头，不跑 rollout，返回的
+        ``rollout=False, world_model=False`` 时走廉价路径：做编码（**含 A3 的 t0 单次
+        st_gnn 消息传递**）+ plan head + 策略/价值头，不跑递归 rollout，返回的
         ``action_mu/action_logstd/value/router_logits/expert_weights/latent`` 与完整前向
-        逐位一致（PPO 收集/BC update 用）。
+        逐位一致（PPO 收集/BC update 用；collect/update 两路径一致执行该单次 pass）。
 
         ``world_model=False``（rollout=True）时仍执行 rollout（轨迹/动作需要），
-        但**不返回** ``od_pred/ld_pred/od_presence_pred/od_entry_pred`` 与 ``z_*_pred``。
+        但**不返回** ``od_pred/ld_pred/od_presence_pred/od_entry_pred``。
 
-        ``wm_detach``：仅为兼容旧签名保留，**no-op**（v8 的 latent 状态链 detach 固定生效）。
+        ``wm_detach``：仅为兼容旧签名保留，**no-op**（v2 的合成帧 detach 固定生效）。
 
         MoE 输出口径（lane U1）：``primary + Σ_{i∈top2} g_i·expert_i``，推理与训练一致、
         全场景生效（无硬切/二值门/硬掩码）；phase 1 训练由 ``set_moe(enabled=False)`` 关闭。
@@ -903,10 +931,6 @@ class DrivingModel(nn.Module):
             out["ld_pred"] = rolled["ld_pred"]
             out["od_presence_pred"] = rolled["od_presence_pred"]
             out["od_entry_pred"] = rolled["od_entry_pred"]
-            # v8（B3）：latent 状态诊断（rollout 逐步堆叠；不参与旧消费者契约）
-            out["z_ego_pred"] = rolled["z_ego_pred"]
-            out["z_od_pred"] = rolled["z_od_pred"]
-            out["z_ld_pred"] = rolled["z_ld_pred"]
         return out
 
     @torch.no_grad()

@@ -1,15 +1,16 @@
-"""Stage A WM 监督（v8 B3）回归：latent consistency 主损失 + 物理解码诊断 + 掩码语义。
+"""Stage A 未来 LD 损失（ld_coef=0 新语义，2026-09-30 拍板）回归。
 
-v8 口径（spec 冻结）：
+规格：A 的 WM 损失组合保留 ``weighted_ld_multi_step_loss``（``ld_fut`` 前 4 维 + ``ld_mask``/``wm_valid``，
+与 OD 同构），但权重 ``stages.A.world_model.ld_coef`` **默认 0.0**——LD 损失照算（监控口径），
+A **不监督 LD 头**（2026-09-30 用户拍板：闭环证据 ld=0 链（L2→基座 0.328→E-β′ 0.436）优于
+ld=0.02 链（phase2 0.222））；非零权重（config/CLI）时监督接通、回传 ``st_gnn.ld_head``。
 
-- **latent consistency（主）**：``z_*`` 逐步 vs 未来帧编码目标（detach），掩码加权
-  smooth_l1；默认权重 **1.0**（``--wm-latent-coef`` 覆盖）；
-- **物理解码（诊断）**：OD 0.1 / LD 0.02（先验+残差，t0 帧；``--wm-od-coef`` /
-  ``--wm-ld-coef`` 覆盖）——LD 物理项默认非零 ⇒ 回传 ``st_gnn.ld_head``；置 0 时仅监控；
-- ``ld_mask`` / ``wm_valid`` 掩码目标不贡献（monkeypatch ``build_future`` 注入损坏，损失不变）；
-- 权重组合：``val_loss = latent_coef·L_latent + od_coef·L_od + ld_coef·L_ld +
-  ego_next_coef·L_ego_next + presence_coef·L_presence + entry_coef·L_entry``；
-- loss 函数自身掩码语义（unit）。
+覆盖：
+
+① A 训练中 LD 损失被计算（监控）/默认不更新 LD 头；非零 coef 回传（合成 v2 小数据 CPU smoke）；
+② ``ld_mask`` / ``wm_valid`` 掩码目标不贡献（monkeypatch ``build_future`` 注入损坏，损失不变）；
+③ ``ld_coef`` 权重可配（config dict / CLI），且只影响总损失、监控口径仍记录 ``wm_loss_ld``；
+④ loss 函数自身掩码语义（unit：掩码槽位无梯度/不贡献，有效项照常）。
 
 全部 CPU 小数据 smoke（秒级），产物落 tmp_path。
 """
@@ -23,7 +24,7 @@ import pytest
 import torch
 
 from pipeline import stages as stages_mod
-from pipeline.stages import _parse_args, run_stage_a
+from pipeline.stages import _parse_args, load_config, run_stage_a
 from pipeline.trainer import BCDataset, save_checkpoint, weighted_ld_multi_step_loss
 from tests.v2_synthetic import TINY_MODEL_YAML, write_v2_dataset
 
@@ -56,40 +57,28 @@ def _run_a(tmp_path: Path, *, out_name: str, ckpt: Path, extra: "list[str] | Non
     return run_stage_a(args, config if config is not None else {})
 
 
-# ---------------------------------------------- ① 计算 + 默认权重 + LD 头受监督
-def test_stage_a_latent_and_physical_losses_computed(tmp_path: Path) -> None:
+# ---------------------------------------------- ① 计算（监控）+ 默认不监督 LD 头
+def test_stage_a_ld_loss_computed_and_default_not_supervised(tmp_path: Path) -> None:
     ckpt = _tiny_ckpt(tmp_path)
     before = torch.load(ckpt, map_location="cpu", weights_only=False)["model"]
     metrics = _run_a(tmp_path, out_name="stage_a", ckpt=ckpt)
 
-    # 规格/口径（v8 B3）
+    # 规格/口径
     assert metrics["ld_loss"] == "direct_multi_step"
-    assert metrics["latent_coef"] == 1.0
-    assert metrics["od_coef"] == 0.1
-    assert metrics["ld_coef"] == 0.02
-    assert np.isfinite(metrics["wm_loss_latent"]) and metrics["wm_loss_latent"] > 0.0
-    assert np.isfinite(metrics["val_loss_latent"]) and metrics["val_loss_latent"] > 0.0
-    assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0, "LD 物理损失必须被计算"
+    assert metrics["ld_coef"] == 0.0, "2026-09-30 拍板：默认不监督 LD 头"
+    assert np.isfinite(metrics["wm_loss_ld"]) and metrics["wm_loss_ld"] > 0.0, "LD 损失必须被计算（监控）"
     assert np.isfinite(metrics["val_loss_ld"]) and metrics["val_loss_ld"] > 0.0
     for k in range(1, 7):
         item = metrics["per_horizon"][f"h{k}"]
-        assert "latent_loss" in item, f"per_horizon h{k} 缺 latent_loss"
-        assert item["latent_loss"] == item["latent_loss"], "latent_loss 不应是 NaN"
         assert "ld_loss" in item, f"per_horizon h{k} 缺 ld_loss"
         assert item["ld_loss"] == item["ld_loss"], "ld_loss 不应是 NaN（有有效 LD 目标）"
 
-    # 默认 ld_coef=0.02：物理 LD 项受监督 → ld_head 被更新
+    # 默认 ld_coef=0：无梯度回传 → ld_head 逐元素不变（LD 头未训练属预期）
     after = torch.load(tmp_path / "stage_a" / "final.pt", map_location="cpu", weights_only=False)["model"]
     ld_names = [name for name in after if name.startswith("st_gnn.ld_head.")]
     assert ld_names, "checkpoint 缺少 st_gnn.ld_head"
-    assert any(not torch.equal(before[name], after[name]) for name in ld_names), (
-        "默认 ld_coef=0.02 时物理 LD 损失必须回传 st_gnn.ld_head"
-    )
-    # latent 转移头受监督（latent consistency 主损失）
-    transition_names = [name for name in after if name.startswith(("st_gnn.od_transition.", "st_gnn.ld_transition."))]
-    assert transition_names, "checkpoint 缺少 st_gnn.*_transition"
-    assert any(not torch.equal(before[name], after[name]) for name in transition_names), (
-        "latent consistency 未更新 st_gnn 转移头"
+    assert all(torch.equal(before[name], after[name]) for name in ld_names), (
+        "ld_coef=0 时 st_gnn.ld_head 不应被更新（监督已关闭）"
     )
 
 
@@ -155,49 +144,56 @@ def test_stage_a_ld_loss_respects_ld_mask_and_wm_valid(tmp_path: Path, monkeypat
     )
 
 
-# ---------------------------------------------- ③ 权重可配（CLI）+ 组合口径
-def test_stage_a_loss_weights_cli_and_composition(tmp_path: Path) -> None:
+# ---------------------------------------------- ③ ld_coef 可配（config / CLI）
+def test_stage_a_ld_coef_config_and_cli(tmp_path: Path) -> None:
     ckpt = _tiny_ckpt(tmp_path)
     before = torch.load(ckpt, map_location="cpu", weights_only=False)["model"]
+    repo_cfg = load_config("config/default.yaml")
+    assert repo_cfg["stages"]["A"]["world_model"]["ld_coef"] == 0.0, (
+        "config 默认 0.0（2026-09-30 拍板：ld=0 链闭环优于 ld=0.02 链）"
+    )
 
     base = _run_a(tmp_path, out_name="coef_default", ckpt=ckpt)
-    half = _run_a(
-        tmp_path, out_name="coef_half", ckpt=ckpt,
-        extra=["--wm-latent-coef", "0.5", "--wm-od-coef", "0.25", "--wm-ld-coef", "0.0"],
-    )
-    assert base["latent_coef"] == 1.0 and base["od_coef"] == 0.1 and base["ld_coef"] == 0.02
-    assert half["latent_coef"] == 0.5 and half["od_coef"] == 0.25 and half["ld_coef"] == 0.0
-    # 各项本身照算（监控口径），权重只改总损失组合：
-    for metrics in (base, half):
-        assert float(metrics["wm_loss_latent"]) > 0.0
-        assert float(metrics["wm_loss_ld"]) > 0.0, "coef=0 时 LD 物理损失仍应计算（监控）"
+    half = _run_a(tmp_path, out_name="coef_half", ckpt=ckpt, extra=["--wm-ld-coef", "0.25"])
+    assert base["ld_coef"] == 0.0 and half["ld_coef"] == 0.25
+    # LD 项本身照算（监控口径），权重只改总损失组合：
+    # val_loss = od + ld_coef·ld + ego_next_coef·ego_next + presence_coef·presence + entry_coef·entry
+    for metrics, coef in ((base, 0.0), (half, 0.25)):
+        assert float(metrics["wm_loss_ld"]) > 0.0, "coef=0 时 LD 损失仍应计算（监控）"
         expected = (
-            float(metrics["latent_coef"]) * float(metrics["val_loss_latent"])
-            + float(metrics["od_coef"]) * float(metrics["val_loss_od"])
-            + float(metrics["ld_coef"]) * float(metrics["val_loss_ld"])
-            + float(metrics["ego_next_coef"]) * float(metrics["ego_next_loss"])
-            + float(metrics["presence_coef"]) * float(metrics["presence_loss"])
-            + float(metrics["entry_coef"]) * float(metrics["entry_loss"])
+            float(metrics["val_loss_od"])
+            + coef * float(metrics["val_loss_ld"])
+            + 0.1 * float(metrics["ego_next_loss"])
+            + 0.1 * float(metrics["presence_loss"])
+            + 0.1 * float(metrics["entry_loss"])
         )
         assert float(metrics["val_loss"]) == pytest.approx(expected, rel=1e-6), (
-            "v8 总损失组合不符（latent/od/ld + ego_next + presence/entry）"
+            f"ld_coef={coef} 时总损失组合不符"
         )
+    assert float(half["val_loss"]) > float(base["val_loss"]), "非零 ld_coef 的 val 总损失应多一个 LD 项"
 
-    # 监督接通/关闭：ld_coef=0 → ld_head 不变；默认 0.02 → 更新
+    # 监督接通/关闭：非零 coef → LD 回传 st_gnn.ld_head；默认 0 → 头不变
     after_base = torch.load(
         tmp_path / "coef_default" / "final.pt", map_location="cpu", weights_only=False
     )["model"]
     after_half = torch.load(
         tmp_path / "coef_half" / "final.pt", map_location="cpu", weights_only=False
     )["model"]
-    ld_names = [name for name in after_base if name.startswith("st_gnn.ld_head.")]
+    ld_names = [name for name in after_half if name.startswith("st_gnn.ld_head.")]
     assert ld_names, "checkpoint 缺少 st_gnn.ld_head"
-    assert any(not torch.equal(before[name], after_base[name]) for name in ld_names), (
-        "默认 ld_coef=0.02 时物理 LD 损失必须回传 st_gnn.ld_head"
+    assert any(not torch.equal(before[name], after_half[name]) for name in ld_names), (
+        "非零 ld_coef 时 LD 损失必须回传 st_gnn.ld_head（监督未接通？）"
     )
-    assert all(torch.equal(before[name], after_half[name]) for name in ld_names), (
-        "--wm-ld-coef 0.0 时 st_gnn.ld_head 不应被更新（监督已关闭）"
+    assert all(torch.equal(before[name], after_base[name]) for name in ld_names), (
+        "默认 ld_coef=0 时 st_gnn.ld_head 不应被更新"
     )
+
+    # config dict 覆盖（非 CLI 路径）
+    cfg = _run_a(
+        tmp_path, out_name="coef_config", ckpt=ckpt,
+        config={"stages": {"A": {"world_model": {"ld_coef": 0.25}}}},
+    )
+    assert cfg["ld_coef"] == 0.25
 
 
 # ---------------------------------------------- ④ loss 函数掩码语义（unit）
@@ -234,56 +230,3 @@ def test_weighted_ld_multi_step_loss_mask_and_valid_gates() -> None:
         pred.detach(), changed, mask, frame_weight=frame_weight, valid=valid
     )
     assert float(changed_loss) != pytest.approx(float(loss.detach()), rel=1e-6)
-
-
-# ---------------------------------------------- ⑤ latent consistency loss（unit）
-def test_weighted_latent_consistency_loss_masks_and_combined_denominator() -> None:
-    """latent consistency：三路联合加权均值；掩码/valid 门控；目标改动影响损失。"""
-    from pipeline.trainer import weighted_latent_consistency_loss
-
-    torch.manual_seed(0)
-    batch, horizon, slots, hidden = 2, 6, 4, 8
-    od_pred = torch.randn(batch, horizon, slots, hidden, requires_grad=True)
-    ld_pred = torch.randn(batch, horizon, slots, hidden, requires_grad=True)
-    ego_pred = torch.randn(batch, horizon, hidden, requires_grad=True)
-    od_target = torch.randn(batch, horizon, slots, hidden)
-    ld_target = torch.randn(batch, horizon, slots, hidden)
-    ego_target = torch.randn(batch, horizon, hidden)
-    od_mask = torch.ones(batch, horizon, slots)
-    od_mask[:, :, 2:] = 0.0
-    ld_mask = torch.ones(batch, horizon, slots)
-    valid = torch.ones(batch, horizon)
-    valid[1, 4:] = 0.0
-    frame_weight = torch.tensor([1.0, 2.0])
-    loss, per_horizon = weighted_latent_consistency_loss(
-        od_pred, od_target, od_mask, ld_pred, ld_target, ld_mask, ego_pred, ego_target,
-        frame_weight=frame_weight, valid=valid,
-    )
-    assert loss.ndim == 0 and torch.isfinite(loss) and len(per_horizon) == 6
-    loss.backward()
-    assert float(od_pred.grad[:, :, :2].abs().sum()) > 0.0
-    assert float(od_pred.grad[:, :, 2:].abs().sum()) == 0.0, "od_mask=0 槽位不得有梯度"
-    assert float(ego_pred.grad[1, 4:].abs().sum()) == 0.0, "valid=0 帧不得有梯度"
-    assert np.isfinite(per_horizon[0]["od_loss"]) and np.isfinite(per_horizon[0]["ld_loss"])
-    assert np.isfinite(per_horizon[0]["ego_loss"])
-    # 掩码外目标注入垃圾不影响；有效目标改动影响
-    corrupted = od_target.clone()
-    corrupted[:, :, 2:] += 100.0
-    masked_loss, _ = weighted_latent_consistency_loss(
-        od_pred.detach(), corrupted, od_mask, ld_pred.detach(), ld_target, ld_mask,
-        ego_pred.detach(), ego_target, frame_weight=frame_weight, valid=valid,
-    )
-    assert float(masked_loss) == pytest.approx(float(loss.detach()), rel=1e-9)
-    changed = ego_target.clone()
-    changed[0, 0] += 1.0
-    changed_loss, _ = weighted_latent_consistency_loss(
-        od_pred.detach(), od_target, od_mask, ld_pred.detach(), ld_target, ld_mask,
-        ego_pred.detach(), changed, frame_weight=frame_weight, valid=valid,
-    )
-    assert float(changed_loss) != pytest.approx(float(loss.detach()), rel=1e-6)
-    # ego 目标缺省（None）→ 只算 od/ld，仍有限
-    no_ego, _ = weighted_latent_consistency_loss(
-        od_pred.detach(), od_target, od_mask, ld_pred.detach(), ld_target, ld_mask,
-        frame_weight=frame_weight, valid=valid,
-    )
-    assert torch.isfinite(no_ego)
