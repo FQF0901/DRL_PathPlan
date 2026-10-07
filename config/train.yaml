@@ -78,9 +78,9 @@ stages:
       loss: direct_multi_step           # Huber + 角度 1-cos
       noise: ego_plan                   # ego plan 噪声增强（CLI --plan-noise*）
       ego_next_coef: 0.1        # plan head `ego_next` 监督权重（方案①：A 阶段 plan head/MoE 唯一梯度源）
-      ld_coef: 0.0              # 未来 LD 直接多步权重（2026-09-30 用户拍板：0.02→0.0。闭环证据：ld=0 链
-                                # L2→基座 0.328→E-β′ 0.436 优于 ld=0.02 链（phase2 0.222）；A 不再监督 LD 头
-                                # （LD 损失仅监控，可经 --wm-ld-coef 开启）。目标 = ld_fut 前 4 维，ld_mask/wm_valid 掩码）
+      # v8（WM latent 重构，2026-10-07）：A 阶段 WM 损失权重（代码默认；CLI --wm-latent-coef /
+      # --wm-od-coef / --wm-ld-coef 覆盖）：latent consistency 1.0（主监督）+ 物理 od 0.1 /
+      # ld 0.02（诊断解码头）。旧键 ld_coef 已废弃不再读取（历史 0.0 口径见 git 历史）。
       presence_coef: 0.1        # presence BCE 权重（id 轴：未来帧同 track id 是否仍在盒内）
       entry_coef: 0.1           # entry BCE 权重（id 轴：新 id 是否出现，"t0 无、t+k 有"）
       trainable: [encoders, mem_encoder, plan_head, st_gnn]  # lane U1+：MoE 在 A 关闭（experts+gate 只在 B-phase2 训）；policy/value 头不参与
