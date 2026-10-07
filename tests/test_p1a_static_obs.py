@@ -3,7 +3,7 @@
 覆盖：
 1. ``env.obs.static`` 几何口径（走廊 / 净距 / 相对车道 one-hot / range / 身后 / 回退）；
 2. ``others`` 通道 static 段落位与 road_class 平移；
-3. schema v4 版本/hash/manifest 记录；
+3. schema 版本/hash/manifest 记录（当前 v6）；
 4. net 旧数据回退（28 维 others → 33 维重排 + 一次性告警）与新特征消费（梯度/形状/无 NaN）。
 
 纯 NumPy + 假 env；用 ``FakeBuilding`` 顶替 ``env.obs.static.BaseBuilding`` 的 isinstance 检查，
@@ -211,12 +211,12 @@ def test_others_channel_static_segment_and_road_class_offset():
 # 3) schema v4 / manifest / 指纹
 # --------------------------------------------------------------------------- #
 
-def test_schema_v5_manifest_records_static_layout():
+def test_schema_v6_manifest_records_static_layout():
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint
 
     manifest = schema_manifest()
-    assert OBS_SCHEMA_VERSION == 5
-    assert manifest["schema_version"] == 5
+    assert OBS_SCHEMA_VERSION == 6
+    assert manifest["schema_version"] == 6
     assert manifest["frame"]["others"]["shape"] == [1, 33]
     assert manifest["history"]["keys"]["others_hist"]["shape"] == [6, 1, 33]
     assert manifest["static_layout"]["feature_names"] == ["present", "gap_norm", "rel_left", "rel_same", "rel_right"]
@@ -224,7 +224,7 @@ def test_schema_v5_manifest_records_static_layout():
     segments = manifest["others_layout"]["segments"]
     assert segments["static"]["dims"] == [STATIC_OFFSET, OTHERS_HEAD_DIM]
     assert segments["road_class"]["dims"][0] == OTHERS_HEAD_DIM
-    assert obs_fingerprint().startswith("v5-")
+    assert obs_fingerprint().startswith("v6-")
     assert STATIC_LAYOUT["scan_range_m"] == 50.0
 
 

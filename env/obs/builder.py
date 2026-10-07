@@ -1,12 +1,10 @@
-"""观测组装：当前帧通道 + 6 帧历史堆叠（schema v5）。
+"""观测组装：当前帧通道 + 6 帧历史堆叠（schema v6）。
 
 ``ObservationBuilder.build(env, spec)`` 输出（全部 float32，除标注外）::
 
     ego (1,8)          ego_mask (1,)
     od  (16,9)         od_mask  (16,)      od_id (16,) int64    od_presence (16,)
     ld  (16,7)         ld_mask  (16,)
-    lane (1,17)        lane_mask (1,)       # v5：当前车道块（d_lat/航向误差/近场+远场几何）
-    ttc (1,12)         ttc_mask (1,)        # v5：per-OD-slot TTC 上下文 token
     nav (1,11)         nav_mask (1,)       # 兼容保留（others 是规范输入）
     signal (1,4)       signal_mask (1,)    # 兼容保留
     others (1,21+K)    others_mask (1,)    # nav + speed_limit + signal + static + road_class one-hot(K)
@@ -24,20 +22,17 @@
 ``od_presence_hist`` 与 ``od_hist`` 同槽位、身份一致且不做 SE(2) 变换。``od_mask`` = 槽位
 本帧有效（已分配），``od_presence`` = 对象本帧在盒内被观测（详见 od 通道文档）。
 
-v5（结构迭代 A）：``ld`` offset 改为远场 {20,40,60,80} m（当前车道占 4 primary 槽 +
-其余车道环填充），近场由 ``lane`` 显式补偿；``ttc`` 是 OD 槽位 TTC 的独立上下文 token
-（与 nav 同组；OD 槽序/字段/排序策略不动）。``lane``/``ttc`` 默认**不进** 6 帧历史
-（当前帧上下文；需要时把它们加入 ``memory.channels`` 并按通道 alignment 对齐）。
+v6（2026-10-07，v8 结构重构）：删除 v5 的 ``lane``/``ttc`` 通道；``ld`` offset 改为
+``{0,20,40,60,80} m``——0 m 点 = ego 投影点，提供近场横向锚定（补偿 lane 删除），
+远场保留 20..80 m 前视（OD 槽序/字段/排序策略不动）。
 
 config（全部可选；``topk_objects``/``topk_lanes``/``history_frames`` 为 config/env.yaml 口径别名）::
 
     {
-      "channels": ["ego", "od", "ld", "lane", "nav", "signal", "others", "ttc"],  # 顺序即输出顺序（可裁剪）
+      "channels": ["ego", "od", "ld", "nav", "signal", "others"],  # 顺序即输出顺序（可裁剪）
       "scope": {"front_m": 150.0, "rear_m": 50.0, "left_m": 25.0, "right_m": 25.0},
       "od": {"num_slots": 16, "ttc_cap_s": 5.0, "release_after_s": 1.0},
-      "ld": {"num_slots": 16, "offsets": [20, 40, 60, 80]},
-      "lane": {"offsets": [5, 15, 60]},
-      "ttc": {"ttc_cap_s": 5.0, "horizon_s": 3.0, "collision_radius_m": 2.5},
+      "ld": {"num_slots": 16, "offsets": [0, 20, 40, 60, 80]},
       "others": {"speed_limit_norm_mps": 30.0},
       "memory": {"frames": 6, "interval": 5, "channels": ["ego", "others", "od", "ld"]},
       "physics_dt": 0.1,
@@ -57,7 +52,6 @@ import numpy as np
 
 from env.obs.base import ObservationChannel
 from env.obs.ego import EgoChannel
-from env.obs.lane import LaneChannel
 from env.obs.ld import LDChannel
 from env.obs.memory import DEFAULT_CHANNELS as DEFAULT_MEMORY_CHANNELS
 from env.obs.memory import FrameMemory
@@ -65,20 +59,15 @@ from env.obs.nav import NavChannel
 from env.obs.od import ODChannel
 from env.obs.others import OthersChannel
 from env.obs.signal import SignalChannel
-from env.obs.ttc import TTCChannel
 from env.obs.world import EgoWorldChannel, RouteWorldChannel
 
 DEFAULT_CHANNELS: tuple[str, ...] = (
     "ego",
     "od",
     "ld",
-    # schema v5（结构迭代 A）：当前车道块（近场横向锚 + 远场几何摘要）
-    "lane",
     "nav",
     "signal",
     "others",
-    # schema v5（结构迭代 A）：OD 槽位 TTC 上下文 token（与 nav 同组）
-    "ttc",
     # schema v3（A4）：世界系地图状态（rollout 逐步重算 nav 的输入；不进 6 帧历史）
     "ego_world",
     "route_world",
@@ -95,8 +84,6 @@ class ObservationBuilder:
         cfg = dict(config or {})
         od_cfg = dict(cfg.get("od") or {})
         ld_cfg = dict(cfg.get("ld") or {})
-        lane_cfg = dict(cfg.get("lane") or {})
-        ttc_cfg = dict(cfg.get("ttc") or {})
         others_cfg = dict(cfg.get("others") or {})
         mem_cfg = dict(cfg.get("memory") or {})
         # config/env.yaml 扁平键别名，方便 pipeline 直接透传
@@ -122,12 +109,9 @@ class ObservationBuilder:
             "ego": EgoChannel(physics_dt=self.physics_dt),
             "od": od_channel,
             "ld": LDChannel(**ld_cfg),
-            "lane": LaneChannel(**lane_cfg),
             "nav": NavChannel(),
             "signal": SignalChannel(),
             "others": OthersChannel(**others_cfg),
-            # TTC 只读 OD 槽位渲染（单槽上下文 token）
-            "ttc": TTCChannel(od_channel=od_channel, **ttc_cfg),
             "ego_world": EgoWorldChannel(),
             "route_world": RouteWorldChannel(),
         }

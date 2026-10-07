@@ -1,4 +1,4 @@
-"""``env.obs`` 观测通道包（schema v5）。
+"""``env.obs`` 观测通道包（schema v6）。
 
 ``obs_fingerprint``：观测实现（``env/obs/*.py`` 内容 + schema 版本）的短指纹。BC 专家数据集
 在 meta 里记录采集时的指纹；训练侧加载时比对——**观测 scope/特征语义改动后必须重新采集
@@ -17,10 +17,13 @@ v4（2026-10-02，P1-A 静态障碍可观测性）变更：``others`` 新增 sta
 tollgate 上游 25–39 m 观测到被占车道；指纹前缀升为 ``v4-``（旧数据由 net 零填充 static 段）。
 
 v5（2026-10-05，结构迭代 A）变更：LD offset 改远场 ``{20,40,60,80} m``（当前车道 4 primary
-槽 + 其余车道环填充，总槽位 16 不变）；新增 ``lane (1,17)`` 当前车道块（d_lat/航向误差/
-车道宽 + 5/15/60 m 中心线摘要，近场横向锚定显式化、与 LD 环填充解耦）与 ``ttc (1,12)``
-OD 槽位 TTC 上下文 token（恒速自车系：min-TTC、<3 s 计数、责任槽位相对位置/速度；OD 槽序/
-字段/排序策略不动）；指纹前缀升为 ``v5-``（旧数据由 net 全 0 + mask=0 + 一次性告警回退）。
+槽 + 其余车道环填充，总槽位 16 不变）；新增 ``lane (1,17)`` 当前车道块与 ``ttc (1,12)``
+OD 槽位 TTC 上下文 token；指纹前缀升为 ``v5-``。
+
+v6（2026-10-07，v8 结构重构）变更：删除 ``lane``/``ttc`` 通道（v5 的上下文 token 在 v8
+不再使用）；LD offset 改为 ``{0,20,40,60,80} m``——0 m 点 = ego 投影点（近场横向锚定，
+补偿 lane 删除），远场保留 20..80 m 前视；指纹前缀升为 ``v6-``（旧数据由 net 缺键回退，
+新数据必须重新采集）。
 """
 
 from __future__ import annotations
@@ -31,11 +34,11 @@ from pathlib import Path
 __all__ = ["obs_fingerprint", "OBS_SCHEMA_VERSION"]
 
 #: 观测 schema 版本（数据结构契约版本，独立于内容哈希）
-OBS_SCHEMA_VERSION = 5
+OBS_SCHEMA_VERSION = 6
 
 
 def obs_fingerprint() -> str:
-    """返回 ``v5-<内容哈希 12 hex>``；目录缺失时返回空串。"""
+    """返回 ``v6-<内容哈希 12 hex>``；目录缺失时返回空串。"""
     directory = Path(__file__).resolve().parent
     if not directory.is_dir():
         return ""

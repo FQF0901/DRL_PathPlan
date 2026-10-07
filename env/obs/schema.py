@@ -16,8 +16,11 @@ gap_norm + 相对车道 one-hot）——收费站岗亭是 BaseBuilding，不在
 建筑补足（见 :mod:`env.obs.static` 与 triage 签名 S1–S4）。
 
 v5（2026-10-05，结构迭代 A）：LD offset 改远场 {20,40,60,80} m；新增 ``lane``（当前车道
-块：d_lat/航向误差/车道宽/近场+远场中心线摘要）与 ``ttc``（per-OD-slot TTC 上下文 token：
-min-TTC、<3 s 计数、责任槽位相对位置/速度）。OD 槽序/字段/排序策略不动。
+块）与 ``ttc``（per-OD-slot TTC 上下文 token）。
+
+v6（2026-10-07，v8 结构重构）：删除 ``lane``/``ttc`` 通道（v5 结构迭代 A 的上下文 token
+在 v8 中不再使用）；LD offset 改为 {0,20,40,60,80} m——0 m 点 = ego 投影点（近场横向锚，
+补偿 lane 删除），远场保留 20..80 m 前视。OD 槽序/字段/排序策略不动。
 """
 
 from __future__ import annotations
@@ -25,7 +28,6 @@ from __future__ import annotations
 from typing import Any
 
 from env.obs.ego import EGO_DIM
-from env.obs.lane import LANE_DIM, LANE_FEATURE_NAMES, LANE_SAMPLE_OFFSETS
 from env.obs.ld import LDChannel, LD_OFFSETS_M
 from env.obs.nav import NUM_CHECKPOINTS, NUM_COMMANDS
 from env.obs.others import (
@@ -43,7 +45,6 @@ from env.obs.static import (
     STATIC_REL_BUCKETS,
     STATIC_SCAN_RANGE_M,
 )
-from env.obs.ttc import TTC_DIM, TTC_FEATURE_NAMES
 from env.obs.world import EGO_WORLD_DIM, ROUTE_WORLD_DIM, ROUTE_WORLD_MAX_POINTS
 
 __all__ = [
@@ -53,8 +54,6 @@ __all__ = [
     "STATIC_LAYOUT",
     "WORLD_LAYOUT",
     "LD_LAYOUT",
-    "LANE_LAYOUT",
-    "TTC_LAYOUT",
 ]
 
 LD_DIM = LDChannel.feature_dim
@@ -173,56 +172,20 @@ WORLD_LAYOUT: dict[str, Any] = {
 }
 
 
-#: LD 采样布局（schema v5 规范）
+#: LD 采样布局（schema v6 规范）
 LD_LAYOUT: dict[str, Any] = {
     "shape": [16, LD_DIM],
     "offsets_m": list(LD_OFFSETS_M),
     "slot_policy": (
-        "当前车道（candidate priority 0）占满全部 offset（primary，4 槽）；其余候选车道按 "
-        "offset 环优先填充（先 20 m 环所有车道，再 40/60/80 m），环内按车道优先级；"
+        "当前车道（candidate priority 0）占满全部 offset（primary，5 槽）；其余候选车道按 "
+        "offset 环优先填充（先 0 m 环所有车道，再 20/40/60/80 m），环内按车道优先级；"
         "共 16 槽，超预算的远端环被裁"
     ),
-    "near_field": "近场（<20 m）不在本通道；由 lane 通道显式提供（schema v5 结构迭代 A）",
+    "near_field": (
+        "0 m 点 = ego 投影点（s = clamp(ego 投影 long, 0, length)），提供近场横向锚定"
+        "（dy 即横向偏差的负值，补偿 v6 删除的 lane 通道）"
+    ),
     "discard": "采样点超车道末端或投影失败 → 该槽 mask=0（通道自动降级）",
-}
-
-#: 当前车道块布局（schema v5，结构迭代 A）
-LANE_LAYOUT: dict[str, Any] = {
-    "shape": [1, LANE_DIM],
-    "dtype": "float32",
-    "feature_names": list(LANE_FEATURE_NAMES),
-    "units": "m / rad / m / 1/m / m/s / 0/1",
-    "sample_offsets_m": list(LANE_SAMPLE_OFFSETS),
-    "semantics": (
-        "只描述 ego 当前车道（ego.lane；缺失时 navigation.current_ref_lanes[0]），单槽、"
-        "不参与 LD 槽位竞争。d_lat 正 = ego 在中心线左侧（= -lane.local_coordinates(...)[1]）；"
-        "heading_err = 车道航向 - ego 航向（正 = 车道方向在 ego 航向左侧）；"
-        "near/mid/far 中心线点 (dx,dy)+heading_rel 分别在 s0+5/15/60 m；*_valid=1 ⇔ 该点"
-        "在车道长度内。无车道/无 ego → 全 0 + lane_mask=0"
-    ),
-    "source": "env.obs.lane.LaneChannel",
-    "fallback": "旧数据（schema v4）无此键 → net 全 0 + mask=0 + 一次性告警（A4/v4 模式）",
-}
-
-#: TTC 上下文布局（schema v5，结构迭代 A）
-TTC_LAYOUT: dict[str, Any] = {
-    "shape": [1, TTC_DIM],
-    "dtype": "float32",
-    "feature_names": list(TTC_FEATURE_NAMES),
-    "units": "s / 计数 / 槽下标 / m / m/s / 0/1",
-    "semantics": (
-        "per-OD-slot TTC（恒速、自车系）汇总：ttc_x = dx/(-vx)（dx>0, vx<0，与 OD 紧迫度"
-        "同口径）；ttc_path = 沿自车路径投影版（对象恒速进入半径 collision_radius_m 的"
-        "自车碰撞圆的最小正根，捕获横向切入）。只统计 presence=1 的新鲜槽；min 字段无对象时"
-        "取 cap；责任槽位 = 两口径合并 TTC 最小者（并列取最小槽下标），携带其相对位置/速度。"
-        "OD 槽序/字段/排序策略不动"
-    ),
-    "ttc_cap_s": 5.0,
-    "horizon_s": 3.0,
-    "collision_radius_m": 2.5,
-    "mask": "ttc_mask=1 ⇔ ego 存在且 OD 通道可用；valid 维区分'无风险'与'无数据'",
-    "source": "env.obs.ttc.TTCChannel（只读 env.obs.od.ODChannel 渲染）",
-    "fallback": "旧数据（schema v4）无此键 → net 全 0 + mask=0 + 一次性告警（A4/v4 模式）",
 }
 
 
@@ -236,7 +199,7 @@ def schema_manifest(
 ) -> dict[str, Any]:
     """返回 obs schema 清单（当前帧 + 6 帧历史 + 世界系状态 + 槽位策略 + others/static 布局）。"""
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "frame": {
             "ego": {
                 "shape": [1, EGO_DIM],
@@ -273,27 +236,11 @@ def schema_manifest(
                 "feature_names": list(LD_FEATURE_NAMES),
                 "units": "dx/dy m; heading_rel rad; curvature 1/m（右转负）; speed_limit m/s（原始）; 线型 id 枚举",
                 "semantics": (
-                    "车道点通道（v5：offset {20,40,60,80} m 远场采样；当前车道 4 primary 槽 + "
-                    "其余车道环填充；近场由 lane 通道补偿，见 ld_layout）"
+                    "车道点通道（v6：offset {0,20,40,60,80} m；0 m 点 = ego 投影点提供近场锚，"
+                    "当前车道 5 primary 槽 + 其余车道环填充，见 ld_layout）"
                 ),
             },
             "ld_mask": {"shape": [num_slots], "dtype": "float32", "semantics": "1 = 该槽本帧有效"},
-            "lane": {
-                "shape": [1, LANE_DIM],
-                "dtype": "float32",
-                "feature_names": list(LANE_FEATURE_NAMES),
-                "units": "m / rad / m / 1/m / m/s / 0/1",
-                "semantics": "v5 当前车道块（d_lat/航向误差/车道宽/曲率/限速 + 5/15/60 m 中心线点摘要，见 lane_layout）",
-            },
-            "lane_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = 当前车道可用（无车道 → 0）"},
-            "ttc": {
-                "shape": [1, TTC_DIM],
-                "dtype": "float32",
-                "feature_names": list(TTC_FEATURE_NAMES),
-                "units": "s / 计数 / 槽下标 / m / m/s / 0/1",
-                "semantics": "v5 per-OD-slot TTC 上下文 token（min-TTC、<3 s 计数、责任槽位位置/速度，见 ttc_layout）",
-            },
-            "ttc_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = ego 存在且 OD 通道可用"},
             "nav": {"shape": [1, NAV_FEATURE_DIM], "dtype": "float32", "feature_names": list(NAV_FEATURE_NAMES), "units": "m / one-hot / [0,1]", "semantics": "兼容保留；others 是规范输入"},
             "nav_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = 导航可用"},
             "signal": {"shape": [1, SIGNAL_DIM], "dtype": "float32", "feature_names": list(SIGNAL_FEATURE_NAMES), "semantics": "恒 [0,0,0,1]（本项目无灯）"},
@@ -327,6 +274,4 @@ def schema_manifest(
         "static_layout": STATIC_LAYOUT,
         "world_layout": WORLD_LAYOUT,
         "ld_layout": LD_LAYOUT,
-        "lane_layout": LANE_LAYOUT,
-        "ttc_layout": TTC_LAYOUT,
     }
