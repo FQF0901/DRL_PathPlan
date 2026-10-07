@@ -397,21 +397,26 @@ def test_supervised_labels_match_config() -> None:
 
 # ---------------------------------------------------------------------- ST-GNN
 def test_st_gnn_untrained_is_constant_velocity_prior() -> None:
-    """零初始化解码器 ⇒ 未训练 ST-GNN = OD 匀速 / LD 静止先验（Stage A 对照下界）。"""
+    """零初始化解码器/转移头 ⇒ 未训练 ST-GNN = OD 匀速 / LD 静止先验 + 恒等 latent 转移。
+
+    v8（B3）：``forward`` 输入 latent 状态（``z_ego/z_od/z_ld``）+ 图位姿；物理小解码头
+    输出层零初始化 ⇒ ``od_pred = 先验``、``ld_pred = t0 锚``；latent 转移头零初始化 ⇒
+    ``z_*_next = z_*``（恒等）。
+    """
     torch.manual_seed(0)
     model = SpatioTemporalGNN(hidden=16, od_slots=4, ld_slots=4, steps=6, spatial_layers=1).eval()
     batch = 2
-    ego_ctx = torch.randn(batch, 16)
-    od_ctx = torch.randn(batch, 4, 16)
-    ld_ctx = torch.randn(batch, 4, 16)
+    z_ego = torch.randn(batch, 16)
+    z_od = torch.randn(batch, 4, 16)
+    z_ld = torch.randn(batch, 4, 16)
     node_mask = torch.ones(batch, 1 + 4 + 4)
     pose = torch.randn(batch, 1 + 4 + 4, 3)
     pose[:, 0] = 0.0
     od_anchor = torch.randn(batch, 4, 5)
     ld_anchor = torch.randn(batch, 4, 4)
 
-    od_pred, ld_pred, presence, entry = model(
-        ego_ctx=ego_ctx, od_ctx=od_ctx, ld_ctx=ld_ctx, node_mask=node_mask, pose=pose,
+    z_ego_next, z_od_next, z_ld_next, od_pred, ld_pred, presence, entry = model(
+        z_ego=z_ego, z_od=z_od, z_ld=z_ld, node_mask=node_mask, pose=pose,
         step_index=2, od_anchor=od_anchor, ld_anchor=ld_anchor,
     )
     expected = torch.stack(
@@ -426,6 +431,10 @@ def test_st_gnn_untrained_is_constant_velocity_prior() -> None:
     )
     assert torch.allclose(od_pred, expected, atol=1e-6)
     assert torch.allclose(ld_pred, ld_anchor, atol=1e-6)
+    # latent 转移头零初始化 ⇒ 初始恒等转移（无效槽位保持 0）
+    assert torch.allclose(z_ego_next, z_ego, atol=1e-6)
+    assert torch.allclose(z_od_next, z_od, atol=1e-6)
+    assert torch.allclose(z_ld_next, z_ld, atol=1e-6)
     # presence 先验 ≈0.88（持续存在）、entry 先验 ≈0.12（新进入罕见）：不与输入耦合
     assert torch.allclose(presence, torch.full_like(presence, presence[0, 0].item()), atol=1e-6)
     assert float(torch.sigmoid(presence).mean()) > 0.8
@@ -440,14 +449,47 @@ def test_st_gnn_step_index_controls_prior_horizon() -> None:
     od_anchor = torch.zeros(batch, 4, 5)
     od_anchor[..., 2] = 2.0  # vx
     kwargs = dict(
-        ego_ctx=torch.randn(batch, 16), od_ctx=torch.randn(batch, 4, 16), ld_ctx=torch.randn(batch, 4, 16),
+        z_ego=torch.randn(batch, 16), z_od=torch.randn(batch, 4, 16), z_ld=torch.randn(batch, 4, 16),
         node_mask=torch.ones(batch, 9), pose=torch.zeros(batch, 9, 3),
         od_anchor=od_anchor, ld_anchor=torch.zeros(batch, 4, 4),
     )
-    od_1, _, _, _ = model(step_index=1, **kwargs)
-    od_6, _, _, _ = model(step_index=6, **kwargs)
+    od_1 = model(step_index=1, **kwargs)[3]
+    od_6 = model(step_index=6, **kwargs)[3]
     assert od_1[..., 0].mean().item() == pytest.approx(1.0, abs=1e-6)
     assert od_6[..., 0].mean().item() == pytest.approx(6.0, abs=1e-6)
+
+
+def test_st_gnn_latent_transition_uses_message_passing_and_masks() -> None:
+    """latent 转移经 MP 节点特征；无效槽位输出保持严格 0；头为 ``2H→H→H``。"""
+    torch.manual_seed(0)
+    model = SpatioTemporalGNN(hidden=16, od_slots=4, ld_slots=4, steps=6, spatial_layers=2)
+    with torch.no_grad():  # 零初始化转移头会挡住上游 → 给输出层非零权重解阻
+        for head in (model.ego_transition, model.od_transition, model.ld_transition):
+            head[-1].weight.normal_(0.0, 0.05)
+    batch = 2
+    z_ego = torch.randn(batch, 16, requires_grad=True)
+    z_od = torch.randn(batch, 4, 16, requires_grad=True)
+    z_ld = torch.randn(batch, 4, 16, requires_grad=True)
+    node_mask = torch.ones(batch, 9)
+    node_mask[0, 1] = 0.0  # OD 槽位 0 无效
+    node_mask[0, 5] = 0.0  # LD 槽位 0 无效
+    z_od = z_od * node_mask[:, 1:5].unsqueeze(-1)
+    z_ld = z_ld * node_mask[:, 5:].unsqueeze(-1)
+    pose = torch.randn(batch, 9, 3)
+    pose[:, 0] = 0.0
+    z_ego_next, z_od_next, z_ld_next, *_ = model(
+        z_ego=z_ego, z_od=z_od, z_ld=z_ld, node_mask=node_mask, pose=pose, step_index=1,
+    )
+    # 无效槽位输出严格 0；有效槽位 ≠ 恒等（非零转移头）
+    assert float(z_od_next[0, 0].abs().sum()) == 0.0
+    assert float(z_ld_next[0, 0].abs().sum()) == 0.0
+    assert not torch.allclose(z_od_next[0, 1:], z_od[0, 1:], atol=1e-6)
+    # 转移对 MP 上游（spatial 层）有梯度（非零头解阻后）
+    (z_ego_next.pow(2).mean() + z_od_next.pow(2).mean()).backward()
+    spatial_grad = sum(
+        float(p.grad.abs().sum()) for p in model.spatial.parameters() if p.grad is not None
+    )
+    assert spatial_grad > 0.0, "latent 转移未回传 MP（spatial）"
 
 
 # 注：v1 ``net.world_model`` 已删除（无调用方；Stage A 走 mem + ST-GNN 教师强制），
@@ -572,27 +614,39 @@ def test_param_redistribution_matches_v8_budget() -> None:
 
 
 def test_head_token_set_is_v8_composition() -> None:
-    """v8 头令牌集合（T=39）：``[OD16, LD16, od_pool, ld_pool, others, ego, nav, signal, latent]``。
+    """v8 头令牌集合（T=39）：``[z_od16, z_ld16, od_pool, ld_pool, others, z_ego, nav, signal, latent]``。
 
-    v8：``lane``/``ttc`` token 已删除（编码器无对应层）；位置由 OD/LD 掩码均值池化与
-    ego token 取代；mask 对应 ``[od_live, ld_live, 1,1,1,1, nav_mask, signal_mask, 1]``。
+    ``z_*`` = 当前帧编码（单帧 latent 状态）；``od_pool/ld_pool`` = t0 上下文
+    ``masked_mean(od_ctx/ld_ctx)``；mask 对应 ``[od_live, ld_live, 1,1,1,1, nav_mask,
+    signal_mask, 1]``。**去掉 t0 单次 MP 进头**：encode 不跑 st_gnn 消息传递。
     """
     model = DrivingModel(hidden=32, num_experts=2, expert_hidden=32, wm_steps=2).eval()
     obs = make_obs(batch=4)
+    counter = {"n": 0}
+    handle = model.st_gnn.spatial.register_forward_hook(
+        lambda *_: counter.__setitem__("n", counter["n"] + 1)
+    )
     with torch.no_grad():
         encoded = model.encode(obs)
+    handle.remove()
+    assert counter["n"] == 0, "v8：encode 不得跑 t0 单次 st_gnn 消息传递"
+
     assert tuple(encoded["tokens"].shape) == (4, TOKEN_LENGTH, 32)
     assert tuple(encoded["key_mask"].shape) == (4, TOKEN_LENGTH)
     assert not hasattr(model.encoders, "lane") and not hasattr(model.encoders, "ttc")
-    # 池化/others/ego/nav/signal/latent 恒有效；OD/LD 槽位按 live 掩码
+    # 池化/others/z_ego/nav/signal/latent 恒有效；OD/LD 槽位按 live 掩码
     assert bool(encoded["key_mask"][:, 32:].all())
     assert torch.equal(encoded["key_mask"][:, :16], encoded["encoded"].od_live)
     assert torch.equal(encoded["key_mask"][:, 16:32], encoded["encoded"].ld_live)
-    # od_pool/ld_pool 位置 = 掩码均值池化（与 plan head 融合路径同源）
+    # od_pool/ld_pool 位置 = 掩码均值池化（t0 上下文）
     from net.model import _masked_mean
 
     od_pool = _masked_mean(encoded["encoded"].od_ctx, encoded["encoded"].od_live)
     assert torch.allclose(encoded["tokens"][:, 32], od_pool, atol=1e-6)
+    # z_* 位置 = 当前帧单帧编码（与 encode 返回的 latent 状态逐位一致）
+    assert torch.allclose(encoded["tokens"][:, :16], encoded["z_od"], atol=1e-6)
+    assert torch.allclose(encoded["tokens"][:, 16:32], encoded["z_ld"], atol=1e-6)
+    assert torch.allclose(encoded["tokens"][:, 35], encoded["z_ego"], atol=1e-6)
 
 
 def test_deterministic_same_seed() -> None:
@@ -609,11 +663,11 @@ def test_deterministic_same_seed() -> None:
 def test_cheap_path_matches_full_forward() -> None:
     """PPO ``collect_rollout`` 廉价路径（``rollout=False, world_model=False``）逐位等价。
 
-    只需策略/价值/路由头，不跑 B1 rollout 与 WM 直接多步；本测试证明与完整前向在
+    只需策略/价值/路由头，不跑 rollout 与 WM 多步；本测试证明与完整前向在
     eval/固定种子下逐位一致（``action_mu``/``action_logstd``/``value``），且不产出多步预测键。
 
-    v6 A3 扩展：**t0 单次 st_gnn 消息传递必须进入两条路径**——用 ``st_gnn.spatial``
-    的 forward hook 计数：cheap path = 1 次（encode 内），完整前向 = 1 + 6 次（t0 + rollout 6 步）。
+    v8（B3）扩展：**cheap path 不跑任何 st_gnn 消息传递**——用 ``st_gnn.spatial``
+    的 forward hook 计数：cheap path = 0 次，完整前向 = 6 次（latent rollout 逐步转移）。
     """
     torch.manual_seed(0)
     model = DrivingModel().eval()
@@ -631,12 +685,12 @@ def test_cheap_path_matches_full_forward() -> None:
     full_calls = counter["n"]
     handle.remove()
 
-    assert cheap_calls == 1, f"cheap path 必须执行 t0 单次 st_gnn 消息传递（实际 {cheap_calls}）"
-    assert full_calls == 1 + 6, f"完整前向 = t0 单次 + rollout 6 步（实际 {full_calls}）"
+    assert cheap_calls == 0, f"cheap path 不得执行 st_gnn 消息传递（实际 {cheap_calls}）"
+    assert full_calls == 6, f"完整前向 = latent rollout 6 步（实际 {full_calls}）"
 
     for key in ("action_mu", "action_logstd", "value"):
         assert torch.allclose(cheap[key], full[key], atol=1e-6), f"{key} 与完整前向不一致"
     # 多步预测键（BC 轨迹目标 / WM 辅助损失用）只在完整前向产出
-    for key in ("traj_xy", "traj_theta", "od_pred", "ld_pred"):
+    for key in ("traj_xy", "traj_theta", "od_pred", "ld_pred", "z_od_pred"):
         assert key in full
         assert key not in cheap
