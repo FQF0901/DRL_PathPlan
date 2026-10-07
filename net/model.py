@@ -38,16 +38,16 @@ v6 增补（docs/v6_net_design.md，冻结）
   的 nav 子向量（:func:`rebuild_nav_from_world` / :func:`sync_others_nav` /
   :func:`advance_signal`；无 ``route_world``/``ego_world`` 键时回退 t0 冻结，逐位兼容旧输入）。
 
-v5 增补（结构迭代 A，仅令牌集合接线）
+v8 增补（参数再分配 + lane/ttc 移除）
 ------------------------------------
-- ``lane``（当前车道块，17 维）与 ``ttc``（OD 槽位 TTC 上下文，12 维）由
-  :func:`net.mem.context_features_from_obs` 从当前帧 obs 读出并编码为 token；
-  令牌集合变为 ``[OD 16, LD 16, lane 1, others 1, ego 1, nav 1, ttc 1, signal 1, latent 1]``
-  （T=39；lane 与 LD 主块并列、ttc 与 nav 相邻）。旧 schema v4 数据缺键 → 全 0 + mask=0 +
-  一次性告警（A4/v4 模式），不参与注意力、逐位兼容。
-- lane/ttc token 为 **t0 上下文**：rollout 逐步复用（TTC 的逐步重算属后续 Lane B 的
-  plan/rollout 路径；本迭代只做令牌集合接线）。
-- ``plan_head`` 融合路径与 ST-GNN 空间节点（[ego, OD, LD]）**不动**（Lane B）。
+- 参数再分配：MoE ``primary/experts/router`` 与 policy trunk / value net 的隐藏维由
+  ``config/model.yaml`` 新键控制（见 :class:`net.moe.MoEBlock` / :class:`net.policy.PolicyHead`）；
+- **lane/ttc 移除**：obs v6 删除 ``lane``/``ttc`` 通道 → 编码器线性层/类型嵌入与
+  ``net.mem.context_features_from_obs`` 一并删除（``NUM_NODE_TYPES`` 7→5）。
+  头令牌集合保持 **T=39**：``[OD 16, LD 16, od_pool 1, ld_pool 1, others 1, ego 1, nav 1,
+  signal 1, latent 1]``（lane/ttc 槽位由 OD/LD 掩码均值池化与 ego token 取代）；
+- K-anchor 保留（默认关）：``plan_anchors`` 的 ``lane_ctx`` 传 ``zeros(B,3)``（valid=0 →
+  恒等变换）；``net.anchor.anchor_lane_context`` 保留但不再接线。
 
 v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 = 旧行为逐位不变）
 ---------------------------------------------------------------------------------------
@@ -106,19 +106,16 @@ from net.encoders import (
     DEFAULT_OTHERS_DIM,
     H,
     HISTORY_FRAMES,
-    LANE_DIM,
     LD_SLOTS,
     NAV_DIM,
     OD_SLOTS,
     SIGNAL_DIM,
-    TTC_DIM,
     ObsEncoders,
 )
 from net.mem import (
     EncodedMem,
     MemBank,
     MemEncoder,
-    context_features_from_obs,
     mem_from_obs,
     squeeze_batch_singletons,
 )
@@ -132,7 +129,7 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
     _mem_nav_features_from_world = None
     _mem_world_state_from_obs = None
 
-from net.anchor import anchor_lane_context, load_anchor_dictionary
+from net.anchor import load_anchor_dictionary
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
 from net.spatial import wrap_angle
@@ -383,8 +380,9 @@ class DrivingModel(nn.Module):
         spatial_layers: int = 2,
         od_knn: int = 4,
         num_experts: int = 8,
-        expert_hidden: int = 192,
-        router_hidden: int = 64,
+        expert_hidden: int = 76,
+        router_hidden: int = 384,
+        primary_hidden: int = 768,
         moe_top_k: int = 2,
         wm_steps: int = 6,
         wm_dt: float = 0.5,
@@ -393,6 +391,8 @@ class DrivingModel(nn.Module):
         log_std_init: float = -1.0,
         attn_heads: int = 4,
         attn_layers: int = 1,
+        trunk_hidden: int = 160,
+        net_hidden: int = 256,
         num_anchors: int = 0,
         anchor_path: str | None = None,
         anchor_temperature: float = 1.0,
@@ -416,6 +416,7 @@ class DrivingModel(nn.Module):
             num_experts,
             expert_hidden,
             router_hidden,
+            primary_hidden=primary_hidden,
             top_k=moe_top_k,
             num_anchors=self.num_anchors,
             anchor_temperature=anchor_temperature,
@@ -439,8 +440,14 @@ class DrivingModel(nn.Module):
             log_std_init=log_std_init,
             num_heads=int(attn_heads),
             layers=int(attn_layers),
+            trunk_hidden=int(trunk_hidden),
         )
-        self.value = ValueHead(hidden, num_heads=int(attn_heads), layers=int(attn_layers))
+        self.value = ValueHead(
+            hidden,
+            num_heads=int(attn_heads),
+            layers=int(attn_layers),
+            net_hidden=int(net_hidden),
+        )
 
     def set_moe(self, *, enabled: bool = True, load_balance_coef: float = 0.0) -> "DrivingModel":
         """MoE 运行时开关 + 负载均衡 α（lane U1；非参数，不进 state_dict）。
@@ -547,21 +554,6 @@ class DrivingModel(nn.Module):
             device=obs["hist_valid"].device,
         )
 
-    def _struct_context_tokens(
-        self, obs: Mapping[str, Tensor], batch: int
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """v5：当前车道块（``lane``）与 TTC token（``ttc``）→ token+mask 四元组 + lane 原始块。
-
-        ``lane``/``ttc`` 是当前帧上下文通道（不进 6 帧历史）；缺键（旧 schema v4 数据）→
-        全 0 + mask=0 + 一次性告警（见 :func:`net.mem.context_features_from_obs`）。
-        第 5 个返回值 = lane 原始特征 ``(B,17)``（K-anchor 计划头的 lane 系上下文）。
-        """
-        lane_feat, lane_mask = context_features_from_obs(obs, "lane", LANE_DIM, batch=batch)
-        ttc_feat, ttc_mask = context_features_from_obs(obs, "ttc", TTC_DIM, batch=batch)
-        lane_token = self.encoders.embed_lane(lane_feat.unsqueeze(1), lane_mask)[:, 0]
-        ttc_token = self.encoders.embed_ttc(ttc_feat.unsqueeze(1), ttc_mask)[:, 0]
-        return lane_token, lane_mask, ttc_token, ttc_mask, lane_feat
-
     # ---------------------------------------------------------------- 编码/规划
     def _plan(
         self, encoded: EncodedMem, nav_token: Tensor, signal_token: Tensor
@@ -586,6 +578,8 @@ class DrivingModel(nn.Module):
         ——注意力头只要对象级节点特征；模型不再直连 ``st_gnn.spatial``/``st_gnn.step_embed``。
         在 ``no_grad`` 下执行：st_gnn 的训练信号保持 WM 损失口径（traj/policy 损失不得
         回传 st_gnn；tests/test_stage_v11.py 锁定），本 pass 只提供"当前权重下的特征"。
+
+        v8 B2：不再接入令牌集合（头令牌改为 latent 状态）；保留供诊断/外部调用。
         """
         with torch.no_grad():
             return self.st_gnn.node_features(
@@ -605,40 +599,39 @@ class DrivingModel(nn.Module):
         signal_token: Tensor,
         signal_mask: Tensor,
         latent: Tensor,
-        lane_token: Tensor,
-        lane_mask: Tensor,
-        ttc_token: Tensor,
-        ttc_mask: Tensor,
         od_obj: Tensor | None = None,
         ld_obj: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """A1：交叉注意力头的令牌集合 + key mask（v6 §1.2；v5 结构迭代 A 扩到 T ≤ 39）。
+        """A1：交叉注意力头的令牌集合 + key mask（v8 令牌集合，T=39）。
 
-        顺序 = ``[OD 16, LD 16, lane 1, others 1, ego 1, nav 1, ttc 1, signal 1, 融合 latent 1]``；
-        mask = ``[od_live, ld_live, lane_mask, 1, 1, nav_mask, ttc_mask, signal_mask, 1]``
-        （ego/latent 恒有效）。``lane`` 与 LD 主块并列、``ttc`` 与 nav 相邻（v5）。
+        顺序 = ``[OD 16, LD 16, od_pool 1, ld_pool 1, others 1, ego 1, nav 1, signal 1,
+        融合 latent 1]``；mask = ``[od_live, ld_live, 1, 1, 1, 1, nav_mask, signal_mask, 1]``
+        （others/ego/池化/latent 恒有效）。v8：``lane``/``ttc`` token 已删除，位置由
+        OD/LD 掩码均值池化（od_pool/ld_pool）与 ego token 取代。
         ``od_obj/ld_obj`` = t0 单次 st_gnn 消息传递后的对象级特征（t0 头用）；
         缺省（rollout 步）直接用 ``encoded.od_ctx/ld_ctx``。
         """
         od_tokens = encoded.od_ctx if od_obj is None else od_obj
         ld_tokens = encoded.ld_ctx if ld_obj is None else ld_obj
         ones = torch.ones((int(encoded.ego_ctx.shape[0]), 1), dtype=encoded.ego_ctx.dtype, device=encoded.ego_ctx.device)
+        od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
+        ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
         tokens = torch.cat(
             [
                 od_tokens,
                 ld_tokens,
-                lane_token.unsqueeze(1),
+                od_pool.unsqueeze(1),
+                ld_pool.unsqueeze(1),
                 encoded.others_ctx.unsqueeze(1),
                 encoded.ego_ctx.unsqueeze(1),
                 nav_token.unsqueeze(1),
-                ttc_token.unsqueeze(1),
                 signal_token.unsqueeze(1),
                 latent.unsqueeze(1),
             ],
             dim=1,
         )
         key_mask = torch.cat(
-            [encoded.od_live, encoded.ld_live, lane_mask, ones, ones, nav_mask, ttc_mask, signal_mask, ones],
+            [encoded.od_live, encoded.ld_live, ones, ones, ones, ones, nav_mask, signal_mask, ones],
             dim=1,
         )
         return tokens, key_mask
@@ -682,18 +675,14 @@ class DrivingModel(nn.Module):
         """
         mem = self._mem_from_obs(obs)
         nav_token, nav_mask, signal_token, signal_mask = self._context_tokens(obs, mem.batch)
-        # v5（结构迭代 A）：当前车道块 + TTC 上下文 token（旧数据缺键 → 0 token + mask=0）
-        lane_token, lane_mask, ttc_token, ttc_mask, lane_feat = self._struct_context_tokens(
-            obs, mem.batch
-        )
         encoded = self.mem_encoder.encode(self.encoders, mem)
         latent, ego_next, moe_aux = self._plan(encoded, nav_token, signal_token)
-        # v7 结构迭代 B：K-anchor 计划（lane 系上下文 → 方案 A 软混合；关闭时不计算）
+        # v7 结构迭代 B：K-anchor 计划（v8：lane 通道已删除 → lane_ctx 恒为 zeros(B,3)，
+        # valid=0 → 锚混合恒等变换；anchor_lane_context 保留但不再接线）
         anchor: dict[str, Tensor] | None = None
         if self.num_anchors > 0:
-            anchor = self.plan_head.plan_anchors(
-                latent, anchor_lane_context(lane_feat, lane_mask)
-            )
+            lane_ctx = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
+            anchor = self.plan_head.plan_anchors(latent, lane_ctx)
         od_obj, ld_obj = self._t0_object_features(encoded)  # A3：单次消息传递（no_grad）
         tokens, key_mask = self._head_tokens(
             encoded,
@@ -702,10 +691,6 @@ class DrivingModel(nn.Module):
             signal_token,
             signal_mask,
             latent,
-            lane_token,
-            lane_mask,
-            ttc_token,
-            ttc_mask,
             od_obj,
             ld_obj,
         )
@@ -738,10 +723,6 @@ class DrivingModel(nn.Module):
             "nav_mask": nav_mask,
             "signal_token": signal_token,
             "signal_mask": signal_mask,
-            "lane_token": lane_token,
-            "lane_mask": lane_mask,
-            "ttc_token": ttc_token,
-            "ttc_mask": ttc_mask,
             "tokens": tokens,
             "key_mask": key_mask,
             "route_world": route_world,
@@ -785,11 +766,6 @@ class DrivingModel(nn.Module):
         nav_mask: Tensor = encoded["nav_mask"]
         signal_token: Tensor = encoded["signal_token"]
         signal_mask: Tensor = encoded["signal_mask"]
-        # v5（结构迭代 A）：lane/ttc 是 t0 上下文 token（逐步复用；重算属 Lane B）
-        lane_token: Tensor = encoded["lane_token"]
-        lane_mask: Tensor = encoded["lane_mask"]
-        ttc_token: Tensor = encoded["ttc_token"]
-        ttc_mask: Tensor = encoded["ttc_mask"]
         world = {
             "route_world": encoded.get("route_world"),
             "route_world_mask": encoded.get("route_world_mask"),
@@ -875,10 +851,6 @@ class DrivingModel(nn.Module):
                         signal_token,
                         signal_mask,
                         latent,
-                        lane_token,
-                        lane_mask,
-                        ttc_token,
-                        ttc_mask,
                     )
                     action, _ = self.policy(tokens, key_mask)
                 else:

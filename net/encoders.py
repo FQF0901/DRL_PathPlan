@@ -13,13 +13,8 @@
   语义；net 只做投影，默认 F_o=33）。旧布局（schema v2/v3，28 维）由 ``net.mem.mem_from_obs``
   零填充 static 段后消费（一次性告警）；
 - nav 11 维：2 个 checkpoint（自车系点）+ 6 命令 one-hot + route_completion；
-- signal 4 维：绿/黄/红/未知 one-hot（本项目恒为未知占位）；
-- lane 17 维（v5 结构迭代 A）：当前车道块 —— ``[d_lat, heading_err, lane_width, curvature,
-  speed_limit, near(dx,dy,heading_rel), mid(...), far(...), near_valid, mid_valid, far_valid]``
-  （见 ``env/obs/lane.py``）；
-- ttc 12 维（v5 结构迭代 A）：OD 槽位 TTC 上下文 token —— ``[min_ttc_x, min_ttc_path,
-  n_lt3_x, n_lt3_path, resp_index, resp_dx, resp_dy, resp_vx, resp_vy, resp_ttc,
-  resp_is_path, valid]``（见 ``env/obs/ttc.py``）。
+- signal 4 维：绿/黄/红/未知 one-hot（本项目恒为未知占位）。
+- v8（obs v6）：``lane``/``ttc`` 上下文通道已删除（env 侧移除；net 不再有对应线性层/类型）。
 
 v2（mem-bank）说明：编码器权重在 **mem 帧 / rollout 合成帧 / 当前帧** 之间共享——同一个
 ``embed_od/embed_ld/embed_ego/embed_others`` 既编码 6 帧 mem（``(B,T,S,F)``），也编码
@@ -44,8 +39,6 @@ H = 96
 EGO_DIM = 8
 OD_DIM = 9
 LD_DIM = 7
-LANE_DIM = 17
-TTC_DIM = 12
 NAV_DIM = 11
 SIGNAL_DIM = 4
 OD_SLOTS = 16
@@ -77,10 +70,8 @@ TYPE_OD = 1
 TYPE_LD = 2
 TYPE_NAV = 3
 TYPE_SIGNAL = 4
-#: v5（结构迭代 A）：上下文 token 类型（lane 与 LD 主块并列；ttc 与 nav 同组）
-TYPE_LANE = 5
-TYPE_TTC = 6
-NUM_NODE_TYPES = 7
+#: v8（obs v6）：lane/ttc 已删除 → 类型数 7 → 5
+NUM_NODE_TYPES = 5
 
 
 @dataclass
@@ -131,8 +122,6 @@ class ObsEncoders(nn.Module):
         self.ego = nn.Linear(EGO_DIM, hidden)
         self.od = nn.Linear(OD_DIM, hidden)
         self.ld = nn.Linear(LD_DIM, hidden)
-        self.lane = nn.Linear(LANE_DIM, hidden)
-        self.ttc = nn.Linear(TTC_DIM, hidden)
         self.others = nn.Linear(self.others_dim, hidden)
         self.nav = nn.Linear(NAV_DIM, hidden)
         self.signal = nn.Linear(SIGNAL_DIM, hidden)
@@ -176,14 +165,6 @@ class ObsEncoders(nn.Module):
 
     def embed_ld(self, feat: Tensor, mask: Tensor) -> Tensor:
         return self._embed(self.ld, feat, mask, TYPE_LD)
-
-    def embed_lane(self, feat: Tensor, mask: Tensor) -> Tensor:
-        """当前车道块（v5）：``feat (...,17)`` + mask → ``(...,H)``。"""
-        return self._embed(self.lane, feat, mask, TYPE_LANE)
-
-    def embed_ttc(self, feat: Tensor, mask: Tensor) -> Tensor:
-        """TTC 上下文 token（v5）：``feat (...,12)`` + mask → ``(...,H)``。"""
-        return self._embed(self.ttc, feat, mask, TYPE_TTC)
 
     def embed_others(self, feat: Tensor, mask: Tensor) -> Tensor:
         return self._embed(self.others, feat, mask, TYPE_OD)

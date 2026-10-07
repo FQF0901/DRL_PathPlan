@@ -116,8 +116,8 @@ def probe(hidden: int, expert_hidden: int, label: str) -> int:
 
 
 def main() -> int:
-    default_total = probe(96, 192, "默认/旧探针口径")
-    configured_total = probe(128, 256, "训练配置 config/model.yaml")
+    default_total = probe(96, 192, "默认/旧探针口径（H=96，expert=192 显式）")
+    configured_total = probe(128, 76, "训练配置 config/model.yaml（H=128，expert=76）")
 
     model = DrivingModel().eval()
     obs = make_dummy_obs()

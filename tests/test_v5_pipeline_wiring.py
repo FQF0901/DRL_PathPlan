@@ -1,16 +1,15 @@
-"""v5 训练管线接线（lane/ttc）回归：BCDataset / SINGLE_SLOT_CHANNELS / RolloutBuffer。
+"""v8 训练管线接线回归（obs v6 / T=39 令牌集合）：BCDataset / SINGLE_SLOT_CHANNELS / RolloutBuffer。
 
-背景（obs v5 未决，fix-4）：obs v5（commit 0291f3a）在 ``env/obs``、``net``、``tools/collect_expert``
-落地，但 pipeline 三处硬编码通道表未含 ``lane``/``ttc`` → v5 npz 的新键被 ``BCDataset`` 过滤、
-PPO 默认缓冲无对应形状，训练时 net 走缺键回退（token mask=0）**新 token 不生效**。本文件锁定：
+背景：obs v5（commit 0291f3a）曾在 pipeline 三处硬编码通道表未含 ``lane``/``ttc`` 导致新键被
+``BCDataset`` 过滤；v8（obs v6）反方向清理：env 侧删除 ``lane``/``ttc`` 通道（Lane A），net 侧
+删除对应编码器/令牌（Lane B，本文件）。本文件锁定 v8 接线：
 
-1. ``BCDataset._obs_keys`` 含 lane/ttc（顺序与 ``collect_expert.CURRENT_CHANNELS`` / builder 一致），
-   ``build_obs_batch`` 与 ``MaterializedBCDataset`` 往返形状/数值；
-2. 旧 v4 数据（无 lane/ttc 键）仍可加载，batch 无新键（缺键回退路径不变）；
-3. ``SINGLE_SLOT_CHANNELS`` 含 lane/ttc（``(B,1,F) → (B,F)``）；
-4. ``RolloutBuffer`` 默认通道含 lane/ttc（缺键填 0、有键透传 + mask）；
-5. 端到端：v5 数据 → ``BCDataset`` batch → ``DrivingModel.encode`` 的 lane/ttc key_mask=1
-   （证明接线生效而非缺键回退）。
+1. ``BCDataset._obs_keys`` 不再含 lane/ttc；含 v6 通道（ego/od/ld/nav/signal/others）且
+   ``build_obs_batch`` / ``MaterializedBCDataset`` 往返形状/数值一致；
+2. ``DEFAULT_CHANNELS``（``pipeline.buffer``）不含 lane/ttc；缺键帧 0 填充 + mask=0 不报错；
+3. ``SINGLE_SLOT_CHANNELS`` 单槽挤压仍作用于 ego/nav/signal/others（lane/ttc 已退出通道表）；
+4. 端到端：v6 数据 → ``BCDataset`` batch → ``DrivingModel.encode`` 的 **T=39 令牌集合**
+   ``[OD16, LD16, od_pool, ld_pool, others, ego, nav, signal, latent]``，后 7 个令牌恒有效。
 """
 
 from __future__ import annotations
@@ -31,20 +30,12 @@ from pipeline.trainer import (
 )
 from tests.v2_synthetic import make_v2_arrays
 
-LANE_DIM = 17
-TTC_DIM = 12
+TOKEN_LENGTH = 39
 
 
-def _v5_arrays(*, with_struct: bool = True, seed: int = 0) -> dict:
-    """v2 合成数组 + 可选 v5 的 lane/ttc 通道（值可区分，验证往返）。"""
+def _v6_arrays(*, seed: int = 0) -> dict:
+    """v2 合成数组（obs v6：无 lane/ttc 键，通道 = v2 基线集合）。"""
     arrays, _ = make_v2_arrays(episodes=4, steps_per_episode=6, seed=seed)
-    if with_struct:
-        count = len(arrays["episode_id"])
-        rng = np.random.default_rng(seed + 1)
-        arrays["lane"] = rng.normal(size=(count, 1, LANE_DIM)).astype(np.float32)
-        arrays["lane_mask"] = np.ones((count, 1), dtype=np.float32)
-        arrays["ttc"] = rng.normal(size=(count, 1, TTC_DIM)).astype(np.float32)
-        arrays["ttc_mask"] = np.ones((count, 1), dtype=np.float32)
     return arrays
 
 
@@ -62,108 +53,80 @@ def _write_dataset(directory: Path, arrays: dict, *, schema: int) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 1) BCDataset：v5 键读取往返 / 旧 v4 兼容
+# 1) BCDataset：v6 键读取往返 / 无 lane/ttc
 # --------------------------------------------------------------------------- #
 
-def test_v5_dataset_roundtrip_reads_lane_ttc(tmp_path: Path) -> None:
-    arrays = _v5_arrays()
-    directory = _write_dataset(tmp_path / "bc_v5", arrays, schema=5)
-    dataset = BCDataset.load(str(directory))
-
-    assert "lane" in dataset._obs_keys and "ttc" in dataset._obs_keys
-    # 顺序与 collect_expert.CURRENT_CHANNELS / builder 一致：lane 紧跟 ld、ttc 在 others 之后
-    assert dataset._obs_keys.index("lane") == dataset._obs_keys.index("ld") + 1
-    assert dataset._obs_keys.index("ttc") == dataset._obs_keys.index("others") + 1
-
-    idx = np.arange(dataset.count, dtype=np.int64)
-    batch = dataset.build_obs_batch(idx)
-    assert batch["lane"].shape == (dataset.count, LANE_DIM)
-    assert batch["ttc"].shape == (dataset.count, TTC_DIM)
-    assert batch["lane_mask"].shape == (dataset.count, 1)
-    assert batch["ttc_mask"].shape == (dataset.count, 1)
-    np.testing.assert_allclose(batch["lane"], arrays["lane"][:, 0])
-    np.testing.assert_allclose(batch["ttc"], arrays["ttc"][:, 0])
-
-    # 物化快路径（训练实际消费）不得丢新键/变形
-    materialized = MaterializedBCDataset(dataset, chunk_size=5, logger=lambda _: None)
-    mat_batch = materialized.obs_batch(idx)
-    assert mat_batch["lane"].shape == (dataset.count, LANE_DIM)
-    assert mat_batch["ttc"].shape == (dataset.count, TTC_DIM)
-    np.testing.assert_allclose(mat_batch["lane"], batch["lane"])
-    np.testing.assert_allclose(mat_batch["ttc"], batch["ttc"])
-
-
-def test_v4_dataset_without_struct_keys_still_loads(tmp_path: Path) -> None:
-    """旧 v4（无 lane/ttc）→ 自动跳过新键，batch 键集合与既有通道形状不变。"""
-    arrays = _v5_arrays(with_struct=False)
-    directory = _write_dataset(tmp_path / "bc_v4", arrays, schema=2)
+def test_v6_dataset_roundtrip_without_struct_keys(tmp_path: Path) -> None:
+    arrays = _v6_arrays()
+    directory = _write_dataset(tmp_path / "bc_v6", arrays, schema=6)
     dataset = BCDataset.load(str(directory))
 
     assert "lane" not in dataset._obs_keys and "ttc" not in dataset._obs_keys
-    batch = dataset.build_obs_batch(np.arange(dataset.count, dtype=np.int64))
+    for key in ("ego", "od", "ld", "nav", "signal", "others"):
+        assert key in dataset._obs_keys, f"v6 通道 {key} 丢失"
+
+    idx = np.arange(dataset.count, dtype=np.int64)
+    batch = dataset.build_obs_batch(idx)
     assert "lane" not in batch and "ttc" not in batch
     assert batch["od"].shape == (dataset.count, 16, 9)
     assert batch["ld"].shape == (dataset.count, 16, 7)
+    assert batch["others"].shape == (dataset.count, 33)
+
+    # 物化快路径（训练实际消费）不得丢键/变形
+    materialized = MaterializedBCDataset(dataset, chunk_size=5, logger=lambda _: None)
+    mat_batch = materialized.obs_batch(idx)
+    for key in ("ego", "od", "ld", "nav", "signal", "others"):
+        assert key in mat_batch
+        np.testing.assert_allclose(mat_batch[key], batch[key])
 
 
 # --------------------------------------------------------------------------- #
-# 2) SINGLE_SLOT_CHANNELS / RolloutBuffer 默认通道
+# 2) SINGLE_SLOT_CHANNELS / RolloutBuffer 默认通道（v8：无 lane/ttc）
 # --------------------------------------------------------------------------- #
 
-def test_single_slot_channels_include_lane_ttc() -> None:
-    assert "lane" in SINGLE_SLOT_CHANNELS and "ttc" in SINGLE_SLOT_CHANNELS
+def test_single_slot_channels_squeeze_without_struct_keys() -> None:
+    assert "lane" not in SINGLE_SLOT_CHANNELS and "ttc" not in SINGLE_SLOT_CHANNELS
     batch = {
-        "lane": np.zeros((2, 1, LANE_DIM), dtype=np.float32),
-        "ttc": np.zeros((2, 1, TTC_DIM), dtype=np.float32),
+        "ego": np.zeros((2, 1, 8), dtype=np.float32),
+        "nav": np.zeros((2, 1, 11), dtype=np.float32),
+        "signal": np.zeros((2, 1, 4), dtype=np.float32),
         "od": np.zeros((2, 16, 9), dtype=np.float32),
     }
     out = squeeze_single_slot(batch)
-    assert out["lane"].shape == (2, LANE_DIM)
-    assert out["ttc"].shape == (2, TTC_DIM)
+    assert out["ego"].shape == (2, 8)
+    assert out["nav"].shape == (2, 11)
+    assert out["signal"].shape == (2, 4)
     assert out["od"].shape == (2, 16, 9)  # 多槽通道不动
 
 
-def test_rollout_buffer_default_channels_include_lane_ttc() -> None:
-    from env.obs.lane import LANE_DIM as ENV_LANE_DIM
-    from env.obs.ttc import TTC_DIM as ENV_TTC_DIM
-
-    assert DEFAULT_CHANNELS["lane"] == (1, ENV_LANE_DIM)
-    assert DEFAULT_CHANNELS["ttc"] == (1, ENV_TTC_DIM)
-    # 与 builder 默认输出同序（lane 在 ld 后、ttc 在 others 后）
-    keys = list(DEFAULT_CHANNELS)
-    assert keys.index("lane") == keys.index("ld") + 1
-    assert keys.index("ttc") == keys.index("others") + 1
+def test_rollout_buffer_default_channels_without_struct_keys() -> None:
+    assert "lane" not in DEFAULT_CHANNELS and "ttc" not in DEFAULT_CHANNELS
+    assert DEFAULT_CHANNELS["others"] == (1, 33)
 
     buffer = RolloutBuffer(2)
     buffer.add_step(
         {
-            "lane": np.full((1, LANE_DIM), 0.5, dtype=np.float32),
-            "lane_mask": np.ones((1,), dtype=np.float32),
-            "ttc": np.full((1, TTC_DIM), 2.0, dtype=np.float32),
-            "ttc_mask": np.ones((1,), dtype=np.float32),
+            "ego": np.full((1, 8), 0.5, dtype=np.float32),
+            "ego_mask": np.ones((1,), dtype=np.float32),
         }
     )
     buffer.add_step({})  # 缺键（旧 replay）→ 0 填充 + mask=0，不报错
-    assert buffer.obs["lane"].shape == (2, 1, LANE_DIM)
-    assert buffer.obs["ttc"].shape == (2, 1, TTC_DIM)
-    np.testing.assert_allclose(buffer.obs["lane"][0], 0.5)
-    np.testing.assert_allclose(buffer.obs["ttc"][0], 2.0)
-    np.testing.assert_allclose(buffer.obs["lane"][1], 0.0)
-    np.testing.assert_allclose(buffer.obs["ttc"][1], 0.0)
-    assert buffer.obs_mask["lane"][0, 0] == 1.0 and buffer.obs_mask["lane"][1, 0] == 0.0
-    assert buffer.obs_mask["ttc"][0, 0] == 1.0 and buffer.obs_mask["ttc"][1, 0] == 0.0
+    assert buffer.obs["ego"].shape == (2, 1, 8)
+    np.testing.assert_allclose(buffer.obs["ego"][0], 0.5)
+    np.testing.assert_allclose(buffer.obs["ego"][1], 0.0)
+    assert buffer.obs_mask["ego"][0, 0] == 1.0 and buffer.obs_mask["ego"][1, 0] == 0.0
 
 
 # --------------------------------------------------------------------------- #
-# 3) 端到端：v5 batch → net 令牌集合的 lane/ttc key_mask=1（非缺键回退）
+# 3) 端到端：v6 batch → net T=39 令牌集合（含池化/ego/latent 恒有效）
 # --------------------------------------------------------------------------- #
 
-def test_v5_batch_feeds_net_lane_ttc_tokens(tmp_path: Path) -> None:
+def test_v6_batch_feeds_net_t39_tokens(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     from net.model import DrivingModel
 
-    arrays = _v5_arrays()
-    dataset = BCDataset(arrays, {"schema_version": 5, "label_names": list(SUPERVISED_LABELS)})
+    arrays = _v6_arrays()
+    dataset = BCDataset(arrays, {"schema_version": 6, "label_names": list(SUPERVISED_LABELS)})
     batch = dataset.build_obs_batch(np.arange(4, dtype=np.int64))
     obs = {key: torch.as_tensor(value) for key, value in batch.items()}
 
@@ -171,8 +134,10 @@ def test_v5_batch_feeds_net_lane_ttc_tokens(tmp_path: Path) -> None:
     with torch.no_grad():
         encoded = model.encode(obs)
 
-    # 令牌序 [OD16, LD16, lane, others, ego, nav, ttc, signal, latent]（T=39）
-    assert tuple(encoded["tokens"].shape) == (4, 39, 32)
-    assert encoded["key_mask"][:, 32].all(), "lane token 被缺键回退（mask=0）"
-    assert encoded["key_mask"][:, 36].all(), "ttc token 被缺键回退（mask=0）"
-    assert bool(encoded["lane_mask"].all()) and bool(encoded["ttc_mask"].all())
+    # 令牌序 [OD16, LD16, od_pool, ld_pool, others, ego, nav, signal, latent]（T=39）
+    assert tuple(encoded["tokens"].shape) == (4, TOKEN_LENGTH, 32)
+    assert tuple(encoded["key_mask"].shape) == (4, TOKEN_LENGTH)
+    assert bool(encoded["key_mask"][:, 32:].all()), "池化/others/ego/nav/signal/latent 必须恒有效"
+    assert torch.equal(encoded["key_mask"][:, :16], encoded["encoded"].od_live)
+    assert torch.equal(encoded["key_mask"][:, 16:32], encoded["encoded"].ld_live)
+    assert not hasattr(model.encoders, "lane") and not hasattr(model.encoders, "ttc")

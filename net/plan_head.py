@@ -45,8 +45,9 @@ class PlanHead(nn.Module):
         self,
         hidden: int = H,
         num_experts: int = 8,
-        expert_hidden: int = 192,
-        router_hidden: int = 64,
+        expert_hidden: int = 76,
+        router_hidden: int = 384,
+        primary_hidden: int = 768,
         top_k: int = 2,
         ego_next_dim: int = EGO_NEXT_DIM,
         load_balance_coef: float = 0.0,
@@ -65,7 +66,12 @@ class PlanHead(nn.Module):
         )
         self.norm = nn.LayerNorm(hidden)
         self.moe = MoEBlock(
-            hidden, num_experts, expert_hidden, router_hidden, top_k=top_k,
+            hidden,
+            num_experts,
+            expert_hidden,
+            router_hidden,
+            primary_hidden=primary_hidden,
+            top_k=top_k,
             load_balance_coef=load_balance_coef,
         )
         self.ego_next = nn.Sequential(

@@ -8,14 +8,14 @@ v6 规格（docs/v6_net_design.md §1，冻结）
   - 键/值令牌集合（≤37）：OD 16 + LD 16 + others 1 + ego 1 + nav 1 + signal 1 +
     **plan_head 融合 latent 1**（保 experts → policy/value 条件通路）；
   - 4 头（d=128 时 head_dim=32）、pre-LN + 残差、默认 1 层（1–2 层可配）；
-  - 注意力输出 → pre-LN → 小 MLP（H→H）→ 输出层（policy: ``mu``/``logstd`` 各 H→2；
-    value: H→1）。
+  - 注意力输出 → pre-LN → 小 MLP（``H → trunk_hidden → H``）→ 输出层（policy:
+    ``mu``/``logstd`` 各 H→2；value: ``net → net_hidden → 1``）。
 - 掩码：``key_mask (B,T)``（1=有效）拼自 ``od_live``/``ld_live``/others/``nav_mask``/
   ``signal_mask``；ego 与融合 latent 恒有效；**全无效行输出严格 0 且不产生 NaN**
   （数值安全：强制一个 key 参与 softmax，再按行置 0）。
-- 参数预算（d=128、1 层、单头）：cross-attn 投影 4×(128²+128)=66,048；查询 1×128=128；
-  pre-LN 2×2×128=512；小 MLP 128²+128=16,512；输出层 policy 2×(128×2+2)=516 /
-  value 128×1+1=129 ⇒ **policy ≈83.7k / value ≈83.3k**（验收区间 [60k,100k]）。
+- 参数预算（v8 参数再分配；d=128、1 层）：cross-attn 投影 4×(128²+128)=66,048；查询
+  1×128=128；pre-LN 2×2×128=512；trunk ``128→160→128``=41,248；输出层 policy
+  2×(128×2+2)=516 / value ``128→256→1``=33,281 ⇒ **policy ≈108.5k / value ≈100.0k**。
 
 动作约定（p2-contract §0，不变）
 -------------------------------
@@ -129,12 +129,17 @@ class PolicyHead(CrossAttnHead):
         log_std_init: float = -1.0,
         num_heads: int = ATTN_HEADS,
         layers: int = ATTN_LAYERS,
+        trunk_hidden: int = 160,
     ):
         super().__init__(hidden, num_heads, layers)
         if not (len(action_low) == len(action_high) == 2):
             raise ValueError("action_low/action_high 必须各为 2 维")
-        #: 小 MLP（128→128；规格：cross-attn → 输出投影 → 小 MLP → 输出层）
-        self.trunk = nn.Sequential(nn.Linear(self.hidden, self.hidden), nn.GELU())
+        #: 小 MLP（v8 参数再分配：``H → trunk_hidden → H``；默认 128 → 160 → 128）
+        self.trunk = nn.Sequential(
+            nn.Linear(self.hidden, int(trunk_hidden)),
+            nn.GELU(),
+            nn.Linear(int(trunk_hidden), self.hidden),
+        )
         self.mu = nn.Linear(self.hidden, 2)
         # 末层零初始化：初始 raw=0 → 动作 = 界中点 (5 m, 0 rad)，远离饱和区
         nn.init.zeros_(self.mu.weight)
@@ -198,10 +203,18 @@ class PolicyHead(CrossAttnHead):
 class ValueHead(CrossAttnHead):
     """交叉注意力价值头：令牌集合 → ``V(s) (B,1)``（PPO+GAE 必需）。"""
 
-    def __init__(self, hidden: int = H, num_heads: int = ATTN_HEADS, layers: int = ATTN_LAYERS):
+    def __init__(
+        self,
+        hidden: int = H,
+        num_heads: int = ATTN_HEADS,
+        layers: int = ATTN_LAYERS,
+        net_hidden: int = 256,
+    ):
         super().__init__(hidden, num_heads, layers)
         self.net = nn.Sequential(
-            nn.Linear(self.hidden, self.hidden), nn.GELU(), nn.Linear(self.hidden, 1)
+            nn.Linear(self.hidden, int(net_hidden)),
+            nn.GELU(),
+            nn.Linear(int(net_hidden), 1),
         )
 
     def forward(self, tokens: Tensor, key_mask: Tensor) -> Tensor:

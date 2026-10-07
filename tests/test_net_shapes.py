@@ -17,7 +17,7 @@ import pytest
 import torch
 import yaml
 
-from net.encoders import EGO_MEM_DIM, H, LANE_DIM, LD_MEM_DIM, OD_MEM_DIM, TTC_DIM
+from net.encoders import EGO_MEM_DIM, H, LD_MEM_DIM, OD_MEM_DIM
 from net.mem import mem_from_obs
 from net.moe import MoEBlock, top_k_softmax
 from net.model import (
@@ -38,6 +38,8 @@ VALID_FRAMES = 3  # 前 3 帧为 warmup 补位（复制最旧真实帧，mask=1�
 OD_SLOTS = 16
 LD_SLOTS = 16
 OTHERS_DIM = 33  # env schema v4：nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12)
+#: v8 令牌集合（T=39）：OD16 + LD16 + od_pool + ld_pool + others + ego + nav + signal + latent
+TOKEN_LENGTH = 39
 
 
 # ---------------------------------------------------------------------- 工具
@@ -55,13 +57,13 @@ def make_obs(
     with_companions: bool = True,
     with_ego_hist: bool = True,
     with_others_hist: bool = True,
-    with_struct_context: bool = True,
+    with_struct_context: bool = True,  # v8 兼容形参：lane/ttc 已删除，恒为 no-op
 ) -> dict[str, torch.Tensor]:
     """构造与 env schema 同形状的观测（含 warmup 复制帧语义 + 伴随数组）。
 
     默认贴近 trainer 组装后的形状：单槽历史 ``(B,6,1,F)``、od/ld ``(B,6,S,F)``；
-    ``with_companions=False`` 时省略 ``od_id_hist/od_presence_hist``（测回退路径）；
-    ``with_struct_context=False`` 时省略 v5 的 ``lane``/``ttc``（测旧数据回退路径）。
+    ``with_companions=False`` 时省略 ``od_id_hist/od_presence_hist``（测回退路径）。
+    ``with_struct_context`` 为 v5 旧形参保留（v8 obs v6 已删除 lane/ttc 通道）。
     """
     generator = torch.Generator().manual_seed(seed)
 
@@ -111,12 +113,6 @@ def make_obs(
         obs["od_id_hist"] = (rand(batch, HISTORY, OD_SLOTS).abs() * 10).long() + 1
         obs["od_presence_hist"] = presence
         obs["od_id"] = obs["od_id_hist"][:, -1].clone()
-    if with_struct_context:
-        # v5（结构迭代 A）：当前车道块 + TTC 上下文 token（trainer 挤压后的 (B,F) 形状）
-        obs["lane"] = rand(batch, LANE_DIM)
-        obs["lane_mask"] = torch.ones(batch, 1)
-        obs["ttc"] = rand(batch, TTC_DIM)
-        obs["ttc_mask"] = torch.ones(batch, 1)
     return obs
 
 
@@ -510,7 +506,7 @@ def test_policy_sample_and_log_prob() -> None:
 
 # ---------------------------------------------------------------------- 装配
 def test_param_budget_and_module_counts() -> None:
-    """参数总量 ≤1.5M（默认 H=96 与训练配置 H=128/256），且各子模块均非空。"""
+    """参数总量 ≤1.5M（默认 H=96 与 config H=128 口径），且各子模块均非空。"""
     torch.manual_seed(0)
     model = DrivingModel()
     total = sum(param.numel() for param in model.parameters())
@@ -528,7 +524,7 @@ def test_param_budget_and_module_counts() -> None:
         assert sum(param.numel() for param in module.parameters()) > 0
 
     torch.manual_seed(0)
-    configured = DrivingModel(hidden=128, expert_hidden=256)
+    configured = DrivingModel(hidden=128)
     configured_total = sum(param.numel() for param in configured.parameters())
     assert configured_total <= PARAM_BUDGET, f"H=128 配置超预算: {configured_total}"
 
@@ -536,6 +532,67 @@ def test_param_budget_and_module_counts() -> None:
     assert configured.plan_head.moe.top_k == 2
     assert configured.plan_head.moe.num_experts == 8
     assert not hasattr(model, "world_model")
+
+
+def test_param_redistribution_matches_v8_budget() -> None:
+    """v8 参数再分配（config/model.yaml 口径，H=128）：
+    router≈52.6k / primary≈197.5k / 每 expert≈19.7k / policy≈108.5k / value≈100.0k。
+
+    结构：router ``128→384→8``、primary ``128→768→128``、expert ``128→76→128``、
+    policy trunk ``128→160→128``、value net ``128→256→1``。
+    """
+    torch.manual_seed(0)
+    model = DrivingModel(hidden=128)
+
+    def count(module: torch.nn.Module) -> int:
+        return sum(parameter.numel() for parameter in module.parameters())
+
+    router = count(model.plan_head.moe.router)
+    primary = count(model.plan_head.moe.primary)
+    expert = count(model.plan_head.moe.experts[0])
+    policy = count(model.policy)
+    value = count(model.value)
+    assert router == 128 * 384 + 384 + 384 * 8 + 8, f"router 参数 {router}"
+    assert primary == 128 * 768 + 768 + 768 * 128 + 128, f"primary 参数 {primary}"
+    assert expert == 128 * 76 + 76 + 76 * 128 + 128, f"expert 参数 {expert}"
+    assert router == 52_616 and primary == 197_504 and expert == 19_660
+    # policy = cross-attn 66,048 + query 128 + 2×LayerNorm 512 + trunk 41,248 + mu/logstd 516
+    assert policy == 108_452, f"policy 参数 {policy}（期望 ≈108.4k）"
+    # value = cross-attn 66,048 + query 128 + 2×LayerNorm 512 + net 33,281
+    assert value == 99_969, f"value 参数 {value}（期望 ≈100.0k）"
+    assert abs(policy - 108_400) < 1_000 and abs(value - 100_000) < 1_000
+
+    # config/model.yaml 的新键与 net 默认一致（build_model 透传口径）
+    config = yaml.safe_load((ROOT / "config" / "model.yaml").read_text(encoding="utf-8"))
+    assert int(config["moe"]["primary"]["hidden_dim"]) == 768
+    assert int(config["moe"]["experts"]["hidden_dim"]) == 76
+    assert int(config["moe"]["router"]["hidden_dim"]) == 384
+    assert int(config["policy"]["trunk_hidden"]) == 160
+    assert int(config["value"]["net_hidden"]) == 256
+
+
+def test_head_token_set_is_v8_composition() -> None:
+    """v8 头令牌集合（T=39）：``[OD16, LD16, od_pool, ld_pool, others, ego, nav, signal, latent]``。
+
+    v8：``lane``/``ttc`` token 已删除（编码器无对应层）；位置由 OD/LD 掩码均值池化与
+    ego token 取代；mask 对应 ``[od_live, ld_live, 1,1,1,1, nav_mask, signal_mask, 1]``。
+    """
+    model = DrivingModel(hidden=32, num_experts=2, expert_hidden=32, wm_steps=2).eval()
+    obs = make_obs(batch=4)
+    with torch.no_grad():
+        encoded = model.encode(obs)
+    assert tuple(encoded["tokens"].shape) == (4, TOKEN_LENGTH, 32)
+    assert tuple(encoded["key_mask"].shape) == (4, TOKEN_LENGTH)
+    assert not hasattr(model.encoders, "lane") and not hasattr(model.encoders, "ttc")
+    # 池化/others/ego/nav/signal/latent 恒有效；OD/LD 槽位按 live 掩码
+    assert bool(encoded["key_mask"][:, 32:].all())
+    assert torch.equal(encoded["key_mask"][:, :16], encoded["encoded"].od_live)
+    assert torch.equal(encoded["key_mask"][:, 16:32], encoded["encoded"].ld_live)
+    # od_pool/ld_pool 位置 = 掩码均值池化（与 plan head 融合路径同源）
+    from net.model import _masked_mean
+
+    od_pool = _masked_mean(encoded["encoded"].od_ctx, encoded["encoded"].od_live)
+    assert torch.allclose(encoded["tokens"][:, 32], od_pool, atol=1e-6)
 
 
 def test_deterministic_same_seed() -> None:

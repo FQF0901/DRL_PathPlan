@@ -164,7 +164,11 @@ def build_model(config: Mapping[str, Any]) -> Any:
     section = config.get("model")
     section = dict(section) if isinstance(section, Mapping) else dict(config)
     moe = dict(section.get("moe", {}) or {})
+    primary = dict(moe.get("primary", {}) or {})
     experts = dict(moe.get("experts", {}) or {})
+    router = dict(moe.get("router", {}) or {})
+    policy_cfg = dict(section.get("policy", {}) or {})
+    value_cfg = dict(section.get("value", {}) or {})
     world_model = dict(section.get("world_model", {}) or {})
     plan_anchor = dict(section.get("plan_anchor", {}) or {})
     # v7 结构迭代 B：K-anchor 计划头（enabled=false → num_anchors=0 → 模型与旧版逐位一致）
@@ -173,7 +177,13 @@ def build_model(config: Mapping[str, Any]) -> Any:
     kwargs = {
         "hidden": int(section.get("hidden_dim", 128)),
         "num_experts": int(experts.get("count", 8)),
-        "expert_hidden": int(experts.get("hidden_dim", 256)),
+        # v8 参数再分配：MoE primary/experts/router 隐藏维独立可配（默认与 config 一致）
+        "primary_hidden": int(primary.get("hidden_dim", 768)),
+        "expert_hidden": int(experts.get("hidden_dim", 76)),
+        "router_hidden": int(router.get("hidden_dim", 384)),
+        # v8：policy trunk / value net 隐藏维（默认与 config 一致）
+        "trunk_hidden": int(policy_cfg.get("trunk_hidden", 160)),
+        "net_hidden": int(value_cfg.get("net_hidden", 256)),
         "wm_steps": int(world_model.get("rollout_steps", 6)),
         "num_anchors": num_anchors,
         "anchor_path": plan_anchor.get("path") if anchor_enabled else None,

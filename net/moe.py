@@ -78,14 +78,21 @@ def switch_load_balance_aux(logits: Tensor, *, top_k: int = 2) -> Tensor:
 
 
 class MoEBlock(nn.Module):
-    """plan-head 内的 MoE（作用于 fusion 后的全局 token）。"""
+    """plan-head 内的 MoE（作用于 fusion 后的全局 token）。
+
+    v8 参数再分配（config/model.yaml）：``primary``/``experts``/``router`` 的隐藏维
+    由三个独立键控制（``primary_hidden`` / ``expert_hidden`` / ``router_hidden``）；
+    默认值与 config 一致（768 / 76 / 384，H=128 口径：primary≈197.5k、每 expert≈19.7k、
+    router≈52.6k）。expert 输出层保持零初始化（初始严格为 0，不破坏 primary 表示）。
+    """
 
     def __init__(
         self,
         hidden: int = H,
         num_experts: int = 8,
-        expert_hidden: int = 192,
-        router_hidden: int = 64,
+        expert_hidden: int = 76,
+        router_hidden: int = 384,
+        primary_hidden: int = 768,
         top_k: int = 2,
         load_balance_coef: float = 0.0,
     ):
@@ -93,7 +100,7 @@ class MoEBlock(nn.Module):
         self.hidden = int(hidden)
         self.num_experts = int(num_experts)
         self.top_k = int(top_k)
-        self.primary = _mlp(hidden, expert_hidden, hidden)
+        self.primary = _mlp(hidden, primary_hidden, hidden)
         self.experts = nn.ModuleList(
             [_mlp(hidden, expert_hidden, hidden, zero_init=True) for _ in range(self.num_experts)]
         )

@@ -69,13 +69,6 @@ others         ``others_hist`` / ``others_hist_mask`` ``(B,6,33)/(B,6)``；33 =
 :func:`rebuild_nav_from_world` 返回 mem 里现存的 nav 子向量（= 旧行为：t0 冻结），
 并**一次性告警**。所有几何输入在函数内 ``detach``：nav 是上下文条件，不把梯度引回
 位姿链/路线（与 t0 nav 来自 obs 常量一致）。
-
-v5 上下文回退（结构迭代 A）
---------------------------
-``lane``（当前车道块）/``ttc``（OD 槽位 TTC token）是**当前帧上下文通道**（默认不进 6 帧
-历史）。:func:`context_features_from_obs` 读取 ``obs[name]``（``(B,F)`` 或 env 原始
-``(B,1,F)``）与 ``obs[name_mask]``；缺键（旧 schema v4 数据）→ 全 0 特征 + ``mask=0`` +
-**一次性告警**（与 A4/v4 回退同模式），旧数据集可直接前向，新 token 不参与注意力。
 """
 
 from __future__ import annotations
@@ -205,61 +198,6 @@ def _squeeze_dim(tensor: Tensor, name: str, dim: int) -> Tensor:
     if int(tensor.shape[dim]) == 1:
         return tensor.squeeze(dim)
     return tensor
-
-
-def context_features_from_obs(
-    obs: Mapping[str, object],
-    name: str,
-    dim: int,
-    *,
-    batch: int,
-) -> tuple[Tensor, Tensor]:
-    """当前帧上下文通道（v5：``lane``/``ttc``）→ ``(feat (B,F), mask (B,1))``。
-
-    - ``obs[name]``：``(B,F)``（trainer 挤压后）或 env 原始 ``(B,1,F)``（多余单例维自动折叠）；
-      形状/ dtype 不符立即报错（避免静默错位）；
-    - ``obs[name + "_mask"]``：缺省全 1；``(B,1)``/``(B,)``/``(B,1,1)`` 均可；
-    - **缺键回退（旧 schema v4 数据/旧 replay）**：全 0 特征 + ``mask=0`` + 一次性
-      ``RuntimeWarning``（A4/v4 模式）；下游按 mask 屏蔽，旧数据前向逐位兼容（新 token
-      不参与注意力）。
-    """
-    dim = int(dim)
-    tensor = obs.get(name)
-    if tensor is None:
-        _warn_fallback(
-            f"context_missing_{name}",
-            f"obs 缺少 {name!r}（env schema v5 结构迭代 A 的上下文通道）→ 全 0 特征 + mask=0 "
-            "（旧数据回退）；用 tools/collect_expert.py 重新采集后自动生效",
-        )
-        reference = next((value for value in obs.values() if torch.is_tensor(value)), None)
-        device = reference.device if reference is not None else torch.device("cpu")
-        dtype = reference.dtype if reference is not None and reference.dtype == torch.float32 else torch.float32
-        return (
-            torch.zeros((batch, dim), dtype=dtype, device=device),
-            torch.zeros((batch, 1), dtype=dtype, device=device),
-        )
-    if not torch.is_tensor(tensor):
-        raise TypeError(f"obs[{name!r}] 必须是 Tensor，收到 {type(tensor).__name__}")
-    feat = squeeze_batch_singletons(tensor.float(), 2, name)
-    if tuple(feat.shape) != (batch, dim):
-        raise ValueError(
-            f"obs[{name!r}] 形状应为 (B,{dim})（或 (B,1,{dim})），收到 {tuple(tensor.shape)}"
-        )
-    mask = obs.get(f"{name}_mask")
-    if mask is None:
-        return feat, torch.ones((batch, 1), dtype=feat.dtype, device=feat.device)
-    if not torch.is_tensor(mask):
-        raise TypeError(f"obs[{name}_mask!r] 必须是 Tensor，收到 {type(mask).__name__}")
-    mask = mask.float()
-    while mask.ndim > 2 and int(mask.shape[1]) == 1:
-        mask = mask.squeeze(1)
-    if mask.ndim == 1:
-        mask = mask.unsqueeze(-1)
-    if tuple(mask.shape) != (batch, 1):
-        raise ValueError(
-            f"obs[{name}_mask!r] 形状应为 (B,1)（或 (B,)/(B,1,1)），收到 {tuple(mask.shape)}"
-        )
-    return feat, mask
 
 
 @dataclass

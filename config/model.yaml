@@ -18,13 +18,15 @@ moe:
   primary:
     enabled: true                 # 主专家常开
     router_gated: false           # 不参与路由门控
+    hidden_dim: 768               # v8 参数再分配：primary 结构 128 → 768 → 128（≈197.5k）
   experts:
     count: 8                      # 8 个专用专家（保持 8）
-    hidden_dim: 256               # 结构 128 → 256 → 128
+    hidden_dim: 76                # v8 参数再分配：结构 128 → 76 → 128（每 expert ≈19.7k）
     init: zero_residual           # 零初始化，输出作为残差
   router:
     type: top2_softmax           # top-2 softmax 混合（net.moe.top_k_softmax；恰 2 个非零权重、和为 1）
     top_k: 2                     # 每 token 取 top-2 logits 后在被选 logits 上 softmax
+    hidden_dim: 384              # v8 参数再分配：router 结构 128 → 384 → 8（≈52.6k）
     supervision: load_balance    # lane U1：router 无监督标签（去聚类）；训练侧只加 Switch 式
                                  # 负载均衡 aux α·E·Σ f_i·P_i（α = stages.B.bc.load_balance_coef）
     # 数据集标签顺序（仅用于数据契约/切片分析；router 不再用标签 BCE/聚类 CE 监督）
@@ -50,11 +52,15 @@ world_model:
 policy:
   type: autoregressive_rollout    # 策略 rollout：自回归（方案 B1）
   rollout_steps: 6                # ×6 步
+  trunk_hidden: 160               # v8 参数再分配：PolicyHead trunk 128 → 160 → 128（≈108.4k 总）
   action:
     space: [ds, dtheta]           # 动作 = 弧长 + 航向变化
     dt: 0.5                       # 作用于下一个 0.5 s
     bounded: true                 # 动作有界
     smooth: true                  # 动作平滑约束
+
+value:
+  net_hidden: 256                 # v8 参数再分配：ValueHead net 128 → 256 → 1（≈100.0k 总）
 
 # v7 结构迭代 B：K-anchor 计划头（fix-3 方案 A：形状锚 + 连续速度 + WTA + 选择头；
 # 车道系对齐；预注册见 docs/v7_program_prereg.md §11）。enabled=false（默认）= 完全关闭：
