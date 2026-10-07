@@ -1,7 +1,7 @@
 """obs schema v6（v8 结构重构）单测（原 v5 lane/ttc 用例改写）。
 
 覆盖：
-1. LD 采样 offset ``{0,20,40,60,80}``：0 m 点 = ego 投影点（近场横向锚）、当前车道
+1. LD 采样 offset ``{5,10,15,20,30}``（v8 诊断臂 A1'：v4 近场口径）、当前车道
    5 primary 槽 + 其余车道环填充、短车道降级；
 2. lane/ttc 通道删除：模块文件 / DEFAULT_CHANNELS / builder / schema / collect_expert
    全链不存在；
@@ -149,40 +149,36 @@ def _patch_base_vehicle(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 1) LD：offset {0,20,40,60,80}（0 m = ego 投影点）
+# 1) LD：offset {5,10,15,20,30}（v4 近场口径；v8 诊断臂 A1'）
 # --------------------------------------------------------------------------- #
 
 
-def test_ld_offsets_include_zero_projection_point() -> None:
-    """默认 offset {0,20,40,60,80}；0 m 点 = ego 投影点（dx=0，dy=-d_lat）。"""
+def test_ld_offsets_near_field_v4() -> None:
+    """诊断臂 A1'：offset {5,10,15,20,30}；同车道中心线各采样点 dy 恒为 -横向偏差。"""
     lane = FakeStraightLane(length=300.0)
     ego = FakeEgo(x=10.0, y=0.7, heading=0.0, lane=lane)  # ego 在中心线左侧 0.7 m
     feats, mask = LDChannel().build(FakeEnv(ego), None)
 
-    assert LDChannel().offsets == tuple(LD_OFFSETS_M) == (0.0, 20.0, 40.0, 60.0, 80.0)
+    assert LDChannel().offsets == tuple(LD_OFFSETS_M) == (5.0, 10.0, 15.0, 20.0, 30.0)
     assert mask[:5].tolist() == [1.0] * 5
-    # slot 0：ego 投影点（s0 = ego 纵向投影）→ 自车系 dx=0、dy = -横向偏差
-    assert feats[0, 0] == pytest.approx(0.0)
-    assert feats[0, 1] == pytest.approx(-0.7)
-    # slot 1..4：20..80 m 远场，同一车道中心线 → dy 恒为 -0.7
-    for k, offset in enumerate(LD_OFFSETS_M[1:], start=1):
+    for k, offset in enumerate(LD_OFFSETS_M):
         assert feats[k, 0] == pytest.approx(offset)
         assert feats[k, 1] == pytest.approx(-0.7)
     assert mask[5:].sum() == 0.0
 
 
-def test_ld_ring_fill_others_starts_at_zero_offset() -> None:
-    """当前车道占 5 primary 槽；相邻车道从 0 m 环开始填充。"""
+def test_ld_ring_fill_others_starts_at_first_offset() -> None:
+    """当前车道占 5 primary 槽；相邻车道从 5 m 环开始填充。"""
     lane = FakeStraightLane(length=300.0, index=("road", "node", 0))
     sibling = FakeStraightLane(y0=-3.5, length=300.0, index=("road", "node", 1))
     env = FakeEnv(FakeEgo(x=10.0, y=0.7, lane=lane), map_graph={"road": {"node": [lane, sibling]}})
 
     feats, mask = LDChannel().build(env, None)
-    for k, offset in enumerate(LD_OFFSETS_M):  # primary：当前车道 0/20/40/60/80
+    for k, offset in enumerate(LD_OFFSETS_M):  # primary：当前车道 5/10/15/20/30
         assert mask[k] == 1.0
         assert feats[k, 0] == pytest.approx(offset)
         assert feats[k, 1] == pytest.approx(-0.7)
-    for k, offset in enumerate(LD_OFFSETS_M):  # secondary：相邻车道 0/20/40/60/80（环优先）
+    for k, offset in enumerate(LD_OFFSETS_M):  # secondary：相邻车道 5/10/15/20/30（环优先）
         assert mask[5 + k] == 1.0
         assert feats[5 + k, 0] == pytest.approx(offset)
         assert feats[5 + k, 1] == pytest.approx(-4.2)
@@ -190,20 +186,20 @@ def test_ld_ring_fill_others_starts_at_zero_offset() -> None:
 
 
 def test_ld_short_lane_drops_far_offsets_and_ring_fills_others() -> None:
-    """当前车道 <60 m：60/80 槽丢弃（mask=0）；相邻车道继续按环填充。"""
-    lane = FakeStraightLane(length=50.0, index=("road", "node", 0))
+    """当前车道 <30 m：30 m 槽丢弃（mask=0）；相邻车道继续按环填充。"""
+    lane = FakeStraightLane(length=22.0, index=("road", "node", 0))
     sibling = FakeStraightLane(y0=-3.5, length=300.0, index=("road", "node", 1))
     env = FakeEnv(FakeEgo(lane=lane), map_graph={"road": {"node": [lane, sibling]}})
     feats, mask = LDChannel().build(env, None)
 
-    # primary：当前车道 0/20/40（60/80 超车道末端丢弃）
-    assert [float(mask[k]) for k in (0, 1, 2)] == [1.0] * 3
-    assert [float(feats[k, 0]) for k in (0, 1, 2)] == pytest.approx([0.0, 20.0, 40.0])
-    # 后续槽：相邻车道 0/20/40/60/80（环优先；当前车道 60/80 已丢弃）
-    assert [float(mask[k]) for k in (3, 4, 5, 6, 7)] == [1.0] * 5
-    assert [float(feats[k, 0]) for k in (3, 4, 5, 6, 7)] == pytest.approx([0.0, 20.0, 40.0, 60.0, 80.0])
-    assert [float(feats[k, 1]) for k in (3, 4, 5, 6, 7)] == pytest.approx([-3.5] * 5)
-    assert mask[8:].sum() == 0.0
+    # primary：当前车道 5/10/15/20（30 超车道末端丢弃）
+    assert [float(mask[k]) for k in (0, 1, 2, 3)] == [1.0] * 4
+    assert [float(feats[k, 0]) for k in (0, 1, 2, 3)] == pytest.approx([5.0, 10.0, 15.0, 20.0])
+    # 后续槽：相邻车道 5/10/15/20/30（环优先；当前车道 30 已丢弃）
+    assert [float(mask[k]) for k in (4, 5, 6, 7, 8)] == [1.0] * 5
+    assert [float(feats[k, 0]) for k in (4, 5, 6, 7, 8)] == pytest.approx([5.0, 10.0, 15.0, 20.0, 30.0])
+    assert [float(feats[k, 1]) for k in (4, 5, 6, 7, 8)] == pytest.approx([-3.5] * 5)
+    assert mask[9:].sum() == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +232,7 @@ def test_builder_emits_v6_channels_without_lane_ttc() -> None:
 
     assert "lane" not in obs and "ttc" not in obs
     assert obs["ld"].shape == (16, 7) and obs["ld_mask"].shape == (16, )
-    assert obs["ld"][0, 0] == pytest.approx(0.0)  # 0 m = ego 投影点
+    assert obs["ld"][0, 0] == pytest.approx(5.0)  # 首个采样点 5 m（诊断臂 A1' 近场口径）
     assert obs["od"].shape == (16, 9)
     assert obs["others"].shape == (1, 33)
     assert builder.feature_spec["ld"] == (16, 7)
@@ -256,8 +252,8 @@ def test_schema_v6_manifest_and_fingerprint() -> None:
     assert manifest["frame"]["ld"]["shape"] == [16, 7]
     assert "lane" not in manifest["frame"] and "ttc" not in manifest["frame"]
     assert "lane_layout" not in manifest and "ttc_layout" not in manifest
-    assert manifest["ld_layout"]["offsets_m"] == list(LD_OFFSETS_M) == [0.0, 20.0, 40.0, 60.0, 80.0]
-    assert "0 m 点 = ego 投影点" in manifest["ld_layout"]["near_field"]
+    assert manifest["ld_layout"]["offsets_m"] == list(LD_OFFSETS_M) == [5.0, 10.0, 15.0, 20.0, 30.0]
+    assert "v4 近场口径" in manifest["ld_layout"]["near_field"]
     assert obs_fingerprint().startswith("v6-")
 
 

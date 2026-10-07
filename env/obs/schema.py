@@ -178,12 +178,12 @@ LD_LAYOUT: dict[str, Any] = {
     "offsets_m": list(LD_OFFSETS_M),
     "slot_policy": (
         "当前车道（candidate priority 0）占满全部 offset（primary，5 槽）；其余候选车道按 "
-        "offset 环优先填充（先 0 m 环所有车道，再 20/40/60/80 m），环内按车道优先级；"
+        "offset 环优先填充（先 5 m 环所有车道，再 10/15/20/30 m），环内按车道优先级；"
         "共 16 槽，超预算的远端环被裁"
     ),
     "near_field": (
-        "0 m 点 = ego 投影点（s = clamp(ego 投影 long, 0, length)），提供近场横向锚定"
-        "（dy 即横向偏差的负值，补偿 v6 删除的 lane 通道）"
+        "近场 5/10 m 采样点提供横向锚定与预瞄几何"
+        "（v8 诊断臂 A1' 回退 v4 近场口径；lane 通道已删除）"
     ),
     "discard": "采样点超车道末端或投影失败 → 该槽 mask=0（通道自动降级）",
 }
