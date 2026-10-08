@@ -1284,6 +1284,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     model_config = {
         "hidden_dim": config.get("hidden_dim", 128),
         "moe": dict(config.get("moe") or {}),
+        # v8 修复（与 eval_runner 同源）：policy/value 隐藏维必须透传，否则学生模型按代码默认
+        # 构造（trunk 160 / net 256）→ 与 ckpt 形状不符 → roll-in 用随机初始化策略（采集毒化）。
+        "policy": dict(config.get("policy") or {}),
+        "value": dict(config.get("value") or {}),
         "world_model": dict(config.get("world_model") or {}),
         # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → num_anchors=0，旧行为逐位不变；
         # 学生 ckpt 带锚头时必须透传，否则锚权重被丢弃、roll-in 退化为无锚计划）
