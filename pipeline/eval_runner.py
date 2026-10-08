@@ -1693,6 +1693,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "model_config": {
                 "hidden_dim": config.get("hidden_dim", 128),
                 "moe": dict(config.get("moe") or {}),
+                # v8 修复：policy/value 隐藏维必须透传，否则评测模型按代码默认
+                # （trunk 160 / net 256）构造 → 与 ckpt 形状不符 → 随机初始化评测（假阴性）。
+                "policy": dict(config.get("policy") or {}),
+                "value": dict(config.get("value") or {}),
                 "world_model": dict(config.get("world_model") or {}),
                 # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
                 # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划——见
