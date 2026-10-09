@@ -1,189 +1,251 @@
-我看完了 deepseekv4p1_argue.md。Coding agent 的反驳大部分成立，但它的推进方案仍偏“先完善诊断、再逐步实验”，对于“显著超过 IDM=0.756”这个目标还不够聚焦。
+我已阅读第三轮收拢文档 deepseekv4p1_argue.md。整体上，方案已经可以从“争论”进入“执行设计”，我接受 coding agent 对 PPO 口径问题的技术修正，并建议按下面版本锁定。
 
-一、我与 coding agent 的共识
+一、确认三项修正
+D-A：接受
 
-以下判断可以直接接受：
+不能直接把 PPO 训练改成 PlanHead+LQR。若 PPO 采样 action 不实际决定执行轨迹，credit assignment 会失真。正确顺序是：
 
-让已经接近完成的容量排摸收尾，但不再扩大扫参范围。
-不应预设删除 World Model，而应通过 No-WM 对照决定去留。
-先区分 plan-out、tracker-out、异常判定和 recovery failure。
-增加 footprint 插值检查，而不只检查六个离散计划点。
-DAgger 应采集真实 recovery trajectory，不能继续依赖首步动作和合成 traj6。
-MoE、WM、history 必须通过严格对照证明价值。
-二、我认为 coding agent 仍低估了两个关键问题
-1. RL 训练与最终评测的执行口径不一致，应升为最高优先级
+先用现有 checkpoint 做双口径零训练评测；
+如果口径差显著，再选择：
+action-conditioned plan；
+或将 repeat-action 定义为部署接口；
+不直接恢复旧的 plan-reference PPO。
+D-B：接受
 
-目前：
+第一步无需重训。评测器已经支持 plan 和 repeat_action 两种 reference，因此先量化同一 checkpoint 的执行口径差，是成本最低且信息量最高的实验。
 
-RL 训练使用 repeat_action / A-hold；
-最终评测使用 PlanHead 生成计划，再由 LQR 跟踪。
+D-C：接受
 
-这意味着 PPO 优化的不是最终部署闭环。即使 PPO 在训练环境中学得很好，也不能保证 PlanHead + LQR 的评测性能同步改善。
+“PPO 完全没有优化部署 plan”这个表述不准确。当前 PPO 可以训练 MoE experts 和 residual scale，因此与 plan 部分耦合；真正的断点是 primary、router、WM 等被冻结，以及训练执行口径与默认评测不同。
 
-这比 TemporalAttention、MoE 参数分配甚至部分 off-road 分类都更接近根因。
+二、关闭 D1–D5
+D1：审计对象
 
-建议立即增加两条执行链对照：
-
-PPO 训练和评测全部采用现有 A-hold；
-PPO 训练和评测全部采用 PlanHead + LQR。
-
-如果只有同口径链路明显改善，就能直接确认 train-eval execution mismatch。
-
-2. 没有先确认“IDM 是否构成可学习上限”
-
-当前训练数据主要来自 expert5k。如果专家本身接近 IDM，BC 很难显著超过 IDM；DAgger 再持续查询同一个专家，也只是在逼近该专家，而不是突破它。
-
-要超过 IDM，必须至少有一种额外信号：
-
-优于 IDM 的 oracle 或搜索型专家；
-基于闭环 reward 的有效 RL；
-failure recovery 标签；
-对 IDM 弱点进行针对性优化，例如复杂几何、收费站、边界安全和路线完成率。
-
-因此先做 expert ceiling audit：
-
-IDM 在 expert5k 对应场景上的成功率；
-expert action 经“网络 plan 接口 + LQR”回放后的成功率；
-oracle/laneplan/精确控制模式的成功率；
-IDM 失败而 oracle 成功的场景数量和类型。
-
-如果 expert + 当前动作接口 + LQR 都无法明显超过 0.756，那么先改网络没有意义。
-
-三、建议的实际推进顺序
-P0：先回答三个决定性问题
-P0-1：上限审计
-
-用相同 eval500 测：
+锁定以下对象：
 
 IDM；
-expert action；
-expert plan + LQR；
-oracle/laneplan；
-s11。
+s11；
+Arm P；
+pri512；
+oracle；
+laneplan。
 
-目标是得到：
+主集使用 eval500，最终候选再用 clean500 复核。P0 阶段不必让所有对象都做三 seed，先用相同 episode ID 做 paired audit。
 
-环境理论上限
-专家上限
-计划接口上限
-LQR 执行上限
-学习模型当前水平
+D2：D 格工具口径
+
+同意 coding agent 的方案：
+
+expert action 按模型相同的 (ds,dθ) 规则积分为 6 点、3 秒 plan，再交给同一个 LQR。
+
+D 格必须复用模型完全相同的：
+
+单位和归一化；
+action clipping；
+0.5 秒时间间隔；
+SE(2) 累积；
+首点处理；
+LQR 参数。
+
+否则测到的不是 plan parameterization ceiling，而是工具实现差异。
+
+D3：口径统一路线
+
+现在不预选 ①②③，由 P0 双口径结果决定：
+
+若 repeat_action 仅高 0–3pt：暂不改执行口径，继续查计划和 tracker；
+若高 3–8pt：优先研究 action-conditioned plan；
+若高于 8pt，且 collision/off-road 同时改善：部署口径本身必须重新评估。
+
+不建议仅因为 success 高就直接把 repeat-action 设为正式口径，还要检查平顺性、碰撞率和与历史协议的可比性。
+
+D4：验收门槛
+
+同意：
+
+G2：3 seeds 平均 success ≥ 0.74；
+G3：success ≥ 0.80 且 paired 显著；
+stretch target：0.82–0.85。
+
+最终验收同时要求 eval500 + clean500。由于目标是“大幅超过 IDM”，0.77 左右只能算追平或弱领先，不能算完成。eval500 在成功率约 0.8 时单集标准误约 1.8pt，因此三 seed 和 paired 检验是必要的。
+
+D5：WM/MoE 对照时点
+
+锁定在 P2，不提前开发 0/2/8 experts。
+
+原因不是 MoE 一定有效，而是当前最需要先解决接口上限、执行口径和主要失败类型。提前改 MoE 会改变失败分布，降低归因价值。
+
+例外：如果 P0 显示 s11 的 router/expert 输出异常，例如频繁切换、残差爆炸或直接导致 plan-out，可以提前做单头对照。
+
+三、锁定后的总体方案
+S0：排摸收尾
+
+允许现有 attn2、tru192、stg3 等已排队实验结束，但：
+
+不再增加新容量臂；
+不用这些结果直接裁决 WM/MoE 去留；
+正式保留 manifest、配置、checkpoint hash 和逐 episode 结果。
+S1：P0 审计，先不训练
+1. 双口径评测
+
+对 s11、Arm P、pri512 分别运行：
+
+plan reference
+repeat_action reference
 
 
-Go/No-Go：
+输出：
 
-若 expert plan + LQR ≤ IDM：先修计划接口或 tracker。
-若 oracle ≫ IDM，但 expert ≈ IDM：需要更强专家或 RL。
-若 expert plan + LQR ≫ IDM，但模型低：才是表示、监督或分布偏移问题。
-P0-2：统一 RL 训练和评测执行口径
+success；
+off-road；
+collision；
+route completion；
+paired episode 差异。
+2. 上限矩阵
 
-优先测试 PlanHead + LQR 闭环进入 PPO rollout。至少保证 PPO 的 action、plan 和环境实际执行之间有明确梯度或可归因关系。
+运行 A–F：
 
-短期无法完全统一时，也应让 PPO reward 针对实际 plan rollout 计算，而不是只针对重复首步动作。
+A：IDM；
+B：oracle trajectory + LQR；
+C：laneplan + LQR；
+D：expert action → 模型格式 plan → LQR；
+E：模型 plan，分别用 LQR 与 exact；
+F：模型 repeat_action。
+3. 初步失败归因
 
-P0-3：完成 off-road 归因
-
-Coding agent 提出的四分类可以保留：
+先对 s11 和 IDM 各取 30–50 个 off-road episode，分类：
 
 plan-out；
 tracker-out；
-判定或坐标异常；
+geometry/termination anomaly；
 recovery failure。
 
-但不要等“100 个失败全部人工完善”才推进。先用 s11 与 IDM 各 30 到 50 个失败得到方向，随后再扩大到 100 个以上。
+必须加入节点之间的 ego footprint 插值检查，不能只检查 6 个 plan 点。
 
-四、归因后的实现分支
-如果主要是 plan-out
+四、P0 结果的决策树
+情况 A：D 不高于 IDM
 
-优先实现：
+说明 expert action 经过当前 (ds,dθ) plan 和 LQR 后已损失过大。
 
-drivable corridor 输入；
+下一步：修 action/plan 接口，不改网络。
+
+重点检查：
+
+曲率连续性；
+0.5 秒节点是否过疏；
+action clipping；
+低速时 dθ/ds 异常；
+LQR 对急弯和收费站的跟踪能力。
+情况 B：D、B 明显高于 IDM，但 E 显著较低
+
+说明接口存在高上限，主要问题在学习。
+
+下一步：走计划侧分支。
+
+首选实现：
+
+DAgger 真实 recovery trajectory；
 footprint boundary margin；
-节点间插值越界损失；
-曲率和曲率变化率损失；
-近场更密的轨迹点；
-失败前 2–4 秒的 expert recovery trajectory。
-如果主要是 tracker-out
+节点间 corridor violation；
+curvature 和 delta-curvature loss；
+hard mining 攓为闭环风险。
 
-优先实现：
+这里我建议把 DAgger recovery 放在新增 corridor observation 之前，因为它更直接利用现有失败分布，也更容易验证收益。
 
-tracker-aware trajectory loss；
-bicycle-model 或实际 MetaDrive rollout 可达性检查；
-限制最大曲率和曲率变化率；
-把 LQR tracking residual 纳入 hard mining；
-必要时重新调整 0.5 秒计划采样粒度。
-如果主要是 recovery failure
+情况 C：Exact 明显高于 LQR
 
-这时单纯 BC 不够，需要：
+说明模型 plan 本身可用，主要损失来自 tracker。
 
-DAgger 回溯失败前窗口；
-专门采集偏离分布下的恢复轨迹；
-对恢复样本提高权重；
-PPO 在与评测一致的 PlanHead + LQR 链路上训练。
-五、WM 与 MoE 怎么处理
-World Model
+下一步：走执行侧分支。
 
-不删除，但暂时不做大改。先比较：
+优先顺序：
 
-当前 detached WM；
-WM rollout 不输入 policy；
-2-step BPTT WM；
-No-WM 等预算模型。
+LQR 参数与速度调度；
+轨迹曲率和连续性约束；
+tracker-aware plan loss；
+必要时增加近场计划点密度。
+情况 D：repeat_action 明显高于 plan
 
-只有 WM 能稳定降低 plan-out、collision 或 recovery failure，才继续投入 EMA target、长 horizon 等改造。
+说明训练和部署口径错位是主要损失源。
 
-MoE
+不要简单把部署改成 repeat-action。先实现：
 
-先继续使用现有 s11，不立即重构。待主链闭环对齐后，再比较：
+PPO action 条件化 PlanHead，并保证 plan 第一段严格由 PPO action 决定。
 
-单头；
-2 experts；
-当前 8 experts。
+随后逐步解冻：
 
-如果 8 experts 没有稳定优于单头，或者路由与道路类型、几何难度无稳定关系，应删除或缩减。现在先做 MoE 重构会混淆主要问题。
+plan final/residual；
+primary 最后一层；
+router；
+必要时再解冻更深层。
 
-六、超过 IDM 的阶段性门槛
+每步监控 KL、BC holdout、plan-action consistency 和 closed-loop KPI。
 
-我建议不要直接把“超过 0.756”设为唯一终点，而是设三个 gate：
+情况 E：主要是 recovery failure
 
-Gate 1：链路正确
-expert plan + LQR 明显高于 IDM；
-PPO 训练和评测执行口径一致；
-95% 以上 off-road 能自动归因。
-Gate 2：先追平
-三 seed 平均 success ≥ 0.74；
-off-road 相比 s11 至少下降 30%；
-collision 不明显恶化。
-Gate 3：确认超过 IDM
-三 seed 平均 success ≥ 0.80；
-相对 IDM=0.756 的 paired eval 有统计显著性；
-bootstrap 95% CI 或 McNemar 检验支持提升；
-提升不能只来自单一道路类型；
-clean500 和 eval500 均成立。
+优先修改 DAgger：
 
-所谓“大幅超过”，我建议目标至少设为 0.82–0.85，而不是 0.77 左右的噪声级领先。
+回溯失败前 2–4 秒；
+保存 student plan、实际轨迹、expert recovery plan；
+训练完整 6 点 recovery trajectory；
+不再使用常量外推的 traj6；
+hard mining 使用 boundary margin、tracking residual、collision risk，而非单纯 BC error。
+五、对当前草案的两点调整
+1. G1 不必须“显著高于 IDM”
 
-最终执行建议
+G1 的作用应是确定可达路径，而不是提前完成统计显著性验证。建议改为：
 
-给 coding agent 的下一条指令应是：
+B、D、E_exact 或 F 中至少一条在 paired eval 上达到 ≥0.80，或者相对 IDM 提升 ≥5pt，并明确主要损失发生在哪一层。
 
-允许当前 v8b 排摸收尾，但禁止扩大扫参。
+正式统计显著性留给 G3。
 
-最高优先级不是继续改 WM/MoE，而是：
+2. P1 不要机械地只做一个代码点
 
-1. 在同一 eval500 上完成 IDM、expert action、expert plan+LQR、
-   oracle/laneplan、s11 的上限审计。
-2. 增加 PPO A-hold 与 PlanHead+LQR 两条同口径训练/评测对照，
-   确认 train-eval execution mismatch 的影响。
-3. 用 s11 和 IDM 各抽取 30–50 个失败，先完成
-   plan-out / tracker-out / anomaly / recovery-failure 分类。
-4. 根据主要类别只实现一条优化分支：
-   plan-out -> corridor/footprint/curvature；
-   tracker-out -> tracker-aware rollout；
-   recovery -> DAgger recovery trajectory。
-5. 主链达到 0.74 以上后，再做 No-WM 和 MoE 等预算对照。
-6. 最终以 3 seeds、eval500 paired test、success>=0.80
-   作为超过 IDM 的第一阶段验收标准。
+应只选择一个根因分支，但一个分支内部通常需要组合修复。例如 plan-out 分支可能同时需要：
+
+recovery data；
+footprint loss；
+curvature regularization。
+
+不应为了“单变量”而只改其中一项。正确方法是：
+
+先用小消融确认各项方向；
+再形成一个完整 candidate recipe；
+candidate recipe 补三 seed。
+六、最终收拢版本
+已锁定共识
+排摸收尾，不扩扫参；
+不预设删除 WM/MoE；
+上限审计先于网络改造；
+双口径先零训练量化；
+失败分类从 30–50 例开始；
+加入 footprint 插值检查；
+DAgger 使用真实 recovery trajectory；
+正式结论使用三 seed、paired test、eval500 和 clean500。
+当前无重大原则分歧
+
+剩余问题已经从架构争论转为数据判决：
+
+超过 IDM 的可达链路在哪里；
+损失主要发生在 plan representation、学习、tracker 还是执行口径；
+P1 应进入计划侧、执行侧还是 recovery 分支。
+建议下一条给 coding agent 的指令
+方案原则已基本收拢。
+
+按 S0→S1 推进：
+
+1. 允许当前容量排摸收尾，但禁止新增扫参臂。
+2. 完成 s11、Arm P、pri512 的 plan/repeat_action 双口径评测。
+3. 完成 A–F 上限矩阵，优先实现 D 格：
+   expert action → 同模型 ds/dtheta 6点计划 → 同一 LQR。
+4. 对 s11 和 IDM 各抽取 30–50 个 off-road episode，
+   完成 plan-out / tracker-out / anomaly / recovery 分类，
+   包括节点间 footprint 插值校验。
+5. 输出一份统一审计报告，包含逐 episode paired 数据、
+   manifest、checkpoint hash、运行口径和推荐 P1 分支。
+
+S1 完成前不修改 WM、MoE、encoder 或 PPO 冻结范围，
+也不开始新的容量实验。
 
 
-核心判断是：**先证明系统具备超过 IDM 的专家与执行上限，再统一 RL 与最终部署链路，最后才优化 WM/MoE。**否则很可能花两周把网络做得更复杂，却仍被 expert ceiling 或 PlanHead-LQR 接口上限卡住。
+这版可以作为大致方案定稿。下一次讨论应只围绕 P0 数据和它触发的分支，不再重复讨论“是否先删 WM”“是否继续扩容量”等已关闭问题。
