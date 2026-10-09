@@ -1,251 +1,235 @@
-我已阅读第三轮收拢文档 deepseekv4p1_argue.md。整体上，方案已经可以从“争论”进入“执行设计”，我接受 coding agent 对 PPO 口径问题的技术修正，并建议按下面版本锁定。
+我继续基于 DRL_PathPlan_code.txt 中已核查的实现和 coding agent 最新排摸收拢。总体方案可以开工，但我建议在正式执行前补上 4 个技术约束，否则 P0 的数字可能仍不可比较。
 
-一、确认三项修正
-D-A：接受
+一、同意 coding agent 的新增结论
+1. s11 必须走兼容代码
 
-不能直接把 PPO 训练改成 PlanHead+LQR。若 PPO 采样 action 不实际决定执行轨迹，credit assignment 会失真。正确顺序是：
+s11 属于 obs v5、v7 网络，当前代码是 obs v6、v8 网络。若当前 eval_runner.py 对 shape mismatch 只记录并继续运行，确实可能出现部分权重随机初始化，结果完全无效。
 
-先用现有 checkpoint 做双口径零训练评测；
-如果口径差显著，再选择：
-action-conditioned plan；
-或将 repeat-action 定义为部署接口；
-不直接恢复旧的 plan-reference PPO。
-D-B：接受
+我同意：
 
-第一步无需重训。评测器已经支持 plan 和 repeat_action 两种 reference，因此先量化同一 checkpoint 的执行口径差，是成本最低且信息量最高的实验。
+使用 v7-lock-20261006 或对应 commit 重建 s11 runner；
+s11 做完整的 plan/repeat_action 双口径评测；
+每次评测强制验证 checkpoint 加载完整性。
+2. checkpoint 加载校验必须升级为 fail-fast
 
-D-C：接受
+不能只是报告里附日志，应直接让正式评测退出：
 
-“PPO 完全没有优化部署 plan”这个表述不准确。当前 PPO 可以训练 MoE experts 和 residual scale，因此与 plan 部分耦合；真正的断点是 primary、router、WM 等被冻结，以及训练执行口径与默认评测不同。
+missing_keys == 0
+unexpected_keys == 0
+shape_mismatch == 0
+obs_schema/fingerprint compatible
 
-二、关闭 D1–D5
-D1：审计对象
 
-锁定以下对象：
+否则以后仍可能制造“模型性能下降”的假结论。当前仓库历史上已经存在 shape mismatch 后继续执行的风险，因此这是 P0 的前置修复，不是一般记录事项。
 
-IDM；
-s11；
-Arm P；
-pri512；
-oracle；
-laneplan。
+3. D 格首点无需额外覆盖
 
-主集使用 eval500，最终候选再用 clean500 复核。P0 阶段不必让所有对象都做三 seed，先用相同 episode ID 做 paired audit。
+专家 6 步动作链的第一个 (ds,dθ) 本身就是下一规划步，确实无需再使用模型 mu 覆盖。但必须复用 net/model.py 的 arc_step 和模型相同的 clipping、单位、SE(2) 累积及 LQR 参数，不能重新写近似转换。
 
-D2：D 格工具口径
+二、需要补充的 4 个关键约束
+约束 1：s11 不能简单使用“完整旧评测栈”和 v8 横向比较
 
-同意 coding agent 的方案：
+如果直接用整个 v7 archive 跑 s11，而 Arm P/pri512 用当前 v8 evaluator，差异可能同时来自：
 
-expert action 按模型相同的 (ds,dθ) 规则积分为 6 点、3 秒 plan，再交给同一个 LQR。
+模型和 obs；
+MetaDrive 环境包装；
+termination 判定；
+reward context；
+LQR 或 action clipping；
+episode spec 解析；
+KPI 聚合代码。
 
-D 格必须复用模型完全相同的：
+这样不再是严格 paired comparison。
 
-单位和归一化；
-action clipping；
-0.5 秒时间间隔；
-SE(2) 累积；
-首点处理；
-LQR 参数。
+建议实现
 
-否则测到的不是 plan parameterization ceiling，而是工具实现差异。
+建立两个版本层：
 
-D3：口径统一路线
+模型兼容层：分别使用 v7 model + obs v5、v8 model + obs v6
+评测语义层：尽量统一使用当前 scenario IDs、termination、tracker 参数和 KPI 聚合
 
-现在不预选 ①②③，由 P0 双口径结果决定：
 
-若 repeat_action 仅高 0–3pt：暂不改执行口径，继续查计划和 tracker；
-若高 3–8pt：优先研究 action-conditioned plan；
-若高于 8pt，且 collision/off-road 同时改善：部署口径本身必须重新评估。
+若无法统一，报告必须明确分开：
 
-不建议仅因为 success 高就直接把 repeat-action 设为正式口径，还要检查平顺性、碰撞率和与历史协议的可比性。
+同版本内部比较：s11 plan vs s11 repeat_action；
+跨版本参考比较：s11 vs v8，只用于方向判断，不做百分点精确归因。
 
-D4：验收门槛
+不要把跨 evaluator 的 2–3pt 差异解释成网络差异。
 
-同意：
+约束 2：D 格是 privileged ceiling，不是可部署 expert ceiling
 
-G2：3 seeds 平均 success ≥ 0.74；
-G3：success ≥ 0.80 且 paired 显著；
-stretch target：0.82–0.85。
+D 格使用 live expert 获取未来 6 步动作。如果这些动作来自专家未来状态轨迹，它实际上利用了未来闭环信息：
 
-最终验收同时要求 eval500 + clean500。由于目标是“大幅超过 IDM”，0.77 左右只能算追平或弱领先，不能算完成。eval500 在成功率约 0.8 时单集标准误约 1.8pt，因此三 seed 和 paired 检验是必要的。
+expert future states
+→ future actions
+→ 6-step plan
+→ LQR
 
-D5：WM/MoE 对照时点
 
-锁定在 P2，不提前开发 0/2/8 experts。
+模型在线时并没有这些未来 expert states，所以 D 应标记为：
 
-原因不是 MoE 一定有效，而是当前最需要先解决接口上限、执行口径和主要失败类型。提前改 MoE 会改变失败分布，降低归因价值。
+expert-oracle parameterization ceiling
 
-例外：如果 P0 显示 s11 的 router/expert 输出异常，例如频繁切换、残差爆炸或直接导致 plan-out，可以提前做单头对照。
+它可以回答“(ds,dθ) + LQR 是否有能力超过 IDM”，但不能证明模型仅靠当前观测能学到这个水平。
 
-三、锁定后的总体方案
-S0：排摸收尾
+建议同时保留两项指标：
 
-允许现有 attn2、tru192、stg3 等已排队实验结束，但：
+D-oracle：真实未来 expert action chain；
+D-hold：只使用当前 expert action 重复 6 步。
 
-不再增加新容量臂；
-不用这些结果直接裁决 WM/MoE 去留；
-正式保留 manifest、配置、checkpoint hash 和逐 episode 结果。
-S1：P0 审计，先不训练
-1. 双口径评测
+D-oracle 与 D-hold 的差距，可以测量“未来动作链信息”的价值，并与模型 plan、repeat_action 直接对应。
 
-对 s11、Arm P、pri512 分别运行：
+约束 3：exact 只能诊断，不能作为可部署性能上限
 
-plan reference
-repeat_action reference
+需要先确认 --tracker exact 的实际语义。如果 exact 直接把车辆状态推进到参考轨迹，或绕过真实控制/车辆动力学，它只能回答：
 
+计划几何本身是否合理。
 
-输出：
+不能把 E_exact ≥ 0.80 直接解释为“只要调好 LQR 就能达到 0.80”。两者之间还可能存在：
 
-success；
-off-road；
-collision；
-route completion；
-paired episode 差异。
-2. 上限矩阵
+车辆动力学不可达；
+转向和加速度饱和；
+10Hz 控制误差；
+轨迹曲率不连续。
 
-运行 A–F：
+因此推荐解释：
 
-A：IDM；
-B：oracle trajectory + LQR；
-C：laneplan + LQR；
-D：expert action → 模型格式 plan → LQR；
-E：模型 plan，分别用 LQR 与 exact；
-F：模型 repeat_action。
-3. 初步失败归因
+E_exact - E_lqr = 执行栈相关损失的上界
 
-先对 s11 和 IDM 各取 30–50 个 off-road episode，分类：
 
-plan-out；
-tracker-out；
-geometry/termination anomaly；
-recovery failure。
+而不是纯粹的“LQR 参数损失”。
 
-必须加入节点之间的 ego footprint 插值检查，不能只检查 6 个 plan 点。
+约束 4：off-road 四分类必须按最早根因分层，不能简单互斥打标签
 
-四、P0 结果的决策树
-情况 A：D 不高于 IDM
+plan-out、tracker-out 和 recovery failure 可能同时发生。例如：
 
-说明 expert action 经过当前 (ds,dθ) plan 和 LQR 后已损失过大。
+计划先产生低 margin；
+LQR 跟踪误差进一步放大；
+最后 recovery 失败并越界。
 
-下一步：修 action/plan 接口，不改网络。
+建议记录三时间戳后采用层级判定：
 
-重点检查：
+T_plan   = 首次计划 footprint 不可行
+T_track  = 首次实际轨迹明显偏离仍可行的计划
+T_cross  = 首次实际 footprint 越界
+T_term   = 环境正式终止
 
-曲率连续性；
-0.5 秒节点是否过疏；
-action clipping；
-低速时 dθ/ds 异常；
-LQR 对急弯和收费站的跟踪能力。
-情况 B：D、B 明显高于 IDM，但 E 显著较低
 
-说明接口存在高上限，主要问题在学习。
+分类规则：
 
-下一步：走计划侧分支。
+T_plan < T_cross 且计划本身越界：plan-originated；
+计划始终可行，但 tracking residual 先超阈值并越界：tracker-originated；
+进入危险状态后仍存在可行 recovery，但模型持续失败：recovery failure；
+几何判定和环境 termination 不一致：anomaly。
 
-首选实现：
+报告中同时保留多个 contributing factors，不要只输出一个标签。
 
-DAgger 真实 recovery trajectory；
-footprint boundary margin；
-节点间 corridor violation；
-curvature 和 delta-curvature loss；
-hard mining 攓为闭环风险。
+三、对 corridor / boundary 实现的具体要求
 
-这里我建议把 DAgger recovery 放在新增 corridor observation 之前，因为它更直接利用现有失败分布，也更容易验证收益。
+coding agent 提议复用 road_edge_distance_from_ctx，方向正确，但要注意：
 
-情况 C：Exact 明显高于 LQR
+reward 使用的通常是当前实际车辆状态；
+P0 需要检查的是任意未来计划 pose 的完整车辆 footprint；
+不能直接把当前 ego 的 road-edge distance 套到未来 plan 点。
 
-说明模型 plan 本身可用，主要损失来自 tracker。
+正确做法是：
 
-下一步：走执行侧分支。
+用 arc_step 得到每个计划 pose；
+在相邻规划节点间按固定空间间隔插值，建议 0.5–1.0m；
+在每个 pose 上生成车辆矩形 footprint；
+至少检查四角、四边中点和中心；
+使用 MetaDrive 地图几何判断采样点是否属于 drivable region；
+记录最小 signed margin。
 
-优先顺序：
+如果引擎不能稳定提供 signed distance，第一版可记录：
 
-LQR 参数与速度调度；
-轨迹曲率和连续性约束；
-tracker-aware plan loss；
-必要时增加近场计划点密度。
-情况 D：repeat_action 明显高于 plan
+inside_ratio
+first_invalid_pose
+invalid_footprint_point_count
 
-说明训练和部署口径错位是主要损失源。
 
-不要简单把部署改成 repeat-action。先实现：
+不要伪造不可靠的连续距离。
 
-PPO action 条件化 PlanHead，并保证 plan 第一段严格由 PPO action 决定。
+四、最终 P0 执行版本
+P0-A：评测安全前置
+正式评测 checkpoint 加载改为 fail-fast；
+保存 missing/unexpected/mismatch 摘要；
+保存 obs schema、fingerprint、commit 和 evaluator version；
+s11 建立 v7 兼容 runner；
+明确跨版本结果只能方向比较。
+P0-B：双口径与上限矩阵
 
-随后逐步解冻：
+运行：
 
-plan final/residual；
-primary 最后一层；
-router；
-必要时再解冻更深层。
+A       IDM
+B       oracle trajectory + LQR
+C       laneplan + LQR
+D1      future expert action chain + arc_step + LQR
+D2      current expert action repeated + arc_step + LQR
+E1      model plan + LQR
+E2      model plan + exact
+F       model repeat_action + LQR
 
-每步监控 KL、BC holdout、plan-action consistency 和 closed-loop KPI。
 
-情况 E：主要是 recovery failure
+D1 是 privileged ceiling，D2 与 repeat_action 更可直接比较。
 
-优先修改 DAgger：
+P0-C：失败归因
 
-回溯失败前 2–4 秒；
-保存 student plan、实际轨迹、expert recovery plan；
-训练完整 6 点 recovery trajectory；
-不再使用常量外推的 traj6；
-hard mining 使用 boundary margin、tracking residual、collision risk，而非单纯 BC error。
-五、对当前草案的两点调整
-1. G1 不必须“显著高于 IDM”
+对 s11 与 IDM 各先做 30–50 个 off-road episode，记录：
 
-G1 的作用应是确定可达路径，而不是提前完成统计显著性验证。建议改为：
+T_plan / T_track / T_cross / T_term
+plan footprint validity
+executed footprint validity
+tracking residual
+road class / map id
+policy action / plan first action
+router top-k / policy std
 
-B、D、E_exact 或 F 中至少一条在 paired eval 上达到 ≥0.80，或者相对 IDM 提升 ≥5pt，并明确主要损失发生在哪一层。
 
-正式统计显著性留给 G3。
+初始分类用于决定方向，不作为最终统计结论。
 
-2. P1 不要机械地只做一个代码点
+五、收拢后的唯一剩余风险
 
-应只选择一个根因分支，但一个分支内部通常需要组合修复。例如 plan-out 分支可能同时需要：
+现在已经没有架构层面的原则分歧。剩余最大风险是：
 
-recovery data；
-footprint loss；
-curvature regularization。
+为了兼容 s11 使用旧代码，导致跨版本评测语义变化，最终把 evaluator 差异误判成模型性能差异。
 
-不应为了“单变量”而只改其中一项。正确方法是：
+因此建议 coding agent 在实施前先输出一份很短的“评测兼容设计”：
 
-先用小消融确认各项方向；
-再形成一个完整 candidate recipe；
-candidate recipe 补三 seed。
-六、最终收拢版本
-已锁定共识
-排摸收尾，不扩扫参；
-不预设删除 WM/MoE；
-上限审计先于网络改造；
-双口径先零训练量化；
-失败分类从 30–50 例开始；
-加入 footprint 插值检查；
-DAgger 使用真实 recovery trajectory；
-正式结论使用三 seed、paired test、eval500 和 clean500。
-当前无重大原则分歧
+哪些模块必须使用 v7
+哪些环境、tracker、termination、spec、KPI 使用统一实现
+哪些指标允许跨版本比较
+哪些指标仅允许版本内比较
 
-剩余问题已经从架构争论转为数据判决：
+可以给 coding agent 的下一条回复
+认可第四轮排摸，按完整版 P0 推进，并增加以下硬约束：
 
-超过 IDM 的可达链路在哪里；
-损失主要发生在 plan representation、学习、tracker 还是执行口径；
-P1 应进入计划侧、执行侧还是 recovery 分支。
-建议下一条给 coding agent 的指令
-方案原则已基本收拢。
+1. 正式评测 checkpoint 加载必须 fail-fast：
+   missing/unexpected/shape_mismatch 均为 0，
+   obs schema/fingerprint 必须兼容。
 
-按 S0→S1 推进：
+2. s11 使用 v7 模型与 obs 兼容代码，但尽量统一当前场景 spec、
+   tracker 参数、termination 与 KPI 聚合。
+   若无法统一，s11 只做版本内 plan vs repeat_action 的严格比较；
+   与 v8 的绝对百分点比较标记为跨版本参考。
 
-1. 允许当前容量排摸收尾，但禁止新增扫参臂。
-2. 完成 s11、Arm P、pri512 的 plan/repeat_action 双口径评测。
-3. 完成 A–F 上限矩阵，优先实现 D 格：
-   expert action → 同模型 ds/dtheta 6点计划 → 同一 LQR。
-4. 对 s11 和 IDM 各抽取 30–50 个 off-road episode，
-   完成 plan-out / tracker-out / anomaly / recovery 分类，
-   包括节点间 footprint 插值校验。
-5. 输出一份统一审计报告，包含逐 episode paired 数据、
-   manifest、checkpoint hash、运行口径和推荐 P1 分支。
+3. D 格拆为：
+   D1 = 未来 expert action chain -> arc_step -> LQR，
+   标记为 privileged/oracle ceiling；
+   D2 = 当前 expert action repeat 6步 -> arc_step -> LQR，
+   用于和 repeat_action 直接比较。
 
-S1 完成前不修改 WM、MoE、encoder 或 PPO 冻结范围，
-也不开始新的容量实验。
+4. exact 只作为计划几何诊断，不视为可部署 tracker 上限。
+   E_exact-E_lqr 解释为执行栈损失上界。
 
+5. off-road 分类采用 T_plan/T_track/T_cross/T_term 的最早根因层级，
+   同时保留 contributing factors。
 
-这版可以作为大致方案定稿。下一次讨论应只围绕 P0 数据和它触发的分支，不再重复讨论“是否先删 WM”“是否继续扩容量”等已关闭问题。
+6. future plan boundary 检查必须对插值后的完整车辆 footprint
+   查询 drivable geometry，不能直接复用当前 ego 的 reward distance。
+
+先输出评测兼容设计与字段定义，再实现并跑 P0。
+P0 完成前继续禁止修改 WM、MoE、encoder 和 PPO scope。
+
+
+这个版本已经足够开工，同时最大程度避免“评测看似严谨，但比较对象实际不一致”。
