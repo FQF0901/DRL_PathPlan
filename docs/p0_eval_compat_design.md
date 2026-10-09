@@ -101,6 +101,6 @@
 
 1. **P0-A 落地**：fail-fast + 版本戳 + 测试（+ IDM 逐 episode 导出）。
 2. **s11 兼容 runner（已完成）**：`c37acbb` archive + 接线 + CPU 加载烟测（0/0/0、154/154）→ GPU 空窗跑两口径（`.slim/deepwork/s1_audit/run_s11.sh`）。
-3. **审计工具**：forensics 增补 D1/D2/F + 记录扩展 + footprint 检查器 + 单测。
+3. **审计工具（已完成）**：forensics 增补 `d1`/`d2`/`--reference` + 记录扩展（footprint 有效性、四时间戳、层级分类）+ footprint 检查器（复用 env `on_lane` 同款查询；引擎只给布尔 → 退化三元组，不伪造 signed distance）+ 单测（27 passed；smoke16 全模式跑通）。注：全量 eval500 每行预计 ~1–1.5h（footprint 射线开销），矩阵按行顺序跑；每行需与 ckpt 匹配的 `config/model.yaml`（矩阵脚本按行切换）。
 4. **GPU 空出后**（排摸收尾）：矩阵跑批（每行附加载摘要）→ **《P0 审计报告》**（逐 episode paired 数据 + 分类 + 推荐 P1 分支）。
 5. 纪律：P0 完成前冻结 WM/MoE/encoder/PPO scope；每行强制加载校验；产物按 §2 落版本戳。

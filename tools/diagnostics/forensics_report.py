@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo 根（本文件在 tools/<sub>/ 下，上溯 3 层）
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 

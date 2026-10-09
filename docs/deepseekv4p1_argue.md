@@ -90,7 +90,8 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 
 ### 0.9.6 开工记录（滚动）
 - **2026-10-09 21:1x 开工**：产出《评测兼容设计 v0.1》→ `docs/p0_eval_compat_design.md`；派发 3 条实现 lane：**P0-A 安全前置**（fail-fast + 版本戳 + IDM 逐 episode）、**s11 v7 兼容 runner**（archive + CPU 加载烟测 + GPU 运行脚本）、**审计工具扩展**（forensics：D1/D2/repeat_action + footprint/四时间戳记录）。GPU 空窗（排摸收尾后）执行 P0-B 矩阵与 P0-C 归因。后续轮次在此追加。
-- **2026-10-09 晚**：P0-A 完成（fix-12；独立复核 14 passed；fail-fast + 版本戳 + `--episodes-out`）；**s11 兼容 runner 完成（fix-11）：更正 s11=obs v4+v7p2、archive 必须 `c37acbb`；CPU 烟测 0/0/0、154/154；runner 待 GPU**；审计工具扩展进行中（fix-13）。**
+- **2026-10-09 晚**：P0-A 完成（fix-12；独立复核 14 passed；fail-fast + 版本戳 + `--episodes-out`）；**s11 兼容 runner 完成（fix-11）：更正 s11=obs v4+v7p2、archive 必须 `c37acbb`；CPU 烟测 0/0/0、154/154；runner 待 GPU**；审计工具扩展进行中（fix-13）。
+- **2026-10-09 深夜**：审计工具扩展完成（fix-13：`d1`/`d2`/`--reference` + footprint/四时间戳/层级分类；CPU 单测 27 passed；smoke16 全 10 模式跑通）。**P0 三件套全部就绪**；顺手修复 `tools/diagnostics/*` 的 `_ROOT` off-by-one（直接调用恢复）。矩阵 runner 已备：`.slim/deepwork/s1_audit/run_matrix.sh`（等 GPU 空窗；按行切 config/model.yaml）。**
 
 ---
 

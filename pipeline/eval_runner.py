@@ -31,7 +31,12 @@
    生成阈值判定：overall_success、collision/offroad ε 保护、route_completion、speed_ratio
    效率守卫、a_lat_mean/p95，以及弱类 floor（``target = max(baseline+0.15, 0.75)``，baseline<0.7）；
 5. 输出 ``<out>/<name>/metrics.json``（overall + by_primary + compound + by_difficulty +
-   by_geometry + verdict）与 ``episodes.csv``（逐 episode 明细）。
+   by_geometry + verdict）与 ``episodes.csv``（逐 episode 明细）；
+6. **P0-A 评测安全前置**：ckpt 加载默认 **fail-fast**（``missing/unexpected/shape_mismatch``
+   任一非零 → 打印三计数与明细后 ``raise SystemExit(2)``，拒绝用部分加载的模型产出数字）；
+   仅 ``--allow-partial-load``（显式）放行，放行时强制在日志与 ``metrics.json::meta.ckpt_load``
+   记录三计数与 missing 列表；``metrics.json::meta`` 另落版本戳（evaluator / git commit /
+   argv / ckpt sha256；config 快照由入口层 manifest 落盘）。干净加载行为逐位不变。
 
 关键实现事实（先核对源码再写码）
 ------------------------------
@@ -60,11 +65,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import inspect
 import json
 import math
 import multiprocessing as mp
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -671,6 +678,37 @@ def _build_ckpt_model(model_cls: Any, config: Mapping[str, Any]) -> Any:
 
 
 _CKPT_MODEL_CACHE: Dict[Tuple[str, str], Any] = {}
+#: P0-A 版本戳/审计：每个 ``(ckpt, device)`` 最近一次成功加载的摘要（含三计数与明细列表）。
+_CKPT_LOAD_SUMMARY: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+def _sha256_file(path: str) -> str:
+    """ckpt 内容 sha256（版本戳；读取失败返回 ``"unknown"``，不阻断评测）。"""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return "unknown"
+
+
+def _git_commit() -> str:
+    """HEAD commit（版本戳；取证尽力而为，失败返回 ``"unknown"``）。"""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_PROJECT_ROOT,
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return proc.stdout.strip() or "unknown"
+    except Exception:  # noqa: BLE001 - 取证字段不阻断评测
+        return "unknown"
+
+
+def _ckpt_load_summary(ckpt: str, device: str = "cpu") -> Optional[Dict[str, Any]]:
+    """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
+    return _CKPT_LOAD_SUMMARY.get((str(ckpt), str(device)))
 
 
 def _filter_checkpoint_state(model: Any, state: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str], List[str], List[str]]:
@@ -705,11 +743,22 @@ def _filter_checkpoint_state(model: Any, state: Mapping[str, Any]) -> Tuple[Dict
     return filtered, missing, unexpected, shape_mismatch
 
 
-def _load_ckpt_model(ckpt: str, config: Mapping[str, Any], device: str = "cpu") -> Any:
+def _load_ckpt_model(
+    ckpt: str,
+    config: Mapping[str, Any],
+    device: str = "cpu",
+    *,
+    allow_partial: bool = False,
+) -> Any:
     """worker 内按 ``(ckpt, device)`` 缓存模型（回收前后各加载一次，不会每 spec 重载）。
 
     架构变更（如 H 96→128）后用 :func:`_filter_checkpoint_state` 只加载形状一致的键，
     其余键打印上报（不修改 ckpt 文件）。
+
+    P0-A 评测安全前置：``missing/unexpected/shape_mismatch`` 任一非零 → **默认 fail-fast**
+    （打印三计数与明细后 ``raise SystemExit(2)``），拒绝用部分加载的模型产出数字；
+    仅 ``allow_partial=True``（CLI ``--allow-partial-load``，显式）可放行，放行时在日志与
+    ``metrics.json::meta.ckpt_load`` 强制记录三计数与 missing 列表。干净加载行为逐位不变。
     """
     cached = _CKPT_MODEL_CACHE.get((ckpt, str(device)))
     if cached is not None:
@@ -727,19 +776,55 @@ def _load_ckpt_model(ckpt: str, config: Mapping[str, Any], device: str = "cpu") 
     if not isinstance(state, Mapping):
         raise ValueError(f"ckpt {ckpt!r} 不含可识别的 state_dict（顶层键 {list(payload)[:5]}）")
     filtered, missing, unexpected, shape_mismatch = _filter_checkpoint_state(model, state)
-    model.load_state_dict(filtered, strict=False)
+    counts = {
+        "missing": len(missing),
+        "unexpected": len(unexpected),
+        "shape_mismatch": len(shape_mismatch),
+    }
+    summary: Dict[str, Any] = {
+        "ckpt": str(ckpt),
+        "sha256": _sha256_file(ckpt),
+        "device": str(device),
+        "allow_partial_load": bool(allow_partial),
+        "loaded_keys": len(filtered),
+        "model_keys": len(model.state_dict()),
+        "ckpt_keys": len(state),
+        "counts": counts,
+        "missing": list(missing),
+        "unexpected": list(unexpected),
+        "shape_mismatch": list(shape_mismatch),
+    }
     # lane U1：MoE 输出口径 = primary + Σ_{i∈top2} g_i·expert_i（推理与训练一致、全场景生效；
     # 无硬切/二值门），评测侧无需任何开关（模型默认 moe_enabled=True）。
     print(
         f"[eval_runner] ckpt 载入 {ckpt}: loaded={len(filtered)}/{len(model.state_dict())} "
-        f"ckpt_keys={len(state)} missing={len(missing)} shape_mismatch={len(shape_mismatch)} "
-        f"unexpected={len(unexpected)} device={device} torch_threads={torch.get_num_threads()}",
+        f"ckpt_keys={len(state)} missing={counts['missing']} shape_mismatch={counts['shape_mismatch']} "
+        f"unexpected={counts['unexpected']} device={device} torch_threads={torch.get_num_threads()}",
         flush=True,
     )
     for label, keys in (("missing", missing), ("shape_mismatch", shape_mismatch), ("unexpected", unexpected)):
         if keys:
             print(f"[eval_runner]   {label}（{len(keys)}，示例 {list(keys)[:5]}）", flush=True)
+    if any(counts.values()):
+        if allow_partial:
+            print(
+                f"[eval_runner] 警告：--allow-partial-load 放行部分加载 missing={counts['missing']} "
+                f"unexpected={counts['unexpected']} shape_mismatch={counts['shape_mismatch']}"
+                "（强制记录到日志与 metrics.json::meta.ckpt_load）",
+                flush=True,
+            )
+            print(f"[eval_runner]   missing 全量（{len(missing)}）：{list(missing)}", flush=True)
+        else:
+            print(
+                f"[eval_runner] ckpt 加载 FAIL-FAST：missing={counts['missing']} "
+                f"unexpected={counts['unexpected']} shape_mismatch={counts['shape_mismatch']}"
+                "（默认拒绝部分加载；如确需放行请显式传 --allow-partial-load）",
+                flush=True,
+            )
+            raise SystemExit(2)
+    model.load_state_dict(filtered, strict=False)
     model.to(device).eval()
+    _CKPT_LOAD_SUMMARY[(ckpt, str(device))] = summary
     _CKPT_MODEL_CACHE[(ckpt, str(device))] = model
     return model
 
@@ -822,7 +907,12 @@ class _CkptController:
 
         self.spec = spec
         self.device = torch.device(str(task.get("device") or "cpu"))
-        self.model = _load_ckpt_model(str(task["ckpt"]), task.get("model_config") or {}, str(self.device))
+        self.model = _load_ckpt_model(
+            str(task["ckpt"]),
+            task.get("model_config") or {},
+            str(self.device),
+            allow_partial=bool(task.get("allow_partial_load")),
+        )
         if bool(task.get("moe_off")):
             # A/B：primary-only 臂 —— 专家分支不参与（评测侧关闭 MoE）
             self.model.set_moe(enabled=False)
@@ -1229,6 +1319,10 @@ def _evaluate_spec(task: Mapping[str, Any]) -> Dict[str, Any]:
         if isinstance(controller, _BaselineController):
             episode["_policy_params"] = controller.params()
         return episode
+    except SystemExit:
+        # P0-A fail-fast：ckpt 部分加载被拒（_load_ckpt_model）时必须硬失败，
+        # 不得降级为 termination="error" 的普通样本继续产出指标。
+        raise
     except BaseException as exc:  # noqa: BLE001 - 单条场景失败不应终止整批评测
         return _error_episode(spec, task, exc)
     finally:
@@ -1574,6 +1668,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy", choices=("baseline", "ckpt"), default="baseline",
                         help="baseline=PurePursuitIDMPolicy（参考对比）；ckpt=加载 N1 权重（需 --ckpt）")
     parser.add_argument("--ckpt", type=Path, default=None, help="策略权重路径（--policy ckpt 必填）")
+    parser.add_argument("--allow-partial-load", action="store_true",
+                        help="显式放行 ckpt 部分加载（missing/unexpected/shape_mismatch 非零）；"
+                             "默认 fail-fast 打印三计数与明细后退出码 2；放行时强制在日志与 "
+                             "metrics.json::meta.ckpt_load 记录三计数与 missing 列表")
     parser.add_argument("--out", type=Path, default=Path("runs/eval"),
                         help="评测输出根目录（实际写到 <out>/<name>/，默认 runs/eval）")
     parser.add_argument("--name", default=None,
@@ -1682,6 +1780,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[eval_runner] 警告：基线参照不可用（{baseline_ref}），判定将标记为缺少可比数据",
               flush=True)
 
+    model_config: Dict[str, Any] = {
+        "hidden_dim": config.get("hidden_dim", 128),
+        "moe": dict(config.get("moe") or {}),
+        # v8 修复：policy/value 隐藏维必须透传，否则评测模型按代码默认
+        # （trunk 160 / net 256）构造 → 与 ckpt 形状不符 → 随机初始化评测（假阴性）。
+        "policy": dict(config.get("policy") or {}),
+        "value": dict(config.get("value") or {}),
+        "world_model": dict(config.get("world_model") or {}),
+        # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
+        # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划——见
+        # /tmp/opencode/v7_struct_b_kanchor.md 未决 #6）
+        "plan_anchor": dict(config.get("plan_anchor") or {}),
+    }
+
+    # ---- P0-A 评测安全前置：ckpt 加载 fail-fast（默认开；父进程 CPU 预检，干净加载零行为变化）----
+    ckpt_load_summary: Optional[Dict[str, Any]] = None
+    if args.policy == "ckpt":
+        print(
+            f"[eval_runner] ckpt 加载预检（fail-fast={'off' if args.allow_partial_load else 'on'}）: "
+            f"{args.ckpt}",
+            flush=True,
+        )
+        _load_ckpt_model(
+            str(args.ckpt), model_config, "cpu", allow_partial=bool(args.allow_partial_load)
+        )
+        ckpt_load_summary = _ckpt_load_summary(str(args.ckpt), "cpu")
+
     tasks: List[Dict[str, Any]] = [
         {
             "spec": spec,
@@ -1690,19 +1815,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "max_steps": int(args.max_steps),
             "traffic_density": None,
             "policy_params": {},
-            "model_config": {
-                "hidden_dim": config.get("hidden_dim", 128),
-                "moe": dict(config.get("moe") or {}),
-                # v8 修复：policy/value 隐藏维必须透传，否则评测模型按代码默认
-                # （trunk 160 / net 256）构造 → 与 ckpt 形状不符 → 随机初始化评测（假阴性）。
-                "policy": dict(config.get("policy") or {}),
-                "value": dict(config.get("value") or {}),
-                "world_model": dict(config.get("world_model") or {}),
-                # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
-                # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划——见
-                # /tmp/opencode/v7_struct_b_kanchor.md 未决 #6）
-                "plan_anchor": dict(config.get("plan_anchor") or {}),
-            },
+            "model_config": model_config,
             "obs_config": dict(env_cfg.get("obs") or {}),
             "tracker_config": dict(env_cfg.get("tracking") or {}),
             "device": device,
@@ -1712,6 +1825,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "tracker": str(args.tracker),
             "eval_reference": str(args.eval_reference),
             "moe_off": bool(getattr(args, "moe_off", False)),
+            "allow_partial_load": bool(args.allow_partial_load),
         }
         for spec in specs
     ]
@@ -1749,6 +1863,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "limit": args.limit,
         "policy": args.policy,
         "ckpt": str(args.ckpt) if args.ckpt is not None else None,
+        # P0-A 版本戳（§2.2）：evaluator 标识 / git commit / argv / ckpt sha256；
+        # config 快照已由入口层 manifest（run_paths.write_manifest）落盘。
+        "evaluator": "pipeline.eval_runner",
+        "git_commit": _git_commit(),
+        "argv": list(sys.argv[1:] if argv is None else argv),
+        "ckpt_sha256": (ckpt_load_summary or {}).get("sha256"),
+        # P0-A 加载审计：三计数 + missing 列表（--allow-partial-load 放行时强制记录；干净加载同样落盘）
+        "ckpt_load": ckpt_load_summary,
         "policy_class": ("env.expert.pure_pursuit_idm.PurePursuitIDMPolicy"
                          if args.policy == "baseline" else "net.model.DrivingModel"),
         "tracker": str(args.tracker) if args.policy == "ckpt" else None,

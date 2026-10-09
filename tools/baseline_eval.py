@@ -13,6 +13,7 @@
     tools/venv-python tools/baseline_eval.py --specs env/specs/specs.json --workers 8 \\
         --out runs/baseline_eval/specs.json
     # 单进程调试：--workers 1 --render
+    # 逐 episode JSONL 导出（审计用；默认关闭）：--episodes-out runs/baseline_eval/specs_episodes.jsonl
 
 契约（P1a §2，其他实现线提供，本脚本只按接口调用）
 ------------------------------------------------
@@ -515,6 +516,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--out", default=None, help="输出 JSON 路径（默认 runs/baseline_eval/<specs 文件名>.json）"
     )
+    parser.add_argument(
+        "--episodes-out", default=None, metavar="PATH",
+        help="逐 episode JSONL 导出路径（每行一条：id/seed/success/collision/off_road/"
+             "route_completion 及现成字段；默认关闭，行为不变）",
+    )
     parser.add_argument("--workers", type=int, default=4, help="并行进程数（默认 4；--render 时强制为 1）")
     parser.add_argument("--limit", type=int, default=None, help="按文件顺序只评测前 N 条（split 过滤后）")
     parser.add_argument(
@@ -716,6 +722,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as handle:
         json.dump(_sanitize(report), handle, ensure_ascii=False, indent=2)
+
+    if args.episodes_out:
+        episodes_path = os.path.abspath(args.episodes_out)
+        os.makedirs(os.path.dirname(episodes_path), exist_ok=True)
+        with open(episodes_path, "w", encoding="utf-8") as handle:
+            for episode in sorted(episodes, key=lambda ep: ep["id"]):
+                handle.write(
+                    json.dumps(_sanitize(_public_episode(episode)), ensure_ascii=False) + "\n"
+                )
+        print(f"[baseline_eval] episodes -> {episodes_path} (n={len(episodes)})")
 
     _print_summary(report)
     print(f"[baseline_eval] report -> {out_path} (n={len(episodes)}, errors={meta['n_error']})")

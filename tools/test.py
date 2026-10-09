@@ -7,7 +7,8 @@
 - ``--policy baseline``：规则基线 ``PurePursuitIDMPolicy``（复现冻结参照，不需要 ``--ckpt``）；
 - ``--policy ckpt``：加载 N1 ``DrivingModel`` 权重 + N3 跟踪器闭环（必须给 ``--ckpt``）。
 
-未识别参数原样透传（``--workers/--limit/--name/--max-steps/--baseline-ref/--seed``），
+未识别参数原样透传（``--workers/--limit/--name/--max-steps/--baseline-ref/--seed``
+``--allow-partial-load/--tracker/--eval-reference/--device/--moe-off`` 等），
 run 名由代码自适应规范化（``pipeline/run_paths.py::eval_run_name``；调用方不手拼）：
 
 - ``--name`` 缺省 → ``BTC<秒级北京戳>_eval500_<policy>``（kind 随 ``--spec`` 文件名自适应）；
