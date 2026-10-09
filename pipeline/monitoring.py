@@ -165,6 +165,7 @@ def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, A
 #: 任何 val 口径曲线不得命名为 loss；留出集统一 ``val/`` 命名空间。
 _SLIM_DIRECT: Dict[str, str] = {
     f"{_TRAIN_PREFIX}/wm_loss": "loss/wm",
+    f"{_TRAIN_PREFIX}/wm_loss_latent": "loss/latent",  # v8 B3：latent consistency 主损失
     f"{_TRAIN_PREFIX}/wm_loss_od": "loss/od",
     f"{_TRAIN_PREFIX}/wm_loss_ld": "loss/ld",   # lane P3-F：stage A 未来 LD 直接多步（恢复监督）
     f"{_TRAIN_PREFIX}/wm_loss_ego_next": "loss/ego_next",

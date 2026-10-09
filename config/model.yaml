@@ -52,6 +52,8 @@ world_model:
 policy:
   type: autoregressive_rollout    # 策略 rollout：自回归（方案 B1）
   rollout_steps: 6                # ×6 步
+  attn_heads: 4                   # v8b 排摸：交叉注意力头数（policy/value 共用）
+  attn_layers: 1                  # v8b 排摸：交叉注意力层数（policy/value 共用）
   trunk_hidden: 160               # v8 参数再分配：PolicyHead trunk 128 → 160 → 128（≈108.4k 总）
   action:
     space: [ds, dtheta]           # 动作 = 弧长 + 航向变化
