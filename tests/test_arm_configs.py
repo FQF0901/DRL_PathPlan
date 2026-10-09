@@ -1,16 +1,17 @@
-"""v7 P2 臂配置 dry-run 守卫（CPU；不开环境）。
+"""当前臂配置守卫（config/arms/*.yaml：加载语义 + 奖励适配器）。
 
-锁定（v7 预注册 §9/§10 的配置面）：
+锁定（CPU；不开环境）：
 
-- 臂文件经训练侧 ``load_config``（一层平铺合并）可加载，``stages.C.reward`` 经
-  ``build_reward_adapter`` 构造成功；
-- arm1（§9）：项集 = arm0 同档草案（rc=1）逐参数 + **恰一个**追加项 ``off_road_edge``
-  （weight −0.5 / ``edge_scale_m`` 1.0）；终局值 = rc=1 草案逐位；``off_road_edge`` 在适配器内
-  生效（居中 → 0；压线 → −0.5；缺车道 ctx → 0）；KL 锚参数键 0.05 → 0.02；
-- arm2（§10）：bundle（rc=1 草案逐参数）+ KL 锚 0.05 → 0.02，**无** ``off_road_edge``；
-- arm3（§10）：bundle only——``stages.C`` payload 与 ``arm0_bundle_rc1.yaml`` 逐位一致
-  （差异仅记录：w1 e005 base 经 CLI、KL 关 = CLI ``--kl-anchor-coef 0``；文件不承载）；
-- 隔离设计：arm1 去 ``off_road_edge`` 项 = arm2 项集；arm2 去 KL 键 = arm3 payload。
+- 当前臂 ``v7_arm1_offroad.yaml`` 经训练侧 ``load_config``（一层平铺合并）可加载，
+  ``stages.C.reward`` 经 ``build_reward_adapter`` 构造成功；
+- 单变量：项集 = rc=1 草案（``docs/reward_audit/ebeta2/config_draft_rc1.yaml``）逐参数
+  + **恰一个**追加项 ``off_road_edge``（weight −0.5 / ``edge_scale_m`` 1.0）；终局值 =
+  rc=1 草案逐位（``max_step`` −46 经适配器实际结算）；
+- ``off_road_edge`` 在适配器内生效（居中 → 0；压线 → −0.5；越界 1 m → 封顶 −1.0；缺车道 ctx → 0）；
+- KL 锚参数键 0.05 → 0.02（v7 预注册 §9；实际执行由 driver CLI 承载）。
+
+历史臂（v6 P4 / v7 §9–§14）已归档至 ``docs/archive/config_arms_legacy/``，
+其测试快照同目录 ``*.py.disabled``（防 pytest 收集）。
 """
 
 from __future__ import annotations
@@ -24,14 +25,11 @@ import yaml
 
 from pipeline.stages import load_config
 from pipeline.trainer import build_reward_adapter
-from reward_model import DEFAULT_TERM_CONFIGS, make_term
+from reward_model import DEFAULT_TERM_CONFIGS
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ARMS = _ROOT / "config" / "arms"
 _ARM = _ARMS / "v7_arm1_offroad.yaml"
-_ARM0 = _ARMS / "arm0_bundle_rc1.yaml"
-_ARM2 = _ARMS / "v7_arm2_bundle_kl.yaml"
-_ARM3 = _ARMS / "v7_arm3_bundle_only.yaml"
 _DRAFT = _ROOT / "docs" / "reward_audit" / "ebeta2" / "config_draft_rc1.yaml"
 
 _INCLUDES = [
@@ -55,11 +53,6 @@ def _load_arm(path: Path = _ARM) -> Dict[str, Any]:
         raw = yaml.safe_load(handle)
     assert raw.get("includes") == _INCLUDES, "臂配置 includes = default.yaml + 四个叶子子配置"
     return load_config(str(path))
-
-
-def _draft_reward() -> Dict[str, Any]:
-    with open(_DRAFT, "r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)["stages"]["C"]["reward"]
 
 
 def test_v7_arm1_reward_single_variable_and_terminal_pairs() -> None:
@@ -127,69 +120,3 @@ def test_v7_arm1_kl_anchor_keys_recorded() -> None:
     assert stage_c["kl_anchor_coef"] == pytest.approx(_KL_INITIAL)
     assert stage_c["kl_anchor_final_coef"] == pytest.approx(_KL_FINAL)
     assert stage_c["kl_anchor_final_coef"] > 0.0, "v7 预注册 §3：KL 锚末值 > 0（方差控制）"
-
-
-def test_v7_arm2_bundle_kl_reward_and_kl_recorded() -> None:
-    """arm2（§10）= bundle（rc=1 草案逐参数）+ KL 0.05 → 0.02；**无** ``off_road_edge``。"""
-    stage_c = _load_arm(_ARM2)["stages"]["C"]
-    reward_cfg = stage_c["reward"]
-    adapter, source = build_reward_adapter(reward_cfg)
-    assert source.startswith("reward_model.aggregation.RewardAggregator"), source
-    weights = {term.name: term.weight for term in adapter.factory().terms}
-    assert "off_road_edge" not in weights, "arm2 不得含 off_road_edge（§10 隔离设计）"
-    assert weights["route_completion"] == pytest.approx(1.0)
-    assert weights["speed_ratio"] == pytest.approx(0.4)
-    assert weights["low_speed"] == pytest.approx(-0.2)
-    assert reward_cfg == _draft_reward(), "arm2 项集/终局值应与 rc=1 草案逐参数一致"
-
-    assert stage_c["kl_anchor_coef"] == pytest.approx(_KL_INITIAL)
-    assert stage_c["kl_anchor_final_coef"] == pytest.approx(_KL_FINAL)
-    assert stage_c["kl_anchor_final_coef"] > 0.0, "v7 预注册 §3：KL 锚末值 > 0（方差控制）"
-
-    _, meta = adapter.step(
-        0, {"max_step": True}, {"ego": np.zeros((1, 8), dtype=np.float32)}, True, 0.0
-    )
-    assert meta["terminal_key"] == "max_step"
-    assert meta["terminal_value"] == pytest.approx(-46.0)
-
-
-def test_v7_arm3_bundle_only_matches_arm0_payload() -> None:
-    """arm3（§10）= bundle only；``stages.C`` payload 与 ``arm0_bundle_rc1.yaml`` 逐位一致。
-
-    与 arm0 的差异**仅记录**（不落到文件 payload）：base = w1 e005 经 CLI、KL 关 =
-    driver 显式 ``--kl-anchor-coef 0``（arm0 = 0.05→0.0 慢衰减；Stage C 默认 0.05）。
-    """
-    arm3_c = _load_arm(_ARM3)["stages"]["C"]
-    arm0_c = _load_arm(_ARM0)["stages"]["C"]
-    assert arm3_c == arm0_c, "arm3 的 stages.C 应与 arm0_bundle_rc1.yaml 逐位一致"
-    assert "kl_anchor_coef" not in arm3_c, "KL 关 = CLI --kl-anchor-coef 0（文件不承载）"
-
-    reward_cfg = arm3_c["reward"]
-    adapter, source = build_reward_adapter(reward_cfg)
-    assert source.startswith("reward_model.aggregation.RewardAggregator"), source
-    weights = {term.name: term.weight for term in adapter.factory().terms}
-    assert "off_road_edge" not in weights
-    assert reward_cfg == _draft_reward()
-
-    _, meta = adapter.step(
-        0, {"max_step": True}, {"ego": np.zeros((1, 8), dtype=np.float32)}, True, 0.0
-    )
-    assert meta["terminal_key"] == "max_step"
-    assert meta["terminal_value"] == pytest.approx(-46.0)
-
-
-def test_v7_arm23_isolation_pairs() -> None:
-    """§10 隔离设计：arm1 − off_road_edge = arm2 项集；arm2 去 KL 键 = arm3 payload。"""
-    arm1_c = _load_arm(_ARM)["stages"]["C"]
-    arm2_c = _load_arm(_ARM2)["stages"]["C"]
-    arm3_c = _load_arm(_ARM3)["stages"]["C"]
-
-    rest = [
-        term for term in arm1_c["reward"]["terms"] if str(term.get("name")) != "off_road_edge"
-    ]
-    assert rest == arm2_c["reward"]["terms"], "arm1 去 off_road_edge 后应与 arm2 项集逐参数一致"
-    assert arm2_c["reward"]["aggregation"] == arm1_c["reward"]["aggregation"]
-    assert arm2_c["kl_anchor_coef"] == pytest.approx(arm1_c["kl_anchor_coef"])
-    assert arm2_c["kl_anchor_final_coef"] == pytest.approx(arm1_c["kl_anchor_final_coef"])
-
-    assert arm2_c["reward"] == arm3_c["reward"], "arm2 去 KL 键后 reward 应与 arm3 逐位一致"

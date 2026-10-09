@@ -65,9 +65,16 @@ def test_config_train_yaml_default_is_aligned() -> None:
 
 
 def test_arm_configs_resolve_to_aligned_default() -> None:
-    """臂文件 ``stages`` 段整体替换（仅 reward）→ 回落代码默认；解析结果仍 = 200。"""
-    for name in ("arm0_bundle_rc1.yaml", "arm4_lam098.yaml", "arm5_ttc.yaml"):
-        config = load_config(str(_ROOT / "config" / "arms" / name))
+    """动态遍历 ``config/arms/*.yaml``（sorted glob；README.md 非 ``.yaml`` 天然跳过）：
+    臂文件 ``stages`` 段整体替换（仅 reward）→ 回落代码默认；解析结果仍 = 200。
+
+    先 assert 至少 1 个臂文件（防 glob 失效空跑）；逐臂钉住"不显式携带
+    ``max_episode_steps``"，防新增臂无声漂移。
+    """
+    arm_files = sorted((_ROOT / "config" / "arms").glob("*.yaml"))
+    assert arm_files, "config/arms/ 应至少有 1 个臂配置（防 glob 失效空跑）"
+    for arm_path in arm_files:
+        config = load_config(str(arm_path))
         assert "max_episode_steps" not in config["stages"]["C"], "臂文件不显式携带（回落代码默认）"
         assert _resolve_stage_c_max_episode_steps(_parse_args(["--stage", "C"]), config["stages"]["C"]) == 200
 

@@ -5051,7 +5051,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "不可得）→ 立即中止（fail-closed）；逐 epoch 记录写 guard/guard.json")
     parser.add_argument("--phase3-guard-config", type=str, default=None,
                         help="守护评测 config（默认 = 训练 --config；注意：需与训练模型口径一致，"
-                             "K-anchor 链应传评测 config，如 config/arms/v7_struct_b_v5_eval.yaml）")
+                             "K-anchor 链应传评测 config，如 config/eval.yaml）")
     parser.add_argument("--phase3-guard-workers", type=int, default=6,
                         help="守护评测 workers（默认 6；训练进程持物化数据时建议 ≤4 控制主机内存）")
     parser.add_argument("--phase3-guard-min-success", type=float, default=None,

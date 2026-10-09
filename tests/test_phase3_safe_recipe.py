@@ -275,7 +275,7 @@ def test_phase3_guard_argv_pins_protocol(tmp_path: Path) -> None:
     argv = _phase3_guard_argv(
         ckpt=tmp_path / "epoch001.pt",
         spec=tmp_path / "specs150.json",
-        config="config/arms/v7_struct_b_v5_eval.yaml",
+        config="config/eval.yaml",
         out_root=tmp_path,
         name="guard/epoch001",
         workers=4,
