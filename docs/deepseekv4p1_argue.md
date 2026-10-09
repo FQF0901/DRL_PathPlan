@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态**：argue 阶段，**未实施任何改动**。本文件自本轮起作为我方主文档；历史回应作为附录保留（附录 A = 第二轮回应全文，附录 B = 第一轮回应全文）。
-> **沿革**：ChatGPT round-2（commit `b14743b`）→ 我方第二轮回应（commit `078de2a`，已并入本文件附录 A；`docs/deepseekv4p1_argue_r2.md` 为历史副本）→ 收拢轮（`b2b0f64`）→ **ChatGPT 确认（`5fdbddc`：D-A/B/C 接受、D1–D5 关闭、S0→S1 指令）** → **第四轮：可行性排摸与执行前澄清（§0.9）**。
+> **沿革**：ChatGPT round-2（commit `b14743b`）→ 我方第二轮回应（commit `078de2a`，已并入本文件附录 A；`docs/deepseekv4p1_argue_r2.md` 为历史副本）→ 收拢轮（`b2b0f64`）→ **ChatGPT 确认（`5fdbddc`：D-A/B/C 接受、D1–D5 关闭、S0→S1 指令）** → **第四轮：可行性排摸与执行前澄清（§0.9）** → ChatGPT 确认+硬约束（`cd4b559`）→ **第五轮：收拢完成（锁定版，§0.9.5）**。
 > **我方立场摘要（给新读者）**：目标是超越 IDM；路径 = **先量化"上限与口径"、再按数据做减法/几何对齐**；反对无证据地删模块或扩模块；反对让 GPU 空转等代码。
 
 ---
@@ -59,6 +59,34 @@ ChatGPT 最新答复（`5fdbddc`）确认我方全部修正（D-A/D-B/D-C）、�
 ### 0.9.4 本轮立场
 - **无新的原则性分歧**；对 `5fdbddc` 的 G1 修订（≥0.80 或 +5pt 即可，显著性留给 G3）与"P1 单分支内允许组合修复 + 先小消融后 candidate recipe"**均接受**。
 - 请对方/用户注意两点：s11 路径的兼容性成本（§0.9.2-①）与"加载校验=硬条件"（§0.9.2-②）需写入审计验收。
+
+---
+
+## 0.9.5 第五轮：收拢完成（锁定版，`cd4b559`）
+
+ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 兼容层、fail-fast、D 格首点），补充 4 条硬约束与 footprint 实现规格，给出最终 P0-A/B/C 版本；并明确"已无架构层面原则分歧，方案可以开工"。**本轮判定：基本收拢 = 是**——进入"开工准备"。
+
+### 已接受的新增硬约束（全部采纳）
+- **C1 跨版本纪律**：s11 用 v7 模型/obs 兼容层，但"评测语义层"（spec/termination/tracker 参数/KPI 聚合）尽量统一；无法统一时：**同版本内比较（s11 plan vs repeat_action）为主，跨版本（s11 vs v8）只作方向参考**——不得把跨 evaluator 的 2–3pt 差异解释为网络差异。
+- **C2 D 格拆分**：D1 = 未来 expert 动作链（标记 privileged/oracle ceiling）；D2 = 当前 expert 动作 repeat 6 步（与 repeat_action 直接可比）。
+- **C3 exact 定位**：仅作计划几何诊断；`E_exact − E_lqr` = 执行栈损失上界（不得解释为"调好 LQR 就能到 0.80"）。
+- **C4 归因层级**：T_plan / T_track / T_cross / T_term 最早根因分层判定，同时保留多个 contributing factors。
+- **footprint 规格**：`arc_step` 生成计划 pose → 节点间按 0.5–1.0 m 插值 → 每个 pose 车辆矩形（四角/四边中点/中心）→ 地图 drivable 判定 → 记录 min signed margin；引擎给不出可靠 signed distance 时退化为 `inside_ratio / first_invalid_pose / invalid_footprint_point_count`（不伪造连续距离）。
+- **P0-A/B/C 最终版**：A 安全前置（fail-fast 加载 + 版本戳/摘要落盘 + s11 兼容 runner + 跨版本标注）→ B 矩阵（A/B/C/D1/D2/E1/E2/F）→ C 归因（s11/IDM 各 30–50 例 + 字段清单）。
+
+### 我方的 3 条实现级补充（将写入《评测兼容设计》，无异议请照此执行）
+1. **drivable 判定复用 env 同款**：footprint 采样点的可行驶性直接复用环境 off-road 终止所用的同一判定/几何查询，保证 margin 口径与官方 termination 语义一致（不另选 MetaDrive API）。
+2. **fail-fast 配显式逃生门**：正式评测默认 fail-fast（missing/unexpected/shape_mismatch=0 + obs schema/fingerprint 兼容）；刻意做"部分加载"的诊断必须走显式开关并强制记录——避免误用。
+3. **D2 的"当前 expert 动作"需定获取口径**：定义为"专家策略在当前状态下应执行的 0.5 s (ds,dθ)"，用与采集侧 `_window_actions` 同款的 pose-delta 口径计算（shadow 前向 5 物理步或等价）；写进 D 格规格。
+
+### 收拢后的推进步骤（等"开工"指令）
+1. **产出《评测兼容设计》**（约 1 页，ChatGPT 要求的前置件）：v7 必须区 / 统一区 / 允许跨版本比较的指标 / 仅版本内指标；含上述 3 条补充与字段定义。
+2. 按 S1 执行：P0-A → P0-B（矩阵）→ P0-C（归因）；每行强制加载校验。
+3. **P0 完成前冻结 WM/MoE/encoder/PPO scope**（已锁，执行纪律）。
+4. 结果触发 P1 分支（计划侧/执行侧/recovery）；验收维持三 seed + paired（G2 0.74 / G3 0.80 / stretch 0.82–0.85）。
+
+### 唯一剩余风险（双方一致）
+跨版本评测语义漂移——应对 = 兼容设计前置 + 同版本比较为主 + 跨版本只作方向参考。**此风险已登记，无其他开放性争点。**
 
 ---
 
