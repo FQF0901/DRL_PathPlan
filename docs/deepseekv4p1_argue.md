@@ -39,8 +39,8 @@ ChatGPT 最新答复（`5fdbddc`）确认我方全部修正（D-A/D-B/D-C）、�
 ### 0.9.2 开工前需明确的 3 件事
 
 **① s11 兼容性（唯一重大问题）。**
-- 事实：s11 是 **obs v5 + v7 代模型**（`runs/BTC20261005-0601_v7p2_s11_arm1/model.snapshot.yaml`：experts 256、含 lane/ttc 时代结构）；当前代码为 obs v6 + v8 结构 → 用当前代码评 s11 会触发 **shape mismatch → 静默随机初始化**（`pipeline/eval_runner.py:677-739` 只打印日志，不报错）。
-- 可行方案：用 v7 代代码重建评测环境（`git archive c37acbb` 或 `v7-lock-20261006` → /tmp；`git worktree` 被权限禁用）。已核实 **v7-lock 代码本身已含双口径评测与 exact/lqr tracker**，因此 s11 的 plan/repeat_action 两口径评测与 v7 版 forensics 分类都可忠实重跑。
+- 事实：s11 是 **obs v4 + v7p2 模型**（fix-11 实测更正：训练早于 obs v5 提交 `0291f3a`；`model.snapshot.yaml`：experts 256）；当前代码为 obs v6 + v8 结构 → 用当前代码评 s11 会触发 **shape mismatch → 静默随机初始化**（现已 fail-fast 拦截）。
+- 可行方案（已落地）：用 **`c37acbb` archive** 重建（`v7-lock` 实测不可用：missing=4/shape_mismatch=1）；CPU 加载烟测已通过（0/0/0、154/154；runner 见 `.slim/deepwork/s1_audit/`）。该代代码已含双口径评测与 exact/lqr，s11 两口径可忠实重跑。
 - 成本：重建+接线 ~0.5–1 天（一次性）；每格评测 ~12min。
 - **选项**：完整版（s11 两口径 + 分类）或简化版（s11 仅用历史 plan-口径数据 `runs/BTC20261005-074755_*`，跳过 F 格与分类）。**我方建议完整版**——s11 是唯一完整 DAgger+RL 链，其口径差与失败画像正是决策树 D/E 分支的关键样本。
 
@@ -89,7 +89,8 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 跨版本评测语义漂移——应对 = 兼容设计前置 + 同版本比较为主 + 跨版本只作方向参考。**此风险已登记，无其他开放性争点。
 
 ### 0.9.6 开工记录（滚动）
-- **2026-10-09 21:1x 开工**：产出《评测兼容设计 v0.1》→ `docs/p0_eval_compat_design.md`；派发 3 条实现 lane：**P0-A 安全前置**（fail-fast + 版本戳 + IDM 逐 episode）、**s11 v7 兼容 runner**（archive + CPU 加载烟测 + GPU 运行脚本）、**审计工具扩展**（forensics：D1/D2/repeat_action + footprint/四时间戳记录）。GPU 空窗（排摸收尾后）执行 P0-B 矩阵与 P0-C 归因。后续轮次在此追加。**
+- **2026-10-09 21:1x 开工**：产出《评测兼容设计 v0.1》→ `docs/p0_eval_compat_design.md`；派发 3 条实现 lane：**P0-A 安全前置**（fail-fast + 版本戳 + IDM 逐 episode）、**s11 v7 兼容 runner**（archive + CPU 加载烟测 + GPU 运行脚本）、**审计工具扩展**（forensics：D1/D2/repeat_action + footprint/四时间戳记录）。GPU 空窗（排摸收尾后）执行 P0-B 矩阵与 P0-C 归因。后续轮次在此追加。
+- **2026-10-09 晚**：P0-A 完成（fix-12；独立复核 14 passed；fail-fast + 版本戳 + `--episodes-out`）；**s11 兼容 runner 完成（fix-11）：更正 s11=obs v4+v7p2、archive 必须 `c37acbb`；CPU 烟测 0/0/0、154/154；runner 待 GPU**；审计工具扩展进行中（fix-13）。**
 
 ---
 

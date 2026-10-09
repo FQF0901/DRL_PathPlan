@@ -13,9 +13,10 @@
 | 栈 | 代码 | 用于 |
 |---|---|---|
 | **v8 栈（当前 HEAD）** | obs v6 + v8 网络 | Arm P / pri512 / IDM / oracle / laneplan / D1 / D2 / E1 / E2 / F |
-| **v7 栈（`v7-lock-20261006` 或 `c37acbb` 的 archive）** | obs v5 + v7 网络 | **仅 s11** |
+| **v7p2 栈（`c37acbb` archive；`v7-lock` 已验证不可用）** | obs v4 + v7p2 网络（type_embed 5、无 lane/ttc） | **仅 s11** |
 
-- v7 栈落地方式：`git archive <commit> | tar -x -C /tmp/opencode/s11_v7/`（`git worktree` 被权限禁用）；**不得**用 v8 代码加载 v7 ckpt（shape mismatch → 静默随机初始化）。
+- v7p2 栈落地方式：`git archive c37acbb | tar -x -C /tmp/opencode/s11_v7_c37acbb/`（`git worktree` 被权限禁用）；**不得**用 v8 代码加载 v7 ckpt（shape mismatch → 静默随机初始化）。
+- **更正（fix-11 实测，2026-10-09）**：s11 训练（10-05 06:01–06:19）早于 obs v5 提交（`0291f3a`，10-05 07:25）→ 实为 **obs v4 + v7p2**（type_embed 5、无 lane/ttc）；`v7-lock-20261006` archive 加载其 ckpt 会 `missing=4 / shape_mismatch=1`（拒绝），**唯一可用 archive = `c37acbb`**（0/0/0，154/154；证据与 runner 见 `.slim/deepwork/s1_audit/`）。
 - s11 资产：`runs/BTC20261005-0601_v7p2_s11_arm1/`（`ckpt_u150.pt`/`final.pt` + `config.snapshot.yaml` + `model.snapshot.yaml` + manifest）。
 
 **统一语义层（尽量复用同一实现/同一数据；做不到的显式标注）**：
@@ -99,7 +100,7 @@
 ## 7. 执行顺序与产物
 
 1. **P0-A 落地**：fail-fast + 版本戳 + 测试（+ IDM 逐 episode 导出）。
-2. **s11 兼容 runner**：v7 archive + 接线 + CPU 加载烟测（三计数=0）→ GPU 空窗跑两口径。
+2. **s11 兼容 runner（已完成）**：`c37acbb` archive + 接线 + CPU 加载烟测（0/0/0、154/154）→ GPU 空窗跑两口径（`.slim/deepwork/s1_audit/run_s11.sh`）。
 3. **审计工具**：forensics 增补 D1/D2/F + 记录扩展 + footprint 检查器 + 单测。
 4. **GPU 空出后**（排摸收尾）：矩阵跑批（每行附加载摘要）→ **《P0 审计报告》**（逐 episode paired 数据 + 分类 + 推荐 P1 分支）。
 5. 纪律：P0 完成前冻结 WM/MoE/encoder/PPO scope；每行强制加载校验；产物按 §2 落版本戳。
