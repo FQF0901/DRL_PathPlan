@@ -15,8 +15,8 @@
 - **难度派生而非随机**：先选目标难度档（round-robin 保证均衡），再从该档的密度/间隙区间采样，
   最后由 ``_derive_difficulty`` 从密度、最小事件间隙、交叉口数量重新派生难度——
   档位与派生值一致（见下方区间设计），标签因此"可解释"。
-- **内容只由 (rng_seed, seed) 决定**：与总数 n 无关，切片与全量可独立生成且同 seed 内容稳定，
-  便于复现与失败定位。
+- **难度档与单条 spec 内部随机流只由 (rng_seed, seed) 决定**：几何槽位分配依赖 split 总数 n
+  （``_build_split`` 的槽位 shuffle + zip），切片不是全量的前缀子集；同 seed 便于复现与失败定位。
 - **自车 spawn 车道显式化**：``_select_spawn_lane`` 按事件请求侧在首块（恒 3 车道，
   见 ``taxonomy.EGO_SPAWN_LANE_NUM``）选中间车道，保证 cut_in/cut_out 请求侧的邻车道存在；
   车道数不足导致请求侧不可达（如 2 车道要外侧）时改选可行车道并就地改写事件 ``side``，
@@ -370,7 +370,7 @@ def _control_label(events: list[dict]) -> str:
 
 
 def _make_spec(split: str, spec_id: int, seed: int, primary: str, target_difficulty: str, rng_seed: int) -> ScenarioSpec:
-    """构造单条 spec；所有随机量来自 (rng_seed, seed)，与总数 n 无关。"""
+    """构造单条 spec；spec 内部随机流由 (rng_seed, seed) 决定；primary 几何由上层按 split 总数 n 的槽位分配传入（见模块 docstring）。"""
     if primary not in SAMPLEABLE_GEOMETRY_LABELS:
         raise ValueError(f"几何标签 {primary!r} 已排除出生成集（见 taxonomy.EXCLUDED_GEOMETRY_LABELS）")
     rng = random.Random(_combine_seed(rng_seed, seed))

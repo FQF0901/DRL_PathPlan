@@ -3,7 +3,14 @@
 > 来源：v7 程序执行期证据档原写于 `/tmp/opencode/`（不入 repo）。2026-10-06 锁版清理时按保留清单**先复制后删除**入仓；本目录为权威副本，sha256 为入仓副本实测值（`sha256sum` 可复验）。
 > 原 `/tmp/opencode/` 其余工作档（一次性脚本/日志/JSON/中间报告）已随同日清理删除；原未决 KEEP 项已于同日清理 B 复核入仓（见 §7）。索引用途：主报告 `docs/v7_program_report.md` 的 §4.4 / §8.7 引用。
 
-## 1. 报告（24 项）
+## 0. 实况概览（2026-10-09 磁盘核对）
+
+- 顶层报告/日志 **26** 个：§1（/tmp 入仓报告 24）+ §4（时间线日志 1）+ §7（KEEP 复核入仓 `v7_struct_retrain_v5.md` 1）；另本 `README.md` 与 `MIGRATION_NOTE.md`。
+- `figures/` **4** 张 PNG（§2）；`specs/` **8** 个 JSON（§3 顶层 3 + §7 `p0_variants/` 5）；`evidence/` **2** 个 JSON（§7）；`cleanup/` **13** 个文件（清单见文末）。
+- 全部 sha256 已于 2026-10-09 逐文件复验，与下文各表一致。
+- **状态：冻结**。本目录正文为 v7 程序冻结证据档，只读（不修改）；本 README 为索引。
+
+## 1. 报告（24 项，均自 /tmp 入仓）
 
 | # | 原路径 | 新路径 | sha256 | 说明 |
 |---|---|---|---|---|
@@ -39,10 +46,10 @@
 
 | 原路径 | 新路径 | sha256 | 说明 |
 |---|---|---|---|
-| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_A_first_sighting_step0821.png` | `docs/v7_reports/figures/…A_first_sighting_step0821.png` | `c2e5f1d73fb59af4249dc18b2aae194abba255fc506456a6d88494cd599b7351` | spec 34：static 首次出现（step 821 / 54.71 m） |
-| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_B_decision_zone_39m_step0869.png` | `docs/v7_reports/figures/…B_decision_zone_39m_step0869.png` | `7f07c00b3d126c77f01e141ad63c2074f3b1a984d65fbea4b9ce60b03d0e1686` | 变道决策区 25–39 m（step 869） |
-| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_C_gate_entry_step0929.png` | `docs/v7_reports/figures/…C_gate_entry_step0929.png` | `96f63d1be8e9688de60f1f423b76c5fe87bfcaf9bbd89fa6f405c54c8f5a4b4f` | 进入 `$` block（step 929 / 17.26 m） |
-| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_D_final_crash_step0961.png` | `docs/v7_reports/figures/…D_final_crash_step0961.png` | `c1b7e80f565948541c2679ba59d433af940907e4fee8cdb352bad1f734630365` | 撞岗亭终局（step 961；ego_v 0.45 m/s） |
+| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_A_first_sighting_step0821.png` | `docs/v7_reports/figures/tollgate_spec34_A_first_sighting_step0821.png` | `c2e5f1d73fb59af4249dc18b2aae194abba255fc506456a6d88494cd599b7351` | spec 34：static 首次出现（step 821 / 54.71 m） |
+| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_B_decision_zone_39m_step0869.png` | `docs/v7_reports/figures/tollgate_spec34_B_decision_zone_39m_step0869.png` | `7f07c00b3d126c77f01e141ad63c2074f3b1a984d65fbea4b9ce60b03d0e1686` | 变道决策区 25–39 m（step 869） |
+| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_C_gate_entry_step0929.png` | `docs/v7_reports/figures/tollgate_spec34_C_gate_entry_step0929.png` | `96f63d1be8e9688de60f1f423b76c5fe87bfcaf9bbd89fa6f405c54c8f5a4b4f` | 进入 `$` block（step 929 / 17.26 m） |
+| `/tmp/opencode/v7_q2_tollgate_figure/tollgate_spec34_D_final_crash_step0961.png` | `docs/v7_reports/figures/tollgate_spec34_D_final_crash_step0961.png` | `c1b7e80f565948541c2679ba59d433af940907e4fee8cdb352bad1f734630365` | 撞岗亭终局（step 961；ego_v 0.45 m/s） |
 
 ## 3. 规格（`specs/`，3 项；外部依赖，必须保）
 
@@ -96,4 +103,4 @@
 | 7 | `/tmp/opencode/KEEP/v7_q6q2/collision_replay.json` | `docs/v7_reports/evidence/collision_replay.json` | `8413de0baff9473b1fb9eef7258d82bf37914d0ec1eb51d9b7487cfafdbcf8ab` | 101 条碰撞仪器化重放原始 JSON（生成脚本已清理，不可原地重生成） |
 | 8 | `/tmp/opencode/KEEP/v7_q6q2/tollgate_viz.json` | `docs/v7_reports/evidence/tollgate_viz.json` | `55d09fda13618d8e415963981c00ad4037d3a3ff4a7d84becec751b6d8d1a91b` | tollgate 运行时度量 JSON（同上） |
 
-> 清理记录存档：`docs/v7_reports/cleanup/`（CLEANUP_PLAN / DELETED_MANIFEST / CLEANUP_A_REPORT / CLEANUP_B_REPORT / KEEP_README / **CLEANUP_C_REPORT / CLEANUP_C_DELETED / CLEANUP_C_WILL_DELETE**）；/tmp 引用映射总说明：`docs/v7_reports/MIGRATION_NOTE.md`。
+> 清理记录存档：`docs/v7_reports/cleanup/`（13 文件：`CLEANUP_PLAN.md`、`DELETED_MANIFEST.txt`、`KEEP_README.md`、`CLEANUP_A_REPORT.md`、`CLEANUP_B_REPORT.md`、`CLEANUP_B_DELETED.txt`、`CLEANUP_B_WILL_DELETE.md`、`CLEANUP_C_REPORT.md`、`CLEANUP_C_DELETED.txt`、`CLEANUP_C_WILL_DELETE.md`、`CLEANUP_D_REPORT.md`、`CLEANUP_D_DEADCODE.md`、`CLEANUP_D_DELETED.txt`）；/tmp 引用映射总说明：`docs/v7_reports/MIGRATION_NOTE.md`。

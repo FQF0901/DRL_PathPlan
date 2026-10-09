@@ -1,291 +1,148 @@
 # DRL_PathPlan
 
-MetaDrive 城市/高速驾驶规划 RL：观测 → 策略输出 `(ds, dθ)`（下一 0.5 s 的弧长 + 航向变化）→ 网络内部
-world model rollout 产生 3 s / 6 点自车轨迹 → MPC/LQR 跟踪该预瞄。分阶段训练：**A 世界模型（teacher forcing）
-→ B 规划器 BC（含 rollout 轨迹辅助）→ C PPO RL（KL 锚定 B 快照）**。
+MetaDrive 城市/高速驾驶规划 RL：观测（当前帧 + 6 帧历史，含 OD/LD/nav）→ 网络输出动作 `(ds, dθ)`
+（下一 0.5 s 的弧长 + 航向变化）→ 网络内 latent rollout 产生 3 s / 6 点 plan → LQR 跟踪执行。
+训练链路：**A 世界模型教师强制 → B 规划器 BC（primary→specific，可接 DAgger 迭代）→ C PPO RL
+（实验口径，KL 锚定 B 快照）**（`pipeline/stages.py:1-27`；网络数据流与输出契约见 `docs/net_architecture.md`）。
 
-> **一句话现状（2026-09-28，v1.2）**：全链路端到端跑通且**硬件吃满**（Stage A GPU 95% / Stage B 97%，宏 batch 1024）；
-> 在统一评测集（500 条完整 episode、LQR、CI ±0.04）上：阶段 B **phase 1（primary）= 0.274** → **phase 2（MoE+难例加权）= 0.396**
-> → **phase 2b（train 侧 DAgger 迭代 3 轮）r1/r2/r3 = 0.450 / 0.476 / 0.492**；**phase 2 → r3 = +0.096（p=0.002）**、
-> off-road 0.552 → 0.438、rc 0.639 → 0.692（规则基线 0.756）。负载均衡使 8 专家各 11–14%（`load_cv≈0.14`，无需人工标签）。
-> ⚠️ **DAgger v1 轮因采集池取自 eval500（train-on-test）已作废并清理**（数据/权重删除、评测目录加 `_void` 留档）；v2 全部在 train 侧切片采集
-> （窗口=失败前 10 s、三轮互不重叠、硬隔离守卫）。剩余缺口：tollgate（0.04）/ curve（0.09）、速度偏慢（0.456 vs 0.73）与 collision 0.030→0.056 的副作用 ⚠。
-> Stage C 仍 EXPERIMENTAL。详见 `docs/experiments.md` §11。
+## 快速开始
 
----
-
-## 1. 系统架构
-
-### 1.1 接口与数据流
-
-```
-MetaDrive 场景（spec JSON）
-   │  env/metadrive_env.py + env/obs/*
-   ▼
-观测（字典，含 mask 与 6 帧历史）
-   │  net/model.py: DrivingModel.forward()
-   ▼
-编码器 → 时序（GRU，hist_valid 门控）→ 空间消息传递 → MoE（primary + 8 specific）
-   │                                    └── world model（预测未来 OD/LD）→ 内部 rollout（B1）
-   ▼
-输出：action_mu/logstd(2)、value(1)、traj_xy(6,2)、od_pred(6,16,5)、ld_pred(6,16,4)、
-      router_logits(8)、plan(6,2)、latent(96)
-   │
-   ├─ 训练时：env 执行 action（0.5 s）；轨迹/未来帧作为辅助监督
-   └─ 评测时：env/tracking.py 的 ExactTracker / LqrTracker 跟踪 plan 预瞄（插值成 30 点 @10 Hz）
-```
-
-**观测通道**（`env/obs/`，全部可插拔注册；**schema v2，2026-09-26**）：
-
-| 通道 | 形状 | 说明 |
-| --- | --- | --- |
-| `ego` | (1, 8) | 自车运动学；**维度 6:8 承载上一策略步 `(ds,dθ)`**（采集/评测注入，见 §4 已修 bug）|
-| `od` | (16, 9) | 周围车辆，盒式 scope（**前 150** / 后 50 / 左 25 / 右 25 m），**固定槽位 = track id**（不再逐帧按 TTC 重排），零填充 + mask |
-| `od_id` / `od_presence` | (16,) int64 / (16,) | 槽位身份（-1=空槽，episode 内稳定）/ 本帧观测标志（0=出盒未释放，特征陈旧）；`od_mask=1` 只表示"槽位本帧有效" |
-| `ld` | (16, 7) | 车道线点（同 scope） |
-| `nav` | (1, 11) | 路线导航（相对坐标 + route_completion 等）；兼容保留 |
-| `signal` | (1, 4) | 本场景无信号灯，预留；兼容保留 |
-| `others` | (1, 28) | **规范上下文输入** = nav(11) + speed_limit(1, 归一化 [0,1]，分母 30 m/s) + signal(4) + road_class one-hot(12, taxonomy.GEOMETRY_LABELS 顺序) |
-| `*_hist` | (6, …) | 6 帧历史 @0.5 s，对齐到当前自车系（SE(2)）；`ego_hist(6,1,8)` / `others_hist(6,1,28)` / `od_hist(6,16,9)` / `od_id_hist(6,16)` / `od_presence_hist(6,16)` / `ld_hist(6,16,7)` + masks + `hist_valid(6)` |
-
-> **v2 与旧版差异**：scope 前向由旧的 **100 m 扩到 150 m**（记忆库要预测 3 s 未来，高速 ~30 m/s 需 ~90 m 前视；
-> 后/侧向不变）；OD 槽位身份稳定（旧实现逐帧重排导致实测 12.5%/步 的槽位换车）；历史按 `(episode_id, step−5j)`
-> **精确查表**（旧实现按行位置重建，16.8% 窗口时间不均匀、最大 3 s 洞）；`hist_valid` 由真实帧决定
-> （episode 头部补位帧不再伪装有效）。schema 清单见 `env/obs/schema.py` 与 `expert_bc.meta.json::schema`。
-
-### 1.2 网络（`net/`）
-
-- **规模**：H=128、8 个 specific expert（128→256→128）→ **1,174,875 参数**（110 tensors，占 1.5M 预算 78.3%）。
-  > 注：`net/param_probe.py` 默认配置打印 666,263（不同配置），以训练 ckpt 的 1,174,875 为准。
-- **结构**：编码器 → 时序聚合（GRU + `hist_valid` 门控）→ 空间消息传递（OD/LD 间）→ **MoE**（primary 常开 +
-  8 个 specific 专家，sigmoid 门、残差零初始化）→ world model（预测未来 OD/LD）→ 策略头 / 价值头。
-- **MoE 语义**：primary 承担主干能力，specific 只做残差增量；路由标签来自场景 taxonomy（8 类：
-  `cutin_active / cutout_active / crowded / car_following / on_curve / merging / roundabout_near / near_intersection`）。
-- **rollout（B1）**：`rollout=True` 时网络用自身预测的未来 OD/LD 迭代展开，产出 `traj_xy`/`plan`（可 detach WM，
-  Stage B 强制 detach，Stage A/C 依配置）。
-
-### 1.3 分阶段训练 v1.1（2026-09-25 用户确认并实现）
-
-| 阶段 | 训练什么 | 冻结什么 | 监督目标 | 验收证据 |
-| --- | --- | --- | --- | --- |
-| **A：WM teacher forcing** | 编码器 / 时序 / 空间 / MoE / WM | 策略头 / 价值头 | 未来 OD/LD 真值（(episode, step+5k) 查表、t0 对齐、mask+valid）；ego 条件 = **专家 GT 动作序列** + 噪声（p=0.5, σ_ds=0.3, σ_dθ=0.05）| **ADE 1.647 / FDE 2.739 vs 匀速 3.269 / 4.483 ✓**（历史产物 `runs/train/stage_a_matched`，已清理、可按命令重生成）|
-| **B：Planner BC** | 主干 / MoE / 策略头 / specific | WM（且 rollout detach） | 专家动作（主损失 1.0）+ **rollout 轨迹小权重辅助 0.3** + router BCE 0.1；先 primary 后 specific | ds **3.499 m**（专家 3.500）、轨迹 MAE **0.633 m**；aux=0 消融 off-road 1.0 → 0.5 |
-| **C：PPO RL** | specific / 策略头 / 价值头（WM 先冻后放） | 编码器 / 时序 / 空间 / MoE(primary) | 规则奖励 + GAE；**KL 锚定 Stage-B 快照**（系数 0.05→0 线性衰减）；primary lr×0.1；可选 critic 预热（value-only） | 50 updates 跑通、44–49 steps/s、无坍塌；300-update 版见 §3 |
-
-**为什么 A 在 B 之前（因果一致性）**：`traj_xy` 是内部 rollout 的产物，rollout 依赖 world model。若 WM 未训练就
-用 `traj_xy` 做 BC 监督，等于监督"假观测下产出的轨迹"（且梯度会污染 WM）。因此先以真值训练 WM（A），再在
-**WM 冻结 + detach** 的前提下用 rollout 轨迹做小权重辅助（B）。
-
-### 1.4 监督与冻结配合（关键规则）
-
-1. **A**：唯一使用 teacher forcing 的阶段（GT ego 动作 + 噪声）；目标帧必须做 t0 帧对齐 + slot 身份匹配
-   （原始 OD 槽位按 TTC 排序，跨帧同一物理车会换槽 → 直接回归病态，匹配后 ADE 3.38 → 1.65）。
-2. **B**：WM 冻结 + rollout detach → 轨迹辅助只训练策略侧；`traj_aux_weight=0.3` 为**闭环验证过的配方**
-   （0.1 会掉横向，见 §3）；`bc_phase_split` 保证 specific 阶段不动 primary 主干。
-3. **C**：无 teacher forcing；KL 锚到 **Stage-B 策略快照**（不是专家 BC）；可选 `--bc-anchor`（默认关）；
-   WM 在前 `updates//4` 冻结、之后解冻（**当前 PPO loss 不消费 WM 输出，解冻仅为后续 WM 辅助损失预留**，见 §4-P8）。
-
-### 1.5 数据集配合
-
-```
-env/specs/*.json（11,250 条已验证，0 失败；11 种可采样几何 + 显式 spawn 车道 + 脚本事件）
-        │  tools/collect_expert.py（专家 = 过滤后的 IDMPolicy；roundtrip + terminal-window 过滤；yield ≈ 0.72）
-        ▼
-BC 数据集（逐帧记录，训练时在线重建 6 帧历史；带 obs_fingerprint 守卫）
-   ├─ （历史）200 场景 → 10,777 样本（早期版本，旧观测 scope）
-   └─ 当前约定：`datasets/BTC<北京时间戳>_expert<N>k`（例：2,000 场景 → **103,938 样本**，yield 0.718；8 个标签全远超下限；难度×主标签配平）
-        │
-        ├─→ Stage A：未来 OD/LD 目标（查表 + 对齐 + mask）
-        ├─→ Stage B：动作 + traj6 + 逐步标签
-        └─→ Stage C：规则奖励环境（rollout 采样）
-```
-
-**纪律**：BC 数据必须与观测版本一致（`env/obs/__init__.py::obs_fingerprint` 写入 meta，`BCDataset.load` 不匹配时告警）；
-采集/评测/训练共用同一套场景 spec 与专家定义。
-
----
-
-## 2. 性能现状（证据，2026-09-27）
-
-### 2.1 基线对照（50 条 val slice；冻结参考 `runs/baseline_eval/val_reference*.json` 为历史产物，已随 `runs/` 清理，可用 `tools/baseline_eval.py` 重生成）
-
-| 对象 | tracker | success | collision | off-road | route_completion | speed_ratio |
-| --- | --- | --- | --- | --- | --- | --- |
-| **规则基线（pure_pursuit_idm）** | exact | **0.82** | 0.10 | **0.06** | 0.925 | 0.734 |
-| 1k-BC（10 条协议切片） | exact | 0.40 | 0.10 | 0.50 | 0.641 | 0.750 |
-| 2k-BC aux0.1 | exact | 0.30 | 0.00 | 0.70 | 0.594 | 0.765 |
-| **2k-BC aux0.3** | exact | **0.40** | 0.20 | 0.60 | **0.675** | **0.796** |
-| 1k-BC | lqr | 0.24 | 0.06 | 0.68 | 0.526 | 0.538 |
-| 2k-BC aux0.1 | lqr | 0.20 | 0.00 | 0.78 | 0.538 | 0.399 |
-| **2k-BC aux0.3** | lqr | **0.26** | 0.00 | 0.72 | 0.539 | 0.364 |
-| Stage C v1（50 updates，从 1k-BC） | lqr | 0.20 | 0.10 | 0.70 | 0.474 | 0.496 |
-| **Stage C v2（300 updates + critic 预热 10，从 2k-BC aux0.3）** | lqr | **0.18** | 0.14 | 0.68 | 0.453 | **0.631** |
-| **Stage C v2**（同上，exact 口径） | exact | **0.10** | 0.50 | 0.40 | 0.398 | **1.093（超速）** |
-| **v1.2 IL（新架构；50 条；LQR）** | lqr | **0.38** | 0.04 | **0.52** | **0.648** | 0.407 |
-| **v1.2 IL 5k（5k 数据；20/20 epochs）** | lqr | **0.30** | 0.04 | 0.64 | 0.550 | 0.439 |
-| **v1.2 IL 5k 第 3 轮**（schema v2 + mem-bank + router；50 条；LQR） | lqr | **0.42** | 0.04 | **0.52** | **0.688** | 0.446 |
-| **v1.2 去聚类 phase 1**（primary；**500 条**；LQR） | lqr | **0.274** | 0.014 | 0.702 | 0.579 | — |
-| **v1.2 去聚类 phase 2**（+MoE+难例加权；500 条；LQR） | lqr | **0.396** | 0.030 | 0.552 | 0.639 | — |
-| **v1.2 phase 2b r3**（train 侧 DAgger 迭代 3 轮，终版；500 条；LQR） | lqr | **0.492** | 0.056 | 0.438 | 0.692 | 0.456 |
-
-> ⚠️ **DAgger v1 轮作废（2026-09-28）**：采集池取自 eval500 失败 spec（train-on-test）→ 三个臂（0.040 / 0.330 / 0.420）不入结论；数据/权重已删除、评测目录加 `_void` 留档。**v2 已在 train 侧池完成 3 轮**（r1/r2/r3 = 0.450/0.476/0.492；phase 2→r3 p=0.002；副作用：collision 0.030→0.056 ⚠）。
-
-### 2.2 开环 vs 闭环（v1.2，2026-09-26）
-
-| 指标 | 值 | 说明 |
-| --- | --- | --- |
-| Stage A WM ADE / FDE | **1.447 / 2.729**（匀速 6.987 / 12.254） | **6/6 horizon 全部胜**；presence AUC **0.970**、entry AUC 0.702（id 轴）|
-| Stage B 动作克隆 `mu_ds` | 3.522 m（加权 3.564；专家 3.218） | 动作加权误差 0.120、median 0.065、p95 0.401 |
-| Stage B 轨迹加权 MAE | 3 s：**1.240 m**（primary）/ 0.942 m（specific）| 逐 horizon：0.125 → 1.240 m（0.5→3.0 s）；口径已修正为米 |
-| router（聚类软目标） | CE 0.0038 / KL 0.0022（非占位）；top-1 簇 0.265、NMI 0.081 | 负载集中：expert2 0.297 + expert6 0.232 |
-| **闭环 off-road** | **0.52**（基线 0.06；v1 为 0.72）| 失败集中在 curve/roundabout/uturn/tollgate（0–25%）|
-| 闭环 success | **0.42** [0.294, 0.558]（v1 0.26；5k 第 2 轮 0.30）| 难度 easy 0.722 / medium 0.278 / hard **0.214** |
-
-**失败模式取证**（2k-BC LQR，50 条）：终止原因 `out_of_road 39 / arrive_dest 10 / max_step 1`，失败发生在
-途中（rc 0.16–0.94），**不是终点行为**；成功的 10 条 rc≈0.98。
-
----
-
-## 3. 问题与线索（对抗性评审的靶子）
-
-### 3.1 已定位的核心问题
-
-- **P1 plan 缺乏车道锚点与偏差回收（已取证定性，最高优先级）**：四类 0% 场景（curve/roundabout/uturn/tollgate）的取证结论
-  （`docs/forensics-2026-09-26.md`）：**策略自己的 plan 用 ExactTracker 完美执行仍 17/17 失败，而同一 LqrTracker 换规则专家路径
-  → 6 arrive + 7 条 rc 0.72–0.98** → 瓶颈在 plan 本身。机理：① plan 锚在自车位姿、**无车道中心反馈**，失败前 1 s 横向偏移峰值
-  0.92 m（基线同场景 0.07 m），且从**直道爬行段**（0.8–2 m/s、10–20 s）就开始漂移；② **转向通道在大转角塌缩**
-  （`plan.dθ` vs 专家：corr 0.31–0.51、过原点斜率 0.14–0.27；|专家 dθ|≥0.2 的薄尾仅 0.3–1.4%、比值 ≈0.05；`ds` 通道正常 corr 0.88–0.96）；
-  ③ 单纯放大转向（×2/×4）无效。
-  排除项：tracker（跟随 e_y p95 0.46 m；实测曲率 R≈57–64 m 在其能力内）、数据量（四类行数与 straight 同级）、预瞄保真（四类 traj MAE 不比 straight 差）。
-  **修法待你批**：E2b 扰动增广（离线，≤1 h；判据 offline 强转段 plan/expert ≥0.6 + 闭环 ≥8/17）/ E3 DAgger-lite（治 crawl/OOD）。
-  次因：纵向 P-only 稳态差（v/ref 0.81）；tollgate 另有"过闸"缺口（oracle 同样在 rc≈0.53 撞 2 次）。
-  **5k 轮的反证（2026-09-26，见 `docs/experiments.md` §9）**：数据 2.5×、epochs 2× 后**开环全线变好**（动作加权误差 0.120 → **0.071**、
-  逐 horizon MAE h6 1.24 → **0.82 m**、router top-1 簇 0.265 → **0.856**），**闭环反而变差**（success 0.38 → **0.30**、off-road 0.52 → **0.64**）
-  → **排除"数据量 / 训练时长 / 开环质量"三个假设**，坐实"plan 无车道锚点与回收能力"是主因。修法：**E2b 扰动增广 / E3 DAgger-lite（待你批）**。
-  **第 3 轮（2026-09-27，schema v2 + router 软目标，见 `docs/experiments.md` §10）**：开环与 §9 持平（ADE 1.449 / val 0.5933），
-  **闭环回到最好**（success **0.42**、rc **0.688**、hard 0.000 → **0.214**、split 0.60 → **1.00**），但 curve/roundabout/uturn/tollgate 仍停在 0–25%
-  → 与"瓶颈在 plan 的车道锚点/偏差回收"一致；**E2b / E3 仍是唯一待批的下一杠杆**。
-- **P2 闭环执行链**：LQR 跟踪比 exact 执行差约 0.12 off-road（0.60 → 0.72）；跟踪器参考已修为 6 点预瞄（见 3.3），
-  但增益未做干净标定（此前的扫描指标被"冲过终点后继续开"污染）。
-- **P3 critic 几乎无解释力**：`value/explained_var ≈ 0`（value_loss 6–33）→ 优势噪声大。已实现 critic 预热
-  （value-only，前 N 步冻结主干），预热期 explained_var −0.036 → +0.012；但**预热冻结主干 → 拟合能力受限**，
-  更强 critic 需要解冻（会破坏"预热期策略逐位不变"的验收口径）。
-- **P4 低速吸引子（已监控）**：固定探针显示 `speed<2 m/s` 两档 ds 均值 0.32 / 1.05 m → **不是硬不动点**
-  （ds > v·0.5，在缓慢加速），但恢复增益小；`probe/low_speed_alert` 每次 update 报警。
-- **P5 仿真非确定性**：少数脚本事件场景（cut-in 等）同种子 run-to-run 有微小差异（排除 PYTHONHASHSEED →
-  MetaDrive 内部线程/时钟时序）→ **事件类 KPI 有噪声**，Gate 4 需记录；候选修复：事件脚本改纯步数驱动。
-- **P6 观测/历史设计未消融**：盒式 scope（v2：**前150**/后50/左25/右25；旧版前 100 已弃用）、top-16、6 帧历史、
-  固定槽位 = track id、`hist_valid` 门控、`prev_action` 注入——均为设计决策，未做消融实验。
-- **P7 Stage C 的 WM 解冻是"记账"**：PPO loss 目前不消费 WM 输出，解冻只让参数回到优化器（为后续 WM 辅助
-  损失预留）→ 当前 Stage C 对世界模型没有直接梯度。
-- **P8 评测样本量**：10 条协议切片噪声大（n=10，Wilson CI 宽），50 条 slice 更可信。
-- **P9 MoE 路由标签是"场景级"的**：路由 BCE 用逐步标签（taxonomy 打标），未验证路由器是否真的学到可解释分工。
-- **P10 Stage C 的 PPO 未带来 KPI 增益（奖励 hack）**：300 updates（critic 预热 10）后，速度比 0.364 → 0.631
-  （低速问题被 RL 修好：探针 0–1 m/s 档 ds 0.19 → 5.7 m、`low_speed_alert` 全程解除），但 success 0.26 → 0.18、
-  碰撞 0.00 → 0.14（exact 口径更极端：succ 0.4 → 0.1、碰撞 0.2 → 0.5、速度比 0.796 → **1.093 超速**）。
-  训练监控显示 u90–210 出现"off-road/步 → −1.28、总奖励转负"的 hack 期、u240 后自行回落，但
-  **critic 全程 `explained_var ≈ 0.004`**（无法为终端风险定价）且 KL 锚系数衰减到 0 → 策略向廉价的速度项漂移。
-  **修复方向**：速度项按在道状态门控（或乘安全指示）、提高 off-road/crash 权重、KL 系数下限 + primary lr 再降、
-  critic 强化（解冻主干 / 更多预热），并且**先修横向弱点**（否则 RL 只是在一个易出界的策略上做速度优化）。
-- **P11 router 负载集中（v1.2 历史观察，聚类方案已废止）**：8 专家中 2 个占 53% 混合权重
-  （expert2 0.297 / expert6 0.232），其余 <0.12；当时以聚类软目标监督（top-2 gap 中位数 0.017、
-  top-1 簇准确率 0.265、NMI 0.081）→ 有效监督被稀释。**lane U1 起取消聚类监督**，改为
-  Switch 式负载均衡 aux（`router/expert_load/*` / `router/load_cv` / `router/gate_entropy`）。
-- **P12 纵向速度偏慢（v1.2 新观察）**：闭环 speed_ratio **0.407**（基线 0.734；v1 最好 0.631），
-  `mu_ds` 3.52 m/0.5 s vs 专家 3.22 → 需分解"动作克隆误差 vs 闭环执行速度差"的贡献。
-
-### 3.2 已排除的假设（有数据支撑，避免重复踩坑）
-
-- 奖励排序错误（爬行 vs 碰撞）：已核验 `爬行 +58 < 碰撞 +105 < 正常行驶 +252`，排序正确；
-- 策略概率坍塌 / `prev_action` OOD / warmup 不足 / 速度 OOD 单独致病：均被 live probe 证伪；
-- Stage B 的 `traj_xy` 目标不匹配（监督的是 3 s 6 点而非 6 帧）：已修；
-- 动作损失未接线 / 策略头 sigmoid 饱和：已修。
-
-### 3.3 已修复的关键 bug（本轮）
-
-| bug | 影响 | 修复 |
-| --- | --- | --- |
-| **跟踪器参考 = 单个动作**（而非 6 点预瞄） | 闭环"偏出车道 + 速度衰减"的元凶（LQR off-road 0.90 → 0.40）| `collect_rollout`/评测改为传 `out["plan"]`（6 点→插值 30 点）|
-| 评测 `prev_action` 恒为 0 | 评测观测 OOD（与采集语义不一致）| `_CkptController` 按采集语义注入（由位姿反推）|
-| `monitoring.py` 的 `csv` 参数遮蔽模块 | 监控静默失效（loss 曲线丢数据）| 改名 + 递归 flatten（现 42 条序列）|
-| spawn worker 无 GL 运行时 | MetaDrive 崩溃（Known Pipes / IndexError）| `pipeline/gl_runtime.py` 守卫（父进程/worker 双保险）|
-| 专家数据与观测版本漂移 | 静默错训 | `obs_fingerprint` 守卫 + 重新采集 |
-| 未来帧槽位按 TTC 排序跨帧换位 | WM 回归病态（ADE 3.38）| slot 身份匹配（ADE → 1.65）；v1.2 改为 **od_id 固定槽位 + id 匹配** |
-| 轨迹度量单位混淆（epoch 日志 `mae=` 实为**未加权 MSE**、`bc_traj_err_h*` 实为 m²）| 报告误读 2× 以上，跨版本不可比 | 新键 `bc_traj_mae_h{k}_m`（米，加权）/`bc_traj_mse_h{k}`（m²）；旧键保留 alias 并标注 |
-| 数据管线瓶颈（GPU 18%、0.44 s/batch）| 训练慢、硬件闲置 | 一次性物化 + 宏 batch 1024（micro 精确累积）+ 线程放开 → **GPU 95%/97%** |
-| 物理 batch 1024 OOM（6 步 ST-GNN ≈32 MB/样本）| 无法直接大 batch | **精确梯度累积**（A micro 256 / B 512；等价性 ≤1e-4 实测）|
-| Stage B 阶段冻结前缀仍是 v1（`world_model.` 等）| "primary→specific" 冻结静默失效 | 改为 v2 前缀（`st_gnn./plan_head.…`）+ 可训练集合断言测试 |
-| 评测 `mean_speed_mps` 实为**末步速度**（`_finite_mean([单值])`）| 速度口径误读（3.844 vs 真值 **4.135**）| 真均值 + 新增 `final_speed_mps`（旧值逐条一致复现）+ `low_speed_step_ratio`/`crawl_seconds` |
-| ckpt 路径 `steer_abs_mean`/`throttle_mean` 恒 0 | 执行侧无从审计 | ckpt 记录实际下发 (ds,dθ)（mean\|ds\| 2.51 m、mean\|dθ\| 0.0071 rad）；lqr 记录 tracker 实测；exact 显式 N/A |
-
----
-
-## 4. 仓库结构与运行方式
-
-| 目录 | 用途 |
-| --- | --- |
-| `config/` | `default/env/model/train/eval` 五份配置（冻结值见 `config/README.md`）|
-| `env/` | MetaDrive 封装：scenario（spec/taxonomy/generator/validator/behaviors/labels）、obs、expert、tracking |
-| `reward_model/` | 规则奖励项（9 项）、聚合（dense+terminal+CaRL+potential shaping）、KPI（primary 分组 + Wilson CI）|
-| `net/` | 编码器 / 时序 / 空间 / MoE / world model / 策略头 / rollout |
-| `pipeline/` | 阶段 A/B/C、trainer、buffer、vector_env、eval_runner、monitoring、gl_runtime |
-| `tools/` | `gene_env.sh`、`train.py`、`test.py`、`collect_expert.py`、`baseline_eval.py`、`visualize.py`、`measure/*`、`diagnostics/*` |
-| `tests/` | 205 项测试（`tools/venv-python -m pytest tests/ -q`）|
-| `datasets/`、`runs/` | 专家数据集（不可清）与运行产物（gitignored，可随时清）；命名纪律见 `docs/archive/design-v1.2.md` §3.5 |
+前置：Python 3.10 + 仓库内 `.venv`（`metadrive-simulator 0.4.3`、`numpy<2`、`opencv-python-headless`）。
+**所有 MetaDrive 运行统一用 `tools/venv-python`**（自动注入 venv 内 glvnd 的 `LD_LIBRARY_PATH`，
+`tools/venv-python:1-14`）。环境重建：
 
 ```bash
-# 环境（一次性；本机无系统 libGL，需 glvnd 本地解包）
 python3 -m venv --without-pip --system-site-packages .venv
-python3 -m pip --python .venv/bin/python install metadrive-simulator
-python3 -m pip --python .venv/bin/python install "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
-bash tools/setup_gl_libs.sh
-# ⚠ 所有 MetaDrive 运行统一用 tools/venv-python（自动设置 LD_LIBRARY_PATH）
+python3 -m pip --python .venv/bin/python install metadrive-simulator "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
+bash tools/setup_gl_libs.sh   # 本机无系统 libGL：在 .venv 内解包 glvnd（不改系统）
+```
 
-# 场景 + 专家数据（数据集放 datasets/，不随 runs/ 清理；命名 BTC<北京时间戳>_expert<N>k）
+`env/specs/*.json`、`datasets/`、`runs/` 都是生成物（`.gitignore:8,10,12`），克隆后按最短链生成：
+
+```bash
+# 1) 场景 spec：env/specs/scenarios_{train,val}.json（默认 10000 / 1000 条）
 bash tools/gene_env.sh
+# 评测集：从 scenarios_val.json 分层抽 500 条 → scenarios_eval500.json（默认 DRY-RUN，必须 --write）
+tools/venv-python tools/make_eval_spec.py --write
+
+# 2) 专家 BC 数据（--specs / --out 必填；--workers 默认 auto）
 tools/venv-python tools/collect_expert.py --specs env/specs/scenarios_train.json --limit 5000 \
-    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"   # --workers 默认 auto（8–10）
+    --out "datasets/BTC$(date +%Y%m%d-%H%M)_expert5k"
 
-# 分阶段训练（零参可跑：数据集/epoch/batch/resume 全在 config/train.yaml；脚本只做 setsid+nohup 分离启动）
-bash tools/train.sh                      # Stage A（默认）；STAGE=B bash tools/train.sh 跑 Stage B（自动用最新 A final、共用同一 run 根）
-# 产物：runs/BTC<北京戳>_train/{logs/stage_a.log, manifest.txt, config/model.snapshot.yaml, stage_a/{final.pt, monitor/}}
-# 续跑：默认 resume: auto 自动从「最新未完成 stage 的周期 ckpt」原地续跑（CKPT_EVERY=5）；显式 RESUME=runs/.../ckpt_epochNNN.pt
+# 3) 训练（零参可跑：数据自动取最新 datasets/BTC*_expert*；A/B 共用一个 run 根）
+bash tools/train.sh            # Stage A（默认）
+STAGE=B bash tools/train.sh    # Stage B（自动接最新 stage_a/final.pt）
 
-# 评测（零参可跑：ckpt 自动取最新 stage_b/final.pt，回退 stage_a final；默认 LIMIT=50 / TRACKER=lqr）
+# 4) 评测（零参可跑：ckpt 自动取最新 stage_b/final.pt、回退 stage_a；默认 LIMIT=50 / TRACKER=lqr）
 bash tools/test.sh
+tools/venv-python tools/test.py --policy baseline --limit 10 --workers 1   # 规则基线参照
 
-# 曲线 / TensorBoard（零参：run 名 train_stageA/train_stageB/eval_*，端口占用自动 +1，PORT 可覆盖）
+# TensorBoard（run 名 train_stageA/train_stageB/eval_*；端口占用自动 +1）
 bash tools/tb.sh
 ```
 
----
+直接 CLI 最小形态（绕过脚本）：
 
-## 5. 下一步计划（v1.2 后）
+```bash
+tools/venv-python tools/train.py --stage A --bc-dir datasets/BTC20260926-2343_expert5k --out runs/train/stage_a
+tools/venv-python tools/train.py --stage B --ckpt runs/train/stage_a/final.pt \
+    --bc-dir datasets/BTC20260926-2343_expert5k --out runs/train/stage_b
+tools/venv-python tools/train.py --stage C --config config/arms/v7_arm1_offroad.yaml \
+    --ckpt runs/train/stage_b/final.pt --updates 200 --out runs/train/stage_c
+tools/venv-python tools/test.py --policy ckpt --ckpt runs/train/stage_b/final.pt --limit 50 --workers 2
+```
 
-1. **场景级失败取证（最高优先级，P1）**：对 curve / roundabout / uturn / tollgate 各取 10–20 条失败 episode，分解
-   ① WM 预瞄保真（预瞄 vs 实际轨迹的横向误差）、② LQR 曲率跟随、③ BC 专家覆盖（这些几何的样本量与难度分布）
-   → 决定是补数据（DAgger / 扰动起点）、修跟踪器，还是改预瞄（plan 头）。
-2. **闭环速度归因（P12）**：分解 `mu_ds` 克隆误差与执行侧速度损失（预瞄速度 vs tracker 实现速度 vs 实际车速）。
-3. **router 负载与软目标（P11）**：降 τ / 减小边界平滑 / 稀有簇重加权的单变量对照（**先给方案，经你确认再执行**）。
-4. **P0-1 / P0-2 修复**（`docs/db44fefe-system-review.md`）→ 之后才谈 Stage C（当前 EXPERIMENTAL）。
-5. 事件脚本确定性修复（P5）与观测消融（P6）。
-6. **Gate 4 薄切片验收**：按冻结协议出正式结论（当前最好：success 0.42 / off-road 0.52，基线 0.82 → 未过）。
+（`runs/train/…` 为入口默认 `--out` 形态，`tools/train.py:72-73`；数据目录示例取仓库现存 KEEP 数据集，
+实际以 `datasets/` 当前内容为准。）
 
----
+入口与默认值来源：`tools/train.sh:1-6`（零参、`STAGE/RESUME/BC_DIR/WORK_DIR` 等环境变量覆盖）、
+`tools/test.sh:1-4`、`tools/run_config.py:56-132`（从 `config/train.yaml` 解析路径与 ckpt）；
+Stage C 当前采用臂见 `config/arms/README.md`。
 
-## 6. 证据索引
+## 仓库布局
 
-> 运行产物按 `docs/archive/design-v1.2.md` §3.5 落在 `datasets/`（数据）与 `runs/BTC<北京时间戳>_*`（产物），可随时清理/重生成；数据集不随 `runs/` 清理。
-
-| 内容 | 路径 |
+| 路径 | 内容 |
 | --- | --- |
-| v1.2 IL 结果表（§8 2k / §9 5k 第 2 轮 / §10 5k 第 3 轮：开环 + 闭环 + 失败模式） | `docs/experiments.md` |
-| 场景级失败取证（只读，2026-09-26） | `docs/forensics-2026-09-26.md`（脚本：`tools/diagnostics/forensics_*.py`）|
-| 数据/产物目录纪律与命名 | `docs/archive/design-v1.2.md` §3.5 |
-| P0 实测 / 数据集统计 / 可行性分析 | `docs/p0-measurements.md`、`docs/dataset_stats.md`、`docs/feasibility-analysis.md` |
-| 系统架构图 | `docs/architecture-BTC20260925-2234.svg` |
+| `config/` | 运行配置：`default/env/model/train/eval` 五份 YAML + `arms/`（RL 臂）+ `plan_anchors_k6.json`；加载关系与消费方见 `config/README.md` |
+| `env/` | MetaDrive 封装（`metadrive_env.py`、`tracking.py`）+ `obs/`（观测通道/历史/schema）+ `scenario/`（spec 生成/校验/标签/脚本事件）+ `expert/`（规则专家） |
+| `net/` | 编码器 / 时序注意力 / 空间消息传递 / MoE / latent 世界模型（ST-GNN）/ 策略与价值头 / K-anchor |
+| `pipeline/` | 阶段编排 `stages.py`、训练器 `trainer.py`、环境池 `vector_env.py`、评测 `eval_runner.py`、DAgger 循环 `phase3_loop.py`、run 布局 `run_paths.py`、监控 `monitoring.py` |
+| `reward_model/` | 奖励项 `terms.py`、聚合 `aggregation.py`、KPI `kpi.py` |
+| `tools/` | 入口脚本（`gene_env.sh` / `train.sh` / `test.sh` / `tb.sh`）+ 采集/评测/诊断工具 + `measure/`、`diagnostics/` |
+| `tests/` | 契约/回归测试：`tools/venv-python -m pytest tests/ -q`（`tests/README.md:1-9`） |
+| `docs/` | 现行文档 + `archive/`（历史归档）+ `cleanup/`（清理记录），见下「文档索引」 |
+| `datasets/`、`runs/` | 生成物（gitignored）：专家数据集 / 训练与评测产物 |
+| `env/specs/` | 生成物（gitignored）：场景 spec JSON |
 
-> 历史运行（Stage A/B/C、评测、冻结基线、BC 数据集）的产物目录随 `runs/` 清理已删除；数字与复现命令已固化在
-> `docs/experiments.md`，按文中命令可重生成。
+## 关键约定
 
-> 依赖：MetaDrive 0.4.3、numpy<2、Python 3.10、torch 2.3（`.venv` 复用系统已装包）。
+### run 命名（代码生成，不手拼）
+
+- 训练 run：`runs/BTC<北京戳>_<name>`（`pipeline/run_paths.py:106-108`）；`run.work_dir: auto` 由入口解析
+  （`config/train.yaml:57-64`、`tools/run_config.py:102-111`）。**同轮 A/B 共用一个 run 根**：Stage B 取
+  Stage A 产物所在 run（`pipeline/run_paths.py:5-6`）。
+- 评测 run：`runs/BTC<秒级北京戳>_<kind>_<tag>`，由 `eval_run_name` 幂等规范化（`pipeline/run_paths.py:86-103`；
+  `tools/test.py:97-101`）；`--name` 传路径时原样使用。
+- run 内固定布局：`logs/stage_<x>.log`、`manifest.txt`、`config.snapshot.yaml`、`model.snapshot.yaml`、
+  `stage_a/`、`stage_b/`（`pipeline/run_paths.py:148-164`；`tools/train.py:116-125`）。
+
+### ckpt 命名
+
+- A/B：周期 `ckpt_epoch{NNN}.pt`（`pipeline/stages.py:493-494`）、阶段末 `final.pt`
+  （`pipeline/stages.py:2709,3461`）、B 另存 `bc.pt`（`pipeline/stages.py:3456`）。
+- C：周期 `ckpt_u{NNN}.pt`（`pipeline/stages.py:539-540`）、阶段末 `final.pt`（`pipeline/stages.py:4888`）。
+- `run.resume: auto` 从最新「有周期 ckpt、无 `final.pt`、进程未在跑」的 stage 原地续跑
+  （`pipeline/run_paths.py:279-287`；`tools/run_config.py:82-99`）。
+- phase3 循环稳定导出 `<loop_dir>/best/final.pt` 供下游消费（`pipeline/phase3_loop.py:115,932`）。
+
+### spec 隔离硬校验（train-on-test 防复发）
+
+- 训练数据只允许来自 train spec；`dagger_collect` 的 `--from-eval` 路径已删除
+  （`tools/dagger_collect.py:6-9`）。
+- 隔离守卫按 `(id, seed)` 与 eval/val 冻结集求交集，命中即 `SystemExit`
+  （`tools/dagger_collect.py:905-932`）；Stage B 合并 DAgger 数据前复核来源（`pipeline/stages.py:309-350`）。
+- 评测集固定 `env/specs/scenarios_eval500.json`（`config/eval.yaml:3`），与 `scenarios_val.json` 的
+  互斥/并集关系与禁训纪律见 `docs/v7_program_prereg.md` §0。
+
+### obs 指纹：改动 `env/obs` 必须重采数据
+
+- `env/obs/__init__.py::obs_fingerprint` = `env/obs/*.py` 内容哈希 + schema 版本（当前 v6，
+  `env/obs/__init__.py:38-49`）。
+- 采集时写入数据集 meta（`tools/collect_expert.py:1632`）；训练加载时不一致 → 告警并要求重新采集
+  （`pipeline/trainer.py:2956-2968`）。
+- 规则：scope/通道/历史语义一旦改动（如 OD/LD scope、历史帧结构），旧 BC 数据在新观测下语义不同，
+  必须用 `tools/collect_expert.py` 重采（`env/obs/__init__.py:3-5`）。
+
+### 配置加载（细节见 `config/README.md`）
+
+- 训练侧 `pipeline.stages.load_config` 只解析**一层 includes + 顶层平铺合并**（`pipeline/stages.py:138-149`）；
+- 评测侧 `pipeline.eval_runner.load_config` 为**递归深合并**（`pipeline/eval_runner.py:1424-1445`）。
+
+## 文档索引
+
+### 现行（当前口径 / 冻结规格）
+
+| 文档 | 内容 |
+| --- | --- |
+| `docs/LOCKS.md` | 锁版记录（Stage A/B 锁版与 RL 基线 tag） |
+| `docs/net_architecture.md` | 网络架构（代码口径：数据流 / 模块 / IO 维度 / 监督） |
+| `docs/rl_reward_v5.md` | 奖励 v5 冻结规格（项集 / 聚合结构 / 终局值档） |
+| `docs/v7_program_prereg.md`、`docs/v7_program_report.md` | v7 程序预注册（冻结）与收尾报告 |
+| `docs/v6_reports/` | v6 报告/预注册/网络设计（目录索引 `docs/v6_reports/README.md`） |
+| `docs/v7_reports/` | v7 证据/报告档 + 冻结 specs/figures（目录索引 `docs/v7_reports/README.md`） |
+| `docs/reward_audit/` | 奖励审计与 E-β″ 复算（`MANIFEST.md` 为入口） |
+
+### 历史归档
+
+| 路径 | 内容 |
+| --- | --- |
+| `docs/archive/` | v3/v4 代历史文档（索引 `docs/archive/README.md`） |
+| `docs/archive/config_arms_legacy/` | v6 P4 / v7 历史臂配置（索引与映射见其 `README.md`） |
+
+### 清理记录
+
+| 路径 | 内容 |
+| --- | --- |
+| `docs/cleanup/` | V8 清理报告：`V8_CLEANUP_config_docs.md`（config/arms + docs 归档）、`V8_CLEANUP_data_runs_DONE.md`（datasets/runs 删除执行）、`V8_CLEANUP_data_runs_WILL_DELETE.md`（清单） |
+
+> 运行产物（`runs/`）与数据集（`datasets/`）不进 git；历史数字与复现命令固化在 `docs/` 各报告中。
