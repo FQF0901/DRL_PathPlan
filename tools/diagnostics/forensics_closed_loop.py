@@ -903,8 +903,14 @@ class LanePlanController(InstrumentedCkpt):
     """Oracle plan：每 0.5 s 用**车道中心线**构造 3 s 参考（不依赖策略网络），交给同一个 LQR。
 
     参考构造：从自车当前车道位置沿路由（ego lane → nav.next_ref_lanes）按 0.1 s 间隔采样
-    世界系中心线位姿 → 转到自车系 → 按 0.5 s 窗口折算 ``(ds, dtheta)``（与
-    ``env.tracking.roundtrip_error`` 同口径），正好 6 段。
+    世界系中心线位姿 → 转到自车系 ``(N,3)``，**直接交 tracker**（与 ``oracle`` 同口径）。
+    为什么不再折算成 6 段 ``(ds, dtheta)``（2026-10-10 修复）：``(ds, dtheta)`` 只保留中心线
+    形状（弦长/航向增量），**丢弃自车相对中心线的横向偏差与航向差**；tracker 按
+    "从当前位姿出发"消费该参考，于是参考退化为"沿当前航向的切线"——一旦车辆偏离
+    中心线，参考不含任何回正信息（开环），LQR 横向自激振荡无阻尼增长 → 必然出界。
+    实测（eval500 id=9）：(ds,dθ) 口径 79 步出界（rc 0.18）；(N,3) 口径 831 步到达
+    （rc 0.98）。``rec["plan"]`` 仍记录 6 段 ``(ds, dtheta)``（字段冻结，供分类/对比），
+    仅 tracker 输入改为位姿参考。
     速度：``speed_mode=hold`` 保持当前速度；``limit`` 用车道限速（clip 到 [1, speed_cap]）。
     """
 
@@ -1027,7 +1033,9 @@ class LanePlanController(InstrumentedCkpt):
                 rec["mu"] = [float(plan[0, 0]), float(plan[0, 1])]
                 rec["plan"] = [[float(a), float(b)] for a, b in plan]
                 rec["reference"] = "laneplan"
-                self.tracker.set_reference(plan)
+                # tracker 参考 = 中心线自车系位姿 (N,3)（保留相对车道的横向/航向偏差；
+                # 见类 docstring 的修复说明）。6×2 plan 仅作记录字段。
+                self.tracker.set_reference(local)
                 ref_window = self._capture_ref_window()
         self._steps += 1
         rec["_ego"] = ego

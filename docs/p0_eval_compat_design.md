@@ -104,3 +104,9 @@
 3. **审计工具（已完成）**：forensics 增补 `d1`/`d2`/`--reference` + 记录扩展（footprint 有效性、四时间戳、层级分类）+ footprint 检查器（复用 env `on_lane` 同款查询；引擎只给布尔 → 退化三元组，不伪造 signed distance）+ 单测（27 passed；smoke16 全模式跑通）。注：全量 eval500 每行预计 ~1–1.5h（footprint 射线开销），矩阵按行顺序跑；每行需与 ckpt 匹配的 `config/model.yaml`（矩阵脚本按行切换）。
 4. **GPU 空出后**（排摸收尾）：矩阵跑批（每行附加载摘要）→ **《P0 审计报告》**（逐 episode paired 数据 + 分类 + 推荐 P1 分支）。
 5. 纪律：P0 完成前冻结 WM/MoE/encoder/PPO scope；每行强制加载校验；产物按 §2 落版本戳。
+
+### 7.1 审计勘误与记录（2026-10-10）
+
+- **laneplan 参考构造 bug（已修）**：旧 `LanePlanController` 把中心线折算成 6×2 (ds,dθ) 交 tracker，**丢弃自车相对中心线的横向/航向偏差** → 参考退化为"沿当前航向的切线"（开环无回正）→ LQR 横向自激振荡无阻尼增长直至出界（eval500 前 20 ids：0/20 succ、off 20/20、rc 0.196；id=9 于 79 步出界）。修复：tracker 输入改为中心线**自车系 (N,3) 位姿**（与 oracle 同口径）；`plan/mu/reference` 记录字段不变。修复后同 20 ids：**6/20 succ、0/20 off、rc 0.815**（对照 oracle 9/20、d2 8/20）；id=9：831 步到达、rc 0.98。→ **全量重跑该一行**（旧 bug 版产物留档 `p0_laneplan_bug.json`）。
+- **d1 崩溃 = 真实结果（非 bug，保留原样）**：链重建（`_window_actions`/`relocate_cursor`/组装）逐位复核正确、cursor 逻辑与 oracle 同源；根因是"开环 (6,2) 专家链"不随自车误差回正（d2 用的是**现状态**专家反馈动作，天然含回正信号）→ 这是"(ds,dθ) 表示 + 开锚"的脆弱性证据，进入审计结论。
+- **anomaly 语义确认（非 bug）**：env `_is_out_of_road` 含黄/白实线与行道 flag（`out_of_road_done` + `on_continuous_line_done`），而 footprint 判定只查 lane 面 → "anomaly"是两套判据口径差的必然产物；报告以"判定口径差异"解释该 bucket，建议后续单独记录这些 flag（未实施）。

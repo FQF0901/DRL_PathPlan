@@ -354,6 +354,84 @@ def test_relocate_cursor_nearest_point() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# laneplan：tracker 参考 = 中心线 (N,3) 自车系位姿（修复：不再折算成 (ds,dθ)）
+# --------------------------------------------------------------------------- #
+
+def _laneplan_stub(route: np.ndarray):
+    """构造 LanePlanController（不走 ckpt 加载；``_route_poses`` 返回固定世界系中心线）。"""
+    from tools.diagnostics.forensics_closed_loop import LanePlanController
+
+    class _Ctrl(LanePlanController):
+        def __init__(self) -> None:
+            self._stub_route = np.asarray(route, dtype=np.float64)
+            self.spec = _StubSpec()
+            self.device = torch.device("cpu")
+            self.records = []
+            self.model = None
+            self.builder = None
+            self.tracker_kind = "lqr"
+            self.tracker = _StubTracker()
+            self.decision_interval = 5
+            self._steps = 0
+            self._action = [0.0, 0.0]
+            self._pose_history = []
+            self._ref_windows = []
+            self.eval_reference = "plan"
+            self.dtheta_gain = 1.0
+            self.speed_mode = "limit"
+            self.speed_cap = 8.0
+
+        def _route_poses(self, env, horizon_s=3.0, dt=0.1):  # noqa: ARG002 - stub
+            return self._stub_route
+
+    return _Ctrl()
+
+
+class _LanePlanEnv:
+    """自车相对中心线有横向 +0.4 m、航向 +0.1 rad 偏差（中心线为世界系 y=0 直线）。"""
+
+    class agent:  # noqa: N801 - stub
+        position = (0.0, 0.4)
+        heading_theta = 0.1
+        speed = 8.0
+
+    prev_policy_action = np.zeros(2)
+
+
+def test_laneplan_tracker_reference_is_centerline_poses_with_offset() -> None:
+    from env.tracking import world_to_ego
+
+    route = np.column_stack([np.arange(0.8, 24.8, 0.8), np.zeros(30), np.zeros(30)])
+    ctrl = _laneplan_stub(route)
+    ctrl.action(_LanePlanEnv())
+    ref = ctrl.tracker.references
+    assert ref is not None and ref.shape == (30, 3)  # (N,3) 位姿参考，不是 (6,2) 动作
+    expected = world_to_ego(route, (0.0, 0.4, 0.1))
+    assert np.allclose(ref, expected)
+    # 关键语义：参考携带自车相对中心线的横向/航向偏差（开环切线口径会丢失 → y=0、θ=0）
+    assert ref[0, 1] < -0.4  # 中心线在自车右侧（世界 y=0 < 车 y=0.4）
+    assert ref[0, 2] == pytest.approx(-0.1)
+    # 记录字段仍为冻结口径：6×2 (ds,dθ) 且 reference 名不变
+    rec = ctrl.records[-1]
+    assert rec["reference"] == "laneplan"
+    assert np.asarray(rec["plan"]).shape == (6, 2)
+    assert np.asarray(rec["plan"])[:, 0] == pytest.approx([4.0] * 5 + [3.2])
+    assert np.asarray(rec["plan"])[:, 1] == pytest.approx(0.0, abs=1e-12)
+    assert rec["mu"] == pytest.approx([4.0, 0.0])
+
+
+def test_laneplan_non_decision_step_keeps_tracker_reference() -> None:
+    route = np.column_stack([np.arange(0.8, 24.8, 0.8), np.zeros(30), np.zeros(30)])
+    ctrl = _laneplan_stub(route)
+    ctrl.action(_LanePlanEnv())
+    first = ctrl.tracker.references.copy()
+    ctrl.action(_LanePlanEnv())  # 非决策步：不刷新参考
+    assert np.allclose(ctrl.tracker.references, first)
+    assert ctrl.records[-1]["decision"] is False
+    assert "plan" not in ctrl.records[-1]
+
+
+# --------------------------------------------------------------------------- #
 # 记录扩展：stub 模型/跟踪器（不建 env）
 # --------------------------------------------------------------------------- #
 
