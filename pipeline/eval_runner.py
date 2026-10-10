@@ -97,6 +97,7 @@ __all__ = [
     "EVAL_REFERENCES",
     "KPI_DEFINITIONS",
     "build_eval_references",
+    "task_model_config",
     "build_report",
     "category_target",
     "evaluate_verdicts",
@@ -856,6 +857,30 @@ def _build_model_from_config(config: Mapping[str, Any]) -> Any:
 #: ``plan``（默认，历史口径）= 6 步 plan 预览（``plan[0] = action_mu``，rollout 前向）；
 #: ``repeat_action`` = ``repeat(action_mu, 6)``（与训练 P0-1 A-hold 同构；走 cheap path，不需要 plan）。
 EVAL_REFERENCES: tuple[str, ...] = ("plan", "repeat_action")
+
+
+def task_model_config(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """评测侧模型配置：key 清单必须与 ``stages.build_model`` 实际读取的键对齐。
+
+    2026-10-10 修复（fail-fast 事故记录）：此前漏传 ``spatial``，stg3 臂（``spatial.layers=3``）
+    的 ckpt 在评测侧被按默认 2 层建模型 → ``unexpected=10`` 被 fail-fast 拦下（rc=2）；
+    若在 fail-fast 引入前，会静默按 2 层评测出错误数字。build_model 读取键：
+    hidden_dim / moe / policy / value / world_model / plan_anchor / spatial。
+    """
+    return {
+        "hidden_dim": config.get("hidden_dim", 128),
+        # v8 修复：policy/value 隐藏维必须透传，否则评测模型按代码默认
+        # （trunk 160 / net 256）构造 → 与 ckpt 形状不符 → 随机初始化评测（假阴性）。
+        "moe": dict(config.get("moe") or {}),
+        "policy": dict(config.get("policy") or {}),
+        "value": dict(config.get("value") or {}),
+        "world_model": dict(config.get("world_model") or {}),
+        # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
+        # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划）。
+        "plan_anchor": dict(config.get("plan_anchor") or {}),
+        # 2026-10-10：spatial 层数（stg3 排摸臂）必须透传——见上方事故记录。
+        "spatial": dict(config.get("spatial") or {}),
+    }
 
 
 def build_eval_references(
@@ -1780,19 +1805,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[eval_runner] 警告：基线参照不可用（{baseline_ref}），判定将标记为缺少可比数据",
               flush=True)
 
-    model_config: Dict[str, Any] = {
-        "hidden_dim": config.get("hidden_dim", 128),
-        "moe": dict(config.get("moe") or {}),
-        # v8 修复：policy/value 隐藏维必须透传，否则评测模型按代码默认
-        # （trunk 160 / net 256）构造 → 与 ckpt 形状不符 → 随机初始化评测（假阴性）。
-        "policy": dict(config.get("policy") or {}),
-        "value": dict(config.get("value") or {}),
-        "world_model": dict(config.get("world_model") or {}),
-        # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
-        # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划——见
-        # /tmp/opencode/v7_struct_b_kanchor.md 未决 #6）
-        "plan_anchor": dict(config.get("plan_anchor") or {}),
-    }
+    model_config: Dict[str, Any] = task_model_config(config)
 
     # ---- P0-A 评测安全前置：ckpt 加载 fail-fast（默认开；父进程 CPU 预检，干净加载零行为变化）----
     ckpt_load_summary: Optional[Dict[str, Any]] = None
