@@ -19,7 +19,7 @@
 | 9 | recovery 质量门 | 样本可用性六门 | `recovery_quality_gates.py`（纯函数 + CLI，schema 契约见模块 docstring） | 每门 False 即不可用 | summary JSON | ✅（fixture 全覆盖；真实数据待 P1-1 采集） |
 | 10 | LQR/动作饱和 | 饱和率 <5% 证据 | forensics `records` 列 `steer_cmd/steer_sat/lon_cmd/lon_sat`（d2）；聚合见配速矩阵 | 饱和率报告 | `runs/p1_0/d2_pacing_matrix.json` | ✅（d2 列已入；lqr 行在 P1-4 前按需加） |
 | 11 | progress/timeout | 配速/超时诊断 | 配速矩阵聚合（timeout 率、rc、`tracking_residual` 中位/均值） | 见 P1-0B 判据 | `runs/p1_0/d2_pacing_matrix.json` | ✅（聚合覆盖）；独立 JSON 待定 |
-| 12 | 三轨 reference 中轨 | plan/reference/actual 全链 | forensics 增 `ref_world` 列 | 三轨并存 | forensics JSON | ⏳ **顺延**（等配速矩阵跑完再动 `tools/diagnostics/*`，避免破坏批次一致性） |
+| 12 | 三轨 reference 中轨 | plan/reference/actual 全链 | forensics 增 `ref_world_head`（决策步：6 点×0.1 s 世界系参考，round 1e-4）+ `ref_arc_len`（全参考弧长；全 tracker 模式、additive） | 三轨并存；旧/新深比对除新列 0 差异 | forensics JSON | ✅ 完成（`3b39ee3`；8 测试 + d2/lqr 冒烟 72/72；内容强校验 max 5e-5；首点=首子步目标，偏移=ds0/5≤2.0 m） |
 
 ## 2. 回归基线（复跑对照）
 
@@ -34,4 +34,4 @@
 - 探针 7 的 `recovery` 配方在 P1-2 落地后必须补跑（A9），并把四计数表并入 P1-2 报告。
 - 探针 12 完成后，`plan/reference/actual` 三轨成为 P1-4A"执行一致性"探针的输入之一。
 
-**版本**：v1（2026-10-10；覆盖 commit `b0cbff5` 时点的工具集）。
+**版本**：v1.1（2026-10-11）：条目 12 完成（`3b39ee3`）；覆盖 commit `3b39ee3` 时点的工具集。
