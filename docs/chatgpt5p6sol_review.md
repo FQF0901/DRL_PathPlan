@@ -1,288 +1,402 @@
-我审阅了 coding agent 最新答复。整体判断是：**P1 v0.3 已经接近可执行，可以接受“三批 probes”裁剪，也可以接受 recovery 配方和 action-conditioned plan 方向。但正式开工前仍需修正 5 个实现细节，否则可能产生新的伪结论。**以下完全基于 deepseekv4p1_argue.md 中记录的代码核查和 P0 实测结果。
+我审阅了 deepseekv4p1_argue.md。总体上，P0 结论和 P1 v0.4 已经很扎实，但文档对上一轮“Action-conditioned plan”的收拢还没有真正完成：它仍锁定为“2D (ds,dθ) 强制作为 plan 首步，再生成后五步”，这与我们后来讨论的“PPO action 应能控制完整轨迹”并不等价。
 
-一、同意并锁定的事项
-1. Probes 分三批是合理的
+一、可以直接锁定的部分
+1. P0 结论可靠
 
-21 项全部前置会拖慢主线。coding agent 选择以下 A 批立即实施，覆盖了最危险的语义错误：
+现有实验证据足以支持：
 
-checkpoint 加载比例；
-plan/action 契约；
-时间索引；
-plan/reference/actual 三轨；
-LQR 饱和；
-progress/timeout；
-recovery 标签质量；
-loss 梯度与 optimizer 更新账本。
+当前模型的主要短板是 plan/action 质量，而非 LQR；
+repeat_action 只是 PPO 信用链工具，不适合部署；
+闭环重规划明显优于开环专家动作链；
+模型主要死于 off-road/压线，D2 主要死于 timeout，IDM 主要死于 collision；
+exact 不优于 LQR，说明“更准确执行坏计划”不会解决问题。
 
-这批足以保护 P1，不必等 B/C 批全部完成。
+这些结论可以停止反复讨论。
 
-2. Recovery 不能继续 specific_only
+2. P1-0 至 P1-3 基本可执行
 
-新增 recovery freeze recipe，训练 PlanHead fusion/trunk、primary 和有限的 experts/residual，同时冻结 encoder、mem、WM、router，方向正确。现有代码已经有 specific_only / trunk_only / all 三种范围，因此新增第四档工程风险可控。
+以下路线合理：
 
-3. Action-conditioned plan 作为首个 PPO 方案
+补测 rou64@e015 的 eval500；
+做 D2 配速 V1/V2/V3；
+上 A 批 probes；
+从 student 真实状态采 recovery；
+训练真实整段 recovery trajectory；
+加 LD 几何代理、引擎真值审计、曲率和进度约束；
+使用 R1/R2 检验 experts 是否应参与 recovery 学习。
+二、必须重新打开的分歧：P1-4 不能照当前 v0.4 直接实施
 
-保持 2D stochastic action 与现有 PPO log-prob、buffer、KL 兼容，并让采样 action 强制成为 plan 首步，再条件生成后五步，这是当前代码下最稳妥的信用链。12D 独立高斯暂不做。
+文档当前写的是：
 
-4. 起点模型补测后再定
+2D 采样动作强制为 plan 首步，PlanHead 根据 latent + z 生成其余五步。
 
-先跑 rou64@e015 的 eval500，并与 pri512@e020 做逐 episode paired，再选择 P1 起点。不能只凭 clean500 的 0.370 直接决定。
+这只能算弱 Action-conditioned plan。
 
-二、开工前必须修正的 5 点
-1. “从 LD 直接构造几何 loss”只能视为近似，不是真实 corridor loss
+它虽然比当前 A-hold 更接近部署链，但仍有两个根本问题。
 
-当前 LD 是稀疏车道线点集，并不能完整表达：
+1. 一个首步 (ds,dθ) 不能充分表达三秒规划意图
 
-drivable surface；
-复杂收费站和分叉的可行域； -完整道路边界；
-route corridor 宽度； -任意未来 pose 下的合法区域。
+相同首步动作可以对应：
 
-因此 P1-3 应明确拆成：
+保持车道；
+一秒后开始换道；
+缓慢减速后停车；
+穿过收费站后向中心收敛；
+先让行，再恢复速度。
 
-可微代理 loss
+如果后五步主要由 PlanHead 自己决定，PPO 的 sampled 2D action 对整条计划的控制权很弱。
 
-由 obs 中 LD 构造：
+形式上：
 
-到可见实线的最小距离； -跨线侧符号变化；
-plan 与局部车道方向夹角； -近场线段 margin。
-引擎真值
+Pt=fϕ(st,at)P_t=f_\phi(s_t,a_t)
 
-通过 rollout/forensics 计算：
+但如果：
 
-footprint 是否在 drivable surface；
-termination 同口径的连续线判定； -真实 route corridor violation；
-hard mining 权重和验收指标。
+∂Pt,2:6∂at≈0\frac{\partial P_{t,2:6}}{\partial a_t}\approx 0
 
-**不能把 LD-based proxy 命名为 drivable_footprint_loss，建议命名为 ld_line_margin_loss。**否则后续容易误以为网络已经接受完整道路边界监督。
+那么 PPO 虽然能计算正确的 log π(a|s)，却很难通过 ata_t 有效改善远期计划。
 
-另外，必须加入 LD 可用性 mask。收费站或拓扑变化处 LD 稀疏、槽位突变时，不能强行产生错误梯度。
+2. “plan[0] 等于 sampled action”不等于 PPO 控制完整 plan
 
-2. D2 配速 oracle 不能只缩放 ds
+当前网络已有 plan[0]=mu 类契约，但这只说明首点一致，不能证明：
 
-coding agent proposes --d2-ds-scale。如果只放大 ds 而保持 dθ 不变，则：
+sampled action 显著改变后续五步；
+action 能控制速度、横向偏移、制动时机和轨迹形状；
+PPO 能修复中后期逐渐恶化的 plan。
 
-κ=dθds\kappa = \frac{d\theta}{ds}
+而 P0 显示模型的 T_plan 通常不是第一个策略步立即出错，而是在闭环推进一段时间后逐渐恶化。只强化首点可能继续修不到核心问题。
 
-会下降，相当于同时改变速度和路径曲率。这测到的不是纯“配速上限”，而是“速度与几何共同变化”。
+三、建议把 P1-4 改成两级实施
+P1-4A：2D action-conditioned plan，仅作为因果烟测
 
-建议至少测试三种版本：
+可以保留当前方案，但降低定位：
 
-V1: ds *= s, dtheta 不变
-V2: ds *= s, dtheta *= s，近似保持曲率
-V3: 只修改 LQR reference speed，不修改几何 plan
+它是验证 PPO→PlanHead→LQR 信用链的最小实验，不是主性能方案。
 
+必须增加四个 probe：
 
-其中 V3 才最接近纯配速实验。若当前 LQR reference speed 直接由 ds/0.5s 推导，则需要增加独立 speed override，而不是只改 plan 几何。P0 已证明 d2 的 118 个 timeout 多数 route completion 很高，因此这个实验值得做，但必须避免速度和曲率混杂。
+后五步敏感性
 
-3. “P1 冻结 MoE”与 recovery 配方中训练 experts 存在表述冲突
+对同一状态改变 sampled action，记录：
 
-文档一处写 P1 不动 MoE，另一处建议 recovery recipe 训练 experts/residual。
+delta_plan_step_1
+delta_plan_steps_2_to_6
+delta_terminal_pose
+delta_curvature_profile
+delta_target_speed_profile
 
-建议明确定义：
 
-不改 MoE 架构、专家数、router 和负载均衡机制；
-recovery 阶段可以训练现有 experts/residual；
-router 保持冻结；
-primary 与 experts 使用不同 LR。
+要求后五步不能几乎不变。
 
-建议首个消融只做两档：
+有效控制维数
 
-R1: fusion + primary
-R2: fusion + primary + experts/residual
+在固定状态上采样不少于 256 个 2D action，计算完整计划的 PCA 或 Jacobian 敏感性。
 
+如果计划变化只集中在：
 
-如果 R2 没有显著优于 R1，则 recovery candidate 不训练 experts，避免专家吸收共享几何问题。
+首点；
+单一角度缩放；
+单一速度缩放；
 
-4. Recovery 样本不能按“失败前固定 2–4 秒”机械截取
+则 2D action 无法覆盖有意义的计划空间。
 
-P0 显示 T_plan 可能在第 120 或 295 个策略步才出现，且失败形成是渐进漂移。
+反事实单调性
 
-更合理的采样锚点是：
+例如：
 
-start = max(
-    T_plan - context_window,
-    T_cross - recovery_window,
-    first_low_margin_step
-)
+增大 ds → 终点纵向距离应总体增加
+增大 dtheta → 终点横向偏移方向应正确
 
 
-建议 recovery 数据分三类：
+不能出现符号反转或后五步抵消首步。
 
-prevention：首次 margin 下降但仍完全可恢复；
-correction：已偏离中心但仍在合法区域；
-late recovery：接近或已经压线。
+执行一致性
 
-训练配比建议优先：
+必须记录：
 
-prevention 50%
-correction 35%
-late recovery 15%
+sampled_action
+decoded_plan
+actual_LQR_reference
+actual_motion
 
 
-因为 late recovery 常存在多解、专家急动作和不可恢复状态，比例过高可能污染正常驾驶。
+确认 PPO 采样变量没有在后续被 mu、clipping 或 deterministic path 覆盖。
 
-每条 recovery 必须带：
+若这些 probe 不通过，P1-4A 应立即停止，不进入完整三 seed 训练。
 
-expert_recovered
-recovery_success_horizon
-min_margin_after_takeover
-route_progress_after_takeover
+P1-4B：Mode + low-dimensional plan latent，作为主性能方案
 
+建议 PPO action 定义为：
 
-专家接管后仍失败的样本不能作为正监督。
+at=(mt,zt)a_t=(m_t,z_t)
 
-5. 几何 loss 的梯度对齐不能只看 norm
+其中：
 
-coding agent 建议各项 gradient norm 控制在约 3–5 倍内，这可以作为起点，但不够。不同 loss 的梯度可能大小相近、方向却互相冲突。
+离散 mode
 
-应额外记录至少三组 cosine：
+首版不宜过多，建议 3–5 类：
 
-cos(grad_traj, grad_geometry)
-cos(grad_traj, grad_curvature)
-cos(grad_progress, grad_geometry)
+follow_route
+shift_left
+shift_right
+yield_or_decelerate
+stop
 
 
-若长期 < -0.3，说明目标存在明显冲突。例如 geometry loss 可能通过减小 ds 避免压线，而 progress loss 要求加速，从而产生 off-road→timeout 的失败置换。
+使用道路几何和 route legality mask，避免在不允许换道时采样换道模式。
 
-同时在固定 probe batch 上记录：
+连续 latent
 
-plan margin；
-progress；
-curvature； -第一步 action error； -六步 pose error。
+建议 4–6 维，表达：
 
-不能仅根据梯度范数调权重。
+target speed / speed delta
+terminal lateral offset
+braking timing
+longitudinal aggressiveness
+trajectory shape factors
 
-三、对 probes 计划的具体裁决
-A 批：全部批准，但补两个项目
 
-除 coding agent 已列的 8 项外，建议加入：
+Conditional PlanHead 输出完整：
 
-A9：freeze recipe 审计
+6 x (ds, dtheta)
 
-每个阶段输出：
 
-requires_grad parameter count
-optimizer parameter count
-nonzero-gradient parameter count
-actually-updated parameter count
+PPO 记录完整 joint log-prob：
 
+log⁡π(m,z∣s)=log⁡π(m∣s)+log⁡π(z∣s,m)\log\pi(m,z\mid s) = \log\pi(m\mid s)+\log\pi(z\mid s,m)
 
-尤其验证新增 recovery recipe：
+这才是一条真正的 trajectory macro-action。
 
-encoder/mem/WM/router 更新量严格为零；
-fusion/primary 确实更新；
-experts 是否按 R1/R2 配方变化。
-A10：geometry proxy coverage
+四、当前阶段不要直接做 GRPO
 
-记录每批次：
+你的多候选、反事实 rollout、组内比较方向适合作为长期架构，但当前 repo 还不具备直接上 GRPO 的基础。
 
-LD geometry valid ratio
-solid-line available ratio
-plan points covered by LD ratio
-loss-active sample ratio
+原因一：当前 WM 尚未证明能做反事实排序
 
+当前 WM：
 
-否则 ld_line_margin_loss 可能只在少数简单路段生效，但训练日志看起来正常。
+逐步 detach；
+主要训练 latent/ego/OD/LD 预测；
+没有验证周车对不同 ego trajectory 的响应；
+没有候选轨迹 pairwise ranking 精度；
+没有 unsafe false-negative 审计。
 
-B 批：同意排在首候选之前
+如果直接用 WM 对 G 条轨迹排序，policy 很可能学会利用 WM 偏差。
 
-尤其重要的是：
+原因二：Best-of-G 选择会改变行为策略概率
 
-BC action chain 与跨行 ego_world 对齐；
-history 反事实； -坐标 round-trip；
-WM action sensitivity；
-value calibration。
+如果：
 
-其中我建议将 跨行 ego_world 对齐提前到 P1-1 数据采集前。因为 recovery 轨迹将依赖跨时间 pose，如果这里仍有时间索引或坐标误差，新数据会整体被污染。
+从 policy 采 G 条
+→ scorer 选一条
+→ 执行选中轨迹
 
-C 批：同意推迟到 P2
 
-Encoder probe、WM horizon、MoE 路由等不会阻塞当前 plan-side 修复，可以后置。
+实际行为策略已不是单条原始 policy。不能直接拿选中候选原本的 log π 做标准 PPO，否则有 selection bias。
 
-四、收敛后的 P1 方案
-P1-0：证据和契约
-rou64@e015 跑 eval500，与 pri512 paired；
-D2 配速执行 V1/V2/V3，优先看 V3；
-完成 A 批 probes，加 freeze audit 和 geometry coverage；
-完成跨行 action/ego pose 对齐；
-固化 recovery schema 和质量门。
-退出条件
-起点模型明确；
-配速后的 teacher ceiling 有数字；
-action/plan/time/optimizer 契约全部 PASS；
-recovery 标签能验证专家确实恢复。
-P1-1：Recovery 数据
+原因三：当前首先要证明“完整 plan 可被 PPO 改善”
 
-存储：
+在多候选搜索之前，应先证明：
 
-student obs/history
-student plan
-actual trajectory
-expert recovery action/plan
-surface/legal-line/route labels
-T_plan/T_cross
-recovery outcome
-road class
+单条 sampled plan latent
+→ 完整计划
+→ LQR
+→ 闭环 reward
+→ PPO 更新
 
 
-按 prevention/correction/late 分类采样。
+确实能稳定提升性能。
 
-P1-2：Recovery BC
+五、GRPO/AlphaGo 路线应作为 P2/P3
 
-首轮两档：
+推荐渐进顺序：
 
-R1 = fusion + primary
-R2 = fusion + primary + existing experts/residual
+第一步：Best-of-G oracle gap
 
+固定 policy，对同一状态采 G 条计划，用真实 MetaDrive 分支 rollout 离线评价。
 
-共同设置：
+比较：
 
-router、encoder、mem、WM 冻结；
-recovery batch 占 20%–30%；
-时间衰减六步监督； -普通 BC anchor 防遗忘； -拒绝合成 traj6。
+single-sample performance
+best-of-4 oracle
+best-of-8 oracle
 
-先用 clean150 做 paired 筛选，再将胜者跑 eval500。
 
-P1-3：几何/曲率/进度联合 recipe
+如果 best-of-8 仅比单样本好 1–2pt，说明候选缺乏多样性，没必要开发复杂 scorer。
 
-使用：
+如果 oracle gap 达到 10–15pt，才说明搜索值得投入。
 
-ld_line_margin_loss，而非声称完整 drivable loss； -引擎真值用于 hard mining 和审计； -低速 curvature mask； -主罚 Δκ 和不可达曲率；
-progress/timeout loss；
-gradient norm 与 gradient cosine 联合校准。
+第二步：训练 candidate scorer
 
-必须报告失败类型是否从 off-road 转成 timeout 或 collision。
+用真实 simulator rollout 监督：
 
-P1-4：Action-conditioned plan PPO
+candidate return
+collision
+off-road
+route progress
+comfort
 
-启动门槛保持：
 
-监督模型至少达到 0.60； -最好达到 0.65；
-action-conditioned plan 的因果探针通过； -采样 action 确实改变最终执行 plan；
-PPO log-prob 只对应实际进入执行链的 2D action。
+评价：
 
-不满足门槛则不进入 PPO。
+pairwise ranking accuracy；
+Spearman correlation；
+unsafe false-negative rate；
+按 tollgate、roundabout 等 road class 分层。
+第三步：蒸馏搜索结果
 
-五、教师上限的最终判决规则
+先采用监督蒸馏：
 
-当前 D2=0.706 不足以证明可以靠监督超过 IDM。
+policy 生成 G 条
+→ simulator/scorer 选优
+→ 将优选 mode/latent 蒸馏回 policy
 
-建议明确：
 
-配速 V3 后 D2 ≥ 0.80：监督路径存在足够上限；
-0.75 ≤ D2 < 0.80：可追平 IDM，但最终超越需要 RL 或更强 recovery teacher；
-D2 < 0.75：当前教师/执行链不足，不能把 0.80 目标押在 BC 上；
-如果配速只提升 success、同时 collision/off-road 显著上升，则不算 ceiling 提升。
-六、最终意见
+这比直接把 LLM GRPO 搬进驾驶更容易验证。
 
-coding agent 的 P1 v0.3 可以批准，但应附加以下明确修改：
+第四步：Group-ranked policy improvement
 
-LD loss 定位为几何代理，不冒充完整道路可行域；
-D2 配速拆成几何缩放和独立速度 override，避免混淆；
-明确 P1“不改 MoE 架构”不等于“experts 永久冻结”；
-recovery 以 T_plan/低 margin 为锚，不机械截取终局前窗口；
-梯度校准同时看 norm 和 cosine；
-跨行 action/ego pose 对齐提前到采集前；
-新增 freeze audit 与 geometry coverage probe。
+最后才考虑：
 
-**剩余真正开放的分歧只有一个：配速修复后 D2 的实际 ceiling 是否足够。**其余实现方向已经基本收敛，可以在上述修改后进入 P1-0。
+候选级 group advantage；
+真实策略 step 的 Critic + GAE；
+absolute safety gate；
+group-relative objective。
+
+候选级 group advantage 不能代替真实时间步上的 GAE。
+
+六、对当前文档另外三点修订
+1. “P1 冻结 PPO scope”与 P1-4 冲突
+
+文档一方面写 P1 不动 PPO scope，另一方面 P1-4 又需要：
+
+新 action head；
+PlanHead 条件化；
+放开相关 PlanHead 参数；
+改 rollout/buffer/log-prob 契约。
+
+建议改成：
+
+P1-1 到 P1-3 不改 PPO scope；P1-4 建立独立 experimental scope，不修改历史 design scope 的语义。
+
+避免新方案悄悄污染旧配方。
+
+2. P1-4 的启动门槛不能只看 success 0.60–0.65
+
+还应要求：
+
+action-to-plan sensitivity PASS
+plan diversity PASS
+decoder reconstruction PASS
+executed-plan identity PASS
+safety projection rate < 5%
+clipping rate < 5%
+
+
+否则 PPO 可能在退化 action space 中训练。
+
+3. Recovery decoder 必须为后续 latent plan 留出覆盖空间
+
+如果 P1-2 使用强单模态均值监督，PlanHead 可能把相似场景的多个有效恢复方案平均成一条差轨迹。
+
+建议训练时至少保留：
+
+多模态 recovery 标签；
+Best-of-N 或 Winner-Takes-All 头；
+或按 coarse behavior mode 分组。
+
+否则 P1-4B 加 latent 时，decoder 本身可能已经 mode collapse。
+
+七、建议更新后的正式计划
+P1-0 至 P1-3
+
+按 v0.4 执行，仅增加：
+
+P1-2 数据中保留恢复行为 mode；
+PlanHead 预留 conditional interface；
+不要把 recovery 多解全部平均。
+P1-4A：2D 因果烟测
+
+目标不是超 IDM，而是验证：
+
+PPO sampled action
+→ 后五步计划明显改变
+→ LQR 实际执行
+→ reward 可归因
+
+
+只跑小规模 clean150、1 seed。
+
+通过才继续。
+
+P1-4B：Mode + latent full-plan PPO
+
+作为实际性能 candidate：
+
+mode K=3–5
+latent D=4–6
+decoder -> 6x2 action chain
+explicit arc integration
+LQR executes first 0.5s
+replan every 0.5s
+
+
+先冻结 decoder，只训练 mode/latent policy 和 value；随后根据 coverage 限制渐进解冻 decoder 尾层。
+
+P2：Best-of-G 与 scorer
+
+先做真实 simulator 的 oracle gap，再决定是否投入 learned WM ranking。
+
+P3：Group-ranked policy improvement
+
+在 scorer 可信、generator 有多样性后，再探索 group advantage + GAE，而不是现在直接做 GRPO。
+
+最终裁决
+
+Coding agent 的最新文档整体可以批准进入 P1-0，但 P1-4 尚未完成收拢。
+
+当前写法中的“2D action-conditioned plan”应该：
+
+保留为最小因果正确性实验；
+不应直接作为主性能方案；
+更不能视为最终轨迹级 PPO。
+
+主性能方向应调整为：
+
+PPO 采样 behavior mode + 低维 plan latent，条件解码完整 3 秒计划，LQR 只执行首 0.5 秒并持续重规划。
+
+而你提出的：
+
+多模态候选 → 反事实 rollout → 安全/价值评估 → 组内比较 + 时间级 GAE → 蒸馏
+
+应当成为明确的 P2/P3 目标。但在当前 WM 还没有候选排序证据、基础 PPO 轨迹信用链还未打通之前，不应直接跳过去。
+
+建议给 coding agent 的定稿指令是：
+
+批准 P1-0 至 P1-3 按 v0.4 实施。
+
+P1-4 重新拆分：
+
+P1-4A：
+2D action-conditioned plan 仅作因果烟测。
+必须验证 sampled action 对后五步计划、终点 pose、
+曲率和速度曲线具有足够敏感性。
+不满足则停止，不做完整训练。
+
+P1-4B：
+主性能方案改为 behavior mode + 4–6D plan latent。
+PPO 对 mode+latent 的 joint logprob 记账，
+conditional decoder 输出完整 6x2 计划，
+LQR 执行该计划首 0.5s，随后重规划。
+
+P2：
+先用 MetaDrive 真实分支 rollout 测 best-of-G oracle gap；
+只有候选多样性和 oracle gap 足够，才训练 candidate scorer。
+
+P3：
+scorer 的 pairwise ranking、unsafe false-negative 和分层指标
+通过后，再做 group-ranked policy improvement + GAE，
+不要直接照搬 LLM 原生 GRPO。
+
+
+这既保留了 coding agent 倾向的低风险渐进路线，也真正吸收了你提出的“轨迹是 macro-action、多模态反事实搜索、候选级和时间级双层信用”框架。
