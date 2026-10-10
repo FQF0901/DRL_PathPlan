@@ -367,6 +367,8 @@ class LqrTracker(BasePolicy):
     纵向：参考点速度的前视比例控制 ``a = speed_gain·(v_ref - v)``，经
     ``accel/brake_action_scale`` 归一化为油门/刹车动作。参考短于 ``Ld`` 时预瞄点**钳制在
     参考末端**：`0.5 s` 单步参考（5 点）因此退化为"瞄准参考终点"的 4–5 m 前视控制。
+    ``ref_speed_scale`` 只缩放参考速度 ``v_ref``（几何 plan/游标不动；默认 1.0 零行为变化），
+    用于 P1-0B 的 V3 配速实验（§7.10-A3）。
 
     ``set_reference`` 每次策略步（0.5 s）调用一次：``(N,2)`` 动作或 ``(N,3)`` 自车系位姿。
 
@@ -402,6 +404,7 @@ class LqrTracker(BasePolicy):
         brake_action_scale: float = 3.0,
         reference_dt: float = 0.5,
         reference_hz: int = 10,
+        ref_speed_scale: float = 1.0,
     ) -> None:
         """
         Args:
@@ -418,6 +421,8 @@ class LqrTracker(BasePolicy):
             speed_gain: 纵向速度误差比例增益（1/s）。
             accel_action_scale / brake_action_scale: 加速度/减速度 → 动作的归一化尺度（m/s²）。
             reference_dt / reference_hz: 参考动作步长与子步频率（与 :func:`interpolate` 一致）。
+            ref_speed_scale: 参考速度缩放系数（V3 配速，§7.10-A3）；只乘 ``v_ref``，
+                几何参考与游标不变；默认 1.0 = 逐位不变。
         """
         super().__init__(control_object=control_object, random_seed=random_seed, config=config)
         self.wheelbase = float(wheelbase) if wheelbase is not None else self._infer_wheelbase(control_object)
@@ -442,6 +447,7 @@ class LqrTracker(BasePolicy):
         self.brake_action_scale = float(brake_action_scale)
         self.reference_dt = float(reference_dt)
         self.reference_hz = int(reference_hz)
+        self.ref_speed_scale = float(ref_speed_scale)
 
         assert self.wheelbase > 0.0, "wheelbase must be positive"
         assert self.max_steer_angle_rad > 0.0, "max_steer_angle_rad must be positive"
@@ -451,6 +457,7 @@ class LqrTracker(BasePolicy):
         assert 0.0 < self.accel_action_scale and 0.0 < self.brake_action_scale
         assert 0.0 <= self.reschedule_dv
         assert self.riccati_iters >= 1
+        assert self.ref_speed_scale > 0.0
 
         self._ref_world: Optional[np.ndarray] = None  # (N,3) 世界系
         self._ref_arc: Optional[np.ndarray] = None  # (N,) 距原点的累计弧长
@@ -485,7 +492,7 @@ class LqrTracker(BasePolicy):
         dt_sub = 1.0 / float(self.reference_hz)
         prev = np.vstack([base[:2], self._ref_world[:-1, :2]])
         chords = np.linalg.norm(self._ref_world[:, :2] - prev, axis=1)
-        self._ref_speed = chords / dt_sub
+        self._ref_speed = chords / dt_sub * self.ref_speed_scale  # 默认 ×1.0 = 逐位不变
         self._ref_arc = np.cumsum(chords)
         self._cursor = 0
         return self._ref_world

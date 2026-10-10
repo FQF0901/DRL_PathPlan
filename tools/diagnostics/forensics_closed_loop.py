@@ -20,6 +20,10 @@
 - ``d2``            : 当前 expert 动作 repeat 6 步（P0-B/D2）：每策略步对现状态做专家
                       **空问**（不注册 engine，只调 ``act()``；与 ``tools/dagger_collect``
                       采集侧同口径）→ ``(ds,dθ)`` → ``np.repeat(·, 6)`` → 交同一 LQR。
+                      P1-0B 配速（§7.10-A3）：``--d2-ds-scale``（V1：ds×s，dθ 不变）/
+                      ``--d2-ds-dth-scale``（V2：ds、dθ 同乘 s）/ ``--d2-v-scale``
+                      （V3：仅缩放 LQR 参考速度 ref_speed_scale，几何 plan 不动）；
+                      V1 与 V2 不能同时非 1.0（argparse 报错）。
 
 新增参数
 --------
@@ -184,6 +188,9 @@ WINDOW_POLICIES = 6
 FOOTPRINT_MAX_GAP_M = 1.0
 #: T_track 显式阈值：0.5 s 窗口内同时刻最大 xy 偏差（m）超过即"明显偏离仍可行的计划"
 TRACK_RESIDUAL_THRESHOLD_M = 0.5
+#: d2 命令饱和阈值（§7.10-A3）：归一化命令 |·| ≥ 0.99 视为饱和
+#: （1.0 = max_steer_angle / 满油门刹车；|steer|≥0.99 ⇔ |转角|≥0.99×max_steer_angle）
+CONTROL_SATURATION_THRESHOLD = 0.99
 
 
 def expand_plan_poses(plan, base_pose, *, max_gap_m: float = FOOTPRINT_MAX_GAP_M) -> np.ndarray:
@@ -1131,11 +1138,30 @@ class D2RepeatExpertController(InstrumentedCkpt):
     副作用）→ ``[steer, throttle]`` → ``expert_action_to_ds_dtheta``（与
     ``tools/dagger_collect`` 采集侧同口径，即 ``pipeline.trainer.expand_policy_action``
     的解析逆映射）→ ``np.repeat(·, 6)`` → 交同一 LQR。
+
+    配速（§7.10-A3，默认 1.0 = 现状）：V1 ``ds_scale`` 只缩放专家动作 ds；V2
+    ``ds_dth_scale`` 同缩放 ds 与 dθ（近似保持曲率）；V3 不在此处——见 main 把
+    ``--d2-v-scale`` 并入 ``tracker_json["ref_speed_scale"]``（仅缩放 LQR 参考速度）。
     """
 
-    def __init__(self, env, spec, task, *, tracker_json=None, expert_kind="pure_pursuit"):
+    #: run_episode 记录扩展（§7.10-A3）：每步 records 补 steer/lon 命令值 + 饱和标志
+    records_control_saturation = True
+
+    def __init__(
+        self,
+        env,
+        spec,
+        task,
+        *,
+        tracker_json=None,
+        expert_kind="pure_pursuit",
+        ds_scale: float = 1.0,
+        ds_dth_scale: float = 1.0,
+    ):
         super().__init__(env, spec, task, tracker_json=tracker_json, load_model=False)
         self.expert_kind = str(expert_kind)
+        self.ds_scale = float(ds_scale)
+        self.ds_dth_scale = float(ds_dth_scale)
         self.labeler = None
 
     def bind(self, env) -> None:
@@ -1153,8 +1179,14 @@ class D2RepeatExpertController(InstrumentedCkpt):
         if self._steps % self.decision_interval == 0 and self.labeler is not None:
             labeled = self.labeler.label(ego)
             action = np.asarray(labeled["action"], dtype=np.float64).reshape(-1)[:2]
+            # 配速 V1/V2（§7.10-A3）：先缩放专家动作再 repeat（V2 同时缩放 dθ）
+            if self.ds_dth_scale != 1.0:
+                action = action * self.ds_dth_scale
+            elif self.ds_scale != 1.0:
+                action = np.array(action, dtype=np.float64, copy=True)
+                action[0] *= self.ds_scale
             plan = np.repeat(action[None, :], WINDOW_POLICIES, axis=0)
-            rec["mu"] = [float(action[0]), float(action[1])]
+            rec["mu"] = [float(plan[0, 0]), float(plan[0, 1])]
             rec["plan"] = [[float(a), float(b)] for a, b in plan]
             rec["reference"] = "expert_repeat"
             rec["privileged"] = True
@@ -1168,6 +1200,31 @@ class D2RepeatExpertController(InstrumentedCkpt):
         self._emit(rec, ref_window)
         self.current = rec
         return [0.0, 0.0]
+
+
+def _control_columns(trk: dict) -> dict:
+    """d2 每步记录扩展（§7.10-A3）：命令值 + 饱和标志；取不到 → None（不报错）。
+
+    来源 = tracker 输出（``steer_applied`` / ``throttle_applied``，即 LqrTracker 每 env step
+    实测 ``[steer, throttle]``，归一化 [-1,1]，与 MetaDrive 车辆 ``steering`` /
+    ``throttle_brake`` 同量纲）。``|steer| ≥ 0.99`` ⇔ ``|前轮转角| ≥ 0.99 × max_steer_angle``。
+    """
+    fields = {"steer_cmd": None, "steer_sat": None, "lon_cmd": None, "lon_sat": None}
+    for raw, cmd_key, sat_key in (
+        (trk.get("steer_applied"), "steer_cmd", "steer_sat"),
+        (trk.get("throttle_applied"), "lon_cmd", "lon_sat"),
+    ):
+        if raw is None:
+            continue
+        try:
+            command = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(command):
+            continue
+        fields[cmd_key] = command
+        fields[sat_key] = bool(abs(command) >= CONTROL_SATURATION_THRESHOLD)
+    return fields
 
 
 def run_episode(env, spec, controller, *, max_steps: int = 1000):
@@ -1209,6 +1266,11 @@ def run_episode(env, spec, controller, *, max_steps: int = 1000):
         row.update({k: _wrap(v) for k, v in trk.items()})
         if controller.records:
             prev = controller.records[-1]
+            if getattr(controller, "records_control_saturation", False):
+                # §7.10-A3：命令值 + 饱和标志（d2 专用；取不到 → None，不报错）
+                controls = _control_columns(trk)
+                row.update(controls)
+                prev.update(controls)
             prev["env_after"] = row
             prev["steer"] = row.get("steer")
         controller.steps.append(row)
@@ -1248,6 +1310,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--speed-mode", default="limit", choices=("hold", "limit"))
     parser.add_argument("--dtheta-gain", type=float, default=1.0, help="诊断：放大 plan 的转向通道")
+    parser.add_argument(
+        "--d2-ds-scale",
+        type=float,
+        default=1.0,
+        help="d2 配速 V1（§7.10-A3）：每步专家动作 ds×s（dθ 不变）；与 --d2-ds-dth-scale 不能同时非 1.0",
+    )
+    parser.add_argument(
+        "--d2-ds-dth-scale",
+        type=float,
+        default=1.0,
+        help="d2 配速 V2（§7.10-A3）：每步专家动作 ds 与 dθ 同乘 s（近似保持曲率）",
+    )
+    parser.add_argument(
+        "--d2-v-scale",
+        type=float,
+        default=1.0,
+        help="d2 配速 V3（§7.10-A3）：仅缩放 LQR 参考速度（ref_speed_scale；几何 plan 不动）",
+    )
     parser.add_argument("--speed-cap", type=float, default=8.0)
     parser.add_argument("--spec", default=SPEC)
     parser.add_argument("--ckpt", default=CKPT)
@@ -1279,6 +1359,14 @@ def _analyze_episode(controller, outcome) -> dict:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.d2_ds_scale != 1.0 and args.d2_ds_dth_scale != 1.0:
+        parser.error(
+            "--d2-ds-scale（V1）与 --d2-ds-dth-scale（V2）互斥：不能同时非 1.0（§7.10-A3）"
+        )
+    if args.mode != "d2" and (
+        args.d2_ds_scale != 1.0 or args.d2_ds_dth_scale != 1.0 or args.d2_v_scale != 1.0
+    ):
+        print(f"[forensics] 警告：--d2-*-scale 仅对 d2 模式生效，{args.mode} 忽略", flush=True)
 
     from pipeline import eval_runner as ev
     from pipeline.gl_runtime import ensure_gl_library_path
@@ -1303,6 +1391,10 @@ def main(argv=None) -> int:
         "eval_reference": args.reference,
     }
     tracker_json = json.loads(args.tracker_json)
+    if args.mode == "d2" and args.d2_v_scale != 1.0:
+        # V3：最小侵入传参——并入 tracker_json（InstrumentedCkpt.bind 用它构造 LqrTracker）；
+        # 默认 1.0 不并入 → 报告与行为逐位不变
+        tracker_json["ref_speed_scale"] = float(args.d2_v_scale)
     if args.reference != "plan" and args.mode not in ("lqr", "lqr_gain", "exact"):
         print(f"[forensics] 警告：--reference={args.reference} 仅对 lqr/lqr_gain/exact 生效，{args.mode} 忽略", flush=True)
 
@@ -1356,7 +1448,10 @@ def main(argv=None) -> int:
                     controller = LanePlanController(env, spec, task, tracker_json=tracker_json,
                                                     speed_mode=args.speed_mode, speed_cap=args.speed_cap)
                 elif args.mode == "d2":
-                    controller = D2RepeatExpertController(env, spec, task, tracker_json=tracker_json)
+                    controller = D2RepeatExpertController(
+                        env, spec, task, tracker_json=tracker_json,
+                        ds_scale=args.d2_ds_scale, ds_dth_scale=args.d2_ds_dth_scale,
+                    )
                 else:
                     controller = InstrumentedCkpt(env, spec, task, tracker_json=tracker_json,
                                                    dtheta_gain=args.dtheta_gain,
