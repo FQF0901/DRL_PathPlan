@@ -95,6 +95,7 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 - **2026-10-09 深夜**：审计工具扩展完成（fix-13：`d1`/`d2`/`--reference` + footprint/四时间戳/层级分类；CPU 单测 27 passed；smoke16 全 10 模式跑通）。**P0 三件套全部就绪**；顺手修复 `tools/diagnostics/*` 的 `_ROOT` off-by-one（直接调用恢复）。矩阵 runner 已备：`.slim/deepwork/s1_audit/run_matrix.sh`（等 GPU 空窗；按行切 config/model.yaml）。**
 - **2026-10-10（收官）**：P0 执行全链完成——排摸收尾（stg3 重跑，178/178 干净加载）+ 矩阵 11 行 × 500 eps + 双口径 6 评测 + s11 v7 双口径；**fail-fast 两次拦下静默错评**（stg3 `spatial` 漏传，已修 `08582f2`；历史 A3 假阴性背景）；laneplan 参考 bug 修复（`5e6e1b3`：0.002→0.442）；d1 确认为真实结果；**clean500 确认**（rou64 0.370 / pri512 0.334 / attn2 0.304 / base 0.292）；**组合臂 C-N1 负交互被拒**（best 0.213 < max 单因子 0.347）。**审计报告与排摸收官见 §5/§6；P1 计划见 §7。**
 - **2026-10-10 晚（round-3）**：ChatGPT 全面审阅（1115 行）——接受 P0 判读（接口非首瓶颈、plan 质量为核心、A-hold 记账≠质量）；**反驳我方 P1 顺序**并给出"P1-0 契约 → recovery → 整段监督 → 几何/曲率 → 轨迹级 PPO"重排；我方**部分接受 + 两项反提案**（配速证据、"12D 非易"及三选反提案）→ §7 v0.2 / §7.6；timeout 配速分析已并入 §5.6。
+- **2026-10-10 深夜（round-4）**：ChatGPT 二次审阅（940 行：P1 v0.2 修正 + 21 项契约探针提案）——**修正 G1（拆分 diagnosis/ceiling；ceiling 未满足）**；要求起点先补 rou64@e015 eval500 + paired；recovery 放开共享 plan 训练范围；P1-4 收敛为 **action-conditioned plan**；新增 D2 配速 oracle 与探针体系。我方回应与**可行性排摸**见 §7.7（含：`road_edge_distance_from_ctx` ctx 依赖证实、phase3 已有三档 freeze + `action_chain_source` 钩子、action↔traj6 逐位一致已核、配速补丁落点已核）→ §7 v0.3。
 
 ---
 
@@ -327,7 +328,7 @@ laneplan  fail279: cls{plan54, none109, anomaly116} factors{plan134, anomaly116}
 ### 5.5 P1 结论摘要（处方与验收；实施细节见 §7）
 
 - 处方（计划侧）：**DAgger 真实 recovery 轨迹**（失败前 2–4s、整段 6 点恢复计划监督、替换常量外推 traj6）+ **几何监督**（节点间插值 footprint / corridor violation / min margin，rollout 期起）+ **曲率/Δ曲率平滑**；**不重定义部署口径**。
-- 验收锚点：d2=0.706 / IDM=0.756；**G1' 已满足**（"明确主要损失层"）；G2 追平（3 seeds 平均 ≥0.74、off-road −30%）；G3 超越（≥0.80，目标带 0.82–0.85；paired 显著、clean500+eval500 双集）。
+- 验收锚点：d2=0.706 / IDM=0.756；**G1 拆分（round-4 修正）**：G1-diagnosis ✅（主要损失层已明确）；**G1-ceiling ❌（尚无任何已验证链 ≥0.756；最高可执行 = d2 0.706）**——"超越 IDM 的路径"未被证明，须由 配速修复 / 更强教师 / RL 超教师 三者之一建立；G2 追平（3 seeds 平均 ≥0.74、off-road −30%）；G3 超越（≥0.80，目标带 0.82–0.85；paired 显著、clean500+eval500 双集）。
 
 ### 5.6 限制与未完成
 
@@ -426,7 +427,7 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 
 ---
 
-## 7. P1 计划 v0.2（吸收 ChatGPT round-3 审阅；待拍板）
+## 7. P1 计划 v0.3（吸收 round-3/round-4 审阅；待拍板）
 
 ### 7.1 原则（含风险自曝）
 
@@ -451,10 +452,10 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 
 ### 7.4 决策点（待用户/双方）
 
-1. **P1 起点模型**：pri512（双集确认）还是 rou64（clean500 最高）？（组合已排除）
+1. **P1 起点模型**：pri512（双集确认）还是 rou64（clean500 最高）？——**先补 rou64@e015 eval500 + 同集 paired（§7.7-A2）再定**；组合已排除。
 2. **数据池**：现有 dagger r1/r2/r3（500×3）？加难例池（tollgate/roundabout 定向）？隔离断言沿用 fail-closed。
 3. **几何真值**：三项分解（surface/legal/route）用 rollout 期监督（建议）还是投资新数据版本？
-4. **P1-4 选型**：低维噪声解码器（建议）/ action-conditioned plan / 12D——请 round-3 评估"探索能力"后再定（§7.6-②）。
+4. **P1-4 选型**：**双方已收敛为 action-conditioned plan（round-4，§7.7-A7）**；低维噪声解码器为第二候选；待最终确认。
 5. **配速修复范围**：仅在参考构造侧（推荐先做）还是触及 LQR/速度策略？
 6. **验收口径**：升级版 gates（mean≥0.80、worst≥0.77、bootstrap LB>0、McNemar……）确认？最终声明是否补 5 seeds？
 7. **起步**：按 §7.3 顺序（已接受重排）——如无异议即按此执行（待"开工"指令）。
@@ -481,6 +482,39 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 - ⓒ 12D 联合高斯（最后备选）。
 
 **补证（供 round-3 框架）**：s11 双口径 plan 0.646 > repeat 0.418——"A-hold 解决记账、不解决质量"在跨版本数据上同样成立；且 s11 已含 DAgger+RL，P1-4 若走"整链重跑"需把时间盒计入（每链 ~3h/seed + 评测）。
+
+### 7.7 对 round-4 的回应与可行性排摸（2026-10-10 晚）
+
+**A. 接受与修正（逐条）**
+
+1. **G1 拆分——接受（已写入 §5.5）**：G1-diagnosis ✅ vs **G1-ceiling ❌（未证明存在 ≥0.756 的可执行链）**；我方原"G1' 已满足"仅是诊断门，认账。
+2. **起点模型——接受"补测再定"**：已核实 **rou64 没有 eval500 评测**（现有：clean150×4 + clean500×2）。P1-0 补 `rou64@e015 on eval500` + `vs pri512@e020` 同集 paired；若 rou64 在 eval500 稳定领先则用它，否则用证据更完整的 pri512。不再训练新组合臂。
+3. **Recovery 可训范围——接受"不能 specific-only"；可行性已核**：代码里 phase3 已有三档 freeze（`specific_only` / `trunk_only`=安全配方（训共享主干：encoders/mem/fusion/norm/ego_next/primary/policy；冻 WM/value/experts/router/锚头）/ `all`），且 **`action_chain_source`（新 dagger 行用真实教师链的钩子）与 `losses.bias_calib` 已存在**。⇒ 所需 = **新增第四档 "recovery" 配方**：训 plan_head fusion/trunk + primary（低 LR）± experts/residual，冻 encoder/mem/WM/router/锚头——比 `trunk_only` 更保守、比 `specific_only` 更对症；工程量小（冻结清单 + LR 分组）。混采 20–30% + anchor 防遗忘，均接受。
+4. **时间衰减 6 步权重（1.00/0.80/0.60/0.40/0.25/0.15）——接受**（loss 加权即可）。
+5. **可微几何——接受其判断，并补一条更便宜的路径**：代码复核证实 **`road_edge_distance_from_ctx` 只读 step_ctx（当前状态），不能查任意未来 pose**（其警告成立）。但 **obs 里已有 `ld`（车道线采样点+线型）与 `static` 通道** ⇒ "plan 位姿 ↔ 车道线点集/实线类型"的 margin/越线损失**可直接由输入张量构造（对 plan 位姿可微、无需新标签、任意批次可用）**。第一版 = **obs 近似可微 loss + 引擎级 forensics 标签（审计 / hard-mining / 离线校准）双轨**；纯离线标签方案作为第二轨的正式化。
+6. **曲率条件化（低速 mask、主罚 Δκ、收费站/环岛条件阈值）——接受**。
+7. **P1-4 选型——双方收敛为 `action-conditioned plan` 第一版**（2D 采样动作强制为 plan 首步、PlanHead 由 latent+z 生成其余 5 步），低维噪声解码器作第二候选，12D 暂不做。**可行性注记**：执行侧 `plan[0]=mu` 已存在（评测参考构造）；训练侧需让 PlanHead 条件化于采样动作 + Stage C 放开 plan-head 相应部分（**与 #3 的冻结范围改动耦合，需一起设计**）。门槛：监督阶段先显著超过 0.37（最好 0.60–0.65）再上 PPO——接受。
+8. **D2 配速 oracle——接受；可行性已核**：d2 参考 = repeat(expert (ds,dθ))，LQR 参考速度 ≈ ds/0.5s（轨迹字段 `lqr_ref_speed_mps` 即此）⇒ 加 `--d2-ds-scale`（缩放 ds）即可做配速 oracle；`--speed-cap 8.0` 只作用于 expert 基线驱动。工程 ~20 行。
+9. **教师上限裁决逻辑（配速后 D2 仍 <0.80 → 承认监督上限不足、须 RL 超教师）——接受**。
+
+**B. 对"契约探针"提案（21 项 + health_report）的可行性分级（我方裁剪建议）**
+
+总评：方向正确（A3/stg3 两次静默错评正是这类问题）；但 21 项是**未计成本的大工程**。裁剪为三批、每项 ≤0.5 天：
+
+- **A 批（立即，随 P1-0）**：①checkpoint 契约升级——三计数 fail-fast 已有，**补"loaded ratio / bytes ratio + 模块级加载比例"**；②plan/action 契约断言（1% 抽样：`plan[0]==mu`、`arc_step` 一致、repeat 每步相同、单位/裁剪/dt 一致）；③时间索引断言 + **恒速合成 episode 单测**（ds=5, dθ=0 → 6 步 ~30m）；④plan/reference/actual **三轨并记**（forensics 已有两轨，补 reference 中轨）；⑤LQR 饱和 hook；⑥**progress/timeout 探针（与 D2 配速 oracle 同批，性价比最高）**；⑦recovery 标签质量 hook；⑧loss 梯度 / optimizer 更新账本（现有 grad probe 扩"optimizer 是否真含该参数"）。
+- **B 批（首候选前）**：坐标 round-trip（±π/末端重复点/无效历史边界）；history 反事实（不重训直接做）；WM action-sensitivity（有限差分）；value 校准；**BC action 链 vs 后续行 `ego_world` 跨行对齐**（同源派生已核，跨行真值对齐补做）。
+- **C 批（P2 模块裁决前）**：encoder 线性 probe；WM horizon 分层漂移；MoE 路由探针；**road-semantics 一致性矩阵**（≥10k pose、disagreement <0.5% 门槛——接受）。
+- `health_report.json`：采纳骨架（我们已有 metrics/monitoring/guard/forensics，填充即可）。
+
+**已提前完成 / 已核实**：
+- checkpoint 三计数 fail-fast（两次实战拦截 stg3-spatial / 历史 A3 背景）；
+- **"top-5 隐藏风险 #1" 已核**：主数据 **action ↔ traj6 逐位一致**（3000 行抽样 max 偏差 <5e-5 m，同源派生）→ 训练标签对自洽 ✓；剩余为跨行真实位姿对齐（B 批）；
+- `road_edge_distance_from_ctx` 的 ctx 依赖已核（其警告成立）；
+- `plan[0]=mu`、A-hold、s11 跨版本证据均已完整记录。
+
+**C. P1 v0.3 变更点（并入 §7.2/§7.4）**：P1-0 增 rou64@e015 eval500 + paired、D2 配速 oracle、A 批探针；P1-1/2 增 `recovery` 冻结配方 + 时间衰减权重 + 混采/ anchor；P1-3 改"obs 可微 + 引擎标签"双轨；P1-4 定为 action-conditioned plan（门槛 0.60–0.65）；G1 拆分写入。
+
+**D. 剩余分歧（待其确认）**：①教师上限（D2 配速后裁决）；②`recovery` 冻结配方的具体清单（我方：fusion/primary±experts，冻 encoder/mem/WM/router/锚头）；③探针裁剪（21 → 三批，A 批随 P1-0）。
 
 ---
 
