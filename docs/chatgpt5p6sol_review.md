@@ -1,402 +1,468 @@
-我审阅了 deepseekv4p1_argue.md。总体上，P0 结论和 P1 v0.4 已经很扎实，但文档对上一轮“Action-conditioned plan”的收拢还没有真正完成：它仍锁定为“2D (ds,dθ) 强制作为 plan 首步，再生成后五步”，这与我们后来讨论的“PPO action 应能控制完整轨迹”并不等价。
+我审阅了最新 deepseekv4p1_argue.md。当前已经足够锁定 P1-0 至 P1-3，但不应把 P1-4B 的 mode+latent PPO 一并视为已批准实施。它应保留为条件分支，等待监督阶段结果和因果探针决定。
 
-一、可以直接锁定的部分
-1. P0 结论可靠
+一、总体结论
+可以锁定
+先跑 rou64 eval500，确定 P1 起点。
+完成 D2 配速 V1/V2/V3，裁决监督上限。
+完成 A 批正确性 probes。
+基于真实 student state 采 recovery 数据。
+使用真实六步 recovery 监督，停止使用合成 traj6。
+Recovery 训练开放 PlanHead fusion/primary，并对 experts 做 R1/R2 消融。
+使用 LD 几何代理、曲率和 progress 联合训练，同时用引擎几何做审计与 hard mining。
+所有候选先 clean150 筛选，再 eval500，最终补三 seed。
+暂不锁定实施
+P1-4B 的 categorical mode + 4–6D latent PPO；
+重新启用 K-anchor；
+GRPO、Best-of-G；
+WM/MoE 架构对照。
 
-现有实验证据足以支持：
+原因是当前监督模型只有约 0.33–0.37，上述模块会同时改变表示、动作分布、buffer、log-prob、KL 和执行链，归因风险过高。仓库已有 K-anchor 失败史，虽然存在 obs、冻结范围等混杂，但目前也没有正向证据。
 
-当前模型的主要短板是 plan/action 质量，而非 LQR；
-repeat_action 只是 PPO 信用链工具，不适合部署；
-闭环重规划明显优于开环专家动作链；
-模型主要死于 off-road/压线，D2 主要死于 timeout，IDM 主要死于 collision；
-exact 不优于 LQR，说明“更准确执行坏计划”不会解决问题。
+二、对 v0.5 的关键修订
+1. P1-4 拆成“方案设计”和“实施授权”
+现在允许实施：4A 因果烟测
 
-这些结论可以停止反复讨论。
+4A 只做最小 action-conditioned plan：
 
-2. P1-0 至 P1-3 基本可执行
+sampled 2D action
+→ 强制成为 plan[0]
+→ 作为显式条件输入后五步生成
+→ 六步计划进入 LQR
 
-以下路线合理：
 
-补测 rou64@e015 的 eval500；
-做 D2 配速 V1/V2/V3；
-上 A 批 probes；
-从 student 真实状态采 recovery；
-训练真实整段 recovery trajectory；
-加 LD 几何代理、引擎真值审计、曲率和进度约束；
-使用 R1/R2 检验 experts 是否应参与 recovery 学习。
-二、必须重新打开的分歧：P1-4 不能照当前 v0.4 直接实施
+目的不是提升性能，而是验证：
 
-文档当前写的是：
+后五步是否真的受 action 控制；
+尾段是否对横向误差和航向误差有反馈；
+sampled action 是否贯穿 plan、tracker reference 和实际运动；
+条件化后是否仍保持 BC 基本性能。
+暂不实施：4B mode+latent PPO
 
-2D 采样动作强制为 plan 首步，PlanHead 根据 latent + z 生成其余五步。
+只有同时满足以下条件才授权开发：
 
-这只能算弱 Action-conditioned plan。
+P1-2/3 监督模型 eval500 ≥ 0.60，最好 ≥ 0.65；
+4A 四类因果探针全部通过；
+D2 V3 或其他可执行教师链证明存在 ≥0.75 的上限；
+K-anchor v8 重拟合 canary 不低于相同起点模型；
+action saturation、LQR saturation 均低于 5%；
+recovery mode 标签具有稳定可分性。
 
-它虽然比当前 A-hold 更接近部署链，但仍有两个根本问题。
+任何一项不满足，4B 停止，不因为“代码已有基础”而继续。
 
-1. 一个首步 (ds,dθ) 不能充分表达三秒规划意图
+2. Mode 语义暂不拍板
 
-相同首步动作可以对应：
+coding agent 建议“横向离散形状 + 纵向连续速度”，方向合理，但当前不应立刻固化为 PPO action space。
 
-保持车道；
-一秒后开始换道；
-缓慢减速后停车；
-穿过收费站后向中心收敛；
-先让行，再恢复速度。
+P1-1/2 只保留用于分析的标签，例如：
 
-如果后五步主要由 PlanHead 自己决定，PPO 的 sampled 2D action 对整条计划的控制权很弱。
+keep_lane
+left_shift
+right_shift
+left_curve
+right_curve
+merge
+turnaround_or_complex
 
-形式上：
 
-Pt=fϕ(st,at)P_t=f_\phi(s_t,a_t)
+先检查：
 
-但如果：
+类别占比；
+类内轨迹方差；
+类间 ADE；
+balanced accuracy；
+tollgate、merge、roundabout 的覆盖率；
+mode 在相邻策略步的切换率。
 
-∂Pt,2:6∂at≈0\frac{\partial P_{t,2:6}}{\partial a_t}\approx 0
+如果 balanced accuracy 只在 0.47–0.53 左右，不能直接推断它适合做 RL 离散动作。必须同时证明类别对闭环行为具有因果意义，而非仅是轨迹聚类。
 
-那么 PPO 虽然能计算正确的 log π(a|s)，却很难通过 ata_t 有效改善远期计划。
+三、锁定后的实施方案
+P1-0：基线、上限与正确性契约
+工作项
+P1-0A：确定模型起点
 
-2. “plan[0] 等于 sampled action”不等于 PPO 控制完整 plan
+运行：
 
-当前网络已有 plan[0]=mu 类契约，但这只说明首点一致，不能证明：
+rou64@e015 on eval500
+pri512@e020 on the same eval500
+paired McNemar + episode-level delta
 
-sampled action 显著改变后续五步；
-action 能控制速度、横向偏移、制动时机和轨迹形状；
-PPO 能修复中后期逐渐恶化的 plan。
 
-而 P0 显示模型的 T_plan 通常不是第一个策略步立即出错，而是在闭环推进一段时间后逐渐恶化。只强化首点可能继续修不到核心问题。
+选择规则：
 
-三、建议把 P1-4 改成两级实施
-P1-4A：2D action-conditioned plan，仅作为因果烟测
+rou64 success 高至少 2pt，且 paired 胜出、off-road 不恶化，选择 rou64；
+差异小于 2pt 或结论不稳定，选择 pri512，因为其双集和审计证据更完整；
+不再训练 pri512+rou64 组合，组合负交互已经证实。
+P1-0B：D2 配速 V1/V2/V3
 
-可以保留当前方案，但降低定位：
+必须同时运行：
 
-它是验证 PPO→PlanHead→LQR 信用链的最小实验，不是主性能方案。
+V1：ds *= scale，dtheta 不变；
+V2：ds *= scale，dtheta *= scale，近似保持曲率；
+V3：几何 plan 不变，仅缩放 LQR v_ref。
 
-必须增加四个 probe：
+建议 scale：
 
-后五步敏感性
+0.90, 1.00, 1.05, 1.10, 1.15
 
-对同一状态改变 sampled action，记录：
 
-delta_plan_step_1
-delta_plan_steps_2_to_6
-delta_terminal_pose
-delta_curvature_profile
-delta_target_speed_profile
+V3 是主要裁决项；V1/V2 仅帮助判断几何与配速耦合。
 
+验收不只看 success，同时看：
 
-要求后五步不能几乎不变。
-
-有效控制维数
-
-在固定状态上采样不少于 256 个 2D action，计算完整计划的 PCA 或 Jacobian 敏感性。
-
-如果计划变化只集中在：
-
-首点；
-单一角度缩放；
-单一速度缩放；
-
-则 2D action 无法覆盖有意义的计划空间。
-
-反事实单调性
-
-例如：
-
-增大 ds → 终点纵向距离应总体增加
-增大 dtheta → 终点横向偏移方向应正确
-
-
-不能出现符号反转或后五步抵消首步。
-
-执行一致性
-
-必须记录：
-
-sampled_action
-decoded_plan
-actual_LQR_reference
-actual_motion
-
-
-确认 PPO 采样变量没有在后续被 mu、clipping 或 deterministic path 覆盖。
-
-若这些 probe 不通过，P1-4A 应立即停止，不进入完整三 seed 训练。
-
-P1-4B：Mode + low-dimensional plan latent，作为主性能方案
-
-建议 PPO action 定义为：
-
-at=(mt,zt)a_t=(m_t,z_t)
-
-其中：
-
-离散 mode
-
-首版不宜过多，建议 3–5 类：
-
-follow_route
-shift_left
-shift_right
-yield_or_decelerate
-stop
-
-
-使用道路几何和 route legality mask，避免在不允许换道时采样换道模式。
-
-连续 latent
-
-建议 4–6 维，表达：
-
-target speed / speed delta
-terminal lateral offset
-braking timing
-longitudinal aggressiveness
-trajectory shape factors
-
-
-Conditional PlanHead 输出完整：
-
-6 x (ds, dtheta)
-
-
-PPO 记录完整 joint log-prob：
-
-log⁡π(m,z∣s)=log⁡π(m∣s)+log⁡π(z∣s,m)\log\pi(m,z\mid s) = \log\pi(m\mid s)+\log\pi(z\mid s,m)
-
-这才是一条真正的 trajectory macro-action。
-
-四、当前阶段不要直接做 GRPO
-
-你的多候选、反事实 rollout、组内比较方向适合作为长期架构，但当前 repo 还不具备直接上 GRPO 的基础。
-
-原因一：当前 WM 尚未证明能做反事实排序
-
-当前 WM：
-
-逐步 detach；
-主要训练 latent/ego/OD/LD 预测；
-没有验证周车对不同 ego trajectory 的响应；
-没有候选轨迹 pairwise ranking 精度；
-没有 unsafe false-negative 审计。
-
-如果直接用 WM 对 G 条轨迹排序，policy 很可能学会利用 WM 偏差。
-
-原因二：Best-of-G 选择会改变行为策略概率
-
-如果：
-
-从 policy 采 G 条
-→ scorer 选一条
-→ 执行选中轨迹
-
-
-实际行为策略已不是单条原始 policy。不能直接拿选中候选原本的 log π 做标准 PPO，否则有 selection bias。
-
-原因三：当前首先要证明“完整 plan 可被 PPO 改善”
-
-在多候选搜索之前，应先证明：
-
-单条 sampled plan latent
-→ 完整计划
-→ LQR
-→ 闭环 reward
-→ PPO 更新
-
-
-确实能稳定提升性能。
-
-五、GRPO/AlphaGo 路线应作为 P2/P3
-
-推荐渐进顺序：
-
-第一步：Best-of-G oracle gap
-
-固定 policy，对同一状态采 G 条计划，用真实 MetaDrive 分支 rollout 离线评价。
-
-比较：
-
-single-sample performance
-best-of-4 oracle
-best-of-8 oracle
-
-
-如果 best-of-8 仅比单样本好 1–2pt，说明候选缺乏多样性，没必要开发复杂 scorer。
-
-如果 oracle gap 达到 10–15pt，才说明搜索值得投入。
-
-第二步：训练 candidate scorer
-
-用真实 simulator rollout 监督：
-
-candidate return
-collision
 off-road
-route progress
-comfort
+collision
+timeout
+route completion
+steer saturation
+longitudinal saturation
+tracking error AUC
 
 
-评价：
+D2 的主要失败为 timeout，且 timeout 中 route completion 中位约 0.849，所以独立速度实验确有必要。
 
-pairwise ranking accuracy；
-Spearman correlation；
-unsafe false-negative rate；
-按 tollgate、roundabout 等 road class 分层。
-第三步：蒸馏搜索结果
+P1-0C：A 批 probes
 
-先采用监督蒸馏：
+必须包括：
 
-policy 生成 G 条
-→ simulator/scorer 选优
-→ 将优选 mode/latent 蒸馏回 policy
+checkpoint 加载比例与模块级覆盖；
+plan/action/arc_step 契约；
+0.5s/0.1s 时间索引；
+plan/reference/actual 三轨；
+LQR 饱和；
+progress/timeout；
+recovery 标签质量；
+loss gradient 与 optimizer update；
+freeze recipe 审计；
+geometry proxy coverage；
+action chain 与跨行 ego_world 对齐。
+P1-0 产物
+docs/p1_implementation_contract.md
+docs/p1_probe_spec.md
+runs/p1_0/model_start_paired.json
+runs/p1_0/d2_pacing_matrix.json
+runs/p1_0/health_report.json
+runs/p1_0/action_ego_alignment.json
 
-
-这比直接把 LLM GRPO 搬进驾驶更容易验证。
-
-第四步：Group-ranked policy improvement
-
-最后才考虑：
-
-候选级 group advantage；
-真实策略 step 的 Critic + GAE；
-absolute safety gate；
-group-relative objective。
-
-候选级 group advantage 不能代替真实时间步上的 GAE。
-
-六、对当前文档另外三点修订
-1. “P1 冻结 PPO scope”与 P1-4 冲突
-
-文档一方面写 P1 不动 PPO scope，另一方面 P1-4 又需要：
-
-新 action head；
-PlanHead 条件化；
-放开相关 PlanHead 参数；
-改 rollout/buffer/log-prob 契约。
-
-建议改成：
-
-P1-1 到 P1-3 不改 PPO scope；P1-4 建立独立 experimental scope，不修改历史 design scope 的语义。
-
-避免新方案悄悄污染旧配方。
-
-2. P1-4 的启动门槛不能只看 success 0.60–0.65
-
-还应要求：
-
-action-to-plan sensitivity PASS
-plan diversity PASS
-decoder reconstruction PASS
-executed-plan identity PASS
-safety projection rate < 5%
-clipping rate < 5%
+P1-0 验收
+所有 correctness probes 为 PASS；
+V3 默认 scale=1.0 与历史 D2 逐 episode 等价；
+rou64/pri512 同集起点选择完成；
+D2 ceiling 被归入以下之一：
+≥0.80：监督上限充足
+0.75–0.80：监督可追平，超越需 RL 或更强教师
+<0.75：当前教师链不足
 
 
-否则 PPO 可能在退化 action space 中训练。
+若配速提升伴随 off-road 或 collision 明显恶化，不认定为上限提升。
 
-3. Recovery decoder 必须为后续 latent plan 留出覆盖空间
+P1-1：Recovery 数据采集
+采集原则
 
-如果 P1-2 使用强单模态均值监督，PlanHead 可能把相似场景的多个有效恢复方案平均成一条差轨迹。
+不能机械截取失败前固定窗口。起点由以下信号决定：
 
-建议训练时至少保留：
-
-多模态 recovery 标签；
-Best-of-N 或 Winner-Takes-All 头；
-或按 coarse behavior mode 分组。
-
-否则 P1-4B 加 latent 时，decoder 本身可能已经 mode collapse。
-
-七、建议更新后的正式计划
-P1-0 至 P1-3
-
-按 v0.4 执行，仅增加：
-
-P1-2 数据中保留恢复行为 mode；
-PlanHead 预留 conditional interface；
-不要把 recovery 多解全部平均。
-P1-4A：2D 因果烟测
-
-目标不是超 IDM，而是验证：
-
-PPO sampled action
-→ 后五步计划明显改变
-→ LQR 实际执行
-→ reward 可归因
+first_low_margin
+T_plan
+T_cross
 
 
-只跑小规模 clean150、1 seed。
+分为：
 
-通过才继续。
+prevention：仍合法，但 margin 开始下降；
+correction：已经明显偏离，但尚可恢复；
+late recovery：接近压线或已进入危险状态。
 
-P1-4B：Mode + latent full-plan PPO
+目标比例：
 
-作为实际性能 candidate：
+50% prevention
+35% correction
+15% late recovery
 
-mode K=3–5
-latent D=4–6
-decoder -> 6x2 action chain
-explicit arc integration
-LQR executes first 0.5s
-replan every 0.5s
+每条 recovery 样本必须保存
+episode_id / map_id / road_class
+student obs + history
+student plan
+student actual trajectory
+expert current-state action
+expert recovery 6-step plan
+expert actual recovery trajectory
+T_plan / T_cross / first_low_margin
+surface / legal-line / route labels
+expert_recovered
+recovery_success_horizon
+min_margin_after_takeover
+route_progress_after_takeover
+mode_label + mode_confidence
+all validity masks
 
+质量门
 
-先冻结 decoder，只训练 mode/latent policy 和 value；随后根据 coverage 限制渐进解冻 decoder 尾层。
+以下样本不得作为正监督：
 
-P2：Best-of-G 与 scorer
+专家接管后仍 off-road 或 collision；
+recovery horizon 内没有恢复 margin；
+route progress 没有改善；
+action chain 与 recovery trajectory 不一致；
+坐标或时间契约失败；
+几何标签不可用。
+P1-1 产物
+data/recovery_v1/
+  manifest.json
+  samples.*
+  schema.json
+  quality_report.json
+  split_manifest.json
 
-先做真实 simulator 的 oracle gap，再决定是否投入 learned WM ranking。
-
-P3：Group-ranked policy improvement
-
-在 scorer 可信、generator 有多样性后，再探索 group advantage + GAE，而不是现在直接做 GRPO。
-
-最终裁决
-
-Coding agent 的最新文档整体可以批准进入 P1-0，但 P1-4 尚未完成收拢。
-
-当前写法中的“2D action-conditioned plan”应该：
-
-保留为最小因果正确性实验；
-不应直接作为主性能方案；
-更不能视为最终轨迹级 PPO。
-
-主性能方向应调整为：
-
-PPO 采样 behavior mode + 低维 plan latent，条件解码完整 3 秒计划，LQR 只执行首 0.5 秒并持续重规划。
-
-而你提出的：
-
-多模态候选 → 反事实 rollout → 安全/价值评估 → 组内比较 + 时间级 GAE → 蒸馏
-
-应当成为明确的 P2/P3 目标。但在当前 WM 还没有候选排序证据、基础 PPO 轨迹信用链还未打通之前，不应直接跳过去。
-
-建议给 coding agent 的定稿指令是：
-
-批准 P1-0 至 P1-3 按 v0.4 实施。
-
-P1-4 重新拆分：
-
-P1-4A：
-2D action-conditioned plan 仅作因果烟测。
-必须验证 sampled action 对后五步计划、终点 pose、
-曲率和速度曲线具有足够敏感性。
-不满足则停止，不做完整训练。
-
-P1-4B：
-主性能方案改为 behavior mode + 4–6D plan latent。
-PPO 对 mode+latent 的 joint logprob 记账，
-conditional decoder 输出完整 6x2 计划，
-LQR 执行该计划首 0.5s，随后重规划。
-
-P2：
-先用 MetaDrive 真实分支 rollout 测 best-of-G oracle gap；
-只有候选多样性和 oracle gap 足够，才训练 candidate scorer。
-
-P3：
-scorer 的 pairwise ranking、unsafe false-negative 和分层指标
-通过后，再做 group-ranked policy improvement + GAE，
-不要直接照搬 LLM 原生 GRPO。
+docs/recovery_v1_dataset_card.md
 
 
-这既保留了 coding agent 倾向的低风险渐进路线，也真正吸收了你提出的“轨迹是 macro-action、多模态反事实搜索、候选级和时间级双层信用”框架。
+必须按 episode 划分 train/validation，禁止同一 episode 的相邻窗口跨集合泄漏。
+
+P1-1 验收
+有效 recovery 成功率 ≥80%；
+prevention/correction/late 分布接近预注册比例；
+action/trajectory 对齐误差通过契约；
+train/validation 无 episode 泄漏；
+tollgate、merge、roundabout 等困难类型有明确覆盖统计。
+P1-2：Recovery trajectory BC
+两个正式消融
+R1
+train:
+  plan fusion/trunk
+  primary
+
+freeze:
+  encoder
+  mem
+  WM/ST-GNN
+  router
+  experts
+  anchor heads
+
+R2
+train:
+  plan fusion/trunk
+  primary
+  existing experts/residual
+
+freeze:
+  encoder
+  mem
+  WM/ST-GNN
+  router
+  anchor heads
+
+
+不改变专家数、router 或负载均衡机制。
+
+训练配方
+recovery 样本占 batch 的 20%–30%； -其余保留原 BC 数据； -使用普通数据的 anchor/BC loss 防遗忘；
+primary 使用较低 LR；
+experts 使用独立 LR； -仅真实 recovery 行启用 traj auxiliary； -完全禁止合成 traj6 进入 loss。
+
+六步监督建议：
+
+1.00, 0.80, 0.60, 0.40, 0.25, 0.15
+
+
+同时监督：
+
+action chain； -相对 pose； -横向位置； -航向；
+ds；
+curvature/valid mask。
+P1-2 验收
+
+先 clean150：
+
+success 相对起点至少 +5pt；
+off-road 相对下降至少 15%；
+collision 不增加超过 2pt；
+timeout 不增加超过 5pt； -正常 BC validation 不退化超过 10%。
+
+胜者再跑 eval500。若 R2 未显著优于 R1，则后续 recipe 使用 R1，不训练 experts。
+
+P1-3：几何、曲率和进度联合 recipe
+明确两个轨道
+可微代理
+
+命名为：
+
+ld_line_margin_loss
+
+
+基于 LD 点、line type 和 mask 构造，不能称为完整 drivable-area loss。
+
+记录：
+
+LD valid ratio；
+solid-line available ratio；
+plan coverage ratio；
+loss-active sample ratio。
+引擎几何真值
+
+用于：
+
+hard mining；
+rollout KPI； -候选验收； -离线标签校准。
+
+分解为：
+
+surface validity
+legal-line crossing
+route-corridor consistency
+
+曲率约束
+
+使用：
+
+κt=Δθtmax⁡(Δst,ϵ)\kappa_t = \frac{\Delta\theta_t}{\max(\Delta s_t,\epsilon)}
+
+但必须：
+
+mask 极小 ds； -主要惩罚 Δκ； -只对超出车辆可达阈值的 κ 强罚； -道路类型条件化； -联合 progress loss，防止降低速度规避所有风险。
+梯度校准
+
+既记录 norm，也记录：
+
+cos(traj, geometry)
+cos(traj, curvature)
+cos(progress, geometry)
+
+
+长期低于 -0.3 视为目标冲突，必须重新调权重或死区。
+
+P1-3 验收
+
+相对 P1-2 胜者：
+
+eval500 success 至少 +3pt；
+off-road 再下降至少 15%；
+timeout 不恶化超过 3pt；
+collision 不高于 IDM 的 0.144； -至少两个主要 road-class 分组改善； -无异常的 action/LQR 饱和增长。
+四、P1-4 的正式状态
+4A：批准为实验性因果门
+
+产物：
+
+docs/p1_4a_contract.md
+runs/p1_4a/causal_probe.json
+runs/p1_4a/clean150_canary.json
+
+
+四类探针：
+
+后五步对 2D action 的敏感性； 2.有效控制维数； 3.反事实单调性； 4.执行一致性。
+
+还必须加入：
+
+尾段对横向误差与航向误差反馈；
+tracker 实际消费 reference；
+LQR 饱和与实际运动响应。
+
+如果不过，4A 停止，不进入 PPO。
+
+4B：仅保留设计，不进入当前开工范围
+
+在满足前述启动条件后，另行出：
+
+docs/p1_4b_design.md
+docs/p1_4b_distribution_contract.md
+docs/p1_4b_buffer_migration.md
+
+
+再决定是：
+
+shape mode + speed latent； -纯连续低维 latent； -或继续 2D conditioned plan。
+
+不能现在提前把 K-anchor 或 categorical mode 写成既定实现。
+
+五、统一产物定义
+
+每个正式实验目录必须包含：
+
+manifest.json
+resolved_config.yaml
+git_state.json
+checkpoint.sha256
+checkpoint_load_report.json
+health_report.json
+episodes.csv
+metrics.json
+probe_results.json
+stdout.log
+decision.md
+
+
+decision.md 必须只给出：
+
+hypothesis
+change
+result
+paired comparison
+failure composition
+probe status
+go / no-go
+next allowed action
+
+
+正式实验不得被自动清理。
+
+六、最终验收标准
+开发门
+
+clean150，单 seed：
+
+用于方向筛选； -不作最终结论； -必须同时报告 success/off-road/collision/timeout。
+候选门
+
+3 seeds，eval500 + clean500：
+
+固定 checkpoint selection； -逐 seed paired； -报告 mean、worst、range； -不得从多个 epoch 中事后挑最好结果而不记录 selection rule。
+追平门 G2
+3-seed mean success ≥ 0.74
+off-road 相对 s11 下降 ≥30%
+collision 不高于 IDM
+clean500 与 eval500 均成立
+
+超越门 G3
+3-seed mean success ≥ 0.80
+worst seed ≥ 0.77
+paired bootstrap lower bound > 0
+McNemar p < 0.05
+collision ≤ 0.144
+提升不集中于单一路型
+
+
+正式声明达到 0.82–0.85 时建议补 5 seeds。
+
+七、当前需要记录的开放项
+
+只保留三个数据驱动问题：
+
+D2 V3 配速后是否能达到 0.80。
+rou64 是否在 eval500 上稳定优于 pri512。
+Recovery + 几何监督能否把模型从约 0.37 推到至少 0.60。
+
+其余争论暂时关闭：
+
+不扩容量； -不改 WM/MoE 架构； -不重定义评测协议； -不启动 GRPO； -不默认重启 K-anchor； -不在监督基础不足时启动复杂 PPO。
+最终建议
+
+可以结束方案争论并执行 P1-0 → P1-1 → P1-2 → P1-3。P1-4A 只作为条件性因果烟测，P1-4B 不纳入本轮实施承诺。
+
+建议给 coding agent 的开工指令是：
+
+批准 P1-0 至 P1-3，按锁定产物和验收标准执行。
+
+P1-0 首先完成：
+1. rou64@e015 eval500 与 pri512 paired；
+2. D2 V1/V2/V3 配速矩阵；
+3. A 批 probes、freeze audit、geometry coverage；
+4. action-chain 与跨行 ego_world 对齐；
+5. recovery schema 与质量门。
+
+P1-0 报告提交后，再启动 recovery 数据采集。
+P1-4A 仅在 P1-2/3 监督模型达到门槛后实施。
+P1-4B、K-anchor、mode+latent PPO、GRPO 均暂不授权。
+
+
+这一版把主线、产物、退出条件和停止条件都固定了，后续应以实验数据推进，不再继续扩大设计讨论。
