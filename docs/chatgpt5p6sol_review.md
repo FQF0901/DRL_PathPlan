@@ -1,1116 +1,941 @@
-我读完了新 repo 和 docs\deepseekv4p1_argue.md。P0 的结果很有价值，因为它已经推翻了几个之前只能靠推理判断的假设：接口和 LQR 不是当前第一瓶颈，模型生成的单步动作与 3 秒计划质量才是核心瓶颈；同时，PPO 的 action 记账与最终 plan 执行链确实没有完全对齐。
+我审阅了附件中的 P0 结果和 P1 v0.2。总体判断：P0 做得扎实，P1 方向基本正确，但当前方案仍不足以支撑“达到 0.80–0.85”。最重要的问题不是步骤顺序，而是目前尚未证明存在一条超过 IDM 的可执行教师或控制链。
 
-下面我先解释你的五个疑问，再对 P1 路线给出我的判断。第 4 点我会明确反驳一部分，因为 P0 的 D1/D2 结果对“autoregressive action chain 就是正确规划接口”提出了很强的反证。
+一、P0 结论基本认可
 
-一、先重读 P0：它真正证明了什么
+以下判断有充分数据支持：
 
-P0 的关键数字是：
+repeat_action 不适合作为部署口径。Arm P、pri512 均为 0，s11 也是 plan 0.646 高于 repeat 0.418，因此继续保持 PlanHead + LQR 评测协议是正确的。
+tracker 暂时不是第一瓶颈。模型 plan 在 exact 下不优于 LQR，甚至碰撞更多，说明精准执行坏 plan 不会改善结果。
+当前主要问题确实在 plan/action 质量。pri512 只有 0.332，而相同执行栈下 D2 达到 0.706。
+off-road/压线是模型的 dominant failure，且 plan 不可行通常在中后期出现，支持“随闭环推进逐渐漂移”的判断。
+fail-fast、laneplan bug 修复、s11 兼容评测都是必要且有效的工程改进。
+二、必须修正的核心结论
+1. G1 实际上没有满足
 
-执行方式	Success	主要含义PurePursuit + IDM 自身	0.756	当前规则专家基线
-D2：当前专家动作重复 6 步 + LQR	0.706	(ds,dθ) + LQR 接口基本可用
-Oracle future pose + LQR	0.608	开环未来轨迹并不天然优于反馈控制
-Lane center plan + LQR	0.442	简单几何计划已超过多数 v8 模型
-pri512 model plan + LQR	0.332	当前较好的 v8 BC 模型
-Arm P model plan + LQR	0.224	当前基线
-D1：未来专家 action chain + LQR	0.000	开环动作链严重失效
-模型 action repeat + LQR	0.000	模型单步动作质量也严重不足
+当前最高可执行链：
 
-此外，pri512 的失败中有 254/334 是 off-road，至少 173 个失败带 plan infeasibility 因子，T_plan 中位约 120 个策略步；exact 执行模型计划不仅没有比 LQR 好，反而更差。这说明问题不是“LQR 没跟上一个好计划”，而是计划本身在闭环推进中逐渐失真。
+IDM：0.756
+D2：0.706
+Oracle：0.608
+laneplan：0.442
 
-所以目前最稳妥的根因排序是：
+没有任何已验证的 plan/control 链超过 IDM，更没有达到 0.80。附件将“主要损失层已明确”视为 G1 满足，可以作为诊断 Gate，但不能作为“超越 IDM 的路径已证明”。
 
-模型动作和计划质量不足；
-长期推进后几何偏差累积，缺少边界和恢复监督；
-PPO action 与最终 plan 执行链信用分配不一致；
-LQR/tracker 不是当前主要瓶颈；
-(ds,dθ) 接口不是绝对不可用，但“如何把它组织成计划”仍然有严重问题。
-二、问题 1：expert5k 的专家不就是 IDM 吗？BC 接近，再由 RL 超越，不正是原设想吗？
-2.1 更准确地说，它不是“纯 IDM”，而是 PurePursuit + IDM
+应该拆成两个 Gate：
 
-repo 使用的是 PurePursuitIDMPolicy：
+G1-diagnosis：主要损失定位完成，已满足。
+G1-ceiling：存在 success ≥0.80 的可执行 teacher/control 链，目前未满足。
 
-IDM 主要处理纵向跟车和速度；
-Pure Pursuit 处理横向路径跟踪；
-最终 expert5k 采的是这套组合规则策略。
+这意味着即使模型完美模仿 D2，理论上目前也只有约 0.706。想达到 0.80–0.85，必须额外解决：
 
-评测里称为 IDM 基线是一种简称，但严格说它是 PurePursuit-IDM 规则专家。当前冻结评测上的 success 是 0.756。
+D2 的 timeout/配速；
+专家 recovery 和交互能力；
+或依靠闭环 RL 超过教师。
 
-2.2 你的原始设想在逻辑上成立
+因此，“超越 IDM”不能只依赖 recovery BC 和几何监督。
 
-正确链路确实可以是：
+2. D2 不能同时作为训练目标和最终上限
 
-Expert demonstrations
-    ↓
-BC 获得稳定初始策略
-    ↓
-DAgger 修复 student-induced distribution shift
-    ↓
-RL 利用环境奖励超越 expert
+D2 的优势来自每 0.5 秒重新查询当前状态下的专家动作，具备闭环纠偏；其失败又主要是 timeout。
 
+D2 更适合作为：
 
-所以“BC 难以超过专家”不等于“整个 BC→DAgger→RL 系统不能超过专家”。
+recovery teacher；
+在线行为上限；
+闭环重规划参考。
 
-但要区分三个阶段的能力边界。
+但如果最终模型仍输出固定 3 秒 plan，而专家每 0.5 秒重查询，两者并不等价。训练时必须强调 receding-horizon 的首段正确性，而不能把整条未来动作链当成绝对真值。D1 全崩已经很好地证明了开环专家链不可靠。
 
-BC
+三、P1 v0.2 中需要调整的地方
+1. 起点模型不能立即在 pri512 和 rou64 中拍脑袋选择
 
-纯 BC 只在拟合专家条件动作分布。通常不能系统性超越专家，但有可能在有限评测集上略高于专家，原因包括：
+rou64 目前只有 clean500 0.370，pri512 有 eval500 0.332 和 clean500 0.334。两者还缺同一 eval500、同一逐 episode paired 口径。
 
-网络对专家噪声做平滑；
-模型学到跨场景共享规律；
-LQR 执行模型计划与专家自身控制回路不同；
-expert 数据带有局部次优动作，但监督平均后反而更平滑。
+应先补：
 
-这种“偶尔超过”不能当作稳定超越机制。
+rou64@e015 on eval500
+rou64@e015 vs pri512@e020 paired comparison
 
-DAgger
 
-DAgger 的主要功能是纠正 covariate shift：
+若 rou64 在 eval500 也稳定领先，P1 用 rou64；否则用证据更完整的 pri512。
 
-学生偏离专家分布
-→ 在学生真实访问的状态上重新请求专家
-→ 学会恢复到专家行为区域
+不要再训练组合臂，pri512+rou64 已证明存在负交互。
 
+2. Recovery 数据优先是对的，但训练范围不能继续 specific-only
 
-如果所有 DAgger 标签仍来自同一个 PurePursuitIDMPolicy，它主要让学生更可靠地逼近该专家在学生分布上的行为，而不是提供超过专家的新决策知识。
+现有 phase3 的问题不只是缺真实 traj6，还包括 specific-only 主要修 experts，而 dominant error 是共享 plan 逐渐漂移。仅训练 MoE residual 很可能继续让 primary 保持错误几何趋势。
 
-不过，DAgger 仍可能帮助最终系统超过专家的一些脆弱实现细节，因为：
+建议 recovery BC 的可训练范围为：
 
-student+LQR 的执行器和 expert 自身执行器不同；
-学到的 recovery 可能比 expert 原始轨迹更平滑；
-网络会在多个相似专家状态之间泛化。
+训练 PlanHead fusion/trunk；
+训练 primary 最后一层或整个 primary，低学习率；
+训练 experts/residual；
+暂时冻结 encoder、memory、WM、router。
 
-但本质上，它不是主要的“超专家信号源”。
+同时保留原 BC 数据混合和 anchor，防止 recovery 数据把正常路况能力冲掉。初始 recovery 样本比例建议从 batch 的 20%–30% 开始，而不是让失败数据主导全部训练。
 
-RL
+3. 整段监督要强调“首段 + 可重规划”，不能平权六步
 
-真正可以系统性超过 expert 的应是 RL，因为奖励并不要求复制 expert：
+D1 表明远期专家 action chain 对实际闭环误差非常脆弱。因此六步 loss 不应等权。
 
-expert 撞车时可以学会更保守；
-expert 超时时可以学会更高效；
-expert 在收费站选择不好时，可以探索更优 route behavior； -采用 BC/KL 只作为先验，环境 return 才是最终目标。
-2.3 但当前 repo 的 RL 还没有形成这条闭环
+建议时间权重类似：
 
-这里是关键。当前 PPO 训练时：
+step 1: 1.00
+step 2: 0.80
+step 3: 0.60
+step 4: 0.40
+step 5: 0.25
+step 6: 0.15
 
-用采样的 2D action 做 log-prob 和记账；
-执行参考采用 repeat_action，确保环境结果依赖被 PPO 记账的随机变量； -最终评测却使用模型生成的完整 plan；
-primary、router、encoder、memory 和 ST-GNN 大部分被冻结；
-PPO 只能通过 policy/value、experts 和 residual scale 部分影响计划。
 
-因此现在不能简单说：
+重点监督：
 
-BC 到 0.65，再让 PPO 从 0.65 优化到 0.80。
+第一步 (ds,dθ)；
+前 1–1.5 秒 pose；
+横向位置与航向；
+曲率连续性；
+后段作为 soft target，而不是硬性复制专家链。
+4. 几何监督必须区分“指标/奖励”和“可微 loss”
 
-因为 PPO 训练的执行对象和最终部署执行对象并不完全相同，而且它能修改的模块范围有限。
+MetaDrive 的地图查询、footprint inside/outside 和实线判定通常是离散几何操作，不能直接对网络 plan 反向传播。
 
-2.4 我的结论
+因此 P1-3 必须明确分为：
 
-你的总体战略没错：
+可立即使用
+corridor violation 作为 hard mining 指标；
+rollout reward；
+dataset sample weight；
+验收指标。
+要作为可微训练 loss
 
-BC 接近 expert，DAgger 修复分布偏移，RL 超越 expert。
+必须先生成可微 target，例如：
 
-但必须补一句：
+每个 plan step 的左右 corridor margin 标签；
+最近边界点及法向； -局部 corridor polyline；
+signed-distance 近似标签。
 
-RL 所采样并计算 log-prob 的 action，必须真正决定最终被 LQR 执行的轨迹。
+否则“footprint loss”只是名字，实际梯度无法进入 PlanHead。
 
-否则“RL 超越 expert”在数学上有目标，在实现上却没有完整信用路径。
+第一版建议采用离线标签：
 
-另外，P0 已显示 D2=0.706，仍低于 expert=0.756。这说明现有 (ds,dθ)+LQR 链即使输入专家动作，也可能有约 5pt 的接口/离散化/速度效率损失。若目标是 0.82–0.85，RL 不仅要补模型相对 D2 的约 37pt，还要进一步越过 expert 本身。这不是不可能，但不能只靠现有 Stage C 小范围微调。
+left_margin[t]
+right_margin[t]
+legal_line_cross[t]
+route_deviation[t]
+valid_mask[t]
 
-三、问题 2：为什么 PPO 训练用 plan 会发生信用分配断裂？A-hold 是什么？
 
-这是整个系统里最需要讲清楚的地方。
+训练时用预测 pose 与局部边界法向构造可微 hinge loss。不要在训练 forward 中直接调用引擎地图查询。
 
-3.1 PPO 实际优化的是什么
+5. 曲率 loss 不能惩罚正确急弯
 
-PPO 每一步需要：
+建议对：
 
-策略根据状态 sts_t 定义分布；
-从这个分布采样动作 ata_t；
-环境执行 ata_t；
-得到奖励 rtr_t；
-用同一个 ata_t 的概率：
-log⁡πθ(at∣st)\log \pi_\theta(a_t \mid s_t)
+κt≈Δθtmax⁡(Δst,ϵ)\kappa_t \approx \frac{\Delta\theta_t}{\max(\Delta s_t,\epsilon)}
 
-计算 PPO ratio：
+做以下处理：
 
-rt(θ)=πθ(at∣st)πθold(at∣st)r_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)} {\pi_{\theta_{\text{old}}}(a_t \mid s_t)}
+低速、极小 ds 使用 mask；
+惩罚超过车辆可达阈值的曲率；
+主要约束 Δκ，而非一味压低 κ；
+tollgate、roundabout 使用道路曲率条件化阈值。
 
-基本因果要求是：
+否则很容易把 off-road 降下来，却制造 timeout 和转弯不足。附件已经发现多个链路存在明显配速问题，这个风险是真实的。
 
-reward 必须由 PPO 记账的 sampled action 导致。
+四、P1-4 选型建议
 
-3.2 当前系统里存在两种候选执行参考
+我不建议第一版采用 12D 独立高斯，coding agent 的反驳成立。
 
-假设 policy 在状态 sts_t 采样：
+在现有代码中，PPO 的随机变量和 log-prob 基于 2D action，直接扩成 12D 会同时改变：
 
-a_t = (ds_t, dtheta_t)
+PolicyHead 输出；
+buffer action shape；
+old/new log-prob；
+entropy；
+KL anchor；
+checkpoint；
+plan first-step contract；
+PPO 测试体系。
 
+风险太高。
 
-同时 PlanHead+WM 还会输出：
+推荐第一版：2D action-conditioned plan
 
-P_t = [p_t^1, p_t^2, ..., p_t^6]
+保持现有 PPO action 和 log-prob 语义：
 
-repeat_action
-
-构造：
-
-[a_t, a_t, a_t, a_t, a_t, a_t]
-→ arc_step
-→ 3 秒 LQR reference
-
-
-此时车辆接下来怎么走，明确依赖 sampled ata_t。
-
-因此：
-
-sampled a_t
-→ LQR reference
-→ physical trajectory
-→ reward
-
-
-PPO 对 ata_t 的 log-prob 有效。
-
-这就是 A-hold。更准确说，它是 sampled action 的零阶保持：
-
-A-hold = hold/repeat current sampled action across the preview horizon
-
-3.3 plan 口径为什么可能断裂
-
-如果执行的是：
-
-PlanHead/WM 生成的完整 P_t
-→ LQR
-→ reward
-
-
-但 PPO buffer 里记录的仍只是：
-
-sampled a_t
-log pi(a_t | s_t)
-
-
-就要问：
-
-完整 plan 的第 2 到 6 步究竟是否由 sampled ata_t 唯一决定？
-
-如果不是，例如：
-
-第一步被 action_mu 覆盖，而不是 sampled action；
-后五步由 deterministic PlanHead 和 latent WM 生成；
-policy sampled action 只是一个旁路输出；
-PPO noise 没进入后五步；
-LQR 主要跟随后五步计划；
-
-那么同样一个 sampled ata_t，可能对应基本相同的执行 plan；或者不同 sampled ata_t，执行 plan 差别很小。
-
-因果链变成：
-
-sampled action a_t ────────┐
-                           │  PPO 对它计算 log-prob
-PlanHead deterministic P_t ├→ LQR → reward
-                           │
-reward 主要由 P_t 决定 ────┘
-
-
-PPO 却把 reward 归因给 ata_t。
-
-这就是信用分配断裂或失真。
-
-3.4 一个具体例子
-
-假设：
-
-sampled action A: dtheta = +0.08
-sampled action B: dtheta = -0.06
-
-
-但 PlanHead 在两个情况下都输出同样的右弯 3 秒计划，因为后五步主要由 primary+WM 决定。
-
-两个 episode 的实际轨迹几乎一样，奖励也一样，但 PPO 会分别提升或降低：
-
-log pi(+0.08 | s)
-log pi(-0.06 | s)
-
-
-这不是有效的策略梯度，因为 reward 并没有真正区分这两个 sampled action 的后果。
-
-反过来也可能发生：
-
-sampled action 几乎相同；
-PlanHead 因 router 或其他隐藏确定性输出变化产生不同计划；
-reward 差异很大；
-PPO 仍把差异归结给相同的 2D action。
-3.5 A-hold 为什么被引入
-
-A-hold 不是为了得到更好的最终驾驶计划，而是为了满足 PPO 的因果账本：
-
-PPO 采样什么，就让环境执行什么。
-
-
-所以 Stage C 采用 repeat_action，把 sampled 2D action 重复 6 次，再交给 LQR。这样虽然计划非常原始，但 PPO 的数学语义成立。docs\deepseekv4p1_argue.md 也明确记录，plan_reference="plan" 被定位为旧行为对照，repeat_action 才是保证执行依赖 PPO 记账变量的训练口径。
-
-3.6 但 P0 证明 A-hold 不适合作为最终部署计划
-
-双口径评测结果：
-
-Arm P：plan 0.224，repeat 0.000；
-pri512：plan 0.332，repeat 0.000；
-s11：plan 0.646，repeat 0.418。
-
-这说明：
-
-A-hold 可以解决 PPO 记账问题；
-但重复模型单步动作不构成高质量部署轨迹；
-当前模型 action 的横向偏差被重复 6 次后会迅速放大；
-所以不能把 repeat_action 直接当最终规划接口。
-
-因此当前真正需要的不是在 plan 和 repeat_action 中二选一，而是：
-
-让 PPO 直接采样一个会被完整执行的 trajectory action，并对这个 trajectory 的概率正确记账。
-
-后面第 4 点详述。
-
-四、问题 3：3 seeds 是什么？为什么这不是“依赖随机种子”？McNemar/bootstrap 又是什么？
-4.1 3 seeds 是训练随机种子，不是拿 seed 调参
-
-seed 会影响：
-
-网络参数初始化；
-minibatch 顺序；
-dropout 或随机采样；
-PPO action exploration；
-rollout 场景顺序； -并行环境时序；
-DAgger 数据采样； -优化器早期轨迹。
-
-同一个架构、相同超参数，因为非凸优化，可能得到不同策略。
-
-所谓 3 seeds 是：
-
-配置完全相同
-seed = 1001
-seed = 2001
-seed = 3001
-
-
-分别独立训练，然后都在相同冻结 eval500 上评测。
-
-它不是：
-
-试 20 个 seed
-挑表现最好的一个发布
-
-
-后者确实是 seed overfitting，应当禁止。
-
-4.2 为什么 deterministic eval 仍需要多 seed
-
-deterministic=true 只说明：
-
--评测时不用随机 action； -场景 spec 固定； -同一个 checkpoint 在相同环境条件下大体可复现。
-
-它不能消除训练随机性。
-
-例如一个方案三次训练得到：
-
-0.62, 0.79, 0.66
-
-
-单拿 0.79 会让人误判方案有效。
-
-另一个方案得到：
-
-0.75, 0.76, 0.75
-
-
-后者才是可靠改善。
-
-所以 seeds 不是优化手段，而是压力测试：
-
-证明改进不是偶然落入一个好局部最优。
-
-我同意你的原则：“不要依赖 seed”。而确保不依赖 seed 的方法，恰好就是要求多 seed 全部稳定。
-
-4.3 3 个 seed 够吗？
-
-3 个是工程最低线，不是统计上很充分。
-
-建议分阶段：
-
-开发筛选阶段
-1 seed；
-clean150； -只淘汰明显无效设计。
-候选确认阶段
-3 training seeds；
-clean500 + eval500； -固定 checkpoint-selection 规则； -报告均值、最差 seed 和范围。
-最终声称“超过 IDM”
-
-如果预算允许，最好 5 seeds。至少要求：
-
-3-seed mean ≥ 0.80；
-每个 seed 不低于某个下限，例如 0.77； -不是一个 seed 0.90、两个 seed 0.75 拼出平均值； -每个 seed 对 IDM 做相同 episode 的 paired comparison。
-4.4 McNemar 是什么
-
-你的 eval500 中，两个策略跑的是同一批 (scenario_id, seed)。
-
-假设比较新模型 A 和 IDM B。对每个 episode 记录 success/failure：
-
-	IDM 成功	IDM 失败模型成功	两者都成功	模型独赢
-模型失败	IDM 独赢	两者都失败
-
-McNemar 只关注两个不一致格：
-
-模型独赢数量 bb；
-IDM 独赢数量 cc。
-
-例如：
-
-模型独赢 = 70
-IDM独赢 = 35
-
-
-虽然总体 success 差可能只是几个点，但同一 episode 上模型赢的次数明显多于输的次数，可以检验这种非对称是否可能只是随机波动。
-
-P0 已经列出了这种原始计数，例如 pri512 与 IDM 的 paired 比较中，IDM 独赢远多于 pri512，说明差距不是普通评测波动。
-
-McNemar 特别适合：
-
--同一批 episode； -结果是 binary success/failure； -两个策略配对比较。
-
-4.5 Bootstrap 是什么
-
-Bootstrap 是对 episode 配对样本反复有放回重采样。
-
-例如有 500 个 episode，每个 episode 计算：
-
-delta_i = success_new_i - success_baseline_i
-
-
-然后：
-
-从 500 个 paired episode 中有放回抽 500 个；
-计算 success difference； 3.重复 5,000 或 10,000 次； 4.得到 95% confidence interval。
-
-可能得到：
-
-新模型 - IDM = +0.048
-95% paired bootstrap CI = [+0.016, +0.080]
-
-
-这种情况下，提升不太可能只是场景抽样碰巧。
-
-Bootstrap 还可以用于非二元指标：
-
-route completion；
-min TTC；
-boundary margin；
-jerk； -每 episode off-road steps。
-4.6 推荐最终统计口径
-
-不要只写“3-seed 平均 0.81”。建议写：
-
-每个 training seed:
-  success
-  off-road
-  collision
-  route completion
-  paired wins/losses vs IDM
-  McNemar p-value
-  paired bootstrap 95% CI
-
-跨 seed:
-  mean
-  min
-  max
-  standard deviation
-
-
-最终 gate 可设为：
-
-3-seed mean success ≥ 0.80；
-worst seed ≥ 0.77；
-paired bootstrap lower bound > 0；
-McNemar p < 0.05；
-off-road 相对当前模型下降至少 30%；
-collision 不高于 IDM，或至少没有统计显著恶化； -提升不只来自一种 road class。
-五、问题 4：World model 为什么必要？规划层和控制层的正确接口是什么？
-
-你的思路中有一半是对的：
-
-实车低层控制需要预瞄轨迹，单个 0.5 秒动作不足以让 LQR 发挥作用；因此策略应输出一段未来计划，而不是只给一个瞬时动作。
-
-我同意。
-
-但我不同意这句话的强版本：
-
-“world model 辅助 policy head 逐步出 action，action 连起来的轨迹就是唯一逻辑通畅的正确路线。”
-
-P0 的 D1=0.000 对这种“开环未来 action chain”提出了直接反证。
-
-5.1 LQR 本身没有规划决策
-
-你的理解正确。LQR 是跟踪控制器，不是决策规划器。
-
-它解决的是：
-
-已有参考轨迹
-+ 当前车辆状态
-→ 计算 steering / acceleration 等低层控制
-→ 减小 tracking error
-
-
-LQR 不会决定：
-
--走左岔还是右岔； -是否换道； -是否为 cut-in 减速； -收费站选哪个通道； -是否绕开障碍； -未来轨迹应该是什么形状。
-
-这些必须由上游 planner/policy 决定。
-
-因此合理分层是：
-
-Prediction / representation
+sampled action z ∈ R²
         ↓
-Planner or trajectory policy
-        ↓ trajectory reference
-LQR tracker
-        ↓ low-level controls
-Vehicle dynamics
+强制成为 plan 第一步
+        ↓
+PlanHead 根据 latent + z 生成后续 5 步
+        ↓
+整个 6 步 plan 交给 LQR
 
-5.2 但 trajectory policy 不必等于 world model
 
-World model 的职责应该是：
+优势：
 
-给定其余交通参与者状态、自车状态和候选 ego action
-→ 预测未来环境状态或风险
+与当前 2D PPO buffer、KL、entropy 最兼容；
+被采样变量确实影响最终执行 plan；
+信用链明确；
+可以从 BC 首步 action 初始化；
+比新增 2–4D latent decoder 少一层不可辨识性。
 
+低维噪声解码器可以作为第二个候选，但必须证明噪声的每个维度稳定影响计划，否则 PPO 会在一个退化 latent action space 中优化。
 
-例如：
+五、建议锁定的 P1 顺序
+P1-0：补两个关键基线
+rou64@e015 跑 eval500，与 pri512 paired；
+D2 做配速 oracle： -适度提高 ds 或参考速度； -保持 dθ/ds 和重规划逻辑； -观察 timeout 能否转 success，且 off-road/collision 不恶化。
 
--周围车辆未来 occupancy； -道路边界相对关系； -碰撞概率； -自车未来 pose； -tracker execution envelope； -route progress； -plan feasibility。
+如果 D2 经配速后仍不能超过 0.80，应承认当前 teacher ceiling 不足，不能仅靠监督学习完成最终目标。
 
-Planner 的职责是：
+P1-1：真实 recovery 数据
 
-利用这些预测，产生最优 ego trajectory
+保存：
 
+student observation/history；
+student plan； -实际执行轨迹； -专家从 student 当前真实状态重规划的动作； -前 1–1.5 秒 recovery pose； -边界和实线标签； -速度、route progress、road class； -T_plan/T_cross。
+P1-2：Recovery trajectory BC
+不再使用合成 traj6；
+时间衰减监督； -训练 PlanHead shared/fusion + primary 后段 + experts；
+encoder/memory/WM/router 暂冻；
+recovery 与普通 BC 混合； -监控正常样本退化。
+P1-3：几何、曲率与配速联合 recipe
 
-所以 world model 是“候选轨迹评价和状态演化模型”，并不必然是“轨迹生成器本身”。
+加入：
 
-可以有三种合理架构：
+legal-line crossing；
+footprint margin；
+route deviation；
+Δκ； -速度/进度下限；
+timeout-aware progress loss。
 
-架构 A：直接 trajectory actor
-obs/history
-→ trajectory distribution
-→ sample 6-step trajectory
-→ LQR
+必须同时监控 off-road、collision、timeout，防止失败类型互换。
 
+P1-4：action-conditioned plan PPO
 
-world model 可作为辅助训练任务或 critic 输入。
+只有在监督阶段显著超过当前 0.37，最好达到 0.60–0.65 后再做。否则 PPO 很可能在质量过低的 plan manifold 上放大错误。
 
-架构 B：候选轨迹 + world-model scoring
-trajectory proposals
-→ world model rollout
-→ cost/value scoring
-→ select trajectory
-→ LQR
+P1-5：验收
 
+开发期：
 
-更接近 learned MPC。
+clean150，单 seed；
+同时看 success/off-road/collision/timeout。
 
-架构 C：自回归 trajectory policy
-z0 → sample a0
-world model(z0, a0) → z1
-z1 → sample a1
-...
-→ [a0...a5]
-→ trajectory
-→ LQR
+候选期：
 
+3 seeds；
+eval500 + clean500；
+固定 checkpoint selection；
+paired McNemar/bootstrap。
 
-这是你提出的路线。它是合理候选，但不是天然正确，更不是当前 P0 证据下已经成立的路线。
+最终声明 0.80–0.85 时，建议补 5 seeds。
 
-5.3 P0 对自回归 action chain 的警告
+六、我建议记录的当前分歧
 
-D1 使用未来专家 action chain，按 (ds,dθ) 积分成 6 步计划，交给 LQR，结果 success=0.000、off-road=0.95。
+目前只剩三个实质待决：
 
-D2 每次只取当前专家 action，并在当前 3 秒参考中重复，却达到 0.706。
+教师上限是否足够
+ 我认为尚未证明。D2=0.706 仍低于 IDM，必须先做配速修复或承认需要 RL 超教师。
 
-差别不是 D1 的未来 action 更差，而是：
+Recovery BC 可训练范围
+ 我不支持继续 specific-only。至少应开放 PlanHead shared/fusion 与 primary 后段，否则无法修正共享几何漂移。
 
-D1 future action chain 是在专家自己的未来状态上生成的；
-当前 ego 被 LQR 执行后，不会精确处于专家影子轨迹的未来状态； -后续 action 不再适合当前实际状态； -错误在 6 步链中无法反馈校正； -D2 每 0.5 秒基于真实当前状态重新查询专家，天然重新锚定。
+PPO 轨迹动作参数化
+ 我建议先用 2D action-conditioned plan；coding agent 推荐的 2–4D低维噪声解码器作为第二候选；12D 暂不做。
 
-这给你的方案一个非常明确的设计约束：
+最终审阅结论
 
-自回归生成 action chain 时，第 k 步 action 必须基于“该候选 action 导致的预测状态”，而不能基于 GT/expert 的未来状态，也不能把独立的一步策略输出简单串起来。
+P0 可以定稿，主根因已经从“容量问题”明确收敛到“计划质量、闭环漂移、几何余量和配速”。但 P1 要避免一个新的误区：
 
-即：
+不能因为已经定位 plan-side，就默认 recovery 数据加几何 loss 足以达到 0.80。
 
-z_0 = encode(current real state)
-a_0 ~ pi(. | z_0)
-z_1 = WM(z_0, a_0)
-a_1 ~ pi(. | z_1)
-z_2 = WM(z_1, a_1)
-...
+目前已验证的最高可执行链只有 0.706。正确策略是：
 
+先把 D2 配速后的真正上限跑出来；
+用真实 recovery 修正 plan 漂移； 3.让几何标签真正可微或用于风险采样；
+用 action-conditioned plan 建立合法 PPO 信用链；
+再依靠 RL 尝试超过教师和 IDM。
 
-这在概念上是通的。
+这条路线比直接投入 12D trajectory PPO 或继续调 WM/MoE，更符合当前代码结构和 P0 实证。
 
-但还缺三个关键条件。
+===============================================================================
+基于 DRL_PathPlan_code.txt 中的网络、训练、评测、环境和测试实现，以及已经暴露过的 checkpoint 静默不匹配、训练/评测执行口径差、合成 traj6、TemporalAttention 全无效输入等问题，我建议增加一套**“契约探针 + 在线打桩 + 反事实探针”**。目标不是堆日志，而是尽早发现“代码正常运行，但语义已经错了”的隐性问题。
 
-条件一：PPO 必须对整条 trajectory 的概率记账
+一、P0：必须先加的正确性契约
+1. Checkpoint 完整加载探针
 
-如果 trajectory action 是：
+位置： pipeline/eval_runner.py、训练 resume 路径。
 
-At=(at0,at1,…,at5)A_t=(a_t^0,a_t^1,\dots,a_t^5)
+正式评测必须 fail-fast：
 
-PPO 应记录：
+assert not missing_keys
+assert not unexpected_keys
+assert not shape_mismatch
+assert obs_fingerprint == checkpoint_obs_fingerprint
+assert model_snapshot_hash == resolved_model_hash
 
-log⁡π(At∣st)=∑k=05log⁡π(atk∣ztk)\log \pi(A_t|s_t) = \sum_{k=0}^{5} \log \pi(a_t^k | z_t^k)
 
-而不是只记录第一步 at0a_t^0 的 log-prob。
+另外记录：
 
-否则后五步仍是未记账的决策变量。
+实际加载参数数 / checkpoint 参数数；
+加载参数字节数比例；
+每个顶层模块加载比例；
+checkpoint SHA256；
+模型配置与观测 schema diff。
 
-更简单的实现是一次输出 12 维 trajectory distribution：
+仅判断 missing_keys == 0 仍不够，因为错误的过滤、重命名或遗漏模块也可能“看起来加载成功”。建议要求：
 
-[ds0, dtheta0, ..., ds5, dtheta5]
+loaded_parameter_ratio == 1.0
+loaded_parameter_bytes_ratio == 1.0
 
 
-并计算完整 12D action 的 joint log-prob。第一版不一定要马上做复杂 autoregressive PPO。
+这要覆盖 s11 的 v7/v5 兼容路径，以及当前 v8 路径。仓库已有 checkpoint resume、dataset contract 和 obs consistency 测试，可在这些测试上扩展。
 
-条件二：被采样的整条 trajectory 必须真正交给 LQR
+2. Plan/action 语义契约
 
-不能：
+位置： net/model.py、pipeline/eval_runner.py、pipeline/trainer.py。
 
-PPO sample trajectory A
-但 LQR 执行 deterministic mean plan P
+每次正式评测随机抽样 1% step，断言：
 
+plan[0] == policy_mu 或当前协议规定的首步动作
+arc_step(plan actions) == exported plan poses
+repeat_action 每步确实重复同一 action
+单位、裁剪、dt 在 train/eval/forensics 完全一致
 
-必须是：
 
-sampled trajectory A
-→ arc_step / trajectory construction
-→ feasibility projection if any
-→ LQR
-→ reward
+重点记录四组差异：
 
+policy_mu - plan_action[0]
+sampled_action - plan_action[0]
+plan_action[0] - executed_reference[0]
+executed_reference[0] - actual_motion
 
-否则信用链又断。
 
-条件三：每 0.5 秒必须 receding-horizon replan
+推荐字段：
 
-LQR 可以预瞄 3 秒计划，但不是说一条 3 秒计划要开环执行完整 3 秒。
+action_plan_l2
+action_exec_l2
+expected_ds_vs_actual_distance
+expected_dtheta_vs_actual_yaw_delta
 
-正确方式是：
 
-t = 0.0s:
-  生成未来3s计划
-  只执行前0.5s
+阈值建议：
 
-t = 0.5s:
-  读取真实新状态
-  再生成未来3s计划
-  只执行前0.5s
+plan[0] 契约误差 <1e-6；
+arc_step 单元测试误差 <1e-5；
+如发生 clipping，必须显式记录，不能静默修改。
 
+这个 probe 能直接防止 action-conditioned plan 改造后出现“PPO action 看似进入 plan，实际又被后续逻辑覆盖”的隐患。
 
-这就是 receding horizon。
+3. 时间尺度和索引契约
 
-所以你说“rollout 后 policy action 连成轨迹”是合理的，但必须是：
+当前 planner 是 0.5 秒、物理执行 0.1 秒、六步 3 秒，非常容易出现一帧偏移或 stride 错误。
 
-3 秒预瞄、0.5 秒重规划、只执行首段。
+位置： 数据采集、pipeline/stages.py、pipeline/trainer.py、环境 step。
 
-不能是 D1 那种未来 action chain 的开环信任。
+为每个训练样本记录：
 
-5.4 当前 PlanHead、PolicyHead、WM 应如何重新定义职责
+obs_timestamp
+action_timestamp[0:6]
+future_frame_timestamp[0:6]
+physics_step_index
+policy_step_index
+wm_target_step_index
 
-建议收敛成以下结构：
 
-Encoder + Memory
-    ↓
-current latent z0
+自动断言：
 
-World Model
-    输入: zk, candidate ak
-    输出: predicted zk+1
-          ego pose delta
-          occupancy/risk
-          road-boundary features
+future[t] - obs_time == (t + 1) * 0.5s
+每个 policy action 实际执行 5 个 physics steps
+WM stride 与 BC action chain 的时间点一致
 
-Trajectory Actor / Policy
-    基于 zk 输出 action distribution
-    rollout 6 steps
-    得到完整 sampled action chain A_t
 
-Trajectory Decoder
-    用统一 arc_step 将 A_t 转为 pose trajectory
-    输出 vehicle-footprint trajectory
+必须增加一个“恒速恒航向合成 episode”测试：
 
-Safety / Feasibility Head
-    输出 boundary margin
-    corridor violation
-    collision risk
-    curvature feasibility
+设置 ds=5m, dθ=0；
+六步后应前进约 30m；
+future target、plan pose、实际 reference 三者索引必须一致。
 
-LQR
-    跟踪 sampled trajectory
-    只执行首0.5s
+很多 world-model 看似预测不准，实际可能是 future target 错一帧。
 
-下一策略步重新规划
+二、P0：闭环执行链探针
+4. Plan、reference 和实际轨迹三轨并记
 
+位置： tools/diagnostics/forensics_closed_loop.py。
 
-这样只剩两个层级：
+每个策略步同时保存：
 
-trajectory policy 决策；
-LQR 执行。
+plan_pose[6]
+tracker_reference_10hz
+actual_pose_10hz
+policy_action
+plan_action[6]
+LQR control command
+applied simulator control
 
-PlanHead 和 PolicyHead 不应继续作为两个模糊的动作中心。可以：
 
--把现有 PlanHead 重构为 trajectory actor； -将现有 PolicyHead 变成每个 rollout step 的 action distribution head； -或者反过来，保留 PolicyHead 作为 trajectory actor，PlanHead 只负责 deterministic proposal/context。
+派生三种误差：
 
-但最终只能有一个明确的 stochastic policy whose log-prob is used by PPO。
+plan prediction error
+tracker reference interpolation error
+vehicle tracking error
 
-5.5 World model 是否“必要”
 
-我不会说它绝对必要。
+特别要区分：
 
-P0 只证明：
+网络 plan 已错误；
+plan 正确但轨迹插值错误；
+reference 正确但 LQR 错；
+LQR 输出正确但 simulator 实际控制被限幅。
 
--当前 plan 质量差； -开环 expert chain 也会崩； -反馈重锚很重要； -接口/LQR 不是第一瓶颈。
+后两项目前很容易一起被归为 tracker-out。
 
-它没有证明：
+5. LQR 饱和和不可达性 hook
 
--必须使用 learned world model； -当前 detached latent WM 已经有用； -没有 WM 就无法输出好轨迹。
+位置： LQR 控制器调用点和环境 action adapter。
 
-因此正确结论是：
+每个 0.1 秒物理 step 记录：
 
-自回归 trajectory policy 需要一个状态推进器，但这个推进器可以是 learned WM、显式运动学模型，或两者结合。
+steer_raw / steer_clipped
+throttle_raw / throttle_clipped
+brake_raw / brake_clipped
+lateral_error
+heading_error
+speed_error
+curvature_reference
+curvature_actual
 
-对 ego 的短时 3 秒传播，完全可以先使用显式车辆运动学：
 
-pose_{k+1} = arc_step(pose_k, ds_k, dtheta_k)
+关键指标：
 
+steer_saturation_rate
+longitudinal_saturation_rate
+max_lateral_error
+tracking_error_auc
+delay_to_divergence
 
-这部分没有必要交给神经网络猜。
 
-learned WM 更应该预测：
+建议告警阈值：
 
--动态对象如何响应； -未来 occupancy； -交互风险； -道路语义和不可见状态； -tracker error envelope。
+连续 3 个物理 step 转向饱和；
+单策略周期内横向误差增加超过 0.5m；
+reference 曲率超过车辆实测可达曲率；
+plan 节点在路内，但插值 reference 越界。
 
-也就是说：
+这能识别“不是 LQR 参数不佳，而是计划根本不可跟踪”的情况。
 
-Ego kinematics 用显式模型，环境 interaction 用 learned world model。
+6. Progress/timeout probe
 
-这比让 latent WM 同时承担 ego pose rollout、对象、车道和计划生成更可辨识。
+P0 已显示 D2 有明显 timeout 风险，因此要把闭环失败分解为安全和效率两个轴。
 
-5.6 对你方案的最终裁决
+每个策略 step 记录：
 
-我赞同：
+route_progress_delta
+distance_travelled
+ds_command
+actual_speed
+speed_limit
+remaining_route_distance
+stationary_steps
 
--最终接口应是 trajectory，而不是裸单步动作； -LQR 是 tracker，不是 planner； -policy 应对将被执行的 trajectory 负责； -WM 可以帮助生成和评价未来轨迹； -3 秒 plan 应以 0.5 秒 receding horizon 重规划。
 
-我反对：
+告警场景：
 
--认为只要“rollout policy action 连成轨迹”就天然正确； -认为 D1/repeat-action/PlanHead 都可以简单排除； -认为 policy 只给第一步 action 的 PPO log-prob，却让后五步影响执行也没有问题； -把所有未来 ego 状态都交给 learned latent WM，而不使用明确运动学。
+ds_command 长期偏小
+有安全空间但速度持续低于 speed_limit 的 40%
+route_progress 连续 10 个策略步接近 0
+临近终局时剩余路线很短但仍 timeout
 
-P0 的 D1=0 已经说明，没有闭环重锚和状态一致性的 action chain，比重复当前反馈动作还危险。
 
-六、问题 5：footprint 插值到底要拿来做什么？
+必须区分：
 
-不是为了把评测做得更漂亮，而是解决当前最主要的失败：计划看似“中心点没出界”，车辆实体却已经压线或切出可行域。
+真正停滞；
+安全减速；
+route completion 计算异常；
+计划 ds 系统性低估；
+LQR 纵向跟踪不足。
 
-6.1 为什么只检查 6 个 plan 点不够
+否则 geometry loss 可能以降低越界为代价，让 timeout 大幅增加。
 
-当前计划间隔是 0.5 秒。假设车速 7 m/s，相邻点距离约 3.5m；高速时可能更远。
+三、P0/P1：几何边界探针
+7. 完整 footprint 插值检查
 
-可能出现：
+位置： forensics、DAgger collector，之后扩展至标签生成。
 
-plan point k：在可行域内
-plan point k+1：也在可行域内
-二者之间的弧线：切过实线、路肩或收费岛
+不能只检查 6 个 plan pose。对每两个节点之间：
 
+空间间隔建议不超过 0.5m；
+航向变化建议不超过 2°–3°；
+为每个插值 pose 生成车辆 footprint；
+检查四角、边中点和车体中心；
+分别记录 drivable-area、实线、route corridor 判定。
 
-另外，plan point 通常表示车辆中心，而车辆不是一个点。
+输出：
 
-即使中心在车道内：
+min_boundary_margin
+first_invalid_segment
+invalid_footprint_ratio
+solid_line_cross_count
+plan_inside_but_interpolation_outside
 
--车头外侧角可能压线； -车尾在急弯中扫出边界； -LQR tracking error 可能让车身外缘越界； -收费站狭窄通道中，中心线可行不代表 2m 宽车身可行。
 
-6.2 footprint 是什么
+需要特别检查：
 
-在每个计划 pose：
+road_edge_distance_from_ctx 是否只适用于当前 ego pose。
 
-(x, y, heading)
+如果它内部读取当前车辆或 reward context，而不是接受任意查询 pose，就不能直接用于未来 plan。应抽取纯函数式 geometry query，避免测试未来 pose 时实际上仍在查询当前 ego。
 
+8. 坐标系 round-trip probe
 
-根据车辆长度和宽度生成矩形车身。
+位置： env/obs/memory.py、pipeline/frames.py、nav/world-route 重建、plan 转换。
 
-实际检查至少包括：
+建立 round-trip 测试：
 
--四个角； -四条边中点； -车身中心。
+world → ego frame → world
+history frame → current frame → original history frame
+route_world → nav checkpoint → reconstructed world checkpoint
 
-然后在相邻计划 pose 间每 0.5 到 1.0 米插值一次，再检查完整车身是否落在 drivable region。
 
-P0 已按这个思路加入 footprint/时间戳归因，发现模型超过一半失败带 plan infeasibility 因子。
+测试对象：
 
-6.3 它有四个用途
-用途一：失败归因
+点；
+航向； -速度向量； -完整六点 plan； -车辆 footprint。
 
-区分：
+误差阈值建议：
 
-Plan 本来就不可行
-vs
-Plan 可行但 LQR 执行偏离
+position < 1e-4 m
+angle < 1e-5 rad
 
 
-这是 P0 的首要用途。
+同时覆盖：
 
-用途二：训练监督
+yaw 接近 ±π；
+reset；
+原地低速；
+倒车或负 ds，如果接口允许；
+route 末端重复点；
+history 部分无效。
 
-为每条候选轨迹计算：
+复杂几何上的 off-road 很可能由微小坐标语义错误放大，不能只假设 SE(2) 实现正确。
 
-min boundary margin
-fraction of footprint outside
-first violating rollout step
-corridor violation severity
+9. 道路语义和实线 crossing 一致性检查
 
+同一 pose 分别调用：
 
-使 planner 在越界发生前就得到稠密信号，而不是等 episode 最终 off-road 才收到惩罚。
+reward 判定；
+termination 判定； -新 footprint inspector；
+route/lane context 判定。
 
-用途三：候选计划筛选
+建立一致性矩阵：
 
-即使策略生成轨迹，也可以在部署前：
+reward says off-road
+termination says off-road
+geometry probe says outside
+solid-line probe says crossed
 
--拒绝明显越界的 candidate； -对多个 candidate 选择 margin 更大的； -或通过小幅 projection 修正到可行域。
 
-用途四：hard mining
+如果这些组件对同一状态判断不同，应输出 anomaly，而不能训练网络去拟合冲突标签。
 
-将高风险样本定义为：
+建议随机抽取至少 10,000 个实际 pose 和 near-boundary perturbation pose，统计 disagreement rate。正式使用 geometry label 前，目标应低于 0.5%；若更高，先解决定义差异。
 
-min_margin < threshold
-future footprint violation
-rapid margin collapse
-large tracking residual
+四、网络内部 probes
+10. Encoder 可辨识性 probe
 
+位置： encoder 输出、当前帧 latent、memory latent。
 
-比当前按 BC action error 选 worst-50% 更对应闭环失败。
+冻结模型后训练小型线性 probe，预测：
 
-6.4 但要修正一个重要口径问题
+ego speed
+lateral offset
+heading error
+road curvature
+left/right boundary margin
+route progress
+next-step ds/dtheta
+OD relative position/velocity
 
-P0 发现很多“off-road”其实来自：
 
--连续黄/白实线； -车道 flag； -环境 termination 的 line-crossing 语义；
+用途不是提升模型，而是判断表示中是否存在规划所需信息。
 
-而 footprint 几何初版只检查 lane surface，因此出现大量 anomaly。
+判定方式：
 
-所以不能只维护一个 drivable_inside。
+当前帧 latent；
+temporal memory 后 latent；
+WM rollout latent； -不同 Stage A/B/C checkpoint。
 
-建议显式拆成三种约束：
+如果 Stage A latent loss 下降，但 boundary margin、curvature、future pose 的 probe 不改善，说明 latent consistency 可能发生共适应，而非学到闭环物理。
 
-surface_valid:
-    完整车身是否仍在道路可行表面
+11. 历史信息因果 probe
 
-legal_corridor_valid:
-    是否跨越禁止跨越的实线/隔离线
+利用现有模型做不重训反事实：
 
-route_corridor_valid:
-    是否仍属于导航允许的道路分支/通道
+normal history
+current frame repeated 6 times
+history reversed
+history shuffled
+history all-zero but valid
+history valid values but hist_valid=0
 
 
-相应输出：
+比较：
 
-surface_margin
-solid_line_margin
-route_corridor_margin
+policy_mu delta
+plan delta
+value delta
+router delta
+world rollout delta
+closed-loop KPI
 
 
-否则模型可能学会“不掉出道路”，却仍然横跨实线，被环境判 off-road。
+预期：
 
-6.5 footprint 不应成为硬保守约束
+正常与复制当前帧若几乎一样，mem bank 没有使用动态历史；
+hist_valid=0 后仍显著影响输出，说明 mask 泄漏；
+reversed/shuffled 几乎无变化，说明模型没有利用时序顺序； -空历史导致非零变化时，重点检查 TemporalAttention bias。
 
-如果一味最大化 margin，模型可能：
+代码已有 test_mem_rollout.py、test_v6_attn_heads.py 等入口，适合扩展为 contract test。
 
--在狭窄收费口停车； -过于贴车道中心； -不敢换道； -通过低速规避 off-road； -导致 timeout 上升。
+12. World Model action-sensitivity probe
 
-D2 当前主要失败就是 timeout，而不是 off-road。
+当前 WM 每步 latent detach，因此必须确认它至少对 action 有敏感且合理的响应。
 
-因此 geometrical loss 应有死区和任务权衡，例如：
+对同一 observation 输入不同动作：
 
-margin >= 0.5m:
-    no penalty
+nominal
+ds +10%
+ds -10%
+dtheta +小扰动
+dtheta -小扰动
+左右镜像动作
+zero action
 
-0 < margin < 0.5m:
-    smooth warning penalty
 
-margin <= 0:
-    steep violation penalty
+记录：
 
+ego latent delta
+predicted ego pose delta
+OD/LD latent delta
+policy output delta
+value delta
 
-具体阈值要根据车辆宽度、道路类型和 lane width 归一化，而不是全局固定 0.5m。
 
-更合理的是：
+关键异常：
 
-mnorm=available lateral clearancelocal corridor half-widthm_\text{norm} = \frac{\text{available lateral clearance}} {\text{local corridor half-width}}
+不同 action 得到几乎相同 rollout：WM 忽略 action；
+左右转扰动产生同方向响应：符号或坐标错误；
+第一步敏感、后续迅速完全相同：detach 或 transition 信息丢失；
+微小 action 引发巨大 latent jump：transition 不稳定。
 
-狭窄收费口和高速宽车道不能用同一个绝对 margin 评价。
+建议计算有限差分 Jacobian：
 
-七、对你列出的 13 点，我的更新判断
-立即做，且不需要再争论
-episode/step 级归因；
-drivable boundary、local width、route corridor 与 footprint；
-signal placeholder 显式化；
-history 消融；
-明确 PlanHead、PolicyHead、LQR 的职责；
-hard mining 改为闭环风险；
-DAgger 存真实 recovery trajectory；
-PPO 渐进解冻，但要在 trajectory action 信用链打通后做。
-方向正确，但需要限定
-OD 8m gate
+∂future_pose / ∂ds
+∂future_pose / ∂dtheta
+∂policy / ∂WM_latent
 
-repo 复核表明：
 
--主路径是 track-id 精确匹配； -8m nearest-neighbor 是缺 identity 时的 v1 fallback。
+无需反向传播，有限差分即可诊断。
 
-所以不应把它列为当前 off-road 主根因。应做 audit，统计 fallback 实际占比以及错误匹配率。如果 fallback 占比低于 1% 到 2%，降级处理。
+13. World Model rollout 漂移 probe
 
-Same encoder + detach latent target
+分别计算 horizon 1–6 的：
 
-你说“这貌似是密集监督通用做法”，部分正确。
+ego pose error
+ego latent cosine/L2
+OD position error
+LD geometry error
+presence calibration
 
-同 encoder、target detach 常见于自监督方法，但通常需要额外稳定机制：
 
-EMA target encoder；
-predictor asymmetry；
-stop-gradient；
-variance/covariance regularization；
-reconstruction target；
-contrastive negatives。
+不要只报告六步平均值。重点看误差增长规律：
 
-这里的风险不在 “detach 本身违规”，而在：
+近似线性；
+指数增长； -第 2 步突然跳变； -只有 latent 误差低但物理误差高。
 
-online encoder 定义 target
-transition 学这个 target
-encoder 又同时被其他 loss 更新
-缺少固定物理坐标约束
-物理解码权重较弱
+另外按以下维度分组：
 
+直道/弯道/tollgate； -速度区间； -边界 margin； -对象密度；
+action curvature。
 
-因此不是一定会坍缩，而是 latent loss 很难解释。
+如果 WM 在简单场景很好、收费站完全失效，平均 loss 会掩盖真正问题。
 
-最便宜的验证不是马上加 EMA，而是做 probe：
+14. MoE 路由有效性 probe
 
-latent 能否线性读出 ego pose、speed、boundary margin、road curvature；
-Stage A 过程中，latent loss 改善是否对应 probe 改善； -未来 1/3/6 步 probe error 是否随 horizon 合理上升。
+位置： net/moe.py、PlanHead 输出。
 
-若 probe 健康，再决定是否需要 EMA。
+每个 step 记录：
 
-Memory 的 LD 时序融合
+router logits
+top-2 experts
+top-2 weights
+router entropy
+primary norm
+per-expert residual norm
+mixed residual norm
+residual / primary norm
+expert switching rate
 
-LD 静态结构不一定需要 temporal attention。对齐误差、lane slot 抖动和局部遮挡可能使它有价值，但不能预设。
 
-你的五组消融是合理的：
+重点检查：
 
-current only；
-2 frames；
-6 frames；
-shuffled history；
-repeated current。
+专家是否真的有影响
 
-最关键比较是：
+暂时屏蔽每个 expert，测 plan 变化和闭环 KPI。
 
-6-frame real history
-vs
-6-frame repeated current
+专家是否只是重复
 
+计算 expert residual 的 pairwise cosine similarity。
 
-如果接近，说明历史动态价值低。
+路由是否稳定
 
-MoE
+同一 episode 相邻策略步的 top-1 切换率；对输入加微小噪声后的切换率。
 
-风险判断仍然成立，但 P1 当前先不要动。P0 已锁定 plan quality 是近期问题，而 MoE 去留要等计划监督对齐后做等预算实验。否则 MoE 可能只是替现有错误目标背锅。
+负载均衡是否伪装成 specialization
 
-World model
+比较 expert ID 与 road class、曲率、速度、边界风险之间的互信息。
 
-当前 detached WM 的长期信用问题仍成立。但根据 P0，我会调整措辞：
+建议警戒值：
 
--不是“WM 与任务无关”； -而是“当前 WM 没有被证明能产生状态一致、可闭环重锚的 trajectory rollout”。
+residual/primary norm 长期 <1%：MoE 几乎没作用；
+多数专家 cosine >0.9：高度重复；
+微小扰动 top-1 切换率 >30%：路由不稳定；
+occupancy 均衡但专家消融无影响：只是满足 balance loss。
+15. Policy std、clipping 与有效探索 probe
 
-未来应把 ego 运动学和 learned environment prediction 分开：
+PPO 不能只看配置中的 log_std。应记录：
 
-ego pose: explicit arc/kinematic update
-other actors/risk: learned WM
+raw sampled action
+squashed action
+clipped action
+executed action
+policy_mu
+policy_std
+clip fraction
+effective action variance
 
-八、我对当前 P1 计划的反驳与重排
 
-docs\deepseekv4p1_argue.md 当前建议：
+特别比较：
 
-P1-3 曲率项先行；
-P1-1 recovery 数据；
-P1-2 footprint/corridor； 4.组合 candidate。
+网络采样方差；
+clipping 后方差；
+LQR 执行后的实际轨迹方差。
 
-我认为这个顺序偏向“先做最便宜的”，但不完全对应根因。
+如果大量 action 被 clipping，PPO 的 log-prob 对应的是 raw action，而环境实际接收的是另一个分布，可能形成隐蔽的 policy-gradient 偏差。
 
-我建议改成：
-P1-0：先冻结真正的 trajectory action 契约
+建议告警：
 
-在写 recovery schema 前先定义：
+任一 action 维 clipping >5%
+实际执行方差 < raw 方差的 20%
+std 很大但轨迹几乎不变
 
-本策略的 stochastic action 到底是什么？
 
+仓库已有 test_policy_logstd_max.py、test_stage_c_effective_action.py，应扩展为分布级测试，而非只验证单个上限值。
 
-短期不能重构 PPO 时，可以保持现有 plan 部署，但必须明确：
+16. Value head 校准 probe
 
-Stage B 学什么；
-Stage C 哪些参数能改变 plan；
-PPO sampled action 如何进入 plan；
-buffer 中存哪些 log-prob；
-LQR 最终执行哪条 sampled/deterministic trajectory。
+按 value prediction 分桶，比较：
 
-产出一页契约：
+predicted value
+empirical discounted return
+success rate
+off-road rate
+timeout rate
 
-policy output
-sampling point
-action dimensionality
-plan construction
-logprob definition
-executed reference
-replan interval
-gradient/trainable path
 
-P1-1：真实 recovery trajectory 数据
+额外输出：
 
-这是主线。必须存：
+explained variance；
+calibration curve；
+success/off-road 二分类 AUC；
+按 road class 的 bias；
+terminal 前 1–5 步 value drop。
 
-student observation
-student plan
-student actual executed trajectory
-expert action at current real state
-expert 6-step recovery trajectory
-surface/line/route corridor labels
-T_plan/T_cross/T_term
-road class
+若 off-road 前 value 仍很高，critic 没有识别 dominant risk，PPO advantage 很难驱动正确修复。
 
+还要检查 timeout 与 off-road 是否在 return 中得到合理区分，避免 critic 学成“慢行最安全”。
 
-重点是 expert trajectory 要从当前 student state重规划，不是从 expert shadow future state拷贝 action chain。D1 已经证明后者危险。
+五、监督与数据 probes
+17. BC 标签自一致性
 
-P1-2：先启用离线可学的整段轨迹监督
+对每个数据样本验证：
 
-把当前 traj_aux=0 改为只对真实 recovery trajectory 行生效。
+action chain 经 arc_step 积分得到的 pose
+vs future ego world pose
 
-必须监督：
 
-6 步 pose/action chain； -横向累计位置； -航向； -速度或 ds； -有效 mask； -整段曲率。
+按 horizon 1–6 报告误差。
 
-不要继续用常量外推的 traj6。
+如果 action label 与 future ego trajectory 不一致，应按来源分类：
 
-P1-3：加入几何与曲率监督
+expert 执行受 tracker/动力学影响；
+action clipping； -时间索引偏移； -坐标变换；
+episode boundary 窗口污染。
 
-曲率项可以先实现，但不应单独作为主要实验结论。
+这是非常关键的盲点。否则模型同时被要求拟合 action chain 和 ego future，而二者可能互相矛盾。
 
-建议联合最小 recipe：
+18. Episode boundary leakage
 
-L=Laction+λtrajLtraj+λκLκ+λΔκLΔκ+λbLboundaryL = L_{\text{action}} + \lambda_{\text{traj}} L_{\text{traj}} + \lambda_\kappa L_\kappa + \lambda_{\Delta\kappa}L_{\Delta\kappa} + \lambda_bL_{\text{boundary}}
+检查训练窗口是否跨越：
 
-初始量级应通过 gradient norm 校准，而不是直接猜系数。让每项在训练早期对 plan-head 的梯度范数处于同一数量级，例如相差不超过约 3 到 5 倍。
+reset；
+termination；
+timeout； -地图切换；
+object track ID 重置。
 
-P1-4：再打通 PPO trajectory credit
+任何跨 episode 的 history/future/action chain 必须被 mask，不得靠零填充后继续作为有效监督。
 
-这是超越 IDM 的必要步骤，不应无限后推。
+建议测试：
 
-两种实现路线：
+最后 5 个样本 + 下一个 episode 前 5 个样本
 
-保守版：12D 一次性 trajectory action
-policy outputs mean/logstd for 6×2
-sample complete chain
-joint logprob = sum over 12 dims
-sampled chain → arc_step → LQR
 
+逐字段检查时间戳、world pose、route ID、track ID 和 valid mask。
 
-优点：
+19. Recovery 标签质量 hook
 
-PPO 记账清楚； -容易实现； -可以直接监督 expert chain； -不会存在“后五步没有 log-prob”。
+真实 recovery 采集后，每条标签必须附：
 
-缺点：
+expert_recovered
+recovery_time
+minimum_margin
+collision_after_recovery
+route_progress_after_recovery
+expert_vs_student_first_action_delta
 
-action dimensionality 增大； -独立 Gaussian 不自然； -需要 smoothness/correlation prior。
-研究版：autoregressive trajectory PPO
-a0 ~ pi(.|z0)
-z1 = transition(z0,a0)
-a1 ~ pi(.|z1)
-...
-joint logprob = sum_k log pi(ak|zk)
 
+低质量标签应过滤：
 
-优点：
+专家自己也失败； -专家首次动作与 student 几乎相同，但结果仍失败；
+recovery 后长期 timeout； -动作链与 future pose 不一致； -边界标签不可用。
 
--符合你的 WM 设想； -能表示条件依赖； -未来 action 基于预测状态。
+不要把“专家接管”自动等价成“有效恢复示范”。
 
-缺点：
+20. Loss 梯度贡献 probe
 
--更复杂； -WM 误差会直接污染 action distribution； -PPO ratio、entropy、KL 都必须按整链处理； -detached state 会影响梯度路径； -训练稳定性风险大。
+每隔固定 update，例如 200–500 step，分别对每项 loss 单独计算目标模块的梯度范数：
 
-建议先做 12D trajectory action 作为因果正确 baseline。它跑通后，再判断 autoregressive WM 是否值得。
+BC action loss
+trajectory loss
+WM latent loss
+ego-next loss
+OD/LD loss
+load-balance loss
+anchor/KL loss
+geometry loss
+curvature loss
 
-九、最终结论
-关于 expert 与超越 IDM
 
-你的原设想正确：
+按模块记录：
 
-BC 接近 PurePursuit-IDM，DAgger 修复 student distribution，RL 用非专家奖励超越。
+encoder
+memory
+plan fusion
+primary
+experts
+router
+ST-GNN
+policy
+value
 
-但当前实现缺的是：RL 所记账的 action 没有完全等价于最终部署的 trajectory action。
 
-关于 PPO 与 A-hold
+重点查：
 
-A-hold 是为保证：
+某项配置了非零权重但梯度始终为零；
+loss 数值很小但梯度极大；
+geometry loss 被其他 loss 完全淹没；
+specific-only 下本应冻结模块出现梯度； -可训练模块有梯度但 optimizer 没有包含；
+optimizer 包含冻结参数。
 
-PPO sampled action
-→ executed LQR reference
-→ reward
+仓库已有 test_grad_group_probe.py 和 test_anchor_grad_probe.py，应将其扩展成运行时梯度账本。
 
+21. Optimizer 真正更新 probe
 
-它解决信用分配，不解决计划质量。P0 repeat-action 归零证明它不适合作为最终部署接口。
+仅检查 requires_grad 不够。每次训练阶段开始后，抽取一次 update，记录：
 
-关于 three seeds
+parameter_before
+gradient_norm
+optimizer_state_exists
+parameter_after
+delta_norm
 
-不是靠 seed 优化，而是用不同 seed 证明方案不依赖偶然性。禁止挑最好 seed，报告 mean、worst、paired confidence interval。
 
-关于 world model 和轨迹接口
+输出每个模块：
 
-最终接口应该是：
+trainable parameter count
+nonzero-gradient count
+updated parameter count
+mean/max update ratio
 
-trajectory policy → LQR
 
+必须检测两类静默 bug：
 
-而不是裸单步 action。但 world model 不是逻辑上唯一的轨迹生成方式。
+参数有梯度，但没有加入 optimizer；
+参数在 optimizer 中，但被意外冻结或梯度覆盖为零。
+六、建议的落地优先级
+立即和 P1 一起做
+checkpoint fail-fast；
+plan/action/arc-step 契约；
+时间索引契约；
+plan/reference/actual 三轨记录；
+LQR 饱和与 progress probe；
+footprint 插值；
+recovery 标签质量；
+loss-gradient 和 optimizer-update 账本。
+首个 P1 candidate 前完成
+BC action 与 future pose 自一致性；
+坐标系 round-trip；
+history 反事实；
+WM action sensitivity；
+MoE residual/router probe；
+policy clipping/effective action probe；
+value calibration。
+P2 模块裁决前完成
+WM horizon 分层误差；
+encoder 线性 probe；
+expert ablation；
+No-WM/MoE 等预算对照；
+按 road class、边界风险、速度分层的 paired KPI。
+七、建议统一产出一个 health_report.json
 
-你提出的 autoregressive action-chain 路线可以成立，前提是：
+每次正式训练或评测生成：
 
--每一步基于候选 action 产生的预测状态； -整条 chain 都有正确 log-prob； -整条 sampled chain 真正交给 LQR； -每 0.5 秒 receding-horizon 重规划； -ego 运动学优先使用显式模型； -learned WM 主要负责环境交互预测。
+{
+  "checkpoint_contract": {},
+  "obs_contract": {},
+  "time_alignment": {},
+  "action_plan_contract": {},
+  "geometry": {},
+  "tracker": {},
+  "progress": {},
+  "history_sensitivity": {},
+  "wm_sensitivity": {},
+  "moe_health": {},
+  "policy_distribution": {},
+  "value_calibration": {},
+  "gradient_accounting": {},
+  "optimizer_accounting": {}
+}
 
-关于 footprint
 
-它不是辅助指标，而是把 dominant failure 变成可学习信号：
+并给每项状态：
 
--完整车身而非中心点； -节点间插值而非只查 6 点； -区分 surface、solid line、route corridor； -用于归因、loss、候选筛选和 hard mining。
+PASS
+WARN
+FAIL
+NOT_AVAILABLE
 
-不过不能单纯最大化 margin，否则会把 off-road 转成 timeout。
 
-下一步最优先事项
+正式 checkpoint 进入三 seed eval500 前，至少要求所有 correctness 类项目 PASS。性能类 probe 可以 WARN，但不能缺失。
 
-我建议 coding agent 不要直接按现有 P1-3→P1-1 顺序推进，而是采用：
+最关键的五个隐藏风险
 
-P1-0：冻结 trajectory-action 与 PPO log-prob 契约；
-P1-1：从 student 真实状态采 expert recovery trajectory；
-P1-2：启用真实整段 trajectory supervision；
-P1-3：加入 footprint boundary + curvature/Δcurvature；
-P1-4：实现完整 6×2 trajectory action PPO baseline；
-达到约 0.70 后再做 WM autoregressive rollout、MoE、渐进解冻和超 IDM。
+如果只能先做五项，我会选：
 
-目前最需要避免的误区是：
+BC action chain 与 future ego pose 是否真正一致；
+PPO sampled action 是否实际决定最终执行 plan；
+训练、评测、forensics 的时间索引和 arc_step 是否完全一致；
+geometry probe 查询的是否真是未来 footprint，而不是当前 ego context；
+配置中的每项 loss 和 trainable scope 是否实际产生参数更新。
 
-把 D2=0.706 解读为“接口已经完全解决”，或者把 D1=0 解读为“未来 trajectory 没价值”。
-
-真正结论是：
-
-闭环状态反馈与每 0.5 秒重锚至关重要；未来计划只有在状态一致、整链记账、完整执行且持续重规划时才有价值。
+这五项最容易出现“所有测试都能跑、loss 也下降，但闭环永远上不去”的语义级 bug。
