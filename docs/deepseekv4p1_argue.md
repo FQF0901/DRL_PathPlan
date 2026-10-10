@@ -14,7 +14,7 @@
 - **待决 D1–D5 已关闭**（`5fdbddc` 裁定；落地澄清见 §0.9.2）。
 - **P0 结果速览（2026-10-10）**：口径差——`repeat_action` 使 v8 模型归零（保持 plan 协议）；上限——**d2=0.706 为最高可执行上限**（oracle 0.608、IDM 0.756）；失败——模型以 off-road/压线为主且 >50% 带 plan 因子；**P1 = 计划侧**。详见 §5。
 - **排摸收官**：单变量赢家 **pri512**（eval500 0.332）与 **rou64**（clean500 0.370）；组合 C-N1（pri512+rou64）**负交互被拒**；最优 epoch 依配置。详见 §6。
-- **当前状态**：GPU 空闲、无在跑作业；P1 计划讨论稿见 §7（待拍板）。
+- **当前状态**：GPU 空闲、无在跑作业；P1 计划 **v0.2（吸收 round-3 审阅，含我方两项反提案）**见 §7——待拍板。
 - **约束（历史）**：P0 开工由用户"开工"指令触发（2026-10-09 已触发并完成）；P1 待拍板后再执行。
 
 ---
@@ -94,6 +94,7 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 - **2026-10-09 晚**：P0-A 完成（fix-12；独立复核 14 passed；fail-fast + 版本戳 + `--episodes-out`）；**s11 兼容 runner 完成（fix-11）：更正 s11=obs v4+v7p2、archive 必须 `c37acbb`；CPU 烟测 0/0/0、154/154；runner 待 GPU**；审计工具扩展进行中（fix-13）。
 - **2026-10-09 深夜**：审计工具扩展完成（fix-13：`d1`/`d2`/`--reference` + footprint/四时间戳/层级分类；CPU 单测 27 passed；smoke16 全 10 模式跑通）。**P0 三件套全部就绪**；顺手修复 `tools/diagnostics/*` 的 `_ROOT` off-by-one（直接调用恢复）。矩阵 runner 已备：`.slim/deepwork/s1_audit/run_matrix.sh`（等 GPU 空窗；按行切 config/model.yaml）。**
 - **2026-10-10（收官）**：P0 执行全链完成——排摸收尾（stg3 重跑，178/178 干净加载）+ 矩阵 11 行 × 500 eps + 双口径 6 评测 + s11 v7 双口径；**fail-fast 两次拦下静默错评**（stg3 `spatial` 漏传，已修 `08582f2`；历史 A3 假阴性背景）；laneplan 参考 bug 修复（`5e6e1b3`：0.002→0.442）；d1 确认为真实结果；**clean500 确认**（rou64 0.370 / pri512 0.334 / attn2 0.304 / base 0.292）；**组合臂 C-N1 负交互被拒**（best 0.213 < max 单因子 0.347）。**审计报告与排摸收官见 §5/§6；P1 计划见 §7。**
+- **2026-10-10 晚（round-3）**：ChatGPT 全面审阅（1115 行）——接受 P0 判读（接口非首瓶颈、plan 质量为核心、A-hold 记账≠质量）；**反驳我方 P1 顺序**并给出"P1-0 契约 → recovery → 整段监督 → 几何/曲率 → 轨迹级 PPO"重排；我方**部分接受 + 两项反提案**（配速证据、"12D 非易"及三选反提案）→ §7 v0.2 / §7.6；timeout 配速分析已并入 §5.6。
 
 ---
 
@@ -331,7 +332,7 @@ laneplan  fail279: cls{plan54, none109, anomaly116} factors{plan134, anomaly116}
 ### 5.6 限制与未完成
 
 - **s11 逐 step 分类未做**（v7 栈缺新 forensics 字段；成本/收益低）；s11 仅作跨版本方向参考。
-- **timeout 占比高**（d2 80%、oracle 51%）值得后续单独分析（配速/卡滞），可能压低上限估计。
+- **timeout 已分析（配速损失证据，2026-10-10）**：timeout 失败的 rc 分布——d2 中位 **0.849**（55% ≥0.8）、oracle 0.807（51%）、laneplan 0.876（70%）、e1_pri 0.841（57%）；而 IDM 的 timeout 中位仅 0.597（真卡滞）。⇒ **执行链系统性"跑得慢/效率低"**（多为"接近完成但超时"），d2=0.706 可能**低估**接口上限；配速分析与修复已列入 P1-0。
 - 分类统计含成功 episode 的"计划曾不可行"标记（factor 层面），诊断为方向性而非最终统计。
 - 所有评测为单一冻结协议（deterministic=true；环境存在已记录的内禀非确定性 ≈1/500）。
 - 3 seeds 验收未做（P1 候选阶段完成后补）。
@@ -425,7 +426,7 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 
 ---
 
-## 7. P1 建议与实施计划（讨论稿，待拍板）
+## 7. P1 计划 v0.2（吸收 ChatGPT round-3 审阅；待拍板）
 
 ### 7.1 原则（含风险自曝）
 
@@ -433,31 +434,53 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 - P1 期间**继续冻结** WM/MoE/encoder/PPO scope；不做新容量臂。
 - **风险自曝**：d1/d2 的教训是"锚定/反馈"比"表示精度"更关键——recovery 数据必须存"student plan + 实际轨迹 + expert recovery plan"三件套，而不是只补几何点，否则收益可能有限。
 
-### 7.2 步骤与每步验证
+### 7.2 步骤与每步验证（v0.2）
 
-- **P1-0（0.5–1 天，纯设计）**：定 recovery 数据 schema（student 6 点 plan / 实际轨迹 / expert recovery 6 点 plan / T_plan、T_cross / 失败类型 / spec 元数据 / 几何真值）；复用 forensics 工具当"几何真值生成器"；产出 dagger_collect 改造点清单。
-- **P1-1（1–2 天 + 采集 + 对照）**：采集端失败前 2–4s 回溯、窗内每步记录 expert 6 点恢复轨迹；训练端 `traj_aux` 对 recovery 行启用（替换"dagger 行 traj=0"）+ 单独计权；验证链 ① 离线 → ② clean150 单轮 → ③ clean500/eval500 对照。
-- **P1-2（1–2 天）**：phase3/RL rollout 期加 plan footprint 可行性项（插值 + corridor + min margin），先单开一项小消融；BC 离线数据无几何真值 → "新数据版本"暂缓。
-- **P1-3（0.5 天，最便宜的先行验证）**：plan 输出 κ/Δκ 惩罚（针对 repeat 曲率放大与压线）。
-- **P1-4**：有效项组合成 candidate recipe → clean500 + eval500 + 3 seeds。
-- **P1-5**：G2 ≥0.74 → G3 ≥0.80（目标带 0.82–0.85）。
+- **P1-0（0.5–1 天，纯设计）**：①**冻结 trajectory-action 与 PPO log-prob 契约**（policy 输出/采样点/动作维度/plan 构造/logprob 定义/被执行参考/重规划间隔/可训梯度路径——一页契约）；②recovery 数据 schema（student 观测/plan/实际轨迹/**expert 从 student 真实状态重规划**的 6 点恢复轨迹/几何三项标签/T_plan、T_cross/road class）；③**timeout/配速分析**（见 §5.6；含参考速度曲线与 LQR 速度策略）；④P1-4 的轨迹级 PPO 选型讨论（§7.6-②）。
+- **P1-1（主线；1–2 天 + 采集）**：真实 recovery 数据采集——失败前 2–4s 回溯；expert 空问机制（d2 同款，现成）从 **student 当前状态**重规划 6 点轨迹；student plan/实际轨迹同存。
+- **P1-2（1 天）**：启用**整段轨迹监督**（`traj_aux` 仅对真实 recovery 行生效；监督 6 步 pose/action 链/横向/航向/ds/mask/整段曲率；彻底弃用合成 traj6）。
+- **P1-3（1–1.5 天）**：几何与曲率**联合 recipe**——footprint 插值 + **三项分解（surface / legal-corridor(实线) / route-corridor）** + **归一化 margin + 死区**（防 off-road→timeout 置换）；κ/Δκ 惩罚；各项权重按 **gradient norm 对齐**（相差不超过 ~3–5×）校准，不猜系数。
+- **P1-4（2–3 天）**：**轨迹级 PPO 信用链**（选型见 §7.6-②：低维噪声解码器 / action-conditioned plan / 12D；先跑"因果正确 baseline"，autoregressive WM 版随后评估）。
+- **P1-5（验收，升级版）**：开发筛选 1 seed（clean150）→ 候选 3 seeds（clean500+eval500，固定 ckpt-selection 规则，报 mean/worst/range + 逐 seed paired）→ 终局判据：3-seed mean ≥0.80、worst ≥0.77、paired bootstrap LB>0、McNemar p<0.05、off-road −30%、collision ≤IDM、非单一 road class（最终声明建议补到 5 seeds）。
 
-### 7.3 建议起步顺序
+### 7.3 顺序（接受 round-3 重排）
 
-**P1-3（0.5 天，先拿便宜的方向信号）→ P1-1（主力，recovery 数据）→ P1-2 → P1-4**。
-理由：曲率项与"压线/曲率放大"证据直接对应、实现成本最低；若单独有方向，可为 P1-1 的数据设计提供"该监督什么"的判据。反对意见：若只看"plan 不可行 >50%"，P1-1 才是最对口的——此点待拍板。
+**P1-0（契约+配速分析）→ P1-1（recovery 数据，主线）→ P1-2（整段监督）→ P1-3（几何/曲率联合 recipe）→ P1-4（轨迹级 PPO）→ P1-5（验收）**。
+- 我方原"曲率先行"收回（同意：曲率项不应单独作主要结论）；保留为 P1-3 联合 recipe 的一个分量。
+- 内部纪律：**每步配 ≤1 天的小消融/探针作为方向门**（不单独作结论），避免"多日开发后才发现方向错"。
 
 ### 7.4 决策点（待用户/双方）
 
 1. **P1 起点模型**：pri512（双集确认）还是 rou64（clean500 最高）？（组合已排除）
-2. **数据池**：用现有 dagger r1/r2/r3（500×3）？是否加难例池（tollgate/roundabout 定向）？隔离断言沿用 fail-closed。
-3. **几何真值**：接受"rollout 期监督"（建议）还是投资"新数据版本"？
-4. **验收口径**：G2/G3 用 clean500+eval500 双集 + 3 seeds——确认？
-5. **起步顺序**：P1-3 先行（建议）还是 P1-1 直接主力？
+2. **数据池**：现有 dagger r1/r2/r3（500×3）？加难例池（tollgate/roundabout 定向）？隔离断言沿用 fail-closed。
+3. **几何真值**：三项分解（surface/legal/route）用 rollout 期监督（建议）还是投资新数据版本？
+4. **P1-4 选型**：低维噪声解码器（建议）/ action-conditioned plan / 12D——请 round-3 评估"探索能力"后再定（§7.6-②）。
+5. **配速修复范围**：仅在参考构造侧（推荐先做）还是触及 LQR/速度策略？
+6. **验收口径**：升级版 gates（mean≥0.80、worst≥0.77、bootstrap LB>0、McNemar……）确认？最终声明是否补 5 seeds？
+7. **起步**：按 §7.3 顺序（已接受重排）——如无异议即按此执行（待"开工"指令）。
 
 ### 7.5 P1 期间明确不做
 
 不动 WM/MoE/encoder/PPO scope；不做新容量臂；不重定义部署口径；不碰评测协议。
+
+### 7.6 我方对 round-3 的接受/反驳（逐条）
+
+**接受**：
+- P1-0 契约优先（"一个 stochastic policy、其 logprob 覆盖被执行物"）——正确且低成本；
+- recovery 必须 **expert 从 student 真实状态重规划**（D1 教训：开环未来链不可信）；空问机制现成（d2 同款）；
+- 整段轨迹监督（弃用合成 traj6）；
+- footprint **三项分解**（surface / legal-corridor / route-corridor）+ 归一化 margin + 死区（防 off-road→timeout 置换）；
+- gates 升级（mean/worst/bootstrap/McNemar/非单一 road class）与"开发 1 seed、候选 3 seeds、终局建议 5 seeds"分阶；
+- WM 职责：ego 运动学显式（arc_step），learned WM 管环境交互；MoE 暂不动；OD 8m fallback 先审计占比；latent 先做线性 probe 再谈 EMA；history 消融最关键对照 = 6 帧真实历史 vs 重复当前帧。
+
+**反驳/修正 1｜"~5pt 接口损失"应改述为"配速损失"（有数据）**：d2 的 118 个 timeout 失败 rc 中位 **0.849**、55% ≥0.8（oracle 0.807/51%；laneplan 0.876/70%；e1_pri 0.841/57%），即多为"接近完成但超时"；对照 IDM 的 timeout 中位仅 0.597（真卡滞）。⇒ 执行链的 ~5pt 差距主要是**效率/配时**，D2=0.706 **低估**接口上限；配速分析与修复列 P1-0（低成本、潜在 5–10pt，同时抬高上限估计与模型分数）。
+
+**反驳/修正 2｜12D 独立高斯不是"容易"的默认**：6×2=12 维独立高斯 → 探索空间过大、维度强相关、BC 冷启动噪声大、entropy/KL 难处理。反提案三选（请 round-3 评"探索能力"，以判断哪个更可能超越 expert）：
+- ⓐ **低维噪声解码器**（2–4D 噪声 → 解码 6×2；logprob 精确、平滑可控）——**建议首选**；
+- ⓑ **action-conditioned plan**（2D action 条件化整段 plan；改动最小、logprob 精确）；
+- ⓒ 12D 联合高斯（最后备选）。
+
+**补证（供 round-3 框架）**：s11 双口径 plan 0.646 > repeat 0.418——"A-hold 解决记账、不解决质量"在跨版本数据上同样成立；且 s11 已含 DAgger+RL，P1-4 若走"整链重跑"需把时间盒计入（每链 ~3h/seed + 评测）。
 
 ---
 
