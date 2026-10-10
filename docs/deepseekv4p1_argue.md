@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue（主文档 · 第三轮：收拢）
+# deepseek-v4.1 argue / P0 主文档（收拢 · 执行 · 审计 · 排摸收官）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态**：argue 阶段，**未实施任何改动**。本文件自本轮起作为我方主文档；历史回应作为附录保留（附录 A = 第二轮回应全文，附录 B = 第一轮回应全文）。
-> **沿革**：ChatGPT round-2（commit `b14743b`）→ 我方第二轮回应（commit `078de2a`，已并入本文件附录 A；`docs/deepseekv4p1_argue_r2.md` 为历史副本）→ 收拢轮（`b2b0f64`）→ **ChatGPT 确认（`5fdbddc`：D-A/B/C 接受、D1–D5 关闭、S0→S1 指令）** → **第四轮：可行性排摸与执行前澄清（§0.9）** → ChatGPT 确认+硬约束（`cd4b559`）→ **第五轮：收拢完成（锁定版，§0.9.5）**。
+> **状态（2026-10-10）**：**P0 执行与审计完成、排摸收官**；P1 计划讨论中（§7）。本文件为**唯一主文档**——审计与排摸结果并入 §5/§6，历史回应保留于附录 A/B。
+> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）**。
 > **我方立场摘要（给新读者）**：目标是超越 IDM；路径 = **先量化"上限与口径"、再按数据做减法/几何对齐**；反对无证据地删模块或扩模块；反对让 GPU 空转等代码。
 
 ---
@@ -12,9 +12,10 @@
 - **共识（8 条，锁定）**：见 §1。硬分歧**已消解**（"立即停扫"并入 C1；"先删 WM"并入 C2；"8m gate"我方认账并限定范围）。
 - **我方修正（3 条）已全部确认**（`5fdbddc`）：D-A/D-B/D-C 均被接受；原分歧记录保留于 §2.1/§2.2。
 - **待决 D1–D5 已关闭**（`5fdbddc` 裁定；落地澄清见 §0.9.2）。
-- **草案方案 v0.1**：P0 三件套（1–2 天、零训练或小工具）→ P1 按数据分支 → P2 模块对照；Gates G1'–G3'——见 §3。
-- **后续计划**：S0 排摸收尾 → S1 P0 → S2 分支 → S3 对照 → S4 验收——见 §4。
-- **约束**：本文档只做收拢，**不触发任何执行**；开工需明确指令。
+- **P0 结果速览（2026-10-10）**：口径差——`repeat_action` 使 v8 模型归零（保持 plan 协议）；上限——**d2=0.706 为最高可执行上限**（oracle 0.608、IDM 0.756）；失败——模型以 off-road/压线为主且 >50% 带 plan 因子；**P1 = 计划侧**。详见 §5。
+- **排摸收官**：单变量赢家 **pri512**（eval500 0.332）与 **rou64**（clean500 0.370）；组合 C-N1（pri512+rou64）**负交互被拒**；最优 epoch 依配置。详见 §6。
+- **当前状态**：GPU 空闲、无在跑作业；P1 计划讨论稿见 §7（待拍板）。
+- **约束（历史）**：P0 开工由用户"开工"指令触发（2026-10-09 已触发并完成）；P1 待拍板后再执行。
 
 ---
 
@@ -92,6 +93,7 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 - **2026-10-09 21:1x 开工**：产出《评测兼容设计 v0.1》→ `docs/p0_eval_compat_design.md`；派发 3 条实现 lane：**P0-A 安全前置**（fail-fast + 版本戳 + IDM 逐 episode）、**s11 v7 兼容 runner**（archive + CPU 加载烟测 + GPU 运行脚本）、**审计工具扩展**（forensics：D1/D2/repeat_action + footprint/四时间戳记录）。GPU 空窗（排摸收尾后）执行 P0-B 矩阵与 P0-C 归因。后续轮次在此追加。
 - **2026-10-09 晚**：P0-A 完成（fix-12；独立复核 14 passed；fail-fast + 版本戳 + `--episodes-out`）；**s11 兼容 runner 完成（fix-11）：更正 s11=obs v4+v7p2、archive 必须 `c37acbb`；CPU 烟测 0/0/0、154/154；runner 待 GPU**；审计工具扩展进行中（fix-13）。
 - **2026-10-09 深夜**：审计工具扩展完成（fix-13：`d1`/`d2`/`--reference` + footprint/四时间戳/层级分类；CPU 单测 27 passed；smoke16 全 10 模式跑通）。**P0 三件套全部就绪**；顺手修复 `tools/diagnostics/*` 的 `_ROOT` off-by-one（直接调用恢复）。矩阵 runner 已备：`.slim/deepwork/s1_audit/run_matrix.sh`（等 GPU 空窗；按行切 config/model.yaml）。**
+- **2026-10-10（收官）**：P0 执行全链完成——排摸收尾（stg3 重跑，178/178 干净加载）+ 矩阵 11 行 × 500 eps + 双口径 6 评测 + s11 v7 双口径；**fail-fast 两次拦下静默错评**（stg3 `spatial` 漏传，已修 `08582f2`；历史 A3 假阴性背景）；laneplan 参考 bug 修复（`5e6e1b3`：0.002→0.442）；d1 确认为真实结果；**clean500 确认**（rou64 0.370 / pri512 0.334 / attn2 0.304 / base 0.292）；**组合臂 C-N1 负交互被拒**（best 0.213 < max 单因子 0.347）。**审计报告与排摸收官见 §5/§6；P1 计划见 §7。**
 
 ---
 
@@ -213,6 +215,260 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 **开工条件**：用户明确说"开工"。本文档只做收拢，不触发任何执行。
 
 ---
+
+---
+
+## 5. P0 审计报告（定稿，2026-10-10）
+
+> 执行窗口：2026-10-10 02:47–07:22（P0-B 矩阵）+ 08:31–10:38（laneplan 修复版重跑 / clean500 确认 / stg3 补跑）。
+> 对象：Arm P（primary 256）与 pri512（primary 512）两个 v8 模型；s11（v7 完整链，跨版本参考）；IDM 规则专家。
+> 纪律：评测安全前置（fail-fast 加载校验 + 版本戳）；跨版本只作方向参考；逐 episode paired 数据 = `runs/forensics/summaries/*_eps.json`。
+
+### 5.0 结论摘要（三问三答）
+
+**Q1 上限在哪？** 最高**可执行上限 = d2（重复"当前专家动作"）0.706** > oracle（开环重放专家路径）0.608 < IDM 自身 0.756。
+⇒ 执行栈与 (ds,dθ) 接口**可承载 ≈0.71–0.76**；v8 模型现处 0.22–0.33 —— **差距在"学到的 plan/动作质量"，不在接口可行性**。
+
+**Q2 口径差多大？** v8 模型在 `repeat_action` 口径下**归零**（arm_p/pri512 均 0.000、off=1.000）；s11（A-hold 训练）plan 0.646 > repeat 0.418。
+⇒ **保持 plan 执行协议**；A-hold 只是 RL 内部记账口径，不得作为部署/评测口径。
+
+**Q3 失败属于哪一类？** 模型失败**以 off-road/压线为主（76–78%）**（IDM 以碰撞为主、d2 以超时为主）；其中 **>50% 的失败带 plan-infeasibility 因子**（T_plan 中位 120/295 步——随驾驶漂移恶化，非瞬时错 plan）；exact ≤ lqr。
+⇒ **P1 = 计划侧（plan-side）**：几何 margin / 曲率平滑 / recovery 数据。
+
+### 5.1 上限矩阵（全表）与判读
+
+| 行 | 参考构建 | succ | off | coll | rc |
+|---|---|---|---|---|---|
+| A/baseline | IDM 自身 | 0.756 | 0.068 | **0.144** | 0.882 |
+| B/oracle | 专家实测未来 3s 位姿（cursor 重定位）+ LQR | 0.608 | 0.134 | 0.058 | 0.856 |
+| **D2/d2** | **当前专家动作 repeat 6 步 + LQR** | **0.706** | 0.038 | 0.020 | 0.913 |
+| C/laneplan | 车道中心线 + LQR（修复版，全量 500） | **0.442** | 0.232 | 0.192 | 0.794 |
+| D1/d1 | 未来专家动作链 → 开环 (6,2) + LQR | 0.000 | 0.950 | 0.050 | 0.259 |
+| E1/e1_arm | 模型 plan（Arm P）+ LQR | 0.224 | 0.604 | 0.026 | 0.695 |
+| E2/e2_arm | 模型 plan（Arm P）+ exact | 0.210 | 0.580 | 0.210 | 0.494 |
+| E1/e1_pri | 模型 plan（pri512）+ LQR | **0.332** | 0.508 | 0.022 | 0.689 |
+| E2/e2_pri | 模型 plan（pri512）+ exact | 0.260 | 0.614 | 0.118 | 0.544 |
+| F/f_arm | 模型动作 repeat + LQR | 0.000 | 0.990 | 0.010 | 0.098 |
+| F/f_pri | 模型动作 repeat + LQR | 0.000 | 0.994 | 0.006 | 0.080 |
+
+**判读**：
+1. **d2=0.706** 是唯一贴近 IDM 的执行栈证明（且 > oracle 0.608：**闭环重锚 > 开环重放**）。
+2. **exact ≤ lqr**（两臂一致）⇒ 照着模型 plan 精确执行不会更好 → **plan 几何本身是瓶颈**；exact 还显著抬高碰撞（0.210/0.118）。
+3. **F 全崩 vs d2 正常**（同口径、只换动作来源）⇒ **模型单步动作质量是硬伤**（repeat 放大：dθ≈0.1–0.19 rad/步复读 → 参考过弯/降速 → LQR 饱和 → 螺旋出界）。
+4. **d1 崩溃经复核为真实结果**（非 bug）：(6,2) 开环专家链不随自车误差回正；d2 的现状态反馈动作天然含回正信号。
+5. **laneplan（修复版）= 0.442、碰撞率 0.192**：单靠"沿车道中心"可达 0.44，但显著低于 oracle/d2 且碰撞高发——路线选择与交互处理是必要成分；**同时它仍高于模型 e1_pri 0.332**——"无脑跟车道"的执行栈都比当前模型学到的 plan 更可用，进一步坐实"计划/动作质量"是主差距。
+
+### 5.2 失败条件化归因（500 eps/行，全量）
+
+| 行 | 失败数 | offroad | timeout | collision | plan 因子 | anomaly | T_plan 中位 |
+|---|---|---|---|---|---|---|---|
+| IDM | 122 | 34 | 16 | **72** | 0 | 34 | — |
+| d2 | 147 | 19 | **118** | 10 | 52 | 19 | 60 |
+| oracle | 196 | 67 | 100 | 29 | 0 | 62 | — |
+| laneplan | 279 | 116 | 67 | 96 | 134 | 116 | 330 |
+| **e1_pri** | 334 | **254** | 69 | 11 | **173（52%）** | 241 | 120 |
+| e1_arm | 388 | **302** | 73 | 13 | 176（45%） | 297 | 295 |
+| e2_pri | 370 | 307 | 4 | 59 | 188 | 296 | 130 |
+| e2_arm | 395 | 290 | 0 | 105 | 180 | 265 | 135 |
+| f_pri | 500 | 497 | 0 | 3 | 433 | 407 | 15（≤5 步 89） |
+| f_arm | 500 | 495 | 0 | 5 | 468 | 449 | 15（≤5 步 118） |
+| d1 | 500 | 475 | 0 | 25 | 178 | 421 | 80 |
+
+**完整明细（cls / factors / 细分 / T_plan）**：
+```
+oracle    fail196: cls{none120, tracker14, anomaly62} split{time100, coll29, off67}
+d2        fail147: cls{plan40, none88, anomaly19} factors{plan52, anomaly19} split{time118, coll10, off19} T_plan med60
+baseline  fail122: cls{none88, anomaly34} split{time16, coll72, off34}
+e1_arm    fail388: cls{anomaly297, plan38, none53} factors{plan176, anomaly297, tracker5, rec1} split{off302, time73, coll13} T_plan med295
+e2_arm    fail395: cls{anomaly265, none98, plan32} factors{plan180, anomaly265} split{off290, coll105} T_plan med135
+f_arm     fail500: cls{anomaly449, plan51} factors{plan468, anomaly449, tracker21} split{off495, coll5} T_plan med15 (≤5:118)
+e1_pri    fail334: cls{plan49, anomaly241, none44} factors{plan173, anomaly241, tracker12, rec2} split{time69, off254, coll11} T_plan med120
+e2_pri    fail370: cls{anomaly296, none51, plan23} factors{plan188, anomaly296} split{off307, coll59, time4} T_plan med130
+f_pri     fail500: cls{anomaly407, plan93} factors{plan433, anomaly407, tracker62} split{off497, coll3} T_plan med15 (≤5:89)
+d1        fail500: cls{anomaly421, plan59, none20} factors{plan178, anomaly421, tracker32} split{off475, coll25} T_plan med80
+laneplan  fail279: cls{plan54, none109, anomaly116} factors{plan134, anomaly116} split{time67, coll96, off116} T_plan med330
+```
+
+**结构差异**：IDM 输在**碰撞**、d2 输在**超时**、模型输在**off-road/压线**——三系统失败画像截然不同。
+**"off-road"的解释**：env `_is_out_of_road` 含黄/白实线与行道 flag（`out_of_road_done`+`on_continuous_line_done`），footprint 检查只查 lane 面 → 大多数"off-road"实为**连续线/几何余量**问题（~95% 落在 anomaly 桶 = 两套判据口径差）。
+**时机**：e1 行 T_plan 中位 120/295 步、≤5 步=0 → plan 恶化是**随驾驶推进的漂移过程**（与 recovery/边界 margin 监督方向吻合）。
+
+**关键配对（McNemar 原始计数）**：
+
+| 配对 | 前者胜 | 后者胜 | 结论 |
+|---|---|---|---|
+| e1_pri vs e1_arm | +80 | −26 | pri512 显著更优（净 +54） |
+| **e1_pri vs d2** | +3 | −190 | **天花板差距决定性** |
+| baseline vs e1_pri | +229 | −17 | IDM 显著更优 |
+| baseline vs e1_arm | +275 | −9 | 同上 |
+| d2 vs baseline | +47 | −72 | d2 贴得最近（唯一） |
+| d2 vs oracle | +58 | −9 | 闭环重锚 > 开环重放 |
+| e1_pri vs f_arm | +166 | 0 | F 全崩 |
+| e1_arm vs f_arm | +112 | 0 | 同上 |
+
+### 5.3 工具勘误与安全事件（"防线"记录）
+
+1. **fail-fast 两次拦截静默错评**：① 历史背景：A3 曾在"形状不匹配→随机初始化"下产出 0.000 假阴性；② 本次：stg3 评测缺 `spatial` 透传（ckpt 3 层 vs 模型 2 层）被 fail-fast 拦为 rc=2——**若在 fail-fast 之前会静默产出错数字**。修复 `eval_runner.task_model_config()` 补 `spatial`（`08582f2`）+ 守卫单测；stg3 四评测补跑完成（178/178 干净加载）。
+2. **laneplan 参考构造 bug（已修 `5e6e1b3`）**：旧实现把中心线折算 6×2 (ds,dθ) 时丢失自车相对中心线的横向/航向偏差 → 参考退化为切线 → 无阻尼横向自激振荡（eval500 前 20 ids 0/20 succ、rc 0.196）；改为 (N,3) 自车系位姿参考后同 20 ids 6/20、rc 0.815；全量 500 = 0.442。
+3. **d1 非 bug**：链重建逐位复核正确（与 oracle cursor 逻辑同源）；崩溃为"开环链不回正"的真实结果。
+4. **anomaly 语义**：判定口径差（非 bug）；建议后续独立记录连续线/行道 flag。
+
+### 5.4 决策树逐条判读（锁定版）
+
+| 情况 | 判定 | 依据 |
+|---|---|---|
+| A：D 不高于 IDM → 修接口 | **否** | d2=0.706 逼近 IDM；接口非瓶颈 |
+| B：B/D ≫ A 且 E ≪ D → 学习/表示侧 | **是（主结论）** | d2 0.706 ≫ e1_pri 0.332；plan 因子 >50% |
+| C：Exact ≫ LQR → tracker 侧 | **否** | e2 ≤ e1（两臂） |
+| D：repeat_action ≫ plan → 口径错位 | **否（反转）** | plan ≥ repeat（模型 repeat 归零；s11 0.646>0.418） |
+| E：主要是 recovery failure | **否（主标签层面）** | recovery 主标签仅 1–2 例；但 recovery 数据仍入 P1 |
+
+### 5.5 P1 结论摘要（处方与验收；实施细节见 §7）
+
+- 处方（计划侧）：**DAgger 真实 recovery 轨迹**（失败前 2–4s、整段 6 点恢复计划监督、替换常量外推 traj6）+ **几何监督**（节点间插值 footprint / corridor violation / min margin，rollout 期起）+ **曲率/Δ曲率平滑**；**不重定义部署口径**。
+- 验收锚点：d2=0.706 / IDM=0.756；**G1' 已满足**（"明确主要损失层"）；G2 追平（3 seeds 平均 ≥0.74、off-road −30%）；G3 超越（≥0.80，目标带 0.82–0.85；paired 显著、clean500+eval500 双集）。
+
+### 5.6 限制与未完成
+
+- **s11 逐 step 分类未做**（v7 栈缺新 forensics 字段；成本/收益低）；s11 仅作跨版本方向参考。
+- **timeout 占比高**（d2 80%、oracle 51%）值得后续单独分析（配速/卡滞），可能压低上限估计。
+- 分类统计含成功 episode 的"计划曾不可行"标记（factor 层面），诊断为方向性而非最终统计。
+- 所有评测为单一冻结协议（deterministic=true；环境存在已记录的内禀非确定性 ≈1/500）。
+- 3 seeds 验收未做（P1 候选阶段完成后补）。
+
+### 5.7 运行清单与可复算性
+
+**双口径评测**（`tools/test.py`，eval500，LQR）：
+
+| 运行 | 参考 | succ | ckpt sha256 | git | 加载 |
+|---|---|---|---|---|---|
+| `BTC20261010-022524_p0_arm_p_plan` | plan | 0.224 | `3d7d16a9c1…` | `7c22939` | 0/0/0 |
+| `BTC20261010-023500_p0_arm_p_repeat` | repeat_action | 0.000 | 同上 | `7c22939` | 0/0/0 |
+| `BTC20261010-023556_p0_pri512_plan` | plan | 0.332 | `f9c91d08b5…` | `7c22939` | 0/0/0 |
+| `BTC20261010-024520_p0_pri512_repeat` | repeat_action | 0.000 | 同上 | `7c22939` | 0/0/0 |
+| `BTC20261010-024746_s11_v7_plan` | plan | 0.646 | `a7cc091f…`（pin） | v7 `c37acbb` | 烟测 0/0/0 |
+| `BTC20261010-024746_s11_v7_repeat_action` | repeat_action | 0.418 | 同上 | 同上 | 同上 |
+
+- arm_p ckpt full sha256：`3d7d16a9c10389663601d00c7c132b2f5e787fdf7b2132f6c5bd280c6b0a31ca`（`runs/BTC20261007-2202_arm_p/stage_b/final.pt`）
+- pri512 ckpt full sha256：`f9c91d08b56c24eb4ba999927d6856decf0a0e00cae5027e2b71326cfbf70161`（`runs/BTC20261009-0824_sw_pri512/stage_b/final.pt`）
+- s11 ckpt：`runs/BTC20261005-0601_v7p2_s11_arm1/ckpt_u150.pt` = `a7cc091fcbda670b25c396a43e18dc39abe089053e50aa292b5fc0f19164ba2e`
+
+**矩阵产物**（`runs/forensics/`；bug 版 laneplan 留档 `p0_laneplan_bug.json`）：
+```
+p0_oracle.json     7e47ad68875c1a6a1d0352b0020fde33
+p0_laneplan.json   （修复版；bug 版 = ef5b91181f1e2a2fc678673fddd77036）
+p0_d1.json         a0a1637711507ff632f31a87e699cb87
+p0_d2.json         78ef3ee705c30722674554cf6c2ad1fc
+p0_baseline.json   30a2f398e8e079216ecebd34f360fac3
+p0_e1_arm.json     8acef08fc80b57cd5be74626ef958f2f
+p0_e2_arm.json     e4e2ca44f89b349bd26713e7e2b7c314
+p0_f_arm.json      6813e6a9ab1a2a7071022c43ca176409
+p0_e1_pri.json     2d7728d725f1e837f244e6e644f9510f
+p0_e2_pri.json     6956559a00676aaafbe7eab3cfaf74d6
+p0_f_pri.json      218af22dffb0788aa7f71b3de7cfb6fb
+p0_idm_summary.json fe4a22a2f37c671414ab5d196e2bc264（+ p0_idm_episodes.jsonl 逐 episode）
+逐 episode：runs/forensics/summaries/*_eps.json
+```
+
+**复现命令（节选）**：
+```bash
+# 双口径评测（示例：arm_p）
+tools/venv-python tools/test.py --policy ckpt --ckpt runs/BTC20261007-2202_arm_p/stage_b/final.pt \
+  --spec env/specs/scenarios_eval500.json --tracker lqr --eval-reference plan --workers 6 --out runs/eval
+# 矩阵行（示例：d2）
+tools/venv-python -m tools.diagnostics.forensics_closed_loop --mode d2 --spec env/specs/scenarios_eval500.json \
+  --ids "$(tools/venv-python -c "import sys;sys.path.insert(0,'.');from env.scenario.spec import load_specs;print(','.join(str(s.id) for s in load_specs('env/specs/scenarios_eval500.json')))")" \
+  --out runs/forensics/p0_d2.json
+# s11（v7 栈）
+bash .slim/deepwork/s1_audit/run_s11.sh
+```
+
+---
+
+## 6. 排摸收官（参数量 × epoch，定稿）
+
+### 6.1 筛选（clean150，8 臂 × 4 ckpt；success）
+
+| arm | e005 | e010 | e015 | e020 | 判定 |
+|---|---|---|---|---|---|
+| base（primary 256） | 0.280 | 0.147 | 0.253 | 0.193 | 基线 |
+| **pri512** | 0.180 | 0.320 | 0.307 | **0.340** | ★（eval500 确认 0.332） |
+| **rou64** | 0.153 | 0.213 | **0.347** | 0.313 | ★ |
+| attn2 | 0.260 | 0.260 | 0.273 | 0.293 | ☆ 温和正向 |
+| stg3（spatial 3 层） | 0.173 | 0.193 | 0.207 | 0.173 | 中性偏负 |
+| tru192 | 0.080 | 0.193 | 0.167 | 0.127 | 负 |
+| pri128 | 0.260 | 0.140 | 0.187 | 0.093 | 负 |
+| exp128 | 0.187 | 0.153 | 0.027 | 0.120 | 负 |
+
+### 6.2 确认（clean500）
+
+| arm | e005 | e015 | e020 |
+|---|---|---|---|
+| base | 0.292 | 0.228 | 0.230 |
+| **pri512** | 0.176 | 0.310 | **0.334**（≈eval500 0.332，跨集一致 ✓） |
+| **rou64** | — | **0.370** | 0.338 |
+| attn2 | — | 0.292 | 0.304 |
+
+### 6.3 组合臂 C-N1（pri512 + rou64）——负交互被拒
+
+| | e005 | e010 | e015 | e020 |
+|---|---|---|---|---|
+| 组合 | 0.047 | 0.213 | 0.140 | 0.187 |
+
+按预注册判据（组合 ≥ max(单因子)=0.347 才算交互增益）→ **组合被拒**；**primary 容量与 router 容量最优值相互纠缠**，参数分配不可简单叠加（再次印证非单调/反转主题）。
+
+### 6.4 结论
+
+- **最优参数量分布（已测范围内）**：单变量赢家 **rou64**（clean500 0.370@e015 / 0.338@e020）与 **pri512**（eval500 0.332；clean500 0.334@e020）；attn2 温和；组合负。
+- **最优 epoch 依赖配置**：base 峰在 e005；pri512/rou64 峰在 e015–e020（rou64 e015 最高）。
+- 该线**仅作容量分配证据**，不作架构裁决（与共识 C1 一致）；主差距按 §5 = 计划侧。
+
+---
+
+## 7. P1 建议与实施计划（讨论稿，待拍板）
+
+### 7.1 原则（含风险自曝）
+
+- 单一根因分支（计划侧），但**分支内允许多项组合修复**：先小消融定方向 → 形成 candidate recipe → 3 seeds 验收。
+- P1 期间**继续冻结** WM/MoE/encoder/PPO scope；不做新容量臂。
+- **风险自曝**：d1/d2 的教训是"锚定/反馈"比"表示精度"更关键——recovery 数据必须存"student plan + 实际轨迹 + expert recovery plan"三件套，而不是只补几何点，否则收益可能有限。
+
+### 7.2 步骤与每步验证
+
+- **P1-0（0.5–1 天，纯设计）**：定 recovery 数据 schema（student 6 点 plan / 实际轨迹 / expert recovery 6 点 plan / T_plan、T_cross / 失败类型 / spec 元数据 / 几何真值）；复用 forensics 工具当"几何真值生成器"；产出 dagger_collect 改造点清单。
+- **P1-1（1–2 天 + 采集 + 对照）**：采集端失败前 2–4s 回溯、窗内每步记录 expert 6 点恢复轨迹；训练端 `traj_aux` 对 recovery 行启用（替换"dagger 行 traj=0"）+ 单独计权；验证链 ① 离线 → ② clean150 单轮 → ③ clean500/eval500 对照。
+- **P1-2（1–2 天）**：phase3/RL rollout 期加 plan footprint 可行性项（插值 + corridor + min margin），先单开一项小消融；BC 离线数据无几何真值 → "新数据版本"暂缓。
+- **P1-3（0.5 天，最便宜的先行验证）**：plan 输出 κ/Δκ 惩罚（针对 repeat 曲率放大与压线）。
+- **P1-4**：有效项组合成 candidate recipe → clean500 + eval500 + 3 seeds。
+- **P1-5**：G2 ≥0.74 → G3 ≥0.80（目标带 0.82–0.85）。
+
+### 7.3 建议起步顺序
+
+**P1-3（0.5 天，先拿便宜的方向信号）→ P1-1（主力，recovery 数据）→ P1-2 → P1-4**。
+理由：曲率项与"压线/曲率放大"证据直接对应、实现成本最低；若单独有方向，可为 P1-1 的数据设计提供"该监督什么"的判据。反对意见：若只看"plan 不可行 >50%"，P1-1 才是最对口的——此点待拍板。
+
+### 7.4 决策点（待用户/双方）
+
+1. **P1 起点模型**：pri512（双集确认）还是 rou64（clean500 最高）？（组合已排除）
+2. **数据池**：用现有 dagger r1/r2/r3（500×3）？是否加难例池（tollgate/roundabout 定向）？隔离断言沿用 fail-closed。
+3. **几何真值**：接受"rollout 期监督"（建议）还是投资"新数据版本"？
+4. **验收口径**：G2/G3 用 clean500+eval500 双集 + 3 seeds——确认？
+5. **起步顺序**：P1-3 先行（建议）还是 P1-1 直接主力？
+
+### 7.5 P1 期间明确不做
+
+不动 WM/MoE/encoder/PPO scope；不做新容量臂；不重定义部署口径；不碰评测协议。
+
+---
+
+## 8. 文档与产物索引
+
+- 兼容设计：`docs/p0_eval_compat_design.md`（§7.1 含全部勘误）
+- 审计数据：`runs/forensics/p0_*.json` + `runs/forensics/summaries/*_eps.json`
+- 评测运行：`runs/eval/BTC20261010-*`
+- 脚本与日志：`.slim/deepwork/s1_audit/`（run_matrix / run_s11 / confirm / combo / classify / aggregate 与各阶段日志）
+- 排摸队列：`.slim/deepwork/v8_run/`（模型变体与状态）
+- 历史回应：本文件附录 A / B
 
 ---
 
