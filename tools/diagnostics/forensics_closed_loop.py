@@ -40,6 +40,15 @@
   lane 面），拿不到可靠 signed distance，按设计不伪造连续距离，改记退化三元组；
 - ``tracking_residual``：本策略步 0.5 s 窗口内实际位姿 vs 跟踪器参考的同时刻最大
   xy 偏差（m；baseline 无参考 → None）；
+- ``ref_world_head`` / ``ref_arc_len``（P1-0C 探针 12，**三轨中轨**）：决策步 tracker
+  当前**世界系参考**（``LqrTracker._ref_world`` / ``ExactTracker._world``，即 set_reference
+  / arm 后交给执行栈的几何）的前 6 个 0.1 s 点 ``[[x, y], ...]``（坐标 round 到 1e-4）
+  与全参考折线弧长（m，round 1e-4）。**时间语义**：``interpolate`` 不输出起点，故
+  ``head[0]`` = 决策后第一个 0.1 s 子步目标（与决策时 ego 距离 ≤ max(ds)/5；``head[i]``
+  与 ``tracking_residual`` 同口径对齐实际第 i+1 个 env step）。语义：`plan`（6 步动作链）/
+  `reference`（本列，世界系执行参考）/ `actual`（``env_after`` 位姿）三轨并存，供 P1-4A
+  执行一致性探针；非 tracker 模式（baseline）、非决策步或取不到 → None（不报错，
+  默认开启的 additive 列）；
 - ``road_class`` / ``map_id``：当前 lane 几何类别（``env.obs.others.road_class_labels``）
   / 地图标识 ``"<seed>:<blocks>"``；
 - ``policy_action_vs_plan_first_action`` / ``router_topk`` / ``policy_std``：模型行专用
@@ -184,6 +193,8 @@ def _map_id(env, spec) -> str:
 POLICY_DT = 0.5
 STEPS_PER_POLICY = 5
 WINDOW_POLICIES = 6
+#: 三轨中轨 ``ref_world_head`` 取 tracker 世界系参考的前 N 个 0.1 s 点（P1-0C 探针 12）
+REF_WORLD_HEAD_POINTS = 6
 #: footprint 路径重采样上限间距（m）；plan 节点间按 ≤ 该值插值（设计文档 §5：0.5–1.0 m）
 FOOTPRINT_MAX_GAP_M = 1.0
 #: T_track 显式阈值：0.5 s 窗口内同时刻最大 xy 偏差（m）超过即"明显偏离仍可行的计划"
@@ -610,6 +621,9 @@ def _base_record(step: int, decision: bool, env, spec) -> dict:
         "plan_footprint_valid": None,
         "exec_footprint_valid": None,
         "tracking_residual": None,
+        # 三轨中轨（P1-0C 探针 12）：决策步由 _emit 覆盖（tracker 模式）；其余 None
+        "ref_world_head": None,
+        "ref_arc_len": None,
         "T_plan": None,
         "T_track": None,
         "T_cross": None,
@@ -760,8 +774,56 @@ class InstrumentedCkpt:
         idx = [min(i, arr.shape[0] - 1) for i in range(STEPS_PER_POLICY)]
         return arr[idx].copy()
 
+    def _capture_ref_head(self, n: int = REF_WORLD_HEAD_POINTS):
+        """tracker 世界系参考前 ``n`` 个 0.1 s 目标点 ``[[x, y], ...]``（round 1e-4）+ 全参考弧长。
+
+        来源与 :meth:`_capture_ref_window` 同一数组（``LqrTracker._ref_world`` /
+        ``ExactTracker._world``；决策步 set_reference / arm 之后立即调用）。**时间语义**
+        （与 :func:`interpolate` 一致）：数组不含起点，``head[0]`` = 决策后**第一个 0.1 s
+        子步**的目标位姿（与决策时 ego 位姿距离 = 首子步弦长 ≤ max(ds)/5），``head[i]`` 与
+        ``tracking_residual`` 同口径对齐实际第 ``i+1`` 个 env step。``ref_arc_len`` = 全参考
+        折线弧长（m，从决策时 ego 位姿起算：LqrTracker ``_ref_arc[-1]``；ExactTracker
+        ``base_pose`` + ``_world`` 差分）。参考点数不足 ``n`` 时取全部；不可用 →
+        ``(None, None)``，不报错。
+        """
+        if self.tracker is None:
+            return None, None
+        world = getattr(self.tracker, "_ref_world", None)
+        if world is None:  # ExactTracker 用 _world
+            world = getattr(self.tracker, "_world", None)
+        if world is None:
+            return None, None
+        try:
+            arr = np.asarray(world, dtype=np.float64)
+            if arr.ndim != 2 or arr.shape[0] == 0:
+                return None, None
+            head = arr[: min(int(n), arr.shape[0]), :2]
+            points = [[round(float(x), 4), round(float(y), 4)] for x, y in head]
+            arc = getattr(self.tracker, "_ref_arc", None)
+            if arc is not None and len(arc):
+                arc_len = float(np.asarray(arc, dtype=np.float64).reshape(-1)[-1])
+            else:
+                base = getattr(self.tracker, "base_pose", None)
+                if base is not None:
+                    base_xy = np.asarray(base, dtype=np.float64).reshape(3)[:2]
+                    prev = np.vstack([base_xy, arr[:-1, :2]])
+                    arc_len = float(np.linalg.norm(arr[:, :2] - prev, axis=1).sum())
+                elif arr.shape[0] >= 2:
+                    arc_len = float(np.linalg.norm(np.diff(arr[:, :2], axis=0), axis=1).sum())
+                else:
+                    arc_len = 0.0
+            return points, round(arc_len, 4)
+        except Exception:  # noqa: BLE001 - 取不到不报错（additive 列）
+            return None, None
+
     def _emit(self, rec, ref_window=None) -> None:
-        """追加记录（与 ``_ref_windows`` 严格对齐；run_episode 另行追加 ``steps``）。"""
+        """追加记录（与 ``_ref_windows`` 严格对齐；run_episode 另行追加 ``steps``）。
+
+        决策步（``ref_window is not None`` = set_reference/arm 已发生）补三轨中轨
+        ``ref_world_head`` / ``ref_arc_len``；其余行保持 ``_base_record`` 的 None 缺省。
+        """
+        if ref_window is not None:
+            rec["ref_world_head"], rec["ref_arc_len"] = self._capture_ref_head()
         self.records.append(rec)
         self._ref_windows.append(ref_window)
 
