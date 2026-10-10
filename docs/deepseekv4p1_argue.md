@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-10）**：**P0 执行与审计完成、排摸收官**；P1 计划讨论中（§7）。本文件为**唯一主文档**——审计与排摸结果并入 §5/§6，历史回应保留于附录 A/B。
-> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）**。
+> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）** → round-3–6 收拢（§7.6–§7.9，v0.5）。
 > **我方立场摘要（给新读者）**：目标是超越 IDM；路径 = **先量化"上限与口径"、再按数据做减法/几何对齐**；反对无证据地删模块或扩模块；反对让 GPU 空转等代码。
 
 ---
@@ -97,6 +97,7 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 - **2026-10-10 晚（round-3）**：ChatGPT 全面审阅（1115 行）——接受 P0 判读（接口非首瓶颈、plan 质量为核心、A-hold 记账≠质量）；**反驳我方 P1 顺序**并给出"P1-0 契约 → recovery → 整段监督 → 几何/曲率 → 轨迹级 PPO"重排；我方**部分接受 + 两项反提案**（配速证据、"12D 非易"及三选反提案）→ §7 v0.2 / §7.6；timeout 配速分析已并入 §5.6。
 - **2026-10-10 深夜（round-4）**：ChatGPT 二次审阅（940 行：P1 v0.2 修正 + 21 项契约探针提案）——**修正 G1（拆分 diagnosis/ceiling；ceiling 未满足）**；要求起点先补 rou64@e015 eval500 + paired；recovery 放开共享 plan 训练范围；P1-4 收敛为 **action-conditioned plan**；新增 D2 配速 oracle 与探针体系。我方回应与**可行性排摸**见 §7.7（含：`road_edge_distance_from_ctx` ctx 依赖证实、phase3 已有三档 freeze + `action_chain_source` 钩子、action↔traj6 逐位一致已核、配速补丁落点已核）→ §7 v0.3。
 - **2026-10-11 凌晨（round-5）**：ChatGPT 批准 v0.3 并给出 5 项实现修正（LD loss 定位/配速三版本/MoE 表述/recovery 锚点/梯度 cosine）+ A9/A10 探针 + 教师上限裁决规则。我方全部接受并完成可行性核验（LqrTracker 无独立速度覆盖→V3 需加性 v_ref 缩放；phase3 已有两组 LR 需扩一组；LD 线型/mask 在位；recovery per-step 量 forensics 已有）→ §7.8 / v0.4。**双方实现方向完全收敛；唯一开放项 = 配速后的 D2 ceiling（P1-0 首裁）。**
+- **2026-10-10 晚（round-6）**：ChatGPT 批准 P1-0–P1-3、**重开 P1-4**（4A 因果烟测/不过即停；4B = mode+4–6D latent 全计划 PPO 主性能；GRPO 推至 P2/P3；另 3 条修订：PPO scope 措辞 / 4B 门槛映射 / recovery 多模态）。我方全部接受 + **3 条本 repo 事实修正**：①4B 形态已有失败史（v7 结构线 K-anchor：fix-11 后 clean500 0.328 / eval500 0.324，路线关闭；obs v5 近场回退 + phase3 契约缺陷 + specific 专家三重混淆）→ 需"重开前置"（重拟合/表示复核/BC canary）；②"safety projection" 本 repo 不存在 → 映射为饱和量；③mode 分解建议（横向=离散形状、纵向=连续速度头）+ mask v1=实线禁换道；另补 v7 Δψ 教训探针（尾段状态反馈）。**收拢判定：可以收拢/开工**；唯一实证开放项 = 配速后 D2 ceiling → §7.9 / v0.5。
 
 ---
 
@@ -428,21 +429,21 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 
 ---
 
-## 7. P1 计划 v0.4（吸收 round-3/4/5 审阅；待拍板）
+## 7. P1 计划 v0.5（吸收 round-3/4/5/6 审阅；待拍板）
 
 ### 7.1 原则（含风险自曝）
 
 - 单一根因分支（计划侧），但**分支内允许多项组合修复**：先小消融定方向 → 形成 candidate recipe → 3 seeds 验收。
-- P1 期间**继续冻结** WM/MoE/encoder/PPO scope；不做新容量臂。
+- P1-1–P1-3 **不改 PPO scope**（WM/MoE/encoder 继续冻结）；**P1-4 建立独立 experimental scope**（round-6 措辞修正，§7.9-A5），不修改历史 design scope 语义；不做新容量臂。
 - **风险自曝**：d1/d2 的教训是"锚定/反馈"比"表示精度"更关键——recovery 数据必须存"student plan + 实际轨迹 + expert recovery plan"三件套，而不是只补几何点，否则收益可能有限。
 
 ### 7.2 步骤与每步验证（v0.2）
 
-- **P1-0（0.5–1 天，纯设计）**：①**冻结 trajectory-action 与 PPO log-prob 契约**（policy 输出/采样点/动作维度/plan 构造/logprob 定义/被执行参考/重规划间隔/可训梯度路径——一页契约）；②recovery 数据 schema（student 观测/plan/实际轨迹/**expert 从 student 真实状态重规划**的 6 点恢复轨迹/几何三项标签/T_plan、T_cross/road class）；③**timeout/配速分析**（见 §5.6；含参考速度曲线与 LQR 速度策略）；④P1-4 的轨迹级 PPO 选型讨论（§7.6-②）。
+- **P1-0（0.5–1 天，纯设计）**：①**冻结 trajectory-action 与 PPO log-prob 契约**（policy 输出/采样点/动作维度/plan 构造/logprob 定义/被执行参考/重规划间隔/可训梯度路径——一页契约）；②recovery 数据 schema（student 观测/plan/实际轨迹/**expert 从 student 真实状态重规划**的 6 点恢复轨迹/几何三项标签/T_plan、T_cross/road class）；③**timeout/配速分析**（见 §5.6；含参考速度曲线与 LQR 速度策略）；④P1-4 的轨迹级 PPO 选型讨论（§7.6-②）；⑤（round-6 增）**锚重开前置**：v8 数据重拟合锚字典 + 覆盖检查 + 现行配方短程 BC canary（§7.9-B1）；⑥（round-6 增）4A 四探针**数值判据预冻结**（§7.9-B3）。
 - **P1-1（主线；1–2 天 + 采集）**：真实 recovery 数据采集——失败前 2–4s 回溯；expert 空问机制（d2 同款，现成）从 **student 当前状态**重规划 6 点轨迹；student plan/实际轨迹同存。
-- **P1-2（1 天）**：启用**整段轨迹监督**（`traj_aux` 仅对真实 recovery 行生效；监督 6 步 pose/action 链/横向/航向/ds/mask/整段曲率；彻底弃用合成 traj6）。
+- **P1-2（1 天）**：启用**整段轨迹监督**（`traj_aux` 仅对真实 recovery 行生效；监督 6 步 pose/action 链/横向/航向/ds/mask/整段曲率；彻底弃用合成 traj6）；**保留 recovery 粗 mode 标签 + 可分性检验**（与 P1-4B mode 定义同套；§7.9-A7）。
 - **P1-3（1–1.5 天）**：几何与曲率**联合 recipe**——footprint 插值 + **三项分解（surface / legal-corridor(实线) / route-corridor）** + **归一化 margin + 死区**（防 off-road→timeout 置换）；κ/Δκ 惩罚；各项权重按 **gradient norm 对齐**（相差不超过 ~3–5×）校准，不猜系数。
-- **P1-4（2–3 天）**：**轨迹级 PPO 信用链**（选型见 §7.6-②：低维噪声解码器 / action-conditioned plan / 12D；先跑"因果正确 baseline"，autoregressive WM 版随后评估）。
+- **P1-4（round-6 拆 4A/4B；§7.9）**：**4A** = 2D action-conditioned plan 的**最小条件化改动**（把尾段生成接上 a_t）+ 小规模校准（clean150×1 seed）→ 四探针（后五步敏感性/有效控制维数/反事实单调性/执行一致性；判据预冻结）**不过即停**；**4B** = **mode + 4–6D latent 全计划 PPO**（主性能方案）：joint log-prob = log π(m|s)+log π(z|s,m)、conditional decoder 输出完整 6×2 链、LQR 每 0.5 s 重规划；**复用 v7 锚机制必须先过"重开前置"**（§7.9-B1）；先冻 decoder 训 mode/latent+value，按 coverage 渐进解冻尾层。门槛：监督阶段 ≥0.60（最好 0.65）+ 4A 探针 PASS +（映射后的）饱和/clip 率 <5%。
 - **P1-5（验收，升级版）**：开发筛选 1 seed（clean150）→ 候选 3 seeds（clean500+eval500，固定 ckpt-selection 规则，报 mean/worst/range + 逐 seed paired）→ 终局判据：3-seed mean ≥0.80、worst ≥0.77、paired bootstrap LB>0、McNemar p<0.05、off-road −30%、collision ≤IDM、非单一 road class（最终声明建议补到 5 seeds）。
 
 ### 7.3 顺序（接受 round-3 重排）
@@ -456,14 +457,14 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 1. **P1 起点模型**：pri512（双集确认）还是 rou64（clean500 最高）？——**先补 rou64@e015 eval500 + 同集 paired（§7.7-A2）再定**；组合已排除。
 2. **数据池**：现有 dagger r1/r2/r3（500×3）？加难例池（tollgate/roundabout 定向）？隔离断言沿用 fail-closed。
 3. **几何真值**：三项分解（surface/legal/route）用 rollout 期监督（建议）还是投资新数据版本？
-4. **P1-4 选型**：**双方已收敛为 action-conditioned plan（round-4，§7.7-A7）**；低维噪声解码器为第二候选；待最终确认。
+4. **P1-4 选型**：**round-6 定案 4A/4B 两级**（4A=2D 因果烟测、不过即停；4B=mode+latent 主性能方案；**复用 v7 锚机制需先过"重开前置"**，§7.9-B1）。待拍板：**mode 语义**（形状锚 vs 行为 mode；我方建议"横向=离散形状、纵向=连续速度头"，§7.9-B2）。
 5. **配速修复范围**：仅在参考构造侧（推荐先做）还是触及 LQR/速度策略？
 6. **验收口径**：升级版 gates（mean≥0.80、worst≥0.77、bootstrap LB>0、McNemar……）确认？最终声明是否补 5 seeds？
 7. **起步**：按 §7.3 顺序（已接受重排）——如无异议即按此执行（待"开工"指令）。
 
 ### 7.5 P1 期间明确不做
 
-不动 WM/MoE/encoder/PPO scope；不做新容量臂；不重定义部署口径；不碰评测协议。
+P1-1–P1-3 不动 WM/MoE/encoder/PPO scope；**P1-4 建立独立 experimental scope**（不改历史 design scope 语义；round-6 措辞修正）；不做新容量臂；不重定义部署口径；不碰评测协议。
 
 ### 7.6 我方对 round-3 的接受/反驳（逐条）
 
@@ -536,6 +537,35 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 - 执行纪律补充：`LqrTracker` 的 v_ref 缩放是**共享代码**改动（eval/forensics 同源）→ 默认 1.0、单测覆盖、历史评测产物零影响，与 fail-fast 同标准。
 
 **C. v0.4 变更点（并入 §7.2）**：P1-0 增〔D2 配速 V1/V2/V3 + tracker v_ref 缩放〕〔A9/A10〕〔跨行对齐前移〕；P1-1/2 采用新锚点/三类采样/质量门与 R1/R2 两档；P1-3 命名与 cosine 校准。**双方实现方向至此完全收敛，按本节修正后即可进入 P1-0。**
+
+### 7.9 对 round-6 的回应与可行性排摸（2026-10-10 晚）
+
+**收拢判定（用户问）**：**可以收拢**——P1-0–P1-3 逐条一致；P1-4 接受"4A 因果烟测 → 4B mode+latent 主性能"两级拆分与全部探针/门槛思路，落地须加 **3 条本 repo 事实修正**（B 节）+ 1 条探针补充（A2），修正只改**成本与前置**、不改方向。剩余唯一实证开放项：**配速后 D2 ceiling**（P1-0 首裁）；另有 1 个待拍板小决策（mode 语义，B2）。
+
+**A. 接受的批评与修正（逐条）**
+
+1. **"2D 首步 ≠ 完整 plan 控制"——接受；且在我方现行实现里这是结构性事实，不是幅度问题**：现行 `_rollout`（`net/model.py:693-832`）中，后五步 = **策略头 μ 沿 latent 自回归**（step0 契约 = `action_mu`；step≥1 = `policy(tokens_k)`），对 a_t 只有经逐步重建 nav/位姿的**旁路弱依赖**（状态链 detach；traj 监督训的是这条自回归链本身）⇒ **a_t 不是尾段的条件变量，PPO 无法通过 a_t 塑造尾段**。叠加 tracker 事实：横向控制用**沿参考弧长的前视点**（`Ld = clip(0.8·v + 2.5, 3.0, 15.0)` m；每策略步消费 6 步参考）⇒ **被跟踪的尾段若不受 a_t 控制，PPO 对跟踪参考的几何没有控制权**。加上 T_plan 中位 120 步（中期恶化）——"只强化首点"确实覆盖不足。4A 四探针由此具备直接性能意义。
+2. **4A 降级为因果烟测 + 四探针——接受**；两点落地修正：①**4A 必须包含"最小条件化改动"**（把尾段生成接上 a_t：action-token / FiLM 旁路等），否则四探针在现行结构上**测到的是"旧结构不是条件化的"**（可预见失败），不是方案本身；②探针记录量含 **tracker 实际消费量**（`set_reference` 世界系参考、前视点、饱和标志），执行一致性 = sampled_action → plan 构造 → tracker 参考 → 前视/限幅 → 实际运动全链（forensics 已具备大部分原件）。**补充探针（来自 v7 的关键教训）**：尾段**状态反馈**检查——扰动航向误差 Δψ/横向误差，尾段 dθ 必须有响应（v7 锚路径"Δψ 只进 dθ_0 且 `plan[0]` 被 `action_mu` 覆盖 ⇒ 尾段对航向误差零反馈"（corr 0.05 vs 0.55）就是当年 496/500 出界的机制；4A/4B 的尾段生成器不得继承此坑）。
+3. **4B（mode+latent 主性能）方向——接受**；成本与前置见 B1（有失败史，须"重开前置"）。
+4. **GRPO 现在不做、P2/P3 分步——接受**（WM 无候选排序证据、best-of-G 改行为策略概率、须先证明单链 PPO 可改善；与我方 P1 冻结 WM scope 一致）。P2 的 oracle-gap 可先用**确定性重放**实现（forensics 已能重放 + 换控制器；"同状态 G 分支" = 重放至分歧点再分叉，成本 G×）。
+5. **"P1 冻结 PPO scope"措辞冲突——接受修正**（§7.1/§7.5 已改：P1-1–P1-3 不改 PPO scope；P1-4 独立 experimental scope）。
+6. **4B 启动门槛——接受，但两处必须映射到本 repo 真实量**：①"safety projection" **本 repo 不存在**（无安全投影层）→ 映射 = 动作 squash 饱和率 + LQR 饱和 hook 率（A 批已有）；②"clipping" = PPO clipfrac（`trainer.py:6908`）+ 动作边界饱和率。**不接受对不存在的机制打 PASS/FAIL**。
+7. **Recovery 多模态监督——接受**（强单模态均值监督会把多解平均成差轨迹）。落地分两段：P1-2 先做**标签侧保留**（粗 mode 标签 + 可分性检验）；WTA/多模态机制复用 P1-4B 锚机制，避免 P1-2 先大改架构。
+
+**B. 落地具体化（可行性排摸；3 条事实修正）**
+
+1. **4B 形态已存在，但有失败史——按"重开前置"走（本轮最重要发现）**：
+   - **实现**（`f42d648`，2026-10-05；677 passed、GPU 冒烟无 NaN；默认关）：K=6 形状锚（`cumdtheta` lane 帧；`config/plan_anchors_k6.json`）+ 选择头（latent→K logits，零初始化）+ 连续速度头（6 步 ds，sigmoid∈[0,10]）+ 逐锚残差 WTA + 软混合（`anchor_mixture` 输出 **ego 系 (ds,dθ) 6×2 链**，弧线积分在 `interpolate` 下游）+ `plan[0]=action_mu` by design；单变量开关 `plan_anchor.enabled=false`。**全部主力 ckpt（arm_p/pri512/s11）未启用锚**（anchor_keys=0，已核）。
+   - **训评史**（v7 结构线）：Stage B b10 clean500 **0.254**（vs w1 0.526）→ phase3 **崩 0.0**（496/500 out_of_road；根因=① specific 专家/router 被训【决定性】② `_SPECIFIC_PHASE_FREEZE` 漏锚头 4 前缀）→ fix-11 补救（契约修复 + `trunk_only` + 锚 CE/WTA 1.0 + clean150 守护）→ clean500 **0.328** / eval500 **0.324** / tg45 0.178 → **不具竞争力，路线关闭**（`docs/v7_program_report.md` §2.3/§3.3）。
+   - **根因读法**：三重混淆（obs v5 近场回退：有效槽 15.07→7.12/行 + phase3 契约缺陷 + specific 专家破坏项）⇒ **不能证明锚机制无效，也无任何正面证据**；`v7_kanchor_feasibility.md` 已预警告"锚是表示不是修复"（tollgate JSD 0.32 仍在——tollgate 可能同时是跟踪/地图几何问题，4B 不自动解决）。
+   - **成本重估**：4B 选**硬 categorical（方案 B）**；按自家可行性报告："方案 B 需改 `sample_action`/`logprob_from_action`/entropy/KL 与 rollout 存储，**风险中等**"。集成点已定位：`net/policy.py`（分布）→ `trainer.sample_action`(:425) → logprob 重算(:476) → `buffer`（action 硬编码 (N,2)：:122/:201）→ `update`(:6718；ratio/KL 由 logprob 驱动) → eval `mu` 路径 + A-hold 参考构造(:659/:6523，需从 `repeat_action` 切"解码链参考")。**= 中等工程"接通+重验证"，非小改、非从零新建。**
+   - **重开前置（P1-0 离线 + 小 canary）**：① v8 数据（现行 obs v6）重拟合锚字典（`tools/fit_plan_anchors.py` 现成）+ 覆盖检查（recovery 切片 / tollgate·merge·uturn 分层）；② 表示层复核（形状重建 ADE、选择头可学性；参考旧读数：expert ADE 0.102 m / dagger 0.449 m；balanced acc 0.47–0.53 vs chance 0.167）；③ 现行配方下**短程 BC canary**（只读重建/WTA/选择指标，不上 RL）；④ 冻结契约按 recovery 配方重配（fix-11 清单需按新组合改写核对）。
+2. **mode 语义与 mask（待拍板）**：现锚 = **形状 mode**（straight/right_curve/left_then_back/…，无 shift/yield/stop 语义）。建议分解：**横向 = 离散形状/行为 mode（含 shift 语义）；纵向 = 连续速度头**（yield/stop = ds→0）——避免与速度头功能重复、与现架构同构。mask v1 = **LD `left/right_line_type_id` 实线禁换道**（字段现成，`env/obs/ld.py:57`）；route legality（路口等）作 v2。**行为 mode 标签与 P1-2 的 recovery 粗标签共用一套定义**（同时是 4B mode 头的监督来源）。
+3. **4A 判据先冻结为数值**（防事后解释）：256+ 个 2D action 采样 → 后五步方差比 / 终点位移分布 / 曲率·速度剖面秩（PCA/Jacobian）——先写死"无效"阈值再跑；不通过即停（不做完整训练）。
+
+**C. v0.5 变更点**：§7.1/§7.5 措辞（A5）；§7.2 P1-0 增⑤⑥、P1-2 增粗 mode 标签、P1-4 拆 4A/4B；§7.4-4 更新；P2/P3 记录（Best-of-G→scorer→蒸馏→group-ranked）。**本回答即视为对 round-6 定稿指令的接受 + 上述具体化。**
+
+**D. 剩余开放项（不靠讨论解决）**：① 配速后 D2 ceiling（P1-0 首裁）；② 锚重开前置实测（P1-0 离线 + canary）；③ 监督阶段实际上限（P1-2/3 后）。**结论：意见可以收拢，可以开工。**
 
 ---
 
