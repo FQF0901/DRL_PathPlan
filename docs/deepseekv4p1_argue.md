@@ -96,6 +96,7 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 - **2026-10-10（收官）**：P0 执行全链完成——排摸收尾（stg3 重跑，178/178 干净加载）+ 矩阵 11 行 × 500 eps + 双口径 6 评测 + s11 v7 双口径；**fail-fast 两次拦下静默错评**（stg3 `spatial` 漏传，已修 `08582f2`；历史 A3 假阴性背景）；laneplan 参考 bug 修复（`5e6e1b3`：0.002→0.442）；d1 确认为真实结果；**clean500 确认**（rou64 0.370 / pri512 0.334 / attn2 0.304 / base 0.292）；**组合臂 C-N1 负交互被拒**（best 0.213 < max 单因子 0.347）。**审计报告与排摸收官见 §5/§6；P1 计划见 §7。**
 - **2026-10-10 晚（round-3）**：ChatGPT 全面审阅（1115 行）——接受 P0 判读（接口非首瓶颈、plan 质量为核心、A-hold 记账≠质量）；**反驳我方 P1 顺序**并给出"P1-0 契约 → recovery → 整段监督 → 几何/曲率 → 轨迹级 PPO"重排；我方**部分接受 + 两项反提案**（配速证据、"12D 非易"及三选反提案）→ §7 v0.2 / §7.6；timeout 配速分析已并入 §5.6。
 - **2026-10-10 深夜（round-4）**：ChatGPT 二次审阅（940 行：P1 v0.2 修正 + 21 项契约探针提案）——**修正 G1（拆分 diagnosis/ceiling；ceiling 未满足）**；要求起点先补 rou64@e015 eval500 + paired；recovery 放开共享 plan 训练范围；P1-4 收敛为 **action-conditioned plan**；新增 D2 配速 oracle 与探针体系。我方回应与**可行性排摸**见 §7.7（含：`road_edge_distance_from_ctx` ctx 依赖证实、phase3 已有三档 freeze + `action_chain_source` 钩子、action↔traj6 逐位一致已核、配速补丁落点已核）→ §7 v0.3。
+- **2026-10-11 凌晨（round-5）**：ChatGPT 批准 v0.3 并给出 5 项实现修正（LD loss 定位/配速三版本/MoE 表述/recovery 锚点/梯度 cosine）+ A9/A10 探针 + 教师上限裁决规则。我方全部接受并完成可行性核验（LqrTracker 无独立速度覆盖→V3 需加性 v_ref 缩放；phase3 已有两组 LR 需扩一组；LD 线型/mask 在位；recovery per-step 量 forensics 已有）→ §7.8 / v0.4。**双方实现方向完全收敛；唯一开放项 = 配速后的 D2 ceiling（P1-0 首裁）。**
 
 ---
 
@@ -427,7 +428,7 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 
 ---
 
-## 7. P1 计划 v0.3（吸收 round-3/round-4 审阅；待拍板）
+## 7. P1 计划 v0.4（吸收 round-3/4/5 审阅；待拍板）
 
 ### 7.1 原则（含风险自曝）
 
@@ -515,6 +516,26 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 **C. P1 v0.3 变更点（并入 §7.2/§7.4）**：P1-0 增 rou64@e015 eval500 + paired、D2 配速 oracle、A 批探针；P1-1/2 增 `recovery` 冻结配方 + 时间衰减权重 + 混采/ anchor；P1-3 改"obs 可微 + 引擎标签"双轨；P1-4 定为 action-conditioned plan（门槛 0.60–0.65）；G1 拆分写入。
 
 **D. 剩余分歧（待其确认）**：①教师上限（D2 配速后裁决）；②`recovery` 冻结配方的具体清单（我方：fusion/primary±experts，冻 encoder/mem/WM/router/锚头）；③探针裁剪（21 → 三批，A 批随 P1-0）。
+
+### 7.8 对 round-5 的回应与可行性排摸（2026-10-10 深夜）
+
+**A. 接受（5 项修正 + A9/A10 + 裁决规则，均已可行性核验）**
+
+1. **LD 几何 loss 定位为代理**——接受：命名 `ld_line_margin_loss`（不冒充完整 drivable）；加 **LD 可用性 mask**（稀疏/槽位突变处不产生错误梯度）；双轨 = 可微代理 + 引擎真值（audit / hard-mining / 验收）。可行性已核：LD 点自带 `left/right_line_type_id`（实线可识别）且 `ld_mask` 在位。
+2. **D2 配速三版本**——接受；**可行性已核**：`LqrTracker` 纵向 = "参考点速度的前视比例控制"（v_ref 隐含在参考点间距 = ds/0.5s），**无现成独立速度覆盖接口** ⇒ **V3 需给 tracker 加"加性 v_ref 缩放"**（默认 1.0 逐位不变 + 单测；共享代码，按 fail-fast 同标准：默认零行为变化）；V1/V2 在 forensics d2 侧缩放 ds / (ds,dθ) 即可。
+3. **MoE 表述**——接受：不改架构/专家数/router/负载均衡机制；recovery 可训**既有** experts/residual；router 冻结；primary 与 experts 用不同 LR。可行性已核：phase3 已有 `lr_scale.base/specific` 两组；需扩一组（primary）或在配方内映射；R1/R2 两档消融（R2 无显著增益则不带 experts）——接受。
+4. **Recovery 锚点与分类**——接受：`start = max(T_plan−context, T_cross−recovery_window, first_low_margin_step)`；三类 prevention/correction/late（**50/35/15**）；四条质量字段（expert_recovered / recovery_success_horizon / min_margin_after_takeover / route_progress_after_takeover）；专家接管仍失败 → 不作正监督。可行性已核：所需的 per-step 量（margin / T_plan / T_cross / first_low_margin）在 forensics 记录中**已有**，采集器扩展可直接复用。
+5. **梯度对齐加 cosine**——接受：除 norm（≤3–5×）外记录 `cos(grad_traj, grad_geometry)`、`cos(grad_traj, grad_curvature)`、`cos(grad_progress, grad_geometry)`；长期 <−0.3 记为**目标冲突**并重校准（防 off-road→timeout 置换）；固定 probe batch 上记录 plan margin / progress / curvature / 首步误差 / 六步 pose 误差。
+- **A9（freeze recipe 审计）**：接受——requires_grad / optimizer / nonzero-grad / actually-updated 四计数；recovery 配方须验证 encoder/mem/WM/router 更新严格为零、fusion/primary 确实更新、experts 随 R1/R2 变化。
+- **A10（geometry proxy coverage）**：接受——LD valid ratio / solid-line available / plan 点被 LD 覆盖比 / loss-active 样本比。
+- **跨行 action/ego_world 对齐前移至 P1-1 采集前**——接受（防新数据被时间索引/坐标误差污染）→ 并入 A 批。
+- **教师上限裁决规则**——接受：V3 配速后 D2 ≥0.80 → 监督路径上限足够；0.75–0.80 → 可追平、超越须 RL/更强教师；<0.75 → 需先改教师/执行链；**配速若只抬 success 而显著恶化 collision/off-road → 不算 ceiling 提升**。
+
+**B. 我方保留与补充**
+- **唯一真正开放分歧 = 配速后的 D2 ceiling**——同意；这就是 P1-0 的第一个裁决实验，出数前不做"监督可达 0.80"的任何假设。
+- 执行纪律补充：`LqrTracker` 的 v_ref 缩放是**共享代码**改动（eval/forensics 同源）→ 默认 1.0、单测覆盖、历史评测产物零影响，与 fail-fast 同标准。
+
+**C. v0.4 变更点（并入 §7.2）**：P1-0 增〔D2 配速 V1/V2/V3 + tracker v_ref 缩放〕〔A9/A10〕〔跨行对齐前移〕；P1-1/2 采用新锚点/三类采样/质量门与 R1/R2 两档；P1-3 命名与 cosine 校准。**双方实现方向至此完全收敛，按本节修正后即可进入 P1-0。**
 
 ---
 
