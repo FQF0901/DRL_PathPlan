@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-10）**：**P0 执行与审计完成、排摸收官**；P1 计划讨论中（§7）。本文件为**唯一主文档**——审计与排摸结果并入 §5/§6，历史回应保留于附录 A/B。
-> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）** → round-3–6 收拢（§7.6–§7.9，v0.5）。
+> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）** → round-3–7 收拢与定稿（§7.6–§7.10，v0.6）。
 > **我方立场摘要（给新读者）**：目标是超越 IDM；路径 = **先量化"上限与口径"、再按数据做减法/几何对齐**；反对无证据地删模块或扩模块；反对让 GPU 空转等代码。
 
 ---
@@ -98,6 +98,7 @@ ChatGPT 最新答复（`cd4b559`）**接受第四轮全部排摸结论**（s11 �
 - **2026-10-10 深夜（round-4）**：ChatGPT 二次审阅（940 行：P1 v0.2 修正 + 21 项契约探针提案）——**修正 G1（拆分 diagnosis/ceiling；ceiling 未满足）**；要求起点先补 rou64@e015 eval500 + paired；recovery 放开共享 plan 训练范围；P1-4 收敛为 **action-conditioned plan**；新增 D2 配速 oracle 与探针体系。我方回应与**可行性排摸**见 §7.7（含：`road_edge_distance_from_ctx` ctx 依赖证实、phase3 已有三档 freeze + `action_chain_source` 钩子、action↔traj6 逐位一致已核、配速补丁落点已核）→ §7 v0.3。
 - **2026-10-11 凌晨（round-5）**：ChatGPT 批准 v0.3 并给出 5 项实现修正（LD loss 定位/配速三版本/MoE 表述/recovery 锚点/梯度 cosine）+ A9/A10 探针 + 教师上限裁决规则。我方全部接受并完成可行性核验（LqrTracker 无独立速度覆盖→V3 需加性 v_ref 缩放；phase3 已有两组 LR 需扩一组；LD 线型/mask 在位；recovery per-step 量 forensics 已有）→ §7.8 / v0.4。**双方实现方向完全收敛；唯一开放项 = 配速后的 D2 ceiling（P1-0 首裁）。**
 - **2026-10-10 晚（round-6）**：ChatGPT 批准 P1-0–P1-3、**重开 P1-4**（4A 因果烟测/不过即停；4B = mode+4–6D latent 全计划 PPO 主性能；GRPO 推至 P2/P3；另 3 条修订：PPO scope 措辞 / 4B 门槛映射 / recovery 多模态）。我方全部接受 + **3 条本 repo 事实修正**：①4B 形态已有失败史（v7 结构线 K-anchor：fix-11 后 clean500 0.328 / eval500 0.324，路线关闭；obs v5 近场回退 + phase3 契约缺陷 + specific 专家三重混淆）→ 需"重开前置"（重拟合/表示复核/BC canary）；②"safety projection" 本 repo 不存在 → 映射为饱和量；③mode 分解建议（横向=离散形状、纵向=连续速度头）+ mask v1=实线禁换道；另补 v7 Δψ 教训探针（尾段状态反馈）。**收拢判定：可以收拢/开工**；唯一实证开放项 = 配速后 D2 ceiling → §7.9 / v0.5。
+- **2026-10-10 晚（round-7）**：ChatGPT 定稿锁定 P1-0–P1-3（实施方案 + 产物 + 验收），4A 保留为条件因果门、4B/K-anchor/GRPO/WM-MoE 对照不纳入本轮承诺。我方**确认收拢**并写入 **§7.10（执行手册 v1）**：4A 排期矛盾消解（采纳最终指令读法）；P1-0A ckpt 口径（pri512 现 0.332=final.pt≠e020，须 e020 重跑配对）；P1-0B 成本与等价协议（15 行 ×~47 min；tracker `ref_speed_scale`；饱和记录列扩展）；P1-0C 映射（加载报告=`meta.ckpt_load` 提取）；P1-1 路径 `datasets/recovery_v1/` + 80% 门消解；P1-2 口径（BC 不退化 10% 操作化）；锚 canary 操作化（−2pp 噪声带 + 表示指标；`runs/p1_0/anchor_canary.json`）；**产物 11 项映射表**；**G 门逐集数字 pin**（s11 off 0.140/0.138 → G2 ≤0.098/≤0.097；IDM coll 0.144/0.174）。**待确认 2 项：样本量下限、canary 判据** → v0.6。
 
 ---
 
@@ -429,7 +430,7 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 
 ---
 
-## 7. P1 计划 v0.5（吸收 round-3/4/5/6 审阅；待拍板）
+## 7. P1 计划 v0.6（round-7 定稿：实施方案/产物/验收；待"开工"）
 
 ### 7.1 原则（含风险自曝）
 
@@ -461,6 +462,8 @@ bash .slim/deepwork/s1_audit/run_s11.sh
 5. **配速修复范围**：仅在参考构造侧（推荐先做）还是触及 LQR/速度策略？
 6. **验收口径**：升级版 gates（mean≥0.80、worst≥0.77、bootstrap LB>0、McNemar……）确认？最终声明是否补 5 seeds？
 7. **起步**：按 §7.3 顺序（已接受重排）——如无异议即按此执行（待"开工"指令）。
+
+> **round-7 后状态**：以上 1–7 已按 **§7.10（执行手册 v1）** 定稿收口（P1-0–P1-3 执行口径/产物/验收全锁定；4A 条件门、4B 不承诺本轮）；执行前仅剩：开工指令 + 2 项待确认量（样本量下限 §7.10-A5；锚 canary 判据 §7.10-A7）。
 
 ### 7.5 P1 期间明确不做
 
@@ -566,6 +569,51 @@ P1-1–P1-3 不动 WM/MoE/encoder/PPO scope；**P1-4 建立独立 experimental s
 **C. v0.5 变更点**：§7.1/§7.5 措辞（A5）；§7.2 P1-0 增⑤⑥、P1-2 增粗 mode 标签、P1-4 拆 4A/4B；§7.4-4 更新；P2/P3 记录（Best-of-G→scorer→蒸馏→group-ranked）。**本回答即视为对 round-6 定稿指令的接受 + 上述具体化。**
 
 **D. 剩余开放项（不靠讨论解决）**：① 配速后 D2 ceiling（P1-0 首裁）；② 锚重开前置实测（P1-0 离线 + canary）；③ 监督阶段实际上限（P1-2/3 后）。**结论：意见可以收拢，可以开工。**
+
+### 7.10 对 round-7 的回应与定稿（2026-10-10 晚）= P1 执行手册 v1
+
+**收拢判定**：**可以收拢**。全盘接受 round-7 的锁定：P1-0–P1-3 按"实施方案 + 产物 + 验收"执行；**4A 仅条件因果门**（排期见 A1）；**4B / K-anchor 重启 / GRPO / Best-of-G / WM-MoE 对照均不纳入本轮承诺**。以下 A–E = 落地定稿：7 条操作化修正（口径固定，不改方向）+ 产物定义映射 + 验收标准定格 + 2 项待确认量。
+
+**A. 操作化修正（7 条）**
+
+1. **4A 排期矛盾消解**：round-7 内部两处表述不一致——§二.1"现在允许实施：4A 因果烟测" vs §最终指令"P1-4A 仅在 P1-2/3 监督模型达到门槛后实施"。**采纳最终指令读法为规范次序**：4A 的契约与实现（`docs/p1_4a_contract.md` + "最小条件化改动"，属 P1-4 独立 experimental scope）可先行；**实际执行（四类探针 + clean150 canary）排期在 P1-2/3 监督模型达门槛之后**（探针须跑在有性能的 base 上，"条件化后仍保持 BC 基本性能"才可判）。请确认（若本意为先跑起点模型，请明示 base）。
+2. **P1-0A ckpt 口径（重要）**：已核实 **pri512 现有 eval500=0.332 用的是 `final.pt`，与 `ckpt_epoch020.pt` 非同权重**（sha 不同）⇒ 不能混用。P1-0A 执行 = **rou64@e015 与 pri512@e020 都按同集重跑**：`--spec env/specs/scenarios_eval500.json --tracker lqr --eval-reference plan --workers 6`（ckpt：`runs/BTC20261009-0824_sw_rou64/stage_b/ckpt_epoch015.pt`、`runs/BTC20261009-0824_sw_pri512/stage_b/ckpt_epoch020.pt`；~12 min/行 + paired ≈0.5 h）。**选择规则量化**：选 rou64 = Δsucc≥+2.0pp **且** McNemar 配对胜（p<0.05、方向为正）**且** off-road Δ≤+1.0pp 且不显著更差；**|Δsucc|<2pp 或 p≥0.05 ⇒ 判"不稳定"→ 选 pri512**。
+3. **P1-0B 口径与成本**：V1/V2/V3 × {0.90, 1.00, 1.05, 1.10, 1.15} = **15 行**；单行实测 ≈47 min（p0_d2 elapsed 2828 s）⇒ 串行 ~11 h、4 路并行 ~3 h（**先验证并行不扰确定性**）；**V3 优先出数**。V3 = 几何 plan 不动、仅缩放 LQR 参考速度 ⇒ tracker 加 `ref_speed_scale`（默认 1.0、零行为变化、单测覆盖；共享代码按 fail-fast 同标准）；V1/V2 在 forensics d2 侧缩放 ds / (ds,dθ)。**等价协议**：50 eps 子集"同参数跑两遍→逐 episode 全等"验证确定性 → scale=1.0 全量 500 对照 `runs/forensics/p0_d2.json`（逐 id/seed：success/off_road/collision/termination 全等；rc/速度均值容差 ≤1e-6/1e-3）。**记录扩展（前置）**：`records` 已含 `tracking_residual`/`lane_lat`（跟踪误差 AUC 可算）；**steer/longitudinal 饱和需给记录器加两列**（命令值 + 限幅标志）。
+4. **P1-0C 映射**：加载报告 = `metrics.json::meta.ckpt_load`（三计数 + sha）→ 独立 `checkpoint_load_report.json`；freeze audit = 现有三档（specific_only / trunk_only / all）+ **新 recovery 配方静态干跑**；recovery 标签质量 = 在**现有 dagger 失败窗口**上干跑质量门（不依赖 P1-1 数据）。
+5. **P1-1 路径/格式/80% 门**：路径改 **`datasets/recovery_v1/`**（本仓数据集约定，替代 `data/`）；样本格式 pin = **npz** + `schema.json`（与现工具链一致）。**80% 门歧义消解**——定义为"**通过质量门的样本有效率 ≥80%**" + **分层专家恢复成功率报告**（prevention/correction/late；late 因定义接近危险态**不设硬门**、单独报告）。**待确认量①——样本规模下限**：我方建议 **有效行 ≥10k、覆盖失败 episode ≥800（含 dagger r1–r3 池）、三档各 ≥1.5k、tollgate/merge/roundabout 各 ≥10%**（上限由单遍采集实测决定，不重采样凑数）。
+6. **P1-2 口径**："正常 BC validation 不退化超过 10%" 操作化 = **原 expert-BC 留出集**上 plan 6 点 ADE 与首步动作 MAE 相对起点恶化 ≤10%（相对值）**且** clean150 paired Δsucc ≥−1pp（不显著劣化）。配方逐项采纳：recovery 20–30% 混采、primary 低 LR、experts 独立 LR、**仅真实 recovery 行启用 traj_aux、禁合成 traj6**、六步权重 1.00/0.80/0.60/0.40/0.25/0.15、监督 action 链/相对 pose/横向/航向/ds/曲率+mask；R1/R2 两档消融（R2 无显著增益 → 用 R1、不训 experts）。
+7. **4B 门与锚 canary 操作化**：6 项启动条件全部采纳（含"K-anchor v8 重拟合 canary 不低于起点"）。**canary 操作化** = v8 数据重拟合锚（`tools/fit_plan_anchors.py`）+ 起点同配方短程 BC；判据 = clean150 同集配对 **Δsucc ≥ −2pp（噪声带）且不显著劣化** + 表示指标（重建 ADE / WTA / 选择 balanced acc）全报告；产物 **`runs/p1_0/anchor_canary.json`**（新增，挂 4B 门证据；可排 P1-0 尾声，离线 + 短训 ~1–2 h GPU）。**待确认量②**：−2 pp 噪声带（若坚持"≥起点"严格口径，需接受单 seed clean150 的假阴性风险）。
+
+**B. 产物定义（统一 11 项 → 本仓落点）**
+
+| 统一产物 | 本仓现状 | 处理 |
+|---|---|---|
+| manifest.json | manifest.txt（created_at/stage/git/config/argv/out） | **新增 json**（同字段结构化；驱动生成） |
+| resolved_config.yaml | config.snapshot.yaml + model.snapshot.yaml | **新增合并单文件**（或声明二文件合集为其实现） |
+| git_state.json | manifest.txt 的 git 行（commit + dirty 计数） | **新增**（commit / dirty 清单 / 时间） |
+| checkpoint.sha256 | manifest + `metrics.json::meta.ckpt_sha256` | **新增独立文件**（逐 ckpt） |
+| checkpoint_load_report.json | `metrics.json::meta.ckpt_load`（三计数） | **新增**（提取落盘；训练侧同样落） |
+| health_report.json | 无 | **新增**（探针聚合 PASS/WARN/FAIL） |
+| episodes.csv | ✓ 已有 | 保持 |
+| metrics.json | ✓ 已有 | 保持 |
+| probe_results.json | monitor/ 部分 | **新增**（探针统一输出） |
+| stdout.log | logs/（近期为空） | **新增**（驱动统一 tee） |
+| decision.md | 无（决策散在 backlog） | **新增**（hypothesis/change/result/paired/failure/probe/go-no-go/next） |
+
+"正式实验不得被自动清理" = 已有规则（正式 run 不进定期清理），沿用。**P1-0 总成本**：A ≈0.5 h + B ≈11 h 串行（可并行压缩）+ C 脚本开发 ~1 天人力（GPU 轻）+ canary 可选 1–2 h ⇒ P1-0 日历 ~1.5–2 天，产出报告后再启动 P1-1 采集。
+
+**C. 验收标准定格（含逐集数字 pin）**
+
+- **开发门**：clean150、单 seed、只作方向筛（必须同报 success/off-road/collision/timeout）。
+- **候选门**：3 seeds、eval500 + clean500、固定 checkpoint-selection 规则、逐 seed paired、报 mean/worst/range（禁止事后挑 epoch 不记录规则）。
+- **G2 追平**：3-seed mean ≥0.74；off-road 相对 s11 −30% ⇒ **eval500 ≤0.098、clean500 ≤0.097**（s11 参照：0.140 / 0.138）；collision ≤ IDM ⇒ **eval500 ≤0.144、clean500 ≤0.174**（IDM 参照）；双集均成立。
+- **G3 超越**：mean ≥0.80、worst ≥0.77、paired bootstrap LB>0、McNemar p<0.05、collision ≤0.144（eval500；clean500 对应 ≤0.174）、提升非单一路型；**0.82–0.85 声明补 5 seeds**。
+- **D2 ceiling 分类**：V3 配速后 ≥0.80 / 0.75–0.80 / <0.75；**配速若只抬 success 而显著恶化 off-road/collision ⇒ 不算上限提升**。
+- 各步内部验收（P1-1/P1-2/P1-3/4A）按 round-7 原文 + 本节 A5–A7 操作化后执行。
+
+**D. 开放项**：3 个数据驱动（D2 V3 是否 ≥0.80；rou64 vs pri512；recovery+几何能否把 ~0.37 推到 ≥0.60）+ 2 个操作确认（A5 样本量下限、A7 canary 判据/排期）。其余争论全部关闭（不扩容量、不改 WM/MoE 架构、不重定义评测协议、不启动 GRPO、不默认重启 K-anchor、监督基础不足不启复杂 PPO）。
+
+**E. 定稿**：主线锁定 **P1-0 → P1-1 → P1-2 → P1-3**（4A 条件门；4B 不承诺）。本 §7.10 即 **P1 执行手册 v1**——等"开工"指令后照此执行，后续以实验数据推进。
 
 ---
 
