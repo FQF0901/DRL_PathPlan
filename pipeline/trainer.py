@@ -93,7 +93,7 @@ import zipfile
 from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -128,6 +128,14 @@ __all__ = [
     "DEFAULT_PROBE_INTERVAL",
     "STAGE_C_DESIGN_PREFIXES",
     "STAGE_C_TRAINABLE_SCOPES",
+    "DEFAULT_PRIMARY_LR_SCALE",
+    "RECOVERY_FREEZE_MODES",
+    "DEFAULT_RECOVERY_CHAIN_DECAY",
+    "RECOVERY_CHAIN_STEPS",
+    "chain_step_weights",
+    "effective_traj_aux_mask",
+    "mix_recovery_batch_indices",
+    "recovery_mixed_batches",
     "apply_trainable_allowlist",
     "trainable_param_groups",
     "GRAD_PROBE_GROUPS",
@@ -538,6 +546,22 @@ _PHASE3_SPECIFIC_PREFIXES: Tuple[str, ...] = (
     "plan_head.moe.residual_scale",
 )
 
+#: P1-2 recovery 配方（R1/R2，§7.10-A6）的 LR 组前缀：
+#: ``trunk`` = plan_head 主干（fusion/norm/ego_next，主 LR 组）；
+#: ``primary`` = plan_head MoE primary（低 LR 独立组）；
+#: ``specific`` = 既有 experts/residual_scale（仅 R2；router 恒冻，不进组）。
+_RECOVERY_TRUNK_PREFIXES: Tuple[str, ...] = (
+    "plan_head.fusion.",
+    "plan_head.norm.",
+    "plan_head.ego_next.",
+)
+_RECOVERY_PRIMARY_PREFIXES: Tuple[str, ...] = ("plan_head.moe.primary.",)
+#: recovery primary 组 LR 缩放默认值（与阶段 C 契约 ``primary_lr_scale=0.1`` 同源：
+#: ``config/train.yaml::stages.C.primary_lr_scale`` / ``pipeline/stages.py`` 兜底 0.1）。
+DEFAULT_PRIMARY_LR_SCALE = 0.1
+#: recovery 配方的 freeze_mode 取值（``recovery`` = R1；``recovery_experts`` = R2）。
+RECOVERY_FREEZE_MODES: Tuple[str, ...] = ("recovery", "recovery_experts")
+
 
 def build_phase3_optimizer(
     model: "nn.Module",
@@ -545,6 +569,7 @@ def build_phase3_optimizer(
     *,
     base_scale: float = 0.25,
     specific_scale: float = 0.5,
+    primary_scale: float = DEFAULT_PRIMARY_LR_SCALE,
     freeze_mode: str = "all",
 ) -> "torch.optim.Optimizer":
     """phase 3（lane P3-B/P3-I）LR 分组优化器：base 主干 × ``base_scale`` / specific × ``specific_scale``。
@@ -559,7 +584,24 @@ def build_phase3_optimizer(
     此时 specific 组为空仍 ``ValueError``（experts/router/residual_scale 必须有可训参数）；
     ``freeze_mode="trunk_only"``（fix-11 安全配方）：specific 组为空是**预期**（experts/router/anchor 头
     冻结），只返回 base 组；specific 组非空 → ``ValueError``（冻结契约被绕过，拒绝静默带病训练）。
+
+    ``freeze_mode="recovery"`` / ``"recovery_experts"``（P1-2，§7.10-A6；默认关闭的配方，由 stages
+    层给冻结前缀）：组序 ``[trunk?, primary?, specific?]``——
+
+    - **trunk**：``plan_head.fusion./norm./ego_next.``（主 LR × ``base_scale``）；
+    - **primary**：``plan_head.moe.primary.``（低 LR × ``primary_scale``，默认 0.1 与阶段 C 契约同源）；
+    - **specific**：``experts/residual_scale``（仅 ``recovery_experts``；× ``specific_scale``）。
+      ``router`` 恒冻（不得出现在任何组）；训练集超出三组前缀（others）→ ``ValueError``（fail-closed）。
     """
+    if freeze_mode in RECOVERY_FREEZE_MODES:
+        return _build_recovery_optimizer(
+            model,
+            lr,
+            base_scale=base_scale,
+            specific_scale=specific_scale,
+            primary_scale=primary_scale,
+            freeze_mode=freeze_mode,
+        )
     base: List["torch.Tensor"] = []
     specific: List["torch.Tensor"] = []
     for name, parameter in model.named_parameters():
@@ -581,6 +623,75 @@ def build_phase3_optimizer(
     groups: List[Dict[str, Any]] = []
     if base:
         groups.append({"name": "base", "params": base, "lr": float(lr) * float(base_scale)})
+    if specific:
+        groups.append({"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)})
+    return torch.optim.Adam(groups, lr=float(lr))
+
+
+def _build_recovery_optimizer(
+    model: "nn.Module",
+    lr: float,
+    *,
+    base_scale: float,
+    specific_scale: float,
+    primary_scale: float,
+    freeze_mode: str,
+) -> "torch.optim.Optimizer":
+    """recovery 配方（P1-2，§7.10-A6）LR 分组：``[trunk?, primary?, specific?]``。
+
+    - ``trunk``（主 LR × ``base_scale``）：``plan_head.fusion./norm./ego_next.``；
+    - ``primary``（低 LR × ``primary_scale``）：``plan_head.moe.primary.``；
+    - ``specific``（× ``specific_scale``）：``experts/residual_scale``（仅 ``recovery_experts``）。
+
+    契约（fail-closed，拒绝静默带病训练）：trunk/primary 必须非空；训练集不得含三组前缀
+    之外的参数（``others``）；``router`` 必须冻结；``recovery`` 下 specific 必须为空、
+    ``recovery_experts`` 下 specific 必须非空。
+    """
+    trunk: List["torch.Tensor"] = []
+    primary: List["torch.Tensor"] = []
+    specific: List["torch.Tensor"] = []
+    others: List[str] = []
+    router_trainable: List[str] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.startswith(_RECOVERY_PRIMARY_PREFIXES):
+            primary.append(parameter)
+        elif name.startswith(_RECOVERY_TRUNK_PREFIXES):
+            trunk.append(parameter)
+        elif name.startswith(_PHASE3_SPECIFIC_PREFIXES):
+            specific.append(parameter)
+        else:
+            others.append(name)
+        if name.startswith("plan_head.moe.router."):
+            router_trainable.append(name)
+    if others:
+        raise ValueError(
+            f"phase 3 {freeze_mode} 训练集超出配方定义：others={len(others)}（{others[:4]}）"
+            "（recovery 只允许 plan 主干/primary（+ experts/residual_scale）可训）"
+        )
+    if not trunk or not primary:
+        raise ValueError(
+            f"phase 3 {freeze_mode} 组为空：trunk={len(trunk)} · primary={len(primary)}"
+            "（配方要求 plan 主干 fusion/norm/ego_next + primary 可训）"
+        )
+    if router_trainable:
+        raise ValueError(f"phase 3 {freeze_mode} 契约不符：router 必须冻结（{router_trainable[:2]}…）")
+    if freeze_mode == "recovery":
+        if specific:
+            raise ValueError(
+                f"phase 3 recovery 契约不符：specific={len(specific)}"
+                "（R1 要求 experts/router/residual_scale 全部冻结）"
+            )
+    elif not specific:
+        raise ValueError(
+            "phase 3 recovery_experts 契约不符：specific=0"
+            "（R2 要求 experts/residual_scale 可训；若只想训主干请用 recovery）"
+        )
+    groups: List[Dict[str, Any]] = [
+        {"name": "trunk", "params": trunk, "lr": float(lr) * float(base_scale)},
+        {"name": "primary", "params": primary, "lr": float(lr) * float(primary_scale)},
+    ]
     if specific:
         groups.append({"name": "specific", "params": specific, "lr": float(lr) * float(specific_scale)})
     return torch.optim.Adam(groups, lr=float(lr))
@@ -788,6 +899,11 @@ class BCConfig:
     #: DAgger 行的 ``traj6`` 是"常量动作外推"合成值 → 掩 0（不吃 traj 损失）；
     #: **只作用于 traj 损失项**，action/load 项与全部监控统计仍为全量口径。
     traj_aux_valid: Optional[np.ndarray] = None
+    #: P1-2 recovery：traj_aux 仅对真实 recovery 行启用（默认 False = 旧行为）。
+    #: True 时掩码 = ``traj_aux_valid``（None → 全 1）× ``recovery_row_mask``（必须提供）。
+    traj_aux_recovery_only: bool = False
+    #: recovery 行掩码（0/1，数据集行空间；``traj_aux_recovery_only=True`` 时必须提供）。
+    recovery_row_mask: Optional[np.ndarray] = None
     #: 独立留出数据集（``--val-dir``；None = 用主数据集 + ``val_indices`` 的旧口径）。
     val_dataset: Optional[Any] = None
     # ---- v7 结构迭代 B：K-anchor WTA 目标（单变量开关；0.0 = 关闭 = 旧行为逐位不变）----
@@ -833,11 +949,12 @@ class Phase3Config:
     shuffle: bool = True
     max_batches: Optional[int] = None
     phase: str = "phase3"
-    #: 冻结模式（lane P3-I / fix-11）：``all`` = 全参数解冻（旧行为）/ ``specific_only`` = 只训
-    #: experts/router/residual_scale（``freeze_prefixes`` 由 stages 层给 phase-2 冻结清单，
+    #: 冻结模式（lane P3-I / fix-11 / P1-2）：``all`` = 全参数解冻（旧行为）/ ``specific_only`` =
+    #: 只训 experts/router/residual_scale（``freeze_prefixes`` 由 stages 层给 phase-2 冻结清单，
     #: 且 :data:`PHASE3_WM_LOSS_KEYS` + 锚 CE/WTA 自动降级为 0）/ ``trunk_only`` = 安全配方
     #: （只训共享主干；``freeze_prefixes`` 由 stages 层给 fix-11 清单，上游 WM/ego_next 监督
-    #: 降级、锚 CE/WTA 保留）。
+    #: 降级、锚 CE/WTA 保留）/ ``recovery``（R1）/ ``recovery_experts``（R2，P1-2 §7.10-A6：
+    #: 只训 plan 主干 + primary（R2 加 experts/residual_scale），上游 WM 与锚 CE/WTA 自动降级）。
     freeze_mode: str = "all"
     #: 冻结参数前缀（``apply_freeze_prefixes``；``all`` 模式为空 = 全参数可训）。
     freeze_prefixes: Tuple[str, ...] = ()
@@ -884,12 +1001,36 @@ class Phase3Config:
     # ---- LR 分组（config stages.B.phase3.lr_scale.*）----
     lr_base_scale: float = 0.25
     lr_specific_scale: float = 0.5
+    #: recovery primary 组 LR 缩放（P1-2；默认 0.1 与阶段 C 契约同源，见
+    #: :data:`DEFAULT_PRIMARY_LR_SCALE`；非 recovery 配方不使用该值）。
+    lr_primary_scale: float = DEFAULT_PRIMARY_LR_SCALE
+
+    # ---- P1-2 recovery 机制（默认关闭；§7.10-A6）----
+    #: recovery 行混采占比（0.0 = 关闭 = 现状；>0 时要求 ``recovery_indices`` 非空）。
+    recovery_mix_ratio: float = 0.0
+    #: 数据侧标记的 recovery 行索引（数据集行空间；None = 无 recovery 行）。
+    recovery_indices: Optional[np.ndarray] = None
+    #: 六步链时间衰减权重（空 = 关闭 = 旧行为；非空须为 :data:`RECOVERY_CHAIN_STEPS` 个有限非负值）。
+    recovery_chain_decay: Tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.freeze_mode not in ("all", "specific_only", "trunk_only"):
+        if self.freeze_mode not in ("all", "specific_only", "trunk_only") + RECOVERY_FREEZE_MODES:
             raise ValueError(
-                f"freeze_mode 非法：{self.freeze_mode!r}（all | specific_only | trunk_only）"
+                f"freeze_mode 非法：{self.freeze_mode!r}"
+                "（all | specific_only | trunk_only | recovery | recovery_experts）"
             )
+        ratio = float(self.recovery_mix_ratio)
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError(f"recovery_mix_ratio 必须在 [0,1]，收到 {self.recovery_mix_ratio!r}")
+        if ratio > 0.0 and (
+            self.recovery_indices is None
+            or int(np.asarray(self.recovery_indices).reshape(-1).size) == 0
+        ):
+            raise ValueError(
+                "recovery_mix_ratio>0 需要 recovery_indices（数据侧标记的 recovery 行索引）"
+            )
+        if self.recovery_chain_decay:
+            chain_step_weights(RECOVERY_CHAIN_STEPS, self.recovery_chain_decay)  # 长度/取值校验
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -2251,6 +2392,7 @@ def weighted_action_chain_loss(
     *,
     frame_weight: Optional["torch.Tensor"] = None,
     loss_type: str = "l2",
+    step_weights: Optional["torch.Tensor"] = None,
 ) -> Tuple["torch.Tensor", List[Dict[str, float]]]:
     """多步动作链监督（lane P3-B）：rollout ``plan`` 第 2..K 步 vs 未来专家首步动作。
 
@@ -2258,6 +2400,9 @@ def weighted_action_chain_loss(
       ``action_mu`` 首步损失监督 → 本项只监督 ``k=1..K-1``，即未来的 t+1..t+K-1 策略步）；
     - ``chain_valid``: ``(B,K)`` 逐帧 mask（同 episode 未来帧缺失 → 0；``[:,0]`` 不参与）；
     - ``frame_weight``: ``(B,)``（``train_weight×balance``），缺省全 1；
+    - ``step_weights``（P1-2 recovery，可选）：``(K,)`` 或 ``(K-1,)`` 六步时间衰减权重
+      （``(K,)`` 时取 ``[1:]``，只作用于第 2..K 步）；缺省 ``None`` = 全 1 = **旧行为逐位不变**；
+      分母同步加权（加权均值口径，见 §7.10-A6 的 1.00/0.80/0.60/0.40/0.25/0.15）；
     - 损失 = ``Σ w·valid·err / Σ w·valid``（``loss_type``：l2→MSE / l1→MAE）。
 
     返回 ``(total, per_step)``：``per_step[k]``（k=1..K-1）含 ``loss/weight/frames``。
@@ -2281,6 +2426,14 @@ def weighted_action_chain_loss(
     diff = plan[:, 1:] - action_target[:, 1:]  # (B,K-1,2)，k=0 不参与
     per_step = (diff ** 2).mean(dim=-1) if loss_type == "l2" else diff.abs().mean(dim=-1)  # (B,K-1)
     weight = frame_weight_t.reshape(-1, 1) * valid[:, 1:]  # (B,K-1)
+    if step_weights is not None:
+        # P1-2：逐 step 时间衰减权重（K 或 K-1 长度；默认 None = 不加权 = 旧行为逐位不变）
+        sw = torch.as_tensor(step_weights, dtype=plan.dtype, device=device).reshape(-1)
+        if int(sw.numel()) == steps:
+            sw = sw[1:]
+        if int(sw.numel()) != steps - 1:
+            raise ValueError(f"step_weights 长度应为 {steps} 或 {steps - 1}，收到 {int(sw.numel())}")
+        weight = weight * sw.reshape(1, -1)
     denominator = weight.sum().clamp(min=1e-8)
     total = (per_step * weight).sum() / denominator
 
@@ -3772,22 +3925,24 @@ def pretrain_bc(
             f"load_balance_coef={config.load_balance_coef}）"
         )
     model.set_moe(enabled=bool(config.moe_enabled), load_balance_coef=float(config.load_balance_coef))
-    # lane U4：traj-aux 逐行掩码（DAgger 行 = 0：其 traj6 是合成常量外推，不得进 traj 损失）
-    traj_valid_all = (
-        None
-        if config.traj_aux_valid is None
-        else np.asarray(config.traj_aux_valid, dtype=np.float32).reshape(-1)
+    # lane U4 / P1-2：traj-aux 逐行掩码（DAgger 行 = 0：其 traj6 是合成常量外推，不得进 traj
+    # 损失；``traj_aux_recovery_only=True`` 时只保留真实 recovery 行——正常 BC 行为不变）
+    traj_valid_all = effective_traj_aux_mask(
+        int(dataset.count),
+        traj_aux_valid=config.traj_aux_valid,
+        recovery_row_mask=getattr(config, "recovery_row_mask", None),
+        recovery_only=bool(getattr(config, "traj_aux_recovery_only", False)),
     )
     if traj_valid_all is not None:
-        if traj_valid_all.size != int(dataset.count):
-            raise ValueError(
-                f"traj_aux_valid 行数 {traj_valid_all.size} != 数据集行数 {int(dataset.count)}"
-                "（掩码必须与训练集逐行对齐）"
-            )
         masked_rows = int(np.count_nonzero(traj_valid_all <= 0.5))
+        scope = (
+            "仅真实 recovery 行吃 traj 损失"
+            if getattr(config, "traj_aux_recovery_only", False)
+            else "DAgger 行不吃 traj 损失"
+        )
         logger(
             f"[bc] traj-aux 掩码：masked={masked_rows}/{traj_valid_all.size}"
-            f"（{masked_rows / max(1, traj_valid_all.size):.1%}；DAgger 行不吃 traj 损失，"
+            f"（{masked_rows / max(1, traj_valid_all.size):.1%}；{scope}，"
             "action/负载与监控统计仍全量口径）"
         )
 
@@ -4490,6 +4645,139 @@ def evaluate_bc(
 
 
 # --------------------------------------------------------------------------- #
+# P1-2 recovery 机制（默认关闭；§7.10-A6 / round-7）
+# --------------------------------------------------------------------------- #
+
+#: 六步链监督的时间衰减权重默认向量（§7.10-A6：1.00/0.80/0.60/0.40/0.25/0.15）。
+DEFAULT_RECOVERY_CHAIN_DECAY: Tuple[float, ...] = (1.0, 0.8, 0.6, 0.4, 0.25, 0.15)
+#: 六步链步数（与模型 plan ``(6,2)`` 契约一致；衰减向量长度校验用）。
+RECOVERY_CHAIN_STEPS = 6
+
+
+def chain_step_weights(
+    n_steps: int = RECOVERY_CHAIN_STEPS, decay: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """六步链逐 step 时间衰减权重（P1-2）：``decay`` 空/None → 全 1（= 关闭，旧行为）。
+
+    ``decay`` 非空时必须为 ``n_steps`` 个有限非负值（默认向量见
+    :data:`DEFAULT_RECOVERY_CHAIN_DECAY`）；返回 ``float64 (n_steps,)``。
+    """
+    steps = int(n_steps)
+    if steps < 1:
+        raise ValueError(f"n_steps 必须 ≥1，收到 {n_steps}")
+    if decay is None or len(decay) == 0:
+        return np.ones(steps, dtype=np.float64)
+    values = np.asarray(list(decay), dtype=np.float64).reshape(-1)
+    if values.size != steps:
+        raise ValueError(f"衰减权重长度应为 {steps}，收到 {values.size}")
+    if not np.all(np.isfinite(values)) or bool(np.any(values < 0.0)):
+        raise ValueError(f"衰减权重必须为有限非负值，收到 {values.tolist()}")
+    return values
+
+
+def effective_traj_aux_mask(
+    n_rows: int,
+    *,
+    traj_aux_valid: Optional[Sequence[float]] = None,
+    recovery_row_mask: Optional[Sequence[float]] = None,
+    recovery_only: bool = False,
+) -> Optional[np.ndarray]:
+    """traj-aux 逐行掩码（P1-2）。
+
+    ``recovery_only=False``（默认）：旧行为——原样返回 ``traj_aux_valid``（None → None）。
+    ``recovery_only=True``：掩码 = ``traj_aux_valid``（None → 全 1）× ``recovery_row_mask``
+    （0/1，数据集行空间，**必须提供**）——traj 损失只落在真实 recovery 行（禁合成 traj6），
+    正常 BC 行的 action/chain/anchor 损失不受影响。
+    """
+    base = None if traj_aux_valid is None else np.asarray(traj_aux_valid, dtype=np.float32).reshape(-1)
+    if base is not None and base.size != int(n_rows):
+        raise ValueError(f"traj_aux_valid 行数 {base.size} != 数据集行数 {int(n_rows)}")
+    if not recovery_only:
+        return base
+    if recovery_row_mask is None:
+        raise ValueError(
+            "traj_aux_recovery_only=True 需要 recovery_row_mask（数据侧标记真实 recovery 行）"
+        )
+    mask = np.asarray(recovery_row_mask, dtype=np.float32).reshape(-1)
+    if mask.size != int(n_rows):
+        raise ValueError(f"recovery_row_mask 行数 {mask.size} != 数据集行数 {int(n_rows)}")
+    mask = (mask > 0.5).astype(np.float32)
+    return mask if base is None else base * mask
+
+
+def mix_recovery_batch_indices(
+    normal_pool: Sequence[int],
+    recovery_pool: Sequence[int],
+    batch_size: int,
+    ratio: float,
+    *,
+    seed: int = 0,
+    step: int = 0,
+) -> np.ndarray:
+    """按 ``ratio`` 混采**一个 batch** 的行索引（确定性：``default_rng([seed, step])``）。
+
+    - ``ratio`` ∈ [0,1]：recovery 行目标数 = ``round(ratio × batch_size)``（Python ``round`` =
+      银行家舍入，``.5`` 取偶；如 ``0.25×10 → 2``、``0.15×10 → 2``），其余来自 normal；
+    - 池不足 → 放回采样（replacement）；目标池为空 → ``ValueError``（fail-closed）；
+    - 两池各自采样后合并洗牌（recovery 行位置不固定）。返回 int64 索引数组。
+    """
+    size = int(batch_size)
+    if size < 1:
+        raise ValueError(f"batch_size 必须 ≥1，收到 {batch_size}")
+    ratio = float(ratio)
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(f"ratio 必须在 [0,1]，收到 {ratio}")
+    normal = np.asarray(list(normal_pool), dtype=np.int64).reshape(-1)
+    recovery = np.asarray(list(recovery_pool), dtype=np.int64).reshape(-1)
+    n_recovery = int(round(ratio * size))
+    n_normal = size - n_recovery
+    if n_recovery > 0 and recovery.size == 0:
+        raise ValueError("recovery 池为空（ratio>0 但无 recovery 行）")
+    if n_normal > 0 and normal.size == 0:
+        raise ValueError("normal 池为空（ratio<1 但无 normal 行）")
+    rng = np.random.default_rng([int(seed), int(step)])
+    parts: List[np.ndarray] = []
+    if n_recovery > 0:
+        parts.append(rng.choice(recovery, size=n_recovery, replace=n_recovery > recovery.size))
+    if n_normal > 0:
+        parts.append(rng.choice(normal, size=n_normal, replace=n_normal > normal.size))
+    batch = np.concatenate(parts).astype(np.int64)
+    rng.shuffle(batch)
+    return batch
+
+
+def recovery_mixed_batches(
+    normal_pool: Sequence[int],
+    recovery_pool: Sequence[int],
+    batch_size: int,
+    ratio: float,
+    *,
+    seed: int = 0,
+    epoch: int = 0,
+    n_batches: Optional[int] = None,
+) -> Iterator[np.ndarray]:
+    """逐 batch 产出混采索引（epoch 内确定性；用于 phase3 epoch 循环的 batch 迭代）。
+
+    ``n_batches`` 缺省 = ``ceil((|normal|+|recovery|)/batch_size)``（与旧循环批次数同口径）；
+    每个 batch 由 :func:`mix_recovery_batch_indices` 生成（``step = epoch×n_batches + i``）。
+    """
+    normal = np.asarray(list(normal_pool), dtype=np.int64).reshape(-1)
+    recovery = np.asarray(list(recovery_pool), dtype=np.int64).reshape(-1)
+    total = int(normal.size + recovery.size)
+    if total == 0:
+        raise ValueError("normal/recovery 两池均为空")
+    count = (
+        int(n_batches)
+        if n_batches is not None
+        else max(1, math.ceil(total / max(1, int(batch_size))))
+    )
+    for index in range(count):
+        yield mix_recovery_batch_indices(
+            normal, recovery, batch_size, ratio, seed=seed, step=int(epoch) * count + index
+        )
+
+
+# --------------------------------------------------------------------------- #
 # stage B phase 3（迭代恢复训练；lane P3-B）
 # --------------------------------------------------------------------------- #
 
@@ -4594,6 +4882,8 @@ def phase3_effective_config(config: Phase3Config) -> "tuple[Phase3Config, Tuple[
     - ``freeze_mode="trunk_only"``（fix-11 安全配方）：WM/ego_next 上游监督按配方保守降级为 0
       （st_gnn 冻结；与失败轮口径一致，保持单组变更）；**锚 CE/WTA 保留**（锚头冻结但梯度经其
       塑形可训共享主干）。
+    - ``freeze_mode="recovery"`` / ``"recovery_experts"``（P1-2）：st_gnn 与 K-anchor 锚头冻结
+      → WM/ego_next 上游监督与锚 CE/WTA 均降级为 0（同 ``specific_only`` 的锚规则）。
     - ``freeze_mode="all"``：原样返回。
 
     返回 ``(effective_config, 被置零键)``。
@@ -4604,7 +4894,8 @@ def phase3_effective_config(config: Phase3Config) -> "tuple[Phase3Config, Tuple[
         return replace(
             config, **{f"{key}_weight": 0.0 for key in PHASE3_WM_LOSS_KEYS}
         ), PHASE3_WM_LOSS_KEYS
-    # specific_only：K-anchor 项只在权重 > 0（确实启用）时才列入降级清单，避免默认关时日志噪声。
+    # specific_only / recovery / recovery_experts：K-anchor 项只在权重 > 0（确实启用）时才列入
+    # 降级清单，避免默认关时日志噪声。
     zeroed = PHASE3_WM_LOSS_KEYS + tuple(
         key
         for key in ("anchor_ce", "anchor_wta")
@@ -4620,6 +4911,7 @@ def _phase3_loss_terms(
     targets: Mapping[str, "torch.Tensor"],
     frame_weight: "torch.Tensor",
     config: Phase3Config,
+    chain_step_weights: Optional["torch.Tensor"] = None,
 ) -> Dict[str, Any]:
     """一次前向 + phase 3 全部损失项（train 侧按 micro 调用；eval 侧也可复用）。
 
@@ -4655,6 +4947,7 @@ def _phase3_loss_terms(
         future_t["action_chain_valid"],
         frame_weight=frame_weight,
         loss_type=config.loss_type,
+        step_weights=chain_step_weights,  # P1-2：默认 None = 旧行为逐位不变
     )
     # v7 结构迭代 B：K-anchor WTA 目标（选择 CE + 被分配锚链回归；权重 0 或未启用锚 → 跳过）
     anchor_ce_loss = anchor_wta_value = torch.zeros((), device=device)
@@ -4795,6 +5088,10 @@ def pretrain_bc_phase3(
     - LR 分组（base/specific，见 :func:`build_phase3_optimizer`）：``freeze_mode="all"`` 时
       全参数可训（``freeze_prefixes`` 为空 = 旧行为）；``"specific_only"`` 时只留 specific 组；
       ``"trunk_only"``（fix-11 安全配方）时只留 base 组（specific 必须全冻结）；
+      ``"recovery"`` / ``"recovery_experts"``（P1-2）时组序 ``[trunk?, primary?, specific?]``
+      （plan 主干 × ``lr_base_scale`` / primary × ``lr_primary_scale`` / experts × ``lr_specific_scale``）；
+      ``recovery_mix_ratio>0``（默认 0 = 关闭）时按 batch 混采 recovery 行，
+      ``recovery_chain_decay``（默认空 = 关闭）时六步链监督逐 step 时间衰减；
     - 数据 = 单一 dagger 目录（或 stages 层合并 5k 锚后的行）；无 worst/mild 权重、无 mining
       （权重 = ``train_weight``）；
     - 冻结配方 ``freeze_mode``（lane P3-I / fix-11）：``all`` = 全参数解冻（旧行为）/
@@ -4828,6 +5125,7 @@ def pretrain_bc_phase3(
         config.lr,
         base_scale=config.lr_base_scale,
         specific_scale=config.lr_specific_scale,
+        primary_scale=float(getattr(config, "lr_primary_scale", DEFAULT_PRIMARY_LR_SCALE)),
         freeze_mode=config.freeze_mode,
     )
     if config.optimizer_state:
@@ -4854,6 +5152,43 @@ def pretrain_bc_phase3(
         elif config.shuffle:
             for _ in range(start_epoch):
                 rng.shuffle(indices.copy())
+    # P1-2 recovery：混采（默认关闭）与六步链时间衰减（默认关闭）
+    recovery_mix_ratio = float(getattr(config, "recovery_mix_ratio", 0.0) or 0.0)
+    recovery_indices_all = (
+        None
+        if getattr(config, "recovery_indices", None) is None
+        else np.asarray(config.recovery_indices, dtype=np.int64).reshape(-1)
+    )
+    recovery_row_mask = np.zeros(int(dataset.count), dtype=bool)
+    if recovery_indices_all is not None and recovery_indices_all.size:
+        low, high = int(recovery_indices_all.min()), int(recovery_indices_all.max())
+        if low < 0 or high >= int(dataset.count):
+            raise ValueError(
+                f"recovery_indices 越界：[{low}, {high}] 不在 [0, {int(dataset.count)})"
+            )
+        recovery_row_mask[recovery_indices_all] = True
+    chain_decay = tuple(getattr(config, "recovery_chain_decay", ()) or ())
+    chain_decay_tensor = (
+        None
+        if not chain_decay
+        else torch.tensor(
+            chain_step_weights(RECOVERY_CHAIN_STEPS, chain_decay), dtype=torch.float32, device=device
+        )
+    )
+    if recovery_mix_ratio > 0.0:
+        n_recovery_train = int(np.count_nonzero(recovery_row_mask[indices]))
+        if n_recovery_train == 0:
+            raise ValueError(
+                "recovery_mix_ratio>0 但训练子集内无 recovery 行"
+                "（recovery_indices ∩ train_indices = ∅；数据侧标记需与训练行对齐）"
+            )
+        logger(
+            f"[bc3] recovery 混采：ratio={recovery_mix_ratio:g} · recovery 行="
+            f"{n_recovery_train}/{indices.size}"
+            f"（seed={int(config.seed)}；batch 内 recovery 目标数 = round(ratio×batch)）"
+        )
+    if chain_decay_tensor is not None:
+        logger(f"[bc3] recovery 六步链时间衰减：{list(chain_decay)}")
     model.set_moe(enabled=bool(config.moe_enabled), load_balance_coef=float(config.load_balance_coef))
     num_experts_cfg = int(getattr(model.plan_head.moe, "num_experts", 0) or 0)
     metrics: Dict[str, Any] = {
@@ -4931,10 +5266,25 @@ def pretrain_bc_phase3(
         anchor_sums: Dict[str, float] = {}
         anchor_weight = 0.0
         data_seconds = forward_seconds = backward_seconds = 0.0
-        for start in range(0, len(order), macro_size):
+        if recovery_mix_ratio > 0.0 and recovery_indices_all is not None:
+            # P1-2：按 batch 混采（normal 池 = 本 epoch 训练序去掉 recovery 行）
+            in_recovery = recovery_row_mask[order]
+            batch_iter: Iterator[np.ndarray] = recovery_mixed_batches(
+                order[~in_recovery],
+                order[in_recovery],
+                macro_size,
+                recovery_mix_ratio,
+                seed=int(config.seed),
+                epoch=epoch,
+                n_batches=max(1, math.ceil(len(order) / macro_size)),
+            )
+        else:
+            batch_iter = (
+                order[start : start + macro_size] for start in range(0, len(order), macro_size)
+            )
+        for batch_indices in batch_iter:
             if config.max_batches is not None and batches >= int(config.max_batches):
                 break
-            batch_indices = order[start : start + macro_size]
             n_macro = int(batch_indices.shape[0])
             data_started = time.perf_counter()
             if batch_source is not None:
@@ -4985,7 +5335,15 @@ def pretrain_bc_phase3(
                 frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
                 data_seconds += time.perf_counter() - data_started
                 forward_started = time.perf_counter()
-                terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, effective_config)
+                terms = _phase3_loss_terms(
+                    model,
+                    obs,
+                    future_t,
+                    targets,
+                    frame_weight,
+                    effective_config,
+                    chain_step_weights=chain_decay_tensor,
+                )
                 components = {key: terms[key] for key in loss_keys}
                 if micro_size < n_macro:
                     scales = _phase3_scale_factors(den_micro, den_macro)

@@ -68,6 +68,7 @@ from pipeline.hard_mining import ckpt_identity, row_il_errors  # noqa: E402
 from pipeline.trainer import (  # noqa: E402
     BCConfig,
     BCDataset,
+    DEFAULT_PRIMARY_LR_SCALE,
     DEFAULT_PROBE_BATCH,
     DEFAULT_PROBE_INTERVAL,
     DEFAULT_STAGE_BATCH_SIZE,
@@ -2775,6 +2776,31 @@ _PHASE3_SAFE_FREEZE: Tuple[str, ...] = (
     "plan_head.moe.residual_scale",
 ) + _PHASE3_ANCHOR_HEAD_PREFIXES
 
+#: recovery 微调（P1-2，§7.10-A6；R1 = ``freeze=recovery``）冻结清单：train = plan_head 主干
+#: （fusion/norm/ego_next）+ primary（primary 低 LR）；freeze = encoders/mem_encoder/WM(st_gnn)/
+#: router/experts(+residual_scale)/K-anchor 锚头/policy/value（锚 CE/WTA 与 WM 上游监督自动降级）。
+_RECOVERY_FREEZE: Tuple[str, ...] = (
+    "st_gnn.",
+    "value.",
+    "encoders.",
+    "mem_encoder.",
+    "plan_head.moe.router.",
+    "plan_head.moe.experts.",
+    "plan_head.moe.residual_scale",
+    "policy.",
+) + _PHASE3_ANCHOR_HEAD_PREFIXES
+
+#: recovery R2（``freeze=recovery_experts``）：R1 ∪ 既有 experts/residual_scale 可训（独立 LR 组；
+#: router 仍冻、专家数/负载均衡机制不变；R2 无显著增益 → 用 R1）。
+_RECOVERY_EXPERTS_FREEZE: Tuple[str, ...] = (
+    "st_gnn.",
+    "value.",
+    "encoders.",
+    "mem_encoder.",
+    "plan_head.moe.router.",
+    "policy.",
+) + _PHASE3_ANCHOR_HEAD_PREFIXES
+
 
 def _action_mu_stats(
     model: Any,
@@ -3703,8 +3729,12 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
       :data:`_SPECIFIC_PHASE_FREEZE`；fix-11 起含 K-anchor 锚头），WM/ego_next 无梯度 →
       损失自动置 0（降级）；``trunk_only`` = **安全配方**（fix-11）：只训共享主干
       （encoders/mem_encoder/plan_head fusion/norm/ego_next/primary/policy），冻结 WM/value +
-      specific experts/router + 锚头，锚 CE/WTA 保留（塑形共享特征）；``all`` = 全参数解冻
-      （含 WM；旧行为）；
+      specific experts/router + 锚头，锚 CE/WTA 保留（塑形共享特征）；``recovery`` /
+      ``recovery_experts`` = **P1-2 微调配方**（§7.10-A6；R1/R2，默认关闭的开关由 config
+      ``stages.B.phase3.recovery`` 提供）：只训 plan 主干 fusion/norm/ego_next + primary
+      （primary 低 LR；R2 加 experts/residual_scale 独立 LR 组；router 恒冻），冻结
+      encoders/mem/WM/value/锚头/policy（锚 CE/WTA 与 WM 上游监督自动降级）；``all`` = 全参数
+      解冻（含 WM；旧行为）；
     - **epoch 级 clean150 守护**（fix-11，``--phase3-guard-spec`` 给出即启用）：每 epoch 保存
       ``guard/epochNNN.pt`` → 子进程评测 clean150 → ``overall.success_rate <
       --phase3-guard-min-success``（或评测不可得）→ 抛 :class:`Phase3GuardCollapse` 立即中止
@@ -3750,19 +3780,25 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         else p3_cfg.get("freeze")
     )
     freeze_mode = str(freeze_raw or "all").strip().lower()
-    if freeze_mode not in ("all", "specific_only", "trunk_only"):
+    if freeze_mode not in ("all", "specific_only", "trunk_only", "recovery", "recovery_experts"):
         raise SystemExit(
-            f"[stageB3] freeze 非法：{freeze_mode!r}（all | specific_only | trunk_only）"
+            f"[stageB3] freeze 非法：{freeze_mode!r}"
+            "（all | specific_only | trunk_only | recovery | recovery_experts）"
         )
     if freeze_mode == "all":
         freeze_prefixes: Tuple[str, ...] = ()
     elif freeze_mode == "specific_only":
         freeze_prefixes = _SPECIFIC_PHASE_FREEZE
-    else:  # trunk_only（fix-11 安全配方：只训共享主干）
+    elif freeze_mode == "trunk_only":  # fix-11 安全配方：只训共享主干
         freeze_prefixes = _PHASE3_SAFE_FREEZE
-    # 降级清单：specific_only 下锚头已冻结（fix-11 契约修复）→ 锚 CE/WTA 无梯度、同规则降级
-    # （仅在权重 > 0 = 实际启用时列入清单；默认关不产生日志噪声）；trunk_only 下锚 CE/WTA
-    # **保留**（梯度经冻结锚头塑形共享主干），仅 WM/ego_next 上游监督按配方保守降级。
+    elif freeze_mode == "recovery":  # P1-2 R1：只训 plan 主干 + primary
+        freeze_prefixes = _RECOVERY_FREEZE
+    else:  # recovery_experts（P1-2 R2）：R1 + experts/residual_scale
+        freeze_prefixes = _RECOVERY_EXPERTS_FREEZE
+    # 降级清单：specific_only / recovery / recovery_experts 下锚头已冻结（fix-11 契约修复）→
+    # 锚 CE/WTA 无梯度、同规则降级（仅在权重 > 0 = 实际启用时列入清单；默认关不产生日志噪声）；
+    # trunk_only 下锚 CE/WTA **保留**（梯度经冻结锚头塑形共享主干），仅 WM/ego_next 上游监督
+    # 按配方保守降级。
     _pre_losses = dict(p3_cfg.get("losses", {}) or {})
 
     def _pre_loss_weight(key: str, default: float) -> float:
@@ -3774,7 +3810,7 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     )
     if freeze_mode == "all":
         frozen_loss_keys: Tuple[str, ...] = ()
-    elif freeze_mode == "specific_only":
+    elif freeze_mode in ("specific_only", "recovery", "recovery_experts"):
         frozen_loss_keys = PHASE3_WM_LOSS_KEYS + _anchor_degrade
     else:  # trunk_only
         frozen_loss_keys = PHASE3_WM_LOSS_KEYS
@@ -3996,6 +4032,12 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     lr_specific_scale = float(
         args.phase3_lr_specific_scale if args.phase3_lr_specific_scale is not None else lr_scale_cfg.get("specific", 0.5)
     )
+    # P1-2 recovery：primary 低 LR（默认 0.1 = 阶段 C 契约；仅 recovery 配方使用）
+    lr_primary_scale = float(lr_scale_cfg.get("primary", DEFAULT_PRIMARY_LR_SCALE))
+    # P1-2 recovery 机制开关（默认关闭；recovery 段缺省即旧行为）
+    recovery_cfg = dict(p3_cfg.get("recovery", {}) or {})
+    recovery_mix_ratio = float(recovery_cfg.get("mix_ratio", 0.0) or 0.0)
+    recovery_chain_decay = tuple(float(value) for value in (recovery_cfg.get("chain_decay") or ()))
     shuffle_seed_base_raw = p3_cfg.get("shuffle_seed_base")
     shuffle_seed = (
         int(shuffle_seed_base_raw) + round_index if shuffle_seed_base_raw is not None else int(args.seed)
@@ -4023,6 +4065,17 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             "冻结配方=specific_only（只训 experts/router/residual_scale；锚头已冻结；"
             f"降级置 0：{', '.join(frozen_loss_keys)}）"
         )
+    elif freeze_mode == "recovery":
+        freeze_text = (
+            "冻结配方=recovery/R1（只训 plan 主干 fusion/norm/ego_next + primary；"
+            "冻结 encoders/mem/WM/router/experts/锚头/policy/value；"
+            f"降级置 0：{', '.join(frozen_loss_keys)}）"
+        )
+    elif freeze_mode == "recovery_experts":
+        freeze_text = (
+            "冻结配方=recovery_experts/R2（R1 + experts/residual_scale 可训；router 仍冻；"
+            f"降级置 0：{', '.join(frozen_loss_keys)}）"
+        )
     else:
         freeze_text = (
             "冻结配方=trunk_only/安全配方（只训共享主干 encoders/mem_encoder/plan_head 主干/policy；"
@@ -4035,10 +4088,13 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         if anchor_enabled
         else "无锚（仅窗口 dagger 行）"
     )
+    lr_scale_text = f"base×{lr_base_scale} · specific×{lr_specific_scale}"
+    if freeze_mode in ("recovery", "recovery_experts"):
+        lr_scale_text += f" · primary×{lr_primary_scale}"
     print(
         f"[stageB3] round={round_index} · dagger={dagger_dir}（窗口 rows={dataset.count - anchor_rows_log}）· "
         f"起点={init_ckpt or resume_path} · epochs={epochs} · {freeze_text} · {anchor_text} · "
-        f"lr={lr:.2e}（base×{lr_base_scale} · specific×{lr_specific_scale}）· "
+        f"lr={lr:.2e}（{lr_scale_text}）· "
         f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）· "
         f"action_chain_source={chain_source_raw} · bias_calib={loss_weights['bias_calib']}"
         + (
@@ -4117,7 +4173,11 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "micro_batch_size": micro_batch_size,
         "grad_accum": bool(micro_batch_size is not None and micro_batch_size < batch_size),
         "lr": lr,
-        "lr_scale": {"base": lr_base_scale, "specific": lr_specific_scale},
+        "lr_scale": (
+            {"base": lr_base_scale, "specific": lr_specific_scale, "primary": lr_primary_scale}
+            if freeze_mode in ("recovery", "recovery_experts")
+            else {"base": lr_base_scale, "specific": lr_specific_scale}
+        ),
         # lane P3-I：配方开关（freeze/anchor）与降级留档
         "freeze": freeze_mode,
         "freeze_prefixes": list(freeze_prefixes),
@@ -4364,6 +4424,10 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         moe_enabled=True,
         lr_base_scale=lr_base_scale,
         lr_specific_scale=lr_specific_scale,
+        lr_primary_scale=lr_primary_scale,
+        recovery_mix_ratio=recovery_mix_ratio,
+        recovery_chain_decay=recovery_chain_decay,
+        # recovery_indices：数据侧标记（P1-2 数据接入时由 stages 层提供；默认 None = 无 recovery 行）
     )
     result = pretrain_bc_phase3(
         model,
@@ -5025,14 +5089,21 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-traj-aux-weight", type=float, default=None,
                         help="轨迹辅助权重（默认 0.0：traj 只做监控，不进损失）")
     # ---- lane P3-I：配方开关（冻结 / 5k 锚）----
-    parser.add_argument("--phase3-freeze", choices=("all", "specific_only", "trunk_only"), default=None,
-                        help="phase 3 冻结配方（默认取 config stages.B.phase3.freeze）："
-                             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单，"
-                             "fix-11 起含 K-anchor 锚头；WM od/ld/presence/entry 与 ego_next、锚 CE/WTA "
-                             "无梯度 → 损失自动置 0）；"
-                             "trunk_only = 安全配方（fix-11）：只训共享主干，冻结 WM/value/specific "
-                             "experts/router/锚头；锚 CE/WTA 保留（塑形共享特征）；"
-                             "all = 全参数解冻（含 WM；旧行为）")
+    parser.add_argument(
+        "--phase3-freeze",
+        choices=("all", "specific_only", "trunk_only", "recovery", "recovery_experts"),
+        default=None,
+        help="phase 3 冻结配方（默认取 config stages.B.phase3.freeze）："
+             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单，"
+             "fix-11 起含 K-anchor 锚头；WM od/ld/presence/entry 与 ego_next、锚 CE/WTA "
+             "无梯度 → 损失自动置 0）；"
+             "trunk_only = 安全配方（fix-11）：只训共享主干，冻结 WM/value/specific "
+             "experts/router/锚头；锚 CE/WTA 保留（塑形共享特征）；"
+             "recovery = P1-2 R1：只训 plan 主干 fusion/norm/ego_next + primary（primary 低 LR），"
+             "冻结 encoders/mem/WM/router/experts/锚头/policy/value；"
+             "recovery_experts = P1-2 R2：R1 + experts/residual_scale（独立 LR 组；router 仍冻）；"
+             "all = 全参数解冻（含 WM；旧行为）",
+    )
     parser.add_argument("--phase3-anchor", action=argparse.BooleanOptionalAction, default=None,
                         help="phase 3 5k 锚（默认取 config stages.B.phase3.anchor.enabled=false）："
                              "开启后把锚数据集行并入训练集（权 = train_weight×配平×mild_weight）")
