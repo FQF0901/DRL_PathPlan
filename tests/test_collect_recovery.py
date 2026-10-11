@@ -1,7 +1,8 @@
-"""P1-1 预备 recovery 采集器离线单测（不建 env、不跑 ckpt）。
+"""P1-1 recovery 采集器离线单测（不建 env、不跑 ckpt）。
 
-覆盖：锚点计算、三档分类、行数上限、episode 级 split 无泄漏、一致性判定
-（strict/relaxed/skip）、质量门接线、mode 标签、ego 系变换、产物写出布局。
+覆盖：多窗口候选/实况三档分类/每档 ≤1 与 ≤20 行每集、配额截断、池选择、池规划外推、
+episode 级 split 无泄漏（'pool:id' 键）、一致性判定（strict/relaxed/skip）、质量门接线、
+mode 标签、ego 系变换、产物写出布局。
 """
 
 from __future__ import annotations
@@ -18,115 +19,239 @@ from tools.controls import recovery_quality_gates as gates
 
 
 # --------------------------------------------------------------------------- #
-# 锚点 / 分类 / 行选择 / split
+# 窗口候选 / 分类 / 选择 / 配额
 # --------------------------------------------------------------------------- #
-def _ts(step: int | None) -> dict | None:
-    return None if step is None else {"step": int(step), "t_s": 0.1 * int(step), "reason": "x"}
-
-
-def test_compute_anchor_prevention() -> None:
-    # T_plan−20=180, T_cross−30=180, first_low=50 → start=180 < T_plan → prevention
-    anchor = cr.compute_anchor(
-        {0: 0.0, 5: 0.2, 50: 1.5, 100: 0.1},
-        {"T_plan": _ts(200), "T_cross": _ts(210)},
-        low_margin_lat=1.0,
+def test_generate_window_candidates() -> None:
+    candidates = cr.generate_window_candidates(
+        t_plan=130,
+        t_cross=556,
+        first_low_margin=125,
         context_steps=20,
         recovery_steps=30,
+        late_margin_steps=5,
     )
-    assert anchor is not None
-    assert anchor["start_raw"] == 180
-    assert anchor["takeover_step"] == 180
-    assert anchor["class"] == "prevention"
-    assert anchor["first_low_margin"] == 50
+    # {125, 110, 130, 525, 550, 555}（已对齐 5 网格）
+    assert candidates == [110, 125, 130, 525, 550, 555]
+
+    # 仅 first_low；以及 T_cross 邻域 clamp 到 0
+    assert cr.generate_window_candidates(
+        t_plan=None, t_cross=None, first_low_margin=17
+    ) == [15]
+    assert cr.generate_window_candidates(
+        t_plan=None, t_cross=3, first_low_margin=None, recovery_steps=30, late_margin_steps=5
+    ) == [0]
+
+    # max_decision_step 截断
+    assert cr.generate_window_candidates(
+        t_plan=130, t_cross=None, first_low_margin=125, max_decision_step=100
+    ) == [100]
 
 
-def test_compute_anchor_correction_and_snap() -> None:
-    # T_plan−20=80, T_cross−30=170 → start=170（≥T_plan、<T_cross）→ correction
-    anchor = cr.compute_anchor(
-        {0: 0.0},
-        {"T_plan": _ts(100), "T_cross": _ts(200)},
-        context_steps=20,
-        recovery_steps=30,
+def test_classify_window_three_classes() -> None:
+    # prevention：计划可行 + margin 健康
+    assert (
+        cr.classify_window(
+            100, t_plan=130, t_cross=None, lane_lat=0.4,
+            plan_footprint_valid=True, exec_footprint_valid=True,
+        )
+        == "prevention"
     )
-    assert anchor["start_raw"] == 170
-    assert anchor["class"] == "correction"
-
-    # 网格对齐：start_raw=123 → takeover=120
-    anchor = cr.compute_anchor(
-        {123: 1.2}, {"T_plan": None, "T_cross": None}, context_steps=20, recovery_steps=30
+    # correction：plan footprint 不可行 / ≥T_plan / |lane_lat| ≥ low_lat
+    assert (
+        cr.classify_window(
+            130, t_plan=130, t_cross=600, lane_lat=0.4,
+            plan_footprint_valid=False, exec_footprint_valid=True,
+        )
+        == "correction"
     )
-    assert anchor["start_raw"] == 123
-    assert anchor["takeover_step"] == 120
-    assert anchor["class"] == "prevention"
-
-
-def test_compute_anchor_late_and_none() -> None:
-    # first_low=90 ≥ T_cross=80 → late
-    anchor = cr.compute_anchor(
-        {90: 1.4}, {"T_plan": _ts(50), "T_cross": _ts(80)}, context_steps=20, recovery_steps=30
+    assert (
+        cr.classify_window(
+            100, t_plan=None, t_cross=600, lane_lat=1.2,
+            plan_footprint_valid=True, exec_footprint_valid=True,
+        )
+        == "correction"
     )
-    assert anchor["class"] == "late"
-    assert anchor["start_raw"] == 90
-
-    assert cr.compute_anchor({0: 0.1}, {"T_plan": None, "T_cross": None}) is None
-
-
-def test_compute_anchor_t_cross_fallback() -> None:
-    # footprint T_cross=None（线压线类 out_of_road）→ env 失败步 200 作 effective T_cross
-    anchor = cr.compute_anchor(
-        {100: 1.2},
-        {"T_plan": _ts(150), "T_cross": None},
-        context_steps=20,
-        recovery_steps=30,
-        t_cross_fallback=200,
+    # late：T_cross 邻域 / exec footprint 不可行 / |lane_lat| ≥ late_lat
+    assert (
+        cr.classify_window(
+            551, t_plan=130, t_cross=556, lane_lat=0.4,
+            plan_footprint_valid=True, exec_footprint_valid=True,
+        )
+        == "late"
     )
-    assert anchor["T_cross"] == 200
-    assert anchor["T_cross_footprint"] is None
-    assert anchor["T_cross_source"] == "env_event"
-    assert anchor["start_raw"] == 170  # T_cross−30
-    assert anchor["class"] == "correction"  # 150 ≤ 170 < 200
-
-    # first_low 晚于 effective T_cross → late
-    anchor = cr.compute_anchor(
-        {210: 1.3},
-        {"T_plan": None, "T_cross": None},
-        context_steps=20,
-        recovery_steps=30,
-        t_cross_fallback=200,
+    assert (
+        cr.classify_window(
+            300, t_plan=130, t_cross=556, lane_lat=0.4,
+            plan_footprint_valid=True, exec_footprint_valid=False,
+        )
+        == "late"
     )
-    assert anchor["class"] == "late"
-
-    # 无 fallback → 旧行为（T_cross 保持 None）
-    anchor = cr.compute_anchor(
-        {100: 1.2}, {"T_plan": _ts(150), "T_cross": None}, context_steps=20, recovery_steps=30
+    assert (
+        cr.classify_window(
+            300, t_plan=130, t_cross=556, lane_lat=1.6,
+            plan_footprint_valid=True, exec_footprint_valid=True,
+        )
+        == "late"
     )
-    assert anchor["T_cross"] is None
-    assert anchor["T_cross_source"] is None
 
 
-def test_classify_anchor_direct() -> None:
-    assert cr.classify_anchor(10, 100, 200) == "prevention"
-    assert cr.classify_anchor(100, 100, 200) == "correction"
-    assert cr.classify_anchor(150, 100, 200) == "correction"
-    assert cr.classify_anchor(200, 100, 200) == "late"
-    assert cr.classify_anchor(10, None, None) == "prevention"
+def test_select_windows_one_per_class_and_cap() -> None:
+    candidates = [110, 125, 130, 525, 550, 555]
+    states = {
+        110: {"lane_lat": 0.3, "plan_footprint_valid": True, "exec_footprint_valid": True},
+        125: {"lane_lat": 1.1, "plan_footprint_valid": True, "exec_footprint_valid": True},
+        130: {"lane_lat": 0.9, "plan_footprint_valid": False, "exec_footprint_valid": True},
+        525: {"lane_lat": 1.2, "plan_footprint_valid": False, "exec_footprint_valid": True},
+        550: {"lane_lat": 1.6, "plan_footprint_valid": True, "exec_footprint_valid": True},
+        555: {"lane_lat": 1.2, "plan_footprint_valid": True, "exec_footprint_valid": False},
+    }
+    windows = cr.select_windows(
+        candidates, lambda step: states[step], t_plan=130, t_cross=556,
+        low_lat=1.0, late_lat=1.5, late_margin_steps=5,
+    )
+    assert windows == [("prevention", 110), ("correction", 125), ("late", 555)]
+
+    # max_windows 截断（prevention → correction → late 顺序）
+    assert cr.select_windows(
+        candidates, lambda step: states[step], t_plan=130, t_cross=556, max_windows=2
+    ) == [("prevention", 110), ("correction", 125)]
+
+    # 无候选 → 空
+    assert cr.select_windows([], lambda step: {}, t_plan=None, t_cross=None) == []
 
 
-def test_select_rows_cap_and_episode_end() -> None:
-    assert cr.select_rows(10, 1000, expert_steps=6, max_rows=20) == [10, 15, 20, 25, 30, 35]
-    assert cr.select_rows(10, 1000, expert_steps=6, max_rows=3) == [10, 15, 20]
-    assert cr.select_rows(10, 22, expert_steps=6, max_rows=20) == [10, 15, 20]
-    assert len(cr.select_rows(0, 1000, expert_steps=30, max_rows=20)) == 20  # ≤20/集
+def test_rows_per_episode_cap() -> None:
+    windows = [("prevention", 10), ("correction", 60), ("late", 120)]
+    total = sum(len(cr.select_rows(step, 1000, expert_steps=6, max_rows=20)) for _, step in windows)
+    assert total == 18  # 3 窗口 × 6 行 ≤ 20/集
+    assert len(cr.select_rows(10, 1000, expert_steps=6, max_rows=20)) == 6
+
+
+def test_filter_windows_by_quota() -> None:
+    windows = [("prevention", 10), ("correction", 60), ("late", 120)]
+    targets = {"prevention": 10, "correction": 2500, "late": 1000}
+    counts = {"prevention": 10, "correction": 5, "late": 0}
+    assert cr.filter_windows_by_quota(windows, counts, targets) == [
+        ("correction", 60), ("late", 120)
+    ]
+
+
+def test_parse_targets() -> None:
+    assert cr.parse_targets("prevention=4000,correction=2500,late=1000") == {
+        "prevention": 4000, "correction": 2500, "late": 1000
+    }
+    assert cr.parse_targets("late=7") == {"prevention": 0, "correction": 0, "late": 7}
+    try:
+        cr.parse_targets("unknown=1")
+    except ValueError as exc:
+        assert "unknown" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("未知档位应报错")
+
+
+def test_parse_shard() -> None:
+    assert cr.parse_shard("0/1") == (0, 1)
+    assert cr.parse_shard("3/6") == (3, 6)
+    for bad in ("1", "6/6", "-1/3", "a/2", "0/0"):
+        try:
+            cr.parse_shard(bad)
+        except ValueError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"非法分片参数应报错: {bad}")
+
+
+def test_shard_episodes_complete_disjoint_deterministic() -> None:
+    selected = [
+        ("b", _FakeSpec(2, "curve")),
+        ("a", _FakeSpec(10, "merge")),
+        ("b", _FakeSpec(1, "curve")),
+        ("a", _FakeSpec(3, "curve")),
+        ("a", _FakeSpec(7, "straight")),
+    ]
+    shards = [cr.shard_episodes(selected, index=i, count=3) for i in range(3)]
+    # 稳定排序（池, id）→ round-robin：a:3 a:7 a:10 b:1 b:2
+    assert [[(p, s.id) for p, s in shard] for shard in shards] == [
+        [("a", 3), ("b", 1)],
+        [("a", 7), ("b", 2)],
+        [("a", 10)],
+    ]
+    union = [item for shard in shards for item in shard]
+    assert len(union) == len(selected)
+    assert {(p, s.id) for p, s in union} == {(p, s.id) for p, s in selected}
+    for i in range(3):
+        for j in range(3):
+            if i != j:
+                assert not ({(p, s.id) for p, s in shards[i]} & {(p, s.id) for p, s in shards[j]})
+    # 确定性
+    assert cr.shard_episodes(selected, index=1, count=3) == shards[1]
+    # 空分片合法
+    assert cr.shard_episodes(selected, index=5, count=6) == []
+
+
+def test_apply_quota_policy() -> None:
+    windows = [("prevention", 10), ("correction", 60), ("late", 120)]
+    targets = {"prevention": 10, "correction": 2500, "late": 1000}
+    counts = {"prevention": 10, "correction": 5, "late": 0}
+    assert cr.apply_quota_policy(windows, counts, targets) == [("correction", 60), ("late", 120)]
+    assert cr.apply_quota_policy(windows, counts, targets, stop_at_target=False) == windows
+
+
+# --------------------------------------------------------------------------- #
+# 池选择 / split
+# --------------------------------------------------------------------------- #
+class _FakeSpec:
+    def __init__(self, spec_id: int, geometry: str):
+        self.id = spec_id
+        self.labels = {"geometry": geometry}
+
+
+def _fake_pools() -> list[dict]:
+    return [
+        {
+            "name": "a",
+            "specs": [_FakeSpec(1, "curve"), _FakeSpec(2, "merge"), _FakeSpec(3, "curve")],
+            "limit": None,
+        },
+        {
+            "name": "b",
+            "specs": [_FakeSpec(10, "curve"), _FakeSpec(11, "merge")],
+            "limit": None,
+        },
+    ]
+
+
+def test_select_episodes_by_ids() -> None:
+    selected = cr.select_episodes(_fake_pools(), ids="2,11")
+    assert [(name, spec.id) for name, spec in selected] == [("a", 2), ("b", 11)]
+
+
+def test_select_episodes_stratified_round_robin() -> None:
+    selected = cr.select_episodes(_fake_pools(), per_geometry=10)
+    assert [(name, spec.id) for name, spec in selected] == [
+        ("a", 1), ("a", 2), ("b", 10), ("b", 11), ("a", 3)
+    ]
+    limited = cr.select_episodes(_fake_pools(), per_geometry=10, limit=3)
+    assert [(name, spec.id) for name, spec in limited] == [("a", 1), ("a", 2), ("b", 10)]
+
+
+def test_select_episodes_pool_limit() -> None:
+    pools = _fake_pools()
+    pools[0]["limit"] = 2
+    selected = cr.select_episodes(pools)
+    assert [(name, spec.id) for name, spec in selected] == [("a", 1), ("a", 2), ("b", 10), ("b", 11)]
 
 
 def test_split_episodes_no_leakage() -> None:
-    ids = [251, 9, 15, 21, 23, 90, 132, 160, 187, 225]
-    train, val = cr.split_episodes(ids)
-    assert train == [9, 15, 21, 23, 132, 160, 187, 225]
-    assert val == [90, 251]
+    keys = ["eval500:9", "eval500:15", "clean500:9", "clean500:90", "dagger_r1:21", "dagger_r1:23"]
+    train, val = cr.split_episodes(keys)
+    assert val == ["eval500:15"]  # sorted 后第 5 个（pos 4）
+    assert train == ["clean500:9", "clean500:90", "dagger_r1:21", "dagger_r1:23", "eval500:9"]
     assert not set(train) & set(val)
-    train2, val2 = cr.split_episodes(ids)
-    assert (train, val) == (train2, val2)  # 确定性
+    assert (train, val) == cr.split_episodes(keys)  # 确定性
+    # int 键兼容
+    train_i, val_i = cr.split_episodes([1, 2, 3, 4, 5])
+    assert train_i == ["1", "2", "3", "4"] and val_i == ["5"]
 
 
 def test_consistency_verdict() -> None:
@@ -168,13 +293,17 @@ def _chain_points(chain: np.ndarray) -> np.ndarray:
     ]
 
 
-def _synthetic_row(*, usable: bool = True) -> dict:
+def _synthetic_row(*, usable: bool = True, window_class: str = "correction") -> dict:
     chain = np.array([[1.0, 0.0]] * 6)
     traj = _chain_points(chain)
     row = {
         "episode_id": 7,
+        "pool": "eval500",
+        "geometry": "merge",
         "step": 20,
-        "class": "correction",
+        "class": window_class,
+        "window_index": 0,
+        "takeover_step": 20,
         "pose": [0.0, 0.0, 0.0],
         "student_plan": np.array([[1.0, 0.0]] * 6),
         "student_mu": np.array([1.0, 0.0]),
@@ -189,9 +318,8 @@ def _synthetic_row(*, usable: bool = True) -> dict:
         "rc": 0.4,
         "T_plan": 60.0,
         "T_cross": 120.0,
+        "T_cross_source": "env_event",
         "first_low_margin": 40.0,
-        "start_raw": 90,
-        "takeover_step": 90,
         "margin_before": -0.5,
         "margin_after": -0.1,
         "rc_before": 0.4,
@@ -219,7 +347,9 @@ def _synthetic_row(*, usable: bool = True) -> dict:
         "obs": {"ego": np.zeros((1, 8), dtype=np.float32), "ld_mask": np.ones((16,), dtype=np.float32)},
         "termination": "out_of_road",
         "map_id": "9:SCS",
-        "road_class": "curve",
+        "road_class": "merge",
+        "usable": usable,
+        "quality_reasons": [],
     }
     if not usable:
         row["takeover_off_road"] = True
@@ -228,12 +358,8 @@ def _synthetic_row(*, usable: bool = True) -> dict:
 
 
 def test_quality_gate_wiring_usable() -> None:
-    row = _synthetic_row()
-    result = gates.evaluate_row(cr.build_gate_row(row))
+    result = gates.evaluate_row(cr.build_gate_row(_synthetic_row()))
     assert result["usable"] is True, result["reasons"]
-    row["usable"] = True
-    row["quality_reasons"] = []
-
     bad = _synthetic_row(usable=False)
     result = gates.evaluate_row(cr.build_gate_row(bad))
     assert result["usable"] is False
@@ -248,81 +374,151 @@ def test_quality_gate_catches_action_traj_mismatch() -> None:
     assert any("action_traj_inconsistent" in reason for reason in result["reasons"])
 
 
+def test_build_pool_plan_extrapolation() -> None:
+    rows = []
+    for index in range(10):
+        row = _synthetic_row(window_class="prevention")
+        row["episode_id"] = index % 3
+        row["pool"] = "eval500"
+        row["geometry"] = "merge" if index < 4 else "curve"
+        row["road_class"] = "merge" if index < 4 else "curve"
+        rows.append(row)
+    for index in range(5):
+        row = _synthetic_row(window_class="correction")
+        row["episode_id"] = index % 2
+        row["pool"] = "dagger_r1"
+        row["geometry"] = "tollgate"
+        row["road_class"] = "tollgate"
+        rows.append(row)
+    episodes = [
+        {"id": 0, "pool": "eval500", "status": "collected"},
+        {"id": 1, "pool": "eval500", "status": "collected"},
+        {"id": 2, "pool": "eval500", "status": "collected"},
+        {"id": 0, "pool": "dagger_r1", "status": "collected"},
+        {"id": 1, "pool": "dagger_r1", "status": "collected"},
+    ]
+    pools_info = [
+        {"name": "eval500", "n_specs": 500, "selected": 3},
+        {"name": "dagger_r1", "n_specs": 500, "selected": 2},
+    ]
+    plan = cr.build_pool_plan(rows, episodes, pools_info, {"prevention": 4000, "correction": 2500, "late": 1000})
+    assert plan["class_rates_per_episode"]["prevention"] == 2.0
+    assert plan["class_rates_per_episode"]["correction"] == 1.0
+    assert plan["class_rates_per_episode"]["late"] == 0.0
+    assert plan["required_episodes_by_class"] == {
+        "prevention": 2000, "correction": 2500, "late": None
+    }
+    assert plan["required_episodes_total"] is None  # late 试点零产出 → 无法外推
+    assert "late" in plan["recommendation"]
+    assert plan["per_pool_yield"]["eval500"]["usable_rows"] == 10
+    assert plan["per_pool_yield"]["dagger_r1"]["usable_rows"] == 5
+    assert plan["projection_all_pools"]["eval500"]["projected_usable_rows"] == 1667  # 500×3.33
+    hard = plan["hard_types"]
+    assert hard["merge"]["usable_rows"] == 4
+    assert hard["merge"]["rows_gap"] == 296
+    assert hard["tollgate"]["usable_rows"] == 5
+    assert hard["tollgate"]["episodes"] == 2
+    assert hard["roundabout"]["usable_rows"] == 0
+    assert hard["roundabout"]["required_episodes_by_rows"] is None
+
+
 def _fake_args(tmp_path: Path) -> Namespace:
     return Namespace(
         ckpt=str(tmp_path / "missing_ckpt.pt"),
         config=str(tmp_path / "missing_config.yaml"),
-        spec=str(tmp_path / "missing_spec.json"),
+        spec=["missing_spec.json"],
         max_steps=1000,
         device="cpu",
         workers=1,
         expert_steps=6,
         context_steps=20,
         recovery_steps=30,
-        low_margin_lat=1.0,
+        low_lat=1.0,
+        late_lat=1.5,
+        late_margin_steps=5,
+        max_windows_per_episode=3,
         max_rows_per_episode=20,
         action_traj_tol=0.5,
+        targets={"prevention": 4000, "correction": 2500, "late": 1000},
         ids="7,11",
         limit=0,
+        stratify_per_geometry=0,
+        shard=(0, 1),
+        no_stop_at_target=False,
         out=str(tmp_path / "out"),
     )
 
 
 def test_write_outputs_layout(tmp_path: Path) -> None:
-    row = _synthetic_row()
-    row["usable"] = True
-    row["quality_reasons"] = []
-    row2 = dict(row)
+    row = _synthetic_row(window_class="correction")
+    row2 = _synthetic_row(window_class="late", usable=False)
     row2["episode_id"] = 11
-    row2["class"] = "late"
-    row2["takeover_off_road"] = True
-    row2["expert_recovered"] = False
-    row2["usable"] = False
-    row2["quality_reasons"] = ["post_takeover_failure:post_takeover_off_road"]
+    row2["pool"] = "clean500"
+    row2["window_index"] = 1
     episodes = [
         {
             "id": 7,
+            "pool": "eval500",
+            "geometry": "merge",
             "status": "collected",
-            "anchor": {"class": "correction"},
-            "n_rows": 1,
-            "n_usable": 1,
-            "expert": {"recovered": True},
-            "determinism": {"accepted": "strict", "attempts": []},
+            "windows": [
+                {"class": "prevention", "takeover_step": 5, "status": "collected",
+                 "determinism": {"accepted": "strict"}, "n_rows": 6, "n_usable": 6},
+                {"class": "correction", "takeover_step": 20, "status": "collected",
+                 "determinism": {"accepted": "strict"}, "n_rows": 6, "n_usable": 6},
+            ],
+            "n_rows": 12,
+            "n_usable": 12,
         },
         {
             "id": 11,
+            "pool": "clean500",
+            "geometry": "tollgate",
             "status": "collected",
-            "anchor": {"class": "late"},
-            "n_rows": 1,
+            "windows": [
+                {"class": "late", "takeover_step": 100, "status": "collected",
+                 "determinism": {"accepted": "relaxed"}, "n_rows": 6, "n_usable": 0},
+            ],
+            "n_rows": 6,
             "n_usable": 0,
-            "expert": {"recovered": False},
-            "determinism": {"accepted": "relaxed", "attempts": []},
         },
+        {"id": 12, "pool": "clean500", "status": "skipped", "reason": "no_window"},
+    ]
+    pools_info = [
+        {"name": "eval500", "path": "a.json", "sha256": "x", "n_specs": 500, "selected": 1},
+        {"name": "clean500", "path": "b.json", "sha256": "y", "n_specs": 500, "selected": 2},
     ]
     out = tmp_path / "out"
-    cr._write_outputs(out, [row, row2], episodes, _fake_args(tmp_path))
+    cr._write_outputs(out, [row, row2], episodes, _fake_args(tmp_path), pools_info)
 
     for name in ("manifest.json", "samples.npz", "schema.json", "quality_report.json", "split_manifest.json"):
         assert (out / name).is_file(), name
 
     data = np.load(out / "samples.npz", allow_pickle=False)
     assert data["episode_id"].tolist() == [7, 11]
+    assert data["pool"].tolist() == ["eval500", "clean500"]
     assert data["class_id"].tolist() == [1, 2]  # correction / late
+    assert data["window_index"].tolist() == [0, 1]
     assert data["usable"].tolist() == [True, False]
     assert data["expert_recovery_traj"].shape == (2, 6, 2)
     assert data["obs__ego"].shape == (2, 1, 8)
-    assert data["obs__ld_mask"].shape == (2, 16)
-    assert data["mode_id"].tolist() == [0, 0]
+    assert "start_raw" not in data.files
 
     schema = json.loads((out / "schema.json").read_text(encoding="utf-8"))
-    assert schema["schema_version"] == 1
-    assert schema["class_definition"]["target_ratio"] == {"prevention": 0.5, "correction": 0.35, "late": 0.15}
+    assert schema["schema_version"] == 2
+    assert "late" in schema["class_definition"]
+    assert schema["class_definition"]["thresholds"]["late_lat"] == 1.5
 
     quality = json.loads((out / "quality_report.json").read_text(encoding="utf-8"))
     assert quality["n_rows"] == 2
     assert quality["n_usable"] == 1
     assert quality["gate_fail_counts"]["post_takeover_failure"] == 1
     assert quality["per_class"]["correction"] == {"rows": 1, "usable": 1}
+    assert quality["quota"]["late"]["target"] == 1000
+    assert quality["quota"]["late"]["usable"] == 0
+    assert quality["quota"]["late"]["gap"] == 1000
+    assert quality["per_pool"]["eval500"]["usable_rows"] == 1
+    assert quality["road_type_coverage"]["hard_types"] == ["tollgate", "merge", "roundabout"]
 
     split = json.loads((out / "split_manifest.json").read_text(encoding="utf-8"))
     assert split["no_leakage"] is True
@@ -333,4 +529,7 @@ def test_write_outputs_layout(tmp_path: Path) -> None:
     assert manifest["counts"]["rows_total"] == 2
     assert manifest["counts"]["rows_usable"] == 1
     assert manifest["divergence"]["relaxed"] == 1
+    assert manifest["quota"]["prevention"]["met"] is False
+    assert manifest["pool_plan"]["class_rates_per_episode"]["correction"] == 0.5
+    assert manifest["pools"][0]["name"] == "eval500"
     assert manifest["field_gaps"]
