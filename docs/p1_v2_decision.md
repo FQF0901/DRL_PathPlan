@@ -65,6 +65,14 @@ P1-4A/4B；K-anchor；GRPO/Best-of-G；WM/MoE 重构；容量扫描。
 - 注记：mode 邻步切换率 0.611 ⇒ 仅分层（不得作训练目标）；难度偏 easy（56%，分层时注意）。
 - **决定：Step 3（gated residual pilot）GO**——架构 `final = base + gate(obs, base_plan) × residual(obs, base_plan)`；**base = pri512@e020 冻结锚定**；gate 输入须含 F2m 类自车特征（**禁锚点 oracle 列**）；验收按 round-10（正常态激活 <5%、intervention recall ≥60%、首步 MAE/6 点 ADE 退化 ≤10%、clean150 ≥base−2pp、off 不增、coll ≤+2pp、二 epoch 不塌）；**不通过即停、不追加复杂度**。
 
+### Step 3 结果（19:31–19:35，已独立复核）：**clean150 主门 FAIL（−3.33pp）→ 按预注册停止**
+
+- Stage A/B1/B2 全过：5/5 单测（gate=0⇒final==base **逐位**）；训练 gate AUC 0.870（二 epoch 不塌）；离线：正常行激活 **3.99%<5%**、recall **61.1%≥60%**、MAE/ADE 无退化（intervention 行还改善）；数据纪律记录（raw 31.3%/exposure 3%/eir 0.096，无 >10× 过采样）。
+- **clean150 闭环**（`specs_val_only150` + lqr/plan-reference，6 workers）：gate-off 对照**逐位复现官方基线**（0.3400/0.4933/0.0333）；gated（阈值 0.05）succ **0.3067（−3.33pp < −2pp 门）**、off 0.4800（−1.33pp）、coll 0.0267（−0.67pp）；配对 **13 成功→失败 vs 8 失败→成功**（净 −5）；timeout 23→30；均速 3.39→3.27。
+- **机制（已验证）**：闭环 gate 激活率 **16.1% 步**（p95 47%、142/150 集）vs 离线 3.99% ⇒ **部署分布漂移下 gate 过触发**，把"减速+回正"残差施加到正常态。根因数据面：F2m 的 footprint 特征需活 env ⇒ gate=0 监督只能取 v2 control（覆盖窄）。
+- **协议合规**：未调参/未加复杂度/未做过采样调整（`stop_rule` 留档）；残差本身有增益面（8 例翻正、off/coll 降）——瓶颈在 **gate 精度**。
+- **下一步：停在本步，转 round-12 决策**。候选方向（未实施）：① gate=0 监督覆盖修复（部署分布 + 活 env 特征）；② "激活<5%"明确为**闭环度量**并做闭环操作点标定；③ footprint/margin 特征离线可计算化（扩大数据源）；④ 补做"gate 精度 ↔ 残差增益"反事实分析（8 翻正 vs 13 翻负的激活模式）。
+
 ## 并行诊断旁线（不得直接改训练 target）
 
 1. **dθ-only 反事实**（补 ④ 分解缺口；①②已完成：V1 0.776–0.778@1.25–1.30 vs V2 0.658–0.676@1.15）；
