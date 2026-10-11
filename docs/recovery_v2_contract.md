@@ -12,6 +12,7 @@
 - `actual_state_t`：ego 位姿/速度等（世界系）；
 - `margin / T_plan / T_cross`：该状态锚点量（口径同 v1；T_cross_source 显式标注）；
 - `intervention label`：**同一状态下 baseline 将失败 ∧ expert 能在规定 horizon 内恢复**（构造规则随行留档）；
+- `control 行（non-intervention）`：同源学生轨迹上 **plan-valid-through-horizon** 的步（当前 + 后 6 决策步 footprint/exec 有效、无邻近锚点事件），须覆盖**晚段/高 rc**（step ≥ onset+30、rc 分层）；与 intervention 行同契约同源，用于 **gate 激活率约束与探针净增量复核**；
 - `recovery outcome`：专家接管实测（`expert_recovered` / `recovery_success_horizon` / `min_margin_after_takeover` / `route_progress_after_takeover`）；
 - `mode 粗标签`：仅用于分层/误差分析/未来 4B 研究输入；**先验证稳定性/类内方差/邻步切换率**，不得作训练目标或 4B 启动依据。
 
@@ -29,13 +30,15 @@
 - episode 级 train/val split、**无泄漏**；
 - expert recovery 成功率 **≥80%**；
 - action-chain 与 recovery trajectory 一致性通过（构造守卫）；
+- **control 行覆盖**：晚段（step ≥ onset+30）高 rc 匹配态，数量与 intervention 行同量级（供 gate 激活率约束与探针复核）；
 - pilot 规模 **2k–3k 行**（通过后再扩容；不先追 10k）。
 
 ## 4. 反模式（禁止）
 
 - Pass-1 obs × Pass-2 label；k≥1 无同源 obs；
 - batch 级替换采样造成 >10× 曝光且不留档 —— 必须记录 `raw sample ratio / sampler exposure / loss weight / effective importance ratio`；
-- 未验证的 mode/label 作为训练目标。
+- 未验证的 mode/label 作为训练目标；
+- control 行缺晚段/高 rc 覆盖（Step 1 的混淆教训：早期负样本会让"净增量"无法确证）。
 
 ## 5. 与下游的接口（gated residual）
 

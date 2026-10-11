@@ -41,6 +41,14 @@ P1-4A/4B；K-anchor；GRPO/Best-of-G；WM/MoE 重构；容量扫描。
    正常态 gate 激活 <5%；intervention recall ≥60%；首步 MAE/6 点 ADE 恶化 ≤10%；第二 epoch 不塌。
    **不通过即停，不追加复杂度**（不加更大 gate / 更复杂 MoE / 更多过采样）。
 
+## Step 1 结果（2026-10-11 晚）：conditional_pass
+
+- **正式 Gate：通过**。F1（当前 obs）matched_natural ROC-AUC **0.934**（LR）/0.933（MLP）、P@10 **0.943**/0.909；cross 0.981/0.984；关键切片 2–4 m/s **0.899/1.000**、tollgate 0.987、merge 0.965、roundabout 0.899 → 无失败切片。
+- **防泄漏自检 → 有条件**：time-only **0.940 ≥ F1**（全集）；时间邻近负样本 F1 0.906 vs time-only 0.909；2–4 m/s 同（0.885/0.895）；同格（60 步）F1 0.895（唯一"独走"，P@10 0.578 @8.2:1）。F1 头部系数 = route_completion / 横向偏移。匹配负样本构造性全早期（step 5–75 vs 正 55–490；60/60 集早期现计划失效）→"晚段健康态"负样本缺失。
+- **诚实上界**：F2∩/F3∩ 0.969/0.964（F2/F3≈1.0 属与标签定义重叠的构造循环，不作证据）。
+- **判定**：正式过门 + **净增量未证** ⇒ 不进全量 gated residual；先做 **Step 1b 负样本增广复核**（晚段健康态 + progress 匹配对照；判据：progress 匹配集 F1 ≥0.80 且相对 time/confound 净增量 ≥0.05 → 确认进入 Step 2；<0.05 维持存疑；<0.80 按现状不成立）。产物：`runs/p1_v2/probe_robustness.json` + 更新 `final_verdict`。
+- 数据语义坑（随档）：CPU 重放与 CUDA 评测结局 50/60 一致（正/负标签自洽于 CPU；"成功段"负样本实为早期段）；matched_speedmatched 退化（713 < 1660）；P@10 比率敏感（报告必须带 n_pos/n_neg）；SIGKILL 根因 = npz 逐索引重复解压（已修，教训归档）。
+
 ## 并行诊断旁线（不得直接改训练 target）
 
 1. **dθ-only 反事实**（补 ④ 分解缺口；①②已完成：V1 0.776–0.778@1.25–1.30 vs V2 0.658–0.676@1.15）；
