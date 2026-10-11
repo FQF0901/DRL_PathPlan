@@ -1,202 +1,299 @@
-结论：基本达成共识，可以锁板
+总体判断
 
-建议正式锁定 deepseekv4p1_argue.md §7.10 为 P1 执行手册 v1，实施范围明确为：
+根据附件中对 docs\p1_0_report.md、docs\p1_2_diagnosis.md、docs\p1_implementation_contract.md、docs\p1_probe_spec.md 等产物的汇总，我认为：
 
-P1-0 → P1-1 → P1-2 → P1-3
+P1-0 结论可信，可以关闭。
+P1-1 数据集“格式验收通过”，但训练语义验收失败。
+P1-2 路线已经被证伪，应停止追加剂量类消融。
+P1-3 不应直接开训，必须先解释 grad cosine=-0.73。
+原 §7.10 已完成历史使命，但不能继续原样锁板执行，应升级为 P1 v2。
 
+一句话概括：
 
-同时明确：
+当前不是 recovery 数据不够，而是 recovery 监督的条件语义不成立。
 
-4A：只锁定契约与最小实现，实际实验等 P1-2/3 达门槛后执行；
-4B、K-anchor 重启、GRPO、Best-of-G、WM/MoE 对照：不属于本轮承诺；
-不扩容量、不改评测协议、不改 WM/MoE 架构；
-后续只允许依据 Gate 和实验数据调整，不再重新展开架构争论。
-对 §7.10 的确认意见
-A1：4A 排期，确认
+一、对当前进展的审阅
+1. P1-0：成果有效
 
-采用文档中的最终解释：
+三个重要结论已经清楚：
 
-P1-0 可先完成 docs/p1_4a_contract.md 和最小 action-conditioned plan 实现；
-不立即跑性能实验；
-等 P1-2/3 的监督模型达到 eval500 ≥0.60，最好 ≥0.65，再执行四类因果探针和 clean150 canary；
-4A 不通过，直接停止，不进入 PPO。
+pri512@e020 作为起点合理，rou64 的 +1.4pp 不显著。
+D2 的纯速度 V3 无明显收益；V1 在 1.20–1.30 达到约 0.76–0.778，但这不是单纯配速提升。
+探针和 fail-fast 体系多次发现真实问题，证明这部分投入有价值。
 
-这里建议再写清楚：
+但应修正一个表述：
 
-4A 的默认 base 是 P1-3 胜出 checkpoint；如果 P1-3 不优于 P1-2，则使用 P1-2 胜出 checkpoint。
+V1 不是“纯教师上限”，因为只放大 ds 会降低等效曲率 dθ/ds。
 
-A2–A4、A6：全部确认
+它证明的是专家动作经过纵向尺度校准后能达到 IDM 水平，不能证明原教师或当前模型模仿上限已经达到 0.778。
 
-包括：
+因此，V1 可以作为 calibration oracle，但不应据此解除 4B/PPO 的教师上限门。
 
-rou64@e015 与 pri512@e020 必须同集重跑，不能拿 final.pt 的 0.332 与 epoch checkpoint 混比；
-rou64 选择条件为 Δsuccess ≥2pp + McNemar p<0.05 + off-road 不恶化；
-D2 V1/V2/V3 共 15 行，V3 优先，ref_speed_scale=1.0 必须与历史 D2 逐 episode 等价；
-checkpoint、freeze、gradient、optimizer、geometry coverage 等 probes 按规定落盘；
-P1-2 的 BC 防遗忘以首步 MAE、6 点 ADE 和 clean150 paired 共同判断；
-R1/R2 消融、真实 recovery traj、时间衰减权重等均可锁定。
-待确认量①：Recovery 样本量
+2. P1-1：数据门设计有盲区
 
-§7.10 建议的“有效行 ≥10k、失败 episode ≥800、三档各 ≥1.5k、困难路型各 ≥10%”方向正确，但建议稍微调整，避免为了凑比例进行重复采样或扭曲自然分布。
+数据集形式上达到：
 
-建议锁定为两级门
-采集可用门
-有效 recovery 行数 ≥ 10,000
-独立 episode 数 ≥ 500
-单 episode 最多贡献 20 行
-质量门通过率 ≥ 80%
+17,256 行；
+1,493 episodes；
+13/13 数据门通过。
 
+但训练后才发现 80% 左右的 k≥1 样本是：
 
-限制单 episode 最多 20 行非常重要，否则 10k 行可能只是少数长 episode 的高度相关窗口。
+Pass-1 student observation
++
+Pass-2 expert-state label
 
-三类最低覆盖
-prevention ≥ 4,000
-correction ≥ 2,500
-late recovery ≥ 1,000
 
+这是反事实错位，不是一般噪声。
 
-剩余样本允许按自然分布进入，不必强制精确达到 50/35/15。
+这说明原质量门验证了：
 
-困难路型最低覆盖
+数量； -覆盖； -恢复结果； -文件完整性；
 
-不要硬性要求 tollgate、merge、roundabout 各占全部数据的 10%。这可能严重改变真实训练分布。建议改为：
+却没有验证最重要的契约：
 
-每类困难路型：
-有效行 ≥ 300
-独立 episode ≥ 30
+每一行 observation 和 teacher target 是否来自同一个决策状态。
 
+建议把本次 recovery_v1 明确定义为：
 
-如果自然采集达不到：
+可用于诊断，不可作为正式监督数据集
 
-单独建立 targeted_hard_split；
-训练时通过 sampler 权重使用；
-不复制样本凑覆盖率；
-在 manifest 中分别报告自然池和定向池。
-最终确认值
 
-我建议锁定：
+不要继续在 recovery_v1 上做更多训练配方搜索。
 
-有效行 ≥10k、独立 episode ≥500、每 episode 最多 20 行；prevention/correction/late 最少 4000/2500/1000；关键困难路型各 ≥300 行且 ≥30 episodes。
+3. P1-2：诊断基本可信，但“残差监督优先”仍不够
 
-若达不到，不直接取消 P1-2，可以先做 pilot，但不能进入正式候选验收。
+附件认定的核心问题是：
 
-待确认量②：Anchor canary 判据
+绝对 recovery target； -正常态与失败态在输入上不可分； -少量 recovery 行被高倍过采样； -导致模型在常见低速状态形成错误条件反射。
 
-我不建议把 clean150 的 −2pp 设为单独硬门。
+这个判断与以下现象一致：
 
-原因是 clean150 中：
+离线 validation 很好，闭环迅速崩溃； -无 recovery 的 A2 基本稳定； -恢复比例从 25% 降至 2% 仍可能在第二 epoch 崩； -更换 freeze 范围不能解决； -对齐行、correction/late 子集也不能解决。
 
-1 个 episode 对应约 0.67pp；
-−2pp 只有约 3 个 episode；
-单 seed clean150 的统计噪声明显大于这个阈值。
+但我不同意简单把下一步定为“残差监督优先”。
 
-“Δ≥−2pp 且不显著劣化”在 clean150 上既容易假阴性，又没有足够统计功效。
+原因
 
-建议改成两段式 canary
-第一段：clean150 灾难性回归门
-Δsuccess ≥ -5pp
-off-road 增加 ≤5pp
-collision 增加 ≤3pp
-无 NaN / collapse / expert occupancy 异常
-重建 ADE、WTA、balanced accuracy 完整报告
+如果同一个有效 observation 对应：
 
+正常状态：残差接近 0
+失败恢复状态：残差很大
 
-这一步只负责排除明显崩溃，不证明 anchor 有效。
 
-第二段：clean500 非劣门
+那么把绝对目标改成残差目标，仍然是一对多映射。残差会减轻破坏范围，但不会解决条件不可辨识。
 
-只有第一段通过才跑 clean500：
+因此正确顺序应是：
 
-paired Δsuccess lower bound > -2pp
-off-road 不显著恶化
-collision 不显著恶化
-表示指标不得明显低于无 anchor 起点
+先证明 recovery need 在现有输入中可辨识；
+再决定 residual、gate 或增加显式状态；
+最后才重训。
+二、P1-3 暂不能直接先行
 
+附件提出 P1-3 可以与 recovery 正交推进，但实测：
 
-建议使用 episode-level paired bootstrap，非劣 margin 设为 −0.02。
+cos(grad_traj, grad_geometry) = -0.73
+19/20 samples < -0.3
 
-但有一个更重要的顺序问题
 
-由于 4B 不属于本轮承诺，anchor canary 不应阻塞 P1-0→P1-1 主线。建议将它从 P1-0 必做项改为：
+这不是一般的权重问题，而是两个目标在持续互相对抗。
 
-P1-3 后、准备评估 4B 时执行的前置 Gate。
+可能有三种根因：
 
-这样不会为了当前不实施的方案占用主线 GPU 与工程时间。
+expert trajectory 本身会触发 LD proxy；
+LD proxy 把合法变道、分叉或收费站路径误判为危险；
+recovery/BC target 与当前几何定义确实矛盾。
 
-§7.10 建议补充的三个文字修订
-1. G2 的 off-road 基线注明跨版本属性
+在确定是哪一种以前，不应通过减小 loss weight 掩盖冲突。
 
-G2 使用 s11 的 off-road 率：
+P1-3 开训前的必要验证
 
-eval500 ≤0.098
-clean500 ≤0.097
+用不训练的固定数据计算：
 
+成功 expert trajectory 的几何误报率
+IDM 成功轨迹的几何误报率
+模型失败轨迹的几何检出率
+按 tollgate / merge / roundabout 分层的误报率
 
-s11 来自 v7/obs v4 兼容栈，应注明这是目标锚点，不是严格同版本 paired baseline。正式 paired 主比较仍应针对 P1 起点模型。
 
-2. Collision 门区分 Gate 用途
+建议门槛：
 
-建议：
+成功 expert 的 active-loss 比例 <5%； -普通道路 <2%； -失败 plan 的检出率明显高于成功 plan； -合法变道不得被统一惩罚。
 
-G2：各数据集分别不高于对应 IDM；
-G3：统一要求 eval500 ≤0.144，clean500 ≤0.174；
-若最终宣称模型整体优于 IDM，不能只靠 success 更高而 collision 明显更差。
-3. P1-3 的几何监督名称保持准确
+如果不能满足，ld_line_margin_loss 只能作为监控指标，不能进入训练。
 
-正式产物和配置统一使用：
+三、建议锁定 P1 v2
+Step 1：立即停止三类工作
 
-ld_line_margin_loss
+停止：
 
+在 recovery_v1 上继续搜索 mix ratio； -继续尝试不同 freeze scope； -直接启用 P1-3 联合 loss。
 
-不要写成完整 drivable_footprint_loss。引擎 footprint 真值用于 hard mining、审计和验收，不假装是直接可微 loss。
+现有四轴消融已经足够说明，这三条路边际信息很低。
 
-锁板后的范围
-纳入本轮
-P1-0A  起点 checkpoint paired
-P1-0B  D2 V1/V2/V3 配速矩阵
-P1-0C  correctness probes + health report
-P1-1   recovery_v1 数据集
-P1-2   R1/R2 recovery trajectory BC
-P1-3   几何代理 + 曲率 + progress 联合 recipe
+Step 2：先做“可辨识性 Gate”
 
-条件执行
-P1-4A  action-conditioned plan 因果验证
+在现有 observation 上训练一个轻量 probe，预测：
 
+该状态是否需要 recovery intervention
 
-启动条件：
 
-P1-2/3 胜者达到 eval500 ≥0.60；
-correctness probes 全部 PASS；
-sampled action 确实进入最终计划与 tracker reference。
-不纳入本轮
-P1-4B mode+latent PPO
-K-anchor 重启
-GRPO / Best-of-G
-WM BPTT / No-WM 对照
-MoE 0/2/8 对照
-新容量扫描
+输入只允许使用正式模型可见的信息，不能偷看未来 termination 或引擎私有状态。
 
-最终裁定
+报告：
 
-可以锁板。
+ROC-AUC；
+PR-AUC；
+precision@10%；
+recall； -按速度、road class、margin 分组结果。
+决策
+ROC-AUC ≥0.80：现有输入足够，采用 gated residual。
+0.65–0.80：可尝试 gate，但必须增加 margin/history 特征审计。
+<0.65：现有输入不可辨识，先修改 observation 或 recovery 定义，禁止继续监督学习。
 
-建议将 §7.10 状态更新为：
+这是下一步最关键、成本最低的实验。
 
-P1 执行手册 v1：LOCKED
+Step 3：采集 recovery_v2
 
-锁定范围：P1-0 至 P1-3
-条件范围：P1-4A
-不承诺范围：P1-4B / K-anchor / GRPO / WM-MoE 对照
+每一行必须严格满足：
 
-Recovery 数据门：
-有效行 ≥10k、独立 episode ≥500、每 episode ≤20 行；
-prevention/correction/late ≥4000/2500/1000；
-关键困难路型各 ≥300 行且 ≥30 episodes。
+obs_t
+baseline_plan_t
+expert_action_t
+expert_recovery_plan_t
+actual student state_t
 
-Anchor canary：
-不阻塞 P1 主线；
-clean150 仅作灾难性回归门（Δsuccess ≥−5pp）；
-进入 4B 前补 clean500 paired 非劣验证，margin=−2pp。
 
+全部来自同一个状态、同一个时刻。
 
-除了 D2 V3 ceiling、rou64 vs pri512、Recovery+几何能否达到 0.60 这三个必须由实验回答的问题外，已不存在需要继续讨论的设计分歧。下一步可以直接按锁板版本开工。
+核心改动：
+
+不再用 Pass-1 observation 配 Pass-2 label；
+k≥1 必须保存 Pass-2 对应 observation； -每一步都从当前真实状态重新查询 expert； -保存 baseline plan，便于构造 residual target； -按 episode 划分训练和验证； -采集后随机重放至少 1,000 行验证状态等价。
+
+第一版无需再次追求 10k 行。先采一个 2k–3k 行 pilot，通过语义门后再扩容。
+
+Step 4：训练 gated residual，而非直接绝对恢复
+
+建议结构：
+
+final_plan = base_plan + gate(obs) * residual(obs)
+
+
+训练目标：
+
+-正常 BC 行：gate=0，保持 base plan；
+
+recovery 行：监督 expert_plan - base_plan；
+gate 使用 intervention label；
+residual 只在 gate 激活时产生梯度； -对 residual norm 加上限；
+primary/base 分支尽量保持稳定。
+
+初始 recovery 自然占比建议 2%–5%，不要再通过 40 倍过采样模拟 25% batch 占比。
+
+如果需要平衡，使用 loss weight 或 episode sampler，但必须记录有效 importance ratio。
+
+Step 5：P1-3 只保留已验证的项
+
+先保留：
+
+Δκ 平滑； -不可达曲率约束；
+progress/timeout 监控。
+
+ld_line_margin_loss 只有在 expert false-positive Gate 通过后才进入训练。
+
+不要把 geometry、recovery、progress 一次性组合，否则再次失败时无法归因。
+
+四、4A/4B 的裁决
+4A
+
+继续保持条件状态，不启动。
+
+启动门仍应是：
+
+监督模型 eval500 ≥0.60
+correctness probes 全 PASS
+sampled action 真正进入 plan 和 tracker reference
+
+
+目前 P1-2 已崩，显然未满足。
+
+4B
+
+V1 达到 0.778 不能单独视为 4B 教师上限条件通过，因为 V1 同时改变了距离和曲率。
+
+因此 4B 继续冻结，不应因为“有一条手工缩放链达到 0.75”而提前启动复杂 PPO。
+
+五、建议产物调整
+保留并定稿
+docs\p1_0_report.md
+docs\p1_2_diagnosis.md
+docs\p1_implementation_contract.md
+docs\p1_probe_spec.md
+新增两个短文档即可
+docs/p1_v2_decision.md
+
+只记录：
+
+被证伪的假设
+保留的证据
+停止项
+下一假设
+Gate
+Go/No-Go
+
+docs/recovery_v2_contract.md
+
+只定义：
+
+同状态 observation/label 契约
+baseline plan
+residual target
+intervention label
+重放验证
+episode split
+
+
+不要继续扩大 docs\deepseekv4p1_argue.md。它现在更适合作为历史审计记录，不适合作为日常执行手册。
+
+六、最终判断
+
+当前最优路线不是附件建议的简单顺序：
+
+残差监督 → collector v2 → DAgger 复盘 → 门控
+
+
+我建议改为：
+
+可辨识性 probe
+→ collector v2 同状态数据
+→ gated residual pilot
+→ 几何代理有效性 Gate
+→ 独立小消融
+→ candidate recipe
+
+可以锁定的下一阶段验收
+数据 Gate
+observation/label 同状态匹配率 100%； -随机重放 1,000 行通过；
+episode 无泄漏；
+recovery expert 成功率 ≥80%。
+可辨识性 Gate
+intervention ROC-AUC ≥0.80； -低速 2–4m/s 子集不能明显失效； -困难路型分别报告。
+Pilot Gate
+
+相对 pri512 clean150：
+
+success 不低于基线 2pp；
+off-road 不增加； -首步 MAE/ADE 不恶化超过 10%； -第二 epoch 不出现崩塌； -正常状态 gate 激活率 <5%。
+
+满足后再扩 recovery_v2 和跑 eval500。
+
+一句话结论
+
+P1-0 成功，P1-2 被可靠地证伪，P1-3 尚未获得训练授权。
+
+下一步不要继续调剂量或组合 loss。应先回答：
+
+模型从当前 observation 能否识别“此刻需要恢复”？
+
+如果不能，残差、更多数据和更复杂 PPO 都只会把同一个语义冲突包装得更复杂。
