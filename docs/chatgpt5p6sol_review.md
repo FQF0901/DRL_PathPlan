@@ -1,190 +1,246 @@
+结论
+
+附件中的 deepseekv4p1_argue.md 仍停留在 §7，内容基本是上一轮方案，没有看到针对我最新意见的新增回应。就当前文本而言：
+
+Round-12A 方向正确，但方案尚未完全闭合。可以开始实现遥测，暂不应直接跑完整筛选矩阵，更不能批准 12B/C。
+
+主要缺口不是小细节，而是三个可能改变根因判断的问题。
+
+一、认可的部分
+
+Coding agent 做对了四件事：
+
+承认现有产物没有逐步 gate、residual、base/final plan 数据，不能假装可以离线复盘。
+改为零训练闭环重跑，而不是立即补数据、重新训练。
+threshold、residual scale、debounce 顺序筛查，而非 60 个全网格盲扫。
+预先接受“有效操作区域为空”这一结果，避免为了保住方案而继续调参。
+
+因此，逐步遥测和 gate-off/gated 重跑可以立即开工。
+
+二、尚未回应的三个关键问题
+1. 缺少 CPU/CUDA 后端一致性检查
+
+文档已记录 60 个 episode 有 10 个 CPU/CUDA 结局翻转，但 §7.4 没有把它纳入 Round-12A。
+
+这是严重缺口。当前可能存在：
+
+CPU collector 状态与标签
+≠
+CUDA 部署时 gate 实际看到的状态
+
+
+如果 gate probability 或 residual 对后端微小差异敏感，补 hard negatives 只是拟合错误分布，无法解决根因。
+
+Round-12A 必须补同输入对照：
+
+base plan 差异
+gate probability 差异
+residual 差异
+首步动作差异
+首次轨迹分叉时间
+最终 episode 结果
+
+
+若差异明显，优先统一 collector 和部署后端，不进入 12B。
+
+2. “逐步 diff”必须限定在首次轨迹分叉前
+
+gate-off 与 gated 一旦执行不同 action，下一时刻 observation 就不同。此后逐步比较不再是同状态反事实。
+
+报告必须明确分为：
+
+Common prefix：
+首次轨迹分叉前，可用于机制归因
+
+Post divergence：
+分叉后的闭环结果，只能用于效果描述
+
+
+否则很容易看到 gated 后续 margin、速度、gate probability 不同，就错误归因于 gate 本身。那些差异也可能只是早期动作分叉后的连锁结果。
+
+必须记录：
+
+first_action_divergence_step
+first_state_divergence_step
+
+3. “正常 episode 激活率低于 5%”定义仍不正确
+
+平均 step 激活率不能代表安全性。一次错误激活就可能把成功 episode 变成 timeout，而一个真正危险 episode 连续激活多步可能完全合理。
+
+应改成 episode 级指标：
+
+破坏性误触发 episode 比例
+首次误触发时间
+每 episode 激活段数
+最长连续激活长度
+累计 residual_ds / residual_dtheta
+激活后的 progress 损失
+
+
+“破坏性误触发”建议定义为：
+
+gate-off 成功，但 gated 在首次激活后没有改善几何余量，并最终变成 timeout、off-road 或 collision。
+
+Go 条件应是：
+
+破坏性误触发 episode 比例 <5%
+
+
+而不是简单的正常 episode 平均激活率低于 5%。
+
+三、对 Round-12A 扫描方案的进一步质疑
+
+当前提议是：
+
+先扫 threshold；
+在最优 threshold 上扫 residual scale；
+再扫 debounce。
+
+这是一种贪心搜索，隐含假设三个变量近似独立。但它们可能强耦合：
+
+低 threshold + 小 residual 可能有效；
+高 threshold + 大 residual 可能有效；
+单独扫 threshold 时，两者都可能被错过。
+
+不需要跑完整 60 格，但建议在顺序扫描后补一个小型交叉验证：
+
+选择最优的 2 个 threshold
+× 最优的 2 个 residual scale
+× debounce {1, 2}
+= 8 个组合
+
+
+这样可以验证顺序搜索是否遗漏明显交互。
+
+仍然属于零训练诊断，不算扩大模型搜索。
+
+四、对“残差有效、只是 gate 拖累”的反驳
+
+当前证据仅能说明：
+
+8 个失败 episode 被修复；
+13 个成功 episode 被破坏；
+off-road/collision 减少；
+timeout 增加； -整体 success 减少 3.33pp。
+
+因此最准确的结论应该是：
+
+residual 对部分状态有局部收益，但适用条件、幅度安全性和长期 progress 影响尚不明确。
+
+尚不能断定瓶颈只在 gate。还可能是：
+
+residual 主要通过减小 ds 避免越界，却造成 timeout；
+residual 只适合某些 recovery 类型；
+repeated activation 导致修正累积过量；
+gate 和 residual 联合训练后存在共适应；
+CPU/CUDA 口径差放大 gate 或 residual 输出。
+
+Round-12A 必须同时分析：
+
+gate precision
+residual magnitude
+residual direction
+累计纵向减速
+连续触发
+backend sensitivity
+
+五、对 12B hard negatives 的限制
+
+即使 12A 证明 gate 误报，也不能直接把 gated 模型遇到的状态全部标成负例。
+
+Hard negative 必须经过同状态双 rollout：
+
+baseline rollout：
+安全、无碰撞、进度正常
+
+expert rollout：
+相比 baseline 没有显著提高成功率、margin 或 progress
+
+
+只看当前六点 base plan 在路内不够。当前系统的问题本来就可能在后续重规划逐渐漂移。
+
+如果无法做同状态双 rollout，12B 数据的标签仍不可靠。
+
+六、建议正式锁定的 Round-12A
+第一阶段：基础遥测
+
+先只实现并验证：
+
+gate_prob
+gate_activation
+residual action/plan
+base plan
+final plan
+tracker reference
+actual trajectory
+speed
+route progress
+footprint validity
+termination
+CPU/CUDA backend
+
+
+原始数组保存 NPZ 或 Parquet，JSONL 仅保留标量和索引。
+
+第二阶段：基准重跑
+
+同一预注册 episode 集：
+
+gate-off
+原 gated 配置
+CPU/CUDA 对照子集
+
+
+先确认历史结果可复现，再开始扫描。
+
+第三阶段：机制筛查
+
+执行：
+
+threshold sweep
+residual scale sweep
+debounce sweep
+小型 2×2×2 交叉验证
+
+
+分析严格区分：
+
+common-prefix causal analysis
+post-divergence outcome analysis
+
+第四阶段：Go/No-Go
+
+进入 12B 至少需要：
+
+存在非空有效操作区域
+保留至少 6/8 个历史翻正
+消除至少 7/13 个历史翻负
+timeout <= baseline +3pp
+破坏性误触发 episode 比例 <5%
+离线 intervention recall >=60%
+CPU/CUDA 一致，或 collector 已统一部署后端
+
+七、最终裁决
+可以立即做
+实现逐步遥测；
+gate-off/gated 基准重跑；
+CPU/CUDA 一致性探针；
+common-prefix 分析；
+threshold/scale/debounce 零训练筛查；
+geometry FP 只读诊断。
+暂不批准
+hard-negative 数据采集；
+gated residual 再训练； -几何 loss 反向传播； -修改 gate/residual 架构； -进入 4A/4B。
 总体判断
 
-进展是可信的，执行纪律也很好：
+Coding agent 的方向是理性的，但当前文本仍略早地把问题定性为“数据覆盖/标定级，而非架构级”。现有证据还不足以排除：
 
-recovery_v2_contract.md 的同状态契约已经真正落地，2,693 行、110 episodes，六项数据硬门全部通过，说明 recovery_v1 的错位问题已解决。
-可辨识性在干净的 F2m 特征上达到 AUC 约 0.87–0.92，说明“是否需要干预”并非完全不可观测。
-gated residual 的离线指标全部过门，但 clean150 从 0.3400 降至 0.3067，按照预注册规则停止，没有继续调参掩盖失败。这一决策正确。
-关键判断：还不能直接认定只是“标定问题”
+后端不一致；
+residual 纵向副作用； -连续激活累积；
+gate-residual 共适应； -闭环不可辨识。
 
-Coding agent 将失败定性为：
+所以建议：
 
-gate 分布迁移过触发，属于数据覆盖/标定问题，非架构问题。
+批准 Round-12A 的遥测与诊断实现，但补齐 CPU/CUDA、common-prefix 和 episode-level 破坏性误触发三个约束后再运行。
 
-这个结论方向大概率正确，但证据还差一步。
-
-现有证据是：
-
-离线正常样本激活率 3.99%；
-闭环激活率 16.1%；
-13 个成功变失败，8 个失败变成功；
-off-road 和 collision 下降，但 timeout 增加，均速下降。
-
-这同时可能由三种机制导致：
-
-gate 误报；
-residual 方向基本正确，但幅度过大；
-gate 正确识别风险，但 recovery residual 过度减速，最终把 off-road 转成 timeout。
-
-因此，不能只通过调高 gate threshold 得出结论。必须先做一次零训练反事实复盘。
-
-对 Round-12 的裁决
-批准 ④：先做反事实复盘
-
-这是成本最低、信息价值最高的一步。
-
-对 clean150 已保存轨迹，分别检查：
-
-8 个失败转成功 episode；
-13 个成功转失败 episode；
-其余未改变 episode。
-
-记录：
-
-首次 gate 激活时间
-激活持续长度
-gate probability
-residual ds / dtheta
-base plan 与 final plan 差异
-激活时 plan 是否已呈危险趋势
-route progress
-后续 termination 类型
-
-
-并离线回放三个轴：
-
-threshold：0.05 / 0.10 / 0.20 / 0.30 / 0.50
-residual scale：0.25 / 0.50 / 0.75 / 1.00
-temporal debounce：连续 1 / 2 / 3 步超过阈值才激活
-
-
-这不是扫参训练，而是确定问题究竟在 gate precision、residual magnitude，还是缺少时间稳定性。
-
-Go 条件
-
-只有存在一个区域同时满足：
-
-正常 episode 闭环激活率 <5%
-intervention recall >=60%
-保留至少 6/8 个翻正收益
-消除至少一半 13 个翻负
-timeout 不继续增长
-
-
-才批准下一轮同架构 pilot。
-
-有条件批准 ①：补部署分布控制行
-
-如果反事实确认主要问题是 gate 误报，可以新增部署同源控制数据，但不建议重新采一整套 recovery_v3。
-
-只补：
-
-gated 模型闭环运行中的高分误触发状态；
-pri512 正常闭环中的晚段、高 route-completion 状态； -低速 2–4m/s 正常状态；
-tollgate、merge、roundabout 正常通过状态。
-
-这些应作为 hard negatives，每行仍满足 recovery_v2_contract.md 的同状态契约。
-
-建议新增约 1,000–2,000 行，而非扩大所有类别。
-
-一个重要修正
-
-不要把所有 gated 模型遇到的状态都标为 gate=0。必须证明：
-
-base plan 在验证 horizon 内安全有效
-且 expert intervention 没有明显优于 baseline
-
-
-否则会把真正需要 recovery 的状态错误标成负例。
-
-② 闭环阈值标定：可以做，但不能成为最终修复
-
-阈值应按闭环分布确定，而不是沿用离线 0.05。这个修正合理。
-
-但如果必须把 threshold 提得很高才能避免过触发，同时 intervention recall 大幅下降，说明 gate 的排序能力不足，不是标定可以解决的。
-
-因此：
-
-threshold 是部署参数； -不能用 clean150 直接选择并在同一 clean150 上报告最终收益； -应用一个校准 split 选择 threshold，再用独立 clean150/eval500 验证。
-
-否则会产生评测集过拟合。
-
-③ 特征离线化：暂缓
-
-将 footprint/margin 从地图和 plan 离线重建，工程价值存在，但当前不是最短路径。
-
-先完成反事实复盘。如果结果证明 F2m 特征本身稳定有效，只是负样本覆盖不足，再做离线化以扩大数据源。
-
-如果最终发现主要问题是 residual magnitude 或时间抖动，特征离线化不会解决核心问题。
-
-P1-3 geometry FP Gate：可以平行做，只诊断
-
-批准并行运行固定数据上的误报 Gate，但仍不得进入反向传播。
-
-核心判断：
-
-成功 expert active-loss <5%
-普通道路 <2%
-失败 plan 检出率显著更高
-合法变道/分叉无系统性误罚
-
-
-当前 traj 与 geometry 梯度 cosine 为 −0.73，在误报原因解释清楚前，不能启动联合训练。
-
-下一轮仅允许一个训练实验
-
-建议顺序：
-
-1. 翻正/翻负反事实复盘
-2. 判断 gate、residual magnitude、temporal debounce 的贡献
-3. 有必要时补 1k–2k hard negatives
-4. 在校准集确定 operating point
-5. 同架构重训一次
-6. 独立 clean150 验证
-
-
-不要同时：
-
-改 gate 架构； -改 residual 架构； -加入 geometry loss； -重新调 recovery 占比； -解冻更多 base 参数。
-
-否则又会失去归因。
-
-下一轮验收标准
-
-建议保持原 clean150 主门，并补两个闭环指标：
-
-success >= baseline - 2pp
-off-road 不增加
-collision <= baseline +2pp
-timeout <= baseline +3pp
-正常 episode 闭环 gate 激活率 <5%
-intervention episode recall >=60%
-13 个历史翻负中至少消除一半
-8 个历史翻正中至少保留 6 个
-第二 epoch 不坍塌
-
-
-如果修复后仍不过门：
-
-关闭 gated residual 主线，不再继续追加 gate 特征、模型容量或采样技巧。
-
-然后把资源转向：
-
-V1 calibration mechanism 的可部署分解；
-action/plan 纵向尺度校准； -后续具备合法信用链的 RL。
-最终建议
-
-批准 Round-12，但不是直接批准“补数据后重训”。
-
-应锁定为：
-
-Round-12A：零训练反事实复盘
-→ Round-12B：必要时补 hard negatives
-→ Round-12C：同架构仅重跑一次 pilot
-
-
-冻结清单继续维持。recovery_v2_contract.md 不需要改原则，只需补充“部署 hard-negative”的质量定义。
-
-一句话判断：
-
-条件恢复路线还有一次值得验证的机会，但必须先分清是 gate 误报、残差过强还是时序抖动。若同架构修复仍失败，就应果断退出，不再把复杂度投入 gate。
+若 Round-12A 找不到非空有效操作区域，应直接关闭 gated residual，不再通过补数据或加模型复杂度挽救它。
