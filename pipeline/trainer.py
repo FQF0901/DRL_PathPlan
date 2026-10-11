@@ -930,8 +930,9 @@ class Phase3Config:
       + K-anchor 锚头（冻结前缀由 stages 传入；锚 CE/WTA 保留 → 梯度经冻结锚头塑形共享特征）；
     - **损失组合**（上游三层监督 + 监控）：首步动作 + 多步动作链 + plan head ``ego_next`` +
       WM latent consistency（v8 主监督）+ WM OD/LD 物理解码（诊断）+ presence/entry BCE +
-      MoE 负载均衡；``traj`` **只做监控**（不进损失，
-      ``traj_aux_weight`` 默认 0 —— dagger 的 ``traj6`` 是常量外推合成值）。
+      MoE 负载均衡；``traj``（pose 链）默认**只做监控**（``traj_aux_weight`` 默认 0——
+      dagger 的 ``traj6`` 是常量外推合成值）；``traj_aux_weight>0``（P1-2 补口）时新增 traj
+      损失项，行掩码 ``traj_aux_valid`` 只放行真实 traj6 行（锚/recovery）。
       ``freeze_mode="specific_only"`` 时上游监督项（:data:`PHASE3_WM_LOSS_KEYS`）与锚 CE/WTA
       无梯度 → **自动降级为 0**；``freeze_mode="trunk_only"`` 时上游 WM/ego_next 监督按安全配方
       保守降级为 0、**锚 CE/WTA 保留**（权重置 0 + 跳过 WM 教师强制前向，见
@@ -985,8 +986,14 @@ class Phase3Config:
     #: presence/entry BCE（id 轴目标；stage A 同系数口径）。
     presence_weight: float = 0.1
     entry_weight: float = 0.1
-    #: 轨迹辅助（监控口径保留；0 = 不进损失，见类 docstring）。
+    #: 轨迹辅助（P1-2 补口）：``0.0``（默认）= 不进损失 = 旧行为逐位不变；``>0`` 时新增
+    #: ``traj`` 损失项（``out["traj_xy"]`` vs ``targets["traj6"]``，算子
+    #: :func:`bc_trajectory_loss`），行权重 = ``frame_weight × traj_aux_valid`` 行掩码
+    #: （只对真实 traj6 行生效；掩码 None = 全 1）。监控口径（``bc_traj_*``）恒为全量。
     traj_aux_weight: float = 0.0
+    #: traj 损失逐行掩码（0/1，数据集行空间；None = 全 1 = 旧行为）。由 stages 层给
+    #: （窗口 dagger 行 0 = traj6 是常量外推合成值；锚/recovery 行 1 = 真实 traj6）。
+    traj_aux_valid: Optional[np.ndarray] = None
     #: bias 标定项（P1 DAgger 前置，2026-10-02）：逐维 signed-bias 惩罚——μ ``(ds,dθ)`` +
     #: plan 尾链逐 step ``(ds,dθ)`` + 尾链横向位置（``traj_xy`` 对 ``traj6`` 的路径法向偏差）。
     #: ``0.0``（默认）= 关闭 = 旧行为逐位不变；bias 监控指标（``bc_bias_*``）恒记录（前后对照）。
@@ -4837,7 +4844,10 @@ PHASE3_FUTURE_KEYS: Tuple[str, ...] = (
 
 
 def _phase3_term_denominators(
-    future: Mapping[str, np.ndarray], frame_weight_np: np.ndarray
+    future: Mapping[str, np.ndarray],
+    frame_weight_np: np.ndarray,
+    *,
+    traj_valid_np: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """phase 3 各损失项的**宏/micro 权重分母**（纯数据计算，无前向）。
 
@@ -4851,7 +4861,9 @@ def _phase3_term_denominators(
       ego 路掩码恒 1 ⇒ 分母为 ``Σ w·wm_valid``）；
     - ``presence``：``Σ w·wm_valid × slots``（BCE 分母 = 帧权重和 × 槽位数）；
     - ``anchor_ce``：``Σ w·row_valid``（K-anchor 选择 CE 分母；row_valid = 链有任一有效 step）；
-    - ``anchor_wta``：``Σ w·chain_valid``（K-anchor WTA 回归分母，逐 step）。
+    - ``anchor_wta``：``Σ w·chain_valid``（K-anchor WTA 回归分母，逐 step）；
+    - ``traj``（P1-2）：``Σ w·traj_valid``（``traj_valid_np=None`` → ``Σ w``；与 traj 损失
+      的 ``frame_weight × traj_aux_valid`` 同口径）。
     """
     valid = np.asarray(future["wm_valid"], dtype=np.float64)
     weight = np.asarray(frame_weight_np, dtype=np.float64).reshape(-1, 1)
@@ -4876,7 +4888,18 @@ def _phase3_term_denominators(
         "presence": float(step_weight.sum()) * float(slots),
         "anchor_ce": float((weight.reshape(-1) * chain_row_valid).sum()),
         "anchor_wta": float((weight * chain_valid).sum()),
+        "traj": float((weight.reshape(-1) * _traj_valid_weights(traj_valid_np, weight.size)).sum()),
     }
+
+
+def _traj_valid_weights(traj_valid_np: Optional[np.ndarray], n_rows: int) -> np.ndarray:
+    """traj 逐行掩码 → ``(n_rows,)`` float64 权重（``None`` → 全 1；长度不符 → ``ValueError``）。"""
+    if traj_valid_np is None:
+        return np.ones(int(n_rows), dtype=np.float64)
+    weights = np.asarray(traj_valid_np, dtype=np.float64).reshape(-1)
+    if weights.size != int(n_rows):
+        raise ValueError(f"traj_aux_valid batch 掩码行数 {weights.size} != batch 行数 {int(n_rows)}")
+    return weights
 
 
 def _phase3_scale_factors(
@@ -4946,6 +4969,7 @@ def _phase3_loss_terms(
     frame_weight: "torch.Tensor",
     config: Phase3Config,
     chain_step_weights: Optional["torch.Tensor"] = None,
+    traj_row_mask: Optional["torch.Tensor"] = None,
 ) -> Dict[str, Any]:
     """一次前向 + phase 3 全部损失项（train 侧按 micro 调用；eval 侧也可复用）。
 
@@ -4983,6 +5007,19 @@ def _phase3_loss_terms(
         loss_type=config.loss_type,
         step_weights=chain_step_weights,  # P1-2：默认 None = 旧行为逐位不变
     )
+    # P1-2 补口：traj（pose 链）损失项 —— 默认 ``traj_aux_weight<=0`` 跳过计算（旧行为逐位不变）；
+    # 行权重 = frame_weight × traj 行掩码（只对真实 traj6 行生效；掩码只作用于本项）。
+    # 六步时间衰减：``bc_trajectory_loss.weights`` 是**逐行**权重（不支持逐点）→ 不套用（TODO）。
+    traj_loss_value = torch.zeros((), device=device)
+    if float(config.traj_aux_weight) > 0.0:
+        traj_weights = frame_weight if traj_row_mask is None else frame_weight * traj_row_mask
+        traj_loss_value, _ = bc_trajectory_loss(
+            out["traj_xy"],
+            targets["traj6"],
+            loss_type=config.loss_type,
+            weights=traj_weights,
+            metric_weights=frame_weight,
+        )
     # v7 结构迭代 B：K-anchor WTA 目标（选择 CE + 被分配锚链回归；权重 0 或未启用锚 → 跳过）
     anchor_ce_loss = anchor_wta_value = torch.zeros((), device=device)
     anchor_metrics: Dict[str, float] = {}
@@ -5066,6 +5103,8 @@ def _phase3_loss_terms(
     terms: Dict[str, Any] = {
         "action": config.action_weight * action_loss,
         "action_chain": config.action_chain_weight * chain_loss,
+        # P1-2：traj 项（weight<=0 时恒 0，不进 loss_keys/total = 旧行为）
+        "traj": float(config.traj_aux_weight) * traj_loss_value,
         "bias_calib": config.bias_calib_weight * bias_penalty,
         "anchor_ce": config.anchor_ce_weight * anchor_ce_loss,
         "anchor_wta": config.anchor_wta_weight * anchor_wta_value,
@@ -5271,7 +5310,7 @@ def pretrain_bc_phase3(
         "presence",
         "entry",
         "load_balance",
-    )
+    ) + (("traj",) if float(config.traj_aux_weight) > 0.0 else ())
     macro_size = max(1, int(config.batch_size))
     micro_size = (
         macro_size
@@ -5341,7 +5380,15 @@ def pretrain_bc_phase3(
                 targets_np = dataset.targets(batch_indices)
             future_np = _future_batch(batch_indices, obs_np)
             frame_weight_np = np.asarray(targets_np["train_weight"], dtype=np.float64).reshape(-1)
-            macro_den = _phase3_term_denominators(future_np, frame_weight_np)
+            # P1-2：traj 行掩码（数据集行空间 → 本 batch；None = 全 1 = 旧行为）
+            traj_valid_batch_np = (
+                traj_valid_for_rows(config.traj_aux_valid, batch_indices)
+                if float(config.traj_aux_weight) > 0.0
+                else None
+            )
+            macro_den = _phase3_term_denominators(
+                future_np, frame_weight_np, traj_valid_np=traj_valid_batch_np
+            )
             macro_den["rows"] = float(n_macro)
             data_seconds += time.perf_counter() - data_started
             optimizer.zero_grad(set_to_none=True)
@@ -5362,6 +5409,11 @@ def pretrain_bc_phase3(
                     )
                     den_micro = dict(macro_den)
                     den_macro = dict(macro_den)
+                    traj_mask_t = (
+                        None
+                        if traj_valid_batch_np is None
+                        else torch.as_tensor(traj_valid_batch_np, device=device, dtype=torch.float32)
+                    )
                 else:
                     obs = _to_device_obs({key: value[m_lo:m_hi] for key, value in obs_np.items()}, device)
                     targets = to_device_tensors(
@@ -5375,9 +5427,21 @@ def pretrain_bc_phase3(
                     den_micro = _phase3_term_denominators(
                         {key: value[m_lo:m_hi] for key, value in future_np.items()},
                         frame_weight_np[m_lo:m_hi],
+                        traj_valid_np=(
+                            None
+                            if traj_valid_batch_np is None
+                            else traj_valid_batch_np[m_lo:m_hi]
+                        ),
                     )
                     den_micro["rows"] = float(m_hi - m_lo)
                     den_macro = dict(macro_den)
+                    traj_mask_t = (
+                        None
+                        if traj_valid_batch_np is None
+                        else torch.as_tensor(
+                            traj_valid_batch_np[m_lo:m_hi], device=device, dtype=torch.float32
+                        )
+                    )
                 frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
                 data_seconds += time.perf_counter() - data_started
                 forward_started = time.perf_counter()
@@ -5389,6 +5453,7 @@ def pretrain_bc_phase3(
                     frame_weight,
                     effective_config,
                     chain_step_weights=chain_decay_tensor,
+                    traj_row_mask=traj_mask_t,
                 )
                 components = {key: terms[key] for key in loss_keys}
                 if micro_size < n_macro:
@@ -5412,6 +5477,8 @@ def pretrain_bc_phase3(
                     + components["entry"]
                     + components["load_balance"]
                 )
+                if "traj" in components:  # P1-2：weight>0 才进入 total（默认路径逐位不变）
+                    total = total + components["traj"]
                 traj_metrics = _phase3_traj_metrics(terms["out"], targets, frame_weight)
                 forward_seconds += time.perf_counter() - forward_started
                 backward_started = time.perf_counter()
@@ -5487,7 +5554,9 @@ def pretrain_bc_phase3(
             "bc_presence_loss": totals["presence"] / divisor,
             "bc_entry_loss": totals["entry"] / divisor,
             "bc_load_balance_loss": totals["load_balance"] / divisor,
-            # traj 监控（不进损失；loss_type 口径的加权误差 + MSE/MAE/FDE）
+            # P1-2：traj 损失项（仅 traj_aux_weight>0 时落键；默认不落 = 旧 metrics 不变）
+            **({"bc_traj_aux_loss": totals["traj"] / divisor} if "traj" in totals else {}),
+            # traj 监控（与损失项无关；loss_type 口径的加权误差 + MSE/MAE/FDE）
             "bc_traj_loss": (
                 totals["traj_mse" if config.loss_type == "l2" else "traj_mae"] / weight_denominator
             ),
@@ -5644,7 +5713,7 @@ def evaluate_bc_phase3(
         "latent",
         "presence",
         "entry",
-    )
+    ) + (("traj",) if float(config.traj_aux_weight) > 0.0 else ())
     numerator = {key: 0.0 for key in loss_keys}
     denominator = {key: 0.0 for key in loss_keys}
     load_sum, load_count = 0.0, 0
@@ -5677,8 +5746,29 @@ def evaluate_bc_phase3(
         )
         future_t = _phase3_future_tensors(future_np, device)
         frame_weight = targets["train_weight"].to(device=device, dtype=torch.float32)
-        den = _phase3_term_denominators(future_np, np.asarray(targets_np["train_weight"], dtype=np.float64))
-        terms = _phase3_loss_terms(model, obs, future_t, targets, frame_weight, effective_config)
+        traj_valid_batch_np = (
+            traj_valid_for_rows(config.traj_aux_valid, batch_indices)
+            if float(config.traj_aux_weight) > 0.0
+            else None
+        )
+        den = _phase3_term_denominators(
+            future_np,
+            np.asarray(targets_np["train_weight"], dtype=np.float64),
+            traj_valid_np=traj_valid_batch_np,
+        )
+        terms = _phase3_loss_terms(
+            model,
+            obs,
+            future_t,
+            targets,
+            frame_weight,
+            effective_config,
+            traj_row_mask=(
+                None
+                if traj_valid_batch_np is None
+                else torch.as_tensor(traj_valid_batch_np, device=device, dtype=torch.float32)
+            ),
+        )
         for key in loss_keys:
             denominator[key] += float(den[_term_key(key)])
             numerator[key] += float(terms[key].detach()) * float(den[_term_key(key)])

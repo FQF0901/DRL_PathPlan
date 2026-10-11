@@ -3546,7 +3546,8 @@ def _merge_anchor_rows(
       ``mild_weight``，:func:`row_action_weights` 再乘配平；窗口行不动 = 权 1.0 口径）；
     - ``traj_aux_valid``：窗口行 0（dagger ``traj6`` 是常量外推合成值）、锚行 1（真实 traj6）。
       沿用 lane U4 掩码语义（只作用于 traj 损失项）；phase 3 ``traj_aux=0`` → 掩码仅记录在
-      返回值/metrics，不参与损失（traj 只做监控）。
+      返回值/metrics；phase 3 ``traj_aux=0``（默认）时仅审计，``>0`` 时经 ``Phase3Config``
+      进入 traj 损失项（只对真实 traj6 行生效）。
     """
     window_rows = int(dataset.count)
     anchor_rows = int(anchor.count)
@@ -4078,7 +4079,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
       （fail-closed）；逐 epoch 记录写 ``guard/guard.json``；
     - 损失 = 首步动作 + **多步动作链**（rollout ``plan`` 第 2..6 步 vs 未来专家首步标签）
       + plan head ``ego_next``（``ego_fut`` + ``wm_valid`` 尾部 mask）+ WM **OD/LD 教师强制**
-      + presence/entry BCE + MoE 负载均衡 aux；``traj_*`` 只做监控（不进损失）；
+      + presence/entry BCE + MoE 负载均衡 aux；``traj_*`` 默认只做监控（``--phase3-traj-aux-weight``
+      >0 时 traj 项进入损失，仅真实 traj6 行：锚/recovery）；
     - **动作链目标来源**（P1 DAgger 前置，``action_chain_source``）：``auto`` 默认新 dagger
       标签口径用逐行 ``action[0:6]`` 真实教师链（窗口丢行/NaN 尾由有限性 mask 处理），
       旧数据/显式 ``lookup`` 回退同 episode 未来行查表；
@@ -4354,10 +4356,30 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             args.load_balance_coef if args.load_balance_coef is not None else losses_cfg.get("load_balance", 0.01)
         ),
     }
-    if loss_weights["traj_aux"] != 0.0:
-        raise SystemExit(
-            f"[stageB3] traj_aux={loss_weights['traj_aux']} 不支持：phase 3 的 traj 只做监控"
-            "（失败窗口的 traj6 是常量外推合成值，不进损失；见设计定案）"
+    # P1-2 补口：traj（pose 链）损失项（默认 0 = 仅监控 = 旧行为）；>0 时只对真实 traj6 行
+    # （锚/recovery；窗口 dagger 行 traj6 是常量外推合成值）生效——无真实行 → fail-closed。
+    traj_aux_weight = float(loss_weights["traj_aux"])
+    if not math.isfinite(traj_aux_weight) or traj_aux_weight < 0.0:
+        raise SystemExit(f"[stageB3] traj_aux 权重必须为有限非负值：{loss_weights['traj_aux']!r}")
+    traj_aux_mask: Optional[np.ndarray] = None
+    if traj_aux_weight > 0.0:
+        if traj_aux_valid is None:
+            raise SystemExit(
+                "[stageB3] traj_aux>0 但无真实 traj6 行可监督（窗口 dagger 行的 traj6 是常量"
+                "外推合成值）→ 需 --recovery-dir 或 --phase3-anchor；拒绝静默全 0"
+            )
+        traj_aux_mask = np.asarray(traj_aux_valid, dtype=np.float32).reshape(-1)
+        if traj_aux_mask.size != int(dataset.count):
+            raise SystemExit(
+                f"[stageB3] traj_aux_valid 行数 {traj_aux_mask.size} != 数据集行数 {dataset.count}"
+            )
+        if float(traj_aux_mask.sum()) <= 0.0:
+            raise SystemExit("[stageB3] traj_aux>0 但 traj_aux_valid 全 0（无真实 traj6 行）→ 拒绝")
+        print(
+            f"[stageB3] traj_aux={traj_aux_weight:g} 进入损失：有效行="
+            f"{int(np.count_nonzero(traj_aux_mask > 0.5))}/{traj_aux_mask.size}"
+            "（窗口 dagger 行 0；锚/recovery 行 1；掩码只作用于 traj 项）",
+            flush=True,
         )
     # P1 DAgger 前置：动作链目标来源（auto = 新 dagger 标签口径 labels / 旧数据 lookup）。
     chain_source_raw = str(
@@ -4472,7 +4494,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         f"[stageB3] round={round_index} · dagger={dagger_dir}（窗口 rows={dataset.count - anchor_rows_log}）· "
         f"起点={init_ckpt or resume_path} · epochs={epochs} · {freeze_text} · {anchor_text} · "
         f"lr={lr:.2e}（{lr_scale_text}）· "
-        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}（仅监控）· "
+        f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}"
+        f"（{'损失项' if traj_aux_weight > 0.0 else '仅监控'}）· "
         f"action_chain_source={chain_source_raw} · bias_calib={loss_weights['bias_calib']}"
         + (
             f" · 降级前权重：{degraded_loss_weights}"
@@ -4592,7 +4615,7 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         # P1-2：recovery 合并/混采留档（未启用时不落键 = 旧 metrics 逐位不变）
         **({"recovery": dict(recovery_info)} if recovery_info.get("enabled") else {}),
         "loss_type": str(args.loss_type if args.loss_type is not None else "l2"),
-        "traj_monitor_only": True,
+        "traj_monitor_only": bool(traj_aux_weight <= 0.0),
         "wm_condition": "rollout_plan_detached",
         "materialize": bool(obs_source is not None),
         "shuffle_seed": int(shuffle_seed),
@@ -4808,6 +4831,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         recovery_chain_decay=recovery_chain_decay,
         # P1-2：recovery 行号（--recovery-dir 合并后给出；默认 None = 无 recovery 行）
         recovery_indices=recovery_indices,
+        # P1-2 补口：traj 损失逐行掩码（仅 weight>0 时非 None；窗口 0 / 锚∪recovery 1）
+        traj_aux_valid=traj_aux_mask,
     )
     result = pretrain_bc_phase3(
         model,
@@ -5467,7 +5492,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-entry-weight", type=float, default=None,
                         help="entry BCE 权重（默认 0.1）")
     parser.add_argument("--phase3-traj-aux-weight", type=float, default=None,
-                        help="轨迹辅助权重（默认 0.0：traj 只做监控，不进损失）")
+                        help="轨迹（pose 链）辅助权重（默认 0.0 = 不进损失 = 旧行为，仅监控）；"
+                             ">0 时新增 traj 损失项（out.traj_xy vs traj6，仅真实 traj6 行："
+                             "锚/recovery 行 1、窗口 dagger 行 0；无真实行 → 报错）")
     # ---- P1-2：recovery 数据接线（默认关闭）----
     parser.add_argument("--recovery-dir", type=str, default=None,
                         help="P1-2 recovery 数据目录（如 datasets/recovery_v1：samples.npz + "
