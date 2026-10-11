@@ -3668,6 +3668,48 @@ def _apply_recovery_row_filter(
     return np.asarray(kept, dtype=np.int64), int(selected.size - kept.size)
 
 
+#: recovery 类别过滤（P1-2 修复候选 A8）：``all``（默认，现行为）/ ``correction_late``
+#: （只并入 correction+late 类行——去掉与正常低速态重叠最重的 prevention 档；依据：受控探针
+#: 显示混采把 v∈[2,4) m/s 带状态条件化重写，prevention 档多处于"计划仍可行"的正常低速态）。
+RECOVERY_CLASS_FILTERS: Tuple[str, ...] = ("all", "correction_late")
+
+
+def _apply_recovery_class_filter(
+    npz: Mapping[str, Any], rows: np.ndarray, class_filter: str
+) -> "tuple[np.ndarray, int]":
+    """按 ``class_filter`` 过滤 recovery 行；返回 ``(selected_rows, excluded_count)``。
+
+    ``correction_late``：按 schema 固定 ``class_id``（0=prevention/1=correction/2=late）；
+    ``class_id`` 缺失时回退 ``class_label`` 字符串；字段缺失/取值越界 → fail-closed。
+    """
+    mode = str(class_filter).strip().lower()
+    if mode not in RECOVERY_CLASS_FILTERS:
+        raise SystemExit(
+            f"[stageB3][recovery] class_filter 非法：{class_filter!r}（{' | '.join(RECOVERY_CLASS_FILTERS)}）"
+        )
+    selected = np.asarray(rows, dtype=np.int64)
+    if mode == "all":
+        return selected, 0
+    if "class_id" in npz:
+        class_ids = np.asarray(npz["class_id"], dtype=np.int64)
+        unknown = set(np.unique(class_ids).tolist()) - {0, 1, 2}
+        if unknown:
+            raise SystemExit(
+                f"[stageB3][recovery] class_id 取值越界：{sorted(unknown)}（schema 0/1/2）→ 拒绝"
+            )
+        keep = (class_ids[selected] == 1) | (class_ids[selected] == 2)
+    elif "class_label" in npz:
+        labels = np.asarray(npz["class_label"]).astype(str)
+        keep = np.isin(labels[selected], ("correction", "late"))
+    else:
+        raise SystemExit(
+            "[stageB3][recovery] 缺 'class_id'/'class_label' → 无法做类别过滤（correction_late 口径）"
+            "；如确需全部类请显式 class_filter='all'"
+        )
+    kept = selected[keep]
+    return np.asarray(kept, dtype=np.int64), int(selected.size - kept.size)
+
+
 def _recovery_obs_present(npz: Mapping[str, Any]) -> np.ndarray:
     """逐行 student obs 可用性（``obs__ego``/``obs__ego_mask`` 全有限）。
 
@@ -3855,8 +3897,9 @@ def _build_recovery_arrays(
     extra = {
         # 执行轨迹另列（分析用；不进损失）
         "recovery_actual_traj": np.asarray(npz["expert_actual_recovery_traj"], dtype=np.float32)[rows],
-        "recovery_class_id": np.asarray(npz["class_id"], dtype=np.int8)[rows],
     }
+    if "class_id" in npz:  # 类别分析列（旧数据缺 class_id 时跳过）
+        extra["recovery_class_id"] = np.asarray(npz["class_id"], dtype=np.int8)[rows]
     return out, history, extra
 
 
@@ -3867,6 +3910,7 @@ def _merge_recovery_rows(
     *,
     base_traj_aux_valid: Optional[np.ndarray] = None,
     row_filter: str = "takeover_only",
+    class_filter: str = "all",
     logger: Any = print,
 ) -> "tuple[BCDataset, np.ndarray, np.ndarray, Optional[np.ndarray], Dict[str, Any]]":
     """P1-2：把 recovery 行（质量门可用 ∧ split train）并入 phase-3 训练集（默认关闭）。
@@ -3894,6 +3938,13 @@ def _merge_recovery_rows(
         raise SystemExit(
             f"[stageB3][recovery] row_filter={row_filter} 后无训练行"
             f"（counterfactual 排除 {counterfactual_excluded}）→ 拒绝"
+        )
+    rows_before_class = int(rows.size)
+    rows, class_excluded = _apply_recovery_class_filter(npz, rows, class_filter)
+    if rows.size == 0:
+        raise SystemExit(
+            f"[stageB3][recovery] class_filter={class_filter} 后无训练行"
+            f"（row_filter 后 {rows_before_class} 行全部被类别过滤）→ 拒绝"
         )
     recovery_arrays, history, extra = _build_recovery_arrays(dataset.arrays, npz, rows)
     window_rows = int(dataset.count)
@@ -3942,8 +3993,11 @@ def _merge_recovery_rows(
         "enabled": True,
         "dir": str(recovery_path),
         "row_filter": str(row_filter),
+        "class_filter": str(class_filter),
+        "rows_before_class_filter": int(rows_before_class),
         "train_rows": int(rows.size),
         "counterfactual_rows_excluded": int(counterfactual_excluded),
+        "class_filtered_rows_excluded": int(class_excluded),
         "val_usable_rows": int(val_usable_rows),
         "student_obs_missing_rows": int(obs_missing_rows),
         "window_rows": window_rows,
@@ -3962,7 +4016,8 @@ def _merge_recovery_rows(
     logger(
         f"[stageB3][recovery] 合并：窗口(+锚) {window_rows} + recovery {rows.size}"
         f"（{recovery_path}；row_filter={row_filter}；反事实错位行排除 {counterfactual_excluded}"
-        f"（step>takeover_step，obs=Pass-1 而标签=Pass-2 帧）；val 可用 {val_usable_rows} 行仅监控；"
+        f"（step>takeover_step，obs=Pass-1 而标签=Pass-2 帧）；class_filter={class_filter}"
+        f"（{rows_before_class}→{rows.size}，类别排除 {class_excluded}）；val 可用 {val_usable_rows} 行仅监控；"
         f"student obs 缺失排除 {obs_missing_rows} 行）= {merged.count} 行；"
         f"episode_id 偏移 +{offset}（recovery 每行独立 id，原 episode 另存）；类分布={info['class_counts']}；"
         f"traj_aux_valid={info['traj_aux_valid_sum']:.0f}/{merged.count}"
@@ -4349,12 +4404,17 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             getattr(args, "phase3_recovery_row_filter", None)
             or (dict(p3_cfg.get("recovery", {}) or {}).get("row_filter", "takeover_only"))
         ).strip().lower()
+        recovery_class_filter = str(
+            getattr(args, "phase3_recovery_class_filter", None)
+            or (dict(p3_cfg.get("recovery", {}) or {}).get("class_filter", "all"))
+        ).strip().lower()
         dataset, train_idx, recovery_indices, traj_aux_valid, recovery_info = _merge_recovery_rows(
             dataset,
             train_idx,
             recovery_dir_arg,
             base_traj_aux_valid=traj_aux_valid,
             row_filter=recovery_row_filter,
+            class_filter=recovery_class_filter,
             logger=print,
         )
         arrays = dataset.arrays
@@ -5636,6 +5696,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "对齐行：obs=Pass-1 与专家标签=Pass-2 同状态；all = 全部可用行，"
                              "其中 step>takeover_step 行是反事实错位对（训练会崩，见 "
                              "runs/p1_2/diag/recovery_batch_integrity.json））")
+    parser.add_argument("--phase3-recovery-class-filter", choices=("all", "correction_late"),
+                        default=None,
+                        help="recovery 类别过滤（默认 all；correction_late = 只并入 correction+late"
+                             " 类行，去掉与正常低速态重叠最重的 prevention 档——P1-2 修复候选 A8）")
     # ---- lane P3-I：配方开关（冻结 / 5k 锚）----
     parser.add_argument(
         "--phase3-freeze",

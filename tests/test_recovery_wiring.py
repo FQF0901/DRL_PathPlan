@@ -71,6 +71,7 @@ def _recovery_arrays(
     n_val: int = 2,
     unusable_train: int = 1,
     misaligned_train: int = 0,
+    train_class_ids: tuple = None,
 ) -> dict:
     n = n_train + n_val
     arrays: dict = {}
@@ -99,8 +100,15 @@ def _recovery_arrays(
     arrays["usable"] = np.array(
         [True] * (n_train - unusable_train) + [False] * unusable_train + [True] * n_val
     )
-    arrays["class_label"] = np.array(["prevention"] * n_train + ["late"] * n_val)
-    arrays["class_id"] = np.zeros(n, dtype=np.int8)
+    if train_class_ids is None:
+        train_class_ids = (0,) * n_train
+    if len(train_class_ids) != n_train:
+        raise ValueError("train_class_ids 长度必须 == n_train")
+    id_to_label = {0: "prevention", 1: "correction", 2: "late"}
+    arrays["class_id"] = np.array(list(train_class_ids) + [2] * n_val, dtype=np.int8)
+    arrays["class_label"] = np.array(
+        [id_to_label[int(c)] for c in train_class_ids] + ["late"] * n_val
+    )
     arrays["window_index"] = np.zeros(n, dtype=np.int8)
     arrays["geometry"] = np.array(["curve"] * n)
     arrays["lane_lat"] = np.linspace(0.1, 0.5, n).astype(np.float32)
@@ -120,6 +128,7 @@ def _write_recovery_dir(
     n_val: int = 2,
     unusable_train: int = 1,
     misaligned_train: int = 0,
+    train_class_ids: tuple = None,
     name: str = "recovery",
     drop_keys: tuple = (),
 ) -> tuple[Path, dict]:
@@ -127,7 +136,7 @@ def _write_recovery_dir(
     directory.mkdir(parents=True, exist_ok=True)
     arrays = _recovery_arrays(
         window_arrays, n_train=n_train, n_val=n_val, unusable_train=unusable_train,
-        misaligned_train=misaligned_train,
+        misaligned_train=misaligned_train, train_class_ids=train_class_ids,
     )
     for key in drop_keys:
         arrays.pop(key, None)
@@ -165,6 +174,9 @@ def test_merge_recovery_rows_uses_train_split_and_usable_only(tmp_path: Path) ->
     assert info["train_rows"] == 3  # 4 train - 1 unusable
     assert info["val_usable_rows"] == 2
     assert info["student_obs_missing_rows"] == 0
+    # 默认 class_filter=all：不过滤、计数为 0（旧行为逐位不变）
+    assert info["class_filter"] == "all"
+    assert info["class_filtered_rows_excluded"] == 0
     assert merged.count == dataset.count + 3
     assert rec_index.tolist() == [dataset.count, dataset.count + 1, dataset.count + 2]
     assert merged_idx.tolist() == list(range(dataset.count)) + rec_index.tolist()
@@ -262,6 +274,63 @@ def test_recovery_row_filter_takeover_only_default_and_all(tmp_path: Path) -> No
     )
     assert info_all["train_rows"] == 4 and info_all["counterfactual_rows_excluded"] == 0
     assert rec_all.size == 4 and merged_all.count == dataset.count + 4
+
+
+def test_recovery_class_filter_correction_late_counts(tmp_path: Path) -> None:
+    """A8：class_filter=correction_late 只并入 correction+late 行（默认 all 逐位不变）。"""
+    window_dir, window_arrays = _write_window_dir(tmp_path)
+    recovery_dir, _ = _write_recovery_dir(
+        tmp_path, window_arrays, n_train=4, n_val=2, unusable_train=0,
+        train_class_ids=(0, 1, 2, 0),
+    )
+    dataset = _load_window(window_dir)
+    train_idx = np.arange(dataset.count, dtype=np.int64)
+    merged_all, _, rec_all, _, info_all = _merge_recovery_rows(
+        dataset, train_idx, recovery_dir, logger=lambda _: None
+    )
+    assert info_all["class_filter"] == "all"
+    assert info_all["train_rows"] == 4 and info_all["class_filtered_rows_excluded"] == 0
+    assert rec_all.size == 4
+
+    merged, _, rec, _, info = _merge_recovery_rows(
+        dataset, train_idx, recovery_dir, class_filter="correction_late", logger=lambda _: None
+    )
+    assert info["class_filter"] == "correction_late"
+    assert info["rows_before_class_filter"] == 4
+    assert info["train_rows"] == 2
+    assert info["class_filtered_rows_excluded"] == 2
+    assert rec.size == 2 and merged.count == dataset.count + 2
+    # 并入的正是 correction(1)/late(2) 行
+    assert merged.arrays["recovery_class_id"][rec].tolist() == [1, 2]
+
+
+def test_recovery_class_filter_all_prevention_fail_closed(tmp_path: Path) -> None:
+    window_dir, window_arrays = _write_window_dir(tmp_path)
+    recovery_dir, _ = _write_recovery_dir(
+        tmp_path, window_arrays, n_train=4, n_val=2, unusable_train=0,
+        train_class_ids=(0, 0, 0, 0),
+    )
+    dataset = _load_window(window_dir)
+    with pytest.raises(SystemExit, match="class_filter=correction_late 后无训练行"):
+        _merge_recovery_rows(
+            dataset, np.arange(dataset.count, dtype=np.int64), recovery_dir,
+            class_filter="correction_late", logger=lambda _: None,
+        )
+
+
+def test_recovery_class_filter_label_fallback(tmp_path: Path) -> None:
+    """class_id 缺失时按 class_label 字符串回退。"""
+    window_dir, window_arrays = _write_window_dir(tmp_path)
+    recovery_dir, _ = _write_recovery_dir(
+        tmp_path, window_arrays, n_train=4, n_val=2, unusable_train=0,
+        train_class_ids=(0, 1, 2, 0), drop_keys=("class_id",),
+    )
+    dataset = _load_window(window_dir)
+    _, _, rec, _, info = _merge_recovery_rows(
+        dataset, np.arange(dataset.count, dtype=np.int64), recovery_dir,
+        class_filter="correction_late", logger=lambda _: None,
+    )
+    assert info["train_rows"] == 2 and rec.size == 2
 
 
 def test_recovery_row_filter_missing_takeover_fail_closed(tmp_path: Path) -> None:
