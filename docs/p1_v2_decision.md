@@ -56,6 +56,15 @@ P1-4A/4B；K-anchor；GRPO/Best-of-G；WM/MoE 重构；容量扫描。
 - 晚段健康负样本 2,781 条 / 51 集（免重放挖出）；残余混淆：其历史通道或含近期失败痕迹（已注记）。
 - **决定：Step 2（recovery_v2 collector）GO**——同状态契约 + control 行（晚段/高 rc）；数据门为硬门（任一失败先修 collector、不训练）；gate 设计须含 plan/margin 派生特征（`gate(obs, base_plan)` 架构内）；数据门通过后以 v2 数据复测干净特征集（F2i/F2m），供 Step 3 gate 设计输入。
 
+### Step 2 结果（19:10，已独立抽验）：六门全 PASS → **Step 3 进入**
+
+- pilot = **2,693 行 / 110 episodes**（takeover 1,292 + control 1,401；labeled intervention 836＝correction 660/prevention 400/late 232；232 windows；expert recovery **89.2%**）。
+- **六项硬门全 PASS**：①同状态 100%（全行离线重算 max_plan_diff 6.7e-06、0 失败 + 1,216 行抽样重放 0 失配）②重放 ≥1,000（1,216 行，含 471 k≥1；obs/pose/baseline_plan max diff 0.0）③split 88/22 无泄漏 ④recovery 89.2% ≥80% ⑤action-chain 一致 0 失败 ⑥control 覆盖（1.08 比、晚段 75.2%、rc≥0.5 36%）。
+- **v1 根因正面实证**：k≥1 行存 Pass-2 同状态 obs（vs Pass-B 逐位 0.0；vs Pass-1 同 step 中位差 33.2）。
+- **probe_v2_check**：干净特征集 **F2m 在 v2 上 AUC 0.87–0.92（natural）/ 0.867–0.895（progress 1:1）**、净增量 +0.33~+0.39；F1 fair（progress 1:1）0.83/0.84。
+- 注记：mode 邻步切换率 0.611 ⇒ 仅分层（不得作训练目标）；难度偏 easy（56%，分层时注意）。
+- **决定：Step 3（gated residual pilot）GO**——架构 `final = base + gate(obs, base_plan) × residual(obs, base_plan)`；**base = pri512@e020 冻结锚定**；gate 输入须含 F2m 类自车特征（**禁锚点 oracle 列**）；验收按 round-10（正常态激活 <5%、intervention recall ≥60%、首步 MAE/6 点 ADE 退化 ≤10%、clean150 ≥base−2pp、off 不增、coll ≤+2pp、二 epoch 不塌）；**不通过即停、不追加复杂度**。
+
 ## 并行诊断旁线（不得直接改训练 target）
 
 1. **dθ-only 反事实**（补 ④ 分解缺口；①②已完成：V1 0.776–0.778@1.25–1.30 vs V2 0.658–0.676@1.15）；
