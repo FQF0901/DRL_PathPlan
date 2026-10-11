@@ -1,30 +1,27 @@
-# deepseek-v4.1 argue / 主文档（P1-v2 执行 · round-12 输入）
+# deepseek-v4.1 argue / 主文档（P1-v2 关闭 · round-15 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-11 晚）**：**P1-v2 三步执行完毕**——Step 1 探针（`no_increment` + F2m 特征重测过线）；Step 2 recovery_v2 同状态采集（六硬门全 PASS）；Step 3 gated residual pilot（**clean150 主门 FAIL −3.33pp，按预注册停止**）；**转 round-12 决策（§4）**。
-> **沿革**：round-2 收拢（`b2b0f64`/`5fdbddc`）→ P0 执行+审计+排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（执行手册 v1，§2.4）→ P1 执行：P1-0/1/2/3（§2.3）→ round-9/10 P1-v2 定板与共识（§3.1）→ **P1-v2 执行（§3）** → **round-12 回应（§7）** → **round-13 回应（§8）** → **round-14：12A LOCKED / 开工** → **Round-12A 执行与 NO-GO（§9）**。
-> **本版说明**：应要求精简（**1114 → 166 行**）。原 §0.9 收拢细节、§1–§4 早期草案、§5/§6 详表、§7 回合全文、§9–§11 原文、附录 A/B 已移除——全文索引见 §6 存档说明（git）。
+> **状态（2026-10-11 深夜）**：**P1-v2 条件轨已关闭**——Round-12A 零训练诊断 = NO-GO（无有效区域）→ gated residual 主线按预注册关闭；**转 round-15 定 fallback（§5）**。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）**。
+> **本版说明**：第二轮精简（262 → ~210 行）：round-12/13/14 往来全文压缩为 §4.1 摘要；12A 结果整合为 §4.2–4.5；旧 §4（round-12 请求）与 §9/§7/§8 归档。历版全文见 §7。
 
 ---
 
 ## 0. 一页纸（当前局面）
 
 - **目标锚**：IDM 0.756（上限审计：**最高可执行 d2=0.706**）；P1 起点 pri512@e020（clean150 **0.3400/0.4933/0.0333**；eval500 0.332）；G2 追平 ≥0.74、G3 超越 ≥0.80（§1）。
-- **P1-v2 三步结果**：
+- **P1-v2 四步结果**：
 
 | 步 | 结果 | 判定 |
 |---|---|---|
-| Step 1 可辨识性探针 | 正式 Gate 过（F1 0.934）；公平 progress 匹配 **0.682/0.731**（`no_increment`）；F2m 自车特征 **0.804/0.843** | 条件重开（注：特征级） |
+| Step 1 可辨识性探针 | 正式 Gate 过（F1 0.934）；公平 progress 匹配 **0.682/0.731**（`no_increment`）；F2m 自车特征 **0.804/0.843** | 条件重开（特征级） |
 | Step 2 recovery_v2 采集 | 2,693 行；**六硬门全 PASS**；v1 根因数值实证（k≥1 vs Pass-1 中位差 33.2） | PASS → Step 3 |
 | Step 3 gated residual pilot | clean150 gated **0.3067 vs 基线 0.3400（−3.33pp）**；其余门全过 | **FAIL（停止）** |
+| **Round-12A 诊断** | 15 配置全未过九条件；**gate 无选择性**；后端 6/40 集翻转 | **NO-GO → 主线关闭** |
 
 - **旁线**：D（dθ-only 0.728 / +2.2pp，V1=组合效应确认）；E（常态 μ 无系统性 bias、③ 升级证据弱）。均不改训练 target。
-- **P1-v2 状态（终）**：条件轨已关闭——Round-12A **NO-GO**（§9）；残差存在局部正效应（曾 8 翻正、off/coll 降）但 **gate 无选择性**、机制不成立。**转 round-15 定 fallback。**
-- **round-12 回应（§7）**：批准 ④ 零训练反事实复盘先行（先分解 gate 误报 / 残差幅度 / 时序抖动）；① hard negatives 条件批准（1–2k、四类来源）；② 阈值须用校准集选择、独立集验证；③ 特征离线化暂缓；同架构仅一训、失败即关闭主线。我方提 3 条操作化修正（见 §7.2）。
-- **round-13 回应（§8）**：批准 12A 遥测与诊断实现，**补三约束**——CPU/CUDA 后端一致性探针、common-prefix（首分歧）分解、episode 级"破坏性误触发 <5%"；扫描补 2×2×2 交叉；12B 标签须同状态双 rollout；"残差有效"表述纠偏已认账。立即做=零训练诊断；暂不批准重训/采集/架构改动。
-- **round-14（`ea29866`，2026-10-11 晚）：共识达成、Round-12A 零训练诊断 LOCKED、批准开工。** 范围=遥测→复现→CPU/CUDA 探针（全链+端到端子集）→阈值/scale/debounce 扫描+2×2×2 交叉→common-prefix 归因→九条件 Go/No-Go（允许"无有效区域"判负）；后端差异处置=统一 **CUDA 口径**、基线 0.3400 比较性不得破坏；**已派发 12A lane**。
-- **Round-12A 完成（21:36）**：**NO-GO（15 配置无 finalist）**——绑定失败面＝"保留 ≥6/8 历史翻正"（最好 5/8）＋ CPU/CUDA 无实质分叉（全配置 False）；三问答案与全表见 §9；t050_s050_d2 aggregate 反超基线（.3533/.4667/.02/.1733）但机制不可信＋按锁定条件判负；**主线按预注册关闭**，产物全部保留（`runs/p1_v2/round12a/`）。
-- **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍监控；conda/python 只读；正式 run 不清理。
+- **终局**：残差存在局部正效应（曾 8 翻正、off/coll 降）但 **gate 无选择性、机制不成立** ⇒ 条件轨关闭；**fallback 三方向待裁（§5）**。
+- **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量；hard-negative 采集/重训/几何反传/架构改动待 round-15（§5）。
 
 ---
 
@@ -81,7 +78,7 @@
 
 ---
 
-## 3. P1-v2 执行纪要（round-10/11 → 2026-10-11 晚）
+## 3. P1-v2 执行纪要（Step 1–3）
 
 ### 3.1 锁板与执行序
 
@@ -121,128 +118,25 @@
 - **D · dθ-only 反事实**（`runs/p1_0/pacing/dth_sweep_summary.json`）：dth0.85 succ **0.728**（+2.2pp vs 基线 0.706）、timeout 0.236→0.210、steer 饱和 0.132→**0.043**；dth0.90 0.696（≈基线）。结合 ③ 证据弱 ⇒ **V1（+7pp）确认为"更长步+更平曲率"的组合效应**，维持 calibration oracle 定位（不改训练 target）。
 - Δκ/progress 监控：未实施（保留于 P1-3 项）。
 
-### 3.6 问题清单与教训（本轮新增）
-
-1. **离线↔闭环分布迁移**：gated 监督的新失效模式（离线操作点 3.99% → 闭环 16.1%）；"正常态激活 <5%"应定义为**闭环度量**。
-2. **gate=0 监督源结构缺陷**：依赖活 env 的特征（footprint/inside_ratio）会限制控制态来源 → 补部署分布采集，或特征离线化。
-3. **残差有效但被 gate 拖垮**：8 例翻正、off/coll 降；瓶颈隔离在 **gate 精度**（不否定残差设计）。
-4. **数据语义**：CPU/CUDA 结局分歧（10/60 翻转）——数据自洽于 CPU；跨口径解读需谨慎。
-5. **工程坑**（已修/已记）：npz 逐索引重复解压=内存爆炸（SIGKILL 根因）；专家相位 `prev_policy_action` 语义对齐；footprint 判定必须活 env；P@10 受负比率强影响（必须带 n_pos/n_neg）。
-6. **语境**：失败态上模型-专家偏离巨大（E：状态条件性、residual=expert−base 大）——与 gated 残差设计前提自洽。
-
 ---
 
-## 4. round-12 决策请求
+## 4. Round-12A 零训练诊断与主线关闭（2026-10-11 晚）
 
-- **现状定性**：P1-v2 在"当前形态"未过 pilot 主门；**失败机制已隔离**（gate 分布迁移过触发）；残差正效应存在但被掩盖；探针 / collector / 同状态基础设施全部就绪且经硬门验证。
-- **候选方向（均未实施；按我方建议优先级）**：
-  1. **gate=0 监督覆盖修复**：在部署同源分布（val_only150 等 spec）上采集控制行 + 失败起点行，**活 env 全特征**（直指已验证根因，采集成本 ~1 小时级）。
-  2. **闭环操作点标定**：把"激活 <5%"改为**闭环度量**；用短闭环预跑标定阈值/分位数。
-  3. **特征离线可计算化**：footprint/margin 由 obs+plan+地图离线推导（解除活 env 依赖，扩展数据源到 expert5k 等）。
-  4. **反事实复盘**：8 翻正 vs 13 翻负的逐集激活模式（量化"gate 精度 ↔ 残差增益"，预估修复收益）。
-- **请求裁决**：①–④ 的取舍/组合；是否批准"**数据覆盖修复 + 同架构重跑 pilot**"；P1-3 几何 FP 门是否平行推进；冻结清单是否维持。
-- **提醒（不粉饰）**：追平/超越 IDM 的正面证据目前仍主要在 **无条件轨（V1 calibration oracle）**与 **RL 超教师（4B 门保持）**；P1-v2 条件轨遭遇的是**数据覆盖/标定级**问题（非架构级）——若一轮修复后仍不收敛，应认真评估切换主线。
+### 4.1 argue 链摘要（round-12 → 14；均已并入执行）
 
----
+1. **round-12（`017e425`）**：先零训练复盘（三机制分解：gate 误报 / 残差幅度 / 时序抖动），不得以调参直接下结论；① hard negatives 条件批准；② 阈值=部署参数（校准集选择、独立验证）；③ 特征离线化暂缓；**同架构仅一训、修复仍失败即关闭主线**。
+2. **round-13（`cb34622`）**：补三约束——CPU/CUDA 后端一致性探针（端到端全链）、common-prefix（首分歧）分解、episode 级"破坏性误触发 <5%"；扫描补 **2×2×2 交叉**；12B 标签须**同状态双 rollout**；"残差有效"表述纠偏（我方认账）。
+3. **round-14（`ea29866`）**：**12A LOCKED、批准开工**；后端差异处置=**统一 CUDA 口径**（基线 0.3400 比较性不得破坏）；九条件（含"非孤立有效区域"与 CPU/CUDA 无实质分叉）；**允许"无有效区域"=判负 → 关闭主线**。
+4. **我方并入的执行级修正**（§7.2/§8.2）：① "离线回放"落为**闭环重跑 + 逐步遥测**（旧产物无逐步字段，事实性缺口）；② "几何余量改善"预注册口径（H=6 窗口）；③ 后端分叉预案（CUDA 口径重抽取 vs 评测统一）。均已在 12A 落地。
 
-## 5. 文档与产物索引
+### 4.2 执行与复现（零训练）
 
-- **决策/契约**：`docs/p1_v2_decision.md`（P1-v2 决策与三步结果）、`docs/recovery_v2_contract.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`
-- **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`
-- **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）
-- **产物**：`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
-- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual 脚本 + logs）
-- **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
-- **关键提交**：`37000ae`（对齐过滤）、`a371cc5`（类别过滤）、`e953f10`（P1-3 损失）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 各步决策）
+- **遥测**（Stage1）：逐 step 记录 gate_prob / activated / streak / residual（raw·scaled）/ base·final plan / tracker_ref / lane_lat / footprint / rc / speed / pose；新旋钮 `--residual-scale`、`--debounce`（N 连续步 > 阈值才激活）；产物 trace.npz + JSONL + manifest；5 eps 冒烟与旧版动作序列一致。
+- **复现**（Stage2）：gate-off **0.3400/0.4933/0.0333**、gated **0.3067/0.4800/0.0267** 逐 episode 复现（13 翻负 / 8 翻正集合一致）。
+- **CPU/CUDA**（Stage3）：全链探针（2,538 状态）——gate 概率 Δ p95 2.5e-4、**各阈值跨界率 ≤0.12%**；base plan Δ 重尾（p95 0.137 / max 1.07）；端到端 40 eps：CUDA 16/19/1 vs CPU 14/21/1（**6 集翻转**）、材料分离（|Δpos|>0.5 m）中位 40 env steps。
+- **扫描**（Stage4）：15 配置（threshold ×5 → scale ×4 → debounce ×3 → 2×2×2 交叉），单轮 ~3.7 min。
 
----
-
-## 6. 存档说明（本版移除了什么 / 去哪找）
-
-- **本版移除**：§0.9/0.9.5/0.9.6（收拢期细节与滚动开工记录）、§1–§4（早期共识草案与分歧清单，已全部消解）、§5/§6 详表（矩阵全表/归因细节）、§7.1–§7.11（round-3–8 讨论全文）、§9–§11 原文（P1 执行进展、round-9/10 回应）、附录 A/B（round-1/2 回应全文）。
-- **全文位置**：`git show 7b83730:docs/deepseekv4p1_argue.md`（1114 行版）；更早各版见对应提交（`408b2a1`/`d5e85ff`/`9f611cf`…）。
-- **压缩时间线**（一句话历史）：
-  - 2026-10-09：round-1/2 收拢（`b2b0f64`/`5fdbddc`）；《评测兼容设计》落 `docs/p0_eval_compat_design.md`；
-  - 2026-10-09/10：P0 三件套（fail-fast / 兼容 runner / 审计工具）→ P0-B 矩阵 + P0-C 归因 → 审计定稿（§2.1）；
-  - 2026-10-10：排摸收官（§2.2）；round-3–8 讨论与 P1 计划锁板（执行手册 v1，§2.4）；
-  - 2026-10-10→11：P1 执行——P1-0 起点/配速（V1 发现）、P1-1 采集、P1-2 崩塌诊断、P1-3 实现（§2.3）；
-  - 2026-10-11：round-9/10 定板（§3.1）→ P1-v2 三步执行（§3.2–3.4）+ 旁线 D/E（§3.5）；
-  - 2026-10-11 晚：本文件精简；**round-12 决策（§4）**。
-
----
-
-## 7. 对 round-12 的分析与回应（2026-10-11 晚；供确认）
-
-### 7.1 接受（逐条；含一处认账）
-
-1. **④ 反事实复盘先行**——接受（成本/信息比最优；三机制的分解只有它能给出）。
-2. **纠偏认账**：我方"数据覆盖/标定问题、非架构级"的定性**证据不足一步**——16.1% vs 3.99% 只证明 **gate 输出分布迁移**；gate 误报 / 残差幅度过大 / 正确识别但过度减速（off-road→timeout）三机制未分解前不下结论。接受。
-3. **① hard negatives 条件批准**（1–2k、四类来源、每行同状态契约；不重采整套 v3）——接受。其"**重要修正**"（不得把 gated 模型遇到的状态一律标 gate=0；须证明 base plan 在 horizon 内安全有效 ∧ expert 不显著更优）——接受，将落为 `docs/recovery_v2_contract.md` 的 hard-negative 质量定义增补。
-4. **② 阈值=部署参数**：校准 split 选择、独立 clean150/eval500 验证；高阈值 + recall 大降 ⇒ 排序能力不足、非标定可解——接受。
-5. **③ 特征离线化暂缓**（先复盘、按需再议）——接受。
-6. **P1-3 几何 FP 门平行、只诊断**（不入反传；cos(traj,geometry)=−0.73 未解释前不联合）——接受（与现行纪律一致）。
-7. **"下一轮仅一个训练实验 + 不得同时改五类变量 + 修复仍失败即关闭主线"**——接受（归因纪律）。
-8. **验收增补**（timeout ≤ base+3pp；闭环激活/recall；保留 ≥6/8 翻正、消除 ≥半 13 翻负；二 epoch 不塌）——接受。
-
-### 7.2 操作化修正（3 条；第 1 条是事实性缺口）
-
-1. **"离线回放"在现产物上不可行，须落为"闭环重跑 + 逐步遥测"**。核验：clean150 现有产物仅逐 episode（`episodes.csv` 35+ 列 + `gate_stats` 聚合：steps/activated/prob_sum/prob_max），**未保存逐步 gate prob / residual / base·final plan / margin**——清单中"首次激活时间、持续长度、概率、residual ds·dθ、plan 差异"均**无数据来源**。修正方案（全程零训练）：① 驱动侧加逐步日志（jsonl：step / gate_prob / activated / residual_ds·dθ / base-vs-final plan 差 / lane_lat / footprint / rc / speed）；② **gate-off 与 gated 各重跑一遍**（~7.5 min 合计）供逐步 diff（含"首次轨迹分歧时刻"）；③ 三轴 = **轻量闭环重跑**：阈值先行 {0.05, 0.10, 0.20, 0.30, 0.50} → 在最优阈值上 scale {0.25, 0.5, 0.75, 1.0} → 再 debounce {1, 2, 3} ⇒ 合计 **~12–15 轮、≲1.5 h**（非全网格 60 轮；每轮 ≈3.5 min·6 workers）。
-2. **激活率须按 episode 类分报**：16.1% 均值混入了"正确激活"（失败类 episode）；须拆 normal 类 vs 失败类的逐集激活率与分布——其 Go 条件"正常 episode <5%"以此为准。
-3. **闭环 recall 的定义缺口**：clean150 无 intervention 标签 ⇒ 建议双口径报告：**离线 recall**（v2 val 行、各阈值曲线）+ 闭环"需要态"代理（激活窗口内锚点/footprint 事件的对齐率，标注近似性）。最终操作点按 ② 在**校准集**（建议 eval500 的 150-eps 子集；与 clean150 天然不同 spec）选择、clean150/eval500 独立验证。
-
-### 7.3 我方补充与保留（2 条）
-
-1. **Go 条件的"空集"是合法结果**：三轴空间内可能不存在同时满足 5 条件的配置——建议预先声明"**空集 = 12A 判负 → 直接 12B 或退出**"，避免为凑条件滑向调参。
-2. **退出后去向的预期应下调（如实）**：D 结果（dθ-only 仅 +2.2pp；V2 为负；V1=组合效应、无单轴可分解）表明"**单轴校准**"天花板低，"V1 calibration 可部署分解"的收益不应被高估；更现实的主挂账仍是 **RL 合法信用链（4B 门保持）**。此判断供"修复失败后路线"参考，不改变本轮"先修 gate"的顺序。
-
-### 7.4 落板（我方版本，等确认）
-
-- **Round-12A（零训练）**：逐步日志 + gate-off/gated 重跑 + 三轴轻量重跑 + 归因报表（m1 gate 误报 / m2 残差幅度 / m3 时序抖动分解 + 分类激活 + 关键段 diff）→ 按其 5 条件 Go/No-Go（含 §7.3-1 空集声明）。
-- **Round-12B（条件）**：hard negatives 1–2k（四类来源、同状态契约、质量定义 = 同状态 + base plan 安全 + expert 非优越）→ 契约增补。
-- **Round-12C**：同架构**仅一训** + 校准集选点 + 独立 clean150/eval500 验证；不通过 → **关闭 gated residual 主线**（不再加 gate 特征/容量/采样技巧）。
-- 本轮**不做任何训练**；冻结清单维持。
-
-**请求对方确认**：§7.2 三条操作化（尤其 ① 的落地方式与批次裁剪、③ 的校准集定义）。
-
----
-
-## 8. 对 round-13 的回应（三条新约束 + 扫描耦合 + 残差定性；2026-10-11 晚；供确认）
-
-> 说明：§7 = 对 `017e425` 的回应；本轮答复（`cb34622`）提出 3 条新约束、重述 2 条限制，批准 12A 遥测与诊断实现。逐条回应：
-
-### 8.1 接受与认账（逐条）
-
-1. **CPU/CUDA 后端一致性检查纳入 12A** —— 接受，**本轮最重要的缺口**。边界说明（我方补充）：10/60 集级翻转是**长时程轨迹发散放大后**的现象；单状态前向差预计为 float 噪声级，但**门槛临界敏感性 × 长时放大**必须实测。探针须**端到端**：同一 obs 输入 → [F2m 特征提取 + base plan + gate + residual] 在 CPU vs CUDA 分别前向，报告 **Δbase_plan / Δgate_prob / Δresidual 分布 + 门槛跨界比例**；并跑 **30–50 eps 的 CPU 端到端对照子集**（`device=cpu` 重放 clean150 子集）对照 episode 结局与 gate 统计。
-2. **common-prefix 纪律** —— 接受：记录 `first_action_divergence_step` / `first_state_divergence_step`；报告强制分 **Common prefix（机制归因）** vs **Post-divergence（效果描述）**；严禁把分叉后的差异归因于 gate 本身。
-3. **episode 级"破坏性误触发"替代平均激活率** —— 接受（其定义：gate-off 成功 ∧ gated 最终失败 ∧ 激活后窗口内几何余量无改善）。报表：破坏性误触发比例、首次误触发时间、每集激活段数、最长连续激活、累计 residual_ds/dθ、激活后 progress 损失；**Go 条件 = 破坏性误触发 <5%**。
-4. **扫描耦合**：顺序扫描后补 **2×2×2 交叉**（top-2 threshold × top-2 scale × debounce{1,2}）——接受（+8 轮，仍零训练；总批次 ~20–22 轮 ≲2 h）。
-5. **"残差有效、只是 gate 拖累"纠偏** —— **认账**：准确表述 = "residual 对部分状态有局部收益；**适用条件 / 幅度安全性 / 长期 progress 影响未明**"。12A 分析清单照其补充（gate precision / residual magnitude / residual direction / 累计纵向减速 / 连续触发 / backend sensitivity）。
-6. **12B hard-negative 同状态双 rollout 定义**（baseline 安全 ∧ expert 非优越；不得仅以六点 base plan 在路内判定）——接受；与本仓 collector 的 Pass A/B 机械一致（标签采集仍属 12B，本轮不做）。
-7. **12A 四阶段锁定与"暂不批准"清单** —— 接受（遥测 → 基准重跑 → 筛查 → Go/No-Go；暂不：hard-negative 采集 / 重训 / 几何反传 / 改架构 / 4A/4B）。
-
-### 8.2 操作化补充（3 条）
-
-1. **遥测存储**：逐步原始数组 → **NPZ**（本仓约定）+ 标量/索引 → **JSONL**；估算 150 eps × ~700 步 × 数组 ≈ 数十 MB/配置 → 扫描批次按配置分目录 + manifest 管理。
-2. **"几何余量改善"操作化**（预注册）：激活后 **H=6 决策步**窗口内 `min lane_lat` / `footprint valid` / `min inside_ratio` 与 gate-off 对应段比较；"改善" = 至少一项回正且无新增越界（common prefix 内有效；分叉后仅描述）。
-3. **后端差异的分叉预案**（若 12A 判"明显"）：不进联合训练，二选一并在 12B 前完成——(a) gate/特征按 **CUDA 口径**重抽取（重训归 12C）；(b) 评测侧后端与采集一致（**须复核对既有基线 0.3400 的比较口径**——基线为 CUDA）。决策依据 = 探针跨界比例 × 闭环影响量级。
-
-### 8.3 我方保留（1 条）
-
-- **"空集 = 判负"再确认**：全部扫描（含交叉）后若**无非空有效区域**，直接关闭 gated residual 主线，不滑向"补数据挽救"或架构加码。
-
-### 8.4 落板（与 round-13 对齐）
-
-- **立即做（零训练）**：逐步遥测实现+验证 → 基准重跑（gate-off/gated 复现确认 + CPU/CUDA 子集）→ 顺序扫描 + 2×2×2 交叉 → 归因报告（common-prefix / 后分叉分离 + episode 级破坏性误触发）→ Go/No-Go（其 7 条件 + 空集声明）。
-- **暂不**：hard-negative 采集、重训、几何反传、改架构、4A/4B。
-- 冻结清单维持；**本轮不做任何训练**。
-
-**请求对方确认**：§8.1-1 探针范围（端到端 + 门槛跨界比例 + CPU 对照子集）与 §8.2-3 的分叉预案。
-
----
-
-## 9. Round-12A 结果（21:36）：**NO-GO（无有效区域）→ 按预注册关闭 gated residual 主线**
-
-- **九条件（15 配置全未过；finalists=∅）**，关键行：
+### 4.3 九条件与三问（终判依据）
 
 | tag | succ | off | coll | timeout | destr | ≥6/8 | ≥7/13 | 非孤立 | CPU/CUDA |
 |---|---|---|---|---|---|---|---|---|---|
@@ -255,8 +149,57 @@
 - **三问答案（证据）**：
   1. **gate 误报且无选择性**：闭环激活 16.1% 决策步 vs 离线 3.99%；**hist_8（被修好）17.07% ≈ hist_13（被弄坏）15.87% ≈ 其他 16.02%**；保守配置下**反选择**（t050_s050_d2：1.2% vs 4.7%；t010_s050_d1：7.8% vs 12.6%）。
   2. **residual 1.0 强度偏强**：@t050，s050 > s100（succ .3467 vs .3333、off .4800 vs .5067）；方向"**救余量、伤进度**"（timeout 23→30、均速 3.39→3.27；目标 ds 中位 −1.06=减速）。
-  3. **连续触发 + 后端离散化放大**：激活段均值 4.43 步、**最长 55 连续决策步（27.5s）**；**2,336 个分叉后激活**（138/150 集）；后端：单步 gate 跨界 ≤0.12%，但 e2e **6/40 集结局改变**、材料分离（|Δpos|>0.5m）中位 40 env steps ⇒ 阈值离散化把 ~1e-3 前向差放大成材料性分叉。
+  3. **连续触发 + 后端离散化放大**：激活段均值 4.43 步、**最长 55 连续决策步（27.5s）**；**2,336 个分叉后激活**（138/150 集）；后端：单步 gate 跨界 ≤0.12%，但 e2e **6/40 集结局改变**、材料分离中位 40 env steps ⇒ 阈值离散化把 ~1e-3 前向差放大成材料性分叉。
 - **正面事实（记录，不改判）**：t050_s050_d2 的 **aggregate 反超基线**（+1.33pp succ / −2.67pp off / timeout +2pp 在门内）；但机制不可信（门无选择性、单 seed、净 +2 集），且按锁定条件判负。
-- **口径问题（随档，供后续）**：① 预注册 destructive-FP 口径**结构性近空**（首激活即分叉因 → 每集 prefix 内仅 1 个窗口、13/13 判"改善"；其余 26–37 个激活在分叉后）——建议下轮改"post-divergence 净变化/段均时长×进度损失"；② **common-prefix 仅适合同设备对照**（CPU/CUDA 从第 1 步起 ~1e-3 差异）；③ "翻正集"由激进配置（t005）定义 ⇒ 保守配置天然丢失（条件间张力）；④ 网格稀疏（非孤立判定已按"同轴相邻"文档化）。
-- **判定与行动（按 round-14 预授权）**：**关闭 gated residual 主线**——不补 hard negatives、不扩 gate、不调采样比例；全部产物保留于 `runs/p1_v2/round12a/`（含遥测、探针、15 配置扫描、归因报告、九条件表）。
-- **转 round-15 决策**：fallback 方向待裁（协议所列为：**V1 calibration 可部署分解 / action·plan 纵向尺度校准 / RL 合法信用链〔4B 门保持〕**）；并请关注**跨后端一致性的全局含义**——CPU 采集 vs CUDA 部署存在 ~15% 集级结局差，后续任何条件监督 / 数据采集 / 校准实验均应统一 CUDA 口径或显式量化之。
+
+### 4.4 口径修正与教训（全轮汇总，随档）
+
+1. **"正常态激活 <5%"必须定义为闭环度量**（离线 3.99% → 闭环 16.1%，不可迁移）。
+2. **destructive-FP 预注册口径结构性近空**：首激活即分叉因 → 每集 prefix 内仅 1 个窗口（13/13 判"改善"），其余 26–37 个激活在分叉后——若复活条件轨，改"post-divergence 净变化 / 段均时长×进度损失"。
+3. **common-prefix 仅适合同设备对照**（CPU/CUDA 从第 1 步起 ~1e-3 差异）；跨设备用"材料分离步 + 结局计数"。
+4. **条件间张力**："翻正集"由激进配置（t005）定义 ⇒ 保守配置天然丢失；若以净收益为目标应改条件表述（本轮按锁定规则判负，仅记录）。
+5. **跨后端 ~15% 集级差**（CPU 采集 vs CUDA 部署；单步 ~1e-3 → 长时程放大）⇒ **后续任何条件监督 / 采集 / 校准统一 CUDA 口径或显式量化**。
+6. **工程坑**（已修/已记）：npz 逐索引重复解压=内存爆炸（SIGKILL 根因）；专家相位 `prev_policy_action` 语义对齐；footprint 判定必须活 env；P@10 受负比率强影响（须带 n_pos/n_neg）；mode 标签邻步切换率 0.611（仅分层）。
+7. **语境**：失败态上模型-专家偏离巨大（E：状态条件性）——与残差设计前提自洽，但 gate 的**选择性**才是瓶颈。
+
+### 4.5 判定与行动
+
+- **NO-GO（无有效区域）→ 按预注册关闭 gated residual 主线**：不补 hard negatives、不扩 gate、不调采样比例；全部产物保留于 `runs/p1_v2/round12a/`（遥测、探针、15 配置扫描、归因报告、九条件表）；零生产代码改动。
+- **转 round-15（§5）**。
+
+---
+
+## 5. round-15 决策请求
+
+- **fallback 三方向（协议所列；均未实施）**：① V1 calibration 可部署分解；② action·plan 纵向尺度校准；③ RL 合法信用链（4B 门保持）。
+- **我方预期（如实）**：D 结果（dθ-only +2.2pp；V2 为负；V1=组合效应）表明**单轴校准天花板低**，① 的收益不应高估；**③ 是更现实的主挂账**。
+- **跨领域提醒**：跨后端 ~15% 集级差（§4.4-5）——fallback 启动前先定"CUDA 口径统一"的执行方式（重抽取 / 重校准 / 评测约定）。
+- **口径遗产（若将来复活条件轨）**：destructive-FP 改闭环净变化口径；12B 标签须同状态双 rollout（baseline 安全 ∧ expert 非优越）。
+- **请求裁决**：fallback 优先级；确认主线关闭与冻结清单维持；P1-3 几何 FP 门是否平行推进（只诊断）。
+
+---
+
+## 6. 文档与产物索引
+
+- **决策/契约**：`docs/p1_v2_decision.md`（P1-v2 决策 + Round-12A 结果）、`docs/recovery_v2_contract.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`
+- **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`
+- **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）
+- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
+- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a 脚本 + logs）
+- **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
+- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（§7/§8 回应）、`5962848`（12A 开工）、`249c51c`（12A NO-GO/关闭）
+
+---
+
+## 7. 存档说明（历次精简 / 去哪找）
+
+- **本版（第二轮精简）移除**：round-12/13/14 往来全文（原 §7/§8）、round-12 请求（原 §4）、12A 原 §9（并入 §4）；全文见 `git show 249c51c:docs/deepseekv4p1_argue.md`（262 行版）。
+- **第一轮精简（1114 → 166 行）移除**：§0.9 收拢细节、§1–§4 早期草案、§5/§6 详表、§7.1–7.11 回合全文、§9–§11 原文、附录 A/B；全文见 `git show 7b83730:docs/deepseekv4p1_argue.md`（1114 行版）。
+- **压缩时间线**：
+  - 2026-10-09：round-1/2 收拢；《评测兼容设计》落 `docs/p0_eval_compat_design.md`；
+  - 2026-10-09/10：P0 三件套 → P0-B 矩阵 + P0-C 归因 → 审计定稿（§2.1）；
+  - 2026-10-10：排摸收官（§2.2）；round-3–8 与 P1 锁板（§2.4）；
+  - 2026-10-10→11：P1 执行——P1-0/1/2/3（§2.3）；
+  - 2026-10-11：round-9/10 定板（§3.1）→ P1-v2 三步（§3.2–3.4）+ 旁线 D/E（§3.5）；
+  - 2026-10-11 晚：round-12/13/14 讨论（§4.1）→ **Round-12A 执行与 NO-GO（§4.2–4.5）**；
+  - 2026-10-11 深夜：本文件第二轮精简；**round-15 决策（§5）**。
