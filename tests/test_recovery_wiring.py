@@ -70,6 +70,7 @@ def _recovery_arrays(
     n_train: int = 4,
     n_val: int = 2,
     unusable_train: int = 1,
+    misaligned_train: int = 0,
 ) -> dict:
     n = n_train + n_val
     arrays: dict = {}
@@ -89,6 +90,12 @@ def _recovery_arrays(
     arrays["pool"] = np.array(["eval500"] * n)
     arrays["episode_id"] = np.array(list(range(n_train)) + [90 + i for i in range(n_val)], dtype=np.int64)
     arrays["step"] = (np.arange(n, dtype=np.int64) * 5 + 100)
+    # 默认全部为"对齐行"（step == takeover_step）；misaligned_train 标记前 N 个 train 行为
+    # 反事实错位行（step > takeover_step）
+    takeover = arrays["step"].copy()
+    if misaligned_train:
+        takeover[:misaligned_train] -= 5
+    arrays["takeover_step"] = takeover
     arrays["usable"] = np.array(
         [True] * (n_train - unusable_train) + [False] * unusable_train + [True] * n_val
     )
@@ -112,13 +119,15 @@ def _write_recovery_dir(
     n_train: int = 4,
     n_val: int = 2,
     unusable_train: int = 1,
+    misaligned_train: int = 0,
     name: str = "recovery",
     drop_keys: tuple = (),
 ) -> tuple[Path, dict]:
     directory = tmp_path / name
     directory.mkdir(parents=True, exist_ok=True)
     arrays = _recovery_arrays(
-        window_arrays, n_train=n_train, n_val=n_val, unusable_train=unusable_train
+        window_arrays, n_train=n_train, n_val=n_val, unusable_train=unusable_train,
+        misaligned_train=misaligned_train,
     )
     for key in drop_keys:
         arrays.pop(key, None)
@@ -227,6 +236,39 @@ def test_merge_recovery_fail_closed_missing_channel(tmp_path: Path) -> None:
     recovery_dir, _ = _write_recovery_dir(tmp_path, window_arrays, drop_keys=("obs__od",))
     dataset = _load_window(window_dir)
     with pytest.raises(SystemExit, match="缺少必需观测通道"):
+        _merge_recovery_rows(
+            dataset, np.arange(dataset.count, dtype=np.int64), recovery_dir, logger=lambda _: None
+        )
+
+
+def test_recovery_row_filter_takeover_only_default_and_all(tmp_path: Path) -> None:
+    """P1-2 崩塌根因修复：默认只并入 step==takeover_step 的对齐行；all 才保留反事实行。"""
+    window_dir, window_arrays = _write_window_dir(tmp_path)
+    recovery_dir, _ = _write_recovery_dir(
+        tmp_path, window_arrays, n_train=4, n_val=2, unusable_train=0, misaligned_train=2
+    )
+    dataset = _load_window(window_dir)
+    train_idx = np.arange(dataset.count, dtype=np.int64)
+    merged, _, rec_index, _, info = _merge_recovery_rows(
+        dataset, train_idx, recovery_dir, logger=lambda _: None
+    )
+    assert info["row_filter"] == "takeover_only"
+    assert info["train_rows"] == 2
+    assert info["counterfactual_rows_excluded"] == 2
+    assert rec_index.size == 2 and merged.count == dataset.count + 2
+    # all：保留全部 4 行（含 2 反事实错位行）
+    merged_all, _, rec_all, _, info_all = _merge_recovery_rows(
+        dataset, train_idx, recovery_dir, row_filter="all", logger=lambda _: None
+    )
+    assert info_all["train_rows"] == 4 and info_all["counterfactual_rows_excluded"] == 0
+    assert rec_all.size == 4 and merged_all.count == dataset.count + 4
+
+
+def test_recovery_row_filter_missing_takeover_fail_closed(tmp_path: Path) -> None:
+    window_dir, window_arrays = _write_window_dir(tmp_path)
+    recovery_dir, _ = _write_recovery_dir(tmp_path, window_arrays, drop_keys=("takeover_step",))
+    dataset = _load_window(window_dir)
+    with pytest.raises(SystemExit, match="takeover_step"):
         _merge_recovery_rows(
             dataset, np.arange(dataset.count, dtype=np.int64), recovery_dir, logger=lambda _: None
         )

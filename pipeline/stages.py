@@ -3631,6 +3631,43 @@ def _recovery_episode_keys(npz: Mapping[str, Any]) -> np.ndarray:
     return np.asarray([f"{p}:{int(e)}" for p, e in zip(pool, episode)], dtype=object)
 
 
+#: recovery 行过滤口径（P1-2 崩塌根因修复，2026-10-11）：
+#: ``takeover_only``（默认）= 只并入 ``step == takeover_step`` 的**对齐行**——该步 Pass-1 学生
+#: 状态与 Pass-2 专家状态经 collector 一致性核验同状态（obs 与专家标签同帧）；
+#: ``all`` = 全部可用行——``step > takeover_step`` 行为**反事实错位对**：obs 取 Pass-1 学生状态
+#: （``collect_recovery.py:860``）而专家标签（action chain/recovery traj）以 Pass-2 专家状态为
+#: 帧（``collect_recovery.py:818``），Pass-1/Pass-2 在接管后分叉且无一致性核验
+#: （``compare_prefix(..., takeover_step)`` 只覆盖接管步）→ 训练对系统性错位（实测 80% 行，
+#: 见 ``runs/p1_2/diag/recovery_batch_integrity.json``）。仅供反事实分析，不得作训练对。
+RECOVERY_ROW_FILTERS: Tuple[str, ...] = ("takeover_only", "all")
+
+
+def _apply_recovery_row_filter(
+    npz: Mapping[str, Any], rows: np.ndarray, row_filter: str
+) -> "tuple[np.ndarray, int]":
+    """按 ``row_filter`` 过滤 recovery 行；返回 ``(selected_rows, excluded_count)``。
+
+    ``takeover_only``：``step == takeover_step``（对齐行）；``takeover_step`` 缺失 → fail-closed。
+    """
+    mode = str(row_filter).strip().lower()
+    if mode not in RECOVERY_ROW_FILTERS:
+        raise SystemExit(
+            f"[stageB3][recovery] row_filter 非法：{row_filter!r}（{' | '.join(RECOVERY_ROW_FILTERS)}）"
+        )
+    selected = np.asarray(rows, dtype=np.int64)
+    if mode == "all":
+        return selected, 0
+    if "takeover_step" not in npz:
+        raise SystemExit(
+            "[stageB3][recovery] 缺 'takeover_step' → 无法做对齐行过滤（takeover_only 口径）"
+            "；如确需全部行请显式 row_filter='all'（训练对错位风险，见 docstring）"
+        )
+    takeover = np.asarray(npz["takeover_step"], dtype=np.int64)
+    step = np.asarray(npz["step"], dtype=np.int64)
+    kept = selected[step[selected] == takeover[selected]]
+    return np.asarray(kept, dtype=np.int64), int(selected.size - kept.size)
+
+
 def _recovery_obs_present(npz: Mapping[str, Any]) -> np.ndarray:
     """逐行 student obs 可用性（``obs__ego``/``obs__ego_mask`` 全有限）。
 
@@ -3829,6 +3866,7 @@ def _merge_recovery_rows(
     recovery_dir: str | Path,
     *,
     base_traj_aux_valid: Optional[np.ndarray] = None,
+    row_filter: str = "takeover_only",
     logger: Any = print,
 ) -> "tuple[BCDataset, np.ndarray, np.ndarray, Optional[np.ndarray], Dict[str, Any]]":
     """P1-2：把 recovery 行（质量门可用 ∧ split train）并入 phase-3 训练集（默认关闭）。
@@ -3850,6 +3888,12 @@ def _merge_recovery_rows(
     if rows.size == 0:
         raise SystemExit(
             f"[stageB3][recovery] {recovery_path} 无可用训练行（usable ∧ split train）→ 拒绝"
+        )
+    rows, counterfactual_excluded = _apply_recovery_row_filter(npz, rows, row_filter)
+    if rows.size == 0:
+        raise SystemExit(
+            f"[stageB3][recovery] row_filter={row_filter} 后无训练行"
+            f"（counterfactual 排除 {counterfactual_excluded}）→ 拒绝"
         )
     recovery_arrays, history, extra = _build_recovery_arrays(dataset.arrays, npz, rows)
     window_rows = int(dataset.count)
@@ -3897,7 +3941,9 @@ def _merge_recovery_rows(
     info: Dict[str, Any] = {
         "enabled": True,
         "dir": str(recovery_path),
+        "row_filter": str(row_filter),
         "train_rows": int(rows.size),
+        "counterfactual_rows_excluded": int(counterfactual_excluded),
         "val_usable_rows": int(val_usable_rows),
         "student_obs_missing_rows": int(obs_missing_rows),
         "window_rows": window_rows,
@@ -3915,7 +3961,8 @@ def _merge_recovery_rows(
     }
     logger(
         f"[stageB3][recovery] 合并：窗口(+锚) {window_rows} + recovery {rows.size}"
-        f"（{recovery_path}；val 可用 {val_usable_rows} 行仅监控；"
+        f"（{recovery_path}；row_filter={row_filter}；反事实错位行排除 {counterfactual_excluded}"
+        f"（step>takeover_step，obs=Pass-1 而标签=Pass-2 帧）；val 可用 {val_usable_rows} 行仅监控；"
         f"student obs 缺失排除 {obs_missing_rows} 行）= {merged.count} 行；"
         f"episode_id 偏移 +{offset}（recovery 每行独立 id，原 episode 另存）；类分布={info['class_counts']}；"
         f"traj_aux_valid={info['traj_aux_valid_sum']:.0f}/{merged.count}"
@@ -4298,11 +4345,16 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     recovery_indices: Optional[np.ndarray] = None
     recovery_dir_arg = str(getattr(args, "recovery_dir", None) or "").strip()
     if recovery_dir_arg:
+        recovery_row_filter = str(
+            getattr(args, "phase3_recovery_row_filter", None)
+            or (dict(p3_cfg.get("recovery", {}) or {}).get("row_filter", "takeover_only"))
+        ).strip().lower()
         dataset, train_idx, recovery_indices, traj_aux_valid, recovery_info = _merge_recovery_rows(
             dataset,
             train_idx,
             recovery_dir_arg,
             base_traj_aux_valid=traj_aux_valid,
+            row_filter=recovery_row_filter,
             logger=print,
         )
         arrays = dataset.arrays
@@ -5579,6 +5631,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="recovery 行 batch 占比（默认 0.25；仅 --recovery-dir 给出时生效；"
                              "batch 内 recovery 目标数 = round(ratio×batch)，Python 银行家舍入，"
                              "建议 ratio×batch 为整数；0 = 合并不混采）")
+    parser.add_argument("--phase3-recovery-row-filter", choices=("takeover_only", "all"), default=None,
+                        help="recovery 行过滤（默认 takeover_only = 只并入 step==takeover_step 的"
+                             "对齐行：obs=Pass-1 与专家标签=Pass-2 同状态；all = 全部可用行，"
+                             "其中 step>takeover_step 行是反事实错位对（训练会崩，见 "
+                             "runs/p1_2/diag/recovery_batch_integrity.json））")
     # ---- lane P3-I：配方开关（冻结 / 5k 锚）----
     parser.add_argument(
         "--phase3-freeze",
