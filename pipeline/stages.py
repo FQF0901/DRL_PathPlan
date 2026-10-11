@@ -71,6 +71,7 @@ from pipeline.trainer import (  # noqa: E402
     DEFAULT_PRIMARY_LR_SCALE,
     DEFAULT_PROBE_BATCH,
     DEFAULT_PROBE_INTERVAL,
+    DEFAULT_RECOVERY_CHAIN_DECAY,
     DEFAULT_STAGE_BATCH_SIZE,
     MaterializedBCDataset,
     PHASE3_WM_LOSS_KEYS,
@@ -89,6 +90,7 @@ from pipeline.trainer import (  # noqa: E402
     capture_rng_state,
     config_snapshot_hash,
     dataset_weight_report,
+    effective_traj_aux_mask,
     ego_kpi_arrays,
     load_checkpoint,
     load_optimizer_state,
@@ -3591,6 +3593,336 @@ def _merge_anchor_rows(
     return merged, merged_train_idx, traj_aux_valid, info
 
 
+# --------------------------------------------------------------------------- #
+# P1-2：recovery 数据接线（datasets/recovery_v1 → 训练集；默认关闭）
+# --------------------------------------------------------------------------- #
+
+#: recovery 行并入训练集时映射的紧凑真实历史键（在线训练路径消费的通道：od/ld 6 帧历史；
+#: ego/others 历史在线路径不产出 → 不映射，net 按 ``net/mem.py`` 契约回退）
+_RECOVERY_HIST_KEYS: Tuple[str, ...] = ("od_hist", "ld_hist")
+#: recovery 适配时"未采集"字段（显式 NaN；不伪造、不静默置零；phase3 不消费）
+_RECOVERY_NAN_KEYS: Tuple[str, ...] = (
+    "traj30",
+    "traj30_measured",
+    "labels",
+    "labels_raw",
+    "roundtrip_dense_err",
+    "roundtrip_key_err",
+)
+
+
+def _load_recovery_split(recovery_dir: str | Path) -> Dict[str, Any]:
+    """读 ``split_manifest.json``（train/val episode 键；缺失/为空 → SystemExit）。"""
+    path = Path(recovery_dir) / "split_manifest.json"
+    if not path.is_file():
+        raise SystemExit(f"[stageB3][recovery] split_manifest.json 不存在：{path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    train = payload.get("train_episodes")
+    if not isinstance(train, list) or not train:
+        raise SystemExit(f"[stageB3][recovery] split_manifest 缺少非空 train_episodes：{path}")
+    return payload
+
+
+def _recovery_episode_keys(npz: Mapping[str, Any]) -> np.ndarray:
+    """``pool:episode_id`` 全局键（与 split_manifest 同口径）。"""
+    pool = np.asarray(npz["pool"]).astype(str)
+    episode = np.asarray(npz["episode_id"], dtype=np.int64)
+    return np.asarray([f"{p}:{int(e)}" for p, e in zip(pool, episode)], dtype=object)
+
+
+def _recovery_obs_present(npz: Mapping[str, Any]) -> np.ndarray:
+    """逐行 student obs 可用性（``obs__ego``/``obs__ego_mask`` 全有限）。
+
+    Pass-1 学生 episode 在锚点前已终止的行整行 obs 为 NaN（反事实对照行）→ 不可训练；
+    本函数用于**显式排除**（计入 info/日志），不得静默置零。
+    """
+    ego = np.asarray(npz["obs__ego"], dtype=np.float32)
+    mask = np.asarray(npz["obs__ego_mask"], dtype=np.float32)
+    ego_ok = np.isfinite(ego).all(axis=tuple(range(1, ego.ndim)))
+    mask_ok = np.isfinite(mask).all(axis=tuple(range(1, mask.ndim)))
+    return ego_ok & mask_ok
+
+
+def _recovery_train_row_indices(
+    npz: Mapping[str, Any], split: Mapping[str, Any]
+) -> "tuple[np.ndarray, int, int]":
+    """（可用 ∧ split train ∧ obs 可用）行号 + 可用 val 行数 + obs 缺失被排除行数。
+
+    val 仅供监控/报告，不进训练集；obs 缺失行（Pass-1 反事实行）显式排除并计数。
+    """
+    if "usable" not in npz:
+        raise SystemExit("[stageB3][recovery] samples.npz 缺少 'usable' 质量门字段")
+    usable = np.asarray(npz["usable"], dtype=bool)
+    keys = _recovery_episode_keys(npz)
+    train_set = {str(key) for key in split["train_episodes"]}
+    in_train = np.asarray([str(key) in train_set for key in keys], dtype=bool)
+    present = _recovery_obs_present(npz)
+    base = usable & in_train
+    train_rows = np.flatnonzero(base & present)
+    obs_missing = int(np.count_nonzero(base & ~present))
+    val_rows = int(np.count_nonzero(usable & ~in_train))
+    return train_rows, val_rows, obs_missing
+
+
+def _recovery_obs(npz: Mapping[str, Any], name: str, rows: np.ndarray) -> np.ndarray:
+    """``obs__<name>`` → float32 切片；缺失 → SystemExit（fail-closed，不得静默置零）。"""
+    key = f"obs__{name}"
+    if key not in npz:
+        raise SystemExit(
+            f"[stageB3][recovery] samples.npz 缺少必需观测通道 {key!r} → 拒绝静默置零"
+        )
+    return np.asarray(npz[key], dtype=np.float32)[rows]
+
+
+def _recovery_obs_int64(npz: Mapping[str, Any], name: str, rows: np.ndarray) -> np.ndarray:
+    """``obs__<name>`` 整数值 → int64（非整数有限值 → SystemExit：id 契约）。
+
+    采集侧空槽位 = NaN（float32 存储）→ 映射为 ``-1``（与 expert BC ``od_id`` 缺失约定一致；
+    显式缺失哨兵，不是静默置零）。
+    """
+    values = _recovery_obs(npz, name, rows)
+    finite = np.isfinite(values)
+    rounded = np.rint(np.where(finite, values, 0.0))
+    if not np.allclose(values[finite], rounded[finite]):
+        raise SystemExit(f"[stageB3][recovery] obs__{name} 含非整数值 → 拒绝（id 契约）")
+    out = rounded.astype(np.int64)
+    out[~finite] = -1
+    return out
+
+
+def _obs_slot0(values: np.ndarray) -> np.ndarray:
+    """``(N,1,D)`` 单槽位维 → ``(N,D)``（``(N,D)`` 原样；兼容新旧采集形状）。"""
+    arr = np.asarray(values)
+    return arr[:, 0, :] if arr.ndim == 3 and int(arr.shape[1]) == 1 else arr
+
+
+def _build_recovery_arrays(
+    window_arrays: Mapping[str, np.ndarray],
+    npz: Mapping[str, Any],
+    rows: np.ndarray,
+) -> "tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, np.ndarray]]":
+    """recovery 行 → 窗口 schema 数组 + 紧凑历史覆盖数组 + 分析列（缺通道 → SystemExit）。
+
+    映射口径（§7.10-A6 / recovery schema）：
+    - 监督：``action`` = ``expert_action_chain``（专家 recovery 链=标签）；``traj6`` =
+      ``expert_recovery_traj``（相对 pose，真实值，**禁合成 traj6**）；执行轨迹另列
+      ``recovery_actual_traj`` = ``expert_actual_recovery_traj``（分析用，不进损失）；
+    - obs/history：``obs__<key>`` → 同名训练通道；od/ld 6 帧历史走**紧凑覆盖**
+      （``recovery_hist__*`` + ``recovery_hist_rows``，仅 recovery 行，见 ``BCDataset``）；
+    - 未采集字段（:data:`_RECOVERY_NAN_KEYS`）显式 NaN；``wm_valid`` = 0（recovery 行无同
+      episode 未来帧；recovery 配方 WM 监督自动降级）；权重类字段 = 1.0（自然分布不重加权）。
+    """
+    n = int(rows.size)
+    direct_obs = (
+        "ego",
+        "ego_mask",
+        "ego_world",
+        "ego_world_mask",
+        "hist_valid",
+        "ld",
+        "ld_mask",
+        "nav",
+        "nav_mask",
+        "od",
+        "od_mask",
+        "od_presence",
+        "others",
+        "others_mask",
+        "route_world",
+        "route_world_mask",
+        "signal",
+        "signal_mask",
+    )
+    out: Dict[str, np.ndarray] = {}
+    for key in window_arrays:
+        reference = np.asarray(window_arrays[key])
+        tail = tuple(reference.shape[1:])
+        dtype = reference.dtype
+        if key in direct_obs:
+            values = _recovery_obs(npz, key, rows)
+            if tuple(values.shape[1:]) != tail:
+                raise SystemExit(
+                    f"[stageB3][recovery] obs__{key} 形状 {values.shape[1:]} != 窗口 {tail} → 拒绝"
+                )
+            if not np.all(np.isfinite(values)):
+                raise SystemExit(
+                    f"[stageB3][recovery] obs__{key} 含非有限值（obs 可用性过滤未覆盖）→ 拒绝"
+                    "（不得静默置零）"
+                )
+            out[key] = values.astype(np.float32)
+        elif key == "episode_id":
+            out[key] = np.asarray(npz["episode_id"], dtype=np.int64)[rows]
+        elif key == "step":
+            out[key] = np.asarray(npz["step"], dtype=np.int64)[rows]
+        elif key == "pose":
+            out[key] = _obs_slot0(_recovery_obs(npz, "ego_world", rows))
+        elif key == "prev_action":
+            out[key] = _obs_slot0(_recovery_obs(npz, "ego", rows))[:, 6:8]
+        elif key == "action":
+            values = np.asarray(npz["expert_action_chain"], dtype=np.float32)[rows]
+            if not np.all(np.isfinite(values)):
+                raise SystemExit("[stageB3][recovery] expert_action_chain 含非有限值 → 拒绝（标签契约）")
+            out[key] = values
+        elif key == "traj6":
+            values = np.asarray(npz["expert_recovery_traj"], dtype=np.float32)[rows]
+            if not np.all(np.isfinite(values)):
+                raise SystemExit("[stageB3][recovery] expert_recovery_traj 含非有限值 → 拒绝")
+            out[key] = values
+        elif key in _RECOVERY_NAN_KEYS:
+            shape = (n,) + tail if tail else (n,)
+            out[key] = np.full(shape, np.nan, dtype=np.float32)
+        elif key == "lane_lat":
+            out[key] = np.asarray(npz["lane_lat"], dtype=np.float32)[rows]
+        elif key == "od_id":
+            out[key] = _recovery_obs_int64(npz, "od_id", rows)
+        elif key == "od_id_hist":
+            out[key] = _recovery_obs_int64(npz, "od_id_hist", rows)
+        elif key == "od_presence_hist":
+            out[key] = _recovery_obs(npz, "od_presence_hist", rows)
+        elif key in ("train_weight", "sample_weight", "balance_weight", "frame_usable"):
+            out[key] = np.ones(n, dtype=np.float32)
+        elif key == "wm_valid":
+            out[key] = np.zeros((n,) + tail, dtype=np.float32)
+        elif key == "balance_group":
+            out[key] = np.full(n, "recovery", dtype=dtype)
+        elif key == "difficulty":
+            out[key] = np.asarray(npz["class_label"]).astype(dtype)[rows]
+        elif key == "geometry":
+            out[key] = np.asarray(npz["geometry"]).astype(dtype)[rows]
+        elif key == "filter_reason":
+            out[key] = np.full(n, "recovery", dtype=dtype)
+        elif key == "seed":
+            out[key] = np.zeros(n, dtype=dtype)  # recovery 未存 spec seed；仅审计字段
+        elif key == "spec_id":
+            out[key] = np.asarray(npz["episode_id"], dtype=np.int64)[rows]
+        elif key == "split":
+            out[key] = np.full(n, "train", dtype=dtype)
+        else:
+            raise SystemExit(
+                f"[stageB3][recovery] 窗口键 {key!r} 未定义映射 → 拒绝静默"
+                "（请在 _build_recovery_arrays 显式扩展）"
+            )
+    history: Dict[str, np.ndarray] = {}
+    for name in _RECOVERY_HIST_KEYS:
+        values = _recovery_obs(npz, name, rows)
+        mask = _recovery_obs(npz, f"{name}_mask", rows)
+        if not np.all(np.isfinite(values)) or not np.all(np.isfinite(mask)):
+            raise SystemExit(f"[stageB3][recovery] {name}/mask 含非有限值 → 拒绝（不得静默置零）")
+        history[name] = values
+        history[f"{name}_mask"] = mask
+    hist_valid = _recovery_obs(npz, "hist_valid", rows)
+    if not np.all(np.isfinite(hist_valid)):
+        raise SystemExit("[stageB3][recovery] hist_valid 含非有限值 → 拒绝")
+    history["hist_valid"] = hist_valid
+    extra = {
+        # 执行轨迹另列（分析用；不进损失）
+        "recovery_actual_traj": np.asarray(npz["expert_actual_recovery_traj"], dtype=np.float32)[rows],
+        "recovery_class_id": np.asarray(npz["class_id"], dtype=np.int8)[rows],
+    }
+    return out, history, extra
+
+
+def _merge_recovery_rows(
+    dataset: BCDataset,
+    train_idx: np.ndarray,
+    recovery_dir: str | Path,
+    *,
+    base_traj_aux_valid: Optional[np.ndarray] = None,
+    logger: Any = print,
+) -> "tuple[BCDataset, np.ndarray, np.ndarray, Optional[np.ndarray], Dict[str, Any]]":
+    """P1-2：把 recovery 行（质量门可用 ∧ split train）并入 phase-3 训练集（默认关闭）。
+
+    - 行序：窗口(+锚)行在前、recovery 行在后；``episode_id`` 累积偏移（防查表/未来目标冲突）；
+    - **只合并 split train 行**；val 行仅计数入 info（监控/报告用）；
+    - ``traj_aux_valid``：窗口行 0（dagger traj6 是常量外推合成值）、锚/recovery 行 1
+      （真实 traj6）——与 lane U4/锚同口径（phase3 traj 仅监控；掩码落 metrics/审计）；
+    - 返回 ``(merged, merged_train_idx, recovery_indices, traj_aux_valid, info)``。
+    """
+    recovery_path = Path(recovery_dir)
+    npz_path = recovery_path / "samples.npz"
+    if not npz_path.is_file():
+        raise SystemExit(f"[stageB3][recovery] samples.npz 不存在：{npz_path}")
+    split = _load_recovery_split(recovery_path)
+    with np.load(npz_path, allow_pickle=True) as payload:
+        npz = {key: payload[key] for key in payload.files}
+    rows, val_usable_rows, obs_missing_rows = _recovery_train_row_indices(npz, split)
+    if rows.size == 0:
+        raise SystemExit(
+            f"[stageB3][recovery] {recovery_path} 无可用训练行（usable ∧ split train）→ 拒绝"
+        )
+    recovery_arrays, history, extra = _build_recovery_arrays(dataset.arrays, npz, rows)
+    window_rows = int(dataset.count)
+    offset = int(np.max(np.asarray(dataset.arrays["episode_id"], dtype=np.int64))) + 1
+    # recovery 行彼此独立（无同 episode 未来帧；历史走紧凑覆盖）→ **每行独立 episode_id**：
+    # 原 episode 内多窗口/多 k 行会共享 ``(episode_id, step)``（实测 2,094 对重复）→ 会破坏
+    # 精确查表唯一性并触发跨行误查；逐行独立 id 保证 (episode, step) 唯一且无跨行耦合。
+    source_episode = recovery_arrays["episode_id"].copy()
+    recovery_arrays["episode_id"] = offset + np.arange(rows.size, dtype=np.int64)
+    extra["recovery_source_episode_id"] = source_episode
+    if "window_index" in npz:  # 分析列（旧数据缺失时跳过）
+        extra["recovery_window_index"] = np.asarray(npz["window_index"], dtype=np.int8)[rows]
+    merged_arrays: Dict[str, np.ndarray] = {}
+    for key, value in dataset.arrays.items():
+        left = np.asarray(value)
+        merged_arrays[key] = np.concatenate([left, recovery_arrays[key].astype(left.dtype)], axis=0)
+    recovery_index = np.arange(window_rows, window_rows + rows.size, dtype=np.int64)
+    # 紧凑历史覆盖（仅 recovery 行；BCDataset.build_obs_batch 按行覆盖；默认无键 = 旧行为）
+    merged_arrays["recovery_hist_rows"] = recovery_index
+    for key, value in history.items():
+        merged_arrays[f"recovery_hist__{key}"] = value
+    for key, value in extra.items():
+        filler_dtype = value.dtype
+        filler = (
+            np.full((window_rows,) + value.shape[1:], -1, dtype=filler_dtype)
+            if np.issubdtype(filler_dtype, np.integer)
+            else np.full((window_rows,) + value.shape[1:], np.nan, dtype=filler_dtype)
+        )
+        merged_arrays[key] = np.concatenate([filler, value], axis=0)
+    merged = BCDataset(merged_arrays, dict(dataset.meta))
+    merged_train_idx = np.concatenate([np.asarray(train_idx, dtype=np.int64), recovery_index])
+    recovery_mask = np.zeros(int(merged.count), dtype=np.float32)
+    recovery_mask[recovery_index] = 1.0
+    traj_aux_valid = effective_traj_aux_mask(
+        int(merged.count), recovery_row_mask=recovery_mask, recovery_only=True
+    )
+    if base_traj_aux_valid is not None:
+        base = np.asarray(base_traj_aux_valid, dtype=np.float32).reshape(-1)
+        if base.size != window_rows:
+            raise SystemExit(
+                f"[stageB3][recovery] base traj_aux_valid 行数 {base.size} != 窗口行 {window_rows}"
+            )
+        traj_aux_valid = np.maximum(base, traj_aux_valid)
+    class_labels = np.asarray(npz["class_label"]).astype(str)[rows]
+    info: Dict[str, Any] = {
+        "enabled": True,
+        "dir": str(recovery_path),
+        "train_rows": int(rows.size),
+        "val_usable_rows": int(val_usable_rows),
+        "student_obs_missing_rows": int(obs_missing_rows),
+        "window_rows": window_rows,
+        "merged_rows": int(merged.count),
+        "episode_id_offset": int(offset),
+        "recovery_row_base": int(window_rows),
+        "class_counts": {
+            label: int(np.count_nonzero(class_labels == label))
+            for label in ("prevention", "correction", "late")
+        },
+        "history_override_rows": int(rows.size),
+        "history_keys": list(_RECOVERY_HIST_KEYS),
+        "traj_aux_valid_sum": float(np.sum(traj_aux_valid)) if traj_aux_valid is not None else 0.0,
+        "traj_aux_window_masked": window_rows,
+    }
+    logger(
+        f"[stageB3][recovery] 合并：窗口(+锚) {window_rows} + recovery {rows.size}"
+        f"（{recovery_path}；val 可用 {val_usable_rows} 行仅监控；"
+        f"student obs 缺失排除 {obs_missing_rows} 行）= {merged.count} 行；"
+        f"episode_id 偏移 +{offset}（recovery 每行独立 id，原 episode 另存）；类分布={info['class_counts']}；"
+        f"traj_aux_valid={info['traj_aux_valid_sum']:.0f}/{merged.count}"
+        f"（窗口 {window_rows} 行=0；recovery 行=1）；历史覆盖={rows.size} 行（{_RECOVERY_HIST_KEYS}）"
+    )
+    return merged, merged_train_idx, recovery_index, traj_aux_valid, info
+
+
 def _phase3_future_fn(
     dataset: BCDataset,
     windows: FrameWindows,
@@ -3723,6 +4055,11 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     - 数据 = ``--phase3 <dagger_dir>`` **单独使用**（无 worst/mild 权重、无 mining；当轮采集的
       失败窗口行）；``anchor.enabled=true``（lane P3-I，默认关）时并入 ``anchor.bc_dir``（5k）
       行，锚行权重 = ``train_weight×配平×anchor.mild_weight``，窗口行权重不变；
+      ``--recovery-dir``（P1-2，默认 None=关）时并入 recovery 数据集（``datasets/recovery_v1``）
+      **质量门可用 ∧ split train ∧ student obs 可用**的行：``action``=专家 recovery 链、
+      ``traj6``=专家 recovery 轨迹（真实值，禁合成）、od/ld 6 帧历史走紧凑覆盖；混采占比
+      ``--recovery-mix-ratio``（默认 0.25；batch 内 recovery 数 = ``round(ratio×batch)``）、
+      六步链衰减缺省 ``1.00/0.80/0.60/0.40/0.25/0.15``；recovery val 行不训练（仅计数）；
     - 起点 = ``--ckpt``（缺省读 config ``stages.B.phase3.init_ckpt``）；
     - **冻结配方** ``freeze``（lane P3-I，默认由 config 定）：
       ``specific_only`` = 只训 experts/router(gate)/residual_scale（复用 phase-2 冻结清单
@@ -3953,6 +4290,20 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         anchor_info["traj_aux_valid_rows"] = int(traj_aux_valid.size)
         anchor_info["traj_aux_valid_sum"] = float(np.sum(traj_aux_valid))
         arrays = dataset.arrays
+
+    # ---- P1-2：recovery 行合并（--recovery-dir；默认关；只并入 split train 的可用行）----
+    recovery_info: Dict[str, Any] = {"enabled": False}
+    recovery_indices: Optional[np.ndarray] = None
+    recovery_dir_arg = str(getattr(args, "recovery_dir", None) or "").strip()
+    if recovery_dir_arg:
+        dataset, train_idx, recovery_indices, traj_aux_valid, recovery_info = _merge_recovery_rows(
+            dataset,
+            train_idx,
+            recovery_dir_arg,
+            base_traj_aux_valid=traj_aux_valid,
+            logger=print,
+        )
+        arrays = dataset.arrays
     windows = FrameWindows(
         arrays,
         dataset.alignments,
@@ -4034,10 +4385,36 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     )
     # P1-2 recovery：primary 低 LR（默认 0.1 = 阶段 C 契约；仅 recovery 配方使用）
     lr_primary_scale = float(lr_scale_cfg.get("primary", DEFAULT_PRIMARY_LR_SCALE))
-    # P1-2 recovery 机制开关（默认关闭；recovery 段缺省即旧行为）
+    # P1-2 recovery 机制开关（默认关闭；--recovery-dir 给出时缺省 ratio=0.25 / 六步衰减向量）
     recovery_cfg = dict(p3_cfg.get("recovery", {}) or {})
-    recovery_mix_ratio = float(recovery_cfg.get("mix_ratio", 0.0) or 0.0)
-    recovery_chain_decay = tuple(float(value) for value in (recovery_cfg.get("chain_decay") or ()))
+    cli_mix_ratio = getattr(args, "recovery_mix_ratio", None)
+    if recovery_dir_arg:
+        recovery_mix_ratio = float(
+            cli_mix_ratio
+            if cli_mix_ratio is not None
+            else (recovery_cfg.get("mix_ratio", 0.25) or 0.25)
+        )
+        if not 0.0 <= recovery_mix_ratio <= 1.0:
+            raise SystemExit(
+                f"[stageB3][recovery] --recovery-mix-ratio 必须在 [0,1]：{recovery_mix_ratio}"
+            )
+        chain_decay_raw = recovery_cfg.get("chain_decay")
+        recovery_chain_decay = (
+            tuple(float(value) for value in DEFAULT_RECOVERY_CHAIN_DECAY)
+            if chain_decay_raw is None
+            else tuple(float(value) for value in chain_decay_raw)
+        )
+        recovery_info["mix_ratio"] = recovery_mix_ratio
+        recovery_info["chain_decay"] = list(recovery_chain_decay)
+        print(
+            f"[stageB3][recovery] 混采 ratio={recovery_mix_ratio:g}（batch 内 recovery 目标数 = "
+            f"round(ratio×batch)；Python 银行家舍入，建议 ratio×batch 为整数）；"
+            f"六步链衰减={list(recovery_chain_decay) or '关'}",
+            flush=True,
+        )
+    else:
+        recovery_mix_ratio = 0.0
+        recovery_chain_decay = tuple(float(value) for value in (recovery_cfg.get("chain_decay") or ()))
     shuffle_seed_base_raw = p3_cfg.get("shuffle_seed_base")
     shuffle_seed = (
         int(shuffle_seed_base_raw) + round_index if shuffle_seed_base_raw is not None else int(args.seed)
@@ -4212,6 +4589,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             ),
         },
         "anchor": dict(anchor_info),
+        # P1-2：recovery 合并/混采留档（未启用时不落键 = 旧 metrics 逐位不变）
+        **({"recovery": dict(recovery_info)} if recovery_info.get("enabled") else {}),
         "loss_type": str(args.loss_type if args.loss_type is not None else "l2"),
         "traj_monitor_only": True,
         "wm_condition": "rollout_plan_detached",
@@ -4427,7 +4806,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         lr_primary_scale=lr_primary_scale,
         recovery_mix_ratio=recovery_mix_ratio,
         recovery_chain_decay=recovery_chain_decay,
-        # recovery_indices：数据侧标记（P1-2 数据接入时由 stages 层提供；默认 None = 无 recovery 行）
+        # P1-2：recovery 行号（--recovery-dir 合并后给出；默认 None = 无 recovery 行）
+        recovery_indices=recovery_indices,
     )
     result = pretrain_bc_phase3(
         model,
@@ -5088,6 +5468,15 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="entry BCE 权重（默认 0.1）")
     parser.add_argument("--phase3-traj-aux-weight", type=float, default=None,
                         help="轨迹辅助权重（默认 0.0：traj 只做监控，不进损失）")
+    # ---- P1-2：recovery 数据接线（默认关闭）----
+    parser.add_argument("--recovery-dir", type=str, default=None,
+                        help="P1-2 recovery 数据目录（如 datasets/recovery_v1：samples.npz + "
+                             "split_manifest.json；给出即把 split train 的可用行并入训练集并启用混采；"
+                             "默认 None = 关闭（旧行为逐位不变））")
+    parser.add_argument("--recovery-mix-ratio", type=float, default=None,
+                        help="recovery 行 batch 占比（默认 0.25；仅 --recovery-dir 给出时生效；"
+                             "batch 内 recovery 目标数 = round(ratio×batch)，Python 银行家舍入，"
+                             "建议 ratio×batch 为整数；0 = 合并不混采）")
     # ---- lane P3-I：配方开关（冻结 / 5k 锚）----
     parser.add_argument(
         "--phase3-freeze",

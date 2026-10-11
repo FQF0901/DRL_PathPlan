@@ -3087,6 +3087,21 @@ class BCDataset:
             if key in arrays and f"{key}_mask" in arrays
         )
         self.has_mem_history = bool("od_hist" in arrays and "hist_valid" in arrays)
+        # P1-2 recovery：recovery 行的**真实历史覆盖**（紧凑存储：只有 recovery 行；默认无该键
+        # = 旧行为逐位不变）。行号须升序；``recovery_hist__{key}`` 与行一一对应。
+        self._recovery_hist_rows: Optional[np.ndarray] = None
+        self._recovery_hist: Optional[Dict[str, np.ndarray]] = None
+        if "recovery_hist_rows" in arrays:
+            rows = np.asarray(arrays["recovery_hist_rows"], dtype=np.int64).reshape(-1)
+            hist = {
+                str(key)[len("recovery_hist__"):]: np.asarray(arrays[key], dtype=np.float32)
+                for key in arrays
+                if str(key).startswith("recovery_hist__")
+            }
+            if rows.size and hist:
+                order = np.argsort(rows, kind="stable")
+                self._recovery_hist_rows = rows[order]
+                self._recovery_hist = {key: value[order] for key, value in hist.items()}
         self.schema_version = int(
             meta.get("schema_version") or (2 if (V2_TRAIN_WEIGHT in arrays or V2_WM_VALID in arrays) else 1)
         )
@@ -3239,8 +3254,27 @@ class BCDataset:
                 hist_valid.append(valid)
             history = {key: np.stack(values, axis=0) for key, values in history.items()}
             history["hist_valid"] = np.stack(hist_valid, axis=0)
+        self._override_recovery_history(history, idx)  # P1-2：recovery 行真实历史（默认无 = 不变）
         batch.update({key: np.asarray(value, dtype=np.float32) for key, value in history.items()})
         return sanitize_masked_od(squeeze_single_slot(batch))
+
+    def _override_recovery_history(self, history: Dict[str, np.ndarray], idx: np.ndarray) -> None:
+        """recovery 行（P1-2）真实历史覆盖（就地写 ``history``；默认 ``None`` = 零行为变化）。
+
+        ``recovery_hist_rows`` 为 merged 数据集行号（升序），``recovery_hist__{key}`` 与其逐行
+        对应；本批不含 recovery 行时直接返回。只覆盖 od/ld 历史（在线训练路径消费的通道）。
+        """
+        if self._recovery_hist is None or self._recovery_hist_rows is None:
+            return
+        positions = np.flatnonzero(np.isin(idx, self._recovery_hist_rows))
+        if positions.size == 0:
+            return
+        source = np.searchsorted(self._recovery_hist_rows, idx[positions])
+        for key, values in self._recovery_hist.items():
+            target = history.get(key)
+            if target is None or target.shape[0] != idx.size:
+                continue
+            target[positions] = values[source]
 
     def targets(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
         idx = np.asarray(indices, dtype=np.int64)
@@ -5167,6 +5201,9 @@ def pretrain_bc_phase3(
                 f"recovery_indices 越界：[{low}, {high}] 不在 [0, {int(dataset.count)})"
             )
         recovery_row_mask[recovery_indices_all] = True
+    # 只要有 recovery 行就用混采迭代器（ratio=0 也走 → recovery 行绝不被抽中；避免 ratio=0
+    # 时旧切片路径把 recovery 行当普通行训练）
+    use_recovery_mix = recovery_indices_all is not None and recovery_indices_all.size > 0
     chain_decay = tuple(getattr(config, "recovery_chain_decay", ()) or ())
     chain_decay_tensor = (
         None
@@ -5175,9 +5212,9 @@ def pretrain_bc_phase3(
             chain_step_weights(RECOVERY_CHAIN_STEPS, chain_decay), dtype=torch.float32, device=device
         )
     )
-    if recovery_mix_ratio > 0.0:
+    if use_recovery_mix:
         n_recovery_train = int(np.count_nonzero(recovery_row_mask[indices]))
-        if n_recovery_train == 0:
+        if recovery_mix_ratio > 0.0 and n_recovery_train == 0:
             raise ValueError(
                 "recovery_mix_ratio>0 但训练子集内无 recovery 行"
                 "（recovery_indices ∩ train_indices = ∅；数据侧标记需与训练行对齐）"
@@ -5201,6 +5238,15 @@ def pretrain_bc_phase3(
         "trainable_params": sum(1 for parameter in model.parameters() if parameter.requires_grad),
         "trainable_param_groups": [str(group.get("name")) for group in optimizer.param_groups],
     }
+    if use_recovery_mix:
+        # P1-2：recovery 混采留档（默认无 recovery 行时不落键 = 旧 metrics 不变）
+        metrics["recovery_mix"] = {
+            "ratio": recovery_mix_ratio,
+            "recovery_rows": int(recovery_indices_all.size) if recovery_indices_all is not None else 0,
+            "train_rows": int(indices.size),
+            "n_batches_per_epoch": max(1, math.ceil(len(indices) / max(1, int(config.batch_size)))),
+            "chain_decay": list(chain_decay),
+        }
     logger(
         f"[bc3] phase={config.phase} freeze={config.freeze_mode}：frozen={len(frozen)} · "
         f"可训={metrics['trainable_params']} · "
@@ -5266,7 +5312,7 @@ def pretrain_bc_phase3(
         anchor_sums: Dict[str, float] = {}
         anchor_weight = 0.0
         data_seconds = forward_seconds = backward_seconds = 0.0
-        if recovery_mix_ratio > 0.0 and recovery_indices_all is not None:
+        if use_recovery_mix:
             # P1-2：按 batch 混采（normal 池 = 本 epoch 训练序去掉 recovery 行）
             in_recovery = recovery_row_mask[order]
             batch_iter: Iterator[np.ndarray] = recovery_mixed_batches(
