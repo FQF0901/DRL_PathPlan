@@ -1,296 +1,232 @@
-结论
+结论：批准 A3，A4 条件批准
 
-总体批准 Coding Agent 的 Round-15 方案，但只批准先做 A1/A2 的零训练审计与确定性尾部 oracle，不批准直接重训、RL 或 Track C 实现。
+这轮结果很关键，根因已经明显收敛：
 
-双方已经没有原则性分歧。Coding Agent 对证据链的修正是正确的：
+模型在 expert-state 上当前动作预测很好，但在 learner-state 上误差扩大 6–16 倍，说明主要问题是 covariate shift，而不是模型容量不足。
+正确当前动作加简单 repeat 尾，闭环可达 0.72–0.78，说明无需学习脆弱的未来六步专家链，也暂未触及接口硬上限。
+Track C 的理想 union 只有 0.790，未达到预设 0.82，因此不值得转向 IDM+Pure Pursuit 混合残差系统。
+LD 几何代理五项 Gate 失败，ld_margin_weight 继续为 0 是正确决定。
+一、批准 A3，但要纠正其定义
 
-D1≈0 主要证明开环执行缺乏反馈，不能单独证明“远期标签无效”；
-真正值得验证的是：模型能否预测当前状态下的专家动作，以及如何把该动作转换成 LQR 可执行的短计划；
-DAgger learner-state aggregation 应归入 Track A，不属于已停止的 recovery/gate 路线；
-RL 必须后置；
-Track C 是否实施取决于最终交付物是否允许“IDM+Pure Pursuit + learned residual”。
-一、我认可的核心判断
-1. Track A 应成为下一主线
+A3 不应再称为“当前动作 BC + 尾部轻监督”，而应严格定义为：
 
-当前最值得追查的 root cause 是：
-
-专家每 0.5 秒基于新状态重新决策
-vs
-模型学习 3 秒六步动作链
-
-
-现有监督可能把三个不同问题混在一起：
-
-当前动作预测误差；
-未来动作只在专家轨迹状态上成立；
-LQR 需要尾部参考，但不代表尾部必须拟合专家未来动作。
-
-因此，先将任务拆成：
-
-当前动作预测
-+
-确定性参考尾部
-+
-0.5 秒闭环重规划
-
-
-比继续调整 WM、MoE、recovery 或直接 PPO 更合理。
-
-2. Track B 只应作为诊断和小幅校准
-
-ds、dθ 和曲率的分层 bias 审计值得做，但不能预设全局 ds×1.25 就是答案。
-
-V1 的提升同时混合了：
-
-纵向尺度； -等效曲率；
-LQR preview；
-timeout； -车辆可跟踪性。
-
-只有在不同速度、曲率和路型下出现稳定 signed bias，才允许启用现有 phase3_bias_calibration。
-
-3. DAgger 可以保留，但定义必须改变
-
-允许在 Track A 中做 DAgger，监督内容只应是：
-
-learner 实际状态下，专家此刻的当前动作。
-
-不要再采集或监督：
-
-Pass-1 observation + Pass-2 label； -绝对 recovery trajectory；
-gate intervention； -专家未来六步动作链作为硬标签。
-二、我对 Coding Agent 两项建议的质疑
-1. “确定性尾族 oracle”必须使用模型将来可获得的信息
-
-Coding Agent 建议比较：
-
-repeat
-衰减 dθ
-保曲率
-V1 式 ds 缩放
-
-
-这个方向正确，但 oracle 的输入应统一为“当前动作”，不能偷用专家未来状态或未来动作。
-
-建议严格定义：
-
-输入：当前专家动作 (ds0, dtheta0)
-输出：确定性六步参考
-执行：相同 LQR
-
-
-这样的比较才能回答：
-
-给定一个正确当前动作，哪种尾部构造最适合 LQR？
-
-建议至少对比：
-
-Repeat
-(ds_t, dtheta_t) = (ds0, dtheta0)
-
-曲率保持、距离衰减
-ds_t = alpha_t * ds0
-dtheta_t = alpha_t * dtheta0
-
-航向增量衰减
-ds_t = ds0
-dtheta_t = alpha_t * dtheta0
-
-常曲率、参考速度独立
-
-几何保持不变，单独调整 LQR v_ref。
-
-最后一种很重要，否则仍然分不开“几何变化”和“速度变化”。
-
-2. 当前离线 MAE 不能直接证明当前动作预测已足够好
-
-首步 MAE 约 0.25–0.27 需要拆成：
-
-MAE_ds
-MAE_dtheta
-相对 action range 的归一化误差
-符号错误率
-曲率误差
-按速度/道路类型/失败类别的误差
-
-
-平均值可能掩盖致命的少数错误。例如：
-
-dθ 平均误差不大，但急弯上符号错误； -低速时 ds 小，微小 dθ 误差造成极大曲率；
-tollgate 样本少，但贡献大部分 off-road；
-timeout episode 存在系统性 ds 低估。
-
-因此 A1 必须以分层误差为主，不能只报告总体 MAE。
-
-三、正式批准的 Round-15A
-A1：当前动作与标签审计
-
-无需训练，使用现有 checkpoint 和数据。
-
-必须输出
-MAE_ds / MAE_dtheta
-P50 / P90 / P99
-符号错误率
-kappa = dtheta / max(ds, eps) 的误差
-模型动作 clipping 比例
-
-
-分层：
-
-速度区间
-道路曲率
-tollgate / merge / roundabout / 普通道路
-成功 / off-road / collision / timeout
-teacher-forced 状态 / learner 状态
-
-关键判定
-如果 teacher-forced 误差低、learner-state 误差高：核心是 covariate shift，进入当前动作 DAgger。
-如果两者都高：先修监督、表示或优化。
-如果当前动作误差低但闭环仍差：核心在尾部参考和 LQR，而不是 BC。
-A2：确定性尾部 oracle
-
-只用当前专家动作构造尾部，不使用未来专家动作。
-
-必须报告
-success
-off-road
-collision
-timeout
-route completion
-LQR saturation
-tracking error
-
-
-目标不是寻找更多超参数，而是回答：
-
-正确当前动作加简单尾部可以达到多少；
-哪类尾部对 LQR 最稳定；
-V1 收益来自速度还是曲率；
-确定性尾部是否足以替代学习六步链。
-Go 条件
-
-建议最优尾部在 eval500 至少达到：
-
-success >= 0.72
-off-road <= 0.08
-collision <= IDM
-
-
-如果正确当前动作加任何合法尾部都明显低于 IDM，说明 action 接口/LQR 存在硬上限，暂不应训练 Track A。
-
-四、A3 训练方案暂时只锁定骨架
-
-A1/A2 通过后，才允许训练：
-
-observation/history
-→ 当前动作 head
-→ 固定 deterministic tail
+obs/history
+→ 预测当前 expert action (ds0, dtheta0)
+→ 固定确定性尾部
+→ arc_step
 → LQR
+→ 每 0.5 秒重新规划
+
+第一版只保留两个尾部
+A3-R：原始 repeat
+(ds_k, dtheta_k) = (ds0, dtheta0)
+
+A3-V：V1 风格纵向尺度
+(ds_k, dtheta_k) = (s * ds0, dtheta0)
 
 
-第一版应尽量简单：
+但 s 不能直接锁死为 1.30。1.25–1.30 是特权专家动作上的最佳值，不保证适用于有预测误差的模型动作。模型动作存在噪声时，放大 ds 可能同步放大执行风险。
 
-不改 encoder； -不改 WM； -不改 MoE 架构； -不加 recovery gate； -不加 geometry loss； -当前动作作为唯一主要监督； -尾部连续性不依赖未来专家动作硬标签。
+建议只测试：
 
-建议先验证纯当前动作 BC，再决定是否需要首步 action-conditioned tail 网络。不要一开始同时引入一个新的 tail decoder。
-
-五、DAgger 的启动条件
-
-只有出现以下结果才启用：
-
-teacher-forced 当前动作误差显著低
-learner-state 当前动作误差显著高
+s = 1.00, 1.15, 1.25
 
 
-采集格式：
+先用 clean150 选择方向，禁止继续扩大扫描。
 
-learner obs_t
-learner history_t
-learner current plan/action
-expert current action_t
+二、A3 的训练目标必须真正删除远期硬标签
+
+这是本轮最重要的实现约束。
+
+Coding agent 写“步 0 主导、尾只担连续性/平滑”，我赞同，但必须落实为：
+
+L = L_current_action
+  + λ_smooth * L_tail_smooth
+  + λ_curv * L_delta_curvature
+
+
+禁止继续保留：
+
+未来 5 步 expert action regression
+未来专家状态上的绝对 trajectory target
+合成 traj6
+recovery trajectory loss
+
+
+否则只是调整权重，没有真正验证“当前动作 + 确定性尾”假设。
+
+此外，L_delta_curvature 只能约束平滑，不能重新启用已经失败的 ld_line_margin_loss。
+
+三、A3 必须从原模型结构中隔离干扰源
+
+第一版建议：
+
+复用现有 encoder/memory；
+当前动作只由一个明确 head 输出；
+不使用 WM rollout 生成尾部；
+不使用 MoE experts 生成尾部；
+不让 PolicyHead 和 PlanHead 分别产生两个动作；
+deterministic tail 必须是纯函数；
+LQR 实际 reference 必须与导出的 plan 逐位一致。
+
+这样才能回答：
+
+当前动作 BC + 简单尾部本身能达到多少？
+
+若继续让 PlanHead、MoE、WM 修改后五步，A3 就失去实验辨识性。
+
+四、A4 条件批准，不应与 A3 同时开训
+
+A1 已满足 DAgger 的触发条件：
+
+expert-state 当前动作误差低；
+learner-state 当前动作误差显著高； -错误在多个道路类型上存在。
+
+但正确顺序必须是：
+
+先训练并评测 A3
+→ 再从 A3 自己访问的状态采集 A4 数据
+→ 再训练 A4
+
+
+不能直接复用 pri512 或 recovery_v2 的 learner-state 数据作为 A4 主数据，因为 A3 的状态访问分布可能完全不同。
+
+A4 数据契约
+
+每行只需：
+
+learner obs/history
+learner current predicted action
+expert current action
+road class
+speed / curvature
 episode outcome
 
 
-不需要 recovery label，也不需要未来六步专家链。
+不采：
 
-初期 learner-state 数据占比建议 10%–20%，并保留普通 expert5k 数据防止遗忘。
+六步专家链；
+recovery gate 标签； -未来绝对轨迹；
+Pass-2 takeover plan。
+混合比例
 
-六、Track C 的战略裁决
+先从：
 
-用户目标是：
-
-闭环性能大幅提升，正确超过 IDM + Pure Pursuit。
-
-如果允许最终系统是混合控制器，我建议保留 Track C，因为它是最现实的工程路径：
-
-IDM + Pure Pursuit
-+ bounded learned residual
-+ safety fallback
+expert5k : A4 = 90 : 10
 
 
-但现在只批准 离线 oracle 上限分析：
+开始，最多升到 80:20。禁止高倍过采样。
 
-IDM 成功、模型失败；
-IDM 失败、模型成功； -二者任一成功； -理想 episode-level oracle 成功率； -使用合法在线信息的 arbitration 可预测性。
-实施门
-理想 oracle success >= 0.82
-合法 arbitration 可辨识
-模型修正不会显著提高 collision
+五、对现有结论的一个重要反驳
 
+文档称：
 
-若理想 oracle 都低于 0.82，不实现 Track C。
+“历史主要损失之一 = 让模型承担远期六步链拟合。”
 
-注意：episode-level oracle 只能测理论互补性，不能作为部署结果。真正 arbitration 不能偷看 episode 最终结局。
+这个结论目前高度可信，但尚未最终证实。
 
-七、RL 继续冻结
+A1 证明 learner-state 当前动作已经严重退化；因此模型闭环差可能主要由首步 covariate shift 导致，而不是远期链本身。A2 只证明正确当前动作配简单尾可以工作。
 
-Coding Agent 已接受这一点，我确认。
+真正证实该结论需要 A3 对照：
 
-RL 启动门维持：
+相同 encoder、相同数据、相同训练预算
 
-监督或混合基线 eval500 >= 0.60–0.65
-当前动作确实决定最终执行
-训练/评测均为相同 PlanHead+LQR 口径
-action clipping <5%
-LQR saturation 可控
-value 在失败前具有风险识别能力
+旧六步链监督
+vs
+仅当前动作监督 + fixed repeat tail
 
 
-即便达到 0.65，RL 的目的也应是提升闭环恢复和效率，不是重新学习基础道路跟踪。
+若后者闭环显著更好，才能裁决未来链监督确实有害或无益。
 
-八、批准范围
+六、A3/A4 验收标准
+A3 clean150 Gate
+
+相对 pri512 0.340：
+
+success >= 0.50
+off-road <= 0.35
+collision <= 0.05
+timeout <= 0.15
+action clipping < 5%
+LQR steer saturation 不高于 A2 oracle 同尾族明显水平
+
+
+同时要求：
+
+teacher-state MAE 不恶化
+learner-state action error 相对 pri512 下降 >= 25%
+模型当前动作 + tail 的计划首段与 LQR reference 一致
+
+
+若 A3 未达到 0.50，先不做 A4 全量训练。应判断：
+
+当前动作 head 没学好；
+fixed tail 对模型误差过敏； -或 observation 在 learner-state 上信息不足。
+A4 clean150 Gate
+
+相对 A3：
+
+success +5pp 以上
+off-road 相对下降 >= 15%
+collision 不增加超过 2pp
+timeout 不增加超过 3pp
+teacher-state MAE 恶化不超过 10%
+
+
+通过后再跑 eval500。
+
+eval500 Gate
+success >= 0.60
+目标 >= 0.65
+
+
+低于 0.60，则不进入 RL。
+
+七、其他线路裁决
+Track B：保留但不独立开训练
+
+learner-state 的 ds 存在稳定低估，但这也可能是 covariate shift 的表现。
+
+因此先让 A4 修 learner-state 分布，再重新测 bias。只有 A4 后仍存在跨路型稳定 ds 低估，才启用 phase3_bias_calibration。
+
+Track C：关闭实现，仅保留报告
+
+理想 union 0.790 未达到 0.82，而且仲裁信号主要由静态信息解释，继续做混合 controller 的收益不足。
+
+Geometry：关闭当前定义
+
+五项 FP Gate 失败意味着问题在 LD 语义和 loss 定义，不是调阈值可解决。保持：
+
+ld_margin_weight = 0
+
+
+如未来重启，应从 drivable corridor 表示重新设计，而不是继续修现有代理。
+
+RL：继续冻结
+
+A3/A4 的目标只是建立可靠地基。即使达到 0.65，与 IDM 仍有约 10pt 差距。只有满足原定六项门槛后，才可进入合法信用链 PPO。
+
+最终批准意见
 立即批准
-Round-15A1：当前动作分层误差审计
-Round-15A2：确定性尾部 oracle
-Track B：ds/dtheta/curvature 分层 bias，只读诊断
-Track C：离线互补 oracle，只做上限分析
-P1-3：geometry FP Gate，只读诊断
-CUDA 统一为正式采集与评测口径
+A3-R：当前动作 BC + repeat tail
+A3-V：当前动作 BC + 有限 ds-scale tail
+旧六步链监督对照
+完整 probes 与 clean150
 
 条件批准
-A3：当前动作 BC + 固定尾部
-A4：learner-state 当前动作 DAgger
+A4：从 A3 自身闭环状态重新采 learner-state 当前动作标签
 
-
-必须等待 A1/A2 结果。
-
-继续禁止
-gated residual 复活
-recovery_v1/v2 扩采
-复杂 tail decoder
+明确禁止
+复用 recovery_v2 代替 A4 新采集
+继续监督未来五步专家动作
+启动 geometry loss
+全局固定 ds × 1.30
 PPO / GRPO
-K-anchor
-WM/MoE 改造
-容量扫描
-geometry loss 反向传播
+WM/MoE/容量改造
 
-最终意见
 
-批准 Round-15 开工，但限定为 A1/A2 和两个零训练 oracle。
+因此可以批准 Round-17 开工。
 
-Coding Agent 的回应总体可靠，特别是对 D1 证据的纠偏、对 D2 差距的分解，以及把 DAgger重新归入当前动作监督，都是正确的。
+不过请把实验核心写清楚：
 
-当前必须追到的根因是：
-
-模型究竟没有学会当前动作，还是当前动作虽然正确，却被错误的六步尾部和 LQR preview 破坏？
-
-A1/A2 能低成本、明确地回答这个问题。在答案出来前，不应直接训练新模型，更不应启动 RL。
+这一轮不是“再训练一个更简单模型”，而是严格验证：闭环规划是否应从“预测三秒专家动作链”改为“预测当前专家动作，加确定性 LQR 预瞄尾部，并持续重规划”。
