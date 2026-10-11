@@ -24,6 +24,8 @@
                       ``--d2-ds-dth-scale``（V2：ds、dθ 同乘 s）/ ``--d2-v-scale``
                       （V3：仅缩放 LQR 参考速度 ref_speed_scale，几何 plan 不动）；
                       P1-v2：``--d2-dth-scale``（仅 dθ×s，ds 不动；与 V1/V2 乘性组合）；
+                      Round-15A2：``--d2-tail``（repeat / decay:{lin,geo}:X 保曲率距离衰减 /
+                      dtheta_decay:{lin,geo}:X 航向衰减；只用当前专家动作，无未来信息）；
                       V1 与 V2 不能同时非 1.0（argparse 报错）。
 
 新增参数
@@ -1220,6 +1222,60 @@ def scale_expert_action(
     return values
 
 
+def parse_tail_spec(spec: str, n: int = WINDOW_POLICIES):
+    """尾族 spec → ``(α_t 系数 (n,), 作用维度 'both'|'dtheta')``（Round-15A2）。
+
+    - ``repeat``：全 1（现状）；
+    - ``decay:lin:X`` / ``decay:geo:X``：ds 与 dθ 同乘 α_t（距离衰减·保曲率）；
+    - ``dtheta_decay:lin:X`` / ``dtheta_decay:geo:X``：仅 dθ 乘 α_t（航向衰减）。
+      ``lin``: α_t = 1 − (t−1)/(n−1)·(1−X)（t=1..n，从 1 线性降到 X）；``geo``: α_t = X^(t−1)。
+    """
+    text = str(spec or "repeat").strip()
+    if text == "repeat":
+        return np.ones(int(n), dtype=np.float64), "both"
+    head, _, tail = text.partition(":")
+    mode, _, value = tail.partition(":")
+    if head not in ("decay", "dtheta_decay") or mode not in ("lin", "geo"):
+        raise ValueError(
+            f"未知尾族 spec: {spec!r}（可选 repeat / decay:lin:X / decay:geo:X / "
+            "dtheta_decay:lin:X / dtheta_decay:geo:X）"
+        )
+    try:
+        end = float(value)
+    except ValueError as exc:
+        raise ValueError(f"尾族衰减系数非法: {value!r}") from exc
+    if not (0.0 < end <= 1.0):
+        raise ValueError(f"尾族衰减系数需 ∈ (0,1]，收到 {end}")
+    index = np.arange(int(n), dtype=np.float64)
+    if mode == "geo":
+        factors = end ** index
+    else:
+        factors = 1.0 - (1.0 - end) * index / max(int(n) - 1, 1)
+    return factors, ("both" if head == "decay" else "dtheta")
+
+
+def build_tail_plan(action, spec: str = "repeat", *, n: int = WINDOW_POLICIES):
+    """当前专家动作 ``(ds0, dθ0)`` + 尾族 spec → ``(n,2)`` plan（只用当前动作，无未来信息）。
+
+    合法输入硬约束：每 0.5 s 重查的**当前**专家动作是唯一动作来源；尾族系数 α_t 与
+    步数 t 有关（确定性形状），不读取任何未来动作/未来状态。``repeat`` = 现状逐位不变。
+    """
+    values = np.asarray(action, dtype=np.float64).reshape(-1)[:2]
+    if str(spec or "repeat").strip() == "repeat":
+        return np.repeat(values[None, :], int(n), axis=0)
+    factors, dims = parse_tail_spec(spec, n)
+    plan = np.repeat(values[None, :], int(n), axis=0)
+    if dims == "both":
+        return plan * factors[:, None]
+    plan[:, 1] = plan[:, 1] * factors
+    return plan
+
+
+def _tail_spec_arg(text: str) -> str:
+    parse_tail_spec(str(text))  # 非法 spec 在 argparse 阶段报错
+    return str(text)
+
+
 class D2RepeatExpertController(InstrumentedCkpt):
     """D2：当前 expert 动作 repeat 6 步（与 F 格 ``repeat_action`` 直接可比）。
 
@@ -1249,12 +1305,14 @@ class D2RepeatExpertController(InstrumentedCkpt):
         ds_scale: float = 1.0,
         ds_dth_scale: float = 1.0,
         dth_scale: float = 1.0,
+        tail_spec: str = "repeat",
     ):
         super().__init__(env, spec, task, tracker_json=tracker_json, load_model=False)
         self.expert_kind = str(expert_kind)
         self.ds_scale = float(ds_scale)
         self.ds_dth_scale = float(ds_dth_scale)
         self.dth_scale = float(dth_scale)
+        self.tail_spec = str(tail_spec)
         self.labeler = None
 
     def bind(self, env) -> None:
@@ -1278,7 +1336,7 @@ class D2RepeatExpertController(InstrumentedCkpt):
                 ds_dth_scale=self.ds_dth_scale,
                 dth_scale=self.dth_scale,
             )
-            plan = np.repeat(action[None, :], WINDOW_POLICIES, axis=0)
+            plan = build_tail_plan(action, self.tail_spec)
             rec["mu"] = [float(plan[0, 0]), float(plan[0, 1])]
             rec["plan"] = [[float(a), float(b)] for a, b in plan]
             rec["reference"] = "expert_repeat"
@@ -1425,6 +1483,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--d2-tail",
+        type=_tail_spec_arg,
+        default="repeat",
+        help=(
+            "d2 尾族（Round-15A2）：repeat（默认，逐位不变）/ decay:lin:X / decay:geo:X"
+            "（ds、dθ 同乘 α_t，保曲率距离衰减）/ dtheta_decay:lin:X / dtheta_decay:geo:X"
+            "（仅 dθ 衰减）；只用当前专家动作，无未来信息"
+        ),
+    )
+    parser.add_argument(
         "--d2-v-scale",
         type=float,
         default=1.0,
@@ -1468,8 +1536,9 @@ def main(argv=None) -> int:
     if args.mode != "d2" and (
         args.d2_ds_scale != 1.0 or args.d2_ds_dth_scale != 1.0
         or args.d2_dth_scale != 1.0 or args.d2_v_scale != 1.0
+        or args.d2_tail != "repeat"
     ):
-        print(f"[forensics] 警告：--d2-*-scale 仅对 d2 模式生效，{args.mode} 忽略", flush=True)
+        print(f"[forensics] 警告：--d2-*-scale/--d2-tail 仅对 d2 模式生效，{args.mode} 忽略", flush=True)
 
     from pipeline import eval_runner as ev
     from pipeline.gl_runtime import ensure_gl_library_path
@@ -1554,7 +1623,7 @@ def main(argv=None) -> int:
                     controller = D2RepeatExpertController(
                         env, spec, task, tracker_json=tracker_json,
                         ds_scale=args.d2_ds_scale, ds_dth_scale=args.d2_ds_dth_scale,
-                        dth_scale=args.d2_dth_scale,
+                        dth_scale=args.d2_dth_scale, tail_spec=args.d2_tail,
                     )
                 else:
                     controller = InstrumentedCkpt(env, spec, task, tracker_json=tracker_json,
