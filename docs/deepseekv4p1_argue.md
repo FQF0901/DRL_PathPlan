@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-10）**：**P0 执行与审计完成、排摸收官**；P1 计划讨论中（§7）。本文件为**唯一主文档**——审计与排摸结果并入 §5/§6，历史回应保留于附录 A/B。
-> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）** → round-3–8 收拢、定稿与锁板（§7.6–§7.11，v0.7；执行手册 v1 LOCKED） → **P1 执行（§9，2026-10-11）** → **round-9 审阅与 P1-v2 定板（§10）**。
+> **沿革**：ChatGPT round-2（`b14743b`）→ 我方第二轮回应（`078de2a`，并入附录 A）→ 收拢轮（`b2b0f64`）→ ChatGPT 确认（`5fdbddc`）→ 第四轮可行性排摸（§0.9）→ ChatGPT 硬约束（`cd4b559`）→ 第五轮收拢完成（§0.9.5）→ **P0 执行（§0.9.6 滚动）** → **审计报告（§5）+ 排摸收官（§6）** → **P1 计划讨论稿（§7）** → round-3–8 收拢、定稿与锁板（§7.6–§7.11，v0.7；执行手册 v1 LOCKED） → **P1 执行（§9，2026-10-11）** → **round-9 审阅与 P1-v2 定板（§10）** → **round-10 共识确认（§11；P1-v2 LOCKED）**。
 > **我方立场摘要（给新读者）**：目标是超越 IDM；路径 = **先量化"上限与口径"、再按数据做减法/几何对齐**；反对无证据地删模块或扩模块；反对让 GPU 空转等代码。
 
 ---
@@ -759,6 +759,52 @@ P1-1–P1-3 不动 WM/MoE/encoder/PPO scope；**P1-4 建立独立 experimental s
 - **验收（接受其三门 + 分层）**：数据门（同状态匹配 100%、重放 1,000、无泄漏、expert 恢复率 ≥80%）；可辨识门（ROC-AUC ≥0.80、2–4 m/s 子集不失效、困难路型分报）；pilot 门（≥基线−2pp、off 不增、首步 MAE/ADE ≤+10%、无二轮坍、正常态 gate 激活 <5%）。
 - **产物**：`docs/p1_v2_decision.md` 与 `docs/recovery_v2_contract.md` 于 P1-v2 开工时创建（其建议）；argue 文档回归"历史审计"定位（本轮按用户要求在 §10 记录，此后日常载体 = 上述两文档 + 各报告）。
 - **目标级现实（不粉饰）**：即使 P1-v2 全绿，条件轨短期仍是"安全的小幅改进"；**追平/超越 IDM 的概率权重仍在 ①无条件轨校准 ②RL 超教师（4B 门保持）**——不要因单轨受阻改变总目标。
+
+## 11. 对 round-10 的回应（能否达成共识 + 可行性排摸；2026-10-11）
+
+> 依据：`docs/chatgpt5p6sol_review.md`（commit `41e3576`）。
+> 结论先行：**可以达成共识，且同意按其所提锁定 P1-v2**——我方接受"无条件轨降级为诊断旁线"；另提 **2 条设计修正 + 1 条机制映射**（均不改变主线，修正已具可行性证据，见 §11-C）。
+
+### 11.1 接受（逐条）
+
+1. **P1-v2 主线锁定**：可辨识性 probe → recovery_v2 同状态采集 → gated residual pilot → 几何代理 FP 门 → 独立小消融 → candidate recipe。**接受**。
+2. **recovery_v1 仅诊断、停止剂量/冻结/子集搜索；4A/4B 冻结；V1=calibration oracle 不解除 4B 门**。接受（与我方 §10 一致）。
+3. **三特征集探针 + 标签严格定义**（"同状态：baseline plan 将在 horizon 内失败 ∧ expert intervention 可恢复"）——接受；其"否则 probe 只学到场景难度/episode 时间"的警告正确（我方再加一层防护，见 11.2-1）。
+4. **自然占比 2–5% + 显式 loss weight + 记录四元 group（raw ratio / sampler exposure / loss weight / effective importance ratio）**。接受。
+5. **mode 标签"有条件同意"**（只作分层/误差分析/未来 4B 研究输入；先验证稳定性/类内方差/切换率）。接受。
+6. **Step 1–4 的产物与验收数值**（ROC-AUC 0.80/0.65–0.80/<0.65 三档、precision@10% ≥0.60；v2 数据门；gated residual 训练纪律与 clean150 门；几何 FP 门）。接受，微调并入 11.2。
+7. **停做清单**（v1 再训练、新 mix、新 freeze、子集组合、无 gate 残差、联合几何 recipe、P1-4、K-anchor/GRPO/WM-MoE/容量）——接受。
+
+### 11.2 我方修正（2 条）与映射（1 条）
+
+1. **探针负样本必须"episode/time 匹配"**——仅靠标签定义不足以防场景难度泄漏。设计（可行性已核）：
+   - 正 = 对齐行（2,317）与 v2 行中"plan 在 horizon 内失败 ∧ expert 可恢复"；
+   - 负 = **同一 episode 内** plan-valid（`plan_footprint_valid` 逐 step ✓）且时间窗邻近的状态（同集对照）+ 一个跨 episode 泛化池；
+   - 报告必须含 **time-in-episode / 难度 / 路型** 分层对照；若控制这些后 AUC 明显回落 → 判"不可辨识"（这正是要防的假阳性）。
+2. **无条件轨分解补 ④"dθ-only 缩减"反事实**（ds 固定、dθ×{0.85, 0.90}）：其 ①② 无法把"曲率变平"与"步长/速度/前视耦合"分离；④ 是缺失对照。**且注明：①②已完成**——P1-0B 全量曲线在案（①V1 0.776–0.778@1.25–1.30；②V2 0.658–0.676@1.15）⇒ 分解缺口只剩 ④ 与 ③。④ 需给 forensics 加 `--d2-dth-scale`（小改动，与既有 V1/V2 flag 同模式；可行性已核）。
+3. **反事实 ③（"仅修正模型动作实测 ds/dθ bias"）映射到既有机制**：`phase3_bias_calibration`（signed-bias 惩罚；`bias_calib_weight` 默认 0、指标常记；trainer.py:2688/5514）**已在库** ⇒ ③ 无需新代码，属"诊断→候选"过渡实验；判定沿用其纪律（**分路型/速度带稳定改善才允许进入训练 target calibration**）。
+
+### 11.3 可行性排摸（本轮只读实测）
+
+| 项 | 结论 |
+|---|---|
+| bias ③ 机制 | **已在库**（`phase3_bias_calibration` + CLI；默认关、指标常记）✓ |
+| dθ-only 反事实 ④ | forensics 目前仅 `--d2-ds-scale`(V1)/`--d2-ds-dth-scale`(V2)/`--d2-v-scale`(V3) ⇒ **需新增 `--d2-dth-scale`**（同模式小改） |
+| 探针数据 | 对齐行 schema 齐（`student_plan`/接管 plan/专家链/`expert_recovered`/footprint inside_ratio ✓）；逐 step 有效性用 forensics `plan_footprint_valid` + episode 级 `T_plan`（`min_signed_margin` 恒 None，以 footprint+lane_lat 代理）✓ |
+| recovery_v2 采集增量 | v1 采集器已存 student plan/接管链/质量字段；v2 增量 = **k≥1 行同源 Pass-2 obs + 行内 baseline_plan + intervention label + 1,000 行重放验证**（中等改造；契约另立 `docs/recovery_v2_contract.md`） |
+| gated residual | 需新增 gate/residual 头 + 冻结 base 锚（`final=base+gate*residual`）；训练纪律（分梯度/锚定/anchor）可落；**中等工程，先 pilot** |
+| 几何 FP 门 | 正/负链来源核对：expert5k_v8 真值链 ✓、forensics `p0_baseline`(IDM)/`p0_e1_pri`(模型) 行 ✓（IDM 逐链字段需先核对） |
+
+### 11.4 落板（同意其"P1-v2：LOCKED"，含我方两条并入）
+
+- **主线**：可辨识性 probe（三特征集 + 11.2-1 的匹配负样本设计）→ recovery_v2 pilot（2–3k 行，同状态契约，1,000 行重放验证）→ gated residual pilot（2–5% 自然占比、四元 group 留档）→ 几何 FP 门（含 2–4 m/s 分层）→ 独立小消融 → candidate recipe。
+- **诊断旁线（不得改训练 target 直至分解+验证）**：① ④ dθ-only 反事实（新增 flag）；② ③ bias 标定实验（既有旋钮）；③ Δκ/progress 监控（P1-3 Step 5 保留项）。
+- **冻结**：其清单全接受（v1 训练、P1-4、K-anchor、GRPO、WM/MoE、容量）。
+- **验收**：Step 1–4 按 round-10 原文 + precision@10% ≥0.60 + 我方分层/匹配要求。
+
+### 11.5 目标锚提醒（不粉饰）
+
+共识达成不改变一个现实：**追平→超越 IDM（0.756）的正面证据目前仍主要在"诊断旁线"（V1 机制）与 RL 超教师（4B 门保持）**。按本轮共识以"小 pilot + 严格停止条件"推进主线；旁线诊断（④/③/Δκ）成本低、信息高，建议在主线 Step 1 数据准备期间**并行只读/离线**完成，避免目标概率权重继续空转。
 
 ---
 
