@@ -1020,6 +1020,53 @@ class Phase3Config:
     #: 六步链时间衰减权重（空 = 关闭 = 旧行为；非空须为 :data:`RECOVERY_CHAIN_STEPS` 个有限非负值）。
     recovery_chain_decay: Tuple[float, ...] = ()
 
+    # ---- P1-3：几何/曲率/推进三项（默认关闭；§7.10-A7/A10 + round-7 P1-3）----
+    #: ``ld_line_margin_loss`` 外层权重（0.0 = 跳过计算 = 旧行为逐位不变）。
+    #: **可微代理**（LD 中心线点集 ↔ plan 位姿），不得冒充 drivable-area 真值。
+    ld_margin_weight: float = 0.0
+    #: 目标裕度（m）：plan 点距最近有效 LD 中心线超过该值 → surface 惩罚（on-lane 代理）；
+    #: 同时作为 LD→plan 覆盖项（coverage）的目标裕度。
+    ld_margin_target_m: float = 2.5
+    #: LD→plan 覆盖项权重（双向最近距的另一方向；0 = 关）。
+    ld_margin_coverage_weight: float = 1.0
+    #: 实线越线惩罚权重（面向侧线型 ∈ :data:`SOLID_LINE_TYPE_IDS` 且 |横向| 超过
+    #: ``ld_margin_solid_halfwidth_m`` 的软期望；0 = 关）。
+    ld_margin_solid_weight: float = 1.0
+    #: 实线越线惩罚的自由半宽（m；横向超过该值视为越过实线边界）。
+    ld_margin_solid_halfwidth_m: float = 1.75
+    #: 最近点 soft-min/soft-argmax 温度 τ（m；越小越接近硬最近）。
+    ld_margin_tau: float = 0.5
+    #: 距离截断上限（m；极端距离/离群槽位截断，数值稳定）。
+    ld_margin_max_dist_m: float = 10.0
+    #: LD→plan 覆盖项只统计距 ego ≤ 该值（m）的有效槽位（避免远端槽位无限拉扯 plan）。
+    ld_margin_coverage_range_m: float = 25.0
+
+    #: 曲率项外层权重（0.0 = 跳过计算 = 旧行为逐位不变）。
+    curvature_weight: float = 0.0
+    #: 超阈值 κ 强罚阈值（1/m；|κ| 超过该值进入强罚项）。
+    curv_kappa_thresh: float = 0.2
+    #: Δκ 死区（1/m；相邻步 |κ_i − κ_{i−1}| 超过该值才罚）。
+    curv_dk_thresh: float = 0.1
+    #: 超阈值 κ 强罚倍率（相对 Δκ 主罚）。
+    curv_strong_weight: float = 2.0
+    #: 极小 ds 掩码阈值（m；|ds| 低于该值的步不进 κ 计算）。
+    curv_min_ds_m: float = 0.1
+
+    #: 推进联合项外层权重（0.0 = 跳过计算 = 旧行为逐位不变）。
+    progress_weight: float = 0.0
+    #: 目标推进（m）：计划末点沿 route 折线的可微推进量低于该值 → hinge 惩罚（防低速规避）。
+    progress_target_m: float = 8.0
+    #: route 最近点 soft-argmax 温度 τ（m）。
+    progress_tau: float = 1.0
+
+    # ---- P1-3：梯度校准探针（默认关；§7.10-A7/A10「gradient norm 对齐 / cosine」）----
+    #: 启用固定 probe batch 的几何梯度探针（默认 False = 零影响）。
+    geom_grad_probe: bool = False
+    #: 每 N 个 macro update 落一次 probe（默认 1 = 每 update）。
+    geom_grad_probe_every: int = 1
+    #: probe batch 行数（取训练序前 N 行；固定 → 可比）。
+    geom_grad_probe_batch: int = 32
+
     def __post_init__(self) -> None:
         if self.freeze_mode not in ("all", "specific_only", "trunk_only") + RECOVERY_FREEZE_MODES:
             raise ValueError(
@@ -1038,6 +1085,27 @@ class Phase3Config:
             )
         if self.recovery_chain_decay:
             chain_step_weights(RECOVERY_CHAIN_STEPS, self.recovery_chain_decay)  # 长度/取值校验
+        # P1-3：三项损失与探针参数校验（权重非负有限；阈值/温度正有限；探针计数 ≥1）
+        for name in (
+            "ld_margin_weight", "ld_margin_coverage_weight", "ld_margin_solid_weight",
+            "curvature_weight", "progress_weight",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} 必须为有限非负值，收到 {value!r}")
+        for name in (
+            "ld_margin_target_m", "ld_margin_solid_halfwidth_m", "ld_margin_tau",
+            "ld_margin_max_dist_m", "ld_margin_coverage_range_m",
+            "curv_kappa_thresh", "curv_dk_thresh", "curv_strong_weight", "curv_min_ds_m",
+            "progress_target_m", "progress_tau",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} 必须为有限正值，收到 {value!r}")
+        if int(self.geom_grad_probe_every) < 1:
+            raise ValueError(f"geom_grad_probe_every 必须 ≥1，收到 {self.geom_grad_probe_every!r}")
+        if int(self.geom_grad_probe_batch) < 1:
+            raise ValueError(f"geom_grad_probe_batch 必须 ≥1，收到 {self.geom_grad_probe_batch!r}")
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -4889,6 +4957,9 @@ def _phase3_term_denominators(
         "anchor_ce": float((weight.reshape(-1) * chain_row_valid).sum()),
         "anchor_wta": float((weight * chain_valid).sum()),
         "traj": float((weight.reshape(-1) * _traj_valid_weights(traj_valid_np, weight.size)).sum()),
+        # P1-3：三项为 **batch 行均值**（不乘 frame_weight）→ 分母 = 行数（micro/macro 按
+        # n_micro/n_macro 精确缩放，同 load_balance 的 "rows" 口径）。
+        "rows": float(weight.size),
     }
 
 
@@ -4961,6 +5032,296 @@ def phase3_effective_config(config: Phase3Config) -> "tuple[Phase3Config, Tuple[
     return replace(config, **{f"{key}_weight": 0.0 for key in zeroed}), zeroed
 
 
+# --------------------------------------------------------------------------- #
+# P1-3：几何 / 曲率 / 推进三项（默认关闭；可微代理，命名纪律 §7.10-C③）
+# --------------------------------------------------------------------------- #
+
+#: 实线线型 id 集合（``env/obs/ld.py::LINE_TYPE_IDS`` 的 4 个 SOLID_* 项，只读派生；
+#: 单测与 env 侧对拍防漂移）。``ld`` 通道第 5/6 维 = left/right_line_type_id。
+SOLID_LINE_TYPE_IDS: Tuple[int, ...] = (2, 3, 6, 7)
+
+
+def _require_channels(obs: Mapping[str, Any], keys: Sequence[str], term: str) -> None:
+    """P1-3 项所需 obs 通道缺失 → ``ValueError``（fail-closed，不静默退化）。"""
+    missing = [key for key in keys if key not in obs]
+    if missing:
+        raise ValueError(f"{term} 需要 obs 通道 {missing}（当前 batch obs 缺键）")
+
+
+def _masked_soft_weights(
+    dist: "torch.Tensor", valid: "torch.Tensor", tau: float
+) -> "tuple[torch.Tensor, torch.Tensor]":
+    """``(…,N)`` 距离 + ``(…,N)`` 掩码 → ``(软权重, 软最近距)``（数值稳定）。
+
+    ``weights`` = ``softmax(−d/τ)`` 仅在有效槽（和为 1；全无效 → 全 0）；
+    ``softmin`` = ``−τ·log Σ valid·exp(−d/τ)``（最近距的软近似；全无效 → 该行 max 距离）。
+    """
+    neg = -dist / float(tau)
+    masked = torch.where(valid, neg, torch.full_like(neg, float("-inf")))
+    any_valid = valid.any(dim=-1, keepdim=True)
+    safe = torch.where(any_valid, masked, torch.zeros_like(masked))
+    shift = safe.max(dim=-1, keepdim=True).values
+    exp = torch.where(valid, torch.exp(safe - shift), torch.zeros_like(safe))
+    den = exp.sum(dim=-1, keepdim=True)
+    weights = exp / den.clamp(min=1e-12)
+    # softmin = −τ·log Σ valid·exp(−d/τ) = −τ·(shift + log den)（shift 以 −d/τ 为单位）
+    softmin = -float(tau) * (
+        shift.squeeze(-1) + torch.log(den.squeeze(-1).clamp(min=1e-12))
+    )
+    softmin = torch.where(any_valid.squeeze(-1), softmin, dist.max(dim=-1).values)
+    return weights, softmin
+
+
+def ld_line_margin_loss(
+    traj_xy: "torch.Tensor",
+    ld: "torch.Tensor",
+    ld_mask: "torch.Tensor",
+    *,
+    target_margin_m: float = 2.5,
+    coverage_weight: float = 1.0,
+    solid_weight: float = 1.0,
+    solid_halfwidth_m: float = 1.75,
+    tau: float = 0.5,
+    max_dist_m: float = 10.0,
+    coverage_range_m: float = 25.0,
+) -> "tuple[torch.Tensor, Dict[str, float]]":
+    """``ld_line_margin_loss``（P1-3 **可微代理**；不得冒充 drivable-area 真值）。
+
+    输入（ego 系）：``traj_xy (B,K,2)`` 计划位姿、``ld (B,S,7)`` LD 通道
+    ``[dx, dy, heading_rel, curvature, speed_limit, left_type, right_type]``、``ld_mask (B,S)``。
+
+    结构（全部在有效 LD 槽上）：
+    - **surface**（plan→LD）：``relu(softmin_d − target_margin_m)``——plan 点须落在有效
+      LD 中心线附近（on-lane 代理）；
+    - **coverage**（LD→plan，双向的另一方向）：距 ego ≤ ``coverage_range_m`` 的有效槽位须有
+      plan 点在 ``target_margin_m`` 内——防 plan 漂离车道结构（远端槽位不拉扯）；
+    - **solid**：plan 点相对最近槽位车道的横向 ``|rel_y|`` 超过 ``solid_halfwidth_m`` 且
+      面向侧线型 ∈ :data:`SOLID_LINE_TYPE_IDS` → 软期望惩罚（越实线代理）。
+
+    距离截断 ``max_dist_m``（数值稳定）；soft-min/软权重温度 τ。返回 ``(loss, diag)``。
+    """
+    batch, steps, _ = traj_xy.shape
+    slots = int(ld.shape[1])
+    finite = torch.isfinite(ld).all(dim=-1)
+    valid = (ld_mask > 0.5) & finite  # (B,S)
+    row_valid = valid.any(dim=-1)  # (B,)
+    row_w = row_valid.to(traj_xy.dtype)
+    # 无效槽位置 0（防 NaN×0=NaN 污染；几何量只经 valid 掩码进入损失）
+    ld = torch.where(valid[:, :, None], ld, torch.zeros_like(ld))
+
+    dist = torch.cdist(traj_xy, ld[:, :, :2]).clamp(max=float(max_dist_m))  # (B,K,S)
+    weights, softmin_d = _masked_soft_weights(dist, valid[:, None, :].expand(batch, steps, slots), tau)
+
+    # surface（plan→LD）
+    surface = torch.relu(softmin_d - float(target_margin_m))
+    surface_mean = (surface * row_w[:, None]).sum() / (row_w[:, None].sum() * steps).clamp(min=1e-8)
+
+    # coverage（LD→plan；只统计距 ego ≤ range 的有效槽位）
+    _, softmin_e = _masked_soft_weights(dist.transpose(1, 2), torch.ones_like(dist.transpose(1, 2), dtype=torch.bool), tau)
+    in_range = ld[:, :, :2].norm(dim=-1) <= float(coverage_range_m)
+    coverage_valid = valid & in_range
+    coverage = torch.relu(softmin_e - float(target_margin_m)) * coverage_valid.to(traj_xy.dtype)
+    coverage_mean = coverage.sum() / coverage_valid.sum().clamp(min=1e-8)
+
+    # solid（实线越线软期望）
+    rel = traj_xy[:, :, None, :] - ld[:, None, :, :2]  # (B,K,S,2)
+    heading = ld[:, :, 2][:, None, :]  # (B,1,S)
+    rel_y = -rel[..., 0] * torch.sin(heading) + rel[..., 1] * torch.cos(heading)  # (B,K,S)
+    left_id = ld[:, :, 5][:, None, :]
+    right_id = ld[:, :, 6][:, None, :]
+    facing = torch.where(rel_y > 0, left_id, right_id).round()
+    solid_flag = torch.zeros_like(facing)
+    for type_id in SOLID_LINE_TYPE_IDS:
+        solid_flag = torch.maximum(solid_flag, (facing == float(type_id)).to(facing.dtype))
+    crossing = torch.relu(rel_y.abs() - float(solid_halfwidth_m)) * solid_flag
+    solid_i = (weights * crossing).sum(dim=-1)  # (B,K) 软期望越线量
+    solid_mean = (solid_i * row_w[:, None]).sum() / (row_w[:, None].sum() * steps).clamp(min=1e-8)
+
+    loss = surface_mean + float(coverage_weight) * coverage_mean + float(solid_weight) * solid_mean
+    denom_steps = (row_w[:, None].sum() * steps).clamp(min=1e-8)
+    diag = {
+        "ld_valid_ratio": float(valid.to(traj_xy.dtype).mean().detach()),
+        "ld_row_valid_ratio": float(row_w.mean().detach()),
+        "ld_plan_covered_ratio": float(
+            ((softmin_d <= float(target_margin_m)).to(traj_xy.dtype) * row_w[:, None]).sum().detach()
+            / denom_steps.detach()
+        ),
+        "ld_margin_mean_m": float((softmin_d * row_w[:, None]).sum().detach() / denom_steps.detach()),
+        "ld_solid_active_ratio": float(
+            ((solid_i > 0).to(traj_xy.dtype) * row_w[:, None]).sum().detach() / denom_steps.detach()
+        ),
+        "ld_coverage_ratio": float(
+            (coverage_valid.to(traj_xy.dtype) * (softmin_e <= float(target_margin_m))).sum().detach()
+            / coverage_valid.sum().clamp(min=1.0).detach()
+        ),
+    }
+    return loss, diag
+
+
+def plan_curvature_loss(
+    plan: "torch.Tensor",
+    *,
+    kappa_thresh: float = 0.2,
+    dk_thresh: float = 0.1,
+    strong_weight: float = 2.0,
+    min_ds_m: float = 0.1,
+) -> "tuple[torch.Tensor, Dict[str, float]]":
+    """计划链曲率项（P1-3）：``κ_i = Δθ_i / max(|Δs_i|, min_ds_m)``。
+
+    - **主罚 Δκ**：相邻有效步 ``|κ_i − κ_{i−1}|`` 超 ``dk_thresh`` 的部分（hinge）；
+    - **超阈值 κ 强罚**：``strong_weight × mean relu(|κ| − kappa_thresh)``（阈值 v1 全局；
+      按道路类型条件化需要类别标签来源——留 TODO，不硬造）。
+    极小 ds 步（``|Δs| < min_ds_m``）不参与 κ 与 Δκ（避免 0/0 放大）。
+    返回 ``(loss, diag)``：大 κ / 大 Δκ 占比在 diag。
+    """
+    ds = plan[..., 0]
+    dtheta = plan[..., 1]
+    valid = ds.abs() >= float(min_ds_m)
+    kappa = dtheta / ds.abs().clamp(min=float(min_ds_m))
+    kappa = torch.where(valid, kappa, torch.zeros_like(kappa))
+    over_kappa = torch.relu(kappa.abs() - float(kappa_thresh))
+    over_kappa_mean = over_kappa.mean()
+    dk = (kappa[:, 1:] - kappa[:, :-1]).abs()
+    pair_valid = valid[:, 1:] & valid[:, :-1]
+    dk_masked = torch.where(pair_valid, dk, torch.zeros_like(dk))
+    dk_pen = torch.relu(dk_masked - float(dk_thresh))
+    loss = dk_pen.mean() + float(strong_weight) * over_kappa_mean
+    valid_f = valid.to(plan.dtype)
+    diag = {
+        "curv_kappa_abs_mean": float((kappa.abs() * valid_f).sum().detach() / valid_f.sum().clamp(min=1.0).detach()),
+        "curv_dk_abs_mean": float(
+            (dk_masked * pair_valid.to(plan.dtype)).sum().detach() / pair_valid.to(plan.dtype).sum().clamp(min=1.0).detach()
+        ),
+        "curv_over_kappa_ratio": float(
+            ((kappa.abs() > float(kappa_thresh)).to(plan.dtype) * valid_f).sum().detach()
+            / valid_f.sum().clamp(min=1.0).detach()
+        ),
+        "curv_over_dk_ratio": float(
+            ((dk_masked > float(dk_thresh)) & pair_valid).to(plan.dtype).sum().detach()
+            / pair_valid.to(plan.dtype).sum().clamp(min=1.0).detach()
+        ),
+        "curv_valid_ds_ratio": float(valid_f.mean().detach()),
+    }
+    return loss, diag
+
+
+def route_progress_loss(
+    traj_xy: "torch.Tensor",
+    ego_world: "torch.Tensor",
+    route_world: "torch.Tensor",
+    route_world_mask: "torch.Tensor",
+    *,
+    target_m: float = 8.0,
+    tau: float = 1.0,
+) -> "tuple[torch.Tensor, Dict[str, float]]":
+    """推进联合项（P1-3，防低速规避）：**计划末点沿 route 折线的可微推进量 − 参考基线**。
+
+    口径与理由：直接以 route 弧长为推进度量（与 rc 同轴），把 route 折线转到 ego 系后用
+    掩码 soft-argmax 取"期望弧长"；基线 = ego 位置（原点）的期望弧长（对 plan 为常数）。
+    ``progress = s_end − s_0``；损失 = ``relu(target_m − progress)``（奖励至少推进 target）。
+    输入：``traj_xy (B,K,2)``（ego 系）、``ego_world (B,3)`` 世界位姿、``route_world (B,M,2)``
+    世界系 route 点、``route_world_mask (B,M)``。无有效 route 的行不进均值（diag 记录占比）。
+    """
+    batch = traj_xy.shape[0]
+    valid = (route_world_mask > 0.5) & torch.isfinite(route_world).all(dim=-1)  # (B,M)
+    row_valid = valid.any(dim=-1)
+    # 沿 route 顺序的累计弧长（无效步长置 0）
+    step_len = (route_world[:, 1:] - route_world[:, :-1]).norm(dim=-1)
+    step_len = torch.where(valid[:, 1:] & valid[:, :-1], step_len, torch.zeros_like(step_len))
+    arc = torch.cat([torch.zeros(batch, 1, dtype=traj_xy.dtype, device=traj_xy.device),
+                     torch.cumsum(step_len, dim=1)], dim=1)  # (B,M)
+    # 世界 → ego 系（route 点与 plan 同系比较）
+    theta = ego_world[:, 2]
+    cos_t, sin_t = torch.cos(theta)[:, None], torch.sin(theta)[:, None]
+    dx = route_world[:, :, 0] - ego_world[:, 0:1]
+    dy = route_world[:, :, 1] - ego_world[:, 1:2]
+    route_ego = torch.stack([dx * cos_t + dy * sin_t, -dx * sin_t + dy * cos_t], dim=-1)  # (B,M,2)
+    route_ego = torch.where(valid[:, :, None], route_ego, torch.zeros_like(route_ego))
+    w0, _ = _masked_soft_weights(route_ego.norm(dim=-1), valid, tau)
+    s0 = (w0 * arc).sum(dim=-1)  # ego 位置的期望弧长（对 plan 为常数）
+    d_end = (traj_xy[:, -1, :][:, None, :] - route_ego).norm(dim=-1)  # (B,M)
+    w_end, _ = _masked_soft_weights(d_end, valid, tau)
+    s_end = (w_end * arc).sum(dim=-1)  # 计划末点的期望弧长
+    progress = s_end - s0
+    hinge = torch.relu(float(target_m) - progress)
+    row_w = row_valid.to(traj_xy.dtype)
+    loss = (hinge * row_w).sum() / row_w.sum().clamp(min=1e-8)
+    diag = {
+        "progress_route_valid_ratio": float(row_w.mean().detach()),
+        "progress_mean_m": float((progress * row_w).sum().detach() / row_w.sum().clamp(min=1e-8).detach()),
+        "progress_shortfall_ratio": float(
+            ((progress < float(target_m)).to(traj_xy.dtype) * row_w).sum().detach()
+            / row_w.sum().clamp(min=1e-8).detach()
+        ),
+    }
+    return loss, diag
+
+
+def geometry_grad_probe(
+    model: "nn.Module",
+    obs: Mapping[str, "torch.Tensor"],
+    future_t: Mapping[str, "torch.Tensor"],
+    targets: Mapping[str, "torch.Tensor"],
+    frame_weight: "torch.Tensor",
+    config: Phase3Config,
+    *,
+    traj_row_mask: Optional["torch.Tensor"] = None,
+) -> Dict[str, Any]:
+    """固定 probe batch 的几何梯度校准探针（P1-3；默认关，纯诊断不改优化）。
+
+    在**同一前向图**上对四个原始项（``traj`` / ``ld_margin`` / ``curvature`` / ``progress``，
+    未乘外层权重）做 ``torch.autograd.grad`` → 各 grad-norm 与 cosine：
+    ``cos(traj, ld_margin)``、``cos(traj, curvature)``、``cos(progress, ld_margin)``；
+    ``cos < −0.3`` 记 ``conflict_*=True``（**仅记录，不自动动作**）。返回可 JSON 化 dict
+    （``grad_norm_*`` / ``cos_*`` / ``conflict_*``）。
+    """
+    terms = _phase3_loss_terms(
+        model, obs, future_t, targets, frame_weight, config,
+        traj_row_mask=traj_row_mask, probe_terms=True,
+    )
+    raw = terms.get("_raw") or {}
+    params = [parameter for parameter in model.parameters() if parameter.requires_grad]
+
+    def _grad_vec(term: "torch.Tensor") -> Optional["torch.Tensor"]:
+        if term is None:
+            return None
+        grads = torch.autograd.grad(term, params, retain_graph=True, allow_unused=True)
+        pieces = [
+            (grad.detach().reshape(-1) if grad is not None else torch.zeros_like(parameter).reshape(-1))
+            for grad, parameter in zip(grads, params)
+        ]
+        if not pieces:
+            return None
+        return torch.cat(pieces)
+
+    vectors: Dict[str, Optional["torch.Tensor"]] = {
+        name: _grad_vec(raw.get(name)) for name in ("traj", "ld_margin", "curvature", "progress")
+    }
+
+    def _cos(a: Optional["torch.Tensor"], b: Optional["torch.Tensor"]) -> float:
+        if a is None or b is None:
+            return float("nan")
+        denom = float(a.norm()) * float(b.norm())
+        if denom <= 1e-12:
+            return float("nan")
+        return float(torch.dot(a, b) / denom)
+
+    cosines = {
+        "cos_traj_geometry": _cos(vectors["traj"], vectors["ld_margin"]),
+        "cos_traj_curvature": _cos(vectors["traj"], vectors["curvature"]),
+        "cos_progress_geometry": _cos(vectors["progress"], vectors["ld_margin"]),
+    }
+    out: Dict[str, Any] = {
+        f"grad_norm_{name}": (float(vec.norm()) if vec is not None else float("nan"))
+        for name, vec in vectors.items()
+    }
+    out.update(cosines)
+    out["conflict_traj_geometry"] = bool(cosines["cos_traj_geometry"] < -0.3)
+    out["conflict_traj_curvature"] = bool(cosines["cos_traj_curvature"] < -0.3)
+    out["conflict_progress_geometry"] = bool(cosines["cos_progress_geometry"] < -0.3)
+    return out
+
+
 def _phase3_loss_terms(
     model: "nn.Module",
     obs: Mapping[str, "torch.Tensor"],
@@ -4970,6 +5331,7 @@ def _phase3_loss_terms(
     config: Phase3Config,
     chain_step_weights: Optional["torch.Tensor"] = None,
     traj_row_mask: Optional["torch.Tensor"] = None,
+    probe_terms: bool = False,
 ) -> Dict[str, Any]:
     """一次前向 + phase 3 全部损失项（train 侧按 micro 调用；eval 侧也可复用）。
 
@@ -5011,7 +5373,7 @@ def _phase3_loss_terms(
     # 行权重 = frame_weight × traj 行掩码（只对真实 traj6 行生效；掩码只作用于本项）。
     # 六步时间衰减：``bc_trajectory_loss.weights`` 是**逐行**权重（不支持逐点）→ 不套用（TODO）。
     traj_loss_value = torch.zeros((), device=device)
-    if float(config.traj_aux_weight) > 0.0:
+    if float(config.traj_aux_weight) > 0.0 or probe_terms:
         traj_weights = frame_weight if traj_row_mask is None else frame_weight * traj_row_mask
         traj_loss_value, _ = bc_trajectory_loss(
             out["traj_xy"],
@@ -5020,6 +5382,46 @@ def _phase3_loss_terms(
             weights=traj_weights,
             metric_weights=frame_weight,
         )
+    # P1-3：几何/曲率/推进三项（默认 weight=0 跳过计算；probe_terms 时强制算原始项供探针）
+    ld_margin_loss_value = torch.zeros((), device=device)
+    curvature_loss_value = torch.zeros((), device=device)
+    progress_loss_value = torch.zeros((), device=device)
+    geom_diag: Dict[str, Dict[str, float]] = {}
+    if float(config.ld_margin_weight) > 0.0 or probe_terms:
+        _require_channels(obs, ("ld", "ld_mask"), "ld_line_margin_loss")
+        ld_margin_loss_value, diag = ld_line_margin_loss(
+            out["traj_xy"],
+            obs["ld"],
+            obs["ld_mask"],
+            target_margin_m=float(config.ld_margin_target_m),
+            coverage_weight=float(config.ld_margin_coverage_weight),
+            solid_weight=float(config.ld_margin_solid_weight),
+            solid_halfwidth_m=float(config.ld_margin_solid_halfwidth_m),
+            tau=float(config.ld_margin_tau),
+            max_dist_m=float(config.ld_margin_max_dist_m),
+            coverage_range_m=float(config.ld_margin_coverage_range_m),
+        )
+        geom_diag["ld_margin"] = diag
+    if float(config.curvature_weight) > 0.0 or probe_terms:
+        curvature_loss_value, diag = plan_curvature_loss(
+            plan,
+            kappa_thresh=float(config.curv_kappa_thresh),
+            dk_thresh=float(config.curv_dk_thresh),
+            strong_weight=float(config.curv_strong_weight),
+            min_ds_m=float(config.curv_min_ds_m),
+        )
+        geom_diag["curvature"] = diag
+    if float(config.progress_weight) > 0.0 or probe_terms:
+        _require_channels(obs, ("ego_world", "route_world", "route_world_mask"), "route_progress_loss")
+        progress_loss_value, diag = route_progress_loss(
+            out["traj_xy"],
+            obs["ego_world"],
+            obs["route_world"],
+            obs["route_world_mask"],
+            target_m=float(config.progress_target_m),
+            tau=float(config.progress_tau),
+        )
+        geom_diag["progress"] = diag
     # v7 结构迭代 B：K-anchor WTA 目标（选择 CE + 被分配锚链回归；权重 0 或未启用锚 → 跳过）
     anchor_ce_loss = anchor_wta_value = torch.zeros((), device=device)
     anchor_metrics: Dict[str, float] = {}
@@ -5105,6 +5507,10 @@ def _phase3_loss_terms(
         "action_chain": config.action_chain_weight * chain_loss,
         # P1-2：traj 项（weight<=0 时恒 0，不进 loss_keys/total = 旧行为）
         "traj": float(config.traj_aux_weight) * traj_loss_value,
+        # P1-3：三项（weight=0 时恒 0，不进 loss_keys/total；probe_terms 时原始项供探针）
+        "ld_margin": float(config.ld_margin_weight) * ld_margin_loss_value,
+        "curvature": float(config.curvature_weight) * curvature_loss_value,
+        "progress": float(config.progress_weight) * progress_loss_value,
         "bias_calib": config.bias_calib_weight * bias_penalty,
         "anchor_ce": config.anchor_ce_weight * anchor_ce_loss,
         "anchor_wta": config.anchor_wta_weight * anchor_wta_value,
@@ -5119,6 +5525,19 @@ def _phase3_loss_terms(
         "action_err": action_err,
         "bias_metrics": bias_metrics,
         "anchor_metrics": anchor_metrics,
+        # P1-3：三项诊断标量（valid ratio / margin 统计等；仅激活项或探针时非空）
+        "geom_diag": geom_diag,
+        # P1-3：探针用**未乘外层权重**的原始项（仅 probe_terms=True 时非空；不进 loss/total）
+        "_raw": (
+            {
+                "traj": traj_loss_value,
+                "ld_margin": ld_margin_loss_value,
+                "curvature": curvature_loss_value,
+                "progress": progress_loss_value,
+            }
+            if probe_terms
+            else {}
+        ),
         "out": out,
     }
     return terms
@@ -5310,7 +5729,13 @@ def pretrain_bc_phase3(
         "presence",
         "entry",
         "load_balance",
-    ) + (("traj",) if float(config.traj_aux_weight) > 0.0 else ())
+    ) + (("traj",) if float(config.traj_aux_weight) > 0.0 else ()) + (
+        ("ld_margin",) if float(config.ld_margin_weight) > 0.0 else ()
+    ) + (
+        ("curvature",) if float(config.curvature_weight) > 0.0 else ()
+    ) + (
+        ("progress",) if float(config.progress_weight) > 0.0 else ()
+    )
     macro_size = max(1, int(config.batch_size))
     micro_size = (
         macro_size
@@ -5329,6 +5754,59 @@ def pretrain_bc_phase3(
         if future_source is not None:
             return future_source.batch(batch_indices)
         return future_fn(batch_indices, obs_np)  # type: ignore[misc]
+
+    # P1-3：固定 probe batch（取训练序前 N 行；默认关 → 零影响）
+    geom_probe_enabled = bool(config.geom_grad_probe)
+    geom_probe_every = max(1, int(config.geom_grad_probe_every))
+    geom_probe_records: List[Dict[str, Any]] = []
+    probe_indices = (
+        np.asarray(indices[: min(int(config.geom_grad_probe_batch), indices.size)], dtype=np.int64)
+        if geom_probe_enabled and indices.size
+        else np.zeros(0, dtype=np.int64)
+    )
+    geom_probe_step = 0
+
+    def _run_geom_probe() -> Optional[Dict[str, Any]]:
+        """固定 probe batch 上的一次几何梯度探针（不改优化；纯诊断）。"""
+        if probe_indices.size == 0:
+            return None
+        if batch_source is not None:
+            obs_np = batch_source.obs_batch(probe_indices)
+            targets_np = batch_source.targets_batch(probe_indices)
+        else:
+            obs_np = dataset.build_obs_batch(probe_indices)
+            targets_np = dataset.targets(probe_indices)
+        future_np = _future_batch(probe_indices, obs_np)
+        obs_t = _to_device_obs(obs_np, device, pin=batch_source is not None)
+        targets_t = to_device_tensors(
+            {key: targets_np[key] for key in ("action", "traj6", "train_weight")},
+            device,
+            dtype=torch.float32,
+            pin=batch_source is not None,
+        )
+        future_t = _phase3_future_tensors(future_np, device, pin=batch_source is not None)
+        frame_w = targets_t["train_weight"].to(device=device, dtype=torch.float32)
+        traj_mask_t = None
+        if config.traj_aux_valid is not None:
+            mask_np = traj_valid_for_rows(config.traj_aux_valid, probe_indices)
+            if mask_np is not None:
+                traj_mask_t = torch.as_tensor(mask_np, device=device, dtype=torch.float32)
+        with torch.enable_grad():
+            return geometry_grad_probe(
+                model,
+                obs_t,
+                future_t,
+                targets_t,
+                frame_w,
+                effective_config,
+                traj_row_mask=traj_mask_t,
+            )
+
+    if geom_probe_enabled:
+        logger(
+            f"[bc3] 几何梯度探针：每 {geom_probe_every} 个 update · probe batch={probe_indices.size} 行"
+            "（固定训练序前缀；grad-norm + cosine 落 metrics；cos<-0.3 仅记录不动作）"
+        )
 
     for epoch in range(start_epoch, int(config.epochs)):
         order = indices.copy()
@@ -5350,6 +5828,9 @@ def pretrain_bc_phase3(
         bias_weight = 0.0
         anchor_sums: Dict[str, float] = {}
         anchor_weight = 0.0
+        geom_sums: Dict[str, float] = {}
+        geom_weight = 0.0
+        epoch_probe_records: List[Dict[str, Any]] = []
         data_seconds = forward_seconds = backward_seconds = 0.0
         if use_recovery_mix:
             # P1-2：按 batch 混采（normal 池 = 本 epoch 训练序去掉 recovery 行）
@@ -5479,6 +5960,9 @@ def pretrain_bc_phase3(
                 )
                 if "traj" in components:  # P1-2：weight>0 才进入 total（默认路径逐位不变）
                     total = total + components["traj"]
+                for key in ("ld_margin", "curvature", "progress"):  # P1-3：同上
+                    if key in components:
+                        total = total + components[key]
                 traj_metrics = _phase3_traj_metrics(terms["out"], targets, frame_weight)
                 forward_seconds += time.perf_counter() - forward_started
                 backward_started = time.perf_counter()
@@ -5505,6 +5989,13 @@ def pretrain_bc_phase3(
                     for key, value in batch_anchor.items():
                         anchor_sums[key] = anchor_sums.get(key, 0.0) + float(value) * weight_micro
                     anchor_weight += weight_micro
+                batch_geom = terms.get("geom_diag") or {}
+                if batch_geom:
+                    for term_name, diag in batch_geom.items():
+                        for key, value in diag.items():
+                            flat_key = f"{term_name}/{key}"
+                            geom_sums[flat_key] = geom_sums.get(flat_key, 0.0) + float(value) * weight_micro
+                    geom_weight += weight_micro
                 with torch.no_grad():
                     diff = terms["out"]["traj_xy"] - targets["traj6"]
                     traj_mse_values.append((diff ** 2).mean(dim=-1).detach().double().cpu().numpy())
@@ -5536,6 +6027,14 @@ def pretrain_bc_phase3(
             )
             optimizer.step()
             batches += 1
+            if geom_probe_enabled and batches % geom_probe_every == 0:
+                probe = _run_geom_probe()
+                if probe is not None:
+                    geom_probe_step += 1
+                    record = {"epoch": int(epoch), "batch": int(batches), "step": int(geom_probe_step)}
+                    record.update(probe)
+                    geom_probe_records.append(record)
+                    epoch_probe_records.append(record)
         metrics["batches"] += batches
         divisor = max(1, batches)
         weight_total = sum(float(np.sum(item)) for item in weight_values)
@@ -5556,6 +6055,10 @@ def pretrain_bc_phase3(
             "bc_load_balance_loss": totals["load_balance"] / divisor,
             # P1-2：traj 损失项（仅 traj_aux_weight>0 时落键；默认不落 = 旧 metrics 不变）
             **({"bc_traj_aux_loss": totals["traj"] / divisor} if "traj" in totals else {}),
+            # P1-3：三项（仅 weight>0 时落键；默认不落 = 旧 metrics 不变）
+            **({"bc_ld_margin_loss": totals["ld_margin"] / divisor} if "ld_margin" in totals else {}),
+            **({"bc_curvature_loss": totals["curvature"] / divisor} if "curvature" in totals else {}),
+            **({"bc_progress_loss": totals["progress"] / divisor} if "progress" in totals else {}),
             # traj 监控（与损失项无关；loss_type 口径的加权误差 + MSE/MAE/FDE）
             "bc_traj_loss": (
                 totals["traj_mse" if config.loss_type == "l2" else "traj_mae"] / weight_denominator
@@ -5584,6 +6087,19 @@ def pretrain_bc_phase3(
             {key: value / max(bias_weight, 1e-12) for key, value in bias_sums.items()}
         )
         epoch_update["bc_bias_calib_weight"] = float(config.bias_calib_weight)
+        # P1-3：三项诊断（valid ratio / margin 统计；权重加权平均）+ 梯度探针记录
+        if geom_sums:
+            epoch_update.update(
+                {f"geom_{key}": value / max(geom_weight, 1e-12) for key, value in geom_sums.items()}
+            )
+        if geom_probe_enabled:
+            epoch_update["geom_grad_probe"] = list(epoch_probe_records)
+            conflicts = {
+                key: int(sum(1 for record in epoch_probe_records if record.get(key)))
+                for key in ("conflict_traj_geometry", "conflict_traj_curvature", "conflict_progress_geometry")
+            }
+            epoch_update["geom_grad_conflict_counts"] = conflicts
+            epoch_update["geom_grad_probe_steps"] = len(epoch_probe_records)
         # v7 结构迭代 B：K-anchor 诊断（分配 margin/dist/软混合 ADE/逐簇占比；权重加权平均）
         if float(effective_config.anchor_ce_weight) > 0.0 or float(effective_config.anchor_wta_weight) > 0.0:
             epoch_update["bc_anchor_ce_loss"] = totals["anchor_ce"] / divisor
@@ -5664,9 +6180,29 @@ def pretrain_bc_phase3(
             f"presence={metrics['bc_presence_loss']:.4f} entry={metrics['bc_entry_loss']:.4f} "
             f"bias={metrics.get('bc_bias_calib_loss', 0.0):.4f} "
             f"traj(monitor)={metrics['bc_traj_mae_m']:.3f}m "
+            + "".join(
+                f" {label}={metrics[key]:.4f}"
+                for key, label in (
+                    ("bc_ld_margin_loss", "ld_margin"),
+                    ("bc_curvature_loss", "curv"),
+                    ("bc_progress_loss", "progress"),
+                )
+                if key in metrics
+            )
+            + " "
             f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s"
             f"{val_text}"
         )
+    if geom_probe_enabled:
+        metrics["geom_grad_probe"] = geom_probe_records
+        metrics["geom_grad_conflict_counts"] = {
+            key: int(sum(1 for record in geom_probe_records if record.get(key)))
+            for key in (
+                "conflict_traj_geometry",
+                "conflict_traj_curvature",
+                "conflict_progress_geometry",
+            )
+        }
     return metrics
 
 
@@ -5713,7 +6249,13 @@ def evaluate_bc_phase3(
         "latent",
         "presence",
         "entry",
-    ) + (("traj",) if float(config.traj_aux_weight) > 0.0 else ())
+    ) + (("traj",) if float(config.traj_aux_weight) > 0.0 else ()) + (
+        ("ld_margin",) if float(config.ld_margin_weight) > 0.0 else ()
+    ) + (
+        ("curvature",) if float(config.curvature_weight) > 0.0 else ()
+    ) + (
+        ("progress",) if float(config.progress_weight) > 0.0 else ()
+    )
     numerator = {key: 0.0 for key in loss_keys}
     denominator = {key: 0.0 for key in loss_keys}
     load_sum, load_count = 0.0, 0
@@ -5873,9 +6415,15 @@ def _term_key(loss_key: str) -> str:
     """损失项键 → :func:`_phase3_term_denominators` 的分母键。
 
     ``entry`` 与 ``presence`` 共用 BCE 分母（帧权重和 × 槽位数）；``ego_next`` 的分母是
-    ``step``（``Σ w·wm_valid``）。
+    ``step``（``Σ w·wm_valid``）；P1-3 三项是 batch 行均值 → ``rows``。
     """
-    return {"entry": "presence", "ego_next": "step"}.get(loss_key, loss_key)
+    return {
+        "entry": "presence",
+        "ego_next": "step",
+        "ld_margin": "rows",
+        "curvature": "rows",
+        "progress": "rows",
+    }.get(loss_key, loss_key)
 
 
 # --------------------------------------------------------------------------- #

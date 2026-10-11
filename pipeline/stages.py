@@ -4347,6 +4347,10 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "presence": _loss_weight("presence", 0.1),
         "entry": _loss_weight("entry", 0.1),
         "traj_aux": _loss_weight("traj_aux", 0.0),
+        # P1-3：几何/曲率/推进三项（0.0 = 关闭 = 旧行为逐位不变；可微代理）
+        "ld_margin": _loss_weight("ld_margin", 0.0),
+        "curvature": _loss_weight("curvature", 0.0),
+        "progress": _loss_weight("progress", 0.0),
         # P1 DAgger 前置：bias 标定项（逐维 signed-bias 惩罚；0.0 = 关闭 = 旧行为逐位不变）
         "bias_calib": _loss_weight("bias_calib", 0.0),
         # v7 结构迭代 B：K-anchor WTA 目标（0.0 = 关闭 = 旧行为逐位不变；specific_only 下自动降级）
@@ -4497,6 +4501,13 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         f"shuffle_seed={shuffle_seed} · traj_aux={loss_weights['traj_aux']}"
         f"（{'损失项' if traj_aux_weight > 0.0 else '仅监控'}）· "
         f"action_chain_source={chain_source_raw} · bias_calib={loss_weights['bias_calib']}"
+        + (
+            f" · P1-3：ld_margin={loss_weights['ld_margin']:g} · curvature={loss_weights['curvature']:g}"
+            f" · progress={loss_weights['progress']:g}"
+            f" · geom_grad_probe={'on' if args.phase3_geom_grad_probe else 'off'}"
+            if any(loss_weights[key] > 0.0 for key in ("ld_margin", "curvature", "progress"))
+            else ""
+        )
         + (
             f" · 降级前权重：{degraded_loss_weights}"
             if degraded_loss_weights
@@ -4818,6 +4829,47 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         presence_weight=loss_weights["presence"],
         entry_weight=loss_weights["entry"],
         traj_aux_weight=loss_weights["traj_aux"],
+        # P1-3：三项 + 子参数（config ``stages.B.phase3.losses.*`` 平铺键；默认即 Phase3Config 默认）
+        ld_margin_weight=loss_weights["ld_margin"],
+        ld_margin_target_m=float(losses_cfg.get("ld_margin_target_m", 2.5)),
+        ld_margin_coverage_weight=float(losses_cfg.get("ld_margin_coverage_weight", 1.0)),
+        ld_margin_solid_weight=float(losses_cfg.get("ld_margin_solid_weight", 1.0)),
+        ld_margin_solid_halfwidth_m=float(losses_cfg.get("ld_margin_solid_halfwidth_m", 1.75)),
+        ld_margin_tau=float(losses_cfg.get("ld_margin_tau", 0.5)),
+        ld_margin_max_dist_m=float(losses_cfg.get("ld_margin_max_dist_m", 10.0)),
+        ld_margin_coverage_range_m=float(losses_cfg.get("ld_margin_coverage_range_m", 25.0)),
+        curvature_weight=loss_weights["curvature"],
+        curv_kappa_thresh=float(
+            args.phase3_curv_kappa_thresh
+            if getattr(args, "phase3_curv_kappa_thresh", None) is not None
+            else losses_cfg.get("curv_kappa_thresh", 0.2)
+        ),
+        curv_dk_thresh=float(
+            args.phase3_curv_dk_thresh
+            if getattr(args, "phase3_curv_dk_thresh", None) is not None
+            else losses_cfg.get("curv_dk_thresh", 0.1)
+        ),
+        curv_strong_weight=float(losses_cfg.get("curv_strong_weight", 2.0)),
+        curv_min_ds_m=float(losses_cfg.get("curv_min_ds_m", 0.1)),
+        progress_weight=loss_weights["progress"],
+        progress_target_m=float(losses_cfg.get("progress_target_m", 8.0)),
+        progress_tau=float(losses_cfg.get("progress_tau", 1.0)),
+        # P1-3：梯度校准探针（CLI > config；默认关）
+        geom_grad_probe=bool(
+            args.phase3_geom_grad_probe
+            if getattr(args, "phase3_geom_grad_probe", None) is not None
+            else losses_cfg.get("geom_grad_probe", False)
+        ),
+        geom_grad_probe_every=int(
+            args.phase3_geom_grad_probe_every
+            if getattr(args, "phase3_geom_grad_probe_every", None) is not None
+            else losses_cfg.get("geom_grad_probe_every", 1)
+        ),
+        geom_grad_probe_batch=int(
+            args.phase3_geom_grad_probe_batch
+            if getattr(args, "phase3_geom_grad_probe_batch", None) is not None
+            else losses_cfg.get("geom_grad_probe_batch", 32)
+        ),
         bias_calib_weight=loss_weights["bias_calib"],
         anchor_ce_weight=loss_weights["anchor_ce"],
         anchor_wta_weight=loss_weights["anchor_wta"],
@@ -5495,6 +5547,29 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="轨迹（pose 链）辅助权重（默认 0.0 = 不进损失 = 旧行为，仅监控）；"
                              ">0 时新增 traj 损失项（out.traj_xy vs traj6，仅真实 traj6 行："
                              "锚/recovery 行 1、窗口 dagger 行 0；无真实行 → 报错）")
+    # ---- P1-3：几何/曲率/推进三项 + 梯度校准探针（默认关；可微代理）----
+    parser.add_argument("--phase3-ld-margin-weight", type=float, default=None,
+                        help="P1-3 ld_line_margin_loss 权重（默认 0.0 = 关；可微代理：LD 中心线"
+                             "点集↔plan 双向最近距 margin + 实线越线软期望；不冒充 drivable-area）")
+    parser.add_argument("--phase3-curvature-weight", type=float, default=None,
+                        help="P1-3 曲率项权重（默认 0.0 = 关；主罚 Δκ + 超阈值 |κ| 强罚；"
+                             "极小 ds 步掩码）")
+    parser.add_argument("--phase3-curv-kappa-thresh", type=float, default=None,
+                        help="曲率项 |κ| 强罚阈值（1/m；默认取 config losses.curv_kappa_thresh=0.2；"
+                             "实测模型 plan |κ| 均值 ~0.01 → 校准前建议按探针分布下调）")
+    parser.add_argument("--phase3-curv-dk-thresh", type=float, default=None,
+                        help="曲率项 Δκ 死区（1/m；默认取 config losses.curv_dk_thresh=0.1）")
+    parser.add_argument("--phase3-progress-weight", type=float, default=None,
+                        help="P1-3 推进联合项权重（默认 0.0 = 关；计划末点沿 route 折线可微推进"
+                             "− ego 基线，hinge 目标 progress_target_m，防低速规避）")
+    parser.add_argument("--phase3-geom-grad-probe", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="P1-3 几何梯度校准探针（默认关）：固定 probe batch 上记录各新项 "
+                             "grad-norm 与 cosine（cos<-0.3 仅记录，不自动动作）")
+    parser.add_argument("--phase3-geom-grad-probe-every", type=int, default=None,
+                        help="探针间隔（每 N 个 macro update；默认 1）")
+    parser.add_argument("--phase3-geom-grad-probe-batch", type=int, default=None,
+                        help="探针 batch 行数（固定训练序前缀；默认 32）")
     # ---- P1-2：recovery 数据接线（默认关闭）----
     parser.add_argument("--recovery-dir", type=str, default=None,
                         help="P1-2 recovery 数据目录（如 datasets/recovery_v1：samples.npz + "
