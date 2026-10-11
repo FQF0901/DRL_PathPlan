@@ -4,7 +4,7 @@
 - 静态层 ``parse_freeze_constants``：``AnnAssign`` + ``Tuple + Name`` 拼接解析；
 - 四计数判定：PASS（freeze 组全零 / train 组 a>0、d>0）；
 - FAIL 案例：冻结参数被塞进 optimizer、可训参数漏出 optimizer、组内冻结/可训混合；
-- ``recovery`` 配方 → ``NOT_IMPLEMENTED`` + R1/R2 建议清单；退出码 2；
+- ``recovery`` / ``recovery_experts`` 配方 → 四计数审计（P1-2 已实现；`RECOVERY_SUGGESTION` 为对照清单）；
 - 真配置集成（``config/default.yaml``，specific_only）。
 """
 
@@ -152,17 +152,28 @@ def test_audit_fail_mixed_group() -> None:
 # recovery / CLI / 真配置集成
 # --------------------------------------------------------------------------- #
 
-def test_run_probe_recovery_not_implemented(tmp_path) -> None:
-    out = tmp_path / "recovery.json"
-    payload = run_probe("recovery", out=out, quiet=True)
-    assert payload["status"] == "NOT_IMPLEMENTED"
-    assert payload["suggested"]["R1"]["train_prefixes"]
-    assert payload["suggested"]["R2"]["train_prefixes"] != payload["suggested"]["R1"]["train_prefixes"]
-    saved = json.loads(out.read_text(encoding="utf-8"))
-    assert saved["status"] == "NOT_IMPLEMENTED"
-    assert saved["suggested"]["doc_ref"].startswith("docs/deepseekv4p1_argue.md")
-    # CLI 退出码：NOT_IMPLEMENTED = 2
-    assert main(["--recipe", "recovery", "--out", str(tmp_path / "recovery2.json")]) == 2
+def test_run_probe_recovery_recipes_real_config(tmp_path) -> None:
+    """recovery（R1）/ recovery_experts（R2）已实现（P1-2）→ 四计数 PASS（真配置）。"""
+    for recipe in ("recovery", "recovery_experts"):
+        payload = run_probe(recipe, out=tmp_path / f"{recipe}.json", quiet=True)
+        assert payload["status"] == "PASS", (recipe, payload["failures"])
+        assert payload["static_match_runtime"] is True
+        groups = payload["groups"]
+        for group in ("encoder", "mem", "st_gnn", "router", "policy", "value"):
+            assert groups[group]["expected"] == "freeze"
+            assert groups[group]["changed"] == 0
+        assert groups["fusion"]["expected"] == "train"
+        assert groups["fusion"]["changed"] > 0
+        assert groups["plan_head.primary"]["expected"] == "train"
+        assert groups["plan_head.primary"]["changed"] > 0
+        if recipe == "recovery":
+            assert groups["experts"]["expected"] == "freeze"
+            assert groups["experts"]["changed"] == 0
+        else:
+            assert groups["experts"]["expected"] == "train"
+            assert groups["experts"]["changed"] > 0
+    # CLI 退出码：PASS = 0
+    assert main(["--recipe", "recovery", "--out", str(tmp_path / "recovery_cli.json")]) == 0
 
 
 def test_cli_parser_defaults() -> None:

@@ -13,7 +13,7 @@ d) ``optimizer.step()`` 后参数变化计数（前后 snapshot 比较）。
   ``pipeline.trainer.apply_freeze_prefixes`` → ``build_phase3_optimizer``（与 phase3
   训练完全同一接线）→ 随机张量小批（无需数据集/GPU；CPU 优先）前向 + backward + step；
 - **判定**：freeze 组 a=b=c=d=0（且不在 optimizer）；train 组 a>0 且 d>0；否则 FAIL；
-- **recovery 配方**：尚未实现 → ``NOT_IMPLEMENTED``，附 §7.10-A6/A9（round-7 R1/R2）建议清单对照。
+- **recovery 配方**：已实现（`_RECOVERY_FREEZE` / `_RECOVERY_EXPERTS_FREEZE`；P1-2）→ 与其它配方同路径四计数审计；`RECOVERY_SUGGESTION` 保留为对照清单。
 
 合成小批 = 随机观测（与 env schema 同形状）+ 前向输出平方损失 + ``1e-3`` × 可训参数平方
 正则项（打破专家零初始化导致 router/residual_scale/部分专家梯度退化为 0 的初始化退化；
@@ -90,9 +90,16 @@ STATIC_CONSTANT_NAMES = (
     "_SPECIFIC_PHASE_FREEZE",
     "_PHASE3_ANCHOR_HEAD_PREFIXES",
     "_PHASE3_SAFE_FREEZE",
+    "_RECOVERY_FREEZE",
+    "_RECOVERY_EXPERTS_FREEZE",
 )
-#: 配方 → 静态常量名（all = 空前缀；recovery 未实现）
-RECIPE_CONSTANT = {"specific_only": "_SPECIFIC_PHASE_FREEZE", "trunk_only": "_PHASE3_SAFE_FREEZE"}
+#: 配方 → 静态常量名（all = 空前缀）
+RECIPE_CONSTANT = {
+    "specific_only": "_SPECIFIC_PHASE_FREEZE",
+    "trunk_only": "_PHASE3_SAFE_FREEZE",
+    "recovery": "_RECOVERY_FREEZE",
+    "recovery_experts": "_RECOVERY_EXPERTS_FREEZE",
+}
 
 #: 合成损失中的可训参数平方正则系数（打破零初始化梯度退化；见模块 docstring）
 PARAM_REG_COEF = 1e-3
@@ -541,8 +548,8 @@ def run_probe(
 ) -> dict:
     """执行审计并把结果写入 out；返回输出 payload。"""
     recipe = str(recipe).strip().lower()
-    if recipe not in ("specific_only", "trunk_only", "all", "recovery"):
-        raise SystemExit(f"[probe] 非法 recipe: {recipe!r}（specific_only|trunk_only|all|recovery）")
+    if recipe not in ("specific_only", "trunk_only", "all", "recovery", "recovery_experts"):
+        raise SystemExit(f"[probe] 非法 recipe: {recipe!r}（specific_only|trunk_only|all|recovery|recovery_experts）")
 
     static_error = None
     static: dict[str, tuple[str, ...]] = {}
@@ -561,17 +568,7 @@ def run_probe(
         "generated_at": _now(),
     }
 
-    if recipe == "recovery":
-        base.update(
-            {
-                "status": "NOT_IMPLEMENTED",
-                "reason": "recovery 配方尚未在 pipeline 实现（§7.10-A4：freeze audit 静态干跑）",
-                "suggested": RECOVERY_SUGGESTION,
-                "failures": [],
-            }
-        )
-        _write_payload(base, out, quiet=quiet)
-        return base
+    # recovery / recovery_experts 已实现（P1-2）→ 与其它配方同路径四计数审计。
 
     if static_error is not None and recipe in RECIPE_CONSTANT:
         base.update({"status": "FAIL", "failures": [static_error]})
@@ -669,8 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recipe",
         required=True,
-        choices=("specific_only", "trunk_only", "all", "recovery"),
-        help="冻结配方（recovery 未实现 → NOT_IMPLEMENTED + 建议清单对照）",
+        choices=("specific_only", "trunk_only", "all", "recovery", "recovery_experts"),
+        help="冻结配方（recovery=R1 / recovery_experts=R2；P1-2 已实现）",
     )
     parser.add_argument("--device", default="cpu", help="torch device（默认 cpu）")
     parser.add_argument("--out", default=DEFAULT_OUT, help="输出 JSON 路径")
