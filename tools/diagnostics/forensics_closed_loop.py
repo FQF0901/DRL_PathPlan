@@ -23,6 +23,7 @@
                       P1-0B 配速（§7.10-A3）：``--d2-ds-scale``（V1：ds×s，dθ 不变）/
                       ``--d2-ds-dth-scale``（V2：ds、dθ 同乘 s）/ ``--d2-v-scale``
                       （V3：仅缩放 LQR 参考速度 ref_speed_scale，几何 plan 不动）；
+                      P1-v2：``--d2-dth-scale``（仅 dθ×s，ds 不动；与 V1/V2 乘性组合）；
                       V1 与 V2 不能同时非 1.0（argparse 报错）。
 
 新增参数
@@ -1193,6 +1194,32 @@ class D1ReplayController(InstrumentedCkpt):
         return [0.0, 0.0]
 
 
+def scale_expert_action(
+    action,
+    *,
+    ds_scale: float = 1.0,
+    ds_dth_scale: float = 1.0,
+    dth_scale: float = 1.0,
+):
+    """专家动作 ``(ds, dθ)`` 缩放（§7.10-A3 + P1-v2 dθ-only）。
+
+    - ``ds_dth_scale``（V2）：ds 与 dθ 同乘（近似保持曲率）；
+    - ``ds_scale``（V1）：仅 ds 乘（与 V2 互斥，调用侧已校验）；
+    - ``dth_scale``（P1-v2）：仅 dθ 乘，**与 V1/V2 乘性组合**（如 V2×dth 或 dth-only）；
+    - 三者全为 1.0 时**逐位不变**（不做复制/运算，直接返回原数组）。
+    """
+    values = np.asarray(action, dtype=np.float64).reshape(-1)[:2]
+    if ds_dth_scale != 1.0:
+        values = values * float(ds_dth_scale)
+    elif ds_scale != 1.0:
+        values = np.array(values, dtype=np.float64, copy=True)
+        values[0] *= float(ds_scale)
+    if dth_scale != 1.0:
+        values = np.array(values, dtype=np.float64, copy=True)
+        values[1] *= float(dth_scale)
+    return values
+
+
 class D2RepeatExpertController(InstrumentedCkpt):
     """D2：当前 expert 动作 repeat 6 步（与 F 格 ``repeat_action`` 直接可比）。
 
@@ -1203,7 +1230,9 @@ class D2RepeatExpertController(InstrumentedCkpt):
 
     配速（§7.10-A3，默认 1.0 = 现状）：V1 ``ds_scale`` 只缩放专家动作 ds；V2
     ``ds_dth_scale`` 同缩放 ds 与 dθ（近似保持曲率）；V3 不在此处——见 main 把
-    ``--d2-v-scale`` 并入 ``tracker_json["ref_speed_scale"]``（仅缩放 LQR 参考速度）。
+    ``--d2-v-scale`` 并入 ``tracker_json["ref_speed_scale"]``（仅缩放 LQR 参考速度）；
+    P1-v2 ``dth_scale`` 只缩放 dθ（与 V1/V2 乘性组合；缩放逻辑见
+    :func:`scale_expert_action`）。
     """
 
     #: run_episode 记录扩展（§7.10-A3）：每步 records 补 steer/lon 命令值 + 饱和标志
@@ -1219,11 +1248,13 @@ class D2RepeatExpertController(InstrumentedCkpt):
         expert_kind="pure_pursuit",
         ds_scale: float = 1.0,
         ds_dth_scale: float = 1.0,
+        dth_scale: float = 1.0,
     ):
         super().__init__(env, spec, task, tracker_json=tracker_json, load_model=False)
         self.expert_kind = str(expert_kind)
         self.ds_scale = float(ds_scale)
         self.ds_dth_scale = float(ds_dth_scale)
+        self.dth_scale = float(dth_scale)
         self.labeler = None
 
     def bind(self, env) -> None:
@@ -1240,13 +1271,13 @@ class D2RepeatExpertController(InstrumentedCkpt):
         ref_window = None
         if self._steps % self.decision_interval == 0 and self.labeler is not None:
             labeled = self.labeler.label(ego)
-            action = np.asarray(labeled["action"], dtype=np.float64).reshape(-1)[:2]
-            # 配速 V1/V2（§7.10-A3）：先缩放专家动作再 repeat（V2 同时缩放 dθ）
-            if self.ds_dth_scale != 1.0:
-                action = action * self.ds_dth_scale
-            elif self.ds_scale != 1.0:
-                action = np.array(action, dtype=np.float64, copy=True)
-                action[0] *= self.ds_scale
+            # 配速 V1/V2 + dθ-only（§7.10-A3 / P1-v2）：缩放专家动作再 repeat
+            action = scale_expert_action(
+                labeled["action"],
+                ds_scale=self.ds_scale,
+                ds_dth_scale=self.ds_dth_scale,
+                dth_scale=self.dth_scale,
+            )
             plan = np.repeat(action[None, :], WINDOW_POLICIES, axis=0)
             rec["mu"] = [float(plan[0, 0]), float(plan[0, 1])]
             rec["plan"] = [[float(a), float(b)] for a, b in plan]
@@ -1385,6 +1416,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="d2 配速 V2（§7.10-A3）：每步专家动作 ds 与 dθ 同乘 s（近似保持曲率）",
     )
     parser.add_argument(
+        "--d2-dth-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "d2 dθ-only（P1-v2）：每步专家动作仅 dθ×s（ds 不动）；与 V1/V2 乘性组合"
+            "（如 V2×dth 或 dth-only），默认 1.0 逐位不变"
+        ),
+    )
+    parser.add_argument(
         "--d2-v-scale",
         type=float,
         default=1.0,
@@ -1426,7 +1466,8 @@ def main(argv=None) -> int:
             "--d2-ds-scale（V1）与 --d2-ds-dth-scale（V2）互斥：不能同时非 1.0（§7.10-A3）"
         )
     if args.mode != "d2" and (
-        args.d2_ds_scale != 1.0 or args.d2_ds_dth_scale != 1.0 or args.d2_v_scale != 1.0
+        args.d2_ds_scale != 1.0 or args.d2_ds_dth_scale != 1.0
+        or args.d2_dth_scale != 1.0 or args.d2_v_scale != 1.0
     ):
         print(f"[forensics] 警告：--d2-*-scale 仅对 d2 模式生效，{args.mode} 忽略", flush=True)
 
@@ -1513,6 +1554,7 @@ def main(argv=None) -> int:
                     controller = D2RepeatExpertController(
                         env, spec, task, tracker_json=tracker_json,
                         ds_scale=args.d2_ds_scale, ds_dth_scale=args.d2_ds_dth_scale,
+                        dth_scale=args.d2_dth_scale,
                     )
                 else:
                     controller = InstrumentedCkpt(env, spec, task, tracker_json=tracker_json,
