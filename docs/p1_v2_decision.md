@@ -49,6 +49,13 @@ P1-4A/4B；K-anchor；GRPO/Best-of-G；WM/MoE 重构；容量扫描。
 - **判定**：正式过门 + **净增量未证** ⇒ 不进全量 gated residual；先做 **Step 1b 负样本增广复核**（晚段健康态 + progress 匹配对照；判据：progress 匹配集 F1 ≥0.80 且相对 time/confound 净增量 ≥0.05 → 确认进入 Step 2；<0.05 维持存疑；<0.80 按现状不成立）。产物：`runs/p1_v2/probe_robustness.json` + 更新 `final_verdict`。
 - 数据语义坑（随档）：CPU 重放与 CUDA 评测结局 50/60 一致（正/负标签自洽于 CPU；"成功段"负样本实为早期段）；matched_speedmatched 退化（713 < 1660）；P@10 比率敏感（报告必须带 n_pos/n_neg）；SIGKILL 根因 = npz 逐索引重复解压（已修，教训归档）。
 
+### Step 1b/1c 终判（18:20）：F1-only `no_increment`；特征重测过线 → **Step 2 进入**
+
+- **决定性 progress 匹配集**（rc±ε + 速度带 + 路型，跨 episode，时间不参与）：F1 AUC **0.682(LR)/0.731(MLP)**、净增量 +0.177（time-only 0.490≈chance ⇒ 匹配生效）。按预注册规则 → **`no_increment`**：F1-only 可辨识性不成立（Step 1a 的 0.934 系进度/时间混淆）。弱档：**prevention 0.633/0.712**（计划仍有效、margin 退化——pilot gate 单独验）。
+- **特征重测（按 ChatGPT 带结构 0.65–0.80="加 margin/plan 特征重测"）**：同集 **F2m（自车可算：lane_lat + 自身 plan footprint/inside_ratio + 历史，无锚点 oracle）= 0.804(LR)/0.843(MLP)** ≥0.80 ⇒ 路径重开。注记：F2/F3 的 0.996 属定义性 oracle 循环（d_*/is_near_anchor），**不作证据**；F2m 仍含负样本选择用到的 footprint/inside_ratio（部分选择重叠）——**pilot 的正常态激活<5% / recall≥60% 为最终仲裁**。
+- 晚段健康负样本 2,781 条 / 51 集（免重放挖出）；残余混淆：其历史通道或含近期失败痕迹（已注记）。
+- **决定：Step 2（recovery_v2 collector）GO**——同状态契约 + control 行（晚段/高 rc）；数据门为硬门（任一失败先修 collector、不训练）；gate 设计须含 plan/margin 派生特征（`gate(obs, base_plan)` 架构内）；数据门通过后以 v2 数据复测干净特征集（F2i/F2m），供 Step 3 gate 设计输入。
+
 ## 并行诊断旁线（不得直接改训练 target）
 
 1. **dθ-only 反事实**（补 ④ 分解缺口；①②已完成：V1 0.776–0.778@1.25–1.30 vs V2 0.658–0.676@1.15）；
