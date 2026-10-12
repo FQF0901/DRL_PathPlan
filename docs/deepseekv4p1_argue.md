@@ -3,7 +3,7 @@
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-12 晚）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A 完成（§5.3）；A3 判负（§5.5）；**Round-18A 完成（§5.8）：拓扑伪边 76.5% + primary 几何响应 ~50× 过弱（history 5–7× 主导）+ 断点-失败 14× ⇒ 分支=输入/拓扑缺陷 + primary 弱响应；下一步候选=模型侧修复（关闭/重建邻接 + 显式池化；无重采）优先、数据侧最小特征（需重采）备选——转 round-20 决策**；RL 冻结。
 > **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ **Round-18A 完成（§5.8）**。
-> **本版说明**：第四轮精简（299 → ~285 行）：§5.2–5.4 往来压为补充存档、§5 标题对齐范围；此前已合入第三轮精简（原 `74f522f`@`Planner_RL_copy`）。历版全文见 §7。
+> **本版说明**：第五轮精简（355 → ~310 行）：§5.4/5.6/5.7 往来压为残档（结果各自见后节）；上版 355 行 = `git show 96df7cb:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -220,15 +220,9 @@
 
 **请求（round-17）**：批准 **A3 开工（+A4 触发条件同理满足）**；确认 A2 四问判读；确认 decay 尾族关闭、`ld_margin_weight` 维持 0。
 
-### 5.4 对 round-17 的回应（`732ba96`）：**无异议、开工**——附 4 条落法澄清
+### 5.4 round-17 往来残档（`732ba96`；已并入执行）
 
-- **接受其反驳（认账）**：§5.3-③"远期六步链拟合是历史主要损失之一"**降为待证假说**——A1 表明首步共变量偏移本身或已主导闭环退化；裁决工具 = **A3 同 encoder/数据/预算对照**（旧链监督 vs 当前动作+fixed tail），已并入批准范围。
-- **落法 1（训练与尾选择解耦）**：训练一次（`L = L_current_action + λ_smooth·L_tail_smooth + λ_curv·L_delta_curvature`；**禁止**未来 5 步 regression / 未来专家态 traj target / 合成 traj6 / recovery traj loss；曲率项只做平滑、不得启用 `ld_line_margin_loss`）；推理期扫 **A3-R(1.00) / A3-V(1.15, 1.25)**（clean150 选向、**禁止扩扫**）；正则项按"构造尾链"计算时固定规范尾（或改对相邻动作平滑）并文档声明。
-- **落法 2（隔离与一致性）**：当前动作由**单一 head** 输出；WM/MoE 不参与尾部；tail=**纯函数**；**LQR reference 与导出 plan 逐位一致**（复用既有等价口径：单步逐位 + 整集 flags/终止全等 + |Δrc|≤1e-3）。
-- **落法 3（对照臂）**：标准六步链监督（1.00/0.80/0.60/0.40/0.25/0.15 权重），同 encoder/数据/预算；建议两臂从同一初始 ckpt（pri512@e020）匹配微调，留档理由。
-- **落法 4（A4 仅条件、契约照锁）**：数据从 **A3 自身闭环状态**采集（CUDA 口径）；行 = learner obs/history、learner 预测动作、expert 当前动作、road class、speed/curvature、episode outcome；**不采**六步链 / gate / 绝对 traj / Pass-2 plan；混合 expert5k:A4 = 90:10 起、≤80:20。
-- **验收照锁**（A3 clean150：succ ≥0.50、off ≤0.35、coll ≤0.05、timeout ≤0.15、clipping<5%、steer 饱和不高于 A2 同尾族明显水平、teacher MAE 不恶化、learner 动作误差 ↓≥25%、plan/LQR 逐位一致；**<0.50 不做 A4**；A4 门=+5pp succ 等；eval500 ≥0.60 → 才谈 RL）。
-- **开工**：已派发 lane——A3-R/V + 对照臂（两臂训练）× 三尾 clean150 + 完整 probes + A1 审计复跑。
+- 无异议、开工：4 条落法（训练/尾解耦〔禁未来链监督〕、隔离〔单 head/纯函数/LQR 逐位〕、对照臂〔同预算六步链监督〕、A4 契约〔learner 态采集 90:10–80:20〕）+ 验收全部并入执行——**结果见 §5.5**。
 
 ### 5.5 Round-17 A3 结果（2026-10-12 08:49 报告）：**FAIL（决定性负结果）**
 
@@ -252,51 +246,16 @@
 - **round-18 候选（未实施）**：**a.** 在允许损失范围内设计**可持性约束**（mu dθ 稳定性 / 与参考曲率一致）后**复用尾侧重跑 A3**（小成本）；**b. 重议 A4**——本轮门"A3<0.50⇒停"与"失败因 = learner 态缺口（恰为 A4 目标）"构成循环，请求按新证据重裁（契约已备）；**c.** 接受 chain 模式执行（其噪声缓冲已有实证价值），资源集中到 learner 态数据/监督；**d.** obs 表示改造（12A 已证现表示不可辨识）。
 - **请求（round-18）**：裁决 a–d 优先级；确认 A3 判负与 A4 暂缓；确认生产改动提交（默认关 + 7 单测，`f8169fd`）。
 
-### 5.6 对 round-18 的分析与回应（`95f23b0`）：**接受 probe-first；附 2 处事实核查 + 4 条落法**
+### 5.6 round-18 往来残档（`95f23b0`；已并入执行）
 
-**接受（新框架与裁决）**
-1. **两层根因框架接受**：① primary 可能主学"expert 态动力学延续 shortcut"（prev_action+速度/航向趋势→下一动作；memory 可读 ego 历史为 shortcut 提供条件），未稳握 ego-lane 关系；② 部署入 learner 态后 covariate shift 放大该缺陷 → dθ 符号/幅度失控。与 A3 同 ckpt 隔离、A1 learner 崩坏、12A"gate 无选择性"全部相容。
-2. **lanekeep 归 primary / specific experts 只做条件残差 / router 需语义监督**——接受（"正常直道 lanekeep 依赖 expert residual"=职责倒置的连接成立）。
-3. **候选裁决 a–d 全部接受**：a 先 probe（认账"可持性正则可把 dθ 压向 0、掩盖 lane 缺失"的风险）；b A4 晚于 probe；c **chain 保留为执行噪声缓冲并重定义**（"可跟踪平滑 reference"而非精确预测未来）；d 先诊断、后最小显式特征。
-4. **Round-18A（四 probe + 7 条验收）**——接受为下一步；零训练、纯前向级成本。
+- 接受 probe-first：两层根因框架（primary 动力学 shortcut + learner 态放大）、lanekeep 归 primary、chain 保留为执行缓冲并重定义——全部接受。
+- 2 处事实核查：LD 7 维**已隐式含** lane-relative 几何（缺的是关联/选择/监督）；`ld_hist` 是输入（"只作输入"≠不进 memory）。
+- 4 条落法与 3 验收补丁——**已并入 §5.8 执行与结果**。
 
-**两处事实核查（以 repo 为准）**
-1. **LD 结构**：`ld (16,7)`＝`[dx, dy, heading_rel, curvature, speed_limit, left/right_line_type]`、offset `{5,10,15,20,30}m` ✓；**其 7 维已隐式含 lane-relative 几何**（每槽 dx/dy/heading_rel/curvature 可重建侧偏/航向差/曲率）——缺的更多是**显式关联与选择**（哪条是目标中心线、统一口径）与**监督约束**，而非几何"不存在"。此细化令 Probe B 的两分法（latent 可解码但 action 不响应 → head/监督）更关键。
-2. **"LD 未进主要时序"表述需修正**：`net/mem.py` 明列 `ld_hist (B,6,16,7)` 为输入（标注"只作输入"＝不作 WM 预测目标）——准确表述 = **LD 历史是输入、但不参与 WM 预测目标**（融合深度待 probe/静态核查）。
+### 5.7 round-19 往来残档（`1ea85dc`；已并入执行）
 
-**落法补充（4 条）**
-1. **Probe 实施规范**：统一固定状态集（expert5k val ≥5k 行 + learner 源 ≥5k 行；可另采 A3 策略若干 episode 状态）；LD 反事实须联动 slot 语义与 mask（镜像/平移需处理 current-lane-first 排序）；**Probe D 可归并进 Probe A 的平移/旋转网格**（同实现 + 符号/单调性统计）；**两 ckpt（pri512 与 A3 臂）同跑对照**（微调是否改变 grounding）。
-2. **决策映射预注册（含"部分带"）**：全过（含 #5 LD 敏感）→ A4 + chain 缓冲；**#5 失败 → 表示/特征优先**；**部分带**（大误差符号 ≥95% 但小误差失败、或 LD 敏感但弱）→ 最小显式特征 + primary-only 监督、后 DAgger——按误差分箱（±0.25/±0.5/±1 m；±2.5°/±5°/±10°）报告，防一刀切误裁。
-3. **"最小显式特征"两条实施建议**：a) 先核验这些量可否由现存 obs 直接算（能：侧偏/航向差可自 pose+LD 推导）——改造可走"显式通道"或**"latent 辅助监督"**（把 Probe B 标签作辅助损失、不改观测接口，中间成本档）；b) 新监督信号必须用 probe 验证过的语义（防重蹈 `ld_line_margin` 代理 FP）。
-4. **chain 重定义清单排序**：接受方向；但清单中 lane direction / boundary·corridor safety 依赖"可信 lane 语义/可行域信号"——其实现应**后于** probe/特征路线（ld_margin 家族已 FAIL 先例）。
-
-**验收 7 条接受 + 3 条补丁**：① 符号/单调性按误差分箱报告；② #7（experts 关）需小适配（router 强制 primary 的推理开关）；③ 同一 probe 集在两 ckpt 上跑（含 A3 臂）。
-
-**请求（round-19）**：确认 Round-18A 开工范围（四 probe + 决策映射 + 补丁；零训练）；确认 A4 / 特征改造 / A3 重跑均后置。
-
-### 5.7 对 round-19 的回应（`1ea85dc`）：**代码论断逐条核验=全部成立；接受 0A/0B/0C 前置；已开工**
-
-**核验表（我方独立复核，file:line）**
-
-| 对方论断 | 核验 | 证据 |
-|---|---|---|
-| PlanHead 融合只用 `masked_mean` 的 ld_pool（16 个 z_ld token 不入 PlanHead） | **成立** | `net/model.py:505-507`：`plan_head(z_ego, od_pool, ld_pool, others_ctx, nav_token, signal_token)`；z_ld tokens 只在 policy/value 侧（T=39） |
-| LD-LD 邻接=槽位链 i↔i+1（secondary 环优先 ⇒ 跨车道伪边） | **成立** | `net/spatial.py:103-106`（`ld_ok[:,i] & ld_ok[:,i+1]` 双向）；其 docstring 第 8 行自注"槽位相邻近似沿线相邻"仅 primary 5 槽成立 |
-| LD 不做时序 = `ld_hist[:, -1]` | **成立** | `net/mem.py:699-705`（"规格第 2 条"） |
-| K-anchor `lane_ctx = zeros(B,3)` | **成立** | `net/model.py:627-632` |
-| `env/obs/ld.py` 注释漂移（0/20/40/60/80 与"0m 投影点"残留） | **成立** | 常量 `LD_OFFSETS_M=(5,10,15,20,30)` 与注释混用旧口径 |
-| 槽位排序=当前车道 5 点 + 其余环优先（跨车道相邻） | **成立** | `ld.py:209-260`（`(offset_idx, lane_priority, lane_order)` 排序） |
-| ego.lane 优先（偏离态语义跳变风险） | **成立（结构）** | `ld.py:137-170`（priority 0=ego.lane）；频率/相关由 0C 测 |
-
-**接受**：0A/0B/0C 前置 + 四 probe 修正（镜像须全语义/输出变化非充分/Probe B 分层定位）+ primary_only 严格模式（代码级旁路、非权重归零、非 expert 路径逐位一致）+ 分支映射（A4 / 显式池化 / 语义特征+重采 / 辅助监督）+ 暂不批准清单。**"关联/选择/监督缺失"升级为"邻接可能主动建错（跨车道伪边）"——认账并接受其优先级。**
-
-**我方实施路线（4 条）**
-1. **0A/0B/0C 的落法=诊断重放**：槽位元数据现不在存储 obs 中且不可事后恢复（identity 不可逆）⇒ builder 加**旁路诊断 dump（默认关、不改 obs fingerprint）+ 有界分层重放（~200 eps）**记录逐帧元数据/跨帧同一性/nav 关联，"槽位链邻接规则下的跨车道伪边比例"由元数据精确推出（纯统计）；顺手修 `ld.py` 注释漂移。
-2. **"env 级镜像"的务实近似**：MetaDrive 路网镜像成本高 ⇒ 采用**全通道一致镜像变换**（ego pose 翻转 + ego-relative 几何翻转 + 左右类型互换 + lane 顺序反序 + nav/OD/历史同步），配不变量测试（双镜像=恒等、物理量一致）；tensor-only 版仅作单元测试，报告标注近似性。
-3. **primary_only 严格模式**：代码路径级旁路 + "非 expert 路径逐位一致"验证；**双 ckpt（pri512@e020、A3 臂）× 双模式（primary_only / full-MoE）全跑**。
-4. **Probe B 标签来源**：取自重放时活 env 几何并与模型前向**同帧配对**；分层解码（raw LD→embed→tokens→pool→fused→primary→mu）定位损失环节。
-
-**开工**：已派发 Round-18A lane（0A/0B/0C → 四 probe（修正版）→ 双 ckpt×双模式 → 分支判定表；零训练；产物 `runs/p1_v2/round18a/`）。
+- **七项代码论断逐条核验=全部成立**（file:line 摘要）：`model.py:505-507`（PlanHead 只看 ld_pool 均值）、`spatial.py:103-106`（LD-LD=槽位链 ⇒ 伪边）、`mem.py:699-705`（LD 仅当前帧）、`model.py:627-632`（K-anchor lane_ctx=0）、`ld.py:209-260/137-170`（环优先排序 / ego.lane 优先）、注释漂移——**量化结果见 §5.8**。
+- 接受 0A/0B/0C 前置与全部修正（全语义镜像 / 输出变化非充分 / Probe B 分层 / primary_only 严格旁路）；4 条实施路线（诊断重放 / 一致镜像近似 / 位级纪律 / 同帧配对）——**已执行（§5.8）**。
 
 ### 5.8 Round-18A 结果（2026-10-12 19:2x）：**拓扑/输入结构性缺陷 + primary 几何响应 ~50× 过弱（动力学主导）**
 
@@ -341,7 +300,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四轮精简（本版）**：§5.2–5.4（round-15/16 往来）压为 §5.2 补充存档、§5 标题对齐；改前版本 = `git show 58ac4c3:docs/deepseekv4p1_argue.md`（299 行版）。
+- **第五轮精简（本版）**：§5.4/5.6/5.7 往来压为残档；改前版本 = `git show 96df7cb:docs/deepseekv4p1_argue.md`（355 行版）。
+- **第四轮精简（299 → 282 行）**：§5.2–5.4 往来压为补充存档、§5 编号顺延（5.5/5.6/5.7→5.3/5.4/5.5，后经轮次自然演化为现编号）；改前 299 行 = `git show 58ac4c3:docs/deepseekv4p1_argue.md`。
 - **第三轮精简（原提交 `74f522f`，位于 `Planner_RL_copy`；已合入本分支）**：round-15/16 往来压缩为 §5.1 授权摘要、§5.2 补充存档；§0/§6/§7 刷新。
 - **第二轮精简（262 → ~210 行）移除**：round-12/13/14 往来全文（原 §7/§8）、round-12 请求（原 §4）、12A 原 §9（并入 §4）；全文见 `git show 249c51c:docs/deepseekv4p1_argue.md`（262 行版）。
 - **第一轮精简（1114 → 166 行）移除**：§0.9 收拢细节、§1–§4 早期草案、§5/§6 详表、§7.1–7.11 回合全文、§9–§11 原文、附录 A/B；全文见 `git show 7b83730:docs/deepseekv4p1_argue.md`（1114 行版）。
