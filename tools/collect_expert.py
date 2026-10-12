@@ -72,6 +72,10 @@ v3/v4/v5/v6 相对 v2 的增量
 - v6（2026-10-07，v8 结构重构）：**删除** ``lane``/``ttc`` 键；LD offset 改为
   {0,20,40,60,80}（0 m 点 = ego 投影点，近场锚）；OD 槽序/字段/排序策略不动。
   ``obs_fingerprint`` 前缀随 ``OBS_SCHEMA_VERSION`` 升为 ``v6-``。
+- v7（2026-10-12，R21 语义重建）：schema v7 新增 ``lane_semantic`` 通道与 LD 点补充伴随
+  数组；本工具（BC 专家集）**暂不采集**新通道（R21 pilot 用专用采集器），
+  ``obs_fingerprint`` 前缀随 ``OBS_SCHEMA_VERSION`` 升为 ``v7-``（旧数据集必然不匹配 →
+  训练前 fail-fast）。
 
 产出（``--out`` 目录）
 ----------------------

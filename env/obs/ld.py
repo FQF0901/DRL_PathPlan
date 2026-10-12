@@ -41,6 +41,16 @@ v8 诊断臂 A1'（2026-10-07）：采样 offset = :data:`LD_OFFSETS_M` = {5,10,
   （见 ``env/metadrive_env.py``），本通道不做换算；
 - ``left_line_type_id`` / ``right_line_type_id``：``lane.line_types`` 的左右线型离散 id
   （``component/pgblock/pg_block.py:257-258`` 确认 [0]=左、[1]=右）。
+
+R21（2026-10-12，语义重建，schema v7）
+--------------------------------------
+本通道新增**逐槽补充伴随数组**（不进 feats/mask，不做 SE(2) 对齐；见
+``docs/r21_lane_semantic_contract.md``）：``ld_lane_role``（target / target_continuation /
+left_adjacent / right_adjacent / other 编码）、``ld_offset_s_norm``（s/length，同车道内严格
+递增）、``ld_group``（观测内局部同车道分组，不暴露全局 lane_id）、``ld_route_associated``
+（∈ current_ref ∪ next_ref）。计算由 :mod:`env.obs.lane_semantic` 提供（target lane 选择为
+唯一纯函数）。``lane_curvature`` 实现移至 :mod:`env.obs.lane_semantic`（此处 import 复用，
+单一出处）。
 """
 
 from __future__ import annotations
@@ -52,6 +62,16 @@ import numpy as np
 from metadrive.type import MetaDriveType
 
 from env.obs.base import FrameAlignment, ObservationChannel, make_empty, safe_ego, wrap_to_pi
+from env.obs.lane_semantic import (
+    LD_SUPPLEMENT_KEYS,
+    classify_slot_roles,
+    lane_curvature,
+    lane_id_of,
+    select_target_lane,
+    slot_group_ids,
+    slot_offset_s_normalized,
+    slot_route_associated,
+)
 
 #: 线型字符串 -> 稳定 id（0 保留给未知/无）。来源：metadrive/type.py:24-43
 LINE_TYPE_IDS: dict[str, int] = {
@@ -85,20 +105,6 @@ def line_type_id(value) -> float:
     if isinstance(value, (int, float, np.integer, np.floating)):
         return float(int(value))
     return float(LINE_TYPE_IDS.get(str(value), LINE_TYPE_ID_UNKNOWN))
-
-
-def lane_curvature(lane, s: float) -> float:
-    """dθ/ds 的数值中心差分（对任意 AbstractLane 实现都成立）。"""
-    try:
-        length = float(lane.length)
-        lo = max(0.0, float(s) - 1.0)
-        hi = min(length, float(s) + 1.0)
-        if hi - lo < 1e-3:
-            return 0.0
-        dh = float(wrap_to_pi(lane.heading_theta_at(hi) - lane.heading_theta_at(lo)))
-        return dh / (hi - lo)
-    except Exception:  # noqa: BLE001 - 几何异常不应让观测通道崩掉
-        return 0.0
 
 
 def _lane_id(lane, default: int = 1 << 20) -> int:
@@ -180,6 +186,15 @@ class LDChannel(ObservationChannel):
     feature_dim = 7
     # (dx,dy) 是点；heading_rel 是角度标量；curvature/speed_limit/线型不随坐标系变化
     alignment = FrameAlignment(point_pairs=((0, 1), ), angle_dims=(2, ))
+    #: R21 LD 点补充（逐槽伴随数组；不进 feats/mask、不做 SE(2) 对齐）：
+    #: ``ld_lane_role`` / ``ld_offset_s_norm`` / ``ld_group`` / ``ld_route_associated``
+    companion_names: tuple[str, ...] = LD_SUPPLEMENT_KEYS
+    companion_fill: dict[str, object] = {
+        "ld_lane_role": -1,
+        "ld_offset_s_norm": 0.0,
+        "ld_group": -1,
+        "ld_route_associated": 0.0,
+    }
 
     def __init__(
         self,
@@ -205,9 +220,12 @@ class LDChannel(ObservationChannel):
         #: ``lane_index``（3 元组）/``lane_priority``/``lane_order``/``offset_idx``/
         #: ``is_ego_lane``/``is_nav_current``/``is_nav_next``/``s``（采样弧长）
         self.last_debug: dict[str, object] | None = None
+        #: ``build`` 后 R21 LD 点补充（伴随数组；见 :meth:`companions`）
+        self._last_supplements: dict[str, np.ndarray] | None = None
 
     def build(self, env, spec=None) -> tuple[np.ndarray, np.ndarray]:
         feats, mask = make_empty(self.num_slots, self.feature_dim)
+        self._last_supplements = None
         ego = safe_ego(env)
         if ego is None:
             return feats, mask
@@ -269,6 +287,7 @@ class LDChannel(ObservationChannel):
         for slot, item in enumerate(assembled):
             feats[slot] = item[3]
             mask[slot] = 1.0
+        self._last_supplements = self._build_supplements(ego, nav, assembled)
         if self.debug:
             ego_lane = getattr(ego, "lane", None)
             current_ref = list(getattr(nav, "current_ref_lanes", None) or [])
@@ -291,3 +310,62 @@ class LDChannel(ObservationChannel):
         else:
             self.last_debug = None
         return feats, mask
+
+    # ------------------------------------------------------- R21 LD 点补充（伴随）
+    def _build_supplements(self, ego, nav, assembled: list) -> dict[str, np.ndarray]:
+        """逐槽补充数组（shape (num_slots,)；无效槽 role/group=-1、其余 0）。
+
+        见 ``docs/r21_lane_semantic_contract.md``：``ld_lane_role`` / ``ld_offset_s_norm`` /
+        ``ld_group`` / ``ld_route_associated``。任何异常 → 全默认（不崩观测）。
+        """
+        num_slots = self.num_slots
+        role = np.full((num_slots, ), -1, dtype=np.int64)
+        group = np.full((num_slots, ), -1, dtype=np.int64)
+        offset_norm = np.zeros((num_slots, ), dtype=np.float32)
+        route_assoc = np.zeros((num_slots, ), dtype=np.float32)
+        if not assembled:
+            return {
+                "ld_lane_role": role,
+                "ld_offset_s_norm": offset_norm,
+                "ld_group": group,
+                "ld_route_associated": route_assoc,
+            }
+        try:
+            lane_objs = [item[4] for item in assembled]
+            s_values = [float(item[5]) for item in assembled]
+            current_ref = list(getattr(nav, "current_ref_lanes", None) or [])
+            next_ref = list(getattr(nav, "next_ref_lanes", None) or [])
+            ego_lane = getattr(ego, "lane", None)
+            selection = select_target_lane(
+                ego_lane=ego_lane,
+                ego_position=getattr(ego, "position", None),
+                current_ref_lanes=current_ref,
+                next_ref_lanes=next_ref,
+            )
+            n = len(assembled)
+            role[:n] = classify_slot_roles(selection.lane, next_ref, lane_objs)
+            group[:n] = slot_group_ids(lane_objs)
+            offset_norm[:n] = slot_offset_s_normalized(s_values, lane_objs)
+            route_assoc[:n] = slot_route_associated(lane_objs, current_ref, next_ref)
+        except Exception:  # noqa: BLE001 - 补充数组失败不应影响主观测
+            pass
+        return {
+            "ld_lane_role": role,
+            "ld_offset_s_norm": offset_norm,
+            "ld_group": group,
+            "ld_route_associated": route_assoc,
+        }
+
+    def companions(self, env=None, spec=None) -> dict[str, np.ndarray]:
+        """返回最近一次 ``build`` 的 LD 点补充（未 build 时返回全默认；返回拷贝）。"""
+        if self._last_supplements is None:
+            return {
+                "ld_lane_role": np.full((self.num_slots, ), -1, dtype=np.int64),
+                "ld_offset_s_norm": np.zeros((self.num_slots, ), dtype=np.float32),
+                "ld_group": np.full((self.num_slots, ), -1, dtype=np.int64),
+                "ld_route_associated": np.zeros((self.num_slots, ), dtype=np.float32),
+            }
+        return {key: np.array(value, copy=True) for key, value in self._last_supplements.items()}
+
+    def reset(self) -> None:
+        self._last_supplements = None

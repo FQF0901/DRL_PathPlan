@@ -21,6 +21,11 @@ v5（2026-10-05，结构迭代 A）：LD offset 改远场 {20,40,60,80} m；新�
 v6（2026-10-07，v8 结构重构）：删除 ``lane``/``ttc`` 通道（v5 结构迭代 A 的上下文 token
 在 v8 中不再使用）；LD offset 改为 {0,20,40,60,80} m——0 m 点 = ego 投影点（近场横向锚，
 补偿 lane 删除），远场保留 20..80 m 前视。OD 槽序/字段/排序策略不动。
+
+v7（2026-10-12，R21 语义重建）：新增 ``lane_semantic``（1×12，target lane 相对语义；
+target lane 选择 = :func:`env.obs.lane_semantic.select_target_lane` 唯一纯函数）；LD 新增
+逐槽补充伴随数组（role/offset_s_norm/group/route_associated，见 ``LD_SEMANTICS_LAYOUT``）。
+**禁 raw lane_id 数值输入**（lane 身份只用 role/同路/左右/route 关联表达）。
 """
 
 from __future__ import annotations
@@ -28,6 +33,17 @@ from __future__ import annotations
 from typing import Any
 
 from env.obs.ego import EGO_DIM
+from env.obs.lane_semantic import (
+    LANE_SEMANTIC_DIM,
+    LANE_SEMANTIC_FEATURE_NAMES,
+    LARGE_DISTANCE_CAP_M,
+    LD_SUPPLEMENT_KEYS,
+    ROLE_LEFT_ADJACENT,
+    ROLE_OTHER,
+    ROLE_RIGHT_ADJACENT,
+    ROLE_TARGET,
+    ROLE_TARGET_CONTINUATION,
+)
 from env.obs.ld import LDChannel, LD_OFFSETS_M
 from env.obs.nav import NUM_CHECKPOINTS, NUM_COMMANDS
 from env.obs.others import (
@@ -54,6 +70,8 @@ __all__ = [
     "STATIC_LAYOUT",
     "WORLD_LAYOUT",
     "LD_LAYOUT",
+    "LANE_SEMANTIC_LAYOUT",
+    "LD_SEMANTICS_LAYOUT",
 ]
 
 LD_DIM = LDChannel.feature_dim
@@ -188,6 +206,73 @@ LD_LAYOUT: dict[str, Any] = {
     "discard": "采样点超车道末端或投影失败 → 该槽 mask=0（通道自动降级）",
 }
 
+#: LD 点补充布局（schema v7，R21）：逐槽伴随数组，**不进 feats/mask**、不做 SE(2) 对齐
+LD_SEMANTICS_LAYOUT: dict[str, Any] = {
+    "shape": [16],
+    "companion_keys": list(LD_SUPPLEMENT_KEYS),
+    "keys": {
+        "ld_lane_role": {
+            "dtype": "int64",
+            "encoding": {
+                "target": ROLE_TARGET,
+                "target_continuation": ROLE_TARGET_CONTINUATION,
+                "left_adjacent": ROLE_LEFT_ADJACENT,
+                "right_adjacent": ROLE_RIGHT_ADJACENT,
+                "other": ROLE_OTHER,
+                "-1": "无效槽（mask=0）",
+            },
+            "semantics": (
+                "该槽车道相对 target lane 的 role：target = 与 target 同一车道对象；"
+                "target_continuation = next 链上的 target 续接车道（同 lane_id 优先，否则端点最近）；"
+                "left/right_adjacent = 与 target 同 road（index[:2] 相等）且 lane_id 更小/更大（0=最左）；"
+                "other = 其余"
+            ),
+        },
+        "ld_offset_s_norm": {
+            "dtype": "float32",
+            "unit": "[0,1]",
+            "semantics": "采样弧长 s / lane.length（clamp）；同车道内随 offset 严格递增",
+        },
+        "ld_group": {
+            "dtype": "int64",
+            "semantics": (
+                "同一 lane 对象 → 同一局部 group id（按槽序首次出现 0,1,2,...）；"
+                "**仅观测内局部 group**，不暴露全局 lane_id；无效槽 = -1"
+            ),
+        },
+        "ld_route_associated": {
+            "dtype": "float32",
+            "unit": "0/1",
+            "semantics": "该槽车道 ∈ current_ref_lanes ∪ next_ref_lanes（按对象身份）",
+        },
+    },
+    "history": "伴随数组随 ld 进 6 帧历史（<key>_hist）；缺帧按 -1/0 填充",
+    "no_raw_lane_id": "补充数组不含 raw lane_id 数值（契约硬约束）",
+}
+
+#: lane_semantic 通道布局（schema v7，R21）
+LANE_SEMANTIC_LAYOUT: dict[str, Any] = {
+    "shape": [1, LANE_SEMANTIC_DIM],
+    "feature_names": list(LANE_SEMANTIC_FEATURE_NAMES),
+    "target_lane_selection": (
+        "唯一纯函数 env.obs.lane_semantic.select_target_lane：route current_ref_lane → "
+        "route continuation → next_ref_lane → ego.lane 仅兜底；选择不依赖 ego 横向位置"
+        "（横向偏移不引起 target 切换）；契约见 docs/r21_target_lane_selection.md"
+    ),
+    "units": (
+        "lat m（MetaDrive 车道系，正=车道方向右侧）；heading_error rad（正=ego 相对切线逆时针/偏左）；"
+        "curvature 1/m（右转负；采样前视 +10/+30 m，clamp 车道末端）；margin m（≥0）；"
+        "valid/change 0/1；confidence [0,1]；distance m"
+    ),
+    "fallbacks": {
+        "mask": "1 ⇔ 选出 target lane（source ≠ none）",
+        "target_lane_valid": "1 ⇔ mask=1 且 ego 投影成功、特征有限；否则该帧 12 维全 0",
+        "no_route": "无 route 信息 → ego.lane 兜底（route_association_confidence=0.25）",
+        "no_topology_change": f"无下一段路线 → distance_to_next_topology_change = {LARGE_DISTANCE_CAP_M} m（上限）",
+    },
+    "no_raw_lane_id": "通道不含 raw lane_id 数值；lane 身份由 LD 点补充（role/group/route 关联）表达",
+}
+
 
 def schema_manifest(
     *,
@@ -199,7 +284,7 @@ def schema_manifest(
 ) -> dict[str, Any]:
     """返回 obs schema 清单（当前帧 + 6 帧历史 + 世界系状态 + 槽位策略 + others/static 布局）。"""
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "frame": {
             "ego": {
                 "shape": [1, EGO_DIM],
@@ -247,6 +332,17 @@ def schema_manifest(
             "signal_mask": {"shape": [1], "dtype": "float32", "semantics": "恒 1"},
             "others": {"shape": [1, others_dim], "dtype": "float32", "semantics": "规范上下文输入（nav+speed_limit+signal+static+road_class，见 others_layout / static_layout）"},
             "others_mask": {"shape": [1], "dtype": "float32", "semantics": "1 = ego 存在（通道整体可用）"},
+            "lane_semantic": {
+                "shape": [1, LANE_SEMANTIC_DIM],
+                "dtype": "float32",
+                "feature_names": list(LANE_SEMANTIC_FEATURE_NAMES),
+                "semantics": "v7（R21）：相对 target lane 的语义特征（见 lane_semantic_layout）",
+            },
+            "lane_semantic_mask": {
+                "shape": [1],
+                "dtype": "float32",
+                "semantics": "1 ⇔ 选出 target lane（source ≠ none）",
+            },
         },
         "history": {
             "window": f"{frames} 帧 @0.5 s（stride=5 env steps），旧→新，SE(2) 对齐到当前帧",
@@ -274,4 +370,6 @@ def schema_manifest(
         "static_layout": STATIC_LAYOUT,
         "world_layout": WORLD_LAYOUT,
         "ld_layout": LD_LAYOUT,
+        "lane_semantic_layout": LANE_SEMANTIC_LAYOUT,
+        "ld_semantics_layout": LD_SEMANTICS_LAYOUT,
     }

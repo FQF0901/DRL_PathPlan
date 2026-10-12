@@ -211,12 +211,12 @@ def test_others_channel_static_segment_and_road_class_offset():
 # 3) schema v4 / manifest / 指纹
 # --------------------------------------------------------------------------- #
 
-def test_schema_v6_manifest_records_static_layout():
+def test_schema_v7_manifest_records_static_layout():
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint
 
     manifest = schema_manifest()
-    assert OBS_SCHEMA_VERSION == 6
-    assert manifest["schema_version"] == 6
+    assert OBS_SCHEMA_VERSION == 7
+    assert manifest["schema_version"] == 7
     assert manifest["frame"]["others"]["shape"] == [1, 33]
     assert manifest["history"]["keys"]["others_hist"]["shape"] == [6, 1, 33]
     assert manifest["static_layout"]["feature_names"] == ["present", "gap_norm", "rel_left", "rel_same", "rel_right"]
@@ -224,7 +224,7 @@ def test_schema_v6_manifest_records_static_layout():
     segments = manifest["others_layout"]["segments"]
     assert segments["static"]["dims"] == [STATIC_OFFSET, OTHERS_HEAD_DIM]
     assert segments["road_class"]["dims"][0] == OTHERS_HEAD_DIM
-    assert obs_fingerprint().startswith("v6-")
+    assert obs_fingerprint().startswith("v7-")
     assert STATIC_LAYOUT["scan_range_m"] == 50.0
 
 

@@ -787,6 +787,19 @@ def validate_bc_dataset(
         problems.append(f"schema_version={schema}（要求 ≥2）")
     if missing:
         problems.append("缺少 v2 通道：" + ", ".join(missing))
+    # R21（schema v7）：观测语义变更（lane_semantic / LD 点补充）后，旧指纹数据集必须
+    # 重采；指纹不一致 = 旧观测口径 → 硬失败（逃生门同上：--allow-legacy-dataset）。
+    if fingerprint:
+        try:
+            from env.obs import obs_fingerprint
+
+            current_fingerprint = str(obs_fingerprint())
+        except Exception:  # noqa: BLE001
+            current_fingerprint = ""
+        if current_fingerprint and fingerprint != current_fingerprint:
+            problems.append(
+                f"obs_fingerprint={fingerprint}（当前 {current_fingerprint}；观测语义已变更，必须重新采集）"
+            )
     tag = f"[stage{stage}]"
     if problems:
         detail = "；".join(problems)

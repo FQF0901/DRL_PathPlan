@@ -257,12 +257,13 @@ def test_builder_output_keys_and_dtypes_match_schema_manifest():
 
     required = set(manifest["frame"]) | set(manifest["history"]["keys"])
     missing = {key for key in required if key not in obs}
-    # ld / nav / signal 未挂载到 builder 配置；其余（含 v2/v3/v4/v6 全部新键）必须存在
+    # ld / nav / signal / lane_semantic 未挂载到 builder 配置；其余（含 v2/v3/v4/v6/v7 全部新键）必须存在
     assert not (
         missing
         - {
             "ld", "ld_mask", "ld_hist", "ld_hist_mask",
             "nav", "nav_mask", "signal", "signal_mask",
+            "lane_semantic", "lane_semantic_mask",
         }
     )
 

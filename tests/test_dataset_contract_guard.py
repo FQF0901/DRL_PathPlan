@@ -57,7 +57,11 @@ def _legacy_dataset(**kwargs: int) -> BCDataset:
     return BCDataset(_legacy_arrays(**kwargs), {"schema_version": 1, "kind": "bc_expert"})
 
 
-def _v2_dataset(fingerprint: str = "v2-testfingerprint", **kwargs: int) -> BCDataset:
+def _v2_dataset(fingerprint: str = "", **kwargs: int) -> BCDataset:
+    if not fingerprint:
+        from env.obs import obs_fingerprint
+
+        fingerprint = str(obs_fingerprint())
     arrays, _ = make_v2_arrays(**kwargs)
     return BCDataset(
         arrays,
@@ -136,16 +140,29 @@ def test_allow_legacy_releases_and_marks(capsys: pytest.CaptureFixture[str]) -> 
 def test_v2_dataset_passes_and_prints_banner(
     stage: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    from env.obs import obs_fingerprint
+
+    current = str(obs_fingerprint())
     dataset = _v2_dataset()
     marker = validate_bc_dataset(dataset, "runs/bc_expert_5k_v2", stage, allow_legacy=False)
     assert marker["legacy_dataset"] is False
-    assert marker["dataset_fingerprint"] == "v2-testfingerprint"
+    assert marker["dataset_fingerprint"] == current
     out_lines = capsys.readouterr().out.splitlines()
     banner = (
         f"[stage{stage}] dataset=runs/bc_expert_5k_v2 rows={dataset.count} "
-        "fingerprint=v2-testfingerprint schema=v2"
+        f"fingerprint={current} schema=v2"
     )
     assert banner in out_lines, f"启动横幅格式不符：{out_lines}"
+
+
+def test_stale_obs_fingerprint_hard_fails_with_escape_hatch() -> None:
+    """R21：旧 obs 指纹（v6-...）数据集在 stage 入口硬失败；逃生门放行并标注 legacy。"""
+    dataset = _v2_dataset(fingerprint="v6-stalefingerprint")
+    with pytest.raises(SystemExit) as excinfo:
+        validate_bc_dataset(dataset, "runs/bc_expert_5k_v2", "B", allow_legacy=False)
+    assert "obs_fingerprint" in str(excinfo.value)
+    marker = validate_bc_dataset(dataset, "runs/bc_expert_5k_v2", "B", allow_legacy=True)
+    assert marker["legacy_dataset"] is True
 
 
 def test_cli_and_env_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:

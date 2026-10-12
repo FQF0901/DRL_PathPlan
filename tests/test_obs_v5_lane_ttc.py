@@ -244,17 +244,20 @@ def test_builder_emits_v6_channels_without_lane_ttc() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_schema_v6_manifest_and_fingerprint() -> None:
+def test_schema_v7_manifest_and_fingerprint() -> None:
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint
 
     manifest = schema_manifest()
-    assert OBS_SCHEMA_VERSION == 6 and manifest["schema_version"] == 6
+    assert OBS_SCHEMA_VERSION == 7 and manifest["schema_version"] == 7
     assert manifest["frame"]["ld"]["shape"] == [16, 7]
     assert "lane" not in manifest["frame"] and "ttc" not in manifest["frame"]
     assert "lane_layout" not in manifest and "ttc_layout" not in manifest
     assert manifest["ld_layout"]["offsets_m"] == list(LD_OFFSETS_M) == [5.0, 10.0, 15.0, 20.0, 30.0]
     assert "v4 近场口径" in manifest["ld_layout"]["near_field"]
-    assert obs_fingerprint().startswith("v6-")
+    assert manifest["frame"]["lane_semantic"]["shape"] == [1, 12]
+    assert manifest["lane_semantic_layout"]["feature_names"][0] == "ego_to_target_lane_lateral_offset"
+    assert manifest["ld_semantics_layout"]["no_raw_lane_id"].startswith("补充数组不含")
+    assert obs_fingerprint().startswith("v7-")
 
 
 def test_collect_expert_passthrough_channels_v6() -> None:

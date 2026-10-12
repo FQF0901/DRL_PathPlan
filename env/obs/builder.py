@@ -10,6 +10,7 @@
     others (1,21+K)    others_mask (1,)    # nav + speed_limit + signal + static + road_class one-hot(K)
     ego_world (1,3)    ego_world_mask (1,) # v3：t0 世界系位姿 (x,y,θ)
     route_world (64,2) route_world_mask (64,)  # v3：世界系路线折线（首段起点 + 各段终点）
+    lane_semantic (1,12) lane_semantic_mask (1,)  # v7（R21）：target lane 相对语义
 
     ego_hist (6,1,8)           ego_hist_mask (6,1)
     others_hist (6,1,21+K)     others_hist_mask (6,1)
@@ -17,6 +18,10 @@
     od_id_hist (6,16) int64    od_presence_hist (6,16)
     ld_hist (6,16,7)           ld_hist_mask (6,16)
     hist_valid (6,)            # 预热补位帧为 0；由真实缓冲长度计算
+
+    # v7 LD 点补充（伴随数组；随 ld 进历史，缺帧填 -1/0）：
+    ld_lane_role (16,) int64   ld_offset_s_norm (16,)   ld_group (16,) int64
+    ld_route_associated (16,)  → 对应 <key>_hist (6,16)
 
 ``od_id`` 是槽位身份（见 ``env/obs/od.py``）：OD 槽位 = track id，跨帧稳定；``od_id_hist``/
 ``od_presence_hist`` 与 ``od_hist`` 同槽位、身份一致且不做 SE(2) 变换。``od_mask`` = 槽位
@@ -34,6 +39,7 @@ config（全部可选；``topk_objects``/``topk_lanes``/``history_frames`` 为 c
       "od": {"num_slots": 16, "ttc_cap_s": 5.0, "release_after_s": 1.0},
       "ld": {"num_slots": 16, "offsets": [0, 20, 40, 60, 80]},
       "others": {"speed_limit_norm_mps": 30.0},
+      "lane_semantic": {},  # v7（R21）：target lane 相对语义（无参数；见 lane_semantic 通道文档）
       "memory": {"frames": 6, "interval": 5, "channels": ["ego", "others", "od", "ld"]},
       "physics_dt": 0.1,
     }
@@ -52,6 +58,7 @@ import numpy as np
 
 from env.obs.base import ObservationChannel
 from env.obs.ego import EgoChannel
+from env.obs.lane_semantic import LaneSemanticChannel
 from env.obs.ld import LDChannel
 from env.obs.memory import DEFAULT_CHANNELS as DEFAULT_MEMORY_CHANNELS
 from env.obs.memory import FrameMemory
@@ -71,6 +78,9 @@ DEFAULT_CHANNELS: tuple[str, ...] = (
     # schema v3（A4）：世界系地图状态（rollout 逐步重算 nav 的输入；不进 6 帧历史）
     "ego_world",
     "route_world",
+    # schema v7（R21 语义重建）：lane-relative 语义（target lane 选择纯函数 + 12 维特征；
+    # 不进 6 帧历史——语义特征由每帧通道实时计算，历史版本留待 R21-3+ 需要时再评估）
+    "lane_semantic",
 )
 #: OD/LD 共用的默认盒式 scope（v2：前 150 / 后 50 / 左右 25）
 DEFAULT_SCOPE: dict[str, float] = {"front_m": 150.0, "rear_m": 50.0, "left_m": 25.0, "right_m": 25.0}
@@ -114,6 +124,7 @@ class ObservationBuilder:
             "others": OthersChannel(**others_cfg),
             "ego_world": EgoWorldChannel(),
             "route_world": RouteWorldChannel(),
+            "lane_semantic": LaneSemanticChannel(),
         }
         wanted = tuple(cfg.get("channels") or DEFAULT_CHANNELS)
         unknown = [name for name in wanted if name not in built_in]

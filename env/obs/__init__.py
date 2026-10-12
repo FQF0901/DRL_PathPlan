@@ -24,6 +24,14 @@ v6（2026-10-07，v8 结构重构）变更：删除 ``lane``/``ttc`` 通道（v5
 不再使用）；LD offset 改为 ``{0,20,40,60,80} m``——0 m 点 = ego 投影点（近场横向锚定，
 补偿 lane 删除），远场保留 20..80 m 前视；指纹前缀升为 ``v6-``（旧数据由 net 缺键回退，
 新数据必须重新采集）。
+
+v7（2026-10-12，R21 语义重建）变更：新增 ``lane_semantic`` 通道（1×12：ego 相对 target lane
+的横向偏移/航向差/近远曲率/左右可行驶 margin/target 有效性/route 关联置信度/左右变道需求/
+到车道末端与下一拓扑变化距离）；LD 新增逐槽补充伴随数组（``ld_lane_role``/
+``ld_offset_s_norm``/``ld_group``/``ld_route_associated``，观测内局部语义，**不含 raw
+lane_id**）。target lane 选择 = :func:`env.obs.lane_semantic.select_target_lane`（唯一纯函数，
+route current_ref → route continuation → next_ref → ego.lane 仅兜底）。指纹前缀升为 ``v7-``；
+旧数据集/旧 ckpt 的 fail-fast 方案见 ``docs/r21_lane_semantic_contract.md`` §6。
 """
 
 from __future__ import annotations
@@ -34,11 +42,11 @@ from pathlib import Path
 __all__ = ["obs_fingerprint", "OBS_SCHEMA_VERSION"]
 
 #: 观测 schema 版本（数据结构契约版本，独立于内容哈希）
-OBS_SCHEMA_VERSION = 6
+OBS_SCHEMA_VERSION = 7
 
 
 def obs_fingerprint() -> str:
-    """返回 ``v6-<内容哈希 12 hex>``；目录缺失时返回空串。"""
+    """返回 ``v7-<内容哈希 12 hex>``；目录缺失时返回空串。"""
     directory = Path(__file__).resolve().parent
     if not directory.is_dir():
         return ""
