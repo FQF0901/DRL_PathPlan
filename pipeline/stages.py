@@ -4152,6 +4152,19 @@ def _phase3_guard_run(argv: Sequence[str], log_path: Path) -> int:
         handle.close()
 
 
+def _parse_chain_decay_cli(text: str) -> "tuple[float, ...]":
+    """A3（round-17）：``--phase3-chain-decay`` 文本 → 六步衰减元组（逗号/分号分隔，fail-closed）。"""
+    try:
+        values = tuple(
+            float(part) for part in str(text).replace(";", ",").split(",") if part.strip()
+        )
+    except ValueError as exc:
+        raise SystemExit(f"[stageB3] --phase3-chain-decay 解析失败：{text!r}（{exc}）")
+    if not values:
+        raise SystemExit("[stageB3] --phase3-chain-decay 为空")
+    return values
+
+
 def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str, Any]:
     """阶段 B phase 3：**迭代恢复训练**（单轮；lane P3-B，lane P3-I 配方开关）。
 
@@ -4451,6 +4464,9 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     loss_weights = {
         "action": _loss_weight("action", 1.0),
         "action_chain": _loss_weight("action_chain", 0.2),
+        # A3（round-17）：尾链正则（0.0 = 关闭 = 旧行为逐位不变）
+        "tail_smooth": _loss_weight("tail_smooth", 0.0),
+        "tail_curv": _loss_weight("tail_curv", 0.0),
         "ego_next": _loss_weight("ego_next", 0.1),
         "od": _loss_weight("od", 1.0),
         "ld": _loss_weight("ld", 1.0),
@@ -4553,6 +4569,16 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     else:
         recovery_mix_ratio = 0.0
         recovery_chain_decay = tuple(float(value) for value in (recovery_cfg.get("chain_decay") or ()))
+    # A3（round-17）对照臂：CLI 显式六步链衰减（默认 None = 现状逐位不变；覆盖 recovery/无 recovery 两分支）
+    chain_decay_cli = getattr(args, "phase3_chain_decay", None)
+    if chain_decay_cli:
+        recovery_chain_decay = _parse_chain_decay_cli(chain_decay_cli)
+        if recovery_dir_arg:
+            recovery_info["chain_decay"] = list(recovery_chain_decay)
+            print(
+                f"[stageB3][recovery] 六步链衰减（CLI 覆盖）={list(recovery_chain_decay)}",
+                flush=True,
+            )
     shuffle_seed_base_raw = p3_cfg.get("shuffle_seed_base")
     shuffle_seed = (
         int(shuffle_seed_base_raw) + round_index if shuffle_seed_base_raw is not None else int(args.seed)
@@ -4934,6 +4960,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         checkpoint_callback=_on_checkpoint,
         action_weight=loss_weights["action"],
         action_chain_weight=loss_weights["action_chain"],
+        tail_smooth_weight=loss_weights["tail_smooth"],
+        tail_curv_weight=loss_weights["tail_curv"],
         ego_next_weight=loss_weights["ego_next"],
         od_weight=loss_weights["od"],
         ld_weight=loss_weights["ld"],
@@ -5633,6 +5661,13 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-action-weight", type=float, default=None, help="首步动作损失权重（默认 1.0）")
     parser.add_argument("--phase3-action-chain-weight", type=float, default=None,
                         help="多步动作链权重（默认取 config stages.B.phase3.losses.action_chain=0.2）")
+    parser.add_argument("--phase3-tail-smooth-weight", type=float, default=None,
+                        help="A3（round-17）尾链平滑正则权重（相邻动作差分；默认 0.0 = 关闭 = 旧行为逐位不变）")
+    parser.add_argument("--phase3-tail-curv-weight", type=float, default=None,
+                        help="A3（round-17）尾链曲率变化正则权重（|Δκ|；默认 0.0 = 关闭 = 旧行为逐位不变）")
+    parser.add_argument("--phase3-chain-decay", default=None,
+                        help="六步链逐 step 衰减权重（逗号分隔，如 1.0,0.8,0.6,0.4,0.25,0.15；"
+                             "默认 None = 沿用 recovery 配置/不加权 = 旧行为逐位不变）")
     parser.add_argument("--phase3-action-chain-source", choices=("auto", "labels", "lookup"), default=None,
                         help="动作链目标来源（P1 DAgger 前置；默认取 config "
                              "stages.B.phase3.action_chain_source=auto）：auto = 新 dagger 标签口径"

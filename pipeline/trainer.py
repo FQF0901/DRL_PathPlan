@@ -998,6 +998,13 @@ class Phase3Config:
     #: plan 尾链逐 step ``(ds,dθ)`` + 尾链横向位置（``traj_xy`` 对 ``traj6`` 的路径法向偏差）。
     #: ``0.0``（默认）= 关闭 = 旧行为逐位不变；bias 监控指标（``bc_bias_*``）恒记录（前后对照）。
     bias_calib_weight: float = 0.0
+    #: A3（round-17）：**尾链平滑**正则（相邻动作二阶差分，作用于模型预测链 ``plan``）。
+    #: ``0.0``（默认）= 关闭 = 旧行为逐位不变；用于"当前动作 BC + 确定性尾"配方中给
+    #: 未被专家目标监督的尾链一个弱连续性先验（推理期尾链由纯函数替换）。
+    tail_smooth_weight: float = 0.0
+    #: A3（round-17）：**尾链曲率变化**正则（``|Δκ|``，κ=dθ/max(|ds|,ε)）。
+    #: ``0.0``（默认）= 关闭 = 旧行为逐位不变；只做平滑，**不得**与 ``ld_line_margin`` 混用。
+    tail_curv_weight: float = 0.0
     load_balance_coef: float = 0.01
     moe_enabled: bool = True
     #: v7 结构迭代 B：K-anchor WTA 目标（0.0 = 关闭 = 旧行为逐位不变；见 :class:`BCConfig`）。
@@ -2524,6 +2531,46 @@ def weighted_action_chain_loss(
             }
         )
     return total, per_horizon
+
+
+def a3_tail_regularizers(
+    plan: "torch.Tensor",
+    *,
+    frame_weight: Optional["torch.Tensor"] = None,
+    loss_type: str = "l2",
+    curv_ds_floor: float = 0.5,
+) -> Tuple["torch.Tensor", "torch.Tensor"]:
+    """A3（round-17）尾链正则：**相邻动作平滑** + **曲率变化**（作用于模型预测链 ``plan``）。
+
+    - ``plan``：``(B,6,2)``（``[:,:,0]=ds``、``[:,:,1]=dθ``；模型 rollout 预测链）。
+    - 平滑项：一阶差分 ``||a_{k+1} − a_k||²``（k=0..4，含首步→尾步过渡）**对 k 取均值**后，
+      再按 ``frame_weight`` 行加权平均（``loss_type='l1'`` 时用绝对差）。
+    - 曲率项：``κ_k = dθ_k / max(|ds_k|, curv_ds_floor)``，惩罚 ``|κ_{k+1} − κ_k|`` 的行加权均值。
+    - ``frame_weight``：``(B,)`` 行权重（缺省全 1；与其它 BC 项同口径：加权均值）。
+    - **默认关闭**（两个外层权重为 0 时本函数不进入计算路径）→ 旧行为逐位不变；
+      只做平滑，不替代任何专家目标监督（禁止未来专家回归，见 round-17 落法 1）。
+    """
+    import torch
+
+    if plan.ndim != 3 or int(plan.shape[-1]) != 2:
+        raise ValueError(f"a3_tail_regularizers 需要 (B,K,2) plan，收到 {tuple(plan.shape)}")
+    batch = int(plan.shape[0])
+    device = plan.device
+    if frame_weight is None:
+        weight = torch.ones(batch, dtype=plan.dtype, device=device)
+    else:
+        weight = frame_weight.to(dtype=plan.dtype, device=device).reshape(-1)
+    diff = plan[:, 1:, :] - plan[:, :-1, :]  # (B,K-1,2)
+    per_sample = (
+        (diff ** 2).sum(dim=-1) if loss_type == "l2" else diff.abs().sum(dim=-1)
+    )  # (B,K-1)
+    smooth = (per_sample.mean(dim=-1) * weight).sum() / weight.sum().clamp(min=1e-8)
+    ds = plan[:, :, 0]
+    dth = plan[:, :, 1]
+    kappa = dth / ds.abs().clamp(min=float(curv_ds_floor))
+    curv = (kappa[:, 1:] - kappa[:, :-1]).abs().mean(dim=-1)  # (B,K-1)
+    curv_loss = (curv * weight).sum() / weight.sum().clamp(min=1e-8)
+    return smooth, curv_loss
 
 
 def anchor_wta_loss(
@@ -5369,6 +5416,13 @@ def _phase3_loss_terms(
         loss_type=config.loss_type,
         step_weights=chain_step_weights,  # P1-2：默认 None = 旧行为逐位不变
     )
+    # A3（round-17）：尾链正则（相邻动作平滑 + 曲率变化）——默认权重 0 → 跳过计算（旧行为逐位不变）
+    tail_smooth_value = torch.zeros((), device=device)
+    tail_curv_value = torch.zeros((), device=device)
+    if float(config.tail_smooth_weight) > 0.0 or float(config.tail_curv_weight) > 0.0:
+        tail_smooth_value, tail_curv_value = a3_tail_regularizers(
+            plan, frame_weight=frame_weight, loss_type=config.loss_type
+        )
     # P1-2 补口：traj（pose 链）损失项 —— 默认 ``traj_aux_weight<=0`` 跳过计算（旧行为逐位不变）；
     # 行权重 = frame_weight × traj 行掩码（只对真实 traj6 行生效；掩码只作用于本项）。
     # 六步时间衰减：``bc_trajectory_loss.weights`` 是**逐行**权重（不支持逐点）→ 不套用（TODO）。
@@ -5505,6 +5559,9 @@ def _phase3_loss_terms(
     terms: Dict[str, Any] = {
         "action": config.action_weight * action_loss,
         "action_chain": config.action_chain_weight * chain_loss,
+        # A3（round-17）：尾链正则（weight=0 时恒 0，不进 loss_keys/total = 旧行为逐位不变）
+        "tail_smooth": float(config.tail_smooth_weight) * tail_smooth_value,
+        "tail_curv": float(config.tail_curv_weight) * tail_curv_value,
         # P1-2：traj 项（weight<=0 时恒 0，不进 loss_keys/total = 旧行为）
         "traj": float(config.traj_aux_weight) * traj_loss_value,
         # P1-3：三项（weight=0 时恒 0，不进 loss_keys/total；probe_terms 时原始项供探针）
@@ -5719,6 +5776,8 @@ def pretrain_bc_phase3(
     loss_keys = (
         "action",
         "action_chain",
+        "tail_smooth",
+        "tail_curv",
         "bias_calib",
         "anchor_ce",
         "anchor_wta",
@@ -6240,6 +6299,8 @@ def evaluate_bc_phase3(
     loss_keys = (
         "action",
         "action_chain",
+        "tail_smooth",
+        "tail_curv",
         "bias_calib",
         "anchor_ce",
         "anchor_wta",
@@ -6423,6 +6484,9 @@ def _term_key(loss_key: str) -> str:
         "ld_margin": "rows",
         "curvature": "rows",
         "progress": "rows",
+        # A3（round-17）：尾链正则与首步动作同为"行加权均值"口径 → 共用 ``action`` 分母
+        "tail_smooth": "action",
+        "tail_curv": "action",
     }.get(loss_key, loss_key)
 
 
