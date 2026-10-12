@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（Round-22 Outcome D · R21-0..2 门全过 · R21-3 待批）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核（§5.11）；round-22 Outcome D（§5.13）；R21-0..2 门全过（§5.14；措辞经 §5.15 更正）；**round-23 批准 R21-3A..3C（接线+契约 / pilot canary / 表示复测）——已开工；正式采集与 S0/S1 等 pilot 门（§5.15）**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ **round-23：R21-3A..3C 批准与开工（§5.15）**。
+> **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核（§5.11）；round-22 Outcome D（§5.13）；R21 0..3 递进（§5.14–5.16）；**R21-3A/3B 门过、3C 表示 3/3+action 4/5（曲率 20.1% 近门）——首现强正向；待 round-24 裁决正式采集/S0/S1（§5.16）**；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ **3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）**。
 > **本版说明**：第七轮精简（305 → ~280 行）：§5.11/§5.12 压为残档、§5.8/§5.5/§7 收缩、§0 补行；**当前状态=Round-22 Outcome D + R21-0..2 全过（§5.14）**；改前 305 行 = `git show bd7c0b8:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -260,6 +260,15 @@
 - **更正（§5.14 措辞）**：不当称"encoder 层清白 / pooling 唯一主因"——新语义未接入，正确表述=**缺少显式 target-lane 通路 + 旧 LD 聚合选择性不足，主因由 R21-3 裁决**（认账）。
 - **我方执行注记**：① 其"并行采集"与 §7/终裁"等 pilot 门"矛盾 ⇒ 按后者（保守）：**3C 过门后才启动正式采集**（20–30 万 expert 行 + 3–5 万扰动行；CUDA/隔离/分层统计/指纹 v7/正式禁 `--allow-legacy-dataset`）；② 3C 若"表示门过而 action 门不过" ⇒ 须区分"冻结解码器表达受限 vs 语义未被用"，不笼统判负；③ 改名保 pilot 可用（若指纹含字段名 ⇒ 同步 pilot schema，数值逐位不变）；④ LD 干预六帧一致；接线消费用末帧；⑤ 正式训练仅 **S0/S1 两臂**（弃 S2），定义 pilot 门后锁定再批准。
 - **开工**：R21-3A..3C lane 已派发（复用 R21 session；产物 `runs/p1_v2/round23/`；零正式采集、零全模型训练）。
+
+### 5.16 R21-3A..3C 结果（2026-10-13 01:0x）：**接线+契约+Canary 全过；3C 表示 3/3 过、action 4/5（曲率 20.1% 近门）——首现强正向；门后停止待裁决（round-24）**
+
+- **3A（门过）**：三项修正落地——归一化单一出处（env 常量→schema→net buffer→快照 + 逐位单测）、`distance_to_target_lane_end` 改名**值逐位不变**（71 行×39 键 max diff 0.0；pilot schema 同步 + `schema_sync.json` 白名单）、margin 改名 same-direction road-surface margin（禁监督真值）；接线=`target_lane_token`（mask/valid=0⇒严格 0）+ LD 逐槽增广（role/route/offset/group-equality）+ **显式分组池化** + `build_geometry_context` 统一消费（t0+rollout 1–6+policy/value；禁均值回退+代码断言）；16 新测、全套 **925 passed**；默认关 baseline 逐位不变。
+- **3B canary（门过）**：冻结 encoder/MemBank/ST-GNN/MoE/router/policy/value，只训 299,909 参数（+PlanHead fusion 低 LR）；2 epoch/15.1s；aux 收敛（lat 0.968/curv 0.983/change 1.000；heading aux 弱为已知量级效应，表示门以 target token probe 为准）。
+- **3C 复测（关键突破）**：target token 解码 **1.000/0.998/1.000**（lat/heading/near-curv）；action 反事实 **sign 99.4%/99.2%**（旧 73%）、**lane 响应 4.31× 旧**（门 3×）、hist/lane **0.243**（门 ≤2；旧口径 36.5）、mirror 98.2/96.5%；**曲率 20.1% expert（门 25%，唯一近门）**；OOD 历史（逆序/shuffle）ratio 3.74 为非门诊断；解码器分析=expert dθ 可从 context/token 线性解码（R² 0.33/0.36）⇒ 残余=**冻结解码器表达 + 短适配预算**，非语义缺失。
+- **判读**：语义接线把"几何响应弱 + history 主导"两症候同时翻面（方向正确率 ~99%、history 相对影响骤降）；**首现强正向信号**；唯一未达=曲率量级（近门），机制上归因于 canary 冻结栈（policy/value 未放开、15s 预算）。
+- **请求（round-24）**：按预注册裁决——① 视 3C 为**门过**（表示 3/3 + sign/lane/hist 全过、curv 近门属冻结栈伪影）→ 批准**正式 v7 主采集（20–30 万 expert + 3–5 万扰动）→ S0/S1 两臂**；或 ② 先补一轮 canary v2（PlanHead fusion 解冻至正常 LR/加 epoch）清 25% 门再采。**我方倾向 ①**（方向性已证；S1 全适配将直接复检曲率指标）。门表/证据：`runs/p1_v2/round23/canary_report.md` + `r21_3c_probe.json`。
+- 产物：`runs/p1_v2/round23/`（3A 审计 / 3C 探针 / canary / 报告）；零正式采集、零全模型训练、DAgger/MoE/RL 未动。
 
 ---
 
