@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（Round-22 Outcome D · R21-0..2 门全过 · R21-3 待批）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；round-22 Outcome D（§5.13）；**R21-0..2 完成且门全过（§5.14）——定位 pooling 丢失为主 + 监督不足 + history shortcut ⇒ 下一步=显式接线 + 复测（R21-3 待批）**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ **R21-0..2 门全过；待 R21-3 批准（§5.14）**。
+> **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核（§5.11）；round-22 Outcome D（§5.13）；R21-0..2 门全过（§5.14；措辞经 §5.15 更正）；**round-23 批准 R21-3A..3C（接线+契约 / pilot canary / 表示复测）——已开工；正式采集与 S0/S1 等 pilot 门（§5.15）**；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ **round-23：R21-3A..3C 批准与开工（§5.15）**。
 > **本版说明**：第七轮精简（305 → ~280 行）：§5.11/§5.12 压为残档、§5.8/§5.5/§7 收缩、§0 补行；**当前状态=Round-22 Outcome D + R21-0..2 全过（§5.14）**；改前 305 行 = `git show bd7c0b8:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -252,6 +252,14 @@
 - **我方执行注记（供 round-23）**：① 复测载体建议 **S1 短适配 ckpt**（表示门须"已适配 encoder"；纯接线未训练 latent 无意义）→ R21-2 复测并入 R21-3 首阶段（接线 → S1 2-epoch → 表示/反事实门 → 过则补 S0/S2 + 闭环门）；② **R21-3 需 v7 主训练集**（pilot 9.5k 仅够表示门；规模/口径与 S0 定义待锁）；③ S2 的 lane aux 仅轻量、不引新损失过门。
 - 产物：`runs/p1_v2/round21/`、`datasets/semantic_v1_pilot/`、docs 三篇；生产提交见 git log；**零主模型训练**，DAgger/MoE/RL 未动。
 - **请求（round-23）**：批准 R21-3 范围（接线 + S1 短适配 + 复测 + S0/S2 + 基础门：clean150 ≥0.50 → eval500 ≥0.60 才谈 DAgger）；确认执行注记 ①②③。
+
+### 5.15 round-23 裁决：**R21-3A..3C（接线/契约 + pilot canary + 表示复测）立即批准——已开工；正式采集与 S0/S1 条件后置**
+
+- **代码核验（三项指控全部成立）**：① **net/ 零消费**（`lane_semantic`/LD companions 均未接；target_lane_token 与 role-aware readout 不存在）；② 12 维**未归一化**（raw：dist 0–200 vs curv 0.01–0.1、heading ±π）；③ `distance_to_next_topology_change` 实为 `remaining if next_lane else 200`（= target lane 剩余距离，非真拓扑变化）；④ drivable margin=同向 road-surface margin（lane_id 序累加同向邻车道宽，不查实线/护栏/route 权限 ⇒ 非合法 corridor、禁作监督真值）。
+- **接受**：三项修正（入口**固定归一化**〔lateral/5、heading/π、curv/0.1、margins/25、conf/flags 原值、dist/200；常数入 schema/快照+单测〕；改名 `distance_to_target_lane_end`〔不实现新地图搜索〕；margin 降级为输入特征）；**接线方案**（归一化→2 层 MLP→`target_lane_token`〔mask/valid=0 ⇒ 严格 0〕；LD 逐槽增广〔role/route/offset/group-equality，group 禁数值〕；**显式分组池化** target/continuation/left/right/route/other〔禁自由注意力〕；单函数 `build_geometry_context` 统一消费 t0/rollout/policy/value、**禁 plan_step 回退均值**）；**3A**（接线+十项契约单测，零训练）→ **3B canary**（冻结 encoder 主体/MemBank/ST-GNN/MoE/router/policy/value；只训 semantic encoder/role emb/readout/fusion adapter〔+可选 PlanHead 末层低 LR〕；9.5k pilot 仅作表示验证；loss=当前 action BC+原 plan/traj+小权重 aux〔仅 lat/heading/curv/lane-change〕）→ **3C 复测**（token/context 解码、反事实、**history 对照〔真 6 帧 vs 当前帧×6 为关键〕**；门：target token R²≥0.80、sign≥90%、curv≥25% expert、lane≥3× 旧、hist/lane≤2）。
+- **更正（§5.14 措辞）**：不当称"encoder 层清白 / pooling 唯一主因"——新语义未接入，正确表述=**缺少显式 target-lane 通路 + 旧 LD 聚合选择性不足，主因由 R21-3 裁决**（认账）。
+- **我方执行注记**：① 其"并行采集"与 §7/终裁"等 pilot 门"矛盾 ⇒ 按后者（保守）：**3C 过门后才启动正式采集**（20–30 万 expert 行 + 3–5 万扰动行；CUDA/隔离/分层统计/指纹 v7/正式禁 `--allow-legacy-dataset`）；② 3C 若"表示门过而 action 门不过" ⇒ 须区分"冻结解码器表达受限 vs 语义未被用"，不笼统判负；③ 改名保 pilot 可用（若指纹含字段名 ⇒ 同步 pilot schema，数值逐位不变）；④ LD 干预六帧一致；接线消费用末帧；⑤ 正式训练仅 **S0/S1 两臂**（弃 S2），定义 pilot 门后锁定再批准。
+- **开工**：R21-3A..3C lane 已派发（复用 R21 session；产物 `runs/p1_v2/round23/`；零正式采集、零全模型训练）。
 
 ---
 
