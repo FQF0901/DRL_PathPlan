@@ -1,9 +1,9 @@
 # deepseek-v4.1 argue / 主文档（Round-20 收官 · 转数据侧 · round-21 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；**round-22 四臂结果=Outcome D：M2a/M2b 未过开发门（α≈1.3%、近均匀、几何响应未达 5×；e002 回落）⇒ LD 架构排摸正式结束、按预注册转 R21 语义重建（§5.13；R21-0..2 已开工）**；RL 冻结。
+> **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；round-22 Outcome D（§5.13）；**R21-0..2 完成且门全过（§5.14）——定位 pooling 丢失为主 + 监督不足 + history shortcut ⇒ 下一步=显式接线 + 复测（R21-3 待批）**；RL 冻结。
 > **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ **round-21 复核：M2 接线缺口 ⇒ 撤回"穷举"；修正版 M2a/M2b 待跑（§5.11）**。
-> **本版说明**：第六轮精简（342 → 261 行）+ round-21/22 新增 §5.11/§5.13（2026-10-12 深夜）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
+> **本版说明**：第六轮精简（342 → 261 行）+ round-21/22 与 R21-0..2 新增 §5.11/§5.13/§5.14（2026-10-13 凌晨）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -262,14 +262,24 @@
 - **坑**：① policy `mu` 末层零初始化 ⇒ 消费契约须先打散（防假阴性）；② α 门控梯度时序（α 先行）；③ obs 指纹警告为既有（四臂一致）；④ α 初值/参数化调整=超参扫描，未批、按边界停止。
 - **唯一行动（预注册）**：**转 R21 语义重建（R21-0..2 已开工）**；不加第五臂、不扫超参、不动数据/MoE/WM。
 
+### 5.14 R21 语义重建结果（R21-0→R21-2，2026-10-12 24:0x）：**三阶段门全过；定位=pooling 丢失为主 + 监督不足 + history shortcut → 下一步=显式接线 + 复测（R21-3 待批）**
+
+- **R21-0（门过）**：`lane_semantic.py` 唯一纯函数 target-lane 选择（route current_ref → continuation → next_ref → ego.lane 仅兜底；**4,632 横向偏移探针 0 切换**）+ **12 维通道** + LD 逐槽补充（role/group/route/offset_s × 6 帧）；**schema v7 / 指纹 `v7-d93a5169c3f7`**、旧数据集 fail-fast（`--allow-legacy-dataset` 逃生门）；新测 35 项、全套 **909 passed**；env 审计全门 true（valid 100%、lat 5e-8m、heading 8e-7°、curv 4e-8、roundtrip 3.6e-14）；可行性 216 case（99.4% 可恢复、expert 查询纯+确定）。
+- **R21-1（门过）**：smoke 681 行（重放 501/501 exact）→ pilot **9,515 行**（A 40.4% / B 42.7% / C 16.9%）；质量门全过（同状态 1,013/1,013 exact；target valid 100%；重放 ≥1,000；split 无泄漏；expert 恢复 92.6%；lane 跳变 0%）。
+- **R21-2（零训练）**：**raw lane_semantic 全过（R²≈1）**；模型侧全灭——**ld_pool lat R² 0.191**、fused latent −0.046、action latent −0.096、action_mu 0.001、target_lane_token 近门（0.876/0.841/0.704/1.000）；counterfactual：sign 73%、mirror 80.5%、ρ 0.124、curv 响应 **8.4% expert**、lane/prev 0.36、**history_shuffle 影响 0.0219 ≫ lane 0.0014（15×）** ⇒ **问题层 = pooling 丢失为主 + primary 监督不足 + history shortcut**（输入/target/encoder 层清白）。
+- **唯一行动（预注册树 Case B）**：lane_semantic **显式接入 net 输入**（target_lane_token + 逐槽路径保持 + role-aware 读出；不加容量、不重启注意力实验）→ R21-2 复测 → 过门后谈 **R21-3 训练**。
+- **我方执行注记（供 round-23）**：① 复测载体建议 **S1 短适配 ckpt**（表示门须"已适配 encoder"；纯接线未训练 latent 无意义）→ R21-2 复测并入 R21-3 首阶段（接线 → S1 2-epoch → 表示/反事实门 → 过则补 S0/S2 + 闭环门）；② **R21-3 需 v7 主训练集**（pilot 9.5k 仅够表示门；规模/口径与 S0 定义待锁）；③ S2 的 lane aux 仅轻量、不引新损失过门。
+- 产物：`runs/p1_v2/round21/`、`datasets/semantic_v1_pilot/`、docs 三篇；生产提交见 git log；**零主模型训练**，DAgger/MoE/RL 未动。
+- **请求（round-23）**：批准 R21-3 范围（接线 + S1 短适配 + 复测 + S0/S2 + 基础门：clean150 ≥0.50 → eval500 ≥0.60 才谈 DAgger）；确认执行注记 ①②③。
+
 ---
 
 ## 6. 文档与产物索引
 
 - **决策/契约**：`docs/p1_v2_decision.md`（P1-v2 决策 + Round-12A 结果）、`docs/recovery_v2_contract.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`
-- **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`
-- **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）
-- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
+- **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`
+- **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）、`datasets/semantic_v1_pilot/`（v7 语义 pilot 9,515 行）
+- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/round21/`（契约审计 / 可行性 / R21-2 表示 probe）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
 - **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a / round18a / round20 脚本 + logs）
 - **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
 - **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）、`96df7cb`+`c71f389`（Round-18A）、`da83ce1`（LD 消融开关）、`e638b76`（§5.10）
