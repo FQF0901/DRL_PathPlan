@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（Round-17 A3 判负 · round-18 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 晚）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A 完成（§5.3）；A3 判负（§5.5）；**Round-18A 完成（§5.8）：拓扑伪边 76.5% + primary 几何响应 ~50× 过弱（history 5–7× 主导）+ 断点-失败 14× ⇒ 分支=输入/拓扑缺陷 + primary 弱响应；下一步候选=模型侧修复（关闭/重建邻接 + 显式池化；无重采）优先、数据侧最小特征（需重采）备选——转 round-20 决策**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ **Round-18A 完成（§5.8）**。
+> **状态（2026-10-12 晚）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/Round-18A 递进（§5.3/5.5/5.8）；**round-20 批准模型侧修复——M0/M1/M2 等预算消融 + 20A/20B 因果探针已开工（§5.9）**；数据侧重采/DAgger 条件后置；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ **round-20：M0/M1/M2 消融 + 因果探针（§5.9）**。
 > **本版说明**：第五轮精简（355 → ~310 行）：§5.4/5.6/5.7 往来压为残档（结果各自见后节）；上版 355 行 = `git show 96df7cb:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -283,6 +283,14 @@
 - **修复阶梯（先模型侧、后数据侧）**：**a. 模型侧（无重采）**：关闭/按语义重建 LD-LD 邻接（`spatial.py:103-106`）+ 显式池化替换全槽均值（`model.py:505-507`）+（可选）几何响应辅助监督——数据可复用、只需重训；**b. 数据侧（需重采）**：最小语义特征（target_lane flag/lane_id/offset idx/route assoc/侧偏/航向差/曲率）——fingerprint 变更、全量重采。0B 显示覆盖并非主缺口 ⇒ **先做 a、以 a 后复测决定是否上 b**。
 - **坑（必带）**：① **模型消费 LD 走 `ld_hist[:, -1]`**——任何 LD 干预必须同时改该通道（否则假 0）；② 镜像不闭合=现象、结论待 env 级；③ 网格符号度量为口径 bug（真实符号由反事实均值证正确）；④ B 解码仅 curvature 可用；⑤ `a3/primary_only` 组合缺（3/4，模式同 pri512/primary_only）；⑥ 0C 非因果。
 - **纪律**：零训练 ✓；net/pipeline 零改动 ✓（primary_only 复用 `set_moe(enabled=False)`）；`ld.py` 仅默认关旁路（fingerprint 不变、2 单测过）✓；已提交（见 git log）。
+
+### 5.9 对 round-20 的回应（`37ee932`）：**无分歧、接受全部收紧与裁决；已开工**
+
+**接受（要点）**：① 伪边 76.5% 是**架构缺陷证据、非闭环因果证据**——须以 M0/M1/M2 等预算消融裁决（认账）；② "~50×"改为**相对口径**（vs expert/oracle 所需纠偏敏感度，不给绝对倍数）（认账）；③ zero_history 为强 OOD 干预——改用温和对照（当前帧×6/逆序/shuffle/末 2 帧/LD-固定换 history/history-固定换 LD），关键对照="真六帧 vs 当前帧×6"；④ **M0 基线复训 / M1 仅关 LD-LD 链 / M2 关链+ego·nav 条件 LD set attention / M3 暂缓**——逐臂独立、同预算；⑤ 不立即做 target/adjacent/boundary 启发式分组（缺可靠 lane 身份，防新错配）；⑥ 数据侧重采 4 个触发条件；⑦ **20A 置换探针 + 20B matched-case**（因果闭环）；⑧ 验收门：结构门 + clean150 vs 同批 M0（+5pp/−10pp/coll+2pp/tmo+3pp/饱和降）+ eval500（0.45 有价值/0.55 进 DAgger/0.60 重评 RL）；**M2<0.45 → 停 LD 架构精修、转数据侧**（预注册）；⑨ A4/MoE/WM/禁制清单照锁。
+
+**我方操作性补充（3 条，已并入施工）**：① **几何响应基准 = 同状态 expert/oracle 响应对照**——在重放环境置偏移并记录 expert mu_dθ 作基线（env 级为主、tensor 级辅助）；② **全部 LD 干预（含置换）须六帧一致**处理 `ld`/`ld_hist`/mask（防漏改 `ld_hist[:, -1]` 与跨帧错配）；③ **M2 落地=LD 完全绕过 spatial MP**（独立 token 编码 + ego/nav 条件 cross-attention）——比"仅关 LD-LD 边"更彻底隔离污染（与其"独立 token encoder"一致）。
+
+**开工**：已派发 Round-20 lane（20A 置换探针 → 20B matched-case → M0 复训基线 → M1 关链 → M2 set-attention（含实现+训练）→ 结构门表 + clean150/eval500 门 → 判定；零新数据；产物 `runs/p1_v2/round20/`）。
 
 ---
 
