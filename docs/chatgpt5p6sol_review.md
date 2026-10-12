@@ -1,409 +1,331 @@
-总体结论
+总体判断
 
-我认可 Coding Agent 对上一轮两处事实的纠正：
+这轮结果非常重要。deepseekv4p1_argue.md 已经把问题从“训练配方不对”进一步推进到“道路几何表示和网络消费方式可能存在结构缺陷”。
 
-LD 并非只有“车道点”，每点已有 dx/dy/heading_rel/curvature/speed_limit/左右线型；
-LD 历史被存入 memory，但 MemEncoder 最终只使用当前帧，不做 LD temporal aggregation。
+我认可这些事实：
 
-Round-18A 可以开工。
- 不过我亲自核查 DRL_PathPlan_Code.txt 后，认为问题比“网络是否使用 LD”更具体：
+A3 证明，简单重复模型当前动作会导致转向抖动被 LQR 预瞄放大，迅速出界；六步 chain 的现实作用更像执行噪声缓冲，而非纯远期预测。
+learner-state 当前动作误差仍然很大，纯 expert-state BC 没有修复 covariate shift。
+LD 槽位链中约 76.5% 的相邻边跨 lane，当前 LD-LD message passing 的拓扑语义高度可疑。
+PlanHead 只消费 LD 全槽均值，可能把 target lane、相邻 lane 和复杂分叉信息混在一起。
+模型对 LD 平移、旋转的动作响应非常弱，而清空 history 的影响明显更大，说明策略更依赖历史动力学惯性，几何纠偏能力不足。
 
-当前 LD 有局部几何，但缺少稳定的车道身份、目标车道关联和正确拓扑；网络又在关键位置对 LD 做无结构池化或错误邻接。因此它可能“看到车道点”，却无法稳健理解“自车应该沿哪条连续中心线行驶”。
+但是，我不同意现在就把根因定案为：
 
-一、代码排摸发现
-1. LD 输入信息不算少，但缺失关键语义
+“LD 伪边导致闭环失败，关闭邻接并加入显式池化即可解决。”
 
-每个 LD 点包含：
+当前证据支持“高风险嫌疑”，还没有完成因果证明。
 
-dx, dy, heading_rel, curvature,
-speed_limit, left_line_type, right_line_type
+一、需要收紧的三个结论
+1. “76.5% 伪边”不等于“这些边一定有害”
 
+槽位相邻不等于 lane 相邻，这确实是结构错误；但 message passing 也可能把它当普通 token mixing 使用，而不是严格拓扑推理。
 
-当前车道优先占 5 个点，实际 offsets 是 5/10/15/20/30m。其他候选包括下一参考车道和同路相邻车道。
+必须通过同预算重训消融证明：
 
-但每个槽位没有显式提供：
+现有槽位链
+vs
+完全关闭 LD-LD 边
+vs
+排列不变的 LD set attention
 
-lane_id
-是否当前车道
-是否 route target lane
-是否 continuation
-相对 lane index
-offset/s 坐标
-该点与哪个其他点属于同一条 lane
 
+如果关闭槽位链以后闭环不改善，说明问题不只在边；如果 set attention 明显提升，才能确认“错误拓扑 + 均值池化”是主要原因。
 
-因此，网络只能从点的坐标猜测这些关系。复杂分叉、收费站、相邻车道并行时，这种猜测很容易失败。
+因此，“伪边率 76.5%”是架构缺陷证据，不是闭环因果证据。
 
-一个文档问题
+2. “几何响应弱约 50 倍”目前不是可靠量纲
 
-env/obs/ld.py 顶部注释仍多处写“0/20/40/60/80m”和“0m 投影点”，但实际常量是：
+模型对 LD 平移 ±1m 只改变约 0.002 rad 的 μ_dθ，确实偏弱。但“合理响应应该大 50 倍”缺少明确基准，因为 policy action 的 0.5 秒语义、LQR preview 和速度共同决定最终横向运动。
 
-LD_OFFSETS_M = (5, 10, 15, 20, 30)
+更严谨的口径应是：
 
+与 expert 对同样几何扰动的动作响应比较；
+与 oracle/current-action controller 比较；
+检查响应方向、单调性、局部增益和闭环恢复能力；
+不直接给出“应为多少倍”的绝对判断。
 
-这是注释漂移，虽然不直接影响运行，但会误导 probe 和监督设计。
+建议将结论改成：
 
-2. 最危险的问题：LD 图邻接与槽位排序不一致
+模型对局部道路几何扰动的动作敏感度，显著低于 expert/oracle 所需的闭环纠偏敏感度。
 
-LD 槽位排序是：
+3. zero_history 影响大，不足以证明“动力学 shortcut”
 
-当前车道五个点
-+
-其他车道按 offset 环优先排列
+将所有历史清零是强 OOD 干预，既删除动力学信息，也改变输入分布。输出变化大不一定说明模型错误依赖历史。
 
+需要增加更温和的对照：
 
-也就是说，secondary 部分很可能是：
+真实历史
+复制当前帧六次
+历史逆序
+历史 shuffle
+只保留最近 2 帧
+LD 保持不变但 ego history 改变
+ego history 保持不变但 LD 当前帧改变
 
-lane A @5m
-lane B @5m
-lane C @5m
-lane A @10m
-lane B @10m
-...
 
+最关键的是：
 
-但 SpatialEncoder 对 LD 建图时，直接连接：
+真实六帧 vs 当前帧复制六次
 
-slot[i] ↔ slot[i+1]
 
+如果两者输出和闭环接近，memory 没利用动态信息；如果差异明显且方向合理，history 依赖本身不是问题。真正的问题可能是几何分支影响不足以覆盖动力学先验。
 
-这意味着很多“相邻边”并不是同一条车道上的连续点，而是：
+二、同意下一步先做“模型侧修复”，但不要一次改三件事
 
-不同车道同一 offset； -当前车道末端点与另一车道近端点；
-continuation 与 sibling lane 之间的伪连接。
+Coding agent 建议：
 
-这不是纯粹表示能力不足，而是图拓扑可能明确建错了。
+关闭或重建 LD-LD 邻接；
+显式池化替换全槽均值；
+可选几何响应辅助监督。
 
-在收费站、merge、split 等多车道结构中，这尤其危险。ST-GNN 可能把并行车道误当成一条连续路径传播消息。
+方向正确，但不能组合成一个实验，否则即使提升也无法知道原因。
 
-这是 Round-18A 必须新增的最高优先级静态审计。
+建议严格拆成四个等预算臂。
 
-3. PlanHead 把 LD 压成 masked mean
+M0：基线复训
 
-PlanHead 的融合输入为：
+使用当前代码、相同数据、相同训练预算重新训练一次。
 
-ego_ctx, od_pool, ld_pool, others_ctx, nav_token, signal_token
+目的：
 
+控制代码漂移； -得到同批环境下的训练随机性参考； -不能只拿历史 pri512 checkpoint 与新架构横比。
+M1：只关闭 LD-LD 槽位链
 
-其中：
+保持：
 
-ld_pool = masked_mean(z_ld, ld_live)
+encoder； -所有池化；
+PlanHead；
+loss； -参数预算；
 
+尽量不变。
 
-masked mean 会抹掉：
+只移除错误的 LD-LD slot adjacency，保留 ego↔LD 或其他合法交互。
 
-哪个点属于当前车道； -前后顺序； -哪条 lane 是 route continuation； -左右车道区别；
-offset 位置。
+这回答：
 
-虽然后面的 policy/value cross-attention 仍能看到 16 个 LD token，但主 PlanHead latent 和 MoE router 接收到的是高度压缩后的 LD 均值。
+槽位伪边本身是否有害？
 
-这会直接影响你的架构初衷：
+M2：LD 改成 permutation-invariant set attention
 
-primary 无法明确获得 target-lane path；
-router 更难识别“普通 lanekeep vs 特殊拓扑”；
-experts 可能被迫补偿 primary 丢失的道路结构。
+不要立即做“target/adjacent/boundary 显式池化”，因为当前数据缺少可靠 lane identity、route association 和 target-lane flag。
 
-所以当前职责倒置未必只是训练问题，也可能来自 PlanHead 的信息瓶颈。
+第一版更安全的是：
 
-4. ego.lane 优先可能在偏离状态造成语义跳变
+query = ego + nav + route context
+keys/values = all valid LD tokens
+output = masked cross-attention / set pooling
 
-LD 的第一候选是：
 
-ego.lane
+特点：
 
+不依赖槽位顺序； -不用假定相邻 slot 在同一 lane； -可根据 ego/nav 查询相关 lane geometry； -无需重新采集数据； -比全槽均值有更强选择性。
 
-其次才是导航参考 lane。
+M2 同时关闭 LD-LD 槽位链，避免 set attention 之前 token 已被错误拓扑污染。
 
-当 learner 已经横向偏离、接近另一条 lane 或错误通道时，MetaDrive 的 ego.lane 可能切换。此时 LD 的“primary lane”会突然变成当前误入的 lane，而不是应该返回的 route lane。
+M3：M2 + 几何响应辅助监督
 
-这会产生危险反馈：
+这一臂暂缓，除非先证明监督标签可靠。
 
-车辆偏离
-→ ego.lane 切换
-→ LD 当前车道语义切换
-→ 网络认为新车道才是应跟随对象
-→ 不再回正
+现有 ld_line_margin_loss 已经失败，不能换个名称重新加入。若做辅助监督，只允许使用经契约验证的物理量，例如：
 
+当前 ego lane-relative lateral offset；
+heading error； -局部道路曲率；
+target-lane existence；
+LD token 与 ego/nav 的关联分类。
 
-这可能同时解释：
+如果这些标签仍来自不稳定的 lane assignment，则 M3 不应实施。
 
-learner-state 的 dθ 误差骤增；
-gate 无法识别 recovery；
-tollgate/复杂几何出界集中； -模型在 expert-state 表现很好，因为 expert 几乎不会触发 lane identity 跳变。
+三、显式池化方案应避免新的错误语义
 
-Round-18A 应专门统计：
-
-ego.lane != navigation target lane
-
-
-出现的频率，以及它与 off-road、dθ 符号错误的相关性。
-
-5. LD temporal 不使用本身未必错误，但其前提不成立
-
-代码明确只取：
-
-ld_ctx = ld_h[:, -1]
-
-
-理由是道路静态，历史对齐后信息近似重复。
-
-这个选择只有在以下条件成立时合理：
-
-同一 slot 跨帧始终代表同一条 lane、同一语义位置
-
-
-但当前 slot 由 ego.lane、导航 lane、siblings 和有效 offset 动态生成，车道变化、短 lane、分叉时很可能发生 slot churn。
-
-因此问题不一定是“应增加 temporal attention”，而是应先测：
-
-相邻帧同 slot 的 lane identity 保持率
-相邻帧排序置换率
-短 lane 造成的 mask 跳变率
-ego.lane 切换时 LD 全局突变量
-
-
-若槽位不稳定，直接做 temporal attention 反而会融合不同 lane 的语义。
-
-6. K-anchor 的 lane context 实际是零
-
-代码中明确写明，v8 删除旧 lane 通道后：
-
-lane_ctx = zeros(B, 3)
-
-
-所以即使未来重新开启 K-anchor，它也没有真实 lane context。
-
-目前 anchor 默认关闭，因此不是当前主因。但它说明 repo 曾经依赖的“lane-frame plan”语义已经被削弱，不能轻易重启 K-anchor。
-
-二、对 Coding Agent Round-18A 的裁决
-批准，但增加三个代码级探针
-Probe 0A：LD slot/topology 审计
-
-为每个 LD slot 临时记录：
-
-lane_index
-lane_priority
-lane_order
-offset_idx
-is_ego_lane
-is_nav_current
-is_nav_next
-
-
-统计：
-
-相邻 slot 属于同一 lane 的比例
-SpatialEncoder LD-LD 边中错误跨 lane 比例
-跨帧 slot identity 保持率
-ego.lane / route lane 不一致率
-
-
-如果 LD-LD 边的大部分不是同 lane 连续点，应先关闭 LD-LD slot adjacency，或按 lane_id + offset 重建图，而不是继续训练。
-
-Probe 0B：target-lane coverage
-
-统计当前 route target lane 在 LD 中：
-
-是否出现
-槽位数
-最近点距离
-5/10/15/20/30m 覆盖率
-heading/curvature 有效率
-
-
-按 tollgate、merge、roundabout、普通道路分层。
-
-若 target lane 经常不在 LD 中，网络“不沿正确车道”首先是输入缺失，不是学习失败。
-
-Probe 0C：lane assignment discontinuity
-
-围绕 learner 轨迹记录：
-
-ego.lane identity
-navigation.current_ref_lanes
-navigation.next_ref_lanes
-LD slot fingerprint
-action_mu
-
-
-检查 lane identity 切换前后：
-
-LD token 跳变量
-mu_dtheta 跳变量
-plan curvature 跳变量
-
-
-这可能直接找到 off-road 前的首个语义断点。
-
-三、原四个反事实 probe 的修正
-1. 不要只在 tensor 上粗暴镜像 LD
-
-镜像必须同时处理：
-
-dy → -dy
-heading_rel → -heading_rel
-curvature → -curvature
-left_line_type ↔ right_line_type
-左右 lane 顺序交换
-nav checkpoint 同步镜像
-OD 若参与控制则同步镜像
-历史帧同步镜像
-
-
-否则得到的是不物理的 observation，不能据此判断模型是否理解车道。
-
-核心测试最好在环境层构造镜像状态，tensor-level 只作单元测试。
-
-2. “去掉 LD 后输出显著变化”不是充分条件
-
-模型可能依靠 nav、others 或 route_world 获得冗余道路信息。因此：
-
-无变化可能表示 LD 未使用； -也可能表示道路信息被其他通道替代； -有变化也不代表响应方向正确。
-
-真正重要的是：
-
-对 lane lateral/heading perturbation 的响应方向正确
-且该响应主要由 route-consistent lane 引起
-
-
-所以验收应优先看符号、单调性和 target-lane selectivity，而不是单纯看输出变化幅度。
-
-3. Probe B 应增加分层定位
-
-依次从以下位置解码：
-
-原始 LD
-LD embedding
-按槽位 LD tokens
-masked ld_pool
-PlanHead fused latent
-primary output
-最终 action_mu
-
-
-这样可以明确损失发生在哪一步：
-
-原始 LD 不可计算：输入缺失；
-embedding 可解码、pool 不可解码：pooling 问题；
-fused latent 可解码、primary 不响应：监督/head 问题；
-primary 正确、最终 action 错：policy/chain/执行问题。
-四、我对当前 LD 设计的最终判断
-做得合理的部分
-使用自车坐标系； -包含点位置、方向和曲率； -当前车道有多距离前视； -有 line type 和 speed limit； -有 route continuation 候选； -保留 per-slot tokens 给 policy/value； -作为结构化输入，比纯 raster 更适合当前小模型。
-不合理或高风险的部分
-缺少 lane identity 和 offset identity；
-缺少明确 target-route association；
-LD-LD adjacency 与实际槽位拓扑不一致；
-PlanHead/MoE 只使用无结构 mean pool；
-优先使用 ego.lane，偏离后可能目标语义跳变；
-跨帧 slot consistency 没有被验证；
-raw feature 尺度差异很大，却只经单一线性层编码；
-没有可靠 lane-direction / centerline-alignment 监督；
-旧 lane context 被删除后，K-anchor lane context 退化为零。
-
-因此，Coding Agent 所说“几何并非不存在，缺的是显式关联、选择与监督”是正确的，但还不够强：
-
-不仅缺显式关联，当前 SpatialEncoder 甚至可能把错误的 lane-slot 邻接当成真实拓扑。
-
-五、关于 primary 与 MoE
-
-你的原则应正式锁定：
-
-Primary 必须负责
-route-consistent lane keeping
-lateral/heading error correction
-基础曲率跟随
-平滑、可持、可跟踪 plan
-普通前车跟随
-
-Specific experts 才负责
-tollgate 通道选择
-merge/yield
-复杂交叉口
-临时避障
-极端恢复
-特殊拓扑
-
-
-Round-18A 必须分别测试：
-
-primary-only
-primary + MoE
-
-
-但“关闭 experts”不能只让 router 权重归零后改变 LayerNorm 或 residual scale，应增加严格的 primary_only 推理模式，并验证其他路径逐位一致。
-
-如果 primary-only 在直道和缓弯都无法通过 counterfactual grid，禁止 A4 specific-only DAgger。否则 experts 会继续承担基础 lanekeep，进一步损害模块职责。
-
-六、建议的实施顺序
-立即批准
-1. Probe 0A：slot/topology 审计
-2. Probe 0B：target-lane coverage
-3. Probe 0C：lane assignment discontinuity
-4. 原 Round-18A lane-grounding/shortcut probes
-5. pri512 与 A3 checkpoint 双模型、primary-only 与 full-MoE 双模式
-
-根据结果分支
-若输入覆盖和拓扑正确，且 primary 对 lane perturbation 响应正确
-
-进入：
-
-A4 learner-state current-action DAgger
-保留 learned chain 作为执行缓冲
-
-若 target lane 存在，但 pooling/head 丢失语义
-
-最小改造：
-
-current/target lane 显式池化
-而不是所有 LD slots masked mean
-
-
-例如分别输出：
-
-target_lane_pool
-adjacent_lane_pool
-boundary_pool
-
-
-不要一开始扩大网络。
-
-若输入本身缺失或 lane assignment 跳变
-
-最小新增：
+Coding agent 提议 target/adjacent/boundary pooling，但当前最小语义特征尚未提供：
 
 target_lane flag
-lane_id/group id
+lane_id
 offset index
 route association
-ego-to-target-lane lateral error
-heading error
-local curvature
+lane-relative lateral offset
+heading difference
 
 
-这会改变 obs fingerprint，必须重采数据。
+所以当前数据上不能可靠地区分：
 
-若输入和 latent 都正确，但 action 不响应
+target lane； -相邻 lane； -道路边界； -收费站不同通道。
 
-优先增加 primary-only 辅助监督：
+不要在缺少标签时用几何启发式强行分组，这可能制造新的隐式错配。
 
-signed lateral-error correction
-lane-tangent direction consistency
-curvature consistency
+推荐当前数据可直接支持的版本
+LD tokens
+→ independent token encoder
+→ ego/nav-conditioned cross-attention
+→ attended geometry context
+→ PlanHead
 
 
-暂不改 MoE。
+保留每个 token 的原始几何，不做 slot-chain message passing，也不做简单 mean。
 
-七、最终审批
+数据侧 v7 特征何时启动
 
-批准 Round-18A 开工，但应将三项静态代码审计 Probe 0A/0B/0C 加到最前面。
+只有满足以下任一条件才重采：
 
-暂不批准：
+M2 明显提升，但仍在 lane transition / tollgate 处失败；
+attention 权重无法稳定选中 ego/route 相关 LD；
+target-lane 缺失的 4.9% 样本对失败贡献明显高于其频率； 4.同路型成功/失败匹配分析确认 lane assignment discontinuity 是领先指标，而不只是共现。
 
-A4 DAgger； -可持性正则训练； -增加 raw LD 点数； -解冻 specific experts； -重启 K-anchor； -加入新的 geometry loss。
+否则先不要承担全量重采和 fingerprint 迁移成本。
 
-最需要优先验证的 root cause 是：
+四、需要补一个真正的因果分析
 
-当前 LD 是否稳定表达了“route target lane 的连续路径”，以及 SpatialEncoder 是否正在用错误槽位邻接破坏这份信息。
+当前 lane-assignment 断点：
 
-如果错误邻接率或 target-lane 缺失率高，那么此前的 covariate shift、gate 无选择性、learner-state dθ 抖动都可能只是下游症状。先修语义和图拓扑，再谈 DAgger，才不会继续用更多数据补偿错误表示。
+失败集 0.5146
+成功集 0.0363
+失败前 20 步 127/127 出现
+
+
+相关性很强，但复杂路口本来就同时更容易：
+
+lane slot 重排；
+route topology 变化；
+off-road。
+
+建议做 matched-case 分析：
+
+相同 road class
+相同速度带
+相近 route progress
+相近曲率
+相同 map / 相邻 episode spec
+
+
+比较成功和失败样本的：
+
+lane assignment discontinuity；
+LD token jump；
+attention/pooling 输出 jump； -μ_dθ jump； -首次不可恢复时间。
+
+如果匹配后差异仍显著，才更接近因果证据。
+
+此外，对相同 observation 做反事实：
+
+只重排 LD slots，不改变 token 内容
+
+
+理想架构的输出应近似不变。当前架构如果对合法 permutation 极敏感，这是直接、强有力的结构缺陷证据。
+
+这个 slot-permutation invariance probe 应在重训前加入。
+
+五、下一轮训练的验收不能只看 success
+结构性 probe Gate
+
+M1/M2 至少应做到：
+
+LD slot permutation 后输出变化显著下降
+LD 平移/旋转响应方向正确且单调
+几何响应强于当前基线
+历史轻扰动不会造成异常跳变
+lane transition 处 plan jump 降低
+
+clean150 Gate
+
+相对同批 M0：
+
+success 至少 +5pp
+off-road 至少下降 10pp
+collision 不增加超过 2pp
+timeout 不增加超过 3pp
+steer saturation 明显下降
+
+
+只提升 1–2pp 不足以支撑全量数据重采。
+
+eval500 Gate
+
+只有 clean150 通过，才跑 eval500。
+
+建议：
+
+success >= 0.45：证明结构修复有价值
+success >= 0.55：继续进入 learner-state DAgger
+success >= 0.60：重新评估 RL 启动路径
+
+
+当前基线约 0.33，因此这轮期待的是结构性提升，不是噪声级领先。
+
+六、A4 DAgger 暂时继续冻结
+
+虽然 learner-state covariate shift 已被证明，但现在发现 observation→action 的几何通路本身可能不健全。
+
+如果先做 DAgger，模型可能：
+
+-用更多 learner-state 数据强化历史动力学 shortcut； -继续无法理解 lane-relative correction； -在训练集上拟合 learner action，闭环仍不稳定。
+
+因此顺序应为：
+
+修复 geometry consumption
+→ 验证几何响应
+→ 再做 learner-state 当前动作 DAgger
+
+
+A4 的 collector 和数据契约可以保留，但现在不要采集和训练。
+
+七、MoE 与 World Model 的新判断
+MoE
+
+primary_only 与 full 结果基本相同，说明 experts 当前没有贡献明显的几何纠偏。
+
+继续冻结正确。不要在这轮重训 experts 或 router。
+
+World Model
+
+这轮问题主要发生在当前几何消费和当前动作响应上，暂时不需要改 WM。
+
+但新架构必须验证：
+
+PlanHead 是否真正使用新的 geometry context；
+WM rollout 是否又把新几何信号稀释掉；
+chain tail 是否继续提供执行平滑。
+
+因此建议保留现有 chain 执行形式，仅替换其几何 context 输入，不重新设计 WM。
+
+八、批准范围
+立即批准
+Round-20A：slot permutation invariance probe
+Round-20B：成功/失败匹配的 lane-transition 分析
+M0：当前模型同预算复训
+M1：仅关闭 LD-LD 槽位链
+M2：关闭槽位链 + ego/nav-conditioned LD set attention
+
+
+第一阶段可先训练 M0/M1；M2 实现后并行，但每个变更必须独立记录。
+
+条件批准
+M3：几何辅助监督
+数据侧语义特征重采
+A4 learner-state DAgger
+
+
+这些需要 M1/M2 结果支持。
+
+继续禁止
+PPO / GRPO
+gated residual 复活
+geometry proxy 反向传播
+MoE/router 改造
+WM BPTT
+容量扫描
+一次性组合“新拓扑+新池化+新特征+新 loss”
+
+最终判断
+
+Coding agent 已经找到当前最有价值的突破口：
+
+模型不是缺少 LD，而是用错误拓扑聚合 LD，并把几何压缩成无选择性的均值，导致当前动作主要依赖历史动态而非道路几何。
+
+这个判断值得推进，但仍需通过 slot permutation probe、matched-case 分析和 M0/M1/M2 独立消融完成因果闭环。
+
+因此我的裁决是：
+
+批准先做模型侧修复，但不批准直接加入语义特征和几何辅助监督。先证明移除伪拓扑、改用排列不变的条件池化能带来显著闭环收益。
+
+若 M2 连 clean150 0.45 都达不到，应停止继续精修 LD 架构，重新评估 observation 本身是否缺少可恢复的道路语义，并转向数据侧重采。
