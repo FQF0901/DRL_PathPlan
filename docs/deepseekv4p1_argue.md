@@ -1,9 +1,9 @@
 # deepseek-v4.1 argue / 主文档（Round-20 收官 · 转数据侧 · round-21 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；**round-22 批准四臂决定性实验（M0/M1/M2a/M2b；预注册 Gate A/B + clean150 门 + eval500 门；失败自动转 R21 语义重建）——已开工（§5.12）**；RL 冻结。
+> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；**round-22 四臂结果=Outcome D：M2a/M2b 未过开发门（α≈1.3%、近均匀、几何响应未达 5×；e002 回落）⇒ LD 架构排摸正式结束、按预注册转 R21 语义重建（§5.13；R21-0..2 已开工）**；RL 冻结。
 > **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ **round-21 复核：M2 接线缺口 ⇒ 撤回"穷举"；修正版 M2a/M2b 待跑（§5.11）**。
-> **本版说明**：第六轮精简（342 → 261 行）+ round-21 复核新增 §5.11（2026-10-12 深夜）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
+> **本版说明**：第六轮精简（342 → 261 行）+ round-21/22 新增 §5.11/§5.13（2026-10-12 深夜）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -252,6 +252,16 @@
 - **我方操作注记**：① Gate B"target/current/continuation 槽位权重"以 **same-lane-as-ego 槽位**为可用代理（无 target-lane 标签，不得过度声称）；② M0/M1 重训以保"同批"零代码状态差（并与旧 ckpt 比对报数）；③ α 门控下 attention 参数在 α≠0 后才获梯度——以 α 轨迹/update 报告为证；④ 评测需"先 set_ld_mode 再 load ckpt"（round-20 坑）。
 - **开工**：Round-22 lane 已派发（复用 round-20 lane session；零新数据；产物 `runs/p1_v2/round22/`）。
 
+### 5.13 Round-22 结果（2026-10-12 23:0x）：**Outcome D——M2a/M2b 未过开发门 → 按预注册转 R21 语义重建**
+
+- **Gate A 全过（9/9 单测）**：α=0 逐位=baseline；attn 模式 `_masked_mean` 调用恰为 baseline 一半、聚合器每前向 7 次（t0+encode+rollout×5）；全灭精确 0 且 fwd/bwd 有限；**α 先行**（step0 `grad_α=6.6e-4` 而 attention 梯度恰 0 → α≠0 后实更新）；链开关仅改 LD-LD 边；严格加载（先 set 再 load）；消费契约（α≠0 ⇒ ld_pool/latent/plan/action_mu 全变）。
+- **零代码状态差**：M0/M1 ckpt 与 round-20 **168/168 键 max|Δ|=0.0**、loss 同值、M1 clean150 复现 0.3533 ⇒ 同批口径成立。
+- **Gate B（接通但量级不足）**：α 收敛 **0.0132/0.0129**（attended ≈ summary 的 **~1.2%**）；entropy 比 0.997/0.992（近均匀）；same-lane 权重 ~1.06–1.08× 均匀（无车道偏好）；translate/rotate 响应 0.96–1.15×（需 ≥5×）；hist/lane 比 0.60–1.04（需 ≤0.5）——**未过**；唯一正向：去链使 zero_history −27%、hist/lane −34~40%（未达门）。
+- **clean150**：M2a **0.28（−4.67pp）**、M2b 0.3267（0.0；tmo **+8.67pp**=off→tmo 转换）；**e001→e002 双回落**（0.36→0.28、0.3667→0.3267，**随 α 增长退化**）⇒ 开发门全未过；eval500 未跑（规则）。
+- **判读**：null=**量级问题**（α≈1.3%、近均匀、无车道偏好、α 增大反退化），非接线问题 ⇒ "条件化读出"在当前 LD 语义下**不被支付**——需要语义重建，而非继续调注意力。
+- **坑**：① policy `mu` 末层零初始化 ⇒ 消费契约须先打散（防假阴性）；② α 门控梯度时序（α 先行）；③ obs 指纹警告为既有（四臂一致）；④ α 初值/参数化调整=超参扫描，未批、按边界停止。
+- **唯一行动（预注册）**：**转 R21 语义重建（R21-0..2 已开工）**；不加第五臂、不扫超参、不动数据/MoE/WM。
+
 ---
 
 ## 6. 文档与产物索引
@@ -259,7 +269,7 @@
 - **决策/契约**：`docs/p1_v2_decision.md`（P1-v2 决策 + Round-12A 结果）、`docs/recovery_v2_contract.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`
 - **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`
 - **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）
-- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
+- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
 - **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a / round18a / round20 脚本 + logs）
 - **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
 - **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）、`96df7cb`+`c71f389`（Round-18A）、`da83ce1`（LD 消融开关）、`e638b76`（§5.10）
