@@ -17,7 +17,8 @@
 |---|---|
 | `samples.npz` | 9515 行（逐行全量 obs + expert/模型动作 + 扰动/switch 元数据） |
 | `manifest.json` | 行数/类型、obs 指纹、ckpt 溯源（`<legacy>` 显式标注）、设备 |
-| `schema.json` | obs schema v7 清单 + 行键说明 |
+| `schema.json` | obs schema v7 清单 + 行键说明（round-23 字段名同步；见 `schema_sync.json`） |
+| `schema_sync.json` | round-23 改名同步记录：旧/新指纹、改名字段、**数值逐位不变**证据与允许用途 |
 | `split_manifest.json` | episode 级 train/val 划分（无泄漏断言） |
 | `replay_report.json` | 随机重放核验（同状态匹配门） |
 | `coverage_report.json` | 路型/速度带/扰动分布/target 使用率/switch 异常率/B 恢复率 |
@@ -99,7 +100,12 @@ tools/venv-python .slim/deepwork/p1_v2/round21/collect_semantic_v1.py verify \
   --workers 6 --device cuda --min-rows 1000
 ```
 
-- obs 指纹：`v7-d93a5169c3f7`（schema v7；`lane_semantic` + LD 点补充）。
+- obs 指纹：采集时 `v7-d93a5169c3f7`（schema v7；`lane_semantic` + LD 点补充）。
+  **round-23 改名后**（`distance_to_next_topology_change` → `distance_to_target_lane_end`；
+  `left/right_drivable_margin` → `left/right_same_direction_road_surface_margin`）当前指纹
+  = `v7-f19d3b2d3d4e`；**数值逐位不变**（`runs/p1_v2/round23/r21_3a_audit.json`：同过程重跑
+  71 行 × 39 obs 键 max abs diff = 0.0）。允许用途：R21-3B canary / R21-3C 探针（指纹白名单，
+  见 `schema_sync.json`）；**正式训练/评测禁止**（round-23 §7）。
   旧指纹数据集在 stage 入口硬失败（`pipeline.stages.validate_bc_dataset`，逃生门
   `--allow-legacy-dataset`）；旧 ckpt 仅允许显式 legacy 标注下加载（见契约 §6）。
 - 资源：采集 1275 task / 6 worker 176.8s（父进程峰值 RSS 77MB）；verify 120 episode 约 2 min。

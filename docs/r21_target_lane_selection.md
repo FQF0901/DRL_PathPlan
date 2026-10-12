@@ -48,7 +48,7 @@
 - `ego_lane` 缺失（罕见）：current_ref 内按横向距离最近；仍无则第一个 ref；
 - 投影失败（圆弧 `local_coordinates` 抛 ValueError）：不切换 continuation（保守），
   通道侧记 `target_lane_valid=0`；
-- `next_ref_lanes` 缺失（终点路段）：不产生 continuation，`distance_to_next_topology_change`
+- `next_ref_lanes` 缺失（终点路段）：不产生 continuation，`distance_to_target_lane_end`
   = 上限 200 m；
 - lane 对象身份比较（`is`）用于去重/角色，lane_id 仅用于**相对**顺序（左右 / 稳定序），
   不进入任何数值特征。

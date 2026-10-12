@@ -15,14 +15,19 @@
 | 1 | `ego_heading_error_to_target_tangent` | rad；`wrap(ego.heading − lane.heading@投影点)`（正 = 自车相对切线逆时针偏左） |
 | 2 | `target_lane_curvature_near` | 1/m；投影点前视 +10 m（clamp 车道末端），右转（顺时针）为负 |
 | 3 | `target_lane_curvature_far` | 1/m；前视 +30 m（同上） |
-| 4 | `left_drivable_margin` | m（≥0）；ego 到左侧最近不可行驶边界的距离（跨同 road 同向相邻车道累加；对向/缺失即停） |
-| 5 | `right_drivable_margin` | m（≥0）；右侧同理 |
+| 4 | `left_same_direction_road_surface_margin` | m（≥0）；ego 到左侧最近不可行驶边界的距离（跨同 road 同向相邻车道累加；对向/缺失即停）。**仅输入特征：不查实线/护栏/route 权限/footprint 连通 ⇒ 非 legal corridor，禁作监督真值/安全 loss**（round-23 §2.3 降级） |
+| 5 | `right_same_direction_road_surface_margin` | m（≥0）；右侧同理 |
 | 6 | `target_lane_valid` | 0/1；1 ⇔ mask=1 且 ego 投影成功、全部特征有限 |
 | 7 | `route_association_confidence` | [0,1]；按选择来源固定：route_current=1.0 / route_continuation=0.8 / route_next=0.6 / ego_fallback=0.25 / none=0 |
 | 8 | `lane_change_required_left` | 0/1；ego 不在 target 且需左移（同 road 按 lane_id 大小；跨 road 按 ego 在 target 车道系的横向位置，\`|lat|\` > width/2 才置位） |
 | 9 | `lane_change_required_right` | 0/1；对称 |
 | 10 | `distance_to_lane_end` | m（≥0）；`target.length − clamp(投影 long)` |
-| 11 | `distance_to_next_topology_change` | m；存在 next 链时 = `distance_to_lane_end`；否则 = 上限 `LARGE_DISTANCE_CAP_M=200` |
+| 11 | `distance_to_target_lane_end` | m；存在 next 链时 = `distance_to_lane_end`；否则 = 上限 `LARGE_DISTANCE_CAP_M=200`（round-23 改名：旧名 `distance_to_next_topology_change` 语义强于实际，**值不变**、不实现新地图搜索） |
+
+**入口固定归一化（round-23 §2.1）**：网络入口逐元素除以 `LANE_SEMANTIC_NORMALIZATION` =
+`(5, π, 0.1, 0.1, 25, 25, 1, 1, 1, 1, 200, 200)`（与上表顺序一一对应；常数单一出处
+`env/obs/lane_semantic.py`，入 schema/模型快照 + 逐位单测；`net.semantic.LaneSemanticEncoder`
+消费同一常量，不得在训练脚本里散落）。
 
 回退语义：
 

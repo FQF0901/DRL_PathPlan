@@ -36,6 +36,7 @@ from env.obs.ego import EGO_DIM
 from env.obs.lane_semantic import (
     LANE_SEMANTIC_DIM,
     LANE_SEMANTIC_FEATURE_NAMES,
+    LANE_SEMANTIC_NORMALIZATION,
     LARGE_DISTANCE_CAP_M,
     LD_SUPPLEMENT_KEYS,
     ROLE_LEFT_ADJACENT,
@@ -250,10 +251,23 @@ LD_SEMANTICS_LAYOUT: dict[str, Any] = {
     "no_raw_lane_id": "补充数组不含 raw lane_id 数值（契约硬约束）",
 }
 
-#: lane_semantic 通道布局（schema v7，R21）
+#: lane_semantic 通道布局（schema v7，R21；round-23 改名/归一化注记）
 LANE_SEMANTIC_LAYOUT: dict[str, Any] = {
     "shape": [1, LANE_SEMANTIC_DIM],
     "feature_names": list(LANE_SEMANTIC_FEATURE_NAMES),
+    "normalization": {
+        name: float(divisor)
+        for name, divisor in zip(LANE_SEMANTIC_FEATURE_NAMES, LANE_SEMANTIC_NORMALIZATION)
+    },
+    "normalization_note": (
+        "网络入口固定归一化除数（round-23 §2.1；`net.semantic.LaneSemanticEncoder` 必须消费"
+        " `env.obs.lane_semantic.LANE_SEMANTIC_NORMALIZATION`，常数入 schema/模型快照 + 逐位单测）"
+    ),
+    "renames_round23": {
+        "distance_to_next_topology_change": "distance_to_target_lane_end（值不变；不实现新地图搜索）",
+        "left_drivable_margin": "left_same_direction_road_surface_margin（仅输入特征；禁作监督真值/legal corridor）",
+        "right_drivable_margin": "right_same_direction_road_surface_margin（同上）",
+    },
     "target_lane_selection": (
         "唯一纯函数 env.obs.lane_semantic.select_target_lane：route current_ref_lane → "
         "route continuation → next_ref_lane → ego.lane 仅兜底；选择不依赖 ego 横向位置"
@@ -261,14 +275,15 @@ LANE_SEMANTIC_LAYOUT: dict[str, Any] = {
     ),
     "units": (
         "lat m（MetaDrive 车道系，正=车道方向右侧）；heading_error rad（正=ego 相对切线逆时针/偏左）；"
-        "curvature 1/m（右转负；采样前视 +10/+30 m，clamp 车道末端）；margin m（≥0）；"
-        "valid/change 0/1；confidence [0,1]；distance m"
+        "curvature 1/m（右转负；采样前视 +10/+30 m，clamp 车道末端）；"
+        "margin m（≥0；**同向 road-surface margin**——不查实线/护栏/route 权限/footprint 连通，"
+        "非 legal corridor）；valid/change 0/1；confidence [0,1]；distance m"
     ),
     "fallbacks": {
         "mask": "1 ⇔ 选出 target lane（source ≠ none）",
         "target_lane_valid": "1 ⇔ mask=1 且 ego 投影成功、特征有限；否则该帧 12 维全 0",
         "no_route": "无 route 信息 → ego.lane 兜底（route_association_confidence=0.25）",
-        "no_topology_change": f"无下一段路线 → distance_to_next_topology_change = {LARGE_DISTANCE_CAP_M} m（上限）",
+        "no_next_segment": f"无下一段路线 → distance_to_target_lane_end = {LARGE_DISTANCE_CAP_M} m（上限）",
     },
     "no_raw_lane_id": "通道不含 raw lane_id 数值；lane 身份由 LD 点补充（role/group/route 关联）表达",
 }

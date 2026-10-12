@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
@@ -46,6 +47,8 @@ __all__ = [
     "lane_index_of",
     "LANE_SEMANTIC_FEATURE_NAMES",
     "LANE_SEMANTIC_DIM",
+    "LANE_SEMANTIC_NORMALIZATION",
+    "normalize_lane_semantic",
     "ROLE_OTHER",
     "ROLE_TARGET",
     "ROLE_TARGET_CONTINUATION",
@@ -92,7 +95,9 @@ _CONFIDENCE = {
     SOURCE_NONE: 0.0,
 }
 
-#: ``distance_to_next_topology_change`` 的"无拓扑变化"上限（m）：路线尽头/无下一段时填该值
+#: ``distance_to_target_lane_end`` 的上限（m）：路线尽头/无下一段时填该值
+#: （round-23 改名：旧名 ``distance_to_next_topology_change`` 语义强于实际——
+#:  实为 target lane 剩余距离；值不变、不实现新地图搜索。见契约 §1.2）
 LARGE_DISTANCE_CAP_M = 200.0
 #: target lane 曲率采样前视偏移（m）：near/far 两档（超出车道长度时 clamp 到末端）
 CURVATURE_NEAR_OFFSET_M = 10.0
@@ -102,22 +107,53 @@ LANE_CONNECT_TOL_M = 1.5
 
 _EPS = 1e-6
 
-#: 12 维特征名（顺序即 ``LaneSemanticChannel`` 输出顺序）
+#: 12 维特征名（顺序即 ``LaneSemanticChannel`` 输出顺序）。
+#: round-23 改名（值逐位不变）：``distance_to_next_topology_change`` →
+#: ``distance_to_target_lane_end``；``left/right_drivable_margin`` →
+#: ``left/right_same_direction_road_surface_margin``（仅输入特征；**禁作监督真值/legal corridor**）。
 LANE_SEMANTIC_FEATURE_NAMES: tuple[str, ...] = (
     "ego_to_target_lane_lateral_offset",
     "ego_heading_error_to_target_tangent",
     "target_lane_curvature_near",
     "target_lane_curvature_far",
-    "left_drivable_margin",
-    "right_drivable_margin",
+    "left_same_direction_road_surface_margin",
+    "right_same_direction_road_surface_margin",
     "target_lane_valid",
     "route_association_confidence",
     "lane_change_required_left",
     "lane_change_required_right",
     "distance_to_lane_end",
-    "distance_to_next_topology_change",
+    "distance_to_target_lane_end",
 )
 LANE_SEMANTIC_DIM = len(LANE_SEMANTIC_FEATURE_NAMES)
+
+#: **入口固定归一化除数**（round-23 §2.1；常数入 schema/模型快照 + 逐位单测）。
+#: 与 :data:`LANE_SEMANTIC_FEATURE_NAMES` 一一对应；1.0 = 原值（confidence/flags）。
+#: 网络入口（``net.semantic.LaneSemanticEncoder``）必须消费本常量，不得在训练脚本里散落。
+LANE_SEMANTIC_NORMALIZATION: tuple[float, ...] = (
+    5.0,        # ego_to_target_lane_lateral_offset（m）
+    math.pi,    # ego_heading_error_to_target_tangent（rad）
+    0.1,        # target_lane_curvature_near（1/m）
+    0.1,        # target_lane_curvature_far（1/m）
+    25.0,       # left_same_direction_road_surface_margin（m）
+    25.0,       # right_same_direction_road_surface_margin（m）
+    1.0,        # target_lane_valid（0/1 原值）
+    1.0,        # route_association_confidence（[0,1] 原值）
+    1.0,        # lane_change_required_left（0/1 原值）
+    1.0,        # lane_change_required_right（0/1 原值）
+    200.0,      # distance_to_lane_end（m）
+    200.0,      # distance_to_target_lane_end（m）
+)
+assert len(LANE_SEMANTIC_NORMALIZATION) == LANE_SEMANTIC_DIM
+
+
+def normalize_lane_semantic(feats):
+    """入口固定归一化（逐元素除以 :data:`LANE_SEMANTIC_NORMALIZATION`；纯函数）。
+
+    支持任意 numpy 兼容数组（返回同型数组）；形状最后一维必须 = 12。
+    """
+    divisors = np.asarray(LANE_SEMANTIC_NORMALIZATION, dtype=np.float64)
+    return np.asarray(feats) / divisors
 
 #: LD 点补充伴随数组键（``LDChannel.companions()`` 输出；映射见契约文档）
 LD_SUPPLEMENT_KEYS: tuple[str, ...] = (
@@ -494,12 +530,13 @@ def _direction_aligned(a: Any, b: Any) -> bool:
         return True
 
 
-def _drivable_margins(env: Any, lane: Any, lat: float) -> tuple[float, float]:
-    """(left_margin, right_margin)：ego 到左右最近"不可行驶边界"的距离（m）。
+def _same_direction_road_surface_margins(env: Any, lane: Any, lat: float) -> tuple[float, float]:
+    """(left_margin, right_margin)：**同向 road-surface margin**（m）——仅输入特征。
 
-    从 target lane 起向两侧扩展**同 road 且同向**的相邻车道（lane_id 递减 = 左、
-    递增 = 右，0 = 最左）；遇到对向/不可用/缺失的相邻车道即停，边界 = 该处。
-    几何不可用时退化为 target lane 自身宽度边界。两值均 ≥ 0。
+    语义（round-23 §2.3 降级注记）：从 target lane 起向两侧扩展**同 road 且同向**的相邻
+    车道（lane_id 递减 = 左、递增 = 右，0 = 最左）累加车道宽；遇到对向/不可用/缺失的相邻
+    车道即停。**不检查实线/护栏/route 权限/footprint 连通性 ⇒ 不是 legal corridor margin，
+    禁作监督真值或安全 loss 依据**。几何不可用时退化为 target lane 自身宽度边界。两值 ≥ 0。
     """
     width = _lane_width(lane)
     left = width / 2.0 + float(lat)
@@ -571,7 +608,7 @@ class LaneSemanticChannel(ObservationChannel):
             heading_error = float(wrap_to_pi(ego_theta - float(lane.heading_theta_at(s))))
             near_s = min(s + CURVATURE_NEAR_OFFSET_M, length)
             far_s = min(s + CURVATURE_FAR_OFFSET_M, length)
-            left_margin, right_margin = _drivable_margins(env, lane, lat)
+            left_margin, right_margin = _same_direction_road_surface_margins(env, lane, lat)
             change_left, change_right = _lane_change_flags(ego_lane, lane, lat)
             remaining = max(length - s, 0.0)
             topology = remaining if nxt else LARGE_DISTANCE_CAP_M
