@@ -1,7 +1,7 @@
 # deepseek-v4.1 argue / 主文档（Round-20 收官 · 转数据侧 · round-21 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；**round-21 代码复核：Round-20 的 M2 未接 PlanHead 主路径（§5.11）⇒ "模型侧穷举/停 LD 架构"撤回；下一动作=修正版 M2a/M2b 决定性实验（零新数据）；数据侧=R21 条件分支（失败后启动）**；RL 冻结。
+> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；**round-22 批准四臂决定性实验（M0/M1/M2a/M2b；预注册 Gate A/B + clean150 门 + eval500 门；失败自动转 R21 语义重建）——已开工（§5.12）**；RL 冻结。
 > **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ **round-21 复核：M2 接线缺口 ⇒ 撤回"穷举"；修正版 M2a/M2b 待跑（§5.11）**。
 > **本版说明**：第六轮精简（342 → 261 行）+ round-21 复核新增 §5.11（2026-10-12 深夜）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
@@ -244,6 +244,13 @@
 - **我方补充**：① 平滑初始化二选一——α=0 门控+监控 α/attention 范数，或末层零初始化+α 可学习（防"门未开=无效"误判；训练后须报告 α 与 attention 输出范数）；② M1 保留为低成本候选（+2.67pp、coll −2.67pp）；③ M2a/M2b 与 M0/M1 进同一 clean150 门表（四臂同批）。
 
 **请求（round-22）**：确认合并方案（先 M2a/M2b 决定性实验、预注册门；fail → 启动第二部分 R21 语义重建阶段化）；确认第二部分设计约束归入条件分支。
+
+### 5.12 round-22 裁决：**批准四臂决定性实验（M0/M1/M2a/M2b）——已开工**
+
+- **批准范围**：**M2a**（`aggregate_ld()` 仅替换 pooled LD summary——`plan_step` 融合与 head-token summary；**per-slot token/WM/OD/损失/参数预算不变**；`ld_summary = mean + α·attn`、α₀=0、query=ego+nav 条件化、单层）→ **M2b**（+仅关 LD-LD 链）；**M0/M1 同批重训**；Gate A 契约（α=0 逐位/无隐藏均值/全灭 fwd-bwd 有限/attention 实更新/严格加载）→ Gate B 机制（α 离开 0、非均匀、translate/rotate ≥5× M0、zero_history/lane 敏感度比 ↓≥50%）→ clean150 开发门（succ ≥+5pp、off ≤−5pp、coll ≤+2pp、tmo ≤+3pp、steer_sat ↓≥20% 相对、非孤立）→ 过门 eval500 ≥0.45。
+- **边界（预注册）**：限一个 session、不加第五臂、不扫超参、不动数据/MoE/WM、M2c 不批；**失败 → 自动转 R21-0..2 语义重建**（不再重复争论）；DAgger 冻结条件维持（Primary 响应正确 ∧ target 表示稳 ∧ clean150 ≥0.50 ∧ teacher 低 ∧ learner 高）。
+- **我方操作注记**：① Gate B"target/current/continuation 槽位权重"以 **same-lane-as-ego 槽位**为可用代理（无 target-lane 标签，不得过度声称）；② M0/M1 重训以保"同批"零代码状态差（并与旧 ckpt 比对报数）；③ α 门控下 attention 参数在 α≠0 后才获梯度——以 α 轨迹/update 报告为证；④ 评测需"先 set_ld_mode 再 load ckpt"（round-20 坑）。
+- **开工**：Round-22 lane 已派发（复用 round-20 lane session；零新数据；产物 `runs/p1_v2/round22/`）。
 
 ---
 
