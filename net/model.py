@@ -128,7 +128,7 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
 from net.anchor import load_anchor_dictionary
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
-from net.spatial import wrap_angle
+from net.spatial import LdSetAttention, wrap_angle
 from net.st_gnn import SpatioTemporalGNN
 
 #: router 监督标签（固定顺序，必须与 config/model.yaml::moe.router.supervised_labels 一致）
@@ -358,6 +358,11 @@ class DrivingModel(nn.Module):
             hidden, od_slots, ld_slots, steps=self.rollout_steps, dt=self.dt,
             spatial_layers=spatial_layers, od_knn=od_knn,
         )
+        #: Round-20 消融（**默认 baseline = 既有行为逐位不变**）：
+        #: ``baseline`` | ``no_chain``（M1：关 LD↔LD 槽位链）| ``set_attn``（M2：关链 + LD set-attention）。
+        #: M2 的注意力模块**惰性构造**（baseline 路径不新增参数 → 既有 ckpt 键集不变）。
+        self.ld_mode: str = "baseline"
+        self.ld_set_attn: "LdSetAttention | None" = None
         # v6 A1：policy/value = 交叉注意力头（K=1 查询 × 令牌集合；命名保 policy./value. 前缀，
         # 见 STAGE_C_DESIGN_PREFIXES 的 allowlist 契约）
         self.policy = PolicyHead(
@@ -375,6 +380,30 @@ class DrivingModel(nn.Module):
             layers=int(attn_layers),
             net_hidden=int(net_hidden),
         )
+
+    def set_ld_mode(self, mode: str = "baseline") -> "DrivingModel":
+        """Round-20 消融开关（默认 ``baseline`` = 逐位不变）。
+
+        - ``no_chain``（M1）：``st_gnn.spatial.include_ld_chain=False``（仅移除 LD↔LD 槽位链边）；
+        - ``set_attn``（M2）：再置 ``exclude_ld_nodes=True``（LD 绕过 MP、独立编码）并**惰性构造**
+          :class:`net.spatial.LdSetAttention`（query=ego/nav/others 上下文，key/value=LD tokens），
+          其输出替换 PlanHead 融合路径的 ``ld_pool``。
+        """
+        mode = str(mode).lower()
+        if mode not in ("baseline", "no_chain", "set_attn"):
+            raise ValueError(f"未知 ld_mode={mode!r}（baseline | no_chain | set_attn）")
+        spatial = self.st_gnn.spatial
+        spatial.include_ld_chain = mode == "baseline"
+        spatial.exclude_ld_nodes = mode == "set_attn"
+        self.ld_mode = mode
+        if mode == "set_attn" and self.ld_set_attn is None:
+            hidden = int(getattr(self.plan_head, "hidden_dim", 0) or 0)
+            if hidden <= 0:
+                hidden = int(self.st_gnn.hidden)
+            self.ld_set_attn = LdSetAttention(hidden, heads=4, ctx_dim=3 * hidden).to(
+                next(self.parameters()).device
+            )
+        return self
 
     def set_moe(self, *, enabled: bool = True, load_balance_coef: float = 0.0) -> "DrivingModel":
         """MoE 运行时开关 + 负载均衡 α（lane U1；非参数，不进 state_dict）。
@@ -620,6 +649,20 @@ class DrivingModel(nn.Module):
         # 上下文 token（t0 静态）：池化来自时序聚合 ctx
         od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
         ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
+        if self.ld_mode == "set_attn" and self.ld_set_attn is not None:
+            # Round-20 M2：LD set-attention 上下文（ego + nav + others 为 query）
+            import torch as _torch
+
+            batch = int(z_ld.shape[0])
+            context = _torch.cat(
+                [
+                    z_ego.reshape(batch, -1),
+                    nav_token.reshape(batch, -1),
+                    encoded.others_ctx.reshape(batch, -1),
+                ],
+                dim=-1,
+            )
+            ld_pool = self.ld_set_attn(z_ld, encoded.ld_live, context)
         latent, ego_next, moe_aux = self.plan_step(
             z_ego, z_od, z_ld, encoded.od_live, encoded.ld_live, encoded.others_ctx,
             nav_token, signal_token,

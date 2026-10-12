@@ -4333,6 +4333,15 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
 
     # ---- 起点权重：--ckpt 优先，否则 config stages.B.phase3.init_ckpt；缺失 = 拒绝静默随机初始化 ----
     model = build_model(_load_yaml(args.model_config))
+    # Round-20：LD 消融模式（默认 baseline = 不触碰任何开关 = 既有行为逐位不变）
+    _ld_mode = str(
+        getattr(args, "phase3_ld_mode", None)
+        or (p3_cfg.get("ld_mode") if isinstance(p3_cfg, dict) else None)
+        or "baseline"
+    ).lower()
+    if _ld_mode != "baseline":
+        model.set_ld_mode(_ld_mode)
+        print(f"[stageB3] LD 消融模式 = {_ld_mode}（Round-20）", flush=True)
     resume_path = _resume_path(args)
     resume_info: Dict[str, Any] = {}
     init_ckpt = ""
@@ -5661,6 +5670,9 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-action-weight", type=float, default=None, help="首步动作损失权重（默认 1.0）")
     parser.add_argument("--phase3-action-chain-weight", type=float, default=None,
                         help="多步动作链权重（默认取 config stages.B.phase3.losses.action_chain=0.2）")
+    parser.add_argument("--phase3-ld-mode", choices=("baseline", "no_chain", "set_attn"), default=None,
+                        help="Round-20 LD 消融（默认 baseline = 逐位不变）：no_chain=M1 关 LD-LD 槽位链；"
+                             "set_attn=M2 关链 + LD set-attention（惰性构造注意力头，替换 ld_pool）")
     parser.add_argument("--phase3-tail-smooth-weight", type=float, default=None,
                         help="A3（round-17）尾链平滑正则权重（相邻动作差分；默认 0.0 = 关闭 = 旧行为逐位不变）")
     parser.add_argument("--phase3-tail-curv-weight", type=float, default=None,
