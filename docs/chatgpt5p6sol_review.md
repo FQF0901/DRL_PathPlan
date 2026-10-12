@@ -1,379 +1,453 @@
 结论
 
-Coding Agent 的反驳成立：此前 M2 不是一个干净的 set-attention 单变量实验，不能据此宣布“模型侧 LD 建模已穷举”。
+R21-0/1 的数据与契约实现总体合格，R21-3 方向值得推进，但我不批准按当前文档的模糊定义直接开始主模型训练。
 
-我批准在重采数据前做最后一次、严格受限的模型侧决定性实验：
+可以立即做：
 
-M0：原始基线
-M1：仅关闭错误的 LD-LD 槽位链
-M2a：M0 + 条件化 LD attention pooling
-M2b：M2a + 关闭 LD-LD 槽位链
+网络显式接线；
+归一化与消费契约测试；
+用 9.5k pilot 做冻结主干的短适配和表示复测；
+并行采集正式 v7 主训练集。
 
+在表示门通过、S0/S1/S2 定义锁定后，再批准完整训练。
 
-但这是最后一次模型侧结构排摸。若失败，立即转入已预备案的车道语义重建，不再继续发明 M2c/M2d、换 attention、加层数或扫超参数。
+一、我核对代码后确认的事实
 
-一、为什么批准 M2a/M2b
+当前代码里：
 
-当前已知：
+lane_semantic 已进入 ObservationBuilder，shape 为 1×12；
+LD 的 role/group/route_associated/offset_s 已随历史保存；
+schema 已升为 v7，旧数据指纹默认 fail-fast；
+但 net/model.py 和 net/mem.py 完全没有消费lane_semantic；
+LD companions 目前也只是数据伴随项，没有进入网络；
+PlanHead 仍只使用现有 z_ld → aggregate_ld() 路径；
+target_lane_token 与 role-aware readout 在当前代码中尚不存在。
 
-LD 槽位链伪边率约 76.5%；
-PlanHead 使用全槽 masked mean；
-模型对 lane translate/rotate 的响应比合理量级弱约 50 倍； -历史信息对输出的影响远强于车道几何；
-M1 有温和正向迹象； -此前 M2 同时改变多处消费路径且接线不干净，不能单独归因 set-attention。
+因此，R21-2 的正确表述应当是：
 
-因此还有一个未被正确回答的问题：
+原始语义通道质量良好，但当前网络尚未接入；旧 LD 表示经过现有聚合后无法可靠读出 lane-relative 几何。
 
-现有 LD 原始特征是否已经包含足够几何，只是 PlanHead 的无条件均值无法选择相关 lane？
+不应过早下结论为“encoder 层清白、pooling 是唯一主因”。因为新语义甚至还没进入 encoder。
 
-M2a/M2b 正好回答这个问题，成本低于修改 observation schema 和全量重采。
+二、R21-0 代码中发现的三个实质风险
+1. 12 维语义特征没有归一化
 
-二、必须收紧 M2a/M2b 的实现范围
-1. aggregate_ld() 只替换“池化摘要”，不得替换 per-slot tokens
+当前 lane_semantic 直接输出：
 
-建议契约：
+lateral offset             几米
+heading error              约 ±π
+curvature                  约 0.01–0.1
+margin                     几米到几十米
+confidence                 0–1
+binary flags               0/1
+distance_to_lane_end       0–数百米
+distance_to_topology       最大 200 m
 
-ld_summary = aggregate_ld(
-    ld_tokens=z_ld,
-    ld_mask=ld_live,
-    ego_token=z_ego,
-    nav_token=nav_token,
-)
 
+如果直接进入一个线性 encoder，distance_to_lane_end 和 distance_to_next_topology_change 很容易主导激活和梯度，而 curvature、heading、binary flag 被淹没。
 
-替换原来的：
+这是 R21-3 开训前必须解决的，不是训练后调参项。
 
-ld_pool = masked_mean(z_ld, ld_live)
+建议在网络入口固定归一化：
 
+lateral_offset             / 5
+heading_error              / π
+curvature_near/far         / 0.1 或 ×10
+left/right margin          / 25
+confidence                 原值
+binary flags               原值
+distance_to_lane_end       / 200
+distance_to_topology       / 200
 
-但以下内容保持不变：
 
-Policy/Value 的 16 个 LD per-slot tokens；
-WM 的 LD slot state；
-OD 路径；
-action/plan 接口； -损失函数； -训练数据； -参数预算主体。
+归一化常数必须进入 schema/模型快照和单测，而不是散落在训练脚本里。
 
-Coding Agent 所说“统一供 t0/rollout/policy 消费”需要谨慎。正确含义应该是：
+2. distance_to_next_topology_change 的当前语义不准确
 
-所有需要 LD pooled summary 的位置统一调用 aggregate_ld()；不得把原本的 per-slot token 全部替换成一个 summary。
+代码当前逻辑相当于：
 
-否则又成为多变量架构实验。
+topology = remaining if next_ref_lanes else 200.0
 
-2. M2a 不能声称已经解决 target-lane selection
 
-当前 LD 没有明确的：
+只要存在 next lane，就把“当前 lane 剩余距离”当作“下一拓扑变化距离”。
 
-target_lane flag
-lane role
-route association
-same-lane group
-offset identity
+但 lane 结束可能只是普通直道的连续分段，并不一定是 merge、split、intersection 或 lane-count change。因此这个字段当前更接近：
 
+distance_to_route_segment_end
 
-所以 ego/nav-conditioned attention 只能根据几何和导航 token推测哪条 lane 相关。
 
-M2a 检验的是：
+而不是：
 
-条件化读出是否比 masked mean 更有效。
+distance_to_next_topology_change
 
-它不能证明：
 
-网络已经稳定识别 route target lane。
+建议二选一：
 
-即使 M2a 阳性，后续显式 lane semantics 仍可能有价值。
+本轮改名为 distance_to_target_lane_end，避免模型学习错误语义；
+或真正沿 route successor 查找首次拓扑变化再计算距离。
 
-三、M2a 的强制实现契约
-1. 残差式初始化
+为控制复杂度，我建议本轮直接改名，不实现新的地图搜索。
 
-建议：
+3. left/right_drivable_margin 不是合法路线余量
 
-ld_summary = ld_mean + alpha * ld_attention
-alpha 初始化为 0
+代码通过同 road、同向的相邻 lane 累加宽度计算 margin。它没有检查：
 
+实线是否允许跨越； -护栏、收费岛等局部障碍；
+route 是否允许进入相邻 lane；
+footprint 是否真的处于连续可行区域。
 
-必须满足：
+因此它可以叫：
 
-alpha=0 时，M2a 与 M0 前向逐位一致
+same-direction road-surface margin
 
 
-训练后必须报告：
+但不能被解释为：
 
-alpha
-attention_output_norm
-mean_output_norm
-attention / mean norm ratio
-attention entropy
+legal corridor margin
 
 
-避免两类假结论：
+本轮可以作为输入特征，但不得用它直接构造安全 loss 或宣称已经显式建模合法 corridor。现有 geometry FP Gate 已失败，更说明不应把该字段升级为监督真值。
 
-alpha 没打开，误判 attention 无效；
-attention 爆炸，提升来自尺度变化而非 lane selection。
-2. Query 必须受 ego 与 nav 条件化
+三、对 R21-2 结论的质疑
+1. “pooling 丢失为主”尚未完全证明
 
-不能只用一个全局 learned query。建议 query 至少依赖：
+R21-2 报告：
 
-ego token
-nav token
-可选 others context
+raw semantic R²≈1；
+ld_pool lateral R²=0.191；
+action 输出接近无法解码；
+history shuffle 影响为 lane perturbation 的约 15 倍。
 
+但这里混合了两个事实：
 
-否则仍然只是另一种无条件 pooling。
+新 lane_semantic 根本没有进入模型；
+旧 LD token 经 pooling 后几何信息弱。
 
-第一版不引入多层 Transformer，单层 attention 足够。
+所以更严谨的诊断是：
 
-3. Mask 与全空输入
+缺少显式 target-lane 语义通路，同时旧 LD 聚合无法提供足够强的几何选择性。
 
-必须验证：
+目前无法区分哪个是主要贡献。R21-3 正是用来裁决，不应在训练前写死结论。
 
-无效 LD 权重严格为 0
-全无效 LD 时输出有限且退化为 0 summary
-无 NaN / Inf
+2. “history shortcut”也应谨慎表述
 
-4. 梯度与优化器
+history_shuffle 是明显的 OOD 干预。输出变化大可以说明模型依赖历史，但不能单独证明这种依赖是错误的。
 
-运行时记录：
+R21-3 复测至少加入：
 
-attention parameter grad norm
-alpha grad / update
-query projection update
-key/value projection update
+真实 6 帧历史
+复制当前帧 6 次
+最近 2 帧 + 其余复制
+逆序历史
+shuffle 历史
 
 
-防止“实现存在但未真正训练”。
+其中最可信的是：
 
-四、四臂实验必须严格同口径
-M0：baseline
-M1：baseline，关闭 LD-LD 槽位链
-M2a：baseline，条件化 attention pooling
-M2b：attention pooling，关闭 LD-LD 槽位链
+真实历史 vs 当前帧复制
 
 
-必须保持一致：
+如果接入 semantic 后，几何反事实响应提高，同时真实历史仍优于复制历史，说明合理目标应是：
 
-同一初始 checkpoint； -同一训练数据； -同一 epoch； -同一 seed； -同一 optimizer 和 LR； -同一 checkpoint selection； -同一 CUDA 评测后端； -除目标改动外 resolved config 无差异。
+几何信号增强，而不是删除历史。
 
-不增加：
+四、R21-3 的正确接线方案
+1. lane_semantic 独立编码成 target token
 
-hidden size； -attention 层数搜索； -新的 auxiliary loss； -lane semantics； -MoE 改动； -WM 改动； -DAgger； -recovery 数据； -geometry loss。
-五、先过机制 Gate，再看闭环
-Gate A：实现正确性
+建议新增：
 
-全部必须通过：
+lane_semantic 1×12
+→ fixed normalization
+→ 2-layer MLP
+→ target_lane_token [B,H]
 
-alpha=0 与 M0 逐位一致；
-所有 pooled LD summary 经统一入口；
-per-slot LD tokens 保持原路径；
-无隐藏的旧 masked mean 替代 attention summary；
-全 mask forward/backward 有限；
-attention 参数获得非零梯度并实际更新；
-M1 与 M2b 只修改 LD-LD adjacency；
-checkpoint 严格完整加载。
 
-任何一项失败，不允许解释性能。
+必须使用 lane_semantic_mask 和内部 target_lane_valid：
 
-Gate B：机制有效性
+mask=0 或 valid=0 → token 严格为 0
 
-训练后至少满足：
 
-alpha 明显离开 0
-attention output 非退化
-attention 不是近似均匀分布
-target/current/continuation 附近槽位获得更高权重
+第一版不要进入 MemBank。当前语义来自当前真实 pose 和当前 route，直接作为当前 target token 更清楚。后续若证明确实需要时间平滑，再做独立 temporal ablation。
 
+2. LD companions 应真正进入逐槽路径
 
-同时重跑 lane counterfactual：
+当前伴随数组：
 
-translate ±1m
-rotate ±10°
-straighten
-zero_ld
-zero_history
+ld_lane_role
+ld_offset_s_norm
+ld_group
+ld_route_associated
 
 
-建议通过标准：
+已经随 6 帧 history 保存，但网络不消费。
 
-lane translate/rotate 的 Δmu_dθ 至少达到 M0 的 5 倍； -响应符号正确； -左右扰动近似对称；
-attention 权重随 lane 扰动发生合理变化；
-zero_history / lane-perturbation 敏感度比相对 M0 至少下降 50%； -不能通过简单放大所有输出获得上述结果。
+建议将每个 LD token 增广为：
 
-如果 attention 学会了非均匀权重，但几何响应仍然极弱，说明它选择的是其他相关性，不是 lane grounding。
+z_ld_slot
++ role embedding
++ route-associated embedding
++ normalized offset encoding
++ target-group relation
 
-六、闭环验收标准需要稍作调整
 
-Coding Agent 建议 clean150 相对 M0：
+ld_group 不能作为数值大小使用。它只是局部 equality/group identity，应采用：
 
-success +5pp
-off-road -7～10pp
+same-group mask；
+group embedding； -或只用于 target/continuation token pooling。
+3. role-aware readout 不要再做自由注意力搜索
 
+Round-22 已显示纯 attention：
 
-方向合理，但 clean150 单 seed 每个 episode 约占 0.67pp，+5pp 约为 7–8 个 episode，适合作为开发门。
+α 只学到约 1.3%； -权重近均匀； -无车道偏好； -α 增大反而性能下降。
 
-正式开发门
+因此 R21-3 不应重新定义成另一次 attention 实验。
 
-M2a 或 M2b 至少满足：
+建议使用显式分组池化：
 
-success >= M0 +5pp
-off-road <= M0 -5pp
-collision 不增加超过2pp
-timeout 不增加超过3pp
-steer saturation 相对下降至少20%
-lane perturbation sensitivity 至少提升5倍
+target_pool
+continuation_pool
+left_adjacent_pool
+right_adjacent_pool
+route_pool
+other_pool
 
 
-同时必须是非孤立改进：
+然后融合：
 
-M2a/M2b 至少有一个明显胜出； -相邻 epoch 不应立即回落； -改善不能只集中于单一道路类型； -不能只是 off-road 转 timeout。
-进入 eval500 的条件
+ld_context = MLP([
+    target_lane_token,
+    target_pool,
+    continuation_pool,
+    left_pool,
+    right_pool,
+    route_pool,
+    other_pool_mean
+])
 
-只有 clean150 开发门通过才跑 eval500。
 
-建议 eval500 Gate：
+这样直接利用已验证的 role 契约，不要求网络从 9.5k pilot 中重新“发现 target lane”。
 
-success >=0.45
-相对同批 M0 >=+5pp
-off-road 相对下降至少10%
-collision <=0.05
-timeout不显著恶化
+4. 必须统一消费位置
 
+target_lane_token 和 role-aware ld_context 必须进入：
 
-0.45 仍离最终目标很远，只代表模型侧机制值得保留，不代表问题解决。
+PlanHead t0
+PlanHead rollout step 1–6
+policy/value head tokens
 
-七、四种结果对应的唯一行动
-情况 1：M1 胜出，M2a/M2b 无增益
 
-说明：
+更重要的是，必须使用同一个函数：
 
--错误 adjacency 确实有害； -现有 LD 缺少足够语义，attention 不能可靠选择 target lane。
+geometry_context = build_geometry_context(...)
 
-行动：
 
-保留 M1 修复
-立即进入 lane semantic 重建
-不再试其他 attention
+禁止 plan_step() 再自行回退到 masked_mean(z_ld)。
 
-情况 2：M2a 明显胜出，M2b 不再提升
+建议增加代码级断言：
 
-说明：
+semantic mode 下：
+PlanHead 不能调用旧 LD mean fallback
 
--主要瓶颈是 mean pooling； -错误 adjacency 影响有限，或被条件化 pooling 绕过。
+五、我反对当前文档中的 S1/S0/S2 模糊定义
 
-行动：
+目前 deepseekv4p1_argue.md 只说明：
 
-保留 M2a
-仍进入轻量 lane semantics pilot
-但可复用 attention pooling
+S1：2 epoch 短适配；
+S0/S2：通过后补；
+S2 lane aux 保持轻量。
 
+但没有定义：
 
-不能因此取消显式 target-lane 契约，因为 attention 仍在猜 lane role。
+冻结范围； -优化器参数； -具体 loss；
+pilot 中 A/B/C 三段的采样比例； -正式 v7 数据集规模；
+checkpoint 初始化和 fail-fast；
+S0、S1、S2 各自究竟改变哪个变量。
 
-情况 3：M2b 最优
+这不足以批准主训练。
 
-说明：
+六、建议锁定的 R21-3 三阶段
+R21-3A：接线与契约测试
 
--错误图拓扑和无条件 pooling 都是实质问题。
+只实现网络接线，不做主训练。
 
-行动：
+必须通过：
 
-保留 M2b
-进入 lane semantics pilot
-不做 M2c
+semantic invalid → token=0；
+特征归一化逐位测试；
+role/group permutation 一致性；
+target-role 改变能改变 target pool；
+PlanHead t0 和 rollout 每一步都消费 semantic context；
+policy/value 消费一致； 7.旧 schema/旧 dataset/旧 ckpt fail-fast； 8.无 hidden mean fallback；
+all-invalid forward/backward finite；
+route/ego target 切换只发生在契约允许的位置。
+R21-3B：Pilot adapter canary
 
+使用 9.5k pilot，但只能作为表示验证。
 
-因为下一瓶颈仍是 lane identity、route association 和 ego-lane relation。
+建议冻结：
 
-情况 4：四臂均无实质提升
+encoder 原主体
+MemBank
+ST-GNN
+MoE/router
+policy/value
 
-说明：
 
-现有 LD 特征即使改善消费机制，也不足以让 Primary 建立 lane grounding。
+只训练：
 
-行动：
+lane semantic encoder
+role embeddings
+role-aware readout
+geometry fusion adapter
+PlanHead 最后融合层，可选且低 LR
 
-模型侧结构排摸正式结束
-启动 R21-0 ～ R21-2 语义重建
 
+不要全模型训练，因为 pilot 中：
 
-禁止：
+B 扰动占 42.7%，且 traffic=0；
+C 只有 20 episodes；
+A/B/C 分布差异很大；
+pilot 明确不足以作为主训练数据。
+Pilot loss
 
--再换 attention； -加更多 heads； -加 Transformer 层； -恢复 slot adjacency； -扫 pooling 超参数； -继续增加 hidden size。
+不要新增复杂几何损失。使用：
 
-八、对数据侧 R21 方案的确认
+当前 action BC
++ 原有 plan/trajectory loss
++ 小权重 semantic reconstruction/probe loss
 
-Coding Agent 要求将 R21 语义重建作为 M2a/M2b fail 分支，我有一个小修正：
 
-它不应只是“失败分支”，而应是已经预注册的下一阶段。M2a/M2b 阳性时，只是复用其 pooling；阴性时，则更明确地直接实施。
+其中 semantic aux 只监督：
 
-因为当前输入缺失以下语义是代码事实，不会因 attention 改善而消失：
-
-target-lane role
-route association
-same-lane grouping
-offset identity
-ego-to-target-lane lateral error
+lateral offset
 heading error
-boundary margins
+near/far curvature
+lane-change-required
 
 
-所以模型侧正结果只能改变语义重建的优先级和复用机制，不能永久取消语义重建。
+暂时不要监督当前定义存在歧义的 drivable margin 和 topology distance。
 
-九、对 A4 DAgger 的状态
+R21-3C：表示 Gate
 
-继续冻结。
+短适配后必须复测：
 
-只有满足下列条件才启动：
-
-Primary 对 lane perturbation 响应方向正确
-target-lane 表示稳定
-clean150 >=0.50
-teacher-state 当前动作误差仍低
-learner-state 当前动作误差仍高
+target token 解码
+role-aware context 解码
+action 对 lateral/heading/curvature 的反事实响应
+history-vs-lane 比
+lane sign / mirror consistency
 
 
-否则 DAgger 只会把更多 learner 状态喂给一个仍不理解 lane 的模型，让它继续学习动力学 shortcut。
+建议门：
 
-十、最终审批
-批准
-Round-22：
-M0 / M1 / M2a / M2b 四臂严格对照
-机制 probes
-clean150开发门
-条件性eval500
+target token:
+  lat / heading / near curvature R² >= 0.80
 
-条件
-限一个实验 session； -不增加第五臂； -不扫 attention 超参数； -不加入新监督； -不更改数据； -不更改 MoE/WM； -失败后自动进入 R21 语义重建，不再开会重新争论模型结构。
+action response:
+  lateral 与 heading 扰动方向正确率 >= 90%
+  curvature response >= expert 的 25%
+  lane response 至少提升到旧模型的 3×
+
+history/lane influence ratio <= 2
+
+
+不要沿用“必须 5×”这种孤立倍数作为唯一 Gate，更应看距 expert 的比例和闭环方向性。
+
+七、正式 v7 主训练数据集
+
+Pilot 通过后再批准采集正式数据。
+
+建议至少：
+
+expert normal rows        200k–300k
+controlled perturbation   30k–50k
+learner-state rows        暂不纳入第一版主训练
+
+
+首先建立稳定的 semantic BC baseline，避免再一次同时引入 covariate-shift 数据和新架构。
+
+正式采集必须：
+
+使用 CUDA 统一口径；
+train/eval specs 严格隔离；
+target selection、validity、role coverage 分层统计； -困难路型分别报告； -观测指纹 v7；
+checkpoint meta 写入 fingerprint；
+禁止 --allow-legacy-dataset 用于正式训练和评测。
+八、正式训练消融应保持极简
+
+Pilot Gate 通过后，只建议两臂：
+
+S0：Semantic wiring only
+新 semantic 接线
+原有 Stage A/B loss
+不加 semantic aux
+
+
+回答：
+
+显式语义输入本身是否带来收益？
+
+S1：Semantic wiring + lightweight aux
+
+只增加：
+
+lat / heading / curvature / lane-change classification
+
+
+回答：
+
+显式监督是否防止语义再次被主任务忽略？
+
+不建议再设 S2 或更多臂。两臂足够，避免再次陷入组合搜索。
+
+九、闭环验收
+
+先 clean150：
+
+success >= 0.50
+off-road <= 0.35
+collision <= 0.05
+timeout <= 0.15
+steer saturation 相比 M0 明显下降
+lane transition 附近 action jump 下降 >=30%
+
+
+达到后跑 eval500：
+
+success >= 0.60
+目标 >=0.65
+
+
+只有 eval500 ≥0.60 且 learner-state action error 显著下降，才重新讨论 A4 DAgger。RL 继续冻结。
+
+最终裁决
+立即批准
+R21-3A 网络显式接线； -固定归一化；
+target token；
+role-aware 显式分组读出；
+PlanHead/rollout/policy/value 统一消费； -契约单测；
+pilot adapter canary；
+pilot 后表示/反事实复测。
+条件批准
+正式 v7 主数据采集；
+S0/S1 两臂正式训练；
+clean150/eval500。
+
+必须等待 pilot 表示门通过。
+
 暂不批准
-M2c
-全量数据重采
-A4 DAgger
-geometry loss
-MoE experts
-RL
-K-anchor
-容量扩展
+直接用 9.5k pilot 全模型训练； -未定义的 S0/S1/S2； -把 distance_to_next_topology_change 当真实拓扑距离监督； -把 drivable_margin 当合法 corridor；
+A4 DAgger；
+PPO/GRPO；
+MoE/WM/容量改造。
+最核心的代码审阅结论
 
-给 Coding Agent 的最终指令
-批准 Round-22。
+R21-0 的数据与 target-lane 选择实现总体严谨，但当前代码存在三个必须在 R21-3 前处理的问题：
 
-先完成 M0/M1/M2a/M2b 四臂同批实验。
-M2a 仅替换 pooled LD summary，保留 per-slot token 路径；
-M2b 仅在 M2a 基础上关闭 LD-LD slot-chain adjacency。
+12 维特征尺度严重不一致；
+distance_to_next_topology_change 名称强于实际语义；
+drivable margin 只是同向 road-surface margin，不是合法 corridor。
 
-必须先通过：
-- alpha=0 逐位等价；
-- masked/all-empty 安全；
-- attention 梯度和实际更新；
-- 无隐藏旧 mean 路径；
-- lane counterfactual sensitivity；
-再解释闭环结果。
+修正这些后，R21-3 才是在验证真正的问题：
 
-clean150 未达到预注册门：
-立即结束 LD 架构排摸，启动 lane-semantic R21-0～R21-2。
-不得新增 M2c/M2d、attention 层数或 pooling 超参实验。
-
-clean150 达门：
-只跑 eval500 验证；
-无论最终阳性或阴性，都保留 lane-semantic 契约作为下一阶段，
-阳性时复用 M2 pooling，阴性时直接重建输入语义。
-
-
-这版可以批准执行。它既修正了此前 M2 无法归因的问题，也设置了明确终点，避免模型结构和数据语义之间继续来回拉扯。
+当 target-lane 几何被明确、归一化且贯穿 PlanHead 的每一步 rollout 时，模型能否摆脱 history shortcut，形成足够强的道路几何闭环纠偏能力。
