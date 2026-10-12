@@ -71,7 +71,7 @@ LINE_TYPE_IDS: dict[str, int] = {
 }
 LINE_TYPE_ID_UNKNOWN = 0
 
-#: v6 默认采样 offset（m）：{0,20,40,60,80}。0 m 点 = ego 投影点（近场锚，补偿 lane 通道删除）；
+#: v6/v8 默认采样 offset（m）：{5,10,15,20,30}（0 m 近场锚已回退，见模块 docstring 的 v8 诊断臂 A1';
 #: 顺序即"当前车道 primary 槽位顺序"，也是其余车道的环填充顺序。
 LD_OFFSETS_M: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0)
 
@@ -190,6 +190,7 @@ class LDChannel(ObservationChannel):
         rear_m: float = 50.0,
         left_m: float = 25.0,
         right_m: float = 25.0,
+        debug: bool = False,
     ):
         self.num_slots = int(num_slots)
         self.offsets = tuple(float(o) for o in offsets)
@@ -197,6 +198,13 @@ class LDChannel(ObservationChannel):
         self.rear_m = float(rear_m)
         self.left_m = float(left_m)
         self.right_m = float(right_m)
+        #: Round-18A 旁路诊断（默认关）：``True`` 时把逐槽元数据写入 :attr:`last_debug`，
+        #: **不改变** feats/mask 输出（obs fingerprint 不变）。运行时可由调用方置位。
+        self.debug = bool(debug)
+        #: ``build`` 后逐槽元数据（debug=True 时；否则 None）：
+        #: ``lane_index``（3 元组）/``lane_priority``/``lane_order``/``offset_idx``/
+        #: ``is_ego_lane``/``is_nav_current``/``is_nav_next``/``s``（采样弧长）
+        self.last_debug: dict[str, object] | None = None
 
     def build(self, env, spec=None) -> tuple[np.ndarray, np.ndarray]:
         feats, mask = make_empty(self.num_slots, self.feature_dim)
@@ -251,11 +259,35 @@ class LDChannel(ObservationChannel):
                     ],
                     dtype=np.float32,
                 )
-                (primary if lane_priority == 0 else secondary).append((offset_idx, lane_priority, lane_order, row))
+                (primary if lane_priority == 0 else secondary).append(
+                    (offset_idx, lane_priority, lane_order, row, lane, float(s))
+                )
 
-        primary.sort(key=lambda item: item[0])  # 当前车道：20 → 80 m
+        primary.sort(key=lambda item: item[0])  # 当前车道：5 → 30 m（offsets 顺序）
         secondary.sort(key=lambda item: (item[0], item[1], item[2]))  # 其余：环优先，环内按车道优先级
-        for slot, (_, _, _, row) in enumerate((primary + secondary)[: self.num_slots]):
-            feats[slot] = row
+        assembled = (primary + secondary)[: self.num_slots]
+        for slot, item in enumerate(assembled):
+            feats[slot] = item[3]
             mask[slot] = 1.0
+        if self.debug:
+            ego_lane = getattr(ego, "lane", None)
+            current_ref = list(getattr(nav, "current_ref_lanes", None) or [])
+            next_ref = list(getattr(nav, "next_ref_lanes", None) or [])
+            self.last_debug = {
+                "num_valid": int(len(assembled)),
+                "lane_index": [tuple(item[4].index) if hasattr(item[4], "index") else None for item in assembled],
+                "lane_priority": [int(item[1]) for item in assembled],
+                "lane_order": [int(item[2]) for item in assembled],
+                "offset_idx": [int(item[0]) for item in assembled],
+                "offset_m": [float(self.offsets[int(item[0])]) for item in assembled],
+                "s_m": [float(item[5]) for item in assembled],
+                "is_ego_lane": [bool(item[4] is ego_lane) for item in assembled],
+                "is_nav_current": [bool(item[4] in current_ref) for item in assembled],
+                "is_nav_next": [bool(item[4] in next_ref) for item in assembled],
+                "ego_lane_index": tuple(ego_lane.index) if ego_lane is not None and hasattr(ego_lane, "index") else None,
+                "nav_current_indices": [tuple(l.index) for l in current_ref if hasattr(l, "index")],
+                "nav_next_indices": [tuple(l.index) for l in next_ref if hasattr(l, "index")],
+            }
+        else:
+            self.last_debug = None
         return feats, mask
