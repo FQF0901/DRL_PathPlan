@@ -128,7 +128,7 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
 from net.anchor import load_anchor_dictionary
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
-from net.spatial import LdSetAttention, wrap_angle
+from net.spatial import LdAggregate, LdSetAttention, wrap_angle
 from net.st_gnn import SpatioTemporalGNN
 
 #: router 监督标签（固定顺序，必须与 config/model.yaml::moe.router.supervised_labels 一致）
@@ -361,8 +361,11 @@ class DrivingModel(nn.Module):
         #: Round-20 消融（**默认 baseline = 既有行为逐位不变**）：
         #: ``baseline`` | ``no_chain``（M1：关 LD↔LD 槽位链）| ``set_attn``（M2：关链 + LD set-attention）。
         #: M2 的注意力模块**惰性构造**（baseline 路径不新增参数 → 既有 ckpt 键集不变）。
+        #: Round-22 新增 ``attn``（M2a）/``attn_no_chain``（M2b）：``LdAggregate`` 仅替换
+        #: **pooled LD summary**（``ld_summary = mean + alpha·attn``、alpha₀=0），同样惰性构造。
         self.ld_mode: str = "baseline"
         self.ld_set_attn: "LdSetAttention | None" = None
+        self.ld_aggregator: "LdAggregate | None" = None
         # v6 A1：policy/value = 交叉注意力头（K=1 查询 × 令牌集合；命名保 policy./value. 前缀，
         # 见 STAGE_C_DESIGN_PREFIXES 的 allowlist 契约）
         self.policy = PolicyHead(
@@ -382,18 +385,25 @@ class DrivingModel(nn.Module):
         )
 
     def set_ld_mode(self, mode: str = "baseline") -> "DrivingModel":
-        """Round-20 消融开关（默认 ``baseline`` = 逐位不变）。
+        """LD 消融开关（默认 ``baseline`` = 逐位不变）。
 
         - ``no_chain``（M1）：``st_gnn.spatial.include_ld_chain=False``（仅移除 LD↔LD 槽位链边）；
-        - ``set_attn``（M2）：再置 ``exclude_ld_nodes=True``（LD 绕过 MP、独立编码）并**惰性构造**
-          :class:`net.spatial.LdSetAttention`（query=ego/nav/others 上下文，key/value=LD tokens），
-          其输出替换 PlanHead 融合路径的 ``ld_pool``。
+        - ``set_attn``（Round-20 M2，保留但不再用于实验）：再置 ``exclude_ld_nodes=True``
+          （LD 绕过 MP、独立编码）并**惰性构造** :class:`net.spatial.LdSetAttention`；
+        - ``attn``（Round-22 M2a）：**保留 LD-LD 链与 LD 节点 MP**，惰性构造
+          :class:`net.spatial.LdAggregate`（``alpha`` 初值 0）——仅替换 pooled LD summary
+          （``plan_step`` 融合输入 + ``encode`` 的 head-token summary）；
+        - ``attn_no_chain``（Round-22 M2b）：M2a 单变量增量（**仅**额外关 LD-LD 链）。
         """
         mode = str(mode).lower()
-        if mode not in ("baseline", "no_chain", "set_attn"):
-            raise ValueError(f"未知 ld_mode={mode!r}（baseline | no_chain | set_attn）")
+        if mode not in ("baseline", "no_chain", "set_attn", "attn", "attn_no_chain"):
+            raise ValueError(
+                f"未知 ld_mode={mode!r}（baseline | no_chain | set_attn | attn | attn_no_chain）"
+            )
         spatial = self.st_gnn.spatial
-        spatial.include_ld_chain = mode == "baseline"
+        #: Round-20 ``set_attn`` 语义保持原样（关链 + LD 排除 MP）；Round-22 ``attn`` 保留两者，
+        #: ``attn_no_chain`` 仅关链（单变量）。
+        spatial.include_ld_chain = mode in ("baseline", "attn")
         spatial.exclude_ld_nodes = mode == "set_attn"
         self.ld_mode = mode
         if mode == "set_attn" and self.ld_set_attn is None:
@@ -403,7 +413,39 @@ class DrivingModel(nn.Module):
             self.ld_set_attn = LdSetAttention(hidden, heads=4, ctx_dim=3 * hidden).to(
                 next(self.parameters()).device
             )
+        if mode in ("attn", "attn_no_chain") and self.ld_aggregator is None:
+            hidden = int(getattr(self.plan_head, "hidden_dim", 0) or 0)
+            if hidden <= 0:
+                hidden = int(self.st_gnn.hidden)
+            self.ld_aggregator = LdAggregate(hidden, heads=4, ctx_dim=3 * hidden).to(
+                next(self.parameters()).device
+            )
         return self
+
+    def stgnn_flags(self) -> tuple[bool, bool]:
+        """``(include_ld_chain, exclude_ld_nodes)``——LD 邻接/消息传递开关的只读视图（诊断用）。"""
+        spatial = self.st_gnn.spatial
+        return bool(spatial.include_ld_chain), bool(spatial.exclude_ld_nodes)
+
+    def aggregate_ld(
+        self,
+        z_ld: Tensor,
+        ld_live: Tensor,
+        ego_token: Tensor,
+        nav_token: Tensor,
+        others_ctx: Tensor | None = None,
+    ) -> Tensor:
+        """Round-22：**LD pooled summary 的统一读出**（t0 / rollout / policy 同一入口）。
+
+        - ``baseline``/``no_chain``/``set_attn``（未接聚合器）：``masked_mean(z_ld, ld_live)``
+          —— 既有路径逐位不变；
+        - ``attn``/``attn_no_chain``：:class:`net.spatial.LdAggregate`
+          （``mean + alpha·attn(q=cat[ego,nav,others], kv=z_ld)``；alpha₀=0 ⇒ 逐位 = mean）。
+        """
+        aggregator = self.ld_aggregator
+        if aggregator is not None and self.ld_mode in ("attn", "attn_no_chain"):
+            return aggregator(z_ld, ld_live, ego_token, nav_token, others_ctx)
+        return _masked_mean(z_ld, ld_live)
 
     def set_moe(self, *, enabled: bool = True, load_balance_coef: float = 0.0) -> "DrivingModel":
         """MoE 运行时开关 + 负载均衡 α（lane U1；非参数，不进 state_dict）。
@@ -532,7 +574,8 @@ class DrivingModel(nn.Module):
         nav_token = squeeze_batch_singletons(nav_token, 2, "nav_token")
         signal_token = squeeze_batch_singletons(signal_token, 2, "signal_token")
         od_pool = _masked_mean(z_od, od_live)
-        ld_pool = _masked_mean(z_ld, ld_live)
+        # Round-22：LD pooled summary 统一读出（baseline = masked_mean，逐位不变）
+        ld_pool = self.aggregate_ld(z_ld, ld_live, z_ego, nav_token, others_ctx)
         return self.plan_head(z_ego, od_pool, ld_pool, others_ctx, nav_token, signal_token)
 
     def _t0_object_features(self, encoded: EncodedMem) -> tuple[Tensor, Tensor]:
@@ -648,7 +691,8 @@ class DrivingModel(nn.Module):
         z_ld = self.encoders.embed_ld(encoded.ld_now, encoded.ld_live)
         # 上下文 token（t0 静态）：池化来自时序聚合 ctx
         od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
-        ld_pool = _masked_mean(encoded.ld_ctx, encoded.ld_live)
+        # Round-22：head-token 的 LD summary token 同样走统一读出（baseline 逐位不变）
+        ld_pool = self.aggregate_ld(encoded.ld_ctx, encoded.ld_live, z_ego, nav_token, encoded.others_ctx)
         if self.ld_mode == "set_attn" and self.ld_set_attn is not None:
             # Round-20 M2：LD set-attention 上下文（ego + nav + others 为 query）
             import torch as _torch

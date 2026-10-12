@@ -5019,6 +5019,17 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             if getattr(args, "phase3_geom_grad_probe_batch", None) is not None
             else losses_cfg.get("geom_grad_probe_batch", 32)
         ),
+        # Round-22：LD 聚合诊断（默认关 → 零影响）
+        ld_diag=bool(
+            getattr(args, "phase3_ld_diag", None)
+            if getattr(args, "phase3_ld_diag", None) is not None
+            else losses_cfg.get("ld_diag", False)
+        ),
+        ld_diag_every=int(
+            args.phase3_ld_diag_every
+            if getattr(args, "phase3_ld_diag_every", None) is not None
+            else losses_cfg.get("ld_diag_every", 1)
+        ),
         bias_calib_weight=loss_weights["bias_calib"],
         anchor_ce_weight=loss_weights["anchor_ce"],
         anchor_wta_weight=loss_weights["anchor_wta"],
@@ -5670,9 +5681,16 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--phase3-action-weight", type=float, default=None, help="首步动作损失权重（默认 1.0）")
     parser.add_argument("--phase3-action-chain-weight", type=float, default=None,
                         help="多步动作链权重（默认取 config stages.B.phase3.losses.action_chain=0.2）")
-    parser.add_argument("--phase3-ld-mode", choices=("baseline", "no_chain", "set_attn"), default=None,
-                        help="Round-20 LD 消融（默认 baseline = 逐位不变）：no_chain=M1 关 LD-LD 槽位链；"
-                             "set_attn=M2 关链 + LD set-attention（惰性构造注意力头，替换 ld_pool）")
+    parser.add_argument("--phase3-ld-mode", choices=("baseline", "no_chain", "set_attn", "attn", "attn_no_chain"),
+                        default=None,
+                        help="LD 消融（默认 baseline = 逐位不变）：no_chain=M1 关 LD-LD 槽位链；"
+                             "set_attn=Round-20 M2（关链 + LD 排除 MP + set-attention，保留不用于 R22）；"
+                             "attn=Round-22 M2a（LdAggregate 仅替换 pooled LD summary，alpha₀=0）；"
+                             "attn_no_chain=M2b（M2a + 仅关 LD-LD 链）")
+    parser.add_argument("--phase3-ld-diag", action="store_true", default=None,
+                        help="Round-22：训练期记录 LdAggregate 诊断（α 轨迹/范数/熵/梯度/更新幅度；默认关）")
+    parser.add_argument("--phase3-ld-diag-every", type=int, default=None,
+                        help="Round-22：每 N 个 macro update 落一条 LD 诊断（默认 1）")
     parser.add_argument("--phase3-tail-smooth-weight", type=float, default=None,
                         help="A3（round-17）尾链平滑正则权重（相邻动作差分；默认 0.0 = 关闭 = 旧行为逐位不变）")
     parser.add_argument("--phase3-tail-curv-weight", type=float, default=None,

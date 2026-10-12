@@ -87,6 +87,160 @@ class LdSetAttention(nn.Module):
         return torch.where(valid_any, out, torch.zeros_like(out))
 
 
+def _masked_mean_slots(x: Tensor, mask: Tensor) -> Tensor:
+    """``(B,S,H)`` 按 ``(B,S)`` 掩码求均值；全无效时返回 0。
+
+    Round-22：``LdAggregate`` 的 mean 分支**独立实现**（与 ``net.model._masked_mean`` 逐位同式）。
+    刻意不复用 ``net.model._masked_mean``：Gate A #2 要求 attn 模式下 LD pooled summary
+    不经过旧均值路径（spy 锁 ``net.model._masked_mean``）。
+    """
+    return (x * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+
+
+class LdAggregate(nn.Module):
+    """Round-22 M2a/M2b：LD pooled summary = ``masked_mean(z_ld) + alpha · cross_attn(q=ctx, kv=z_ld)``。
+
+    契约（round-22 §A.1 / §B）：
+    - ``alpha`` = **标量 Parameter，初值 0** ⇒ 前向 = ``masked_mean``（逐位等价 baseline）；
+    - query = ``Proj(cat[ego, nav, others?])``（**单 query token**；``others`` 缺省用零向量，
+      保持 ctx 维度恒定）；key/value = LD per-slot tokens（各自投影）；
+    - mask = ``ld_live``；**全灭行**：有限负值加法 bias + 零 dummy token ⇒ 前向/反向均无 NaN/Inf，
+      输出精确 0（乘法掩码收尾）；
+    - ``collect_stats=True``（诊断，默认关）：累计 alpha/范数/熵/权重统计（``pop_stats`` 取用）。
+
+    仅替换 **pooled LD summary**（``plan_step`` 的 PlanHead 融合输入 + ``encode`` 的 head-token
+    summary token）；per-slot ``z_ld`` 令牌、WM LD 状态、OD 路径、动作/计划接口均不变。
+    """
+
+    NEG = -1.0e4  #: 加法掩码的**有限**负值（用 -inf 会让 softmax 反向产生 NaN）
+
+    def __init__(
+        self,
+        hidden: int,
+        *,
+        heads: int = 4,
+        ctx_dim: int | None = None,
+        collect_stats: bool = False,
+        stats_cap: int = 4096,
+    ):
+        super().__init__()
+        hidden = int(hidden)
+        heads = int(heads)
+        if heads < 1 or hidden % heads:
+            raise ValueError(f"hidden={hidden} 必须能被 heads={heads} 整除")
+        self.hidden = hidden
+        self.heads = heads
+        self.head_dim = hidden // heads
+        self.ctx_dim = int(ctx_dim or 3 * hidden)
+        self.q_proj = nn.Linear(self.ctx_dim, hidden)
+        self.k_proj = nn.Linear(hidden, hidden)
+        self.v_proj = nn.Linear(hidden, hidden)
+        self.out_proj = nn.Linear(hidden, hidden)
+        self.alpha = nn.Parameter(torch.zeros(()))
+        self.collect_stats = bool(collect_stats)
+        self.stats_cap = int(stats_cap)
+        self.reset_stats()
+
+    # ------------------------------------------------------------- 诊断（默认关）
+    _STAT_KEYS = ("alpha", "mean_norm", "attn_norm", "ratio", "entropy", "attn_max", "valid_slots")
+
+    def reset_stats(self) -> None:
+        self._stats: dict[str, list[float]] = {key: [] for key in self._STAT_KEYS}
+
+    def pop_stats(self) -> dict[str, float]:
+        """取（并清空）累计诊断的均值；无记录 → 空 dict（默认路径零影响）。"""
+        out = {key: float(sum(values) / len(values)) for key, values in self._stats.items() if values}
+        self.reset_stats()
+        return out
+
+    # ------------------------------------------------------------- 前向
+    def _context(self, ego_token: Tensor, nav_token: Tensor, others_ctx: Tensor | None) -> Tensor:
+        batch = int(ego_token.shape[0])
+        ego = ego_token.reshape(batch, -1)
+        nav = nav_token.reshape(batch, -1)
+        others = torch.zeros_like(nav) if others_ctx is None else others_ctx.reshape(batch, -1)
+        ctx = torch.cat([ego, nav, others], dim=-1)
+        if int(ctx.shape[-1]) != self.ctx_dim:
+            raise ValueError(f"LD aggregate ctx 维度应为 {self.ctx_dim}，收到 {int(ctx.shape[-1])}")
+        return ctx
+
+    def attention_weights(
+        self,
+        z_ld: Tensor,
+        ld_live: Tensor,
+        ego_token: Tensor,
+        nav_token: Tensor,
+        others_ctx: Tensor | None = None,
+    ) -> Tensor:
+        """诊断用：``(B, L)`` 归一化注意力权重（全灭行 = 全 0）。"""
+        return self._attend(z_ld, ld_live, ego_token, nav_token, others_ctx)[1]
+
+    def _attend(
+        self,
+        z_ld: Tensor,
+        ld_live: Tensor,
+        ego_token: Tensor,
+        nav_token: Tensor,
+        others_ctx: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        batch, slots, _ = z_ld.shape
+        ctx = self._context(ego_token, nav_token, others_ctx)
+        q = self.q_proj(ctx).reshape(batch, 1, self.heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(z_ld).reshape(batch, slots, self.heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(z_ld).reshape(batch, slots, self.heads, self.head_dim).transpose(1, 2)
+        scores = (q @ k.transpose(-1, -2)) / (float(self.head_dim) ** 0.5)  # (B,hd,1,L)
+        valid = (ld_live > 0.5).to(z_ld.dtype)  # (B,L)
+        has_valid = valid.any(dim=-1, keepdim=True)  # (B,1)
+        neg = torch.full_like(valid, self.NEG)
+        bias = torch.where(valid > 0.5, torch.zeros_like(valid), neg)  # (B,L)
+        # dummy token（零 key/value）：仅在全灭行可被注意 → 杜绝 softmax 全 -inf 的 NaN
+        dummy_bias = torch.where(
+            has_valid.reshape(batch, 1, 1, 1),
+            torch.full((batch, self.heads, 1, 1), self.NEG, dtype=scores.dtype, device=scores.device),
+            torch.zeros((batch, self.heads, 1, 1), dtype=scores.dtype, device=scores.device),
+        )
+        scores = torch.cat(
+            [scores + bias.reshape(batch, 1, 1, slots), dummy_bias], dim=-1
+        )  # (B,hd,1,L+1)
+        weights = torch.softmax(scores, dim=-1)
+        v_full = torch.cat(
+            [v, torch.zeros((batch, self.heads, 1, self.head_dim), dtype=v.dtype, device=v.device)],
+            dim=2,
+        )
+        attended = weights @ v_full  # (B,hd,1,d)；全灭行 = dummy 的零 value
+        attended = attended.transpose(1, 2).reshape(batch, 1, self.hidden)
+        out = self.out_proj(attended).reshape(batch, self.hidden)
+        out = out * has_valid.to(out.dtype)  # 全灭行**精确** 0（含 out_proj 偏置）
+        return out, weights[..., :slots].mean(dim=1).reshape(batch, slots)
+
+    def forward(
+        self,
+        z_ld: Tensor,
+        ld_live: Tensor,
+        ego_token: Tensor,
+        nav_token: Tensor,
+        others_ctx: Tensor | None = None,
+    ) -> Tensor:
+        """``(B,H)``：``masked_mean(z_ld) + alpha · attn``（alpha=0 ⇒ 逐位 = masked_mean）。"""
+        mean = _masked_mean_slots(z_ld, ld_live)
+        attended, weights = self._attend(z_ld, ld_live, ego_token, nav_token, others_ctx)
+        gated = self.alpha * attended
+        if self.collect_stats and len(self._stats["alpha"]) < self.stats_cap:
+            with torch.no_grad():
+                mean_norm = float(mean.norm(dim=-1).mean())
+                attn_norm = float(gated.norm(dim=-1).mean())
+                probs = weights.clamp_min(1e-12)
+                entropy = float((-(probs * probs.log()).sum(dim=-1)).mean())
+                self._stats["alpha"].append(float(self.alpha.detach()))
+                self._stats["mean_norm"].append(mean_norm)
+                self._stats["attn_norm"].append(attn_norm)
+                self._stats["ratio"].append(attn_norm / max(mean_norm, 1e-12))
+                self._stats["entropy"].append(entropy)
+                self._stats["attn_max"].append(float(weights.max(dim=-1).values.mean()))
+                self._stats["valid_slots"].append(float((ld_live > 0.5).sum(dim=-1).float().mean()))
+        return mean + gated
+
+
 class SpatialEncoder(nn.Module):
     """2 层消息传递编码器（层数可配）。"""
 

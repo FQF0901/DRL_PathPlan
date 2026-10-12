@@ -1074,6 +1074,12 @@ class Phase3Config:
     #: probe batch 行数（取训练序前 N 行；固定 → 可比）。
     geom_grad_probe_batch: int = 32
 
+    # ---- Round-22：LD 聚合（M2a/M2b）诊断（默认关；α=0 门控路径零影响）----
+    #: 训练期记录 ``LdAggregate`` 诊断（α 轨迹/范数/熵/梯度/更新幅度）。
+    ld_diag: bool = False
+    #: 每 N 个 macro update 落一条诊断（默认 1 = 每 update）。
+    ld_diag_every: int = 1
+
     def __post_init__(self) -> None:
         if self.freeze_mode not in ("all", "specific_only", "trunk_only") + RECOVERY_FREEZE_MODES:
             raise ValueError(
@@ -1113,6 +1119,8 @@ class Phase3Config:
             raise ValueError(f"geom_grad_probe_every 必须 ≥1，收到 {self.geom_grad_probe_every!r}")
         if int(self.geom_grad_probe_batch) < 1:
             raise ValueError(f"geom_grad_probe_batch 必须 ≥1，收到 {self.geom_grad_probe_batch!r}")
+        if int(self.ld_diag_every) < 1:
+            raise ValueError(f"ld_diag_every 必须 ≥1，收到 {self.ld_diag_every!r}")
 
 
 def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[str, ...]:
@@ -5825,6 +5833,17 @@ def pretrain_bc_phase3(
     )
     geom_probe_step = 0
 
+    # Round-22：LD 聚合（M2a/M2b）诊断（默认关 → 零影响；仅 ld_mode∈{attn, attn_no_chain} 时有效）
+    ld_diag_enabled = bool(getattr(config, "ld_diag", False))
+    ld_diag_every = max(1, int(getattr(config, "ld_diag_every", 1)))
+    ld_diag_records: List[Dict[str, Any]] = []
+    aggregator = getattr(model, "ld_aggregator", None)
+    if ld_diag_enabled and aggregator is not None:
+        aggregator.collect_stats = True
+    elif ld_diag_enabled:
+        print("[round22] ld_diag 已开但模型无 ld_aggregator（ld_mode != attn/attn_no_chain）→ 跳过", flush=True)
+        ld_diag_enabled = False
+
     def _run_geom_probe() -> Optional[Dict[str, Any]]:
         """固定 probe batch 上的一次几何梯度探针（不改优化；纯诊断）。"""
         if probe_indices.size == 0:
@@ -5890,6 +5909,7 @@ def pretrain_bc_phase3(
         geom_sums: Dict[str, float] = {}
         geom_weight = 0.0
         epoch_probe_records: List[Dict[str, Any]] = []
+        epoch_ld_diag_records: List[Dict[str, Any]] = []
         data_seconds = forward_seconds = backward_seconds = 0.0
         if use_recovery_mix:
             # P1-2：按 batch 混采（normal 池 = 本 epoch 训练序去掉 recovery 行）
@@ -5932,6 +5952,9 @@ def pretrain_bc_phase3(
             macro_den["rows"] = float(n_macro)
             data_seconds += time.perf_counter() - data_started
             optimizer.zero_grad(set_to_none=True)
+            if ld_diag_enabled:
+                # Round-22：每 update 重置聚合器诊断累计（默认关 → 零影响）
+                aggregator.reset_stats()
             macro_totals = {key: 0.0 for key in list(totals)}
             for m_start in range(0, n_macro, micro_size):
                 m_lo, m_hi = m_start, min(m_start + micro_size, n_macro)
@@ -6080,11 +6103,42 @@ def pretrain_bc_phase3(
                             load_count += n_rows
             for key, value in macro_totals.items():
                 totals[key] += value
+            ld_diag_snapshot = None
+            if ld_diag_enabled:
+                # Round-22：**pre-clip** 梯度快照 + step 前参数快照（仅诊断）
+                ld_diag_snapshot = {
+                    name: parameter.detach().clone()
+                    for name, parameter in aggregator.named_parameters()
+                }
+                ld_diag_grads = {
+                    name: float(parameter.grad.detach().pow(2).sum()) ** 0.5
+                    for name, parameter in aggregator.named_parameters()
+                    if parameter.grad is not None
+                }
             torch.nn.utils.clip_grad_norm_(
                 [parameter for parameter in model.parameters() if parameter.requires_grad],
                 float(config.grad_clip),
             )
             optimizer.step()
+            if ld_diag_enabled and batches % ld_diag_every == 0:
+                record: Dict[str, Any] = {
+                    "epoch": int(epoch),
+                    "batch": int(batches),
+                    "alpha": float(aggregator.alpha.detach()),
+                }
+                record.update({f"fwd_{key}": value for key, value in aggregator.pop_stats().items()})
+                for name, value in ld_diag_grads.items():
+                    record[f"grad_{name}"] = round(value, 8)
+                for name, parameter in aggregator.named_parameters():
+                    before = ld_diag_snapshot.get(name)
+                    if before is not None:
+                        delta = (parameter.detach() - before).pow(2).sum()
+                        record[f"update_{name}"] = round(float(delta) ** 0.5, 8)
+                record["grad_norm_total"] = round(
+                    float(sum(value ** 2 for value in ld_diag_grads.values())) ** 0.5, 8
+                )
+                ld_diag_records.append(record)
+                epoch_ld_diag_records.append(record)
             batches += 1
             if geom_probe_enabled and batches % geom_probe_every == 0:
                 probe = _run_geom_probe()
@@ -6159,6 +6213,17 @@ def pretrain_bc_phase3(
             }
             epoch_update["geom_grad_conflict_counts"] = conflicts
             epoch_update["geom_grad_probe_steps"] = len(epoch_probe_records)
+        if ld_diag_enabled:
+            # Round-22：LD 聚合诊断（逐 update 记录；α 轨迹/范数/熵/梯度/更新幅度）
+            epoch_update["ld_diag_steps"] = len(epoch_ld_diag_records)
+            if epoch_ld_diag_records:
+                last = epoch_ld_diag_records[-1]
+                epoch_update["ld_diag_last"] = dict(last)
+                epoch_update["ld_alpha_end"] = float(last.get("alpha", 0.0))
+                epoch_update["ld_fwd_attn_norm_end"] = float(last.get("fwd_attn_norm", 0.0))
+                epoch_update["ld_fwd_mean_norm_end"] = float(last.get("fwd_mean_norm", 0.0))
+                epoch_update["ld_fwd_ratio_end"] = float(last.get("fwd_ratio", 0.0))
+                epoch_update["ld_fwd_entropy_end"] = float(last.get("fwd_entropy", 0.0))
         # v7 结构迭代 B：K-anchor 诊断（分配 margin/dist/软混合 ADE/逐簇占比；权重加权平均）
         if float(effective_config.anchor_ce_weight) > 0.0 or float(effective_config.anchor_wta_weight) > 0.0:
             epoch_update["bc_anchor_ce_loss"] = totals["anchor_ce"] / divisor
@@ -6252,6 +6317,15 @@ def pretrain_bc_phase3(
             f"data={data_seconds:.2f}s fwd={forward_seconds:.2f}s bwd={backward_seconds:.2f}s"
             f"{val_text}"
         )
+    if ld_diag_enabled:
+        # Round-22：LD 聚合诊断全量记录（α 轨迹/范数/熵/梯度/更新幅度）
+        metrics["ld_diag"] = ld_diag_records
+        metrics["ld_diag_steps"] = len(ld_diag_records)
+        if ld_diag_records:
+            metrics["ld_alpha_trajectory"] = [
+                {"batch": int(record["batch"]), "alpha": float(record["alpha"])}
+                for record in ld_diag_records
+            ]
     if geom_probe_enabled:
         metrics["geom_grad_probe"] = geom_probe_records
         metrics["geom_grad_conflict_counts"] = {
