@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（Round-17 A3 判负 · round-18 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 上午）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A 全批次完成（§5.3）；round-17 A3 判负（§5.5）；**round-18 锁定 probe-first——Round-18A 四反事实 probe（lane-grounding + shortcut；零训练级），A4/特征改造/A3 重跑全后置（§5.6）**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18：probe-first 锁定（§5.6）。
+> **状态（2026-10-12 上午）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A 完成（§5.3）；A3 判负（§5.5）；**round-18/19：probe-first → 加码 LD 语义/拓扑审计（0A/0B/0C）——Round-18A 已开工（§5.6–5.7）**；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）。
 > **本版说明**：第四轮精简（299 → ~285 行）：§5.2–5.4 往来压为补充存档、§5 标题对齐范围；此前已合入第三轮精简（原 `74f522f`@`Planner_RL_copy`）。历版全文见 §7。
 
 ---
@@ -273,6 +273,30 @@
 **验收 7 条接受 + 3 条补丁**：① 符号/单调性按误差分箱报告；② #7（experts 关）需小适配（router 强制 primary 的推理开关）；③ 同一 probe 集在两 ckpt 上跑（含 A3 臂）。
 
 **请求（round-19）**：确认 Round-18A 开工范围（四 probe + 决策映射 + 补丁；零训练）；确认 A4 / 特征改造 / A3 重跑均后置。
+
+### 5.7 对 round-19 的回应（`1ea85dc`）：**代码论断逐条核验=全部成立；接受 0A/0B/0C 前置；已开工**
+
+**核验表（我方独立复核，file:line）**
+
+| 对方论断 | 核验 | 证据 |
+|---|---|---|
+| PlanHead 融合只用 `masked_mean` 的 ld_pool（16 个 z_ld token 不入 PlanHead） | **成立** | `net/model.py:505-507`：`plan_head(z_ego, od_pool, ld_pool, others_ctx, nav_token, signal_token)`；z_ld tokens 只在 policy/value 侧（T=39） |
+| LD-LD 邻接=槽位链 i↔i+1（secondary 环优先 ⇒ 跨车道伪边） | **成立** | `net/spatial.py:103-106`（`ld_ok[:,i] & ld_ok[:,i+1]` 双向）；其 docstring 第 8 行自注"槽位相邻近似沿线相邻"仅 primary 5 槽成立 |
+| LD 不做时序 = `ld_hist[:, -1]` | **成立** | `net/mem.py:699-705`（"规格第 2 条"） |
+| K-anchor `lane_ctx = zeros(B,3)` | **成立** | `net/model.py:627-632` |
+| `env/obs/ld.py` 注释漂移（0/20/40/60/80 与"0m 投影点"残留） | **成立** | 常量 `LD_OFFSETS_M=(5,10,15,20,30)` 与注释混用旧口径 |
+| 槽位排序=当前车道 5 点 + 其余环优先（跨车道相邻） | **成立** | `ld.py:209-260`（`(offset_idx, lane_priority, lane_order)` 排序） |
+| ego.lane 优先（偏离态语义跳变风险） | **成立（结构）** | `ld.py:137-170`（priority 0=ego.lane）；频率/相关由 0C 测 |
+
+**接受**：0A/0B/0C 前置 + 四 probe 修正（镜像须全语义/输出变化非充分/Probe B 分层定位）+ primary_only 严格模式（代码级旁路、非权重归零、非 expert 路径逐位一致）+ 分支映射（A4 / 显式池化 / 语义特征+重采 / 辅助监督）+ 暂不批准清单。**"关联/选择/监督缺失"升级为"邻接可能主动建错（跨车道伪边）"——认账并接受其优先级。**
+
+**我方实施路线（4 条）**
+1. **0A/0B/0C 的落法=诊断重放**：槽位元数据现不在存储 obs 中且不可事后恢复（identity 不可逆）⇒ builder 加**旁路诊断 dump（默认关、不改 obs fingerprint）+ 有界分层重放（~200 eps）**记录逐帧元数据/跨帧同一性/nav 关联，"槽位链邻接规则下的跨车道伪边比例"由元数据精确推出（纯统计）；顺手修 `ld.py` 注释漂移。
+2. **"env 级镜像"的务实近似**：MetaDrive 路网镜像成本高 ⇒ 采用**全通道一致镜像变换**（ego pose 翻转 + ego-relative 几何翻转 + 左右类型互换 + lane 顺序反序 + nav/OD/历史同步），配不变量测试（双镜像=恒等、物理量一致）；tensor-only 版仅作单元测试，报告标注近似性。
+3. **primary_only 严格模式**：代码路径级旁路 + "非 expert 路径逐位一致"验证；**双 ckpt（pri512@e020、A3 臂）× 双模式（primary_only / full-MoE）全跑**。
+4. **Probe B 标签来源**：取自重放时活 env 几何并与模型前向**同帧配对**；分层解码（raw LD→embed→tokens→pool→fused→primary→mu）定位损失环节。
+
+**开工**：已派发 Round-18A lane（0A/0B/0C → 四 probe（修正版）→ 双 ckpt×双模式 → 分支判定表；零训练；产物 `runs/p1_v2/round18a/`）。
 
 ---
 
