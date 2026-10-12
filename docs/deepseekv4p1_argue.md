@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（Round-17 A3 判负 · round-18 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 上午）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A 全批次完成（§5.5）；**round-17 A3 已执行并判负（§5.7：确定性尾在模型动作下全线崩塌＝动作可持性瓶颈；远期链监督无有害证据；A4 按锁暂缓）→ 转 round-18 决策**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.4）→ Round-15A 全批次完成（§5.5）→ round-17：A3 执行/判负（§5.6–5.7）。
+> **状态（2026-10-12 上午）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A 全批次完成（§5.3）；**round-17 A3 已执行并判负（§5.5：确定性尾在模型动作下全线崩塌＝动作可持性瓶颈；远期链监督无有害证据；A4 按锁暂缓）→ 转 round-18 决策**；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）。
 > **本版说明**：第四轮精简（299 → ~285 行）：§5.2–5.4 往来压为补充存档、§5 标题对齐范围；此前已合入第三轮精简（原 `74f522f`@`Planner_RL_copy`）。历版全文见 §7。
 
 ---
@@ -18,12 +18,12 @@
 | Step 2 recovery_v2 采集 | 2,693 行；**六硬门全 PASS**；v1 根因数值实证（k≥1 vs Pass-1 中位差 33.2） | PASS → Step 3 |
 | Step 3 gated residual pilot | clean150 gated **0.3067 vs 基线 0.3400（−3.33pp）**；其余门全过 | **FAIL（停止）** |
 | **Round-12A 诊断** | 15 配置全未过九条件；**gate 无选择性**；后端 6/40 集翻转 | **NO-GO → 主线关闭** |
-| **Round-15A 零训练批次** | A1 共变量偏移（6.4×/16.5×）；A2 硬上限未触发、repeat 最优 **0.778**；C1 FAIL；P1-3 FAIL | A3/A4 条件满足（§5.5） |
-| **Round-17 A3** | 确定性尾全线 succ **0**；同 ckpt chain **0.3533**（隔离=动作可持性）；远期链监督无有害证据；A1 复跑 learner 无改善 | **FAIL → round-18（§5.7）** |
+| **Round-15A 零训练批次** | A1 共变量偏移（6.4×/16.5×）；A2 硬上限未触发、repeat 最优 **0.778**；C1 FAIL；P1-3 FAIL | A3/A4 条件满足（§5.3） |
+| **Round-17 A3** | 确定性尾全线 succ **0**；同 ckpt chain **0.3533**（隔离=动作可持性）；远期链监督无有害证据；A1 复跑 learner 无改善 | **FAIL → round-18（§5.5）** |
 
 - **旁线**：D（dθ-only 0.728 / +2.2pp，V1=组合效应确认）；E（常态 μ 无系统性 bias、③ 升级证据弱）。均不改训练 target。
-- **终局**：条件轨已关闭（gate 无选择性）；**Round-15A → A3 已执行（§5.7）**：确定性尾在模型动作下崩塌（**动作可持性**）、远期链监督无有害证据、A4 按锁暂缓 ⇒ **转 round-18**（候选 a–d 见 §5.7）。
-- **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4/可持性实验待 round-18；禁制详见 §5.1/§5.6。
+- **终局**：条件轨已关闭（gate 无选择性）；**Round-15A → A3 已执行（§5.5）**：确定性尾在模型动作下崩塌（**动作可持性**）、远期链监督无有害证据、A4 按锁暂缓 ⇒ **转 round-18**（候选 a–d 见 §5.5）。
+- **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4/可持性实验待 round-18；禁制详见 §5.1/§5.4。
 
 ---
 
@@ -187,7 +187,7 @@
 - **RL 启动门（6 条）**：监督/混合基线 eval500 ≥0.60–0.65、当前动作确实决定执行、训练/评测同 PlanHead+LQR 口径、clipping<5%、LQR 饱和可控、value 能识风险。
 - **我方要点（存档）**：接受 + 认账（RL 排序：先修监督、RL 后置）；三条澄清（D1≈0=开环 / D2 差距三成分〔特权判断·参考尾形状·learner 偏移〕/ Track C 战略前提）；四条建议（A1/A2 先出数、尾族 oracle 预筛、落 phase3 `chain_step_weights` 机制、DAgger 归 Track A）；Go 条件联合解读（硬上限仅由 succ 明显低于 IDM 触发）。
 
-### 5.5 Round-15A 结果（全批次完成，2026-10-12 00:51）
+### 5.3 Round-15A 结果（全批次完成，2026-10-12 00:51）
 
 **A1 · 当前动作分层审计（判定树 → ① 共变量偏移 → DAgger）**
 - teacher-forced（canonical w>0，26,767 行）：MAE_ds **0.064 m** / MAE_dθ **0.0060 rad** / sign 错 3.1% / κ P90 0.0048；
@@ -220,9 +220,9 @@
 
 **请求（round-17）**：批准 **A3 开工（+A4 触发条件同理满足）**；确认 A2 四问判读；确认 decay 尾族关闭、`ld_margin_weight` 维持 0。
 
-### 5.6 对 round-17 的回应（`732ba96`）：**无异议，开工**——附 4 条落法澄清
+### 5.4 对 round-17 的回应（`732ba96`）：**无异议、开工**——附 4 条落法澄清
 
-- **接受其反驳（认账）**：§5.5-③"远期六步链拟合是历史主要损失之一"**降为待证假说**——A1 表明首步共变量偏移本身或已主导闭环退化；裁决工具 = **A3 同 encoder/数据/预算对照**（旧链监督 vs 当前动作+fixed tail），已并入批准范围。
+- **接受其反驳（认账）**：§5.3-③"远期六步链拟合是历史主要损失之一"**降为待证假说**——A1 表明首步共变量偏移本身或已主导闭环退化；裁决工具 = **A3 同 encoder/数据/预算对照**（旧链监督 vs 当前动作+fixed tail），已并入批准范围。
 - **落法 1（训练与尾选择解耦）**：训练一次（`L = L_current_action + λ_smooth·L_tail_smooth + λ_curv·L_delta_curvature`；**禁止**未来 5 步 regression / 未来专家态 traj target / 合成 traj6 / recovery traj loss；曲率项只做平滑、不得启用 `ld_line_margin_loss`）；推理期扫 **A3-R(1.00) / A3-V(1.15, 1.25)**（clean150 选向、**禁止扩扫**）；正则项按"构造尾链"计算时固定规范尾（或改对相邻动作平滑）并文档声明。
 - **落法 2（隔离与一致性）**：当前动作由**单一 head** 输出；WM/MoE 不参与尾部；tail=**纯函数**；**LQR reference 与导出 plan 逐位一致**（复用既有等价口径：单步逐位 + 整集 flags/终止全等 + |Δrc|≤1e-3）。
 - **落法 3（对照臂）**：标准六步链监督（1.00/0.80/0.60/0.40/0.25/0.15 权重），同 encoder/数据/预算；建议两臂从同一初始 ckpt（pri512@e020）匹配微调，留档理由。
@@ -230,7 +230,7 @@
 - **验收照锁**（A3 clean150：succ ≥0.50、off ≤0.35、coll ≤0.05、timeout ≤0.15、clipping<5%、steer 饱和不高于 A2 同尾族明显水平、teacher MAE 不恶化、learner 动作误差 ↓≥25%、plan/LQR 逐位一致；**<0.50 不做 A4**；A4 门=+5pp succ 等；eval500 ≥0.60 → 才谈 RL）。
 - **开工**：已派发 lane——A3-R/V + 对照臂（两臂训练）× 三尾 clean150 + 完整 probes + A1 审计复跑。
 
-### 5.7 Round-17 A3 结果（2026-10-12 08:49 报告）：**FAIL（决定性负结果）**
+### 5.5 Round-17 A3 结果（2026-10-12 08:49 报告）：**FAIL（决定性负结果）**
 
 **结果表（clean150；基线 pri512 0.3400/0.4933/0.0333）**
 
@@ -262,14 +262,14 @@
 - **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
 - **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a 脚本 + logs）
 - **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
-- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.5 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.6）、`f8169fd`（A3 配方开关）
+- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）
 
 ---
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
 - **第四轮精简（本版）**：§5.2–5.4（round-15/16 往来）压为 §5.2 补充存档、§5 标题对齐；改前版本 = `git show 58ac4c3:docs/deepseekv4p1_argue.md`（299 行版）。
-- **第三轮精简（原提交 `74f522f`，位于 `Planner_RL_copy`；已合入本分支）**：round-15/16 往来压缩为 §5.1 授权摘要、§5.3 要点化；§0/§6/§7 刷新。
+- **第三轮精简（原提交 `74f522f`，位于 `Planner_RL_copy`；已合入本分支）**：round-15/16 往来压缩为 §5.1 授权摘要、§5.2 补充存档；§0/§6/§7 刷新。
 - **第二轮精简（262 → ~210 行）移除**：round-12/13/14 往来全文（原 §7/§8）、round-12 请求（原 §4）、12A 原 §9（并入 §4）；全文见 `git show 249c51c:docs/deepseekv4p1_argue.md`（262 行版）。
 - **第一轮精简（1114 → 166 行）移除**：§0.9 收拢细节、§1–§4 早期草案、§5/§6 详表、§7.1–7.11 回合全文、§9–§11 原文、附录 A/B；全文见 `git show 7b83730:docs/deepseekv4p1_argue.md`（1114 行版）。
 - **压缩时间线**：
