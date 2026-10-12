@@ -1,9 +1,9 @@
-# deepseek-v4.1 argue / 主文档（Round-20 收官 · 转数据侧 · round-21 输入）
+# deepseek-v4.1 argue / 主文档（Round-22 Outcome D · R21-0..2 门全过 · R21-3 待批）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核撤回"穷举"（§5.11）；round-22 Outcome D（§5.13）；**R21-0..2 完成且门全过（§5.14）——定位 pooling 丢失为主 + 监督不足 + history shortcut ⇒ 下一步=显式接线 + 复测（R21-3 待批）**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ **round-21 复核：M2 接线缺口 ⇒ 撤回"穷举"；修正版 M2a/M2b 待跑（§5.11）**。
-> **本版说明**：第六轮精简（342 → 261 行）+ round-21/22 与 R21-0..2 新增 §5.11/§5.13/§5.14（2026-10-13 凌晨）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ **R21-0..2 门全过；待 R21-3 批准（§5.14）**。
+> **本版说明**：第七轮精简（305 → ~280 行）：§5.11/§5.12 压为残档、§5.8/§5.5/§7 收缩、§0 补行；**当前状态=Round-22 Outcome D + R21-0..2 全过（§5.14）**；改前 305 行 = `git show bd7c0b8:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -20,11 +20,12 @@
 | **Round-12A 诊断** | 15 配置全未过九条件；**gate 无选择性**；后端 6/40 集翻转 | **NO-GO → 主线关闭** |
 | **Round-15A 零训练批次** | A1 共变量偏移（6.4×/16.5×）；A2 硬上限未触发、repeat 最优 **0.778**；C1 FAIL；P1-3 FAIL | A3/A4 条件满足（§5.3） |
 | **Round-17 A3** | 确定性尾全线 succ **0**；同 ckpt chain **0.3533**（隔离=动作可持性）；远期链监督无有害证据；A1 复跑 learner 无改善 | **FAIL → round-18（§5.5）** |
-| **Round-18A+20（LD 结构）** | 伪边输出层惰性；M1 +2.67pp 无净胜；几何响应仅 oracle **2–4%**；M2 set-attn 崩（0.0）——**但 M2 未接 PlanHead 主路径（§5.11）** | **修正版 M2a/M2b 待跑；数据侧=条件分支** |
+| **Round-18A+20（LD 结构）** | 伪边输出层惰性（置换不变）；M1 +2.67pp 无净胜；几何响应仅 oracle **2–4%**；M2 实为"未接 PlanHead"的接线缺口（§5.11） | → 修正版四臂（§5.13） |
+| **Round-22 + R21-0..2** | 四臂 Outcome D（α≈1.3%、近均匀、几何响应未达 5×；e002 回落）；R21 三阶段门全过——**定位 pooling 丢失为主 + 监督不足 + history shortcut** | **下一步=显式接线 + 复测（R21-3 待批，§5.14）** |
 
 - **旁线**：D（dθ-only 0.728 / +2.2pp，V1=组合效应确认）；E（常态 μ 无系统性 bias、③ 升级证据弱）。均不改训练 target。
-- **终局**：条件轨已关闭（gate 无选择性）；A3 判负（**动作可持性**）；Round-18A/20 + §5.11 复核：M2 接线缺口使"模型侧穷举"不成立 ⇒ **下一动作=修正版 M2a/M2b 决定性实验（零新数据）；fail → R21 语义重建（条件分支）**。
-- **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4/可持性/数据侧重采待 round-21；禁制详见 §5.1/§5.4/§5.10。
+- **终局**：条件轨已关闭；A3 判负（**动作可持性**）；round-22 四臂 Outcome D ⇒ LD 架构排摸结束；**R21-0..2 全过（定位 pooling 丢失为主 + 监督不足 + history shortcut）⇒ 下一步=显式接线 + 复测（R21-3 待批，§5.14）**。
+- **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
 ---
 
@@ -161,10 +162,9 @@
 
 - **门**（A3 最优尾 R）：succ ✗ / off ✗ / learner-误差 ✗（ds **−6.0% 恶化**）/ steer-饱和 ✗（5.1–7.5× oracle）；coll / tmo / clipping / teacher-MAE / plan-逐位 ✓ ⇒ **判负；A4 按锁定不启动**（仅记录契约）。
 - **同 ckpt 隔离（关键）**：A3 ckpt——chain 模式 **0.3533** vs 确定性尾 **0.0000** ⇒ 瓶颈 = **动作可持性（holdability）**，非尾形、非监督配方。
-- **对照裁决**：A3+chain 0.3533 ≈ 对照+chain 0.3267 ≈ 基线 0.3400 ⇒ **远期六步链监督"无害亦无明显收益"**——round-15 的"远期链=历史主损"假说**未获实证**（方向受挫）。
+- **对照裁决**：A3+chain 0.3533 ≈ 对照+chain 0.3267 ≈ 基线 0.3400 ⇒ **远期六步链监督"无害亦无明显收益"**（round-15 假说未获实证）；等价核验 100/100 + |Δrc|=5e-5、oracle 尾族与 A2 旧账一致 ⇒ **负结果非工具伪影**。
 - **A1 复跑**：A3 ckpt teacher ds 0.0553（↓13%）但 learner 态无改善（ds 0.4308，**+6%**）⇒ 共变量偏移缺口**未被"专家数据上的当前动作 BC"触及**（强化 DAgger 结论）。
 - **机制（trace）**：模型 mu 的 dθ 在直道态即抖 ±0.09–0.23 rad（≈ learner 态 dθ MAE 0.097）；repeat 3s → LQR 预瞄成紧弯 → steer 饱和 0.69（oracle 0.14）→ 10–20 决策步内甩出。**学习链在 chain 模式下充当"执行噪声缓冲"**（尾部衰减/平滑使执行可行）——原设计的学习尾在执行稳健性上有实质功能。
-- **工具可信度**：等价核验 **100/100 flags/终止全等 + |Δrc|=5e-5 + plan0/ref 失配 0**；oracle 尾族 0.687/0.747/0.780 与 A2 eval500 旧账一致 ⇒ **负结果非工具伪影**。
 - **新认识与去向**：① **动作可持性是被忽视的独立属性**（专家天生 dθ≈0；模型不具备）；② 六步链或主要承担**执行噪声缓冲**；③ learner 态数据缺口仍是第一瓶颈（A1 复跑确认）。round-18 候选 a–d（可持性约束重跑 / 重议 A4 / 接受 chain 缓冲 / obs 改造）→ 由 round-18 裁决 probe-first（§5.6）；生产改动提交 `f8169fd`（默认关 + 7 单测）。
 
 ### 5.6 round-18 往来残档（`95f23b0`；已并入执行）
@@ -190,20 +190,15 @@
 | 反事实 | Δmu_dθ | latent 相对 | 判读 |
 |---|---|---|---|
 | zero_ld | **0.0153** | 0.32 | LD 必要性 ✓ |
-| straighten | 0.0005 | 0.007 | 极弱 |
 | **translate ±1m / rotate ±10°** | **±0.002 / ±0.0026（≈0.1–0.15°）** | 0.02–0.03 | **符号正确、单调，但比合理量级小 ~50×** |
-| remove_prev_action | 0.0024 | 0.139 | 弱 |
+| straighten / remove_prev / 镜像 | 0.0005 / 0.0024 / 等变率 0–0.2% | — | 极弱；镜像不闭合（需 env 级定论） |
 | **zero_history** | **0.0134（几何响应 5–7×）** | 0.71 | **转向由动力学/历史主导** |
-| 镜像（tensor 级） | 等变率 0–0.2% | — | 不闭合（需 env 级+OD 身份定论） |
 | primary_only vs full | ≈同（0.0196 vs 0.0153） | — | experts 关不降级 ✓ |
 - B 解码：curvature 可解（R² 0.52/0.58）✓；lat/heading/边界距 R² 负（跨 episode 标签方差主导，需 episode 内归一化/分类化重做）。
 
 **分支判定（report.json）**：`input_topology`=缺陷（伪边 76.5%+缺 lane 4.9%+抖动 8.2%）⇒ **最小语义特征路线**（fingerprint 变更 ⇒ 需重采）；`primary_response`=弱 ⇒ 同时支持**显式池化（target/adjacent/boundary）**设计。
 
-**我方综合（供 round-20）**：
-- **修复阶梯（先模型侧、后数据侧）**：**a. 模型侧（无重采）**：关闭/按语义重建 LD-LD 邻接（`spatial.py:103-106`）+ 显式池化替换全槽均值（`model.py:505-507`）+（可选）几何响应辅助监督——数据可复用、只需重训；**b. 数据侧（需重采）**：最小语义特征（target_lane flag/lane_id/offset idx/route assoc/侧偏/航向差/曲率）——fingerprint 变更、全量重采。0B 显覆盖非主缺口 ⇒ 先 a 后 b（执行见 §5.9/§5.10：**a 已穷举关闭，b 为现行路线**）。
-- **坑（必带）**：① **模型消费 LD 走 `ld_hist[:, -1]`**——任何 LD 干预必须同时改该通道（否则假 0）；② 镜像不闭合=现象、结论待 env 级；③ 网格符号度量为口径 bug（真实符号由反事实均值证正确）；④ B 解码仅 curvature 可用；⑤ `a3/primary_only` 组合缺（3/4，模式同 pri512/primary_only）；⑥ 0C 非因果。
-- **纪律**：零训练 ✓；net/pipeline 零改动 ✓（primary_only 复用 `set_moe(enabled=False)`）；`ld.py` 仅默认关旁路（fingerprint 不变、2 单测过）✓；已提交（见 git log）。
+**我方综合（去向：已全部执行）**：修复阶梯 a（模型侧，无重采）=关链/显式池化/可选几何监督 → 由 round-20/22 穷举关闭；b（数据侧，需重采）=最小语义特征 → R21 已落地（§5.14）。**坑（长期有效）**：① 模型消费 LD 走 `ld_hist[:, -1]`——LD 干预须六帧一致；② 网格符号度量为口径 bug（真实符号由反事实均值证正确）；③ 0C 非因果（共现/暴露因子）。**纪律**：零训练、net/pipeline 零改动、`ld.py` 仅默认关旁路（已提交）。
 
 ### 5.9 round-20 往来残档（`37ee932`；已并入执行）
 
@@ -226,31 +221,17 @@
 - **坑（必带）**：① M2 载入必须"先 `set_ld_mode` 再 load"（fail-fast 首跑踩中；修后得真实崩塌数）；② oracle=解析近似（env 级 expert 重放仍缺口；静止态限定 v≥2）；③ **离线 loss 不预示闭环保崩**（M2 val 仅差 ~9%、闭环 0→崩——离线不可作架构选择依据）；④ 终版结构探针未含 A3（仅 20 样冒烟）；⑤ 峰值 RSS 未埋点（缺口）。
 - **综合（Round-18A+20 收敛）**：瓶颈=**几何响应量级（~50× 过弱）+ 动作基噪声（5×）**——均指向**数据/监督侧**而非 LD 接线；架构侧 LD 修复已被穷举（伪边惰性、M1 无净胜、M2 反而崩）。
 - **纪律/提交**：默认关+惰性构造（既有 ckpt 键集不变）✓；5 新测试 + 组合 **99 passed** ✓；M3/数据侧重采/A4 均未启动；生产改动（`net/spatial.py`/`net/model.py`/`pipeline/stages.py` + 测试）提交见 git log。
-- **下一步（供 round-21）**：数据侧路线立项——**最小语义特征**（target_lane flag/lane_id/offset idx/route assoc/侧偏/航向差/曲率；obs fingerprint 变更 ⇒ **需重采**）+（M3）几何响应辅助监督（标签须先过可靠性）→ 重训 → 结构门复测 → 闭环保。**请求 round-21**：确认转数据侧范围与重采规模；M1 小正向（coll 降）是否纳入后续配方；环境级 expert 对照列入数据侧计划。
+- **下一步（供 round-21；已被 §5.11–5.14 覆盖）**：数据侧路线（最小语义特征，fingerprint 变更 ⇒ 重采）+（可选）M3 几何辅助；M1 小正向纳入评估。
 - **更正（round-21 代码复核，见 §5.11）**：M2 的 attended context 仅流入 policy/value tokens——`plan_step`（`net/model.py:534-536`）恒用 `masked_mean`，PlanHead（t0/rollout 全步）**从未收到 attended 读出**；且 M2 一次改 3 个变量（关链 + LD 全排除 MP + 随机初始化 attention）⇒ **"M2 崩 = set-attention 无效"与"停 LD 架构"两处结论撤回**；M1 保留为低成本选项。
 
-### 5.11 round-21 代码复核与立场（2026-10-12 深夜）
+### 5.11 round-21 代码复核残档（`ed9637d` 前轮；已并入执行）
 
-**核验结论：round-21 的核心指控成立**（"M2 没有接到 PlanHead 主路径"）：
-- `plan_step`（`net/model.py:534-536`）无条件 `masked_mean(z_ld)`、不读 `ld_mode`；net 内 `plan_head(` 唯一调用点即此 ⇒ **PlanHead 全路径（t0 `encode:666`、rollout `:848`）恒用 LD 均值**；M2 的 attended 读出只进 `_head_tokens`（`:682-683`）→ policy/value（rollout `:852-867` 复用 t0 存储值）。
-- `set_ld_mode('set_attn')`（`:396-397`）一次改三变量：关 LD-LD 链 + `exclude_ld_nodes=True`（LD 全排除 MP、输出直通原始特征，`net/spatial.py:188-198`）+ 随机初始化 attention——**非单变量消融**。
-- `LdSetAttention`（`net/spatial.py:61-87`）无 gate/residual/对齐初始化；all-invalid 行 MHA 后 `torch.where` 掩零 ⇒ **反向 NaN 风险**（NaN×0），现有单测仅前向。
-- **过程教训（测试缺口）**：round-20 五个单测（直通/槽序不变/全 mask=0…）均无"**PlanHead 消费契约**"（改 attention 输出 ⇒ plan steps 必变）；规范要求"注入 PlanHead"，实现只注入 head tokens，验收未逐行比对 `plan_step`。**此后"替换 X"类断言必须配消费测试。**
-⇒ **§5.10 的"模型侧已穷举 / 停 LD 架构"撤回**（认账；M2 既非单变量、也未测靶假设）。
+- **核心指控成立**：`plan_step`（`net/model.py:534-536`）恒 `masked_mean`、net 内 `plan_head(` 唯一调用点 ⇒ PlanHead 全路径（t0/rollout）恒用均值——M2 的 attended 读出只进 `_head_tokens`→policy/value；`set_attn` 一次改 3 变量（关链+LD 全排除 MP+随机初始化）、无 gate/初始化、全灭反向 NaN 风险；5 单测无"PlanHead 消费"契约 ⇒ **§5.10"穷举/停 LD 架构"撤回**。
+- **立场（已全案批准）**：先 **M2a/M2b** 修正阶梯（统一 `aggregate_ld`、α=0 逐位、4 契约测试、clean150 门）；R21 语义重建为 **fail 分支预备案**（禁 raw lane_id、拆分 ego/route/legal 标志、route 优先·ego 兜底）。**教训：此后"替换 X"类断言必须配消费测试。**——执行结果见 §5.13/§5.14。
 
-**立场**：
-- **同意 round-21 第一部分**：**M2a**（保留 MP，仅把 PlanHead 读出改为 ego/nav 条件化 set-attention：统一 `aggregate_ld()` 供 t0/rollout/policy 一致消费；`ld_context = mean + α·attn`、初始逐位=baseline）→ **M2b**（M2a + 关 LD-LD 链，单变量）→ M2c（绕 MP）后置；4 契约测试（消费/无隐藏均值/全灭 fwd-bwd 有限/α=0 逐位=baseline）；clean150 门（vs 同批 M0：succ ≥+5pp、off −7~10pp、coll 不恶化、tmo ≤+3pp、饱和降、几何响应显著升）；**clean150 不过门（或过门后 eval500<0.45）→ 才批准全量重采**。
-- **不同意第二部分"不再试 set-attention、直接语义重建"**：其前提建立在接线错误的多变量 M2 上（且与第一部分自相矛盾）。**修正版 M2a/M2b 是最便宜的决定性实验（零新数据、一 session）**；机制与语义互补——M2a 验"条件化选择读出"机制本身，阳性则后续语义重建可复用该机制，阴性则"重采与机制无关"的结论更坚实。第二部分的 R21-0..5（契约→pilot→表示门→Primary-only→DAgger）**作为 fail 分支预备案采纳**（含：禁 raw lane_id 数值输入、拆分 ego/route/legal 标志、target lane=route 优先·ego.lane 仅兜底；R21-1 受控 lane-relative 扰动的 env 级可行性=数据侧启动第一审查项）。
-- **我方补充**：① 平滑初始化二选一——α=0 门控+监控 α/attention 范数，或末层零初始化+α 可学习（防"门未开=无效"误判；训练后须报告 α 与 attention 输出范数）；② M1 保留为低成本候选（+2.67pp、coll −2.67pp）；③ M2a/M2b 与 M0/M1 进同一 clean150 门表（四臂同批）。
+### 5.12 round-22 裁决残档（`ed9637d`；已并入执行）
 
-**请求（round-22）**：确认合并方案（先 M2a/M2b 决定性实验、预注册门；fail → 启动第二部分 R21 语义重建阶段化）；确认第二部分设计约束归入条件分支。
-
-### 5.12 round-22 裁决：**批准四臂决定性实验（M0/M1/M2a/M2b）——已开工**
-
-- **批准范围**：**M2a**（`aggregate_ld()` 仅替换 pooled LD summary——`plan_step` 融合与 head-token summary；**per-slot token/WM/OD/损失/参数预算不变**；`ld_summary = mean + α·attn`、α₀=0、query=ego+nav 条件化、单层）→ **M2b**（+仅关 LD-LD 链）；**M0/M1 同批重训**；Gate A 契约（α=0 逐位/无隐藏均值/全灭 fwd-bwd 有限/attention 实更新/严格加载）→ Gate B 机制（α 离开 0、非均匀、translate/rotate ≥5× M0、zero_history/lane 敏感度比 ↓≥50%）→ clean150 开发门（succ ≥+5pp、off ≤−5pp、coll ≤+2pp、tmo ≤+3pp、steer_sat ↓≥20% 相对、非孤立）→ 过门 eval500 ≥0.45。
-- **边界（预注册）**：限一个 session、不加第五臂、不扫超参、不动数据/MoE/WM、M2c 不批；**失败 → 自动转 R21-0..2 语义重建**（不再重复争论）；DAgger 冻结条件维持（Primary 响应正确 ∧ target 表示稳 ∧ clean150 ≥0.50 ∧ teacher 低 ∧ learner 高）。
-- **我方操作注记**：① Gate B"target/current/continuation 槽位权重"以 **same-lane-as-ego 槽位**为可用代理（无 target-lane 标签，不得过度声称）；② M0/M1 重训以保"同批"零代码状态差（并与旧 ckpt 比对报数）；③ α 门控下 attention 参数在 α≠0 后才获梯度——以 α 轨迹/update 报告为证；④ 评测需"先 set_ld_mode 再 load ckpt"（round-20 坑）。
-- **开工**：Round-22 lane 已派发（复用 round-20 lane session；零新数据；产物 `runs/p1_v2/round22/`）。
+- 批准 **M0/M1/M2a/M2b 四臂 + Gate A/B + clean150/eval500 门**（限 1 session；无第五臂/M2c/超参；失败自动转 R21）；我方注记：same-lane-as-ego 代理、M0/M1 重训保同批、α 梯度时序、先 set_ld_mode 再 load。——**结果见 §5.13**。
 
 ### 5.13 Round-22 结果（2026-10-12 23:0x）：**Outcome D——M2a/M2b 未过开发门 → 按预注册转 R21 语义重建**
 
@@ -288,12 +269,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第六轮精简（本版；342 → 261 行）**：§3/§4 执行细节压缩，§5.3/§5.5/§5.9 收缩，§0 补 Round-18A+20 行，§6/§7 刷新；改前版本 = `git show e638b76:docs/deepseekv4p1_argue.md`（342 行版）。
-- **第五轮精简**：§5.4/5.6/5.7 往来压为残档；改前 355 行 = `git show 96df7cb:docs/deepseekv4p1_argue.md`。
-- **第四轮精简（299 → 282 行）**：§5.2–5.4 往来压为补充存档、§5 编号顺延（5.5/5.6/5.7→5.3/5.4/5.5，后经轮次自然演化为现编号）；改前 299 行 = `git show 58ac4c3:docs/deepseekv4p1_argue.md`。
-- **第三轮精简（原提交 `74f522f`，位于 `Planner_RL_copy`；已合入本分支）**：round-15/16 往来压缩为 §5.1 授权摘要、§5.2 补充存档；§0/§6/§7 刷新。
-- **第二轮精简（262 → ~210 行）移除**：round-12/13/14 往来全文（原 §7/§8）、round-12 请求（原 §4）、12A 原 §9（并入 §4）；全文见 `git show 249c51c:docs/deepseekv4p1_argue.md`（262 行版）。
-- **第一轮精简（1114 → 166 行）移除**：§0.9 收拢细节、§1–§4 早期草案、§5/§6 详表、§7.1–7.11 回合全文、§9–§11 原文、附录 A/B；全文见 `git show 7b83730:docs/deepseekv4p1_argue.md`（1114 行版）。
+- **第七轮精简（本版；305 → ~280 行）**：§5.11/§5.12 压为残档（结果在 §5.13/§5.14）、§5.8/§5.5/§7 收缩、§0 补 Round-22+R21 行；改前 305 行 = `git show bd7c0b8:docs/deepseekv4p1_argue.md`。
+- **历次精简留档**：第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`，`Planner_RL_copy`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
 - **压缩时间线**：
   - 2026-10-09：round-1/2 收拢；《评测兼容设计》落 `docs/p0_eval_compat_design.md`；
   - 2026-10-09/10：P0 三件套 → P0-B 矩阵 + P0-C 归因 → 审计定稿（§2.1）；
@@ -302,4 +279,5 @@
   - 2026-10-11：round-9/10 定板（§3.1）→ P1-v2 三步（§3.2–3.4）+ 旁线 D/E（§3.5）；
   - 2026-10-11 晚：round-12/13/14 讨论（§4.1）→ **Round-12A 执行与 NO-GO（§4.2–4.5）**；
   - 2026-10-11 深夜–10-12：round-15/16/17 讨论与执行（§5.1–5.7）：Round-15A 全批次 → **A3 执行/判负 → round-18**；
-  - 2026-10-12：round-18/19/20（§5.6–5.10）：Round-18A probe+审计 → round-20 M0-M2 消融+因果探针 → **停 LD 架构、转数据侧（round-21 输入）**。
+  - 2026-10-12：round-18/19/20（§5.6–5.10）：Round-18A probe+审计 → round-20 M0-M2 消融+因果探针 → **停 LD 架构、转数据侧（round-21 输入）**；
+  - 2026-10-12 深夜–10-13 凌晨：round-21 复核 → round-22 四臂（Outcome D）→ **R21-0..2 三阶段门全过**（§5.11–5.14）。
