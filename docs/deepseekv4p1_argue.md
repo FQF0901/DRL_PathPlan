@@ -1,9 +1,9 @@
 # deepseek-v4.1 argue / 主文档（Round-20 收官 · 转数据侧 · round-21 输入）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/Round-18A 递进（§5.3/5.5/5.8）；**Round-20 完成：M1 无净胜、M2 崩 ⇒ 预注册触发——停 LD 架构精修、转数据侧（§5.10）**；请求 round-21 立项数据侧（最小语义特征+重采+M3）；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ **Round-20 结果：停 LD 架构、转数据侧（§5.10）**。
-> **本版说明**：第六轮精简（342 → 261 行）：§3/§4 执行细节与 §5.3/§5.5/§5.9 压缩、§0/§6/§7 刷新；改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
+> **状态（2026-10-12 深夜）**：P1-v2 条件轨已关闭（Round-12A NO-GO）；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；**round-21 代码复核：Round-20 的 M2 未接 PlanHead 主路径（§5.11）⇒ "模型侧穷举/停 LD 架构"撤回；下一动作=修正版 M2a/M2b 决定性实验（零新数据）；数据侧=R21 条件分支（失败后启动）**；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ **round-21 复核：M2 接线缺口 ⇒ 撤回"穷举"；修正版 M2a/M2b 待跑（§5.11）**。
+> **本版说明**：第六轮精简（342 → 261 行）+ round-21 复核新增 §5.11（2026-10-12 深夜）；第六轮改前 342 行 = `git show e638b76:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -20,10 +20,10 @@
 | **Round-12A 诊断** | 15 配置全未过九条件；**gate 无选择性**；后端 6/40 集翻转 | **NO-GO → 主线关闭** |
 | **Round-15A 零训练批次** | A1 共变量偏移（6.4×/16.5×）；A2 硬上限未触发、repeat 最优 **0.778**；C1 FAIL；P1-3 FAIL | A3/A4 条件满足（§5.3） |
 | **Round-17 A3** | 确定性尾全线 succ **0**；同 ckpt chain **0.3533**（隔离=动作可持性）；远期链监督无有害证据；A1 复跑 learner 无改善 | **FAIL → round-18（§5.5）** |
-| **Round-18A+20（LD 结构）** | 伪边输出层惰性（置换不变；M1 +2.67pp 无净胜）；几何响应仅 oracle **2–4%**；M2 set-attn **崩（0.0）** | **停 LD 架构 → 转数据侧（§5.10）** |
+| **Round-18A+20（LD 结构）** | 伪边输出层惰性；M1 +2.67pp 无净胜；几何响应仅 oracle **2–4%**；M2 set-attn 崩（0.0）——**但 M2 未接 PlanHead 主路径（§5.11）** | **修正版 M2a/M2b 待跑；数据侧=条件分支** |
 
 - **旁线**：D（dθ-only 0.728 / +2.2pp，V1=组合效应确认）；E（常态 μ 无系统性 bias、③ 升级证据弱）。均不改训练 target。
-- **终局**：条件轨已关闭（gate 无选择性）；A3 判负（**动作可持性**）；Round-18A/20 穷举 LD 架构侧（伪边输出层惰性、M1 无净胜、M2 崩）⇒ **停 LD 架构、转数据侧**——待 round-21 立项（§5.10）。
+- **终局**：条件轨已关闭（gate 无选择性）；A3 判负（**动作可持性**）；Round-18A/20 + §5.11 复核：M2 接线缺口使"模型侧穷举"不成立 ⇒ **下一动作=修正版 M2a/M2b 决定性实验（零新数据）；fail → R21 语义重建（条件分支）**。
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4/可持性/数据侧重采待 round-21；禁制详见 §5.1/§5.4/§5.10。
 
 ---
@@ -227,6 +227,23 @@
 - **综合（Round-18A+20 收敛）**：瓶颈=**几何响应量级（~50× 过弱）+ 动作基噪声（5×）**——均指向**数据/监督侧**而非 LD 接线；架构侧 LD 修复已被穷举（伪边惰性、M1 无净胜、M2 反而崩）。
 - **纪律/提交**：默认关+惰性构造（既有 ckpt 键集不变）✓；5 新测试 + 组合 **99 passed** ✓；M3/数据侧重采/A4 均未启动；生产改动（`net/spatial.py`/`net/model.py`/`pipeline/stages.py` + 测试）提交见 git log。
 - **下一步（供 round-21）**：数据侧路线立项——**最小语义特征**（target_lane flag/lane_id/offset idx/route assoc/侧偏/航向差/曲率；obs fingerprint 变更 ⇒ **需重采**）+（M3）几何响应辅助监督（标签须先过可靠性）→ 重训 → 结构门复测 → 闭环保。**请求 round-21**：确认转数据侧范围与重采规模；M1 小正向（coll 降）是否纳入后续配方；环境级 expert 对照列入数据侧计划。
+- **更正（round-21 代码复核，见 §5.11）**：M2 的 attended context 仅流入 policy/value tokens——`plan_step`（`net/model.py:534-536`）恒用 `masked_mean`，PlanHead（t0/rollout 全步）**从未收到 attended 读出**；且 M2 一次改 3 个变量（关链 + LD 全排除 MP + 随机初始化 attention）⇒ **"M2 崩 = set-attention 无效"与"停 LD 架构"两处结论撤回**；M1 保留为低成本选项。
+
+### 5.11 round-21 代码复核与立场（2026-10-12 深夜）
+
+**核验结论：round-21 的核心指控成立**（"M2 没有接到 PlanHead 主路径"）：
+- `plan_step`（`net/model.py:534-536`）无条件 `masked_mean(z_ld)`、不读 `ld_mode`；net 内 `plan_head(` 唯一调用点即此 ⇒ **PlanHead 全路径（t0 `encode:666`、rollout `:848`）恒用 LD 均值**；M2 的 attended 读出只进 `_head_tokens`（`:682-683`）→ policy/value（rollout `:852-867` 复用 t0 存储值）。
+- `set_ld_mode('set_attn')`（`:396-397`）一次改三变量：关 LD-LD 链 + `exclude_ld_nodes=True`（LD 全排除 MP、输出直通原始特征，`net/spatial.py:188-198`）+ 随机初始化 attention——**非单变量消融**。
+- `LdSetAttention`（`net/spatial.py:61-87`）无 gate/residual/对齐初始化；all-invalid 行 MHA 后 `torch.where` 掩零 ⇒ **反向 NaN 风险**（NaN×0），现有单测仅前向。
+- **过程教训（测试缺口）**：round-20 五个单测（直通/槽序不变/全 mask=0…）均无"**PlanHead 消费契约**"（改 attention 输出 ⇒ plan steps 必变）；规范要求"注入 PlanHead"，实现只注入 head tokens，验收未逐行比对 `plan_step`。**此后"替换 X"类断言必须配消费测试。**
+⇒ **§5.10 的"模型侧已穷举 / 停 LD 架构"撤回**（认账；M2 既非单变量、也未测靶假设）。
+
+**立场**：
+- **同意 round-21 第一部分**：**M2a**（保留 MP，仅把 PlanHead 读出改为 ego/nav 条件化 set-attention：统一 `aggregate_ld()` 供 t0/rollout/policy 一致消费；`ld_context = mean + α·attn`、初始逐位=baseline）→ **M2b**（M2a + 关 LD-LD 链，单变量）→ M2c（绕 MP）后置；4 契约测试（消费/无隐藏均值/全灭 fwd-bwd 有限/α=0 逐位=baseline）；clean150 门（vs 同批 M0：succ ≥+5pp、off −7~10pp、coll 不恶化、tmo ≤+3pp、饱和降、几何响应显著升）；**clean150 不过门（或过门后 eval500<0.45）→ 才批准全量重采**。
+- **不同意第二部分"不再试 set-attention、直接语义重建"**：其前提建立在接线错误的多变量 M2 上（且与第一部分自相矛盾）。**修正版 M2a/M2b 是最便宜的决定性实验（零新数据、一 session）**；机制与语义互补——M2a 验"条件化选择读出"机制本身，阳性则后续语义重建可复用该机制，阴性则"重采与机制无关"的结论更坚实。第二部分的 R21-0..5（契约→pilot→表示门→Primary-only→DAgger）**作为 fail 分支预备案采纳**（含：禁 raw lane_id 数值输入、拆分 ego/route/legal 标志、target lane=route 优先·ego.lane 仅兜底；R21-1 受控 lane-relative 扰动的 env 级可行性=数据侧启动第一审查项）。
+- **我方补充**：① 平滑初始化二选一——α=0 门控+监控 α/attention 范数，或末层零初始化+α 可学习（防"门未开=无效"误判；训练后须报告 α 与 attention 输出范数）；② M1 保留为低成本候选（+2.67pp、coll −2.67pp）；③ M2a/M2b 与 M0/M1 进同一 clean150 门表（四臂同批）。
+
+**请求（round-22）**：确认合并方案（先 M2a/M2b 决定性实验、预注册门；fail → 启动第二部分 R21 语义重建阶段化）；确认第二部分设计约束归入条件分支。
 
 ---
 
