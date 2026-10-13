@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（R26：Q1 全面生效 · teacher/sat 未闭合+停止 · round-27 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 下午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；round-25 R25（§5.19–5.20）；**round-26 R26：Q1 全面优于 Q0（pert/learner MAE −50%+、Δp99× ≤1.25 ✓、mirror ✓、calib50 0.50 vs legacy 0.40）——但硬门仍未全过（teacher +40~44%、sat +14.5pp）⇒ 按预注册停止+定位（§5.22）；待 round-27**；正式采集/DAgger/MoE/RL 仍冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）。
+> **状态（2026-10-13 傍晚）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；round-25/26 R25/R26（Q1 全面生效；teacher/sat 未闭合）（§5.19–5.22）；**round-27 批准 R27（27A 饱和归因 + 27B N0/N1/C 残差分解 + R0/R1 条件 preservation + 归因驱动 trackability 正则）——已开工（§5.23）；正式采集/DAgger/MoE/RL 仍冻结**。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）→ **round-27：R27 批准开工（§5.23）**。
 > **本版说明**：第十一轮精简（269 → 261 行）：§5.21 并入残档、§5.20/5.18/5.16 收缩、§0 表合并 Steps 行并补 R26 行、§6/§7 更新；**当前状态=R26：Q1 全面生效（calib50 0.50 vs 0.40、Δp99 ≤1.25、mirror ✓）、teacher/sat 未闭合+停止（§5.22）、round-27 待裁**；改前 269 行 = `git show 9c6a3a2:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -25,7 +25,7 @@
 | **Round-25（R25）** | Gate A 全过（β=0 逐位）；**P1 首现闭环超 legacy：succ 0.400（+7.3pp）/ off 0.347（−20.7pp）**；B/C/D 未全过（mirror-lat 0.891、teacher +57%、tmo +14pp、sat 0.894）；**修复 R21-1 遗留 B 行标签错配（corr −0.156→+0.606）** | → R26（§5.21–5.22） |
 | **Round-26（R26）** | 26A 数据 ✅（v1 暴露 0）；**Q1 全面优于 Q0：pert −53.6% / learner −51.5%、Δp99× 1.017、mirror ✓、calib50 0.50 vs 0.40**；硬门未全过（**teacher +43.7%、sat +14.5pp**） | **停止+定位：teacher 保持性 + 饱和 → 待 round-27（§5.22）** |
 
-- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ R25 首现超 legacy（+7.3pp / off 减半）→ **R26 Q1 全面生效（calib50 0.50 vs 0.40、Δp99× ≤1.25、mirror ✓；pert/learner −50%+）——teacher 保持性 + steer 饱和尚未闭合 ⇒ 停止+定位，待 round-27（§5.22）**。
+- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ R25 首现超 legacy（+7.3pp / off 减半）→ R26 Q1 全面生效（calib50 0.50 vs 0.40、Δp99× ≤1.25、mirror ✓）——teacher 保持性 + steer 饱和未闭合 ⇒ **round-27 批准 27A 归因 / 27B 分解 / R0-R1（条件 preservation + 归因驱动 trackability）已开工（§5.23）**。**收敛一句话：lane semantic 四层（表示/采用/幅度/对称性）中前三层已正证，仅剩 normal-state preservation 与 plan-level trackability 未闭合。**
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
 ---
@@ -226,6 +226,15 @@
 - **未闭合两项（定位）**：① **teacher-state 保持性**（正常驾驶仍被扰动 +40~44%——"零修正"约束不足）；② **steer 饱和**（0.949 vs 0.804，+14.5pp）。候补方向（未执行，需 round-27 批准）：**teacher 态零修正强约束 + 饱和感知阻尼**。
 - **坑**：eval_a3/gate_c 默认 MoE=on 与语义臂训练口径（MoE off）不一致 ⇒ 加 `--moe-off` 诊断（结论不变）；R25 独立集 expert 分母索引误用（已修）；semantic_off 的 plan 基底须用 z_ld（β=0 非零 4.6e-4，已修）。
 - 产物：`runs/p1_v2/round26/`（契约/标签/限额/legacy 动作/Q0/Q1/8×calib/gate C on·off/report）；**待 round-27（teacher/sat 两闭合项）**。
+
+### 5.23 round-27 裁决：**批准 Round-27（27A 饱和归因 + 27B N0/N1/C 残差分解 + R0/R1；条件 preservation + 归因驱动 trackability 正则）——已开工**
+
+- **核验（成立）**：residual 监督走 `mu_on − mu_off.detach()`、legacy 基底冻结（梯度只落语义路径）✓；target token 折叠/static_role_only/β 保留 ✓；N0/N1/C 分类拟放 trainer/dataset 层（不进 forward）✓。
+- **接受更深根因**：teacher 恶化四机制（A 正常态 residual 目标非真零 / B 正常数据上过度激活 / C 覆写 legacy+chain 的闭环补偿习惯 / D 分布不平衡）⇒ **禁止全局"teacher 零修正"强压**（须保住 N1 小偏差修正，否则 off-road 收益会丢）；**saturation 六机制须先归因**（首步/尾段/Δκ/重规划抖动/low-ds-high-dθ/场景必要；门 **≥90% 可归类**）——**无归因不得设计新饱和 loss**。
+- **Round-27 范围**：**27A 零训练归因**（Q1+legacy 同 episode 逐步遥测：mu/Δ/plan[0:6]/κ/Δκ/LQR ref/raw·clipped steer/误差/速度；输出首步/尾段占比、成功集·off 前·tmo 前饱和率、按路型分层）；**27B N0/N1/C 分解**（N0 legacy 足够好且 H 步无前兆 → residual≈0；N1 稳定小偏差 → 允许小 residual；C → 全 residual）；**R0=Q1 复现（同批基准）**；**R1=R0+条件化 preservation（仅 N0，`L_preserve=‖Δa_sem‖₁`）+ 归因驱动 plan 级 trackability 正则（Δκ0 软锚 / 尾段 Δκ 超分布惩罚 / 条件化时序平滑——按 27A 选择）**。
+- **门**：**A** 归因（≥90% 归类+分层）→ **B** preservation（teacher ≤+10%、N0 residual P95≈0、N1 不抹除、learner 仍 ≥30% 改善〔允许自 51.5% 部分回退〕）→ **C** 可执行性（sat ≤legacy+5pp、ΔP99 ≤1.25×、plan Δκ ≤ expert P95×1.25、tmo ≤+3pp）→ **D** 连续两 epoch 机制门（sign/mirror ≥95%、curv ≥25%、hist ≤1、teacher ≤+10%）→ **E** clean150（**succ ≥0.43 且 +8pp**、off ≤0.35、coll ≤+2pp、tmo ≤+3pp）→ 才 eval500（0.45/+7pp/off −15%/coll ≤IDM）。未过=停（不增 loss/数据、不转 DAgger/MoE/RL）。
+- **我方执行注记**：① 27A 的 clean150 仪器化须含 **Q1（此前未跑 clean150）**与 legacy 同 episode；② N0/N1/C 定义在 trainer/dataset 层锁定 + 单测 + 比例统计；③ **数据集入口硬抗拒读 B 行旧 expert_action**（v2 标签唯一来源）+ 历史报告统一 errata 标记；④ forward 只加只读监控输出（训练逻辑不进 forward）；⑤ history-dropout 诊断=可选、隔离于 R0/R1、不入门（0/25/50%、冻结 canary、观测 teacher/learner/lane/hist）。
+- **开工**：R27 lane 已派发（复用 R21 session；`runs/p1_v2/round27/`）。
 
 ---
 
