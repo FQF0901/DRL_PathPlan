@@ -107,6 +107,8 @@
 
 **产物**：`runs/p1_v2/round30/v2/*/reward.csv`、`v2/matrix_report.{json,md}`（v2 扫描；数值与 v1 相同）。
 
+**口径附注（R31-I4；MoE 敏感性）**：K1 链训练全程 `set_moe(False)`（`r28_train.py:216`），上表矩阵为 **MoE-on 评测口径**。MoE-off（训练口径）敏感性复跑（`runs/round31/moe_off/`）：K1e2 lqr_plan **0.560**/0.140/0.080/tmo 11（vs 0.520/0.120/0.080/tmo 14；逐 episode 48/50 一致，2 翻正/0 翻负）；exact_plan 0.560（coll 0.10→0.18、tmo 6→1）；lqr_repeat 0.060（vs 0.020）⇒ **结论稳健**（S1≈S2、S3 崩不变），训练口径整体略优 ~+2–4pp。
+
 ---
 
 ## 2. R30-2 R4 rollout 一致性（完成 ✅）＋ R30-6 三臂（条件触发，已执行）
