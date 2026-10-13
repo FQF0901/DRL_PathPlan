@@ -2,7 +2,7 @@
 
 > 依据：`docs/deepseekv4p1_argue.md` §5.30（CG5.6 终审 `acf1b8f`：批准缩减版 Reality Audit、训练全冻结）。
 > 纪律：**零训练**；只读评测 + 诊断脚本 + 文档。产物：`runs/p1_v2/round30/`、`.slim/deepwork/p1_v2/round30/`。
-> 状态：**第一轮完成**（R30-0..6b 全执行 ✅；R30-5：消费审计 ✅ + 契约 v1 ✅；reward=v2 复跑补采中）。等待 round-31 裁决。本文随结果滚动更新。
+> 状态：**第一轮完成**（R30-0..6b 全执行 ✅；R30-5：消费审计 ✅ + 契约 v1 ✅；reward 复采 + 复现性 8/8 ✅=§1.5）。等待 round-31 裁决。本文随结果滚动更新。
 
 ---
 
@@ -18,7 +18,7 @@
 | C4 | optimizer 契约（只记录；白名单建组后置） | ✅ 记录；修复后置 | §5.2 + `stages.py:1810-1819` |
 | C5 | 架构命名（文档级）：PlanHead=ContextFusion/PolicyBackbone；PolicyHead=唯一动作器；WM=唯一状态预测器；rollout 编排 | ✅ | §5.2（class 名/ckpt 键未动） |
 | 结构 A | Stage B 预测态监督 → R4 三分解 ×h、分层路型/结局 | ✅（+R30-6b 超出） | §2.1–2.2、§2.5 |
-| 结构 B | Stage C 四格矩阵（同 ckpt/episode；succ/off/coll/tmo/rc/reward；paired 转换） | ✅（reward=v2 复跑补采，进行中） | §1、`matrix_report.{json,md}`、§1.5 |
+| 结构 B | Stage C 四格矩阵（同 ckpt/episode；succ/off/coll/tmo/rc/reward；paired 转换） | ✅（reward 复采完成 + 复现性 8/8 一致，§1.5） | §1、`matrix_report.{json,md}`、§1.5 |
 | P1 | R4：E_z/E_policy/E_action × h1..h6；报告 interface/deploy 比值 | ✅（E_z h6=0.332 补报；action 族上限 h5） | §2.1 |
 | P2 | WM fidelity（ds×/dθ·κ±/zero/mirror；6 条相对门） | ✅ 实测（mirror 门构造不可判 → 重造提案） | §3 |
 | P3 | 账本 4 问（共享 transition 梯度 / 早期无后段 credit / policy→WM / B 冻结） | ✅ | §4.2 |
@@ -85,6 +85,27 @@
 - `runs/p1_v2/round30/matrix_{K1e2,pri512}_{lqr,exact}_{plan,repeat}/`（8 run；`_episodes/*.npz` + `episodes.csv` + `summary.json`）；
 - `runs/p1_v2/round30/matrix_report.{json,md}`（生成器：`.slim/deepwork/p1_v2/round30/r30_matrix_report.py`）；
 - 运行链：`.slim/deepwork/p1_v2/logs/round30_chain.log`；探索/jouranl：`.slim/deepwork/p1_v2/round30/journal.md`。
+
+### 1.5 v2 复跑：reward 补采 + 复现性（2026-10-13 23:48；8 格全部 rc=0）
+
+**动机**：`eval_runner._run_episode` 丢弃 env reward（`_, _, terminated, truncated, info = env.step(action)`）⇒ 既有记录无 reward 列。R30 在**自家 eval_a3** 内包 `env.step` 只读旁录（生产代码未动；`reward.csv` 逐 episode），8 格全部复跑（独立目录 `runs/p1_v2/round30/v2/`）。
+
+**复现性**：**8 格 succ/off/coll/tmo/rc 与 v1 完全一致（Δ=0.000），逐 episode success 一致率 50/50 × 8** ⇒ 确定性复现通过（本协议下未见引擎漂移）。
+
+**reward（MetaDrive 原始口径；episode 和 与 per-step）**：
+
+| cell | succ（v1=v2） | reward_sum（succ\|fail） | per-step（succ\|fail） | steps 均（succ\|fail） |
+|---|---|---|---|---|
+| K1e2 lqr_plan | 0.520 | 265.57（270.72\|259.99） | 0.334（0.348\|0.318） | 796（779\|814） |
+| K1e2 lqr_repeat | 0.020 | 191.80（234.61\|190.93） | 0.196（0.241\|0.195） | 980（972\|980） |
+| K1e2 exact（plan=repeat） | 0.540 | 200.62（232.21\|163.54） | 0.512（0.576\|0.438） | 447（428\|471） |
+| pri512 lqr_plan | 0.360 | 210.25（262.29\|180.98） | 0.330（0.353\|0.317） | 636（746\|574） |
+| pri512 lqr_repeat | 0.000 | 12.11（—\|12.11） | 0.259 | 55 |
+| pri512 exact（plan=repeat） | 0.260 | 127.43（221.59\|94.35） | 0.536（0.621\|0.506） | 245（385\|196） |
+
+**口径注记（重要）**：`reward_sum` 受**时长混淆**（超时/长 episode 累积更多步：K1e2 lqr_repeat steps≈980 vs pri512 lqr_repeat≈55）⇒ 跨格比较须看 per-step 或按结局分层；即便 per-step 仍受终止结构影响（pri512 exact off=0.66/steps≈245，per-step 0.536 > 其 lqr_plan 0.330，但 succ 更低）——**reward 不可替代 succ 作唯一判据**。cell 内 succ-vs-fail 区分度（per-step 差）：K1e2 exact +0.138、pri512 exact +0.115、pri512 lqr_plan +0.036、K1e2 lqr_plan +0.030 —— reward 对结局有可测但不均匀的区分度（若作 RL 稠密信号需注意）。
+
+**产物**：`runs/p1_v2/round30/v2/*/reward.csv`、`v2/matrix_report.{json,md}`（v2 扫描；数值与 v1 相同）。
 
 ---
 
