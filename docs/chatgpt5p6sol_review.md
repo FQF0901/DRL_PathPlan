@@ -1,578 +1,548 @@
-总体裁决
+总体判断
 
-最新结果把问题进一步收敛了：
+这轮取得了第一个可信的闭环正向结果：
 
-车道语义输入、target-lane 选择和表示接线已经基本成立。
-闭环失败不再主要归因于“网络看不到车道”。
-当前瓶颈转变为：
+success 从约 0.327 提升到 0.400，+7.3pp；
+off-road 从约 0.553 降到 0.347，下降 20.7pp；
+learner-state 的 dθ 误差下降约 24%； -扰动状态误差下降约 31%； -方向错误率下降约 58%。
 
-语义信息已经存在于 latent，但训练过程中没有被稳定地转化为动作。全量 BC 又重新选择了 history/dynamics shortcut，并且替换式 semantic 接线破坏了旧策略的初始化基本盘。
+这证明两件事：
 
-因此：
+显式 lane semantic 不是无效设计；
+只有加入动作级语义监督，网络才会真正采用 lane semantic，普通 BC 会重新退回 history/dynamics shortcut。
 
-R21-3D 的停止决定正确。
-不批准正式大规模采集、DAgger、MoE 或 RL。
-批准一个严格受限的 Round-25：平滑接入 + 动作级语义采用 + 分阶段解冻。
-Round-25 若仍失败，应停止当前 semantic-BC 配方，不继续堆 loss 或扩大数据。
-一、对最新结果的判断
-1. R21-3D-1/2 已经排除了三个主要嫌疑
+但当前还远不能进入大规模数据、DAgger、MoE 或 RL，因为提升伴随着：
 
-当前证据支持：
+timeout 增加约 14pp； -转向饱和升至约 0.89–0.94； -teacher-state MAE 恶化约 57%； -镜像一致性未过门； -整个实验还发现了一个严重的扰动标签状态错配 bug。
 
-semantic_chain 明显优于 semantic_no_chain；
-rollout 使用 static_role_only 优于全量重复注入 t0 动态语义；
-target-lane correctness 在 983 个状态上达到 100%； -独立集上方向正确率约 99.6%–99.8%； -曲率响应达到 25%； -history/lane 敏感度比下降到 0.227。
+所以这轮应定性为：
 
-所以目前不能再把失败简单归因于：
+机制和方向获得关键正证，但控制幅度、对称性和正常驾驶保持性尚未闭合。
 
-target lane 选错；
-LD-LD chain； -rollout 重复使用动态 semantic； -输入不充分； -表示不可解码。
+一、代码修改审阅
+1. 残差式 semantic 接入正确
 
-车道语义已经成为可用表示。
-
-2. 3D-3 失败定位基本合理
-
-小规模闭环 canary：
-
-S0 success = 0.240
-S1 success = 0.247
-legacy baseline = 0.327 左右
-
-
-同时出现：
-
-steer saturation：0.80 → 0.21
-lane sign：e1 约0.93 → e3 约0.60
-独立集 sign：约0.56–0.60
-
-
-这说明模型并非完全没学到 semantic，而是逐 epoch 把语义的动作影响削弱了。
-
-最可能的机制是：
-
-semantic 信息进入表示
-→ 初期能够影响动作
-→ BC 总体 loss 更容易通过原历史/动力学模式下降
-→ 优化器逐步绕开 semantic
-→ 动作变得更保守、转向变弱
-→ steer saturation 降低，但 lanekeep 与闭环 success 反而下降
-
-
-因此，当前 root cause 是：
-
-Semantic representation 已建立，但 action adoption 没有被训练目标和初始化方式保护。
-
-二、代码中最关键的问题：当前 semantic 是“替换式接入”
-
-model.py 当前 semantic 模式把原来的 LD summary 替换为新构造的 geometry_context，并额外向 policy/value token 集合追加 target_lane_token。新 SemanticWiring 是惰性随机构造，因此即便从旧 checkpoint 加载，semantic 模式一开启，PlanHead 和 Policy 的输入分布就立即改变。
-
-这很好地解释了：
-
-S0 e001 success 仅0.093
-随后 e003 恢复到0.240
-
-
-这不只是“训练预算不足”，而是旧策略接入新语义时遭遇了明显的 feature-distribution shock。
-
-正确修复方向
-
-Semantic 不应替换旧 LD context，而应残差式加入：
+model.py 现在采用：
 
 geometry_context
-    = legacy_ld_context
-    + beta_context * semantic_delta
+= legacy_context + beta_context × semantic_delta
 
 
-Policy 的 target token 也应受同一个门控约束：
+以及：
 
-target_token_effective
-    = beta_token * target_lane_token
-
-
-初始化：
-
-beta_context = 0
-beta_token = 0
+effective_target_token
+= beta_token × target_lane_token
 
 
-从而保证：
+beta_context 和 beta_token 都初始化为 0，因此载入旧 checkpoint 后：
 
-semantic 模式初始 action_mu / value / plan / rollout
-与 legacy checkpoint 逐位一致
-
-
-否则再增加 epoch，只是在等待模型重新找回旧能力，不是高效地学习 semantic。
-
-三、需要修复的一个隐藏 Mask 问题
-
-目前 _head_tokens() 在存在 target_token 时，为它追加恒为 1 的 mask。model.py 中 target token 被直接加入 Policy/Value token 集，而没有传入 lane_semantic_mask。
-
-虽然当前数据集的 target valid 几乎是 100%，正式部署仍可能遇到：
-
-无 route；
-lane 投影失败； -地图异常；
-reset/warmup； -target-lane fallback 无效。
-
-即使 target token 数值被置零，CrossAttention 的 key/value projection 如果带 bias，零 token 仍可能产生非零影响。
-
-必须修正为
-target_token_mask = lane_semantic_mask * target_lane_valid
+action_mu
+plan
+rollout
+value
+router logits
 
 
-并将它传递给 _head_tokens()，而不是恒为 1。
+与旧模型逐位相同。
 
-验收：
+实际验证 max|Δ|=0，说明此前的 feature-distribution shock 已被解决。
 
-semantic invalid 时：
-target token mask = 0
-action/value 与无 target token 路径逐位一致
+这是这轮最重要、最正确的工程修改。
 
-四、对 static_role_only 的判断
+2. Target token 的 mask 问题已合理规避
 
-当前实现将以下字段视为 dynamic，并在 rollout 后段清零：
+之前 target token 被追加为一个始终有效的独立 token，存在无效语义仍通过 projection bias 影响输出的风险。
 
-lateral offset
-heading error
-左右 margin
-distance_to_lane_end
-distance_to_target_lane_end
+现在 target token 不再增加新 token，而是：
+
+ld_slot = ld_pool + target_proj(target_token)
 
 
-保留：
+并且 target_token 已经过：
 
-near/far curvature
-target valid
-route confidence
-lane-change direction
-role/group/route association
+beta_token * raw_target
 
 
-这个选择目前有实证支持，可以作为 Round-25 默认口径。
+无效 semantic 时 raw target 为零，初始 beta 也为零，因此不会影响输出。
 
-但要注意：near/far curvature 相对车辆前进后也不是严格静态。当前 3 秒 rollout 内保持 t0 curvature 只是近似，并不代表语义上完全正确。
+这比仅仅修一个 mask 更稳健，还保持 token 数量恒为 39。
 
-因此：
+不过必须保留以下测试：
 
-Round-25 暂不修改； -仍需记录后段计划曲率和实际道路曲率偏差； -不要把 static_role_only 宣称为最终物理模型。
-五、Round-25 实施方案
+semantic invalid
+→ target contribution 严格为0
+→ action/value/plan 与 legacy 路径逐位一致
 
-这次只解决一个问题：
+3. 单一标量 beta 简洁，但不是最终形态
 
-如何让新 semantic 以不破坏旧策略的方式进入动作决策，并保持其动作因果影响。
+当前：
 
-不采新数据，继续使用 semantic_v1_3d3 的 53,765 行数据。
-
-Phase 25A：平滑接入
-
-新增 residual semantic adapter：
-
-legacy_ld_context = 原 masked mean / 原路径
-semantic_delta = SemanticWiring(...)
-
-geometry_context =
-    legacy_ld_context + beta_context * semantic_delta
+beta_context: scalar
+beta_token: scalar
 
 
-Target token：
+优点是：
 
-target_token_effective =
-    beta_token * target_lane_token
+参数少； -解释性强； -能判断 semantic 是否被采用； -不容易过拟合。
 
+但缺点也很明显：
 
-初始化：
+-所有道路类型、速度和语义维度共享同一个强度； -无法区分 lateral、heading、curvature； -无法区分正常驾驶与恢复状态； -一个标量只能整体放大或缩小 semantic。
 
-beta_context = 0
-beta_token = 0
+本轮不应立即复杂化，但 Round-26 应记录分组效果：
 
-强制契约
-
-加载旧 checkpoint 后，在任何训练之前：
-
-action_mu max_abs_diff < 1e-6
-value max_abs_diff < 1e-6
-plan max_abs_diff < 1e-6
-traj_xy max_abs_diff < 1e-6
-router_logits max_abs_diff < 1e-6
+beta × road class
+beta × speed
+beta × lateral-error bucket
+beta × heading-error bucket
 
 
-如果做不到，不开始训练。
+如果同一 beta 在某些组明显过强、某些组明显不足，后续才考虑弱条件化 gate。现在不要提前引入。
 
-Phase 25B：分阶段解冻
-Stage 1：只训练 semantic adoption
+4. P1 证明“动作级监督必需”，但监督幅度过强
+
+三臂结果非常有信息量：
+
+P0：只有普通 BC
+beta_context ≈ -0.06
+lane response 只有 0.13–0.6×
+history/lane ratio 2.3–9.4
+
+
+网络不仅不采用 semantic，甚至倾向于反向抵消它。
+
+P1：动作级 semantic 监督
+beta_context ≈ +0.10～0.12
+sign ≈ 1.0
+lane response 约 98×
+history/lane ≈ 0.023
+
+
+semantic 被强力采用，闭环也首次超过 legacy。
+
+P2：进一步解冻 Primary
+
+没有优于 P1。
+
+因此可明确裁决：
+
+Primary 本体暂不需要继续解冻。当前问题在动作监督尺度，不在 Primary 容量。
+
+P1 的问题是从“完全不用 semantic”跳到了“过度使用 semantic”。
+
+二、重大数据 bug 的影响
+Bug 内容
+
+受控扰动 B 行原先是：
+
+obs = 人工置位后的扰动状态
+label = 运行恢复窗口之后才查询的 expert action
+
+
+因此 observation 与 label 不属于同一状态。
+
+表现为：
+
+corr(perturb_lat, expert_dtheta) = -0.156
+
+
+修复为置位后立即查询 expert，重采 10,803 行后：
+
+corr = +0.606
+
+
+这不是小噪声，而是监督方向错误。
+
+影响范围
+
+以下结论需要标记为受污染：
+
+R21-3B/3C 的扰动动作结果； -R21-3D-3 的 S0/S1； -Round-25 最初使用旧 B 标签的首跑； -任何基于旧 B 行得出的 mirror、direction、amplitude 结论。
+
+表示层结果不一定全部失效，因为 lane semantic 本身仍正确，但动作采用相关结论必须以修复后的 10,803 行数据为准。
+
+建议在所有相关报告中加入统一勘误：
+
+B-label-v1: invalid for action supervision
+B-label-v2: same-state expert label, valid
+
+
+正式训练入口应永久拒绝旧版本 B 数据。
+
+三、为什么闭环提高但仍不过门
+1. Off-road 大幅下降说明修正方向有效
+
+P1 将 off-road 减少约 20.7pp，这不是随机小波动。模型确实更能根据 lane geometry 纠正横向偏离。
+
+2. Timeout 大幅增加说明修正幅度和纵横耦合错误
+
+timeout 增加约 14pp，同时转向饱和约 0.89–0.94，说明模型可能在做：
+
+过早、过强、持续的横向修正
+→ LQR 大量转向饱和
+→ 速度下降或路线进度不足
+→ off-road 被部分转化为 timeout
+
+
+因此不能只看 success 和 off-road 就宣布成功。
+
+3. Teacher MAE 恶化 57% 表明基础驾驶被扰动
+
+动作级语义监督在受控偏离状态有效，但也改变了正常 expert-state 上的动作。
+
+这说明监督还没有学会：
+
+正常状态：
+semantic correction 应接近0
+
+偏离状态：
+semantic correction 应按需要增加
+
+
+而是学成：
+
+所有状态都对 lane semantic 高增益响应
+
+4. 镜像一致性失败指向状态交互未覆盖
+
+mirror-lateral 只有约 0.891，在大 heading error 样本上甚至只有 0.51–0.73。
+
+当前 paired loss 主要覆盖 lateral-only 扰动，却没有完整覆盖：
+
+lateral offset × heading error
+
+
+例如：
+
+-自车位于车道左侧，但车头已经朝右； -自车位于车道右侧，但车头继续朝右； -位置误差和航向误差要求的瞬时动作可能相互竞争。
+
+仅根据 lateral sign 监督动作会产生错误标签。
+
+四、Round-26 推荐方案
+
+本轮不要再改网络结构，也不要扩大数据。只修两个已明确的问题：
+
+动作修正幅度过强；
+lateral 与 heading 的联合对称性不足。
+26A：修复后的数据契约
+
+只允许：
+
+B-label-v2
+同状态 observation / expert action
+CUDA 同口径
+
+
+永久禁止旧 B 行进入：
+
+-训练； -验证； -checkpoint selection； -probe； -mirror 统计。
+
+新增 fail-fast：
+
+dataset.label_state_version == "same_state_v2"
+
+26B：重新定义动作修正目标
+
+不要直接让 semantic 输出拟合完整 expert action。应监督相对于 legacy policy 的修正量：
+
+delta_expert
+= expert_action - legacy_action
+
+
+模型语义修正：
+
+delta_model
+= semantic_action - legacy_action
+
 
 训练：
+
+L_delta = SmoothL1(delta_model, delta_expert)
+
+
+这样：
+
+-正常状态 expert 与 legacy 接近，修正自然接近 0； -偏离状态才产生较大修正； -旧驾驶基本盘不会被整体重写。
+
+26C：幅度锚定
+推荐软锚，而非硬裁剪
+
+定义：
+
+delta_theta_limit
+= 分组 expert correction 的 P95 或 P99
+
+
+按以下分组计算：
+
+速度带
+道路曲率
+lateral-error bucket
+heading-error bucket
+
+
+损失：
+
+L_amp = relu(
+    abs(delta_model_theta) - delta_theta_limit
+)^2
+
+
+不建议直接设置一个全局手工阈值，因为：
+
+-低速和高速可接受的 dθ 不同； -直道和急弯不同； -横向误差和航向误差组合不同。
+
+运行时仍保留安全限幅
+
+建议 semantic correction 的部署上限先设为 expert correction P99，而不是 action 全范围。
+
+26D：完整镜像 paired supervision
+
+镜像必须同时变换：
+
+lateral_offset → -lateral_offset
+heading_error → -heading_error
+curvature → -curvature
+lane_change_left ↔ lane_change_right
+left_margin ↔ right_margin
+LD dy / heading / curvature 同步变换
+左右 lane role 同步交换
+OD 横向坐标、横向速度同步镜像
+
+
+监督：
+
+delta_ds(mirror) ≈ delta_ds(original)
+delta_dtheta(mirror) ≈ -delta_dtheta(original)
+
+
+必须包含联合网格：
+
+lateral:
+-1.0, -0.5, 0, +0.5, +1.0m
+
+heading:
+-10°, -5°, 0°, +5°, +10°
+
+
+重点报告四象限：
+
+lat+, heading+
+lat+, heading-
+lat-, heading+
+lat-, heading-
+
+
+这比单独 lateral paired 更能识别位置误差与航向误差的交互。
+
+五、Round-26 只允许两个正式候选
+
+不要再做三四个结构臂。
+
+Q0：修复数据后的 P1 重跑
+
+目的：
+
+确认旧正向结果在正确标签下是否仍成立。
+
+配置保持 Round-25 P1 不变，只替换：
+
+B-label-v1 → B-label-v2
+
+
+这是必要的基准，不可跳过。
+
+Q1：Q0 + delta supervision + amplitude anchor + full mirror pair
+
+这是唯一改进候选。
+
+Primary 保持冻结，不运行类似 P2。
+
+如果 Q0 已经明显改善，可以判断旧污染标签是主要问题；如果 Q1 再改善，则幅度和对称性修正有效。
+
+六、训练和 checkpoint 选择
+Stage 1
+
+只训练：
 
 SemanticWiring；
 beta_context；
 beta_token；
-lane auxiliary heads； -必要的 target-token projection。
+target projection； -语义动作辅助头。
+Stage 2
 
-冻结：
-
-encoder；
-MemBank；
-ST-GNN；
-PlanHead legacy fusion；
-primary；
-experts/router；
-policy/value；
-WM。
-
-目的：
-
--先让 semantic feature 具有正确表示； -不允许旧动作决策器为了降低 BC loss重新改写全部表示。
-
-建议：
-
-1–2 epochs
-
-Stage 2：动作接口适配
-
-解冻：
+只解冻：
 
 PlanHead fusion 最后一层；
-Policy trunk/输出前最后一层；
-Primary 最后一层，可选，低 LR。
+Policy 输出前最后一层。
 
-继续冻结：
+Primary 保持冻结。
 
-encoder；
-ST-GNN；
-WM；
-MoE experts/router；
-Policy CrossAttention 主体先不全开。
+Epoch 选择
 
-建议学习率：
+不能只看 loss，也不能只看 sign accuracy。
 
-semantic path：1.0×
-PlanHead final：0.1×
-Policy final：0.1×
-Primary final：0.03–0.05×
+建议硬门筛选：
 
-Stage 3：仅在 Stage 2 通过后
+sign >=95%
+mirror >=95%
+curvature >=25%
+history/lane <=1
+teacher MAE degradation <=10%
+semantic correction P99 不超过 expert P99 的1.25倍
 
-才允许扩大到：
 
--完整 PlanHead fusion； -完整 Policy trunk。
+满足硬门后，再按 calibration50 闭环 success 选择 epoch。
 
-不允许一次性全模型解冻。
+clean150 只用于最后开发验证。
 
-六、动作级监督应该怎么做
+七、Round-26 验收标准
+Gate A：数据正确性
+旧 B-label-v1 暴露数 = 0
+同状态匹配率 =100%
+随机重放 >=2,000 行
+perturb_lat 与 expert_dtheta 的方向关系合理
+左右/航向四象限覆盖完整
 
-Coding Agent 提议“action 级方向监督”是对的，但不能只加一个不连续的 sign classification。
+Gate B：语义采用
 
-现有 BC 已经监督动作，但整体数据多数位于 lane center，模型仍可通过 dynamics shortcut 获得低平均 loss。新监督必须强调：
+连续两个 epoch：
 
-lane perturbation
-→ 动作变化方向
-
-1. 当前动作回归
-
-对 controlled perturbation 和 learner-state 行，提高当前动作权重：
-
-L_action =
-    SmoothL1(mu_ds, expert_ds)
-  + lambda_theta * SmoothL1(mu_dtheta, expert_dtheta)
-
-
-B/C 数据的权重高于普通 expert-center 数据，但不做 40 倍过采样。
-
-建议 exposure：
-
-normal expert：50%
-controlled perturbation：25%
-learner-state：20%
-complex topology：5%
-
-2. 方向 Margin Loss
-
-定义 expert correction direction：
-
-y = sign(expert_dtheta - baseline_dtheta)
-
-
-仅在 correction magnitude 超过死区时启用：
-
-|expert_dtheta - baseline_dtheta| > theta_deadband
-
-
-损失可使用：
-
-L_direction =
-    softplus(-y * (mu_dtheta - baseline_dtheta) / temperature)
-
-
-避免在“专家几乎不需要修正”时强行产生方向标签。
-
-3. Paired Counterfactual Loss
-
-对左右对称扰动对：
-
-state_left
-state_right
-
-
-要求：
-
-mu_dtheta(left) > mu_dtheta(center)
-mu_dtheta(right) < mu_dtheta(center)
-
-
-具体符号按 repo 坐标定义校验，不能凭自然语言假设。
-
-这比单样本 sign loss 更难被 history shortcut 绕过。
-
-4. Semantic adoption loss
-
-监控但不宜过强：
-
-L_adoption =
-    max(0, margin - |∂mu_dtheta / ∂lane_lateral_error|)
-
-
-实际训练不一定需要直接求 Jacobian，可以用左右 paired 输出差近似。
-
-重点是保证：
-
-lane semantic 的变化确实改变动作
-
-
-而不仅是能从 latent 中线性解码出来。
-
-七、Round-25 只允许三个正式实验
-
-避免再次膨胀。
-
-P0：平滑接入，不加新动作监督
-Residual semantic initialization
-+ staged unfreeze
-+ 原 BC loss
-
-
-作用：分辨此前失败是否主要来自替换式初始化。
-
-P1：P0 + action direction supervision
-
-加入：
-
-perturbation/learner-state 当前动作加权； -direction margin； -paired counterfactual loss。
-
-这是主要候选。
-
-P2：P1 + Primary final low-LR
-
-只额外解冻 Primary 最后一层。
-
-若 P2 不优于 P1，则 Primary 保持冻结，不再扩大解冻范围。
-
-不做：
-
--不同 loss weight 大扫描； -不同网络容量； -不同 optimizer 大扫参；
-
-MoE； -RL； -DAgger； -更多数据。
-八、checkpoint selection 不能再只看训练 loss
-
-当前已经观察到：
-
-e1 semantic sign ≈0.93
-e3 semantic sign ≈0.60
-
-
-训练 loss 下降但动作语义变差。
-
-因此每个 epoch 必须计算联合评分：
-
-Score =
-  clean150 success proxy/canary
-  + lane sign score
-  + curvature response
-  - history shortcut penalty
-  - off-road proxy
-
-
-不应该在同一 clean150 上频繁进行真正闭环选择。建议：
-
-semantic_val 用于 epoch 选择；
-calibration50 用于短闭环选择；
-clean150 只用于最终开发验证。
-必须记录
-sign accuracy
-mirror consistency
-lane response ratio
-curvature response ratio
-history/lane ratio
-teacher MAE
-perturbed-state MAE
-learner-state MAE
-beta_context
-beta_token
-semantic gradient norm
-policy final-layer gradient norm
-
-九、Round-25 验收标准
-Gate A：初始化与代码正确性
-
-全部通过：
-
-beta=0 时完整输出逐位等价
-invalid semantic token mask 正确
-semantic_no_chain 开关隔离
-static_role_only 输出确定
-checkpoint 完整加载
-训练参数/optimizer/update 账本一致
-
-Gate B：动作语义保持
-
-在独立 semantic 集：
-
-sign accuracy >=95%
-mirror consistency >=95%
-lane response >= legacy 3×
+sign >=95%
+mirror >=95%
+lane response >=3× legacy
 curvature response >=25%
-history/lane ratio <=1.0
+history/lane <=1
 
-
-并要求：
-
-连续两个 epoch 不低于门槛
-
-
-不能只挑一个瞬时峰值。
-
-Gate C：动作质量
-
-相对 legacy：
-
+Gate C：幅度与基础能力
 perturbed-state dtheta MAE 至少下降20%
 learner-state dtheta MAE 至少下降15%
-dtheta sign error 至少下降30%相对值
-teacher-state MAE 恶化不超过10%
+teacher-state MAE 恶化 <=10%
+semantic delta P95/P99 不超过 expert对应分位数的1.25倍
+steer saturation 不高于 legacy +5pp
 
 Gate D：clean150
 
-Round-25 的正式候选至少达到：
+最低要求：
 
-success >=0.38
-且相对 legacy >=+5pp
+success >=0.42
+且相对 legacy >=+7pp
 
-off-road 相对 legacy下降至少5pp
-collision 不增加超过2pp
-timeout 不增加超过3pp
-steer saturation：
-  不得再次接近0.80
-  也不得低于合理响应区间导致欠转
+off-road <=0.35
+collision <= legacy +2pp
+timeout <= legacy +3pp
 
 
-建议 steer saturation 不设简单“越低越好”，而看：
+这里将 success 门从 0.38 提高到 0.42，因为 Round-25 已经达到 0.40，修复后必须继续进步，而不是仅复现。
 
-off-road episode 中 saturation 是否下降
-成功弯道路段是否仍有足够 steering response
+Gate E：进入正式采集许可
 
+只有 Q1 的 A–D 全过，才允许：
 
-3D-3 将 saturation 从 0.80 降至 0.21，却性能变差，说明低 saturation 也可能是欠响应。
+-扩充正确标注的扰动数据； -正式 20 万级 expert 数据； -下一阶段 learner-state DAgger 设计。
 
-Gate E：扩大数据许可
+八、暂不批准的事项
 
-只有 Gate A–D 全过，才允许正式采集 20 万级数据。
+继续冻结：
 
-否则不采。
-
-十、对 DAgger、MoE、RL 的状态
-DAgger
-
-继续冻结。
-
-虽然 covariate shift 已被证明存在，但当前模型对已有 learner-state 和 perturbation 数据仍未稳定采用 semantic。现在做 DAgger只会增加模型继续忽略的数据。
-
-启动门：
-
-Round-25 Gate A–D 全过
-clean150 >=0.45
-learner-state error仍显著高于teacher-state
-
-MoE
-
-继续关闭。
-
-Primary 尚未证明已经恢复基础 lane keeping。此时启用 experts 会再次让 specific 补偿 Primary 的基本能力。
-
-RL
-
-继续冻结。
-
-当前闭环约 0.24–0.33，远不到合法 RL 启动门。
-
-十一、我对正式目标的现实判断
-
-R21 semantic 路线解决的是一个真实且重要的问题，但它不会自动把 0.33 推到 0.80。
-
-当前合理里程碑：
-
-Round-25：恢复并超过 legacy，目标 clean150 0.38–0.45
-正式 semantic BC：eval500 0.50–0.60
-semantic + current-action DAgger：0.60–0.70
-后续场景型 MoE / PPO：尝试追平并超过0.756
-
-
-如果 Round-25 连 legacy 都不能稳定超过，应停止继续完善该 semantic adapter，重新评估：
-
-BC 数据和 expert 行为的一致性；
-chain/action 监督； -模型执行接口； -IDM+Pure Pursuit hybrid 路线。
-十二、最终批准
-批准
-Round-25：
-P0 平滑初始化
-P1 动作级 semantic adoption
-P2 Primary final low-LR
-分阶段解冻
-联合 checkpoint selection
-
-暂不批准
-正式20万级采集
-DAgger
+Primary 全量解冻
 MoE experts
-RL
-WM修改
+DAgger 实施
+PPO / GRPO
+WM 修改
 K-anchor
-容量扩展
+新容量扫描
+新的 semantic 网络层
 geometry loss
 
-给 Coding Agent 的执行指令
-批准 Round-25，仅使用现有 semantic_v1_3d3 数据。
 
-先将 semantic 接线改为 residualized adoption：
+其中 DAgger 虽然最终很可能需要，但当前模型还无法做到：
 
-geometry = legacy_geometry + beta_context * semantic_delta
-target_token = beta_token * semantic_target
-beta 初始 0，确保旧 checkpoint 完整输出逐位一致。
+在不破坏正常驾驶的前提下，以正确幅度使用 lane semantics。
 
-修复 target token mask：
-mask = lane_semantic_mask * target_lane_valid，
-不得恒为1。
+现在加入更多 learner-state，只会扩大错误修正。
 
-训练采用三阶段：
-1. semantic path only；
-2. semantic + PlanHead/Policy final low-LR；
-3. 仅在前两阶段达门后，允许 Primary final low-LR。
+九、对终极目标的判断
 
-正式三臂：
-P0 平滑接入；
-P1 P0 + action direction/paired counterfactual supervision；
-P2 P1 + Primary final low-LR。
+Round-25 是关键突破，但距离超过 IDM+Pure Pursuit 的 0.756 仍有很大差距：
 
-每 epoch 强制测：
-sign/mirror/lane-response/curvature/history-ratio，
-不得只按 BC loss 选择 checkpoint。
-
-clean150 达到 success>=0.38 且相对 legacy +5pp，
-off-road下降、collision/timeout不恶化，
-才允许扩大数据。
-
-Round-25 失败：
-停止 semantic adapter 训练扩展，
-不得转向 DAgger/MoE/RL 掩盖问题。
+legacy约0.33
+Round-25 P1约0.40
+IDM+Pure Pursuit约0.756
 
 
-这个阶段的中心任务不是“让 latent 包含 lane semantics”，这一点已经完成；现在必须证明：
+接下来合理的里程碑是：
 
-Semantic 能在不破坏旧策略的前提下，持续、稳定、因果地影响最终动作。
+Round-26：
+语义修正稳定化，clean150 达0.42–0.48
+
+正式 semantic BC：
+eval500 达0.50–0.60
+
+current-action DAgger：
+推进到0.60–0.70
+
+之后才考虑：
+场景型 MoE / 合法信用链 PPO
+
+
+如果 Round-26 在正确标签和幅度控制后仍无法超过 0.42，应停止继续调 semantic loss，重新审视：
+
+chain 与动作的联合监督； -专家标签和 LQR 执行兼容性； -训练数据中普通驾驶与偏离状态比例； -混合 IDM+Pure Pursuit + learned residual 的工程路线。
+最终批准
+批准
+Round-26：
+Q0 正确标签重跑
+Q1 delta supervision + amplitude anchor + full mirrored state pairs
+Primary冻结
+分阶段小范围解冻
+严格checkpoint选择
+
+关键反驳
+
+我不同意简单按 Coding Agent 的说法：
+
+“P1 正向，但量级过强，因此加一个动作上限即可。”
+
+根因不只是幅度过强，而是：
+
+旧扰动标签存在状态错配
++ 监督目标重写完整动作而非修正量
++ lateral-only paired 未覆盖 lateral×heading 交互
++ 正常 expert 状态缺少零修正约束
+
+
+Round-26 必须四项一起纠正，否则硬限幅只能掩盖监督语义错误。
+
+给 Coding Agent 的推进指令
+批准 Round-26，不改网络容量与主架构。
+
+先做 Q0：
+仅用 same-state B-label-v2 重跑 Round-25 P1，
+确认原正向在正确标签下是否成立。
+
+再做 Q1：
+学习 expert_action - legacy_action 的 semantic delta，
+加入按速度/曲率/lat/heading 分组的幅度软锚，
+并使用完整 lat+heading 镜像状态 paired supervision。
+
+Primary保持冻结；
+只解冻 semantic path + PlanHead/Policy末层低LR。
+
+必须满足：
+- teacher MAE退化<=10%
+- mirror>=95%
+- semantic delta分位不超过expert 1.25倍
+- steer saturation<=legacy+5pp
+- clean150 success>=0.42
+- off-road<=0.35
+- timeout<=legacy+3pp
+
+未过门：
+停止增加semantic loss、数据规模或模型复杂度；
+不转DAgger/MoE/RL。
+
+
+这一步的目标非常明确：
+
+把已经证明“方向正确”的车道语义修正，校准成强度正确、左右对称、不会破坏正常驾驶的动作增量。
