@@ -25,6 +25,7 @@ import numpy as np
 
 V2_VERSION = "same_state_v2"
 KAPPA_VALID_DS_M = 0.5  # κ 有效阈值（ds ≥ 0.5 m/0.5s；与 R21-28 K1 监督掩码一致）
+NEG_DS_EPS = 1e-6       # R21-29：负 ds fail-fast 阈值（ds < −ε 视为非法，禁 abs 静默接受）
 EXPERT_BACKEND = "metadrive_expert_pure_pursuit"
 QUERY_TIMING = "same_state_immediate_post_teleport"
 
@@ -67,6 +68,9 @@ def kinematics_metadata(arrays: dict, legacy_actions_path: str | Path | None = N
     """
     expert = np.asarray(arrays["expert_action"], dtype=np.float64)
     expert_ds, expert_dth = expert[:, 0], expert[:, 1]
+    neg = int((expert_ds < -NEG_DS_EPS).sum())
+    if neg:
+        raise SystemExit(f"[semantic_labels] fail-fast：expert ds < −{NEG_DS_EPS} 行数={neg}（禁 abs 静默接受）")
     expert_kappa = expert_dth / np.maximum(expert_ds, 1e-6)
     out = {
         "expert_ds": expert_ds.astype(np.float32),
@@ -82,6 +86,9 @@ def kinematics_metadata(arrays: dict, legacy_actions_path: str | Path | None = N
         if legacy.shape[0] != expert.shape[0]:
             raise SystemExit(f"[semantic_labels] fail-fast：legacy 行数 {legacy.shape[0]} != {expert.shape[0]}")
         legacy_ds, legacy_dth = legacy[:, 0], legacy[:, 1]
+        neg = int((legacy_ds < -NEG_DS_EPS).sum())
+        if neg:
+            raise SystemExit(f"[semantic_labels] fail-fast：legacy ds < −{NEG_DS_EPS} 行数={neg}（禁 abs 静默接受）")
         legacy_kappa = legacy_dth / np.maximum(legacy_ds, 1e-6)
         out.update({
             "legacy_ds": legacy_ds.astype(np.float32),
@@ -90,6 +97,11 @@ def kinematics_metadata(arrays: dict, legacy_actions_path: str | Path | None = N
         })
         valid = valid & (np.abs(legacy_ds) >= KAPPA_VALID_DS_M)
     out["kappa_valid"] = valid
+    # R21-29：Δκ 系字段（相邻 plan 步的 Δκ；action 级仅首步 Δκ=κ−κ_legacy 语义见 residual_classes）
+    if legacy_actions_path is not None:
+        out["expert_delta_kappa"] = (expert_kappa - legacy_kappa).astype(np.float32)
+        out["legacy_delta_kappa"] = np.zeros_like(out["expert_delta_kappa"])
+        out["valid_delta_kappa"] = valid
     return out
 
 

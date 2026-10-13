@@ -27,6 +27,12 @@ CLASS_N1 = "N1"
 CLASS_C = "C"
 CLASSES = (CLASS_N0, CLASS_N1, CLASS_C)
 
+#: R21-29：低 ds 的 κ 三态（低 ds **不自动**通过 κ 门）
+CURV_VALID = "valid_curvature"            # ds ≥ 0.5（expert 与 legacy 同时满足）→ κ 有效
+CURV_LOW_YAW = "low_progress_yaw_motion"  # ds < 0.5 且 |dθ| < theta_low → 低速小转向，可 N0/N1
+CURV_INVALID = "invalid_or_unknown"       # ds < 0.5 且 |dθ| ≥ theta_low → correction/unsafe（禁 N0/N1）
+DS_VALID_M = 0.5
+
 LAT_SAFE = 1.0
 HEAD_SAFE = 0.10
 SPEED_FLOOR = 1.0
@@ -57,6 +63,34 @@ def compute_thresholds(res_ds: np.ndarray, res_dth: np.ndarray, teacher_mask: np
             out["tau_kappa"] = float(np.quantile(values, 0.50))
             out["tau_kappa_n1"] = float(np.quantile(values, 0.90))
             out["n_teacher_kappa_valid"] = int(values.size)
+    return out
+
+
+def low_ds_dtheta_threshold(expert_ds: np.ndarray, expert_dtheta: np.ndarray,
+                            low_ds_mask: np.ndarray | None = None, quantile: float = 0.95) -> float:
+    """``theta_low``：expert **低 ds（< DS_VALID_M）** 行的 |dθ| P95（数据驱动，非手调）。"""
+    ds = np.abs(np.asarray(expert_ds, dtype=np.float64))
+    dth = np.abs(np.asarray(expert_dtheta, dtype=np.float64))
+    mask = ds < DS_VALID_M if low_ds_mask is None else np.asarray(low_ds_mask, dtype=bool)
+    values = dth[mask]
+    if values.size == 0:
+        return float("inf")
+    return float(np.quantile(values, float(quantile)))
+
+
+def curvature_state(expert_ds: np.ndarray, expert_dtheta: np.ndarray, legacy_ds: np.ndarray,
+                    theta_low: float) -> np.ndarray:
+    """逐行 κ 三态（R21-29）：有效 / 低速小转向（可 N0/N1）/ 无效-大转向（correction/unsafe）。"""
+    eds = np.abs(np.asarray(expert_ds, dtype=np.float64))
+    lds = np.abs(np.asarray(legacy_ds, dtype=np.float64))
+    dth = np.maximum(np.abs(np.asarray(expert_dtheta, dtype=np.float64)),
+                     np.abs(np.asarray(expert_dtheta, dtype=np.float64)))
+    valid = (eds >= DS_VALID_M) & (lds >= DS_VALID_M)
+    low = (eds < DS_VALID_M) | (lds < DS_VALID_M)
+    small = dth < float(theta_low)
+    out = np.full(eds.shape[0], CURV_INVALID, dtype=object)
+    out[low & small] = CURV_LOW_YAW
+    out[valid] = CURV_VALID
     return out
 
 
@@ -102,7 +136,14 @@ def classify_rows(features: dict, thresholds: dict) -> np.ndarray:
         safe = safe_future
         safe_mode = "future_fallback"
     kappa_ok = np.ones(n, dtype=bool)
-    if "res_kappa" in features and "tau_kappa" in thresholds:
+    if "curvature_state" in features:
+        # R21-29：三态——invalid_or_unknown 直接禁 N0/N1；低速小转向按 κ 残差门
+        state = np.asarray(features["curvature_state"], dtype=object)
+        kappa_ok = state != CURV_INVALID
+        if "res_kappa" in features and "tau_kappa" in thresholds:
+            rk = np.abs(np.asarray(features["res_kappa"], dtype=np.float64))
+            kappa_ok = kappa_ok & ((state != CURV_VALID) | (rk <= thresholds["tau_kappa"]))
+    elif "res_kappa" in features and "tau_kappa" in thresholds:
         rk = np.abs(np.asarray(features["res_kappa"], dtype=np.float64))
         valid_k = np.asarray(features.get("kappa_valid", np.ones(n, dtype=bool)), dtype=bool)
         kappa_ok = (~valid_k) | (rk <= thresholds["tau_kappa"])
@@ -116,7 +157,13 @@ def classify_rows(features: dict, thresholds: dict) -> np.ndarray:
     ep = np.asarray(features["episode_id"])
     consistent = np.array([consistency.get(int(key), 0.0) >= CONSISTENCY_MIN for key in ep], dtype=bool)
     kappa_ok_n1 = np.ones(n, dtype=bool)
-    if "res_kappa" in features and "tau_kappa_n1" in thresholds:
+    if "curvature_state" in features:
+        state = np.asarray(features["curvature_state"], dtype=object)
+        kappa_ok_n1 = state != CURV_INVALID
+        if "res_kappa" in features and "tau_kappa_n1" in thresholds:
+            rk = np.abs(np.asarray(features["res_kappa"], dtype=np.float64))
+            kappa_ok_n1 = kappa_ok_n1 & ((state != CURV_VALID) | (rk <= thresholds["tau_kappa_n1"]))
+    elif "res_kappa" in features and "tau_kappa_n1" in thresholds:
         rk = np.abs(np.asarray(features["res_kappa"], dtype=np.float64))
         valid_k = np.asarray(features.get("kappa_valid", np.ones(n, dtype=bool)), dtype=bool)
         kappa_ok_n1 = (~valid_k) | (rk <= thresholds["tau_kappa_n1"])
@@ -158,6 +205,10 @@ def class_stats(labels: np.ndarray, features: dict) -> dict:
             "p50": float(np.quantile(rk[valid_k], 0.50)) if valid_k.any() else None,
             "p95": float(np.quantile(rk[valid_k], 0.95)) if valid_k.any() else None,
         }
+    if "curvature_state" in features:
+        state = np.asarray(features["curvature_state"], dtype=object)
+        stats["curvature_state"] = {name: int((state == name).sum())
+                                    for name in (CURV_VALID, CURV_LOW_YAW, CURV_INVALID)}
     stats["by_speed_band"] = {}
     for band, mask in (("<5", speed < 5.0), ("5-10", (speed >= 5.0) & (speed < 10.0)), (">=10", speed >= 10.0)):
         if int(mask.sum()) == 0:

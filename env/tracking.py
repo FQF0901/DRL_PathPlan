@@ -405,6 +405,9 @@ class LqrTracker(BasePolicy):
         reference_dt: float = 0.5,
         reference_hz: int = 10,
         ref_speed_scale: float = 1.0,
+        telemetry_coupling: bool = False,
+        curvature_feedforward: bool = False,
+        ff_gain: float = 1.0,
     ) -> None:
         """
         Args:
@@ -448,6 +451,12 @@ class LqrTracker(BasePolicy):
         self.reference_dt = float(reference_dt)
         self.reference_hz = int(reference_hz)
         self.ref_speed_scale = float(ref_speed_scale)
+        # R21-29：横纵耦合遥测（默认关）+ 曲率前馈（默认关；零训练对照，非默认配置）
+        self.telemetry_coupling = bool(telemetry_coupling)
+        self.curvature_feedforward = bool(curvature_feedforward)
+        self.ff_gain = float(ff_gain)
+        self._prev_preview: int | None = None
+        self._prev_plan_step: int | None = None
 
         assert self.wheelbase > 0.0, "wheelbase must be positive"
         assert self.max_steer_angle_rad > 0.0, "max_steer_angle_rad must be positive"
@@ -518,6 +527,11 @@ class LqrTracker(BasePolicy):
         error = np.array([float(rel[1]), float(rel[2])], dtype=np.float64)
         gain = self._gain_for(speed)
         delta = float(gain @ error) * self.steer_gain
+        if self.curvature_feedforward:
+            # R21-29（默认关、零训练对照）：曲率前馈 δ_ff = atan(wb·κ_ref)（非默认配置）
+            ref_curv = self._ref_curvature(preview)
+            if np.isfinite(ref_curv):
+                delta = self.ff_gain * float(np.arctan(self.wheelbase * ref_curv)) + delta
         steer = float(clip(delta / self.max_steer_angle_rad, -1.0, 1.0))
 
         accel = self.speed_gain * (float(self._ref_speed[preview]) - speed)
@@ -550,6 +564,16 @@ class LqrTracker(BasePolicy):
                 "ref_chord_speed": float(self._ref_speed[preview]),
             }
         )
+        if self.telemetry_coupling:
+            plan_step = int(preview) // max(int(self.reference_hz * self.reference_dt), 1)
+            self.action_info.update({
+                "lqr_speed_error": float(self._ref_speed[preview]) - float(speed),
+                "lqr_curvature_error": float(ref_curvature) - float(actual_curvature),
+                "preview_index_delta": (int(preview) - int(self._prev_preview)) if self._prev_preview is not None else 0,
+                "preview_plan_step_transition": (int(plan_step) - int(self._prev_plan_step)) if self._prev_plan_step is not None else 0,
+            })
+            self._prev_preview = int(preview)
+            self._prev_plan_step = int(plan_step)
         return action
 
     # ------------------------------------------------------------------ 内部

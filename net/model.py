@@ -1274,6 +1274,10 @@ class DrivingModel(nn.Module):
             out["plan_kappa"] = kappa
             out["plan_delta_kappa"] = kappa[..., 1:] - kappa[..., :-1]
             out["plan_valid_kappa"] = (plan[..., 0].abs() >= 1e-3)
+            # R21-29：Δκ 的 pairwise 有效掩码（相邻两步 ds 均 ≥ 0.5；无效低速点不得污染 Δκ 指标/投影）
+            out["plan_valid_delta_kappa"] = (
+                (plan[..., 0].abs() >= 0.5)[..., :-1] & (plan[..., 0].abs() >= 0.5)[..., 1:]
+            )
         # R21-28：只读动作级物理量（final_*；legacy_* 见 semantic_action_decomposition）
         mu = out.get("action_mu")
         if torch.is_tensor(mu) and int(mu.shape[-1]) == 2:
