@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（R21-3D：3D-1/2 门过 · 3D-3 未过门+定位 · round-25 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 上午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核（§5.11）；round-22 Outcome D（§5.13）；R21 0..3D 递进（§5.14–5.18）；**R21-3D：3D-1/2 门过（独立集含曲率 25.0%）；3D-3 小 canary 未过门（S0/S1 −8~9pp）⇒ 按预注册停止+定位（三嫌疑清除；层=初始化代价 + action 未采用语义）——待 round-25（§5.18）**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）。
+> **状态（2026-10-13 上午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；**round-25 批准 R25（残差平滑接入 + 分阶段解冻 + 动作级采纳监督；P0/P1/P2）——已开工（§5.19）；正式采集/DAgger/MoE/RL 仍冻结**。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ **round-25：R25 批准开工（§5.19）**。
 > **本版说明**：第九轮精简（269 → ~250 行）：§5.17 并入残档、§5.16/5.5/5.3/§3/§2.4 收缩、§0 补 R21-3D 行、§6/§7 更新；**当前状态=3D-1/2 门过、3D-3 未过门+定位（§5.18）、round-25 待裁**；改前 269 行 = `git show f788fdd:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -215,6 +215,15 @@
 - **失败定位（预注册 fail branch）**：三嫌疑（chain/rollout semantic/target selection）**全部清除**；实际层=① **替换式接线初始化代价**（S0 e001 0.093 → e003 0.240，恢复中但预算不足）；② **语义方向未被 action 采用**（monitor sign 0.93→0.70→0.60 逐 epoch 下降；独立集 sign 0.56/0.60；而表示可解码 token R²≈1.0、expert dθ 线性可解码 R²≈0.70/0.62）⇒ **BC+exposure 下动力学 shortcut 复发**；③ static_role_only 后段不纠偏/转向弱化（sat 0.21）——定向 follow-up。
 - **待裁决（round-25；不自行开工）**：follow-up 候选（不加容量、不加新损失类型需批）：**(a) 平滑初始化**（语义路径对旧 summary 残差化、初值=baseline，消除替换代价；须配 action 级监督防重蹈 α 门）；**(b) action 级方向监督**（现 S1 aux 仅表示级、loss≈0.001 过弱；改动作纠正方向/lateral-correction 直接监督+调权）；**(c) 分阶段解冻**（canary 证明冻结适配可达 sign 99%——先保适配路径、再渐进解冻）；**(d) 预算/早停**（e1 sign 0.93 vs e3 0.60 的张力：逐 epoch sign 选择，不能只看 loss）。坑：全参下 sign 随 epoch 下降；static late≈0 时 flip 为符号噪声。
 - 产物：`runs/p1_v2/round24/`（报告 + 5 canary 探针 + rollout diag + clean150×5）；零 20 万级采集、DAgger/MoE/RL 未动。
+
+### 5.19 round-25 裁决：**批准 Round-25（残差式平滑接入 + 分阶段解冻 + 动作级采纳监督；P0/P1/P2 三臂）——已开工**
+
+- **核验（两项指控均成立）**：① semantic 模式为"替换式"接线（`build_geometry_context` 直接返回 SemanticWiring 输出替换旧 summary；惰性随机初始化）⇒ 载入即分布冲击（解释 e001 0.093）；② `_head_tokens:796-798` 追加 target token 时 **mask 恒 1**（无 lane_semantic_mask×valid）⇒ 无效时零 token 仍可能经 KV 投影 bias 产生影响。
+- **接受方案**：**残差化** `geometry = legacy + β_context·Δsemantic`、`target_token_eff = β_token·token`，β 初值 0（**契约：载入后训练前 action_mu/value/plan/traj_xy/router_logits max|Δ|<1e-6，否则不得开训**）；**mask 修复**（`lane_semantic_mask × target_lane_valid`；无效 ⇒ 与无 target-token 路径逐位一致）；**分阶段解冻**（S1 仅 semantic path 1–2ep → S2 解冻 PlanHead/Policy 末层 0.1×、Primary 末层 0.03–0.05× → S3 仅 S2 过门后）；**动作级监督**（B/C 加权当前动作回归〔exposure 50/25/20/5、λθ〕+ 方向 margin loss〔死区〕+ **左右 paired counterfactual loss**〔符号按 repo 坐标校验〕+ 弱 adoption 监控）；**联合 checkpoint selection**（semantic_val 选 epoch、calibration50 短闭环、clean150 终验；逐 epoch 记录 sign/mirror/lane/curv/hist + **β 轨迹 + 梯度范数**——不得只看 BC loss）。
+- **三臂与门**：P0 平滑接入（分辨替换初始化是否为失败主因）；P1=P0+动作级监督（主候选）；P2=P1+Primary 末层（劣于 P1 ⇒ 保持冻结）。门：**A** 初始化/代码正确性 → **B** 独立集动作语义保持（sign/mirror ≥95%、lane ≥3×、curv ≥25%、hist/lane ≤1、**连续两 epoch**）→ **C** 动作质量（perturbed dθ MAE ↓≥20%、learner ↓≥15%、sign err ↓≥30% 相对、teacher ≤+10%）→ **D** clean150（**succ ≥0.38 且 vs legacy ≥+5pp**、off ↓≥5pp、coll ≤+2、tmo ≤+3、饱和不得近 0.80 亦不得欠转）→ **E** 全过才准扩大数据。**不做**：loss 权重大扫、容量、optimizer 扫参、MoE/RL/DAgger、新数据。
+- **我方执行注记**：① 旧契约测试须改写（残差化后"semantic 禁 masked_mean"语义反转：基底=legacy 均值；新契约=β=0 逐位=baseline + 残差路径存在）；② `baseline_dθ` 须精确定义（建议=对应无扰动 base 态 expert 动作）并配单测 + 符号按 repo 坐标校验；③ 监控 β 轨迹与梯度健康——β 恒 ≈0 即"目标仍偏好 shortcut"直接证据（P0 ≈ legacy 属预期，不据此判死方向）；④ static_role_only 的 curvature 静止近似需记录后段偏差（不得宣称为最终物理模型）。
+- **边界**：Round-25 失败 → 停 semantic adapter（不堆 loss/数据、不转 DAgger/MoE/RL；现实阶梯：R25 恢复/超 legacy → 正式 semantic BC 0.50–0.60 → DAgger 0.60–0.70 → MoE/PPO 追 0.756）。
+- **开工**：R25 lane 已派发（复用 R21 session；零新数据=3d3 53,765 行；产物 `runs/p1_v2/round25/`）。
 
 ---
 
