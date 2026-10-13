@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（R27：27A/27B 过 · R1 修饱和但 tmo/teacher/Δκ 未闭合 · round-28 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 下午·三）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D（§5.14–5.18）；round-25/26/27 R25–R27（§5.19–5.24）；**round-28 根因升级=横纵耦合（κ=dθ/ds 参数化 + LQR chord 链 + 共享 action head）；批准 R28（28A 零训练耦合审计 + 28B K0/K1 仅横向 κ residual；ds_final≡legacy）——已开工（§5.25）；正式采集/DAgger/MoE/RL 仍冻结**。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）→ round-27：R27 执行（27A/27B 过、R1 修饱和但 tmo/teacher/plan-Δκ 未闭合+停止）（§5.23–5.24）→ **round-28：R28 批准开工（§5.25）**。
+> **状态（2026-10-13 傍晚）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D（§5.14–5.18）；round-25/26/27 R25–R27（§5.19–5.24）；**round-28 R28：28A 归因 ✅（主轴=F3 速度参考；F1 κ-ds 耦合 / F4 LQR 尾段命中）；K1 核心假设被否定（ds≡legacy 未消除 tmo）+ S2 崩塌 ⇒ 预注册停止（§5.26）；待 round-29（lateral/tracking 线；S2 解冻模式待审）**；正式采集/DAgger/MoE/RL 仍冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）→ round-27：R27 执行（27A/27B 过、R1 修饱和但 tmo/teacher/plan-Δκ 未闭合+停止）（§5.23–5.24）→ round-28：R28 执行（28A 归因 ✅、K1 假设否定+S2 崩塌+停止）（§5.25–5.26）。
 > **本版说明**：第十二轮精简（280 → ~271 行）：§5.23 并入残档、§5.22/5.24/5.20/5.18/5.10 收缩、§0 补 R27 行并刷新终局、§6/§7 更新；**当前状态=R27：27A/27B ✅、R0 复现；R1 修好饱和（sat 0.710 ✓）但换取 tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗ ⇒ 停止+定位（§5.24）、round-28 待裁**；改前 280 行 = `git show b9e70f4:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -244,6 +244,15 @@
 - **代码补强（采纳）**：tracking 增 `lqr_ref_curvature / lqr_actual_curvature / lqr_preview_plan_step / throttle_raw / throttle_clipped / ref_chord_speed`（默认关）；model forward 增只读诊断 `legacy_ds / legacy_kappa / Δκ / final_ds / final_kappa / final_dθ`（训练逻辑不进 forward）；residual_classes 增 `res_kappa + legacy_rollout_safe`（同态短 horizon legacy rollout）；semantic_labels metadata 增 expert/legacy 的 ds/dθ/κ/valid；manifest 增 label/expert hash + backend + query timing。
 - **不作**：继续调 R1 preservation 权重、全局 progress loss、独立纵向头训练、DAgger/MoE/RL、大采集、WM/K-anchor/容量。
 - **开工**：R28 lane 已派发（复用 R21 session；`runs/p1_v2/round28/`）。
+
+### 5.26 Round-28 结果（2026-10-13 17:5x）：**28A 归因 ✅（主轴 F3 速度参考；F1 κ-ds 耦合、F4 LQR 尾段命中）；K1 核心假设被否定（ds≡legacy 未消除 tmo）+ S2 崩塌 ⇒ 预注册停止**
+
+- **28A（Gate A ✅，覆盖率 1.0）**：物理量（Q1 vs legacy）——throttle 饱和 **0.50 vs 0.19**、|e_y| 0.99 vs 0.51、raw steer 2.88 vs 1.40；**chord 效应仅 0.005 m/s**（参考速度差异来自 plan ds 本身）。四族反事实（paired 50）：**F3（几何不动、v_ref×1.15）tmo 12%→8%、off 不变、succ 52% ✓**；**F1（κ 不变同缩）tmo→0 但 off 30%→52% ✓（κ-ds 强耦合）**；**F4（只改尾段）raw steer +0.18、tmo 12%→2% ✓（LQR preview/chain 主耦合源）**；F2 未命中。13 问题 episode 全被 ≥1 族改善（覆盖 1.0）。
+- **28B**：**K0=Q1 逐位复现**；**K1 S1 e1/e2 强**（teacher **+1.1%**、learner κ MAE **−71.6%**、lane sign 1.000、**sat −12.5pp vs legacy**、plan Δκ 3.90×→2.78×、calib50 **0.52/off 0.12/rc 0.863**），**S2 解冻末层即崩塌**（e3/e4 teacher 0.28、calib 0.0、off 1.0）。
+- **门**：B 4/5（plan Δκ 2.78× ✗、κ mirror **0.70** ✗〔经 common-ds 复核=真横向不对称〕）；C 3/4（**ds 逐位 ✓ max|Δ|=0、teacher ds MAE 逐位 ✓、v_ref 仅 chord ✓；tmo +20pp ✗**）⇒ 无过门 epoch ⇒ 停止（无 clean150/K2）。
+- **关键否定结论**：**ds≡legacy 并未消除 tmo 恶化**（K1 0.28 vs K0 0.24 vs legacy 0.08）⇒ **tmo 非纵向 residual 造成**，应转向 lateral/tracking（F3/F4：speed-ref 与尾段可控）；**S2 解冻崩塌第三次出现**（R1/K1）——"末层解冻"模式本身待审。
+- 28B 升级：`res_kappa + legacy_rollout_safe`（68.3% safe）；semantic_labels kinematics + manifest；7 新测、**958 passed**。
+- 产物：`runs/p1_v2/round28/`（审计/反事实×6/门/报告/K0-K1）；生产提交见 git log；**待 round-29**。
 
 ---
 
