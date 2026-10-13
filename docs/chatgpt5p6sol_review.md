@@ -1,575 +1,1029 @@
-总体结论
+你说得对。之前的优化和负结果都很宝贵，但现在到了必须重新核对“设计意图、代码真实行为、训练梯度、部署链路”是否一致的节点。不能一边假设 Stage A/B/C 按理想方式工作，一边继续追加 loss 或结构。
 
-Round-28 给出了一个非常关键的否定结果：
+我已结合最新 DRL_PathPlan_Code.txt 和 PPOGRPO.docx 做了第一轮代码级排摸。下面给出的是“先审计、再定架构、最后分阶段优化”的完整开工方案。
 
-固定 ds 并只学习横向曲率 κ，仍然没有消除 timeout。
+一、先锁定本轮的架构原则
+1. 唯一动作生成者是 PolicyHead
 
-所以此前“timeout 主要由 semantic 意外修改纵向动作造成”的假设不成立。横纵耦合确实存在，但当前主要矛盾已经进一步定位到：
+正式定义：
 
-横向修正改变完整六步路径
-→ LQR 从尾段预瞄
-→ 横向误差、实际车速、油门需求相互影响
-→ 即使 ds 数值保持 legacy，一样可能车辆掉速并 timeout
+ak=πϕ(zk)a_k=\pi_\phi(z_k)
 
+其中：
 
-目前最强候选不是失败品。K1 的第一阶段已经取得：
-
-teacher MAE 只恶化约 1.1%；
-learner-state κ MAE 下降约 71.6%； -纠偏方向正确率 100%； -steer saturation 比 legacy 低 12.5pp； -calibration50 success 达 0.52； -off-road 约 0.12。
-
-这说明“固定纵向、只学曲率 residual”的方向基本正确。真正失败的是：
-
-timeout 仍增加约 20pp； -plan Δκ 仍为 expert 的 2.78 倍； -镜像曲率一致性只有 0.70； -S2 一旦解冻末层就彻底崩溃。
-
-因此我不赞成立刻推翻 K1，更不赞成现在增加纵向头。下一步应把 K1 的尾段路径与 LQR 预瞄链闭合。
-
-一、Round-28 真正证明了什么
-1. 横纵耦合是真实的，但不只来自动作头
-
-四组反事实已经给出较强证据：
-
-F1 保持曲率、联合缩放 ds/dθ，timeout 消失但 off-road 显著恶化，说明速度、路径尺度和跟踪能力强耦合；
-F3 不改路径，只提升独立 v_ref，timeout 从 12% 降至 8%，且 off-road 不变，说明 tracker 速度参考是一个独立有效轴；
-F4 只改尾段就显著影响当前 steer 和 timeout，说明 LQR preview 让未来计划点直接作用于当前控制；
-K1 保证 ds 与 legacy 逐位相同，timeout 仍明显增加，说明 timeout 不是简单的 ds residual 造成。
-
-所以现在不能再用：
-
-ds = 纵向
-dθ = 横向
+a_k = 当前0.5秒的单步规划动作
 
 
-这种简单理解。
+当前动作可继续使用：
 
-真正的控制链是：
-
-六步 ds / dθ
-→ 六段曲率与路径形状
-→ 10Hz reference
-→ LQR 预瞄尾段
-→ steering 与车辆真实掉速
-→ longitudinal controller 追赶参考速度
-→ throttle 饱和 / 横向误差 / route progress
-
-二、对具体代码更改的审阅
-1. env/tracking.py 的新增遥测是正确的
-
-当前已经增加：
-
-steer_raw
-throttle_raw
-lqr_ref_curvature
-lqr_actual_curvature
-lqr_preview_plan_step
-ref_chord_speed
+(ds, dθ)
 
 
-这些字段足以区分：
+或者内部重参数化为：
 
-参考路径本身过弯；
-LQR 增益导致过度控制； -车辆真实曲率达不到参考曲率； -当前控制主要由第几个 plan step 决定；
-timeout 是否来自 throttle 长期饱和。
+(ds, κ)，再转换 dθ=κ·ds
 
-建议保留。
 
-但还缺两个关键指标
+但无论如何：
 
-建议补充：
+World Model 不产生动作；
+PlanHead 不产生另一条独立轨迹；
+K-anchor 不产生独立尾部；
+projector 不成为第二规划器； -六步计划全部由同一个 PolicyHead 被调用六次产生。
 
-lqr_curvature_error =
-    lqr_ref_curvature - lqr_actual_curvature
+六步链是：
 
-lqr_speed_error =
-    lqr_ref_speed_mps - actual_speed
+a0=π(z0)a_0=\pi(z_0) z^1=WM(z0,a0),a1=π(z^1)\hat z_1=WM(z_0,a_0), \quad a_1=\pi(\hat z_1)
+
+一直到：
+
+z^5=WM(z^4,a4),a5=π(z^5)\hat z_5=WM(\hat z_4,a_4), \quad a_5=\pi(\hat z_5)
+2. World Model 只负责预测世界状态
+
+World Model 的职责：
+
+z^k+1=fθ(zk,ak)\hat z_{k+1}=f_\theta(z_k,a_k)
+
+它负责：
+
+ego future state； -周车 future state； -lane-relative state； -presence/entry； -上下文随动作演化后的状态。
+
+它不负责判断 action 好不好。
+
+PolicyHead 才负责：
+
+π(z)→a\pi(z)\rightarrow a
+
+但二者必须通过接口验收：
+
+π(z^kWM)≈π(zkreal)\pi(\hat z_k^{WM}) \approx \pi(z_k^{real})
+
+这不是让 WM 为 Policy 的准确性负责，而是检验预测状态是否保留了 Policy 决策所需的信息。
+
+3. Stage C 使用 ExactTracker 训练单步 Policy
+
+你对 Stage C 的定义是合理的：
+
+真实环境状态
+→ PolicyHead输出单步action
+→ ExactTracker精确执行
+→ 环境真实转移
+→ reward
+→ PPO更新PolicyHead
+
+
+这样能够：
+
+-隔离规划与控制； -不让 Policy 为 LQR 跟踪误差负责； -建立清晰的 action-to-reward 因果链； -训练同一个单步 PolicyHead。
+
+部署时再通过 World Model 把同一个 PolicyHead 展开六次：
+
+Policy–WM–Policy–WM × 6
+→ 六步规划
+→ 固定LQR
+
+
+因此 Stage C 的 PPO 不需要把 action 扩成 12 维。RL 直接训练一步 action，六步能力来自参数共享和准确的 WM rollout。
+
+4. LQR 完全冻结
+
+本轮不再修改：
+
+LQR gain
+lookahead
+Riccati参数
+steer gain
+speed gain
+controller frequency
+curvature feedforward
+
+
+规划端必须适配固定 LQR 的输入契约。
+
+最终应分别报告：
+
+ExactTracker：
+Planner自身能力上界
+
+Fixed LQR：
+可部署闭环性能
+
+
+不能用 ExactTracker 指标直接宣称系统超过 IDM+Pure Pursuit。
+
+二、当前 Repo 已确认的代码事实
+
+这些是初步排摸后的事实，不是最终推断。
+
+1. Stage A 当前是专家动作 teacher forcing
+
+config/train.yaml 中 Stage A 的实际配置为：
+
+name = world_model_teacher_forcing
+ego_condition = expert_gt_actions
+targets = future_od_ld_lookup
+loss = direct_multi_step
+rollout_steps = 6
+
+
+真实流程是：
+
+t0 observation
++ 专家六步 action chain
+→ 逐步推进 latent
+→ 与真实 future observation latent 对齐
+
+
+这符合你的 Stage A 原始意图。
+
+2. Stage A 当前每步会 detach latent
+
+当前实现中：
+
+z_ego, z_od, z_ld = (
+    z_ego_next.detach(),
+    z_od_next.detach(),
+    z_ld_next.detach(),
+)
+
+
+因此当前 Stage A 虽然连续预测六步，但训练图不是完整六步 BPTT。
+
+实际更接近：
+
+一步transition训练
+→ 把预测latent作为下一步输入
+→ 但切断后续误差对前一步transition的梯度
+
+
+后果：
+
+h5/h6 错误不能修正 h1/h2 transition； -一步准确不代表六步稳定； -误差可能在 free rollout 中累积； -配置中的 direct_multi_step 不能自动等价为端到端六步优化。
+
+这必须先形成实证，而不是立即删 detach。
+
+3. 当前 Action 对 WM 的条件化主要是间接的
+
+当前链路是：
+
+(ds,dθ)
+→ arc_step
+→ 累积ego pose
+→ pose进入ST-GNN图关系
+→ latent transition
+
+
+ST-GNN transition 没有显式接收 action token。
+
+因此需要验证：
+
+这种pose-mediated action conditioning是否足够？
+
+
+不能直接假定一定不足，也不能直接假定配置里的 conditioned_on: ego 已完整实现：
+
+WM(z,a)WM(z,a)
+
+自动驾驶 World Model 尤其需要验证 action fidelity，仅有视觉、latent 或平均预测指标不足以证明模型遵循动作条件。ACT-Bench 也专门将 action controllability 与一般生成质量分开评估。
+
+4. Stage A 不训练 PolicyHead
+
+Stage A 当前可训练模块包括：
+
+encoders
+mem_encoder
+plan_head
+st_gnn
+
+
+不包括：
+
+policy
+value
+
+
+Stage A 的 PlanHead 主要通过 ego_next 辅助目标获得梯度。
+
+这符合“WM 与 Policy 分阶段训练”的思想，但必须核查：
+
+Stage A 预测 latent 的坐标系和统计尺度；
+Stage B Policy 消费该 latent 时是否分布一致；
+Stage B 是否在 predicted latent 上获得过监督。
+5. 当前 PlanHead 实际不是动作输出头
+
+当前代码职责大致是：
+
+PlanHead：
+ego/OD/LD/semantic/nav/signal融合
++ Primary/MoE
+→ policy context latent
+→ ego_next辅助预测
+
+PolicyHead：
+context tokens
+→ action_mu / action_logstd
+
+ValueHead：
+context tokens
+→ state value
+
+
+因此 PlanHead 更准确的概念名称应是：
+
+PolicyBackbone
+PolicyContextEncoder
+SceneDecisionBackbone
+
+
+先只修文档，不立刻改 class/checkpoint key。
+
+正式契约锁定：
+
+PolicyHead 是唯一动作输出器。
+
+K-anchor 继续保持关闭。
+
+6. Stage B 虽然传 world_model=False，仍可能运行 latent rollout
+
+当前 model(..., rollout=True, world_model=False) 的含义不是关闭 WM transition，而是：
+
+-仍运行六步 latent rollout； -仍生成六步 action plan； -只是不返回 OD/LD/latent 预测诊断输出。
+
+所以 Stage B 的未来五步仍依赖 ST-GNN transition。
+
+目前必须继续核查：
+
+Stage B 中 ST-GNN 是否冻结；
+step 1–5 的 action loss 能否回到 ST-GNN；
+action chain label 属于哪个真实状态； -真实 latent 与 predicted latent 的混用方式； -是否存在新的 state-label mismatch 风险。
+7. Stage C 文档显示走 cheap path
+
+pipeline\README.md 说明 PPO collect/update 使用 cheap path。
+
+当前 cheap path 通常是：
+
+rollout=False
+world_model=False
+
+
+这很可能意味着 Stage C：
+
+真实状态
+→ PolicyHead当前action
+→ ExactTracker
+→ PPO
+
+
+这本身符合你的设计。
+
+但必须核实：
+
+-环境实际执行的是 action0 还是 plan； -PPO buffer 保存的是哪个 action； -Stage C update 是否只更新 Policy； -MoE、WM、Encoder、Value 的实际梯度； -Stage C checkpoint 部署时，WM rollout+LQR 是否与训练时动作口径一致。
+
+三、新一轮不能先改网络，先做 Stage A/B/C Reality Audit
+
+Coding Agent 第一任务不是训练，而是提交两份真实契约：
+
+docs/stage_abc_reality_audit.md
+docs/stage_abc_execution_contract.md
+
+
+所有结论必须来源于：
+
+实际CLI入口
+实际forward调用
+运行时hook
+gradient/update ledger
+
+
+不能用 README 或配置注释代替运行事实。
+
+四、审计工作包 1：Stage A/B/C 真正的数据流
+Stage A 要回答
+1. 输入的6步动作来自哪里？
+2. 每一步future target来自哪里？
+3. future slot如何匹配？
+4. ego/OD/LD分别监督什么？
+5. latent target如何生成？
+6. 哪一步detach？
+7. 哪些loss能更新哪些模块？
+8. action噪声如何注入？
+9. teacher-forced与free rollout是否同口径？
+10. validation是否只测teacher-forced？
+
+
+输出：
+
+runs/reality_audit/stage_a_execution.json
+runs/reality_audit/stage_a_gradient_ledger.csv
+
+Stage B 要回答
+1. a0...a5是否全部来自同一个PolicyHead？
+2. predicted latent从哪一步开始使用？
+3. 每一步action label属于哪个物理状态？
+4. 六步action-chain loss如何定义？
+5. trajectory loss监督位置还是action？
+6. ST-GNN是否冻结？
+7. Stage B loss能否更新WM？
+8. Primary和specific experts何时开关？
+9. DAgger数据如何与普通BC数据并入？
+10. predicted-state训练是否存在标签错配？
+
+
+重点是：
+
+z^kWM\hat z_k^{WM}
+
+对应的监督 action 必须属于其代表的同一个物理状态。
+
+不能再次发生：
+
+预测状态 / 扰动状态
+×
+另一个时间或恢复后的expert label
+
+Stage C 要回答
+1. PPO sampled action是什么？
+2. ExactTracker实际执行什么？
+3. action/log_prob/value存入buffer的是什么？
+4. Stage C更新哪些参数？
+5. WM是否完全冻结？
+6. Policy更新后部署tail如何变化？
+7. collect/update/eval是否同一Policy口径？
+8. MoE在Stage C是on还是off？
+9. PPO entropy/clip/GAE的实际配置？
+10. Stage C checkpoint如何进入WM rollout+LQR部署评测？
+
+
+输出：
+
+runs/reality_audit/stage_c_effective_action.jsonl
+runs/reality_audit/stage_c_gradient_ledger.csv
+runs/reality_audit/stage_c_deployment_gap.json
+
+五、审计工作包 2：参数与梯度账本
+
+对每个 Stage 自动生成：
+
+parameter_name
+module
+requires_grad
+optimizer_group
+learning_rate
+weight_decay
+grad_norm
+update_norm
+checkpoint_loaded
+checkpoint_changed
+
+
+必须能直接回答：
+
+Stage A：
+Policy是否真的0更新？
+
+Stage B：
+WM是否真的冻结？
+step5 action loss能否触达step1 transition？
+
+Stage C：
+只更新Policy/Value还是也更新Backbone/MoE？
+WM是否有漂移？
+
+必须增加的梯度探针
+
+分别对：
+
+h1 loss
+h3 loss
+h6 loss
+
+
+单独 backward，记录到：
+
+encoder
+mem_encoder
+plan_head / policy backbone
+st_gnn transition
+policy head
+value head
+primary
+specific experts
+router
+
+
+这会证明 detach 后的真实梯度可达范围。
+
+六、审计工作包 3：World Model 能力四分法
+
+Stage A 不能只看一个总 loss。
+
+A. Teacher-forced one-step
+
+真实状态 + 专家 action：
+
+z_t, a_t → z_hat_(t+1)
+
+
+报告：
+
+ego pose/speed/heading/yaw
+OD position/velocity
+lane-relative state
+presence/entry
+latent error
+
+B. Teacher-action free latent rollout
+
+动作仍使用真实 expert chain，但状态来自前一步预测：
+
+z_hat_(k+1)=WM(z_hat_k,a_expert_k)
+
+
+这隔离：
+
+WM 多步累计误差。
+
+C. Policy-action free rollout
+
+动作也来自 Policy：
+
+a_hat_k=Policy(z_hat_k)
+z_hat_(k+1)=WM(z_hat_k,a_hat_k)
+
+
+这是部署链的真实近似。
+
+D. Oracle-state Policy
+
+每步使用真实未来 observation 编码出的 latent：
+
+a_oracle_k=Policy(Encoder(obs_real_k))
+
+
+这隔离：
+
+WM问题
+vs
+Policy问题
+
+七、审计工作包 4：核心 Rollout Consistency Probe
+
+这是连接 Stage C 单步 RL 与部署六步计划的核心。
+
+真实环境链
+
+Stage C使用ExactTracker运行，记录：
+
+z_t, a_t
+z_(t+1), a_(t+1)
+...
+z_(t+5), a_(t+5)
+
+
+对应：
+
+at+kreal=π(zt+kreal)a_{t+k}^{real}=\pi(z_{t+k}^{real})
+WM链
+
+从相同 z_t 开始：
+
+a^0=π(zt)\hat a_0=\pi(z_t) z^1=WM(zt,a^0)\hat z_1=WM(z_t,\hat a_0) a^1=π(z^1)\hat a_1=\pi(\hat z_1)
+
+直到第六步。
+
+每个 horizon 报告三类误差
+状态预测误差
+Ez(k)=d(z^k,zkreal)E_z(k)=d(\hat z_k,z_k^{real})
+Policy 接口误差
+Eπ(k)=∥π(z^k)−π(zkreal)∥E_\pi(k)= \|\pi(\hat z_k)-\pi(z_k^{real})\|
+动作链误差
+Ea(k)=∥a^k−akreal∥E_a(k)= \|\hat a_k-a_k^{real}\|
+
+输出：
+
+runs/reality_audit/rollout_consistency_h1_h6.json
+
+
+分层：
+
+普通直道
+弯道
+tollgate
+merge
+roundabout
+成功
+off-road
+collision
+timeout
+
+八、审计工作包 5：Action Conditioning Fidelity
+
+同一真实状态输入动作反事实：
+
+ds × {0.8, 1.0, 1.2}
+dθ ± perturbation
+κ ± perturbation
+zero action
+左右镜像 action
+
+
+对 horizon 1–6 观测：
+
+future ego pose
+future heading
+future speed
+OD relative state
+lane-relative state
+next policy action
+latent distance
+
+
+通过条件：
+
+ds增加 → future progress单调增大
+左转 → yaw/lateral响应方向正确
+镜像action → future状态近似镜像
+不同动作 → future latent可区分
+action影响不能只停留在pose字段
+
+
+如果 pose-conditioned WM 已通过，就不加 action token。
+
+如果失败，再进入最小改造：
+
+action embedding
+=
+MLP(normalized ds, dθ, κ, speed intent)
+
+
+并将 action embedding 接到：
+
+ego transition
+OD transition
+可选graph message conditioning
+
+
+先不加容量。
+
+九、审计工作包 6：WM/no-WM/oracle 对照
+
+同一 a0，比较未来尾段：
+
+W0：当前WM rollout
+W1：frozen-t0 latent + step embedding
+W2：oracle真实未来state + Policy
+W3：expert action chain
+W4：几何可行tail，仅作诊断下界
+
+
+固定 LQR，不修改控制器。
+
+比较：
+
+六步action error
+plan κ / Δκ
+重规划一致性
+LQR preview step
+raw steer
+steer saturation
+timeout
+off-road
+success
+
+
+判定：
+
+W2明显好于W0
+
+World Model 是主要瓶颈。
+
+W0≈W2，但都不好
+
+Policy/Stage B 是主要瓶颈。
+
+W1≥W0
+
+当前 WM transition 在伤害 rollout。
+
+W4明显好于W0
+
+当前 WM/Policy tail 未达到基本规划可行性，但 W4 不能直接替代正式路线 A。
+
+十、Stage A 新训练方案只能在审计后按分支启动
+情况 A：一步准，多步漂移
+
+不改架构，优化训练：
+
+A0：1-step teacher forcing
+A1：2-step truncated BPTT
+A2：3-step truncated BPTT
+A3：6-step free rollout validation
+
+
+不直接六步全 BPTT，避免训练不稳定。
+
+推荐 curriculum：
+
+Epoch 1–3：1-step
+Epoch 4–6：2-step
+Epoch 7–10：3-step
+最终：6-step只作验证
+
+
+只有 3-step 稳定后才尝试 6-step 梯度。
+
+情况 B：Action fidelity 不足
+
+增加显式 action token：
+
+action_embed = MLP(ds, dθ, κ, ds/dt)
+
+
+但保留：
+
+-原 pose conditioning； -原 ST-GNN； -原参数规模； -现有 checkpoint 可残差初始化。
+
+结构：
+
+transition_input
+=
+[z, graph_context, action_embed]
+
+情况 C：WM 物理预测准，但 Policy action-chain 差
+
+不改 WM，修 Stage B：
+
+B0：real-state BC
+B1：oracle-future-state BC
+B2：WM-predicted-state distillation
+B3：真实环境DAgger
+
+
+关键：
+
+预测latent上的动作监督
+必须与其对应的真实future state action对齐
+
+情况 D：WM 与 Policy 都好，但六步 plan 不可跟踪
+
+问题在：
+
+动作参数化
+六步chain平滑性
+可行性监督
+固定LQR输入契约
+
+
+此时才考虑内部：
+
+(ds,κ)
 
 
 以及：
 
-preview_heading_error
-preview_lateral_error
+κ continuity
+speed profile
+replanning consistency
 
 
-虽然已有 lqr_error_y/psi，最好在归因报告中明确形成组合字段。
+外部仍转换成：
 
-还建议记录：
+(ds,dθ)
 
-preview_plan_step 切换频率
+十一、Stage B 新训练方案
 
+在 Stage A 过门后执行。
 
-如果 preview 在 plan step 边界频繁跳跃，控制抖动可能来自离散预瞄索引，而不是模型轨迹本身。
+B1：Primary 单步 IL
+真实状态
+→ PolicyHead
+→ expert current action
 
-2. net/model.py 的曲率诊断基本正确，但低速处理仍不严谨
 
-当前：
+Primary 先掌握：
 
-kappa = dtheta / ds.clamp_min(1e-6)
+lane keeping
+route following
+普通曲率跟随
+普通前车跟随
+轻微纠偏
 
 
-并通过：
+MoE 暂时关闭。
 
-valid_kappa = abs(ds) >= 0.5
+B2：六步 rollout IL
+real z0
+→ Policy-WM ×6
+→ action chain
 
 
-标记有效性。
+监督：
 
-在本项目 ds 预计非负，因此通常不会发生负值分母问题。但这里仍有两个风险：
+h1当前动作高权重
+h2–h6逐步衰减
 
-风险 A：无效曲率仍被数值计算
 
-当 ds 很小时，kappa 会产生巨大值，只是额外返回一张 valid mask。
+建议第一版权重：
 
-必须确保所有：
+1.00, 0.50, 0.25, 0.15, 0.10, 0.05
 
-loss； -分位数； -均值； -镜像指标； -plan Δκ；
 
-都真正应用 mask，而不是先聚合再看 valid ratio。
+但不能只看 chain action MAE，还要看：
 
-风险 B：plan_delta_kappa 没有 pairwise validity
+WM-state vs real-state action consistency
+plan κ
+plan Δκ
+重规划一致性
+固定LQR闭环
 
-当前：
+B3：Mixed latent
 
-plan_delta_kappa = kappa[..., 1:] - kappa[..., :-1]
+逐步扩大 predicted latent 比例：
 
+20% → 50% → 80%
 
-正确的有效 mask 应是：
 
-valid_delta_kappa[t]
-=
-valid_kappa[t] & valid_kappa[t+1]
+不允许一步切成100% imagined latent。
 
+B4：DAgger
 
-否则一个无效低速 step 会污染相邻两个 Δκ。
+只有满足：
 
-建议模型明确输出：
+WM rollout consistency过门
+primary clean150 >=0.50
+teacher-state不显著退化
 
-plan_valid_delta_kappa
 
-3. pipeline/semantic_labels.py 的曲率标签方向正确
+才启动真实 learner-state DAgger。
 
-现在保存：
+B5：MoE
 
-expert_ds / expert_dtheta / expert_kappa
-legacy_ds / legacy_dtheta / legacy_kappa
-kappa_valid
+Primary 达到稳定 lanekeep 后再启用。
 
+MoE 只负责：
 
-并统一使用 ds >= 0.5m/0.5s 的有效门，方向是对的。
+tollgate
+merge/yield
+roundabout
+复杂交互
+避障
+特殊恢复
 
-小问题
 
-代码中 validity 使用 abs(ds) >= 0.5，但代码库的物理动作语义是前进行驶距离，正常情况下 ds 应非负。
+不允许 experts 补偿日常 lanekeep。
 
-建议增加 fail-fast：
+十二、Stage C 新训练方案
+C0：ExactTracker PPO baseline
 
-ds < -epsilon 的行数必须为0
+训练：
 
+单步 PolicyHead
+ValueHead
+可选冻结 PolicyBackbone
 
-而不是默默使用绝对值接受负 ds。否则未来若出现动作解码 bug，曲率标签系统会把倒车动作视为有效正常样本。
 
-4. pipeline/residual_classes.py 对曲率增加审计是进步，但 invalid-kappa 策略不合理
+World Model 冻结。
 
-当前逻辑相当于：
+PPO 使用：
 
-kappa_ok = (~valid_kappa) | (res_kappa <= threshold)
+-步级 reward； -Critic； -GAE； -clipped objective； -KL gate； -entropy regularization。
 
+这符合 PPOGRPO.docx 对 PPO 在连续、逐时间步控制和细粒度信用分配上的定位。
 
-也就是：
+C1：每个 PPO checkpoint 的部署迁移 Gate
 
-曲率无效时自动通过曲率门。
+每次 PPO 更新后必须同时通过：
 
-这对一般数据审计方便，但对本项目当前的 timeout/低速问题很危险。
+ExactTracker真实闭环
+WM rollout consistency
+固定LQR闭环
 
-因为：
 
--低 ds 正是最容易产生高曲率和 timeout 的区域； -曲率无效不代表状态安全； -自动通过可能把低速、高 dθ 状态归为 N0/N1； -随后 preservation 会保护一个实际上不可持或者不可跟踪的动作。
+如果：
 
-建议改成三种状态
-valid_curvature
-low_progress_yaw_motion
-invalid_or_unknown
+Exact提升
+但WM+LQR退化
 
 
-对于 ds < 0.5m：
+该 checkpoint 不得进入下一轮。
 
--如果 |dθ| 也小，可以作为低速近静止状态； -如果 |dθ| 大，应归入 correction/unsafe； -不能自动视为 curvature safe。
+C2：GRPO 暂不实施
 
-例如：
+PPOGRPO.docx 中的结论仍然成立：
 
-low_ds_safe = (ds < 0.5) & (abs(dtheta) < theta_low_speed_limit)
-kappa_ok = (valid_kappa & residual_kappa_ok) | low_ds_safe
+-候选组内比较适合评估“哪条完整轨迹更好”； -但原生 GRPO 对轨迹内部时间信用分配较粗； -自动驾驶仍需要 Critic+GAE 的 step-level advantage。
 
+因此本轮：
 
-阈值应来自 expert 低速动作分布，而不是手工猜测。
+PPO主线
+GRPO只做未来候选级辅助
 
-5. S2 解冻崩溃不是偶然，应正式关闭这条支路
 
-S2 解冻末层后：
+等单策略稳定后，才考虑：
 
-teacher error ≈ 0.28
-calibration success = 0
-off-road = 1
+候选级Group Advantage
++
+时间步Critic/GAE
 
+十三、必须新增的只读 Hooks
 
-类似崩溃已经重复出现多次。
+所有 hook：
 
-这说明当前末层一旦接受新的 semantic/κ 监督，就会破坏 legacy 的动作流形。可能原因包括：
+默认关闭
+零行为变化
+不进入checkpoint
+不改变模型输出
 
--同一个输出层同时控制 ds/dθ； -动作量纲和梯度尺度不同； -旧 chain 与新第一步动作不再匹配； -优化器新建状态导致旧层更新过猛； -辅助 loss 与 BC 对输出层发生方向冲突。
+World Model Hook
 
-因此：
+每个 horizon 保存：
 
-Round-29 不允许再次解冻 Policy/Primary/PlanHead legacy 层。
+action_in
+z_ego_in/out
+z_od_in/out
+z_ld_in/out
+ego_pose
+nav_token
+step_embedding
+od_pred
+ld_pred
+presence
+entry
 
-只训练 semantic residual path。S2 不再当作普通候选保留。
+Policy Hook
+policy input tokens
+PolicyBackbone latent
+Primary output
+MoE expert outputs
+router weights
+action_mu/logstd
+value
+semantic contribution
 
-三、K1 为什么 ds 不变仍然 timeout？
+Gradient Hook
+h1/h3/h6 loss到各模块的grad norm
+参数update norm
+optimizer state
 
-这是当前最关键的问题。
+Rollout Consistency Hook
+real_state_latent
+predicted_state_latent
+real_state_action
+predicted_state_action
+horizon
+episode/step
+road class
+outcome
 
-1. 实际车速不是由 ds 单独决定
+Effective Action Hook
 
-虽然 ds_final == ds_legacy，但模型修改了 κ，于是参考路径更弯。
+Stage C 保存：
 
-车辆实际执行时：
+sampled_action
+executed_exact_action
+old_log_prob
+value
+reward
+next_real_state
+deployment_rollout_plan[6]
+fixed_LQR_reference[30]
 
--需要更大横向力； -LQR steering 增大； -车辆动力学导致实际速度下降； -纵向控制器继续追踪 legacy 的参考速度； -因而出现高 throttle、低实际 progress； -最终 timeout。
 
-Round-28 中：
+此 hook 用于分析，不要求 Stage C 实际执行 LQR。
 
-throttle saturation 0.50 vs 0.19
-|e_y| 0.99 vs 0.51
-raw steer 2.88 vs 1.40
+十四、阶段性验收门
+Stage A-R Gate
+action intervention方向正确率 >=95%
+左右镜像一致率 >=95%
+horizon误差不指数爆炸
+WM tail优于frozen-t0 tail
+困难路型无系统性坍塌
 
 
-正好支持这个解释。
+绝对门建议作为初始开发门：
 
-2. 六步尾段直接影响当前控制
+ego position P90：
+h1 <=0.20m
+h3 <=0.60m
+h6 <=1.20m
 
-LQR 使用速度相关 lookahead，从轨迹中选择未来 preview point。
+heading P90：
+h1 <=2°
+h3 <=5°
+h6 <=10°
 
-所以第一步曲率合理，不代表当前 steer 合理。后续某个 plan step 曲率或航向突变，也会通过 preview 提前影响当前控制。
 
-F4 只修改尾段就显著改变 timeout，说明这是当前主因之一。
+这些门需要结合 simulator 尺度复核，可在审计后调整一次，之后锁定。
 
-3. Δκ 仍然远高于 expert
+Stage B-R Gate
+real-state current-action误差过门
+WM-state action误差接近real-state
+六步action chain无指数漂移
+plan Δκ <= expert P95×1.25
+clean150 >=0.50
+off-road显著下降
 
-K1 的 plan Δκ 仍约为 expert 的 2.78 倍。
+Stage C-R Gate
+ExactTracker PPO显著正向
+rollout consistency不退化
+固定LQR clean150同步正向
+teacher-state能力不显著退化
 
-这说明 K1 已经学会“往哪转”，但六步路径仍然：
 
-转向变化过快
-弯曲方式不平滑
-与跟踪器预瞄不匹配
+达到后才跑 eval500。
 
+十五、本轮明确禁止事项
 
-因此现在的主要问题已经从：
+审计结束前不得：
 
-lane semantic 是否正确
+修改LQR
+新增tail生成器
+一次输出6个action
+启用K-anchor
+增加World Model容量
+直接删除detach
+直接开启6步BPTT
+启动DAgger
+启动MoE重训
+启动PPO/GRPO
+扩大数据
+新增大量loss
 
+十六、给 Coding Agent 的正式开工指令
+启动“Stage A/B/C Repo Reality Audit”，暂停新主模型训练。
 
-转为：
+目标：
+确认当前repo是否真实实现：
+PolicyHead单步action
+→ World Model预测下一状态
+→ 同一PolicyHead继续决策
+→ rollout六步
+→ 固定LQR部署；
+以及Stage C ExactTracker PPO是否能通过该接口迁移到部署六步计划。
 
-semantic lateral correction 如何形成可执行的六步路径
+第一批交付：
 
-四、对 Round-28 结论的反驳与修正
+1. docs/stage_abc_reality_audit.md
+2. docs/stage_abc_execution_contract.md
+3. Stage A/B/C真实调用图
+4. Stage A/B/C参数、optimizer、gradient ledger
+5. h1/h3/h6梯度可达性报告
+6. teacher/free/policy/oracle/frozen-t0 rollout报告
+7. action-conditioning intervention probe
+8. real-state vs WM-state Policy action consistency
+9. Stage C sampled-action / executed-action / deployment-plan契约
+10. 当前代码与原始Stage A/B/C设计逐项差异
+11. 唯一推荐的下一步和Go/No-Go依据
 
-Coding Agent 写道：
+必须核实：
 
-K1 核心假设被否定。
+- PolicyHead是否唯一动作输出器；
+- PlanHead实际职责；
+- K-anchor是否全程关闭；
+- Stage A每步detach的真实影响；
+- WM是否对action具备足够敏感性；
+- Stage B predicted latent对应的动作标签是否同状态；
+- Stage C cheap path与部署rollout的迁移关系；
+- PPO checkpoint更新后WM rollout consistency是否退化。
 
-这个表述过强。
+纪律：
 
-被否定的是：
-
-“只要固定 legacy ds、只学习 κ residual，就能自动消除 timeout。”
-
-但 K1 的核心价值并没有被否定。相反，K1 S1 在多个关键指标上是目前最好结果：
-
--正常 teacher action 基本不退化；
-
-learner κ 大幅改善； -转向饱和下降； -calibration success 达到 0.52； -off-road 只有 0.12。
-
-所以更准确的结论是：
-
-横纵动作解耦有效，但仅解耦第一步动作不够；还需要同时解决六步 lateral path shaping 与 path-conditioned speed tracking。
-
-这与行业方向一致。PLUTO 显式建模横纵行为，AlignDrive 则先规划 lateral path，再让纵向决策条件化于路径，而不是让两个头完全独立。
-
-五、Round-29：先修尾段，不训练纵向头
-目标
-
-保留 K1 S1 的优势：
-
-teacher稳定
-learner κ改善
-off-road低
-semantic方向正确
-
-
-只解决：
-
-plan Δκ过大
-LQR preview受尾段干扰
-实际速度下降导致timeout
-
-29A：零训练尾段投影实验
-
-以 K1 S1 e1/e2 checkpoint 为唯一基础。
-
-保持第一步：
-
-ds0, kappa0 不变
-
-
-只处理 plan step 1–5。
-
-T0：原始 K1 plan
-
-作为基线。
-
-T1：曲率变化率投影
-
-求一个最接近原计划的平滑曲率序列：
-
-min⁡κ1′...κ5′∑twt(κt′−κt)2\min_{\kappa'_1...\kappa'_5} \sum_t w_t(\kappa'_t-\kappa_t)^2
-
-约束：
-
-∣κt+1′−κt′∣≤Δκmax|\kappa'_{t+1}-\kappa'_t| \leq \Delta\kappa_{max}
-
-并固定：
-
-κ0′=κ0\kappa'_0=\kappa_0
-
-其中 Δκ_max 使用 expert plan 的 P95 或 P99，按速度和道路曲率分组。
-
-最终：
-
-dθt′=κt′dstd\theta'_t=\kappa'_t ds_t
-T2：尾段指数衰减到道路曲率
-
-令：
-
-κt′=ρtκt+(1−ρt)κlane,t\kappa'_t = \rho_t\kappa_t+ (1-\rho_t)\kappa_{lane,t}
-
-其中前段更信任模型，后段逐步靠近 target-lane curvature。
-
-第一版可以使用：
-
-rho = [1.0, 0.8, 0.6, 0.4, 0.25, 0.15]
-
-
-但只作为一次固定对照，不扫参数。
-
-T3：T1 + 独立 v_ref ×1.15
-
-几何用 T1，tracker 参考速度使用 F3 已验证的 1.15。
-
-这是当前最关键组合，因为：
-
-T1 解决尾部 preview 的 lateral trackability； -独立 v_ref 解决实际掉速后的 longitudinal progress； -不会重新引入 learned longitudinal residual。
-六、Round-29 不应立刻训练 tail decoder
-
-先用确定性投影回答：
-
-一个可跟踪的尾部参考，能否让 K1 的 lateral correction 变成更好的闭环？
-
-如果 T1/T3 有效，再选择：
-
-部署时保留确定性 projector； 2.用 projector 输出作为 tail distillation target； 3.将约束做成可微投影层。
-
-目前不要训练新的 tail network，否则又会重新引入数据和归因变量。
-
-七、Round-29 评测标准
-Gate A：路径可跟踪性
-
-相对 K1 T0：
-
-plan Δκ P95 <= expert P95 ×1.25
-raw steer P95 至少下降20%
-steer saturation <= legacy +5pp
-|e_y| P95 至少下降15%
-曲率方向正确率 >=95%
-
-Gate B：纵向进度
-timeout <= legacy +3pp
-route completion不下降
-throttle saturation <= legacy +10pp
-实际平均速度不低于legacy 5%以上
-
-Gate C：闭环开发门
-
-在 calibration50：
-
-success >=0.54
-off-road <=0.12
-collision不恶化
-timeout <=0.12
-
-
-达到后才跑 clean150。
-
-clean150
-success >=0.43
-相对legacy >=+8pp
-off-road <=0.35
-collision <=legacy+2pp
-timeout <=legacy+3pp
-
-eval500
-
-只有 clean150 通过才执行：
-
-success >=0.45
-relative legacy >=+7pp
-off-road相对下降至少15%
-collision <=IDM
-timeout无显著恶化
-
-八、若 Round-29 成功，下一步是什么？
-方案 A：确定性 projector 保留
-
-如果 T3 明显有效且计算开销很低，可以先作为正式 planning layer：
-
-model lateral intent
-→ curvature projection
-→ path-conditioned speed reference
-→ LQR
-
-
-这不是不纯粹的“后处理补丁”，而是规划可行性层。传统规划和 FRENETIX 一样，也会在候选轨迹后进行可行性检查与多目标约束。
-
-方案 B：蒸馏 projector
-
-网络训练时监督：
-
-raw tail → projected feasible tail
-
-
-逐渐让模型直接产生平滑可执行路径。
-
-只有 projector 上限明确后才值得做。
-
-九、如果 Round-29 失败
-
-若 T1/T3 仍不能同时解决 off-road 与 timeout，则问题不再适合继续通过 plan loss 修补。
-
-应转向两种选择：
-
-路径 1：重新设计 tracker
-
-检查：
-
--速度相关 lookahead； -preview index 离散跳变； -steer gain； -LQR 对曲率前馈缺失。
-
-当前 LQR 只有 error feedback，没有显式道路曲率 feedforward。对于弯道，全部 steering 依赖 lateral/heading error 累积产生，这可能是 raw steer 很高和跟踪滞后的原因。
-
-可考虑：
-
-δ=Lκref+K[ey,eψ]\delta = L\kappa_{ref} + K[e_y,e_\psi]
-
-其中第一项是曲率前馈。
-
-路径 2：Frenet/path-conditioned planner
-
-若现有六步 (ds,dθ) 很难稳定协调，则进一步改为：
-
-lateral path / curvature profile
-→ longitudinal progress along path
-
-
-但这应是更后续的结构升级，不能在 Round-29 一起做。
-
-十、具体代码建议
-env/tracking.py
-
-新增：
-
-lqr_speed_error
-lqr_curvature_error
-preview_index_delta
-preview_plan_step_transition
-
-
-并增加一个实验性、默认关闭的 curvature feedforward：
-
-delta_ff = atan(wheelbase * ref_curvature)
-delta = delta_ff + gain @ error
-
-
-但本轮只做零训练对照，不进入默认配置。
-
-net/model.py
-
-修复或补齐：
-
-plan_valid_delta_kappa
-
-
-定义为相邻两步都满足 ds>=0.5。
-
-不要让无效低速点污染 Δκ 指标与投影。
-
-pipeline/residual_classes.py
-
-低 ds 时不要自动通过 curvature gate。
-
-增加：
-
-low_ds_small_dtheta
-low_ds_large_dtheta
-
-
-其中后者直接进入 correction/unsafe，而不是 N0/N1。
-
-pipeline/semantic_labels.py
-
-增加 fail-fast：
-
-expert_ds < -epsilon 或 legacy_ds < -epsilon → 失败
-
-
-并保存：
-
-expert_delta_kappa
-legacy_delta_kappa
-valid_delta_kappa
-
-十一、批准范围
-批准
-Round-29A：
-K1 S1 e1/e2 固定checkpoint
-T0/T1/T2/T3零训练尾段投影
-独立v_ref组合
-补齐trackability遥测
-条件性clean150/eval500
-
-条件批准
-LQR curvature feedforward只读/零训练对照
-
-暂不批准
-新纵向head
-新tail decoder
-再次解冻legacy层
-DAgger
-MoE
-PPO/GRPO
-大规模采集
-WM/K-anchor
-更多semantic loss
+- 所有probe/hook默认关闭、零行为变化；
+- 不修改LQR；
+- 不新增网络容量；
+- 不训练新主模型；
+- 不启动DAgger/MoE/RL；
+- 不扩大数据；
+- 结论以运行时hook和actual gradient为准，不以README注释代替。
 
 最终判断
 
-横纵耦合已被证实，但 Round-28 也证明：
+新一大轮优化的目标不是再寻找一个局部技巧，而是重新闭合整条因果链：
 
-问题不在第一步 ds residual，而在“横向 correction 如何形成六步路径，以及这条路径如何被 LQR 预瞄和纵向执行”。
+Stage A：
+World Model真正预测准确、action-sensitive、可滚动
 
-目前最合理的推进不是继续训练，而是利用已经很强的 K1 checkpoint，增加一个严格受限的轨迹可行性层：
+Stage B：
+唯一PolicyHead在真实/预测/learner状态上都能做正确单步决策
 
-semantic curvature intent
-→ 平滑、受约束的 lateral tail
-→ 独立 speed reference
-→ LQR
+Stage C：
+ExactTracker真实环境PPO提高单步Policy
+
+部署：
+同一Policy经准确WM展开六步，
+固定LQR闭环性能同步提升
 
 
-如果这能把 calibration50 从 0.52 进一步提升，并同时压低 timeout，才真正形成一条有希望向 0.60、0.70，最终超过 IDM+Pure Pursuit 的可扩展路径。
+等 Repo Reality Audit 完成后，再根据唯一根因选择：
+
+显式action conditioning
+多步BPTT
+mixed latent IL
+DAgger
+MoE
+PPO
+或之后的候选级GRPO
+
+
+这能最大限度避免再次出现“方案理论正确，但代码实际上没有按该方案运行”的方向性偏差。
