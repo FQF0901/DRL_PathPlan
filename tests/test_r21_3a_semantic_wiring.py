@@ -82,11 +82,19 @@ def _forward(model, obs, **kwargs):
     return model(obs, rollout=True, world_model=False, **kwargs)
 
 
+def _activate_residual(model, *, context: float = 1.0, token: float = 1.0) -> None:
+    """R21-25A：β=0 为 baseline 逐位；消费/一致性断言前把 β 置非零（残差路径存在）。"""
+    with torch.no_grad():
+        model.beta_context.fill_(float(context))
+        model.beta_token.fill_(float(token))
+
+
 # --------------------------------------------------------------------------- #
 # 1) invalid → token 严格 0
 # --------------------------------------------------------------------------- #
 def test_semantic_invalid_token_strict_zero() -> None:
     model = _semantic_model()
+    _activate_residual(model, context=0.0, token=1.0)
     obs = _semantic_obs(batch=2, sem_valid=1)
     out = _forward(model, obs)
     token = out["target_lane_token"]
@@ -146,6 +154,7 @@ def test_normalize_lane_semantic_bitwise() -> None:
 # --------------------------------------------------------------------------- #
 def test_role_group_permutation_consistency() -> None:
     model = _semantic_model()
+    _activate_residual(model, context=1.0, token=0.0)
     obs = _semantic_obs(batch=1, seed=3)
     base = _forward(model, obs)
     perm = torch.randperm(NUM_LD)
@@ -176,6 +185,7 @@ def test_ld_group_only_equality() -> None:
 # --------------------------------------------------------------------------- #
 def test_target_role_change_changes_context() -> None:
     model = _semantic_model()
+    _activate_residual(model, context=1.0, token=0.0)
     obs = _semantic_obs(batch=1, seed=5)
     base = _forward(model, obs)["geometry_context"]
     moved = {key: (value.clone() if torch.is_tensor(value) else value) for key, value in obs.items()}
@@ -207,6 +217,7 @@ def test_target_role_change_changes_context() -> None:
 # --------------------------------------------------------------------------- #
 def test_planhead_t0_and_rollout_consume_semantic() -> None:
     model = _semantic_model()
+    _activate_residual(model, context=1.0, token=1.0)
     obs = _semantic_obs(batch=2, seed=6)
     base = _forward(model, obs)
     perturbed = {key: (value.clone() if torch.is_tensor(value) else value) for key, value in obs.items()}
@@ -247,16 +258,14 @@ def test_old_ckpt_fail_fast_whitelist() -> None:
 # --------------------------------------------------------------------------- #
 # 8) 无 hidden mean fallback
 # --------------------------------------------------------------------------- #
-def test_no_hidden_mean_fallback() -> None:
+def test_residual_base_is_legacy_and_plan_step_requires_context() -> None:
+    """R21-25A 契约改写：semantic 模式**以 legacy aggregate_ld 为残差基底**（旧"禁 masked_mean"
+    语义反转）；仍禁止"缺 context 的静默回退"。"""
     model = _semantic_model()
     obs = _semantic_obs(batch=1, seed=7)
-
-    def _boom(*args, **kwargs):
-        raise AssertionError("semantic 模式不得调用 aggregate_ld / masked_mean 回退")
-
-    model.aggregate_ld = _boom  # type: ignore[method-assign]
-    _forward(model, obs)  # 不应抛错
-    with pytest.raises(RuntimeError, match="禁止回退 masked_mean"):
+    # semantic 模式正常前向会调用 aggregate_ld（legacy 基底）——不应抛错
+    _forward(model, obs)
+    with pytest.raises(RuntimeError, match="禁止静默回退"):
         model.plan_step(
             torch.randn(1, H), torch.randn(1, NUM_LD, H), torch.randn(1, NUM_LD, H),
             torch.ones(1, NUM_LD), torch.ones(1, NUM_LD), torch.randn(1, H),
@@ -285,6 +294,7 @@ def test_all_invalid_forward_backward_finite() -> None:
 def test_token_depends_only_on_lane_semantic_and_validity() -> None:
     """token 只由 lane_semantic（12 维）与 mask/valid 决定：role/route/offset/group 变化不动 token。"""
     model = _semantic_model()
+    _activate_residual(model, context=0.0, token=1.0)
     obs = _semantic_obs(batch=1, seed=9)
     token_a = _forward(model, obs)["target_lane_token"]
     changed = {key: (value.clone() if torch.is_tensor(value) else value) for key, value in obs.items()}
@@ -320,7 +330,11 @@ def test_round23_renames_consistent() -> None:
 def test_semantic_wiring_param_count_and_names() -> None:
     model = _semantic_model()
     names = model.semantic_parameter_names()
-    assert names and all(name.startswith("semantic_wiring.") for name in names)
+    assert names and all(
+        name.startswith("semantic_wiring.") or name in ("beta_context", "beta_token")
+        or name.startswith("target_proj.")
+        for name in names
+    )
     total = sum(p.numel() for p in model.semantic_wiring.parameters())
     assert total > 0
     # 归一化常数随 ckpt 持久化（state_dict 含 buffer）

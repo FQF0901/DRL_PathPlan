@@ -372,6 +372,12 @@ class DrivingModel(nn.Module):
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
+        #: R21-25A：残差式语义接入（β 初值 0 ⇒ 载入旧 ckpt 后逐位 = baseline；
+        #: 惰性构造，默认关 ⇒ 旧 ckpt 键集不变）。target_proj：target token → summary 槽的
+        #: 投影（bias 零初始化 ⇒ β=0 时贡献严格 0；R21-25B「必要 target-token projection」）。
+        self.beta_context: "nn.Parameter | None" = None
+        self.beta_token: "nn.Parameter | None" = None
+        self.target_proj: "nn.Linear | None" = None
         # v6 A1：policy/value = 交叉注意力头（K=1 查询 × 令牌集合；命名保 policy./value. 前缀，
         # 见 STAGE_C_DESIGN_PREFIXES 的 allowlist 契约）
         self.policy = PolicyHead(
@@ -438,7 +444,16 @@ class DrivingModel(nn.Module):
             hidden = int(getattr(self.plan_head, "hidden_dim", 0) or 0)
             if hidden <= 0:
                 hidden = int(self.st_gnn.hidden)
-            self.semantic_wiring = SemanticWiring(hidden).to(next(self.parameters()).device)
+            device = next(self.parameters()).device
+            self.semantic_wiring = SemanticWiring(hidden).to(device)
+            # R21-25A：残差门控（标量 Parameter，初值 0；进 optimizer 账本）
+            self.beta_context = nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+            self.beta_token = nn.Parameter(torch.zeros((), dtype=torch.float32, device=device))
+            # target token → summary 槽投影（bias 零初始化 ⇒ β=0 时严格 0 贡献）
+            proj = nn.Linear(hidden, hidden).to(device)
+            nn.init.zeros_(proj.bias)
+            nn.init.normal_(proj.weight, std=0.02)
+            self.target_proj = proj
         return self
 
     def _is_semantic(self) -> bool:
@@ -477,28 +492,34 @@ class DrivingModel(nn.Module):
         others_ctx: Tensor,
         *,
         semantic: Mapping[str, Tensor] | None,
-        t0_context: Tensor | None,
+        t0_delta: Tensor | None,
         t0_target: Tensor | None,
     ) -> tuple[Tensor, Tensor | None]:
-        """R21-3D：rollout 单步 geometry context（按 :meth:`set_rollout_semantic` 口径）。
+        """R21-25A：rollout 单步 plan 融合 context = **legacy(z_ld_k) + β_context·delta_k**。
 
-        - ``full``：当步 latent + t0 全量语义重建（R21-3A 现状）；
-        - ``t0_only``：直接复用 t0 context/target（不重复注入动态语义）；
-        - ``static_role_only``：当步 latent + **仅静态**语义（动态特征置零）重建。
+        rollout 口径只门控**语义 delta**（基底始终逐 step legacy —— 保证 β=0 与 baseline 逐位）：
+
+        - ``full``：delta_k = wiring(z_ld_k, t0 语义全量)；
+        - ``t0_only``：delta_k = t0 delta（不重复注入动态语义）；
+        - ``static_role_only``：delta_k = wiring(z_ld_k, t0 语义的**静态部分**；
+          动态 lat/heading/margins/distance 置零)。
         """
+        legacy = self.aggregate_ld(z_ld, ld_live, z_ego, nav_token, others_ctx)
         mode = self.rollout_semantic_mode
         if mode == "t0_only":
-            return t0_context, t0_target
-        if mode == "static_role_only" and semantic is not None:
+            delta, raw_target = t0_delta, t0_target
+        elif mode == "static_role_only" and semantic is not None:
             static_semantic = dict(semantic)
             feats = semantic["lane_semantic"].clone()
             for index in self.SEMANTIC_DYNAMIC_FEATURES:
                 feats[:, index] = 0.0
             static_semantic["lane_semantic"] = feats
-            return self.build_geometry_context(
-                z_ld, ld_live, z_ego, nav_token, others_ctx, semantic=static_semantic
-            )
-        return self.build_geometry_context(z_ld, ld_live, z_ego, nav_token, others_ctx, semantic=semantic)
+            delta, raw_target = self.semantic_wiring(z_ld, ld_live, **static_semantic)
+        else:
+            delta, raw_target = self.semantic_wiring(z_ld, ld_live, **semantic)
+        context = legacy + self.beta_context * delta if delta is not None else legacy
+        target = self.beta_token * raw_target if raw_target is not None else None
+        return context, target
 
     def stgnn_flags(self) -> tuple[bool, bool]:
         """``(include_ld_chain, exclude_ld_nodes)``——LD 邻接/消息传递开关的只读视图（诊断用）。"""
@@ -527,10 +548,14 @@ class DrivingModel(nn.Module):
 
     # ------------------------------------------------- R21-3A：语义接线（唯一入口）
     def semantic_parameter_names(self) -> tuple[str, ...]:
-        """``semantic_wiring`` 下的参数/buffer 名（旧 ckpt fail-fast 白名单）。"""
+        """semantic 接线新增的参数/buffer 名（旧 ckpt fail-fast 白名单）。"""
         if self.semantic_wiring is None:
             return ()
-        return tuple(f"semantic_wiring.{name}" for name in self.semantic_wiring.parameter_names())
+        names = [f"semantic_wiring.{name}" for name in self.semantic_wiring.parameter_names()]
+        names += ["beta_context", "beta_token"]
+        if self.target_proj is not None:
+            names += [f"target_proj.{name}" for name, _ in self.target_proj.named_parameters()]
+        return tuple(sorted(names))
 
     def _semantic_inputs_from_obs(self, obs: Mapping[str, Tensor]) -> dict[str, Tensor]:
         """obs → semantic 接线输入（current frame；缺键/形状不符直接报错 = 旧数据 fail-fast）。
@@ -583,17 +608,26 @@ class DrivingModel(nn.Module):
     ) -> tuple[Tensor, Tensor | None]:
         """**统一几何读出入口**（PlanHead t0 + rollout 1–6 + policy/value head tokens）。
 
-        - 非 ``semantic`` 模式：``(aggregate_ld(...), None)`` —— baseline/attn 路径逐位不变；
-        - ``semantic`` 模式：必须提供 ``semantic`` 输入（``_semantic_inputs_from_obs`` 产物），
-          否则报错（**禁 ``masked_mean`` 隐藏回退**）；返回 ``(ld_context, target_lane_token)``。
+        R21-25A **残差式接入**（round-25 §2）：
+
+        - ``legacy = aggregate_ld(...)``（baseline = masked_mean；attn 模式 = LdAggregate）——
+          作为**基底**（注意：这反转了 round-23 的"semantic 禁 masked_mean"语义）；
+        - ``geometry_context = legacy + beta_context · semantic_delta``；
+        - ``target_token_eff = beta_token · target_lane_token``（无效语义 ⇒ token 严格 0）；
+        - ``beta_*`` 初值 0 ⇒ 载入旧 ckpt 后与 baseline **逐位一致**（Gate A）。
+        - ``semantic`` 模式必须提供 ``semantic`` 输入（否则报错，无静默回退）。
         """
         if self._is_semantic():
             if semantic is None or self.semantic_wiring is None:
                 raise RuntimeError(
                     "semantic 模式必须提供 lane_semantic 输入（build_geometry_context semantic=None）"
-                    "——禁止回退 masked_mean(z_ld)（round-23 §4.4）"
+                    "——禁止静默回退（round-25 §2；残差基底 = legacy aggregate_ld）"
                 )
-            return self.semantic_wiring(z_ld, ld_live, **semantic)
+            delta, target_token = self.semantic_wiring(z_ld, ld_live, **semantic)
+            legacy = self.aggregate_ld(z_ld, ld_live, z_ego, nav_token, others_ctx)
+            context = legacy + self.beta_context * delta
+            target_eff = self.beta_token * target_token
+            return context, target_eff
         return self.aggregate_ld(z_ld, ld_live, z_ego, nav_token, others_ctx), None
 
     def set_moe(self, *, enabled: bool = True, load_balance_coef: float = 0.0) -> "DrivingModel":
@@ -732,8 +766,9 @@ class DrivingModel(nn.Module):
         if self._is_semantic():
             if geometry_context is None:
                 raise RuntimeError(
-                    "semantic 模式下 plan_step 缺 geometry_context——禁止回退 masked_mean(z_ld)"
-                    "（round-23 §4.4；调用方必须先走 build_geometry_context）"
+                    "semantic 模式下 plan_step 缺 geometry_context——禁止静默回退"
+                    "（round-25 §2：残差基底 = legacy aggregate_ld，但必须由 build_geometry_context "
+                    "统一构造；调用方不得自行拼接）"
                 )
             ld_pool = geometry_context
         else:
@@ -778,24 +813,27 @@ class DrivingModel(nn.Module):
         latent: Tensor,
         target_token: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """交叉注意力头的令牌集合 + key mask（v8 B3，T=39；semantic 模式 T=40）。
+        """交叉注意力头的令牌集合 + key mask（v8 B3，T=39；semantic 模式仍 T=39）。
 
         顺序 = ``[z_od 16, z_ld 16, od_pool 1, ld_pool 1, others 1, z_ego 1, nav 1, signal 1,
-        融合 latent 1]``（semantic 模式在 ``ld_pool`` 后追加 ``target_lane_token 1``）；
-        mask 对应追加恒 1。``z_*`` = 当前步 latent 状态（rollout 逐步迭代；t0 = 当前帧编码）；
-        ``od_pool/ld_pool`` = t0 上下文（``masked_mean(od_ctx)`` / 统一几何读出）。
+        融合 latent 1]``。R21-25A：target token **不追加新 key**，而是经 ``target_proj``
+        折叠进既有 ``ld_pool`` 槽（``ld_slot = ld_pool + target_proj(target_token)``）——
+        等价消除 round-24 指出的"追加 token mask 恒 1"隐患（无新 key ⇒ 无效 token 不影响
+        任何输出；bias 零初始化 + β=0 ⇒ 贡献严格 0，逐位 = baseline）。
+        ``z_*`` = 当前步 latent 状态（rollout 逐步迭代；t0 = 当前帧编码）。
         """
         ones = torch.ones((int(z_ego.shape[0]), 1), dtype=z_ego.dtype, device=z_ego.device)
+        ld_slot = ld_pool
+        if target_token is not None:
+            proj = self.target_proj
+            ld_slot = ld_pool + (proj(target_token) if proj is not None else target_token)
         token_parts = [
             z_od,
             z_ld,
             od_pool.unsqueeze(1),
-            ld_pool.unsqueeze(1),
+            ld_slot.unsqueeze(1),
         ]
         mask_parts = [od_live, ld_live, ones, ones]
-        if target_token is not None:
-            token_parts.append(target_token.unsqueeze(1))
-            mask_parts.append(ones)
         token_parts.extend(
             [
                 others_ctx.unsqueeze(1),
@@ -858,12 +896,27 @@ class DrivingModel(nn.Module):
         z_ld = self.encoders.embed_ld(encoded.ld_now, encoded.ld_live)
         # 上下文 token（t0 静态）：池化来自时序聚合 ctx
         od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
-        # R21-3A：semantic 输入（current frame；缺键报错 = 旧数据 fail-fast）
+        # R21-3A/25A：semantic 输入（current frame；缺键报错 = 旧数据 fail-fast）
         semantic = self._semantic_inputs_from_obs(obs) if self._is_semantic() else None
-        # 统一几何读出（baseline = aggregate_ld，逐位不变；semantic = target token + 分组读出）
-        ld_context, target_token = self.build_geometry_context(
-            encoded.ld_ctx, encoded.ld_live, z_ego, nav_token, encoded.others_ctx, semantic=semantic
-        )
+        # R21-25A 残差：head 槽基底 = legacy(ld_ctx)（与 baseline 同源）；plan 基底 = legacy(z_ld)；
+        # 语义 delta 由 SemanticWiring 在**当前帧 z_ld** 上计算（t0 delta 供 rollout t0_only 复用）
+        delta_t0 = None
+        target_token = None
+        if semantic is not None:
+            delta_t0, raw_target = self.semantic_wiring(z_ld, encoded.ld_live, **semantic)
+            target_token = self.beta_token * raw_target
+            head_context = (
+                self.aggregate_ld(encoded.ld_ctx, encoded.ld_live, z_ego, nav_token, encoded.others_ctx)
+                + self.beta_context * delta_t0
+            )
+            plan_context = (
+                self.aggregate_ld(z_ld, encoded.ld_live, z_ego, nav_token, encoded.others_ctx)
+                + self.beta_context * delta_t0
+            )
+        else:
+            head_context = self.aggregate_ld(encoded.ld_ctx, encoded.ld_live, z_ego, nav_token, encoded.others_ctx)
+            plan_context = None
+        ld_context, target_token = head_context, target_token
         ld_pool = ld_context
         if self.ld_mode == "set_attn" and self.ld_set_attn is not None:
             # Round-20 M2：LD set-attention 上下文（ego + nav + others 为 query）
@@ -882,7 +935,7 @@ class DrivingModel(nn.Module):
         latent, ego_next, moe_aux = self.plan_step(
             z_ego, z_od, z_ld, encoded.od_live, encoded.ld_live, encoded.others_ctx,
             nav_token, signal_token,
-            geometry_context=ld_context if self._is_semantic() else None,
+            geometry_context=plan_context,
         )
         # v7 结构迭代 B：K-anchor 计划（v8：lane 通道已删除 → lane_ctx 恒为 zeros(B,3)，
         # valid=0 → 锚混合恒等变换；anchor_lane_context 保留但不再接线）
@@ -948,9 +1001,11 @@ class DrivingModel(nn.Module):
             "route_world_mask": route_world_mask,
             "ego_world": ego_world,
             "anchor": anchor,
-            # R21-3A：semantic 模式诊断/下游（baseline = None / 与 ld_pool 相同）
+            # R21-3A/25A：semantic 模式诊断/下游（baseline = None / 与 ld_pool 相同）
             "target_lane_token": target_token,
-            "geometry_context": ld_context,
+            "geometry_context": ld_context,          # head 槽上下文（ld_ctx 基底）
+            "geometry_context_plan": plan_context,   # plan 融合上下文（z_ld 基底）
+            "semantic_delta_t0": delta_t0,
             "semantic_inputs": semantic,
         }
 
@@ -1070,20 +1125,21 @@ class DrivingModel(nn.Module):
                 semantic = encoded.get("semantic_inputs")
                 step_target = encoded.get("target_lane_token")
                 if self._is_semantic():
-                    # R21-3A/3D：按 rollout_semantic_mode 决定逐步注入口径
-                    step_context, step_target = self._rollout_step_geometry(
+                    # R21-25A：plan 基底逐 step legacy + 语义 delta（口径由 rollout_semantic_mode 门控）；
+                    # head 槽保持 t0 上下文（与 baseline 同结构 ⇒ β=0 逐位）
+                    plan_context_k, _ = self._rollout_step_geometry(
                         z_ld,
                         ld_live,
                         z_ego,
                         nav_token,
                         others_ctx,
                         semantic=semantic,
-                        t0_context=encoded.get("geometry_context"),
+                        t0_delta=encoded.get("semantic_delta_t0"),
                         t0_target=encoded.get("target_lane_token"),
                     )
                     latent, _, _ = self.plan_step(
                         z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token,
-                        geometry_context=step_context,
+                        geometry_context=plan_context_k,
                     )
                 else:
                     latent, _, _ = self.plan_step(
@@ -1097,14 +1153,14 @@ class DrivingModel(nn.Module):
                         od_live,
                         ld_live,
                         od_pool,
-                        step_context if self._is_semantic() else ld_pool,
+                        ld_pool,
                         others_ctx,
                         nav_token,
                         nav_mask,
                         signal_token,
                         signal_mask,
                         latent,
-                        step_target if self._is_semantic() else encoded.get("target_lane_token"),
+                        encoded.get("target_lane_token"),
                     )
                     action, _ = self.policy(tokens, key_mask)
                 else:

@@ -122,7 +122,7 @@ def test_semantic_chain_effect_with_scattered_transitions() -> None:
 def test_plan_step_semantic_requires_context_for_no_chain_too() -> None:
     model = _semantic_model()
     model.set_ld_mode("semantic_no_chain")
-    with pytest.raises(RuntimeError, match="禁止回退 masked_mean"):
+    with pytest.raises(RuntimeError, match="禁止静默回退"):
         model.plan_step(
             torch.randn(1, 16), torch.randn(1, 16, 16), torch.randn(1, 16, 16),
             torch.ones(1, 16), torch.ones(1, 16), torch.randn(1, 16),
