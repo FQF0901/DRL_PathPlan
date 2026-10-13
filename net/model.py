@@ -1273,6 +1273,14 @@ class DrivingModel(nn.Module):
             kappa = plan[..., 1] / plan[..., 0].clamp_min(1e-6)
             out["plan_kappa"] = kappa
             out["plan_delta_kappa"] = kappa[..., 1:] - kappa[..., :-1]
+            out["plan_valid_kappa"] = (plan[..., 0].abs() >= 1e-3)
+        # R21-28：只读动作级物理量（final_*；legacy_* 见 semantic_action_decomposition）
+        mu = out.get("action_mu")
+        if torch.is_tensor(mu) and int(mu.shape[-1]) == 2:
+            out["final_ds"] = mu[..., 0]
+            out["final_dtheta"] = mu[..., 1]
+            out["final_kappa"] = mu[..., 1] / mu[..., 0].clamp_min(1e-6)
+            out["valid_kappa"] = (mu[..., 0].abs() >= 0.5)
         return out
 
     @torch.no_grad()
@@ -1292,12 +1300,26 @@ class DrivingModel(nn.Module):
                 "beta_token": 0.0,
             }
         legacy = self.forward(obs, rollout=bool(rollout), world_model=False, semantic_off=True)["action_mu"].detach()
+        eps = 1e-6
+        legacy_ds = legacy[..., 0]
+        legacy_dtheta = legacy[..., 1]
+        legacy_kappa = legacy_dtheta / legacy_ds.clamp_min(eps)
+        final_kappa = final[..., 1] / final[..., 0].clamp_min(eps)
         return {
             "final_action": final,
             "legacy_action": legacy,
             "semantic_delta_action": final - legacy,
             "beta_context": float(self.beta_context.detach()) if self.beta_context is not None else 0.0,
             "beta_token": float(self.beta_token.detach()) if self.beta_token is not None else 0.0,
+            # R21-28：横纵耦合审计（只读）
+            "legacy_ds": legacy_ds,
+            "legacy_dtheta": legacy_dtheta,
+            "legacy_kappa": legacy_kappa,
+            "final_ds": final[..., 0],
+            "final_dtheta": final[..., 1],
+            "final_kappa": final_kappa,
+            "semantic_delta_kappa": final_kappa - legacy_kappa,
+            "valid_kappa": (legacy_ds.abs() >= 0.5),
         }
 
     @torch.no_grad()

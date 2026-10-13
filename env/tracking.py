@@ -522,9 +522,14 @@ class LqrTracker(BasePolicy):
 
         accel = self.speed_gain * (float(self._ref_speed[preview]) - speed)
         scale = self.accel_action_scale if accel >= 0.0 else self.brake_action_scale
-        throttle = float(clip(accel / scale, -1.0, 1.0))
+        throttle_raw = float(accel / scale)
+        throttle = float(clip(throttle_raw, -1.0, 1.0))
 
         action = [steer, throttle]
+        # R21-28：只读遥测（ref/actual curvature、preview 所属 plan step、throttle raw/clip、chord 参考速度）
+        ref_curvature = self._ref_curvature(preview)
+        # 实际曲率（运动学）：由 clip 后转向角换算 κ = tan(δ·δmax)/L（只读，不改变动作）
+        actual_curvature = float(np.tan(steer * self.max_steer_angle_rad) / self.wheelbase)
         self.action_info.update(
             {
                 "action": action,
@@ -536,6 +541,13 @@ class LqrTracker(BasePolicy):
                 "lqr_ref_speed_mps": float(self._ref_speed[preview]),
                 # R21-27：raw steer（clip 前）遥测——只读，不改变动作（action[0] 仍为 clip 后）
                 "steer_raw": float(delta / self.max_steer_angle_rad),
+                # R21-28：横纵耦合审计遥测（只读）
+                "lqr_ref_curvature": ref_curvature,
+                "lqr_actual_curvature": actual_curvature,
+                "lqr_preview_plan_step": int(preview) // max(int(self.reference_hz * self.reference_dt), 1),
+                "throttle_raw": throttle_raw,
+                "throttle_clipped": float(throttle),
+                "ref_chord_speed": float(self._ref_speed[preview]),
             }
         )
         return action
@@ -557,6 +569,22 @@ class LqrTracker(BasePolicy):
         target_arc = float(self._ref_arc[nearest]) + self._lookahead(speed)
         index = int(np.searchsorted(self._ref_arc, target_arc, side="left"))
         return int(min(max(index, nearest), n - 1))
+
+    def _ref_curvature(self, preview: int, half_window: int = 2) -> float:
+        """R21-28 只读：preview 邻域参考曲率 κ ≈ Δheading/Δarc（几何来自插值参考，不变）。"""
+        ref = self._ref_world
+        arc = self._ref_arc
+        if ref is None or arc is None or len(ref) < 3:
+            return float("nan")
+        lo = max(0, int(preview) - int(half_window))
+        hi = min(len(ref) - 1, int(preview) + int(half_window))
+        if hi - lo < 2:
+            return float("nan")
+        darc = float(arc[hi] - arc[lo])
+        if darc <= 1e-9:
+            return float("nan")
+        dtheta = float(wrap_to_pi(float(ref[hi][2]) - float(ref[lo][2])))
+        return dtheta / darc
 
     def _gain_for(self, speed: float) -> np.ndarray:
         """按速度分桶的 LQR 增益（``_solve_dare``，结果缓存 → 确定性）。"""

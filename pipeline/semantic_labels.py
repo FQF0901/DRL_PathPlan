@@ -16,12 +16,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
 V2_VERSION = "same_state_v2"
+KAPPA_VALID_DS_M = 0.5  # κ 有效阈值（ds ≥ 0.5 m/0.5s；与 R21-28 K1 监督掩码一致）
+EXPERT_BACKEND = "metadrive_expert_pure_pursuit"
+QUERY_TIMING = "same_state_immediate_post_teleport"
 
 
 def load_v2_label_map(labels_path: str | Path) -> dict:
@@ -51,8 +56,64 @@ def _excluded_keys(contract_path: str | Path | None) -> set:
     return {(int(item["episode_id"]), int(item["step"])) for item in contract.get("excluded_b_rows", [])}
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def kinematics_metadata(arrays: dict, legacy_actions_path: str | Path | None = None) -> dict:
+    """R21-28：expert/legacy 的 ds/dθ/κ/valid 元数据（供训练/审计直接消费，避免重复重算）。
+
+    ``κ = dθ/max(ds, ε)``；``kappa_valid = ds ≥ 0.5``（expert 与 legacy 同时满足）。
+    """
+    expert = np.asarray(arrays["expert_action"], dtype=np.float64)
+    expert_ds, expert_dth = expert[:, 0], expert[:, 1]
+    expert_kappa = expert_dth / np.maximum(expert_ds, 1e-6)
+    out = {
+        "expert_ds": expert_ds.astype(np.float32),
+        "expert_dtheta": expert_dth.astype(np.float32),
+        "expert_kappa": expert_kappa.astype(np.float32),
+    }
+    valid = np.abs(expert_ds) >= KAPPA_VALID_DS_M
+    if legacy_actions_path is not None:
+        path = Path(legacy_actions_path)
+        if not path.exists():
+            raise SystemExit(f"[semantic_labels] fail-fast：缺 legacy 动作 {path}")
+        legacy = np.asarray(np.load(path)["action"], dtype=np.float64)
+        if legacy.shape[0] != expert.shape[0]:
+            raise SystemExit(f"[semantic_labels] fail-fast：legacy 行数 {legacy.shape[0]} != {expert.shape[0]}")
+        legacy_ds, legacy_dth = legacy[:, 0], legacy[:, 1]
+        legacy_kappa = legacy_dth / np.maximum(legacy_ds, 1e-6)
+        out.update({
+            "legacy_ds": legacy_ds.astype(np.float32),
+            "legacy_dtheta": legacy_dth.astype(np.float32),
+            "legacy_kappa": legacy_kappa.astype(np.float32),
+        })
+        valid = valid & (np.abs(legacy_ds) >= KAPPA_VALID_DS_M)
+    out["kappa_valid"] = valid
+    return out
+
+
+def build_manifest(labels_path: Path, arrays: dict, *, rows: int, covered_b_rows: int,
+                   excluded_b_rows: int) -> dict:
+    """R21-28：正式训练 manifest（label/expert hash + backend + query timing），防数据版本混淆。"""
+    expert = np.asarray(arrays["expert_action"], dtype=np.float32)
+    return {
+        "label_source": str(labels_path),
+        "label_hash": _sha256(labels_path),
+        "expert_hash": hashlib.sha256(expert.tobytes()).hexdigest()[:16],
+        "backend": EXPERT_BACKEND,
+        "query_timing": QUERY_TIMING,
+        "label_state_version": V2_VERSION,
+        "rows": int(rows),
+        "covered_b_rows": int(covered_b_rows),
+        "excluded_b_rows": int(excluded_b_rows),
+        "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 def load_samples_v2(data_dir: str | Path, labels_path: str | Path,
-                    contract_path: str | Path | None = None) -> dict:
+                    contract_path: str | Path | None = None,
+                    legacy_actions_path: str | Path | None = None) -> dict:
     """加载数据集 + **强制 v2 覆盖**：返回 ``{"arrays", "keep_mask", "n", "v1_exposed", "label_meta"}``。
 
     - B 行：``expert_action`` ← v2 置位态标签；``excluded_b_rows`` → ``keep_mask=False``（值为 NaN）；
@@ -91,13 +152,18 @@ def load_samples_v2(data_dir: str | Path, labels_path: str | Path,
     if exposed:
         raise SystemExit(f"[semantic_labels] fail-fast：B 行 v1 暴露={exposed}（要求 0；v2 唯一来源）")
     arrays["expert_action"] = expert
+    meta = {
+        "version": labels["version"], "covered_b_rows": int(covered),
+        "excluded_b_rows": int((~keep & (row_type == 1)).sum()),
+        "source": str(labels_path),
+    }
+    kinematics = kinematics_metadata(arrays, legacy_actions_path)
+    meta["kappa_valid_rows"] = int(kinematics["kappa_valid"].sum())
+    manifest = build_manifest(Path(labels_path), arrays, rows=n, covered_b_rows=int(covered),
+                              excluded_b_rows=int((~keep & (row_type == 1)).sum()))
     return {
         "arrays": arrays, "keep_mask": keep, "n": n, "v1_exposed": int(exposed),
-        "label_meta": {
-            "version": labels["version"], "covered_b_rows": int(covered),
-            "excluded_b_rows": int((~keep & (row_type == 1)).sum()),
-            "source": str(labels_path),
-        },
+        "label_meta": meta, "kinematics": kinematics, "manifest": manifest,
     }
 
 
