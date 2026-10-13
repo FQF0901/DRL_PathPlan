@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（R27：27A/27B 过 · R1 修饱和但 tmo/teacher/Δκ 未闭合 · round-28 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 下午·二）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；round-25/26 R25/R26（§5.19–5.22）；**round-27 R27：27A/27B ✅、R0 逐位复现 Q1；R1 修好饱和（sat −9.4pp ✓）但换取 tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗ ⇒ 按预注册停止+定位（§5.24）；待 round-28（plan Δκ 全域约束 / ds-转向解耦 / N1 并入保持）**；正式采集/DAgger/MoE/RL 仍冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）→ round-27：R27 执行（27A/27B 过、R1 修饱和但 tmo/teacher/plan-Δκ 未闭合+停止）（§5.23–5.24）。
+> **状态（2026-10-13 下午·三）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D（§5.14–5.18）；round-25/26/27 R25–R27（§5.19–5.24）；**round-28 根因升级=横纵耦合（κ=dθ/ds 参数化 + LQR chord 链 + 共享 action head）；批准 R28（28A 零训练耦合审计 + 28B K0/K1 仅横向 κ residual；ds_final≡legacy）——已开工（§5.25）；正式采集/DAgger/MoE/RL 仍冻结**。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）→ round-27：R27 执行（27A/27B 过、R1 修饱和但 tmo/teacher/plan-Δκ 未闭合+停止）（§5.23–5.24）→ **round-28：R28 批准开工（§5.25）**。
 > **本版说明**：第十二轮精简（280 → ~271 行）：§5.23 并入残档、§5.22/5.24/5.20/5.18/5.10 收缩、§0 补 R27 行并刷新终局、§6/§7 更新；**当前状态=R27：27A/27B ✅、R0 复现；R1 修好饱和（sat 0.710 ✓）但换取 tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗ ⇒ 停止+定位（§5.24）、round-28 待裁**；改前 280 行 = `git show b9e70f4:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -26,7 +26,7 @@
 | **Round-26（R26）** | 26A 数据 ✅（v1 暴露 0）；**Q1 全面优于 Q0：pert −53.6% / learner −51.5%、Δp99× 1.017、mirror ✓、calib50 0.50 vs 0.40**；硬门未全过（**teacher +43.7%、sat +14.5pp**） | → R27（§5.23–5.24） |
 | **Round-27（R27）** | **27A/27B ✅、R0 逐位复现 Q1**；R1 目标轴见效（**sat 0.949→0.710 ✓**、learner −72.2%、N0 ↓40%）但 **tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗** | **停止+定位：ds-转向未分离 → 待 round-28（§5.24）** |
 
-- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ R25 首现超 legacy → R26 Q1 全面生效（calib50 0.50 vs 0.40）→ R27（27A/27B ✅、R0 复现）：**R1 修好饱和（0.710<legacy 0.804）但换取 tmo +26pp 与 teacher +59.6%、plan Δκ 2.1–2.3× ⇒ 停止+定位（ds-转向未分离），待 round-28（§5.24）**。**收敛一句话：lane semantic 四层（表示/采用/幅度/对称性）中前三层已正证，仅剩 normal-state preservation 与 plan-level trackability 未闭合。**
+- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ R25 首现超 legacy → R26 Q1 全面生效 → R27（27A/27B ✅、R0 复现；R1 修饱和但 tmo +26pp/teacher +59.6%/plan Δκ 2.1–2.3× ✗）⇒ **根因升级=横纵耦合**（κ=dθ/ds + LQR chord 链 + 共享 action head）；**round-28 批准 28A 耦合审计 + 28B K0/K1（仅横向 κ residual、ds≡legacy）已开工（§5.25）**。**收敛一句话：lane semantic 四层前三层已正证；未闭合 = normal-state preservation + plan-level trackability，共同底层机制=横纵耦合。**
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
 ---
@@ -234,6 +234,16 @@
 - **R1（+条件 preservation +归因驱动 trackability）**：**目标轴见效**——**sat 0.949→0.710（低于 legacy 0.804；Gate C sat ✅）**、learner −72.2%（R0 −51.5%）、sign err −79.5%、N0 P95 0.033→0.021–0.025（↓40%）；**但换取**：**tmo 0.12→0.34（+26pp ✗✗）**、teacher +43.7%→**+59.6% ✗**、**plan Δκ 2.33×→2.12×（新 Gate C 项，两臂均 ✗；expert P95 0.0169 vs R0 0.0393 / R1 0.0359）**。⇒ 无连续两 epoch 全过 ⇒ **停止**（D/E、eval500 未跑）。
 - **定位**：修复"转向过猛"成功，但代价=**进度/纵向驱动被削弱（tmo 爆表）** + 正常态仍被扰（teacher）——即 **ds 进度与转向权限未分离**；lane 建议（未执行）：plan Δκ **步 1–5 全域** expert 分位约束、progress 与 steering 解耦、**N1 纳入保持**。
 - **产物/诊断**：`runs/p1_v2/round27/`；history-dropout 0/25/50% → learner MAE 0.0739/0.0767/0.0740（**无改善**，不入门）；**待 round-28**。
+
+### 5.25 round-28 裁决：**根因升级=横纵耦合（参数化/执行器/共享头）；批准 Round-28（28A 零训练耦合审计 + 28B K0/K1 仅横向 κ residual）——已开工**
+
+- **核验（成立）**：`arc_step` 恒曲率弧 κ=dθ/ds（改任一维都改曲率）✓；tracking 链=chord 速度→纵向→实际速度→预瞄→横向（`ref_speed_scale` 钩子在案）✓；`residual_classes` 仍按动作残差分类（res_ds/res_dθ）+ safe_future 取自数据未来（非 legacy 同态 rollout）✓；`action_dim_weights` dθ 相对权重巨大（历史 (1, 69.4)）✓。
+- **接受根因升级（认账）**：R1"修好饱和却爆 tmo"= **横纵耦合强证据**；不再沿"加 preservation/trackability 权重"细调（会在耦合空间拔河）。
+- **Round-28 范围**：**28A 零训练耦合审计**——物理量换算（`κ_t=dθ/max(ds,ε)`、arc/chord 速度、Δκ、actual speed、progress、raw steer、throttle）+ **四族反事实：F1（固定曲率、ds/dθ 同缩）/ F2（固定 ds、只改 dθ）/ F3（固定几何、独立 v_ref 覆写——`ref_speed_scale` 钩子）/ F4（固定首步、只改尾段）**；输出 success/off/tmo、steer·throttle 饱和、rc、跟踪误差；按路型/结果分层、逐 episode paired；门 **≥90% tmo/off 差异可归因（F1–F4 主轴明确）**。**28B**：**K0=Q1/R0 基线复现**；**K1=纵横重参数化 canary**——`legacy→(ds_leg, κ_leg)`、`Δκ_semantic` 学习、**ds_final≡ds_legacy（纵向 residual 固定 0）**、`dθ=κ_final·ds_legacy`；外部接口保持 (ds,dθ)（**不改 env/LQR**）；监督 `L_kappa_residual / L_mirror_kappa / L_delta_kappa_smooth / L_N0-preservation`；**ds<0.5m 掩码禁用 κ 监督**。
+- **门**：**A** 归因（≥90%、F1–F4 主轴明确、逐 episode paired）→ **B** 横向（learner κ MAE ↓≥30%、mirror/lane-sign ≥95%、plan Δκ ≤expert P95×1.25、sat ≤legacy+5pp）→ **C** 纵向保持（**ds 逐位=legacy**、v_ref 差异仅几何 chord、tmo ≤legacy+3pp、rc 不降 >2pp、teacher ds MAE 逐位不变）→ **D** clean150（succ ≥0.43 且 +8pp、off ≤0.35、coll ≤+2pp、tmo ≤+3pp）→ **E** 才许 K2（path-conditioned 纵向 residual）；K1 失败 ⇒ 不加深纵向头，回到 chain/LQR preview 或 expert label 可持性。
+- **代码补强（采纳）**：tracking 增 `lqr_ref_curvature / lqr_actual_curvature / lqr_preview_plan_step / throttle_raw / throttle_clipped / ref_chord_speed`（默认关）；model forward 增只读诊断 `legacy_ds / legacy_kappa / Δκ / final_ds / final_kappa / final_dθ`（训练逻辑不进 forward）；residual_classes 增 `res_kappa + legacy_rollout_safe`（同态短 horizon legacy rollout）；semantic_labels metadata 增 expert/legacy 的 ds/dθ/κ/valid；manifest 增 label/expert hash + backend + query timing。
+- **不作**：继续调 R1 preservation 权重、全局 progress loss、独立纵向头训练、DAgger/MoE/RL、大采集、WM/K-anchor/容量。
+- **开工**：R28 lane 已派发（复用 R21 session；`runs/p1_v2/round28/`）。
 
 ---
 
