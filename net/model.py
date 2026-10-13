@@ -877,7 +877,7 @@ class DrivingModel(nn.Module):
         signal_token, signal_mask = advance_signal(signal_token, signal_mask, int(step_index))
         return nav_token, nav_mask, signal_token, signal_mask
 
-    def encode(self, obs: Mapping[str, Tensor]) -> dict[str, object]:
+    def encode(self, obs: Mapping[str, Tensor], *, semantic_off: bool = False) -> dict[str, object]:
         """观测 → mem/编码 mem/**latent 状态**/plan-head latent/头令牌集合（不跑 rollout）。
 
         v8（B3）：状态 latent = **当前帧编码**（``embed_ego(ego_now)`` / ``embed_od(od_now,
@@ -902,7 +902,7 @@ class DrivingModel(nn.Module):
         # 语义 delta 由 SemanticWiring 在**当前帧 z_ld** 上计算（t0 delta 供 rollout t0_only 复用）
         delta_t0 = None
         target_token = None
-        if semantic is not None:
+        if semantic is not None and not semantic_off:
             delta_t0, raw_target = self.semantic_wiring(z_ld, encoded.ld_live, **semantic)
             target_token = self.beta_token * raw_target
             head_context = (
@@ -914,8 +914,14 @@ class DrivingModel(nn.Module):
                 + self.beta_context * delta_t0
             )
         else:
+            # 非 semantic 或 semantic_off（R21-26B：delta 监督的"基底"前向 = legacy 路径，
+            # 语义贡献严格为 0；用于 delta_model = mu_on − mu_off.detach()）
             head_context = self.aggregate_ld(encoded.ld_ctx, encoded.ld_live, z_ego, nav_token, encoded.others_ctx)
-            plan_context = None
+            # plan 基底必须与 semantic 分支 β=0 逐位一致（z_ld 基底，而非 head 的 ld_ctx 基底）
+            plan_context = (
+                self.aggregate_ld(z_ld, encoded.ld_live, z_ego, nav_token, encoded.others_ctx)
+                if self._is_semantic() else None
+            )
         ld_context, target_token = head_context, target_token
         ld_pool = ld_context
         if self.ld_mode == "set_attn" and self.ld_set_attn is not None:
@@ -1007,6 +1013,7 @@ class DrivingModel(nn.Module):
             "geometry_context_plan": plan_context,   # plan 融合上下文（z_ld 基底）
             "semantic_delta_t0": delta_t0,
             "semantic_inputs": semantic,
+            "semantic_off": bool(semantic_off),
         }
 
     # ---------------------------------------------------------------- rollout
@@ -1124,7 +1131,7 @@ class DrivingModel(nn.Module):
             if k < self.rollout_steps:
                 semantic = encoded.get("semantic_inputs")
                 step_target = encoded.get("target_lane_token")
-                if self._is_semantic():
+                if self._is_semantic() and not encoded.get("semantic_off"):
                     # R21-25A：plan 基底逐 step legacy + 语义 delta（口径由 rollout_semantic_mode 门控）；
                     # head 槽保持 t0 上下文（与 baseline 同结构 ⇒ β=0 逐位）
                     plan_context_k, _ = self._rollout_step_geometry(
@@ -1137,6 +1144,13 @@ class DrivingModel(nn.Module):
                         t0_delta=encoded.get("semantic_delta_t0"),
                         t0_target=encoded.get("target_lane_token"),
                     )
+                    latent, _, _ = self.plan_step(
+                        z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token,
+                        geometry_context=plan_context_k,
+                    )
+                elif self._is_semantic():
+                    # R21-26B semantic_off：基底前向（legacy 路径，语义贡献严格 0）
+                    plan_context_k = self.aggregate_ld(z_ld, ld_live, z_ego, nav_token, others_ctx)
                     latent, _, _ = self.plan_step(
                         z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token,
                         geometry_context=plan_context_k,
@@ -1188,6 +1202,7 @@ class DrivingModel(nn.Module):
         rollout: bool = True,
         world_model: bool = True,
         wm_detach: bool | None = None,
+        semantic_off: bool = False,
     ) -> dict[str, Tensor]:
         """完整前向：策略/价值/路由 + （可选）latent 自回归 rollout 与 t0 帧物理解码。
 
@@ -1204,7 +1219,7 @@ class DrivingModel(nn.Module):
         MoE 输出口径（lane U1）：``primary + Σ_{i∈top2} g_i·expert_i``，推理与训练一致、
         全场景生效（无硬切/二值门/硬掩码）；phase 1 训练由 ``set_moe(enabled=False)`` 关闭。
         """
-        encoded = self.encode(obs)
+        encoded = self.encode(obs, semantic_off=bool(semantic_off))
         moe_aux: dict[str, Tensor] = encoded["moe_aux"]
         latent: Tensor = encoded["latent"]
         tokens: Tensor = encoded["tokens"]

@@ -109,3 +109,17 @@ tools/venv-python .slim/deepwork/p1_v2/round21/collect_semantic_v1.py verify \
   旧指纹数据集在 stage 入口硬失败（`pipeline.stages.validate_bc_dataset`，逃生门
   `--allow-legacy-dataset`）；旧 ckpt 仅允许显式 legacy 标注下加载（见契约 §6）。
 - 资源：采集 1275 task / 6 worker 176.8s（父进程峰值 RSS 77MB）；verify 120 episode 约 2 min。
+
+## 8. Errata（R21-26A；B 行标签状态契约）
+
+- **B-label-v1（无效）**：数据集内 `expert_action` 的 B 行旧标签在**恢复窗口之后**查询，
+  查询状态 ≠ 存储 obs 状态（obs = 置位态、label = 恢复后状态）；`corr(perturb_lat,
+  expert_dθ) = −0.156`。**v1 标签不得用于动作监督/探针/mirror 分母**。
+- **B-label-v2（`label_state_version=same_state_v2`，有效）**：确定性重放（置位后**立即**查询）
+  的 same-state 专家标签；`corr = +0.606`、`correct_sign_frac = 0.685`（repo 坐标：lat 正
+  ⇒ 修正 dθ 为正）。产物：`runs/p1_v2/round26/baseline_labels.npz`（3d3，10,803 行；
+  独立集 `indep_labels/baseline_labels.npz`，537 行），含 `label_pose` 供 same-state 审计。
+- **fail-fast 契约**：训练/验证/选择/probe/mirror 入口必须校验 `label_state_version ==
+  same_state_v2` 且 **v1 暴露 = 0**，否则拒绝运行（`runs/p1_v2/round26/data_contract.json`）。
+- **排除行**：same-state 审计失败且不可复现轨迹的 B 行（ep1091 的 4 行；重放轨迹漂移 ~10–16 m）
+  在训练/验证/选择/probe 全链剔除并记录（`excluded_b_rows`），不得以 v1 标签回填。
