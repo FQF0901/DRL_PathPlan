@@ -1,455 +1,610 @@
 总体裁决
 
-这轮是截至目前最接近可用方案的一次正向实验：
+我同意 docs\deepseekv4p1_argue.md 对 Round-27 的 停止判定，但不同意继续沿“加 preservation 权重、加更多 trackability loss”这条路细调。
 
-Q1 相对 Q0，在扰动状态、learner-state、方向错误、修正幅度和镜像一致性上全面改善；
-calibration50 达到 0.50，相对 legacy 的 0.40 提升 10pp；
-MoE-off 同口径下，Q1 达到 0.52，对照约 0.26；
-语义动作修正的 P99 已基本贴近专家，说明 residual target、幅度软锚和完整镜像增强确实生效。
+最新结果很明确：
 
-但仍然没有达到正式候选门：
+R1 把 steer saturation 从约 0.95 降至 0.71，说明正则确实约束了横向控制；
+learner-state 误差继续改善约 72%，方向错误下降约 80%； -但 timeout 从约 0.12 升至 0.34； -teacher-state MAE 恶化约 60%； -plan Δκ 仍为 expert 的 2.1倍。
 
-正常 expert-state MAE 恶化约 40%–44%； -转向饱和增加约 14.5pp； -没有连续两个 epoch 同时满足全部机制门； -尚未完成 clean150 独立验证，更谈不上 eval500 和超越 IDM。
+这不是单纯“loss 权重没调好”，而是在暴露更底层的问题：
 
-因此我的结论是：
+当前 (ds,dθ) 动作参数化、联合动作头、监督目标和 LQR 执行器，把纵向进度与横向曲率过度耦合了。
 
-Round-26 方向批准，Q1 保留为当前最佳候选；但不批准直接进入 DAgger、大数据、MoE 或 RL。下一阶段只关闭“正常态保持”和“转向饱和”两个问题。
+你的怀疑是成立的，而且很可能已经成为现阶段的主 root cause。
 
-一、代码实现审阅
-1. Residual target 实现正确
+一、横纵向在哪里发生了耦合？
+1. 动作参数化本身就是耦合的
 
-当前监督是：
+net\model.py 中，轨迹按恒曲率圆弧生成：
 
-模型语义增量：
-mu_semantic_on - mu_semantic_off.detach()
+κ=dθds\kappa = \frac{d\theta}{ds} R=dsdθR=\frac{ds}{d\theta}
 
-目标增量：
-expert_action - legacy_action
+也就是说：
 
+改 dθ 会改变路径曲率； -改 ds 也会改变路径曲率； -缩短 ds 而保持 dθ 不变，会显著增大曲率。
 
-这里 semantic_off.detach() 与冻结 legacy base 非常重要：
+因此当前动作并不是：
 
-梯度不能通过修改 base policy 来“伪造 residual”； -语义路径必须解释 expert 与 legacy 的动作差； -正常状态 expert≈legacy 时，目标 residual 自动接近零。
+ds = 纯纵向控制
+dθ = 纯横向控制
 
-这比 Round-25 直接让 semantic 强力改写完整动作合理得多。
 
-2. 幅度锚定已发挥作用
+而是：
 
-Q1 的模型 Δdθ P99≈0.231，专家约 0.227，P99 比率约 1.017；不同分组的模型修正量也已接近 expert，而 Q0 超过 expert 两倍。
+ds 与 dθ 共同决定横向曲率；
+ds 还决定纵向速度。
 
-这证明软锚确实解决了“semantic 修正量爆炸”的主要问题。
 
-但要注意：
+Round-27 中为了压低转向饱和而改变动作或计划平滑性，很容易同时损伤 ds 和 route progress，最终把 off-road 转化为 timeout。
 
-输出 residual 分位数正确，不等于最终 LQR 控制强度正确。
+2. LQR 执行层也把两者继续耦合
 
-因为 LQR 消费的是完整六步 plan。即使第一步 residual 合理，后续 chain 的累计曲率、连续触发和速度耦合仍可能造成转向饱和。
+env\tracking.py 中：
 
-所以下一轮不能只继续收紧 Δdθ 的 P95/P99。
+reference speed 由轨迹相邻点的 chord distance 计算； -这些轨迹点同时由 ds 和 dθ 生成； -LQR lookahead 又依赖车辆当前速度； -横向控制使用预瞄位置和航向误差； -纵向控制使用同一个 preview 点的参考速度。
 
-3. Full-mirror 配对基本有效
+因此链路是：
 
-Q1 镜像残差约 0.014–0.040，明显优于 Q0 的 0.042–0.059，说明完整状态镜像的设计有效。
+ds,dθ
+→ 圆弧几何
+→ chord speed
+→ longitudinal throttle
+→ actual speed
+→ lookahead distance
+→ lateral steer
 
-这一方向与行业经验一致：ChauffeurNet 通过合成扰动、环境约束和运动历史 dropout，迫使模型依据道路和环境因果线索，而非只复制专家历史。
 
-但目前镜像增强的训练分布仍主要来自合成 B 行：
+也就是说，纵向变化会改变横向预瞄，横向曲率又会轻微改变参考速度。
 
-traffic=0； -置位后 history 与真实连续 learner history 不完全同分布； -高速覆盖不足； -复杂路型扰动较少。
+这是物理上合理的一定程度耦合，但当前模型与监督没有将：
 
-所以不能把 synthetic mirror 的通过等价为真实闭环对称性已经解决。
+必要的物理协调
 
-4. Label fail-fast 修复正确，但历史报告必须标记失效
 
-旧 B-label-v1 存在 observation 与 expert label 状态错配，修复后相关性从负值变成明确正值。旧标签现在已被 fail-fast 禁止，且不可复现的 4 行被剔除，这是正确做法。
+和：
 
-必须进一步完成两件事：
+不必要的表示/优化纠缠
 
-所有历史报告加统一勘误标签；
-任何 checkpoint selection、probe 或统计若曾读取 v1，都应标记为不再具有动作监督证据。
-二、Q1 没过门的真正原因
 
-Coding Agent 将剩余问题概括为：
+区分开。
 
-teacher-state 保持性
-+
-steer saturation
+传统 Frenet 规划通常先在路径坐标系中分解横向路径和纵向速度，再在可行性层重新联合检查；FRENETIX 就采用轨迹采样、可行性检查和多目标代价来协调安全、舒适与路径精度。
 
+3. 网络输出头也是联合的
 
-这基本正确，但还需继续追一层。
+当前 Policy 基于同一 latent、同一 trunk 输出 2D action：
 
-1. Teacher MAE 恶化不一定只是“零修正约束不足”
+(ds, dθ)
 
-它可能来自四种机制：
 
-A. 正常态 residual target 并非真正为零
+因此：
 
-Legacy action 与 expert action 本来就有差值，即使 expert-state 行驶正常：
+lane semantic 进入 shared latent； -动作级 semantic loss 同时影响两维； -即使主要目标是纠偏，梯度也可能改变 ds； -正常状态 preservation 和 trackability loss 也可能通过 shared trunk 改变两维。
 
-expert_action - legacy_action != 0
+已有 action_dim_weights 还曾因为动作尺度不同，对 dθ 使用很大的相对权重。这有其历史原因，但也会使横向监督在共享网络中对纵向输出产生间接影响。
 
+4. 当前监督仍在分别拟合 ds/dθ，却没有直接监督真正的物理变量
 
-如果在全部正常样本上学习这个 residual，semantic 仍会系统性重写 legacy policy。
+现在重点监督：
 
-B. 新语义路径在 normal expert 数据上过度激活
+Δds
+Δdθ
 
-虽然 residual target 较小，但大量 normal expert 样本的累计梯度，可能推动 beta_context 形成持续非零修正。
 
-C. 训练正常态的 expert residual 会覆盖 legacy 的闭环补偿习惯
+但车辆真正执行关心的是：
 
-Legacy 与 learned chain 是联合工作的。单步 expert action 更准，不代表替换 legacy action 后的完整 plan 更稳定。
+速度 / 进度
+曲率
+曲率变化率
+轨迹可跟踪性
 
-D. 数据分布不平衡
 
-Normal expert 行数较多，但真正决定 lane correction 的大误差状态较少。若 loss 权重不合理，模型可能同时：
+两个动作在 dθ 上误差相同，如果 ds 不同，其物理曲率误差可能完全不同。
 
--在 normal 上学不必要的细微修正； -在 learner-state 上学过强修正。
+例如：
 
-因此不建议简单把 normal residual target 全部强制为严格零，这可能阻止修复 legacy 的系统性 bias。
+动作A：(ds=5m, dθ=0.1rad) → κ=0.02
+动作B：(ds=1m, dθ=0.1rad) → κ=0.10
 
-2. Steer saturation 来源尚未定位
 
-当前只知道：
+两者 dθ 相同，但第二个是第一条路径曲率的 5 倍。
 
-最终 steer saturation 增加14.5pp
+所以用 dθ residual 的 P95/P99 做软锚仍不充分。应该锚定的是：
 
+Δκ
+以及 path-conditioned progress
 
-还不知道来自：
 
-第一步 dθ 过大； 2.六步 chain 累计曲率过大； 3.相邻计划点 Δκ 不连续； 4.每次重规划 residual 符号来回切换； 5.速度 ds 与 dθ 比例改变，导致等效曲率增大； 6.LQR preview 对尾段过度响应。
+而非只锚定 Δdθ。
 
-行业中的 VAD 不只监督动作或轨迹误差，还显式加入 lane-direction、road-boundary 和 collision constraints，因为几何方向正确并不能自动保证规划轨迹安全、连续且可执行。
+二、对 Round-27 代码修改的审阅
+1. env\tracking.py 的遥测改动正确
 
-所以 Round-27 前必须先完成 saturation attribution，而不是直接增加“饱和惩罚”。
+新增 steer_raw，保留 clip 前转向指令，是正确做法。它能区分：
 
-三、建议的 Round-27
+模型计划只是接近饱和
+vs
+模型计划实际远超可执行边界
 
-目标只剩两个：
 
-保留 Q1 的 learner-state 修复收益
-同时恢复正常驾驶基本盘并降低 LQR 饱和
+但当前遥测仍缺少：
 
+reference curvature at preview
+actual curvature
+ref_speed 与 ds/dθ 的分解来源
+preview point 属于哪个 plan step
+throttle saturation
 
-不改模型容量，不采新大数据。
 
-27A：先做零训练饱和归因
+Round-28 应补上这些字段，否则“首步、尾部、trackability”分类仍然偏经验化。
 
-对 Q1 与 legacy，在相同 calibration50 + clean150 episode 上逐策略步记录：
+2. pipeline\residual_classes.py 的 N0/N1/C 分类方向合理
 
-mu_ds / mu_dtheta
-semantic Δds / Δdtheta
-plan[0:6]
-每步 kappa = dtheta / max(ds, eps)
+当前分类大致是：
+
+N0：legacy 已安全且 expert residual 很小；
+N1：legacy 有稳定小偏差，但未来仍安全；
+C：明显 correction 状态。
+
+这个逻辑优于将所有 teacher-state 强制 residual=0。
+
+但有两个问题。
+
+问题 A：分类仍在 action space 判断
+
+N0/N1 主要根据：
+
+|expert_ds - legacy_ds|
+|expert_dθ - legacy_dθ|
+
+
+而不是：
+
+speed residual
+curvature residual
+path-relative progress residual
+
+
+所以一个 dθ 差值很小、但 ds 很小导致曲率差很大的状态，可能被错误归类为 N0/N1。
+
+问题 B：safe_future 还不等于 legacy policy 本身安全
+
+未来 lat/head/speed 指标来自哪条 rollout 必须明确。如果是 expert future 或数据记录，而不是 legacy 从当前状态闭环执行的结果，那么：
+
+状态未来安全
+
+
+不等于：
+
+legacy action 在此状态是安全的
+
+
+N0 的 preservation 应依赖 legacy 行为的同状态短 horizon rollout，而不是只依赖 expert 轨迹未来安全。
+
+3. pipeline\semantic_labels.py 的 v2 fail-fast 正确
+
+它已经：
+
+-加载同状态 v2 expert label； -剔除不可复现行； -发现任何旧 B-label 暴露就直接退出； -覆盖率进入元数据。
+
+这部分可以保留。
+
+建议再将：
+
+label source hash
+expert implementation hash
+backend
+query timing
+
+
+写入每个正式训练 manifest，防止后续数据版本再次混淆。
+
+三、Round-27 结果应该如何解释
+“73.7% 为场景必要饱和”这个结论需要谨慎
+
+如果“场景必要”定义为：
+
+expert 或 legacy 在该场景也出现较大 steering
+
+
+仍不代表 Q1/R1 当前的饱和是合理的。
+
+应区分：
+
+场景确实需要较强曲率； 2.模型走晚了，导致必须急转； 3.路径方向正确但 ds 太低，造成 κ=dθ/ds 偏大； 4.连续重规划令纠偏反复累积； 5.LQR lookahead 与速度不匹配。
+
+因此“场景必要”最好改名为：
+
+场景具有高横向控制需求。
+
+不能直接从中推导模型饱和合理。
+
+R1 修好 steer、却让 timeout 爆发，是横纵耦合的强证据
+
+R1：
+
+steer saturation 低于 legacy；
+learner-state 误差改善更大； -却 timeout 增加 26pp； -plan Δκ 仍是 expert 两倍以上。
+
+这表明：
+
+通过动作/计划平滑令横向执行更温和时，纵向进度也被同步削弱了；同时真正路径曲率变化并未被解决。
+
+所以继续加 preservation 或 throttle reward，只会在耦合空间中拔河。
+
+四、行业方案给出的启发
+
+完全独立的横纵规划也不是答案。并行、互不条件化的横纵头容易产生“路径想左转、速度却仍按直行方案”的协调失败。
+
+最新的 AlignDrive 正是针对这一点：先产生 lateral drive path，再让 longitudinal prediction 条件化于该路径，并在路径上预测一维纵向位移，而不是让横纵两个头完全独立。
+
+PLUTO 同样强调 longitudinal-lateral aware architecture，并通过显式横纵行为建模和数据增强改善闭环，且在 nuPlan 上报告超过规则规划器。
+
+因此我们不应选择两个极端：
+
+当前：ds/dθ 完全纠缠
+或
+错误方案：两者完全独立、互不通信
+
+
+更合理的是：
+
+先规划横向路径，再基于该路径规划纵向速度。
+
+五、建议 Round-28：先证实耦合，再做最小重参数化
+
+这轮不要继续添加 loss。分两步。
+
+Round-28A：零训练横纵耦合审计
+1. 将动作转换为物理变量
+
+逐 plan step 计算：
+
+κt=dθtmax⁡(dst,ϵ)\kappa_t = \frac{d\theta_t}{\max(ds_t,\epsilon)} vtarc=dst0.5sv_t^{arc} = \frac{ds_t}{0.5s}
+
+同时计算 tracker 实际 chord speed：
+
+vtchord=2Rtsin⁡(∣dθt∣/2)0.5sv_t^{chord} = \frac{2R_t\sin(|d\theta_t|/2)}{0.5s}
+
+输出：
+
+ds
+dtheta
+kappa
+arc-speed
+chord-speed
 delta-kappa
-LQR reference curvature
-raw steer / clipped steer
-heading error
-lateral error
-speed
+actual speed
+route progress
+raw steer
+throttle
+
+2. 做四类反事实
+F1：固定路径曲率，只改速度
+ds *= scale
+dtheta *= scale
 
 
-将饱和分为：
+使 κ=dθ/ds 近似不变。
 
-首步动作型
-尾段chain型
-曲率不连续型
-重复重规划累积型
-低ds高dtheta型
-场景必要饱和
+F2：固定速度，只改曲率
 
-必须输出
-首步导致的饱和比例
-尾部导致的饱和比例
-成功episode中的饱和率
-off-road前饱和率
-timeout前饱和率
-按road class分组
+保持 ds 不变，只修改 dθ。
+
+F3：固定几何 plan，只独立修改 tracker v_ref
+
+几何不变，用独立 speed override。
+
+F4：保持第一步不变，只修改尾段速度/曲率
+
+用于区分：
+
+首步动作影响
+vs
+LQR preview 尾段影响
+
+3. 关键输出
+success / off-road / timeout
+raw steer / steer saturation
+throttle saturation
+route completion
+tracking error
 
 
-没有这个归因，不允许设计新的饱和 loss。
+按以下分层：
 
-27B：正常状态 residual 分解
+直道
+弯道
+tollgate
+merge
+成功/off-road/timeout
 
-将 expert-state 分成三类：
+通过判定
 
-N0：Legacy 已足够正确
+若 F3 能减少 timeout 且不恶化 off-road：
 
-定义例如：
+主要问题在 speed reference，而非 path geometry。
 
-|expert - legacy| 小
-legacy计划可行
-未来H步无失败前兆
+若 F1 明显优于仅调 ds：
 
+当前失败来自曲率随 ds 变化的耦合。
+
+若 F2 改善 off-road但 timeout基本不变：
+
+横向曲率头应独立重构。
+
+若 F4 尾段变化显著改变当前 steer：
+
+LQR preview/chain 是主要耦合源。
+
+Round-28B：最小动作重参数化 canary
+
+仅在 28A 后实施，建议改为内部输出：
+
+longitudinal：ds 或 v
+lateral：kappa
+
+
+执行前转换：
+
+dθ=κ⋅dsd\theta = \kappa \cdot ds
+
+接口对外仍保持：
+
+(ds,dtheta)
+
+
+因此无需重写环境和 LQR，只修改 policy head 和监督口径。
+
+六、推荐模型结构：解耦输出，条件耦合决策
+1. Lateral branch
+
+输入重点：
+
+lane semantic
+target lane token
+ego lateral/heading error
+road curvature
+OD lateral constraints
+
+
+输出：
+
+kappa_0...kappa_5
+
+
+或先只输出第一步 κ residual。
+
+主监督：
+
+expert kappa
+delta-kappa
+lane-direction consistency
+mirror consistency
+
+2. Longitudinal branch
+
+输入：
+
+最终 lateral path / kappa sequence
+ego speed
+speed limit
+route progress
+OD/TTC
+signal
+
+
+输出：
+
+ds_0...ds_5 或 speed profile
+
+
+关键是：
+
+longitudinal branch 必须 condition on lateral path。
+
+这样急弯时可自然减速，直道时保持进度，而不是由一个 shared residual 同时修改 ds/dθ。
+
+3. 最终转换
+dtheta_t = kappa_t * ds_t
+
+
+并通过现有 arc_step 和 LQR 执行。
+
+这比直接输出独立 ds/dθ 更符合物理语义，也更容易约束。
+
+七、Round-28 只批准两个训练臂
+K0：当前 Q1/R0 基线
+
+同批复现。
+
+K1：纵横重参数化 canary
+legacy action → (ds_legacy, kappa_legacy)
+
+semantic lateral residual：
+delta_kappa
+
+longitudinal residual：
+第一版固定为0，即 ds_final = ds_legacy
+
+kappa_final = kappa_legacy + delta_kappa
+dtheta_final = kappa_final * ds_legacy
+
+
+第一版故意只让 semantic 修正横向曲率，完全不碰 ds。
+
+这样能直接回答：
+
+Timeout 是否主要由 semantic 横向修正意外修改纵向进度导致？
+
+若 K1 保留 off-road 改善并消除 timeout 恶化，横纵耦合 root cause 得到确认。
+
+只有 K1 通过后，下一轮才增加独立 longitudinal residual。
+
+八、K1 的监督
 
 目标：
 
-semantic residual ≈ 0
+κexpert=dθexpertmax⁡(dsexpert,ϵ)\kappa_{expert} = \frac{d\theta_{expert}} {\max(ds_{expert},\epsilon)} Δκtarget=κexpert−κlegacy\Delta\kappa_{target} = \kappa_{expert}-\kappa_{legacy}
 
-N1：Legacy 有稳定小偏差
+模型：
 
-例如跨路型一致的 ds 低估或轻微曲率 bias。
+κfinal=κlegacy+Δκsemantic\kappa_{final} = \kappa_{legacy}+\Delta\kappa_{semantic}
 
-目标：
+损失：
 
-允许小 residual
-
-C：Perturbation / learner correction
-
-目标：
-
-学习完整 expert residual
+L_kappa_residual
+L_mirror_kappa
+L_delta_kappa_smooth
+L_normal-preservation，仅N0
 
 
-这样比“所有 teacher-state 一律零修正”更合理。
+低速和极小 ds 时必须 mask，建议：
 
-四、Round-27 仅允许两个候选
-R0：Q1 重跑基线
-
-固定 Q1 代码与数据，用于同批比较。
-
-R1：Q1 + normal-state preservation + saturation-aware regularization
-Normal-state preservation
-
-对 N0 样本：
-
-Lpreserve=∥Δasemantic∥1L_{preserve} = \|\Delta a_{semantic}\|_1
-
-但只对“legacy 已足够好”的样本启用，不能覆盖所有 teacher-state。
-
-Saturation-aware regularization
-
-根据 27A 归因选择：
-
-若第一步曲率过大
-
-约束：
-
-Δκ0=dθfinaldsfinal−dθlegacydslegacy\Delta \kappa_0 = \frac{d\theta_{final}}{ds_{final}} - \frac{d\theta_{legacy}}{ds_{legacy}}
-
-相对 expert residual 做软锚。
-
-若尾段累计曲率导致饱和
-
-约束：
-
-LΔκ=∑t∣κt+1−κt∣L_{\Delta\kappa} = \sum_t |\kappa_{t+1}-\kappa_t|
-
-但只惩罚超过 expert/legacy 正常分布的部分，不能全面追求小曲率。
-
-若连续重规划抖动导致饱和
-
-对相邻 decision step 的 semantic residual 加时序平滑：
-
-Ltemporal=∥Δat−Δat−1∥L_{temporal} = \|\Delta a_t-\Delta a_{t-1}\|
-
-仅在 target lane 和 route context 未发生变化时启用。
-
-五、一个关键反驳：暂时不要增加更大“teacher 零修正权重”
-
-如果直接把正常 expert residual 压到零，可能保住 teacher MAE，却失去 Q1 改善 off-road 的核心能力。
-
-ChauffeurNet 的经验不是简单增加 imitation 权重，而是同时使用合成扰动、环境约束、progress 等任务，并通过 past-motion dropout 限制历史 shortcut。
-
-当前 repo 也应避免再走向：
-
-为了保住正常态
-→ semantic大部分时间被压成0
-→ learner-state收益消失
+ds < 0.5m/0.5s 不启用kappa监督
 
 
-所以 preservation 必须基于 N0 条件，而不是面向全部 expert 行。
+否则 κ 会数值爆炸。
 
-六、是否需要 history dropout？
+不要在同一轮加入 longitudinal residual、progress loss、MoE 或 DAgger。
 
-值得加入诊断，但暂不进入 Round-27 正式候选。
+九、Round-28 验收标准
+Gate A：零训练耦合审计
+至少 90% timeout/off-road 差异可归因到 path、speed 或 preview； -明确 F1/F2/F3/F4 哪个轴主导； -输出结果可逐 episode paired。
+Gate B：横向能力
 
-当前已经证明 history shortcut 长期存在。ChauffeurNet 在一部分训练样本中去掉过去运动历史，迫使模型查看道路和环境线索，这是高度相关的行业方案。
+K1 相对 K0：
 
-建议先做一个小离线实验：
-
-正常history
-history dropout 25%
-history dropout 50%
-
-
-仅观察：
-
-teacher MAE
-learner MAE
-lane response
-history/lane ratio
-
-
-若 25% dropout 能降低 learner error 且 teacher degradation 可控，再进入后续正式训练。不要与 Round-27 R1 同时加入，否则无法归因。
-
-七、DAgger 是否即将具备条件？
-
-还没有。
-
-DAgger 用 learner 实际访问状态向 expert 查询动作，正是解决 covariate shift 和误差累积的标准路径。
-
-但当前 Q1 已经在 learner-state 上减错 51.5%，却仍存在：
-
-teacher MAE +40%； -饱和 +14.5pp； -没有连续两个 epoch 稳定通过。
-
-这意味着现在加入更多 learner-state，可能放大“过强修正”。
-
-DAgger 启动门仍应是：
-
-teacher degradation <=10%
-saturation <=legacy+5pp
-clean150 >=0.42
-连续两个epoch机制门通过
-
-八、Round-27 验收标准
-Gate A：饱和归因完成
->=90%的新增饱和可归入明确机制
-首步/尾段/抖动/低ds高dtheta占比明确
-按路型、速度、结果分层
-
-Gate B：Normal-state preservation
-teacher-state MAE恶化 <=10%
-N0语义residual P95 接近0
-N1小偏差修正不被完全抹除
-learner-state dtheta MAE仍下降>=30%
-
-
-Round-26 已下降 51.5%，允许部分回退，但不能低于 30%。
-
-Gate C：控制可执行性
-steer saturation <=legacy+5pp
-semantic delta P99 <=expert P99×1.25
-plan delta-kappa不高于expert P95×1.25
-timeout <=legacy+3pp
-
-Gate D：机制稳定性
-
-连续两个 epoch：
-
-sign >=95%
+learner-state kappa MAE下降 >=30%
 mirror >=95%
-curvature >=25%
-history/lane <=1
-teacher degradation <=10%
+lane correction sign >=95%
+plan delta-kappa <=expert P95×1.25
+steer saturation <=legacy+5pp
 
-Gate E：clean150
+Gate C：纵向保持
+
+由于 K1 不修改 ds：
+
+ds输出逐位等于legacy
+reference speed差仅来自几何chord效应
+timeout <=legacy+3pp
+route completion不下降超过2pp
+teacher ds MAE逐位不变
+
+Gate D：clean150
 success >=0.43
-relative legacy >=+8pp
+相对legacy >=+8pp
 off-road <=0.35
 collision <=legacy+2pp
 timeout <=legacy+3pp
 
+Gate E：下一阶段许可
 
-达到后才跑 eval500。
+K1 全过后才允许 K2：
 
-eval500 开发门
-success >=0.45
-relative legacy >=+7pp
-off-road相对下降>=15%
-collision <=IDM
-timeout无明显恶化
+path-conditioned longitudinal residual / speed profile
 
 
-这仍只是确认 semantic 路线可扩展，不代表接近最终目标。
+K1 失败则不应继续加纵向头，应回到 chain/LQR preview 或 expert label 可持性问题。
 
-九、代码与文档需补的内容
-model.py
+十、代码具体建议
+net/model.py
 
-保留：
+新增明确诊断输出：
 
-residual beta； -target token 折叠； -static_role_only； -semantic-off detach 作为 base。
-
-新增监控输出：
-
-semantic_delta_action
-legacy_action
-final_action
-plan_kappa[6]
-plan_delta_kappa[5]
-semantic_beta_context
-semantic_beta_token
+legacy_ds
+legacy_kappa
+semantic_delta_kappa
+final_ds
+final_kappa
+final_dtheta
 
 
-不要把训练专用标签逻辑写进模型 forward。N0/N1/C 分类应放在 trainer/dataset 层。
+不要在 forward() 内塞训练分类逻辑。
 
-semantic_v1_dataset_card.md
+需要严格处理：
 
-Errata 已写得很好，但应再明确：
-
-semantic_v1_pilot/samples.npz 中的 B expert_action 不得使用
-有效动作标签必须来自 round26/baseline_labels.npz
+valid_kappa = ds.abs() >= epsilon_ds
 
 
-最好在原 NPZ 消费入口直接拒绝读取 B 行的旧 expert_action，不能依赖使用者记得覆盖。
+所有 curvature loss 和指标必须带 mask。
 
-deepseekv4p1_argue.md
+env/tracking.py
 
-建议将 Round-25/26 的结论收敛成一句：
+新增：
 
-lane semantic 的表示、采用、幅度和对称性四层中，前三层已得到正证；当前仅剩 normal-state preservation 与 plan-level trackability 未闭合。
-
-十、距离终极目标的现实判断
-
-Q1 在 calibration50 达到 0.50 是重要进展，但样本只有 50 个，不能与 IDM 的 0.756 直接比较。
-
-当前应按以下阶梯：
-
-Round-27 clean150 >=0.43
-→ eval500 >=0.45
-→ 正式 semantic BC >=0.55
-→ current-action DAgger >=0.65
-→ 再考虑 MoE/PPO追平或超过0.756
+lqr_ref_curvature
+lqr_actual_curvature
+lqr_preview_plan_step
+throttle_raw
+throttle_clipped
+ref_chord_speed
 
 
-行业方案同样表明，显式 lane-direction、boundary、collision 约束能提高规划安全性，但它们不是单独解决闭环分布偏移的万能药。VAD 通过向量场景交互与显式规划约束共同降低碰撞，而 imitation 系统仍需关注闭环分布和后续训练。
+目前只有 steer_raw，不足以分析完整横纵耦合。
 
-最终审批
+pipeline/residual_classes.py
+
+N0/N1/C 判断增加：
+
+res_kappa
+legacy_rollout_safe
+
+
+不要继续只按 res_ds/res_dtheta 分类。
+
+pipeline/semantic_labels.py
+
+继续保持 v2 fail-fast，并在 label metadata 中增加：
+
+expert_ds
+expert_dtheta
+expert_kappa
+kappa_valid
+legacy_ds
+legacy_dtheta
+legacy_kappa
+
+
+避免训练阶段反复、可能不一致地重算。
+
+十一、批准与冻结
 批准
-Round-27A：零训练 saturation attribution
-Round-27B：N0/N1/C normal-state residual 分解
-Round-27 R0/R1 两臂
-条件 preservation
-归因驱动的 trackability regularization
+Round-28A 零训练横纵耦合审计
+tracking遥测补齐
+N0/N1/C curvature-aware审计
+Round-28B K0/K1 两臂
+仅 lateral kappa residual
 
 暂不批准
-盲目提高teacher零修正权重
-全局更严dtheta裁剪
-正式大数据扩采
-DAgger
+继续调R1 preservation权重
+全局progress loss
+独立longitudinal head训练
+正式DAgger
 MoE
-RL
-history dropout进入正式候选
-新网络容量
+PPO/GRPO
+大规模采集
+WM修改
+K-anchor
+容量扫描
 
-给 Coding Agent 的推进指令
-Round-26 方向确认，Q1 为当前最佳候选。
+最终判断
 
-先对新增 steer saturation 做逐步归因：
-首步幅度、尾段累计曲率、delta-kappa、连续重规划抖动、
-低ds高dtheta、路型和结果分层。
+你的疑问是关键的：
 
-然后仅做两臂：
-R0 = Q1复现；
-R1 = Q1 + 条件化normal-state preservation
-     + 由归因决定的plan-level trackability regularization。
+当前 root cause 很可能包含显著的横纵向耦合，而且不仅在网络层，也同时存在于动作定义、监督空间、chain rollout 和 LQR preview 中。
 
-Normal preservation仅作用于legacy已安全正确的N0状态，
-不得把全部expert-state residual强压为0。
+但不应简单改成两个完全独立的 head。行业趋势更加支持：
 
-必须达到：
-teacher MAE degradation <=10%
-learner MAE improvement >=30%
-steer saturation <=legacy+5pp
-timeout <=legacy+3pp
-sign/mirror >=95%
-curvature >=25%
-clean150 success >=0.43且相对legacy +8pp
-
-未达到：
-停止继续增加semantic loss与数据；
-不启动DAgger/MoE/RL。
+先确定 lateral path / curvature
+→ 再让 longitudinal speed 条件化于该 path
 
 
-这轮最重要的转变是：
+AlignDrive 明确指出，平行且互不条件化的横纵预测会产生协调失败，因此采用 path-conditioned longitudinal planning；PLUTO 也通过显式 longitudinal-lateral aware 架构提升了闭环规划性能。
 
-问题已经不再是“网络是否理解车道”，而是“如何让正确的车道修正转化为平滑、可执行、且不破坏正常驾驶的完整计划”。
+下一步最干净的实验是：
+
+固定 legacy ds，让 semantic 只学习 Δκ。
+
+如果这样既保留 off-road 改善，又消除 timeout 恶化，就基本确认当前 (ds,dθ) residual 的横纵纠缠是核心瓶颈。
