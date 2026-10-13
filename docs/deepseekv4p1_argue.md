@@ -224,7 +224,7 @@
 ### 5.31 R30 缩减版 Reality Audit 第一轮结果（2026-10-13 夜·五；R30-0..6b 全执行、零训练）
 
 - **结果**：
-  - **R30-1 四格矩阵（8 run）**：exact 行结构退化（0.5s 决策协议仅消费 `plan[0]`，5 子步后 re-arm）⇒ 实为 3 系统；**S1≈S2**（K1e2 0.540 vs 0.520 配对平局；pri512 0.260 vs 0.360，S1 更差）；**S3 严格劣**（0.020/0.000，跨策略 0 翻正）⇒ 训练栈≠部署栈（结构级）。
+  - **R30-1 四格矩阵（8 run）**：exact 行结构退化（0.5s 决策协议仅消费 `plan[0]`，5 子步后 re-arm）⇒ 实为 3 系统；**S1≈S2**（K1e2 0.540 vs 0.520 配对平局；pri512 0.260 vs 0.360，S1 更差）；**S3 严格劣**（0.020/0.000，跨策略 0 翻正）⇒ 训练栈≠部署栈（结构级）；**v2 复跑（reward 复采 + 复现性）：逐 episode 8/8 全一致**（审计 §1.5）。
   - **R30-2 R4（calib50、7,970 决策步）**：E_if/E_deploy = 1.54→1.22（≫50%）⇒ 接口主瓶颈（预注册带判定成立）；E_z_ego 0.203→0.316；E_real ≈0.40 恒定（策略误差地板）。
   - **R30-3 WM 动作条件化（M0，N=200）**：动作诱导 Δz 弱于状态自然差异 1–3 数量级（ds 通道最弱 ~1e-4）；a_next 呈"反向修正"极性（~0.90）；**mirror 门按现构造不可判**（需全场景镜像重造）。
   - **R30-4 梯度账本（B=32）**：detach 截断 / `policy→WM 不可达` / `Stage-B WM 全冻` 三布尔全实证（决定性对照 0.0 vs 2.226）；共享 transition 全 horizon 有梯度。
@@ -233,7 +233,7 @@
   - **R30-6 三臂（离线）**：k≥2 起 WM 尾段动作不如 frozen-hold（WM 更优 50%→10%→0%），oracle 平坦 0.40；机制=**尾段 ds 上冲**（2.56→3.64 vs mu 1.94/expert 2.30）+ δ-方向 2–3 步失配 + 幅度膨胀（overshoot drift）。
   - **R30-6b TF 消歧（全量 35,695 anchors、双模型）**：纯 WM TF 误差 ego 1−cos = **0.021→0.042**（pri512；M0 0.032→0.074），比 R4 部署链小 **8–10×** ⇒ **WM 固有能力 OK；根因=部署链一致性**（策略动作/状态分布漂移 + 0.5s 重规划替换尾参考（open-loop 语义）+ LQR 跟踪残差）。
 - **问题（round-31 裁决单，待裁）**：①**链路一致性修复三支**：训练分布（learner-state/DAgger）、协议侧（cadence/参考消费语义审计）、监督侧（overshoot drift 指标化后预注册）；②**Stage C 口径**：S3≪S2 结构级 ⇒ 键级 fail-fast + 口径重选（Exact 主训练前置=§5.30 注记 2）；③**工程尾巴**：mirror 门重造（全场景镜像）、配置 fail-fast/删键批次、road_class 旁记。
-- **产物**：`runs/p1_v2/round30/`（matrix×8、r4_K1e2、wm_action_probe_M0、grad_ledger、wm_tf_check×2、matrix_report）、`docs/round30_audit.md`（全文）、`docs/stage_a_config_consumption.md`、`.slim/deepwork/p1_v2/round30/`（journal/monitor/run_*.sh）；零训练、零生产代码改动。
+- **产物**：`runs/p1_v2/round30/`（matrix×8 + v2 复跑[reward]、r4_K1e2、wm_action_probe_M0、grad_ledger、wm_tf_check×2、matrix_report）、`docs/round30_audit.md`（全文）、`docs/stage_a_config_consumption.md`、`.slim/deepwork/p1_v2/round30/`（journal/monitor/run_*.sh）；零训练、零生产代码改动。
 
 ---
 
