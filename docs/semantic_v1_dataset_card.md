@@ -121,5 +121,9 @@ tools/venv-python .slim/deepwork/p1_v2/round21/collect_semantic_v1.py verify \
   独立集 `indep_labels/baseline_labels.npz`，537 行），含 `label_pose` 供 same-state 审计。
 - **fail-fast 契约**：训练/验证/选择/probe/mirror 入口必须校验 `label_state_version ==
   same_state_v2` 且 **v1 暴露 = 0**，否则拒绝运行（`runs/p1_v2/round26/data_contract.json`）。
+- **入口强制（R21-27）**：任何消费方**不得**直接读 `samples.npz["expert_action"]`；必须经
+  `pipeline.semantic_labels.load_samples_v2(data_dir, round26/baseline_labels.npz, contract)` ——
+  该入口把 B 行替换为 v2、排除行置 NaN + `keep_mask`、v2 缺失即 fail-fast（单测
+  `tests/test_r27_semantic_labels.py`）。历史报告 errata 标记见 `runs/p1_v2/round27/errata_marks.json`。
 - **排除行**：same-state 审计失败且不可复现轨迹的 B 行（ep1091 的 4 行；重放轨迹漂移 ~10–16 m）
   在训练/验证/选择/probe 全链剔除并记录（`excluded_b_rows`），不得以 v1 标签回填。

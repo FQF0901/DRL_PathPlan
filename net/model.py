@@ -1267,7 +1267,38 @@ class DrivingModel(nn.Module):
             out["z_ego_pred"] = rolled["z_ego_pred"]
             out["z_od_pred"] = rolled["z_od_pred"]
             out["z_ld_pred"] = rolled["z_ld_pred"]
+        # R21-27：只读计划曲率监控（纯派生，无训练逻辑；plan = (B,6,2) 的 (ds,dθ)）
+        plan = out.get("plan")
+        if torch.is_tensor(plan) and plan.ndim >= 2 and int(plan.shape[-1]) == 2:
+            kappa = plan[..., 1] / plan[..., 0].clamp_min(1e-6)
+            out["plan_kappa"] = kappa
+            out["plan_delta_kappa"] = kappa[..., 1:] - kappa[..., :-1]
         return out
+
+    @torch.no_grad()
+    def semantic_action_decomposition(self, obs: Mapping[str, Tensor], *, rollout: bool = False) -> dict:
+        """R21-27 只读监控：``final_action`` / ``legacy_action``（detach）/ ``semantic_delta_action`` + β。
+
+        语义增量 = ``final − legacy``（legacy = semantic_off 基底前向，detach）。非 semantic 模式
+        → delta 恒 0。**纯监控**：不参与训练目标（trainer 的 delta 监督自行计算，保持梯度语义）。
+        """
+        final = self.forward(obs, rollout=bool(rollout), world_model=False)["action_mu"]
+        if not self._is_semantic():
+            return {
+                "final_action": final,
+                "legacy_action": final.detach(),
+                "semantic_delta_action": torch.zeros_like(final),
+                "beta_context": 0.0,
+                "beta_token": 0.0,
+            }
+        legacy = self.forward(obs, rollout=bool(rollout), world_model=False, semantic_off=True)["action_mu"].detach()
+        return {
+            "final_action": final,
+            "legacy_action": legacy,
+            "semantic_delta_action": final - legacy,
+            "beta_context": float(self.beta_context.detach()) if self.beta_context is not None else 0.0,
+            "beta_token": float(self.beta_token.detach()) if self.beta_token is not None else 0.0,
+        }
 
     @torch.no_grad()
     def rollout(self, obs: Mapping[str, Tensor]) -> dict[str, Tensor]:

@@ -534,6 +534,8 @@ class LqrTracker(BasePolicy):
                 "lqr_error_psi": float(error[1]),
                 "lqr_lookahead_m": float(self._lookahead(speed)),
                 "lqr_ref_speed_mps": float(self._ref_speed[preview]),
+                # R21-27：raw steer（clip 前）遥测——只读，不改变动作（action[0] 仍为 clip 后）
+                "steer_raw": float(delta / self.max_steer_angle_rad),
             }
         )
         return action
