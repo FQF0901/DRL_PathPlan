@@ -1,9 +1,9 @@
-# deepseek-v4.1 argue / 主文档（R27：27A/27B 过 · R1 修饱和但 tmo/teacher/Δκ 未闭合 · round-28 待裁）
+# deepseek-v4.1 argue / 主文档（R28：28A 归因 ✅ · K1 假设否定+S2 崩塌 · round-29 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-13 傍晚）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D（§5.14–5.18）；round-25/26/27 R25–R27（§5.19–5.24）；**round-28 R28：28A 归因 ✅（主轴=F3 速度参考；F1 κ-ds 耦合 / F4 LQR 尾段命中）；K1 核心假设被否定（ds≡legacy 未消除 tmo）+ S2 崩塌 ⇒ 预注册停止（§5.26）；待 round-29（lateral/tracking 线；S2 解冻模式待审）**；正式采集/DAgger/MoE/RL 仍冻结。
 > **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）→ round-27：R27 执行（27A/27B 过、R1 修饱和但 tmo/teacher/plan-Δκ 未闭合+停止）（§5.23–5.24）→ round-28：R28 执行（28A 归因 ✅、K1 假设否定+S2 崩塌+停止）（§5.25–5.26）。
-> **本版说明**：第十二轮精简（280 → ~271 行）：§5.23 并入残档、§5.22/5.24/5.20/5.18/5.10 收缩、§0 补 R27 行并刷新终局、§6/§7 更新；**当前状态=R27：27A/27B ✅、R0 复现；R1 修好饱和（sat 0.710 ✓）但换取 tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗ ⇒ 停止+定位（§5.24）、round-28 待裁**；改前 280 行 = `git show b9e70f4:docs/deepseekv4p1_argue.md`。历版全文见 §7。
+> **本版说明**：第十三轮精简（289 → ~285 行）：§5.25 并入残档、§5.24/5.22/5.26 收缩、§0 补 R28 行并刷新终局、§6/§7 更新；**当前状态=R28：28A 归因 ✅（主轴 F3）、K1 假设否定（ds≡legacy 未消除 tmo）+S2 崩塌 ⇒ 停止（§5.26）、round-29 待裁**；改前 289 行 = `git show c5a44df:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -24,9 +24,10 @@
 | **R21-3D** | **3D-1/2 门过**（独立集 **5/5**：曲率 **25.0%**、lane 6.17×、target 1.00/1.00）；**3D-3 小 canary 未过门（S0 −8.7pp / S1 −8.0pp）** | → R25（§5.19–5.20） |
 | **Round-25（R25）** | Gate A 全过（β=0 逐位）；**P1 首现闭环超 legacy：succ 0.400（+7.3pp）/ off 0.347（−20.7pp）**；B/C/D 未全过（mirror-lat 0.891、teacher +57%、tmo +14pp、sat 0.894）；**修复 R21-1 遗留 B 行标签错配（corr −0.156→+0.606）** | → R26（§5.21–5.22） |
 | **Round-26（R26）** | 26A 数据 ✅（v1 暴露 0）；**Q1 全面优于 Q0：pert −53.6% / learner −51.5%、Δp99× 1.017、mirror ✓、calib50 0.50 vs 0.40**；硬门未全过（**teacher +43.7%、sat +14.5pp**） | → R27（§5.23–5.24） |
-| **Round-27（R27）** | **27A/27B ✅、R0 逐位复现 Q1**；R1 目标轴见效（**sat 0.949→0.710 ✓**、learner −72.2%、N0 ↓40%）但 **tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗** | **停止+定位：ds-转向未分离 → 待 round-28（§5.24）** |
+| **Round-27（R27）** | **27A/27B ✅、R0 逐位复现 Q1**；R1 目标轴见效（**sat 0.949→0.710 ✓**、learner −72.2%、N0 ↓40%）但 **tmo +26pp、teacher +59.6%、plan Δκ 2.1–2.3× ✗** | → R28（§5.25–5.26） |
+| **Round-28（R28）** | **28A 归因 ✅**（主轴 F3；F1 κ-ds 耦合/F4 LQR 尾段命中；覆盖 1.0）；**K1 假设否定（ds≡legacy 未消除 tmo 0.28）+S2 崩塌**；K1 S1 强（κ MAE −71.6%、sat −12.5pp、calib 0.52/off 0.12） | **停止+定位：转 lateral/tracking；S2 解冻模式待审 → 待 round-29（§5.26）** |
 
-- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ R25 首现超 legacy → R26 Q1 全面生效 → R27（27A/27B ✅、R0 复现；R1 修饱和但 tmo +26pp/teacher +59.6%/plan Δκ 2.1–2.3× ✗）⇒ **根因升级=横纵耦合**（κ=dθ/ds + LQR chord 链 + 共享 action head）；**round-28 批准 28A 耦合审计 + 28B K0/K1（仅横向 κ residual、ds≡legacy）已开工（§5.25）**。**收敛一句话：lane semantic 四层前三层已正证；未闭合 = normal-state preservation + plan-level trackability，共同底层机制=横纵耦合。**
+- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21→R26 语义链验证（§5.14–5.22）→ R27（§5.23–5.24）→ **R28：28A 归因 ✅（主轴 F3 速度参考；F1 κ-ds 耦合、F4 LQR 尾段命中）；K1 假设否定（ds≡legacy 未消除 tmo）+ S2 崩塌 ⇒ 停止+定位（转 lateral/tracking；S2 解冻模式待审），待 round-29（§5.26）**。**收敛一句话：lane semantic 前三层已正证；未闭合 = normal-state preservation + plan-level trackability，其耦合层已被 28A 解构（F3/F1/F4）。**
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
 ---
@@ -220,8 +221,7 @@
 
 - **26A/26B/C/D（门过/落地）**：标签 v2 全链 fail-fast（**v1 暴露 0**、same-state 99.96%、**ep1091 4 行剔除**；corr **+0.606**）；delta 监督 `mu_on − mu_off.detach()` vs `expert−legacy`（基底冻结、4 单测）；`L_amp`；**5×5 全字段镜像 paired**（对合自测 12 字段）；幅度限额 P95/P99=**0.199/0.329 rad**。
 - **关键结果**：**Q1 e1 硬门 6/7（仅 teacher +39.6% ✗）**；连续两 epoch 全过=无 ⇒ **预注册停止**（D/E 未进入）。**Gate C：Q1 4/6**——pert **−53.6%**、learner **−51.5%**、sign err −66.3%、**Δp99× 1.017 ✓**；未过=**teacher +43.7% ✗、sat +14.5pp ✗**。**calib50：Q1 = 0.50**（legacy 0.40；MoE-off 0.52 vs 0.26）。幅度对齐 0.076–0.127 vs expert 0.065–0.106（Q0 超 2×）；镜像残差 0.014–0.040。
-- **未闭合+坑**：① teacher 保持性（+40~44%）；② steer 饱和（0.949 vs 0.804）。坑：eval/gate 默认 MoE=on 与训练口径不一致（`--moe-off` 诊断，结论不变）；独立集分母索引（已修）；semantic_off plan 基底须用 z_ld（已修）。
-- 产物：`runs/p1_v2/round26/`；待 round-27。
+- **未闭合+坑+产物**：① teacher 保持性（+40~44%）；② steer 饱和（0.949 vs 0.804）。坑：eval/gate 默认 MoE=on 与训练口径不一致（`--moe-off` 诊断，结论不变）；独立集分母索引（已修）；semantic_off plan 基底须用 z_ld（已修）；`runs/p1_v2/round26/`；待 round-27。
 
 ### 5.23 round-27 裁决残档（`268151e`；已并入执行）
 
@@ -232,27 +232,18 @@
 - **27A（Gate A ✅，可归类 100%）**：Q1 sat **0.952** vs legacy 0.816；**73.7% 为"场景必要"**；新增 5,610 步驱动 = **trackability 36.3% / 重规划抖动 34.9% / 首步 27.8%**（尾段 1.0%、Δκ 0%、未归类 0）；calib50 同构；按路型 Q1 0.92–0.97。
 - **27B（✅）+ R0**：N0/N1/C 定义锁定（5 单测；比例 **14.3/30.0/55.7%**；教师行 21.7/45.3/33.0）；`load_samples_v2` **硬拒 B 行 v1** + 13 件历史产物 errata；forward 只读监控（plan κ/Δκ + semantic decomposition）。**R0 = Q1 逐位复现**（4 epoch + calib50 全同）⇒ 同批基准成立。
 - **R1（+条件 preservation +归因驱动 trackability）**：**目标轴见效**——**sat 0.949→0.710（低于 legacy 0.804；Gate C sat ✅）**、learner −72.2%（R0 −51.5%）、sign err −79.5%、N0 P95 0.033→0.021–0.025（↓40%）；**但换取**：**tmo 0.12→0.34（+26pp ✗✗）**、teacher +43.7%→**+59.6% ✗**、**plan Δκ 2.33×→2.12×（新 Gate C 项，两臂均 ✗；expert P95 0.0169 vs R0 0.0393 / R1 0.0359）**。⇒ 无连续两 epoch 全过 ⇒ **停止**（D/E、eval500 未跑）。
-- **定位**：修复"转向过猛"成功，但代价=**进度/纵向驱动被削弱（tmo 爆表）** + 正常态仍被扰（teacher）——即 **ds 进度与转向权限未分离**；lane 建议（未执行）：plan Δκ **步 1–5 全域** expert 分位约束、progress 与 steering 解耦、**N1 纳入保持**。
-- **产物/诊断**：`runs/p1_v2/round27/`；history-dropout 0/25/50% → learner MAE 0.0739/0.0767/0.0740（**无改善**，不入门）；**待 round-28**。
+- **定位/产物**：修复"转向过猛"成功，但代价=**进度/纵向驱动被削弱（tmo 爆表）** + 正常态仍被扰（teacher）——即 **ds 进度与转向权限未分离**；lane 建议（未执行）：plan Δκ 步 1–5 全域 expert 分位约束、progress 与 steering 解耦、N1 纳入保持；`runs/p1_v2/round27/`；待 round-28。
 
-### 5.25 round-28 裁决：**根因升级=横纵耦合（参数化/执行器/共享头）；批准 Round-28（28A 零训练耦合审计 + 28B K0/K1 仅横向 κ residual）——已开工**
+### 5.25 round-28 裁决残档（`2acca30`；已并入执行）
 
-- **核验（成立）**：`arc_step` 恒曲率弧 κ=dθ/ds（改任一维都改曲率）✓；tracking 链=chord 速度→纵向→实际速度→预瞄→横向（`ref_speed_scale` 钩子在案）✓；`residual_classes` 仍按动作残差分类（res_ds/res_dθ）+ safe_future 取自数据未来（非 legacy 同态 rollout）✓；`action_dim_weights` dθ 相对权重巨大（历史 (1, 69.4)）✓。
-- **接受根因升级（认账）**：R1"修好饱和却爆 tmo"= **横纵耦合强证据**；不再沿"加 preservation/trackability 权重"细调（会在耦合空间拔河）。
-- **Round-28 范围**：**28A 零训练耦合审计**——物理量换算（`κ_t=dθ/max(ds,ε)`、arc/chord 速度、Δκ、actual speed、progress、raw steer、throttle）+ **四族反事实：F1（固定曲率、ds/dθ 同缩）/ F2（固定 ds、只改 dθ）/ F3（固定几何、独立 v_ref 覆写——`ref_speed_scale` 钩子）/ F4（固定首步、只改尾段）**；输出 success/off/tmo、steer·throttle 饱和、rc、跟踪误差；按路型/结果分层、逐 episode paired；门 **≥90% tmo/off 差异可归因（F1–F4 主轴明确）**。**28B**：**K0=Q1/R0 基线复现**；**K1=纵横重参数化 canary**——`legacy→(ds_leg, κ_leg)`、`Δκ_semantic` 学习、**ds_final≡ds_legacy（纵向 residual 固定 0）**、`dθ=κ_final·ds_legacy`；外部接口保持 (ds,dθ)（**不改 env/LQR**）；监督 `L_kappa_residual / L_mirror_kappa / L_delta_kappa_smooth / L_N0-preservation`；**ds<0.5m 掩码禁用 κ 监督**。
-- **门**：**A** 归因（≥90%、F1–F4 主轴明确、逐 episode paired）→ **B** 横向（learner κ MAE ↓≥30%、mirror/lane-sign ≥95%、plan Δκ ≤expert P95×1.25、sat ≤legacy+5pp）→ **C** 纵向保持（**ds 逐位=legacy**、v_ref 差异仅几何 chord、tmo ≤legacy+3pp、rc 不降 >2pp、teacher ds MAE 逐位不变）→ **D** clean150（succ ≥0.43 且 +8pp、off ≤0.35、coll ≤+2pp、tmo ≤+3pp）→ **E** 才许 K2（path-conditioned 纵向 residual）；K1 失败 ⇒ 不加深纵向头，回到 chain/LQR preview 或 expert label 可持性。
-- **代码补强（采纳）**：tracking 增 `lqr_ref_curvature / lqr_actual_curvature / lqr_preview_plan_step / throttle_raw / throttle_clipped / ref_chord_speed`（默认关）；model forward 增只读诊断 `legacy_ds / legacy_kappa / Δκ / final_ds / final_kappa / final_dθ`（训练逻辑不进 forward）；residual_classes 增 `res_kappa + legacy_rollout_safe`（同态短 horizon legacy rollout）；semantic_labels metadata 增 expert/legacy 的 ds/dθ/κ/valid；manifest 增 label/expert hash + backend + query timing。
-- **不作**：继续调 R1 preservation 权重、全局 progress loss、独立纵向头训练、DAgger/MoE/RL、大采集、WM/K-anchor/容量。
-- **开工**：R28 lane 已派发（复用 R21 session；`runs/p1_v2/round28/`）。
+- **核验成立、答案认账（根因升级=横纵耦合）** ⇒ 批准 **R28**：28A 零训练耦合审计（物理量换算+遥测补齐；**F1 固定曲率/F2 固定 ds/F3 独立 v_ref 覆写/F4 尾段**；≥90% 归因、逐 episode paired）+ 28B **K0=Q1 复现 / K1=仅横向 κ residual（ds≡legacy、dθ=κ·ds、外部接口不变）**；N0/N1/C 增 `res_kappa + legacy_rollout_safe`；门 A–E（C：ds 逐位=legacy；D：succ ≥0.43 且 +8pp）；K1 败 ⇒ 不加深纵向头。——**已执行，结果见 §5.26。**
 
 ### 5.26 Round-28 结果（2026-10-13 17:5x）：**28A 归因 ✅（主轴 F3 速度参考；F1 κ-ds 耦合、F4 LQR 尾段命中）；K1 核心假设被否定（ds≡legacy 未消除 tmo）+ S2 崩塌 ⇒ 预注册停止**
 
 - **28A（Gate A ✅，覆盖率 1.0）**：物理量（Q1 vs legacy）——throttle 饱和 **0.50 vs 0.19**、|e_y| 0.99 vs 0.51、raw steer 2.88 vs 1.40；**chord 效应仅 0.005 m/s**（参考速度差异来自 plan ds 本身）。四族反事实（paired 50）：**F3（几何不动、v_ref×1.15）tmo 12%→8%、off 不变、succ 52% ✓**；**F1（κ 不变同缩）tmo→0 但 off 30%→52% ✓（κ-ds 强耦合）**；**F4（只改尾段）raw steer +0.18、tmo 12%→2% ✓（LQR preview/chain 主耦合源）**；F2 未命中。13 问题 episode 全被 ≥1 族改善（覆盖 1.0）。
 - **28B**：**K0=Q1 逐位复现**；**K1 S1 e1/e2 强**（teacher **+1.1%**、learner κ MAE **−71.6%**、lane sign 1.000、**sat −12.5pp vs legacy**、plan Δκ 3.90×→2.78×、calib50 **0.52/off 0.12/rc 0.863**），**S2 解冻末层即崩塌**（e3/e4 teacher 0.28、calib 0.0、off 1.0）。
 - **门**：B 4/5（plan Δκ 2.78× ✗、κ mirror **0.70** ✗〔经 common-ds 复核=真横向不对称〕）；C 3/4（**ds 逐位 ✓ max|Δ|=0、teacher ds MAE 逐位 ✓、v_ref 仅 chord ✓；tmo +20pp ✗**）⇒ 无过门 epoch ⇒ 停止（无 clean150/K2）。
-- **关键否定结论**：**ds≡legacy 并未消除 tmo 恶化**（K1 0.28 vs K0 0.24 vs legacy 0.08）⇒ **tmo 非纵向 residual 造成**，应转向 lateral/tracking（F3/F4：speed-ref 与尾段可控）；**S2 解冻崩塌第三次出现**（R1/K1）——"末层解冻"模式本身待审。
-- 28B 升级：`res_kappa + legacy_rollout_safe`（68.3% safe）；semantic_labels kinematics + manifest；7 新测、**958 passed**。
-- 产物：`runs/p1_v2/round28/`（审计/反事实×6/门/报告/K0-K1）；生产提交见 git log；**待 round-29**。
+- **关键否定结论 + 产物**：**ds≡legacy 并未消除 tmo**（K1 0.28 vs K0 0.24 vs legacy 0.08）⇒ tmo 非纵向 residual 造成，转 lateral/tracking；**S2 解冻崩塌第三次**（R1/K1）待审；`runs/p1_v2/round28/`；待 round-29。
 
 ---
 
@@ -261,17 +252,17 @@
 - **决策/契约**：`docs/p1_v2_decision.md`（P1-v2 决策 + Round-12A 结果）、`docs/recovery_v2_contract.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`
 - **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`
 - **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）、`datasets/semantic_v1_pilot/`（9,515 行）、`datasets/semantic_v1_independent/`（8,953）、`datasets/semantic_v1_3d3/`（53,765）
-- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/round21/`（契约审计 / 可行性 / R21-2 表示 probe）、`runs/p1_v2/round23/`（3A 审计 / 3C 探针 / canary）、`runs/p1_v2/round24/`（3D 报告 / 5 探针 / rollout diag / clean150）、`runs/p1_v2/round25/`（残差 / 三臂 / 门表 / selection）、`runs/p1_v2/round26/`（Q0/Q1 / 契约 / calib / gate C）、`runs/p1_v2/round27/`（归因/分解/R0-R1/门/遥测）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
-- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a / round18a / round20 / round21 / round23 / round24 / round25 / round26 / round27 脚本 + logs）
+- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/round21/`（契约审计 / 可行性 / R21-2 表示 probe）、`runs/p1_v2/round23/`（3A 审计 / 3C 探针 / canary）、`runs/p1_v2/round24/`（3D 报告 / 5 探针 / rollout diag / clean150）、`runs/p1_v2/round25/`（残差 / 三臂 / 门表 / selection）、`runs/p1_v2/round26/`（Q0/Q1 / 契约 / calib / gate C）、`runs/p1_v2/round27/`（归因/分解/R0-R1/门/遥测）、`runs/p1_v2/round28/`（耦合审计/反事实×6/K0-K1/门）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
+- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a / round18a / round20 / round21 / round23 / round24 / round25 / round26 / round27 / round28 脚本 + logs）
 - **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
-- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）、`96df7cb`+`c71f389`（Round-18A）、`da83ce1`（LD 消融开关）、`e638b76`（§5.10）、`02ef947`+`a1986f3`（第六/七轮精简）、`69c0545`+`7fba3f5`（§5.11/§5.15）、`5e6e3e2`（LD 聚合）、`0f73b6d`+`51712bd`（R21 语义）、`11f0000`（§5.16）、`ee2651b`（第八轮精简+推送）、`bf32e23`（round-24 答复）、`eaff4d6`（§5.17）、`3e3df68`（3D 模式）、`f788fdd`（§5.18）、`8b35e84`（round-25 答复）、`19c18b1`（§5.19）、`4ec66ee`（R25 残差）、`6e4fc79`（§5.20）、`f41b06a`（§5.21）、`416e849`（R26 semantic_off）、`9c6a3a2`（§5.22）、`c2da011`（§5.23）、`d5dee2d`（R27 分解/守卫）、`b9e70f4`（§5.24）
+- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）、`96df7cb`+`c71f389`（Round-18A）、`da83ce1`（LD 消融开关）、`e638b76`（§5.10）、`02ef947`+`a1986f3`（第六/七轮精简）、`69c0545`+`7fba3f5`（§5.11/§5.15）、`5e6e3e2`（LD 聚合）、`0f73b6d`+`51712bd`（R21 语义）、`11f0000`（§5.16）、`ee2651b`（第八轮精简+推送）、`bf32e23`（round-24 答复）、`eaff4d6`（§5.17）、`3e3df68`（3D 模式）、`f788fdd`（§5.18）、`8b35e84`（round-25 答复）、`19c18b1`（§5.19）、`4ec66ee`（R25 残差）、`6e4fc79`（§5.20）、`f41b06a`（§5.21）、`416e849`（R26 semantic_off）、`9c6a3a2`（§5.22）、`c2da011`（§5.23）、`d5dee2d`（R27 分解/守卫）、`b9e70f4`（§5.24）、`423ae7c`（§5.25）、`8933049`（R28 审计基建）、`c5a44df`（§5.26）
 
 ---
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第十二轮精简（本版；280 → ~271 行）**：§5.23 并入残档、§5.22/5.24/5.20/5.18/5.10 收缩、§0 补 R27 行并刷新终局、§6/§7 更新；改前 280 行 = `git show b9e70f4:docs/deepseekv4p1_argue.md`。
-- **历次精简留档**：第十一轮（269→261，`6e2e2cd`）；第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
+- **第十三轮精简（本版；289 → ~285 行）**：§5.25 并入残档、§5.24/5.22/5.26 收缩、§0 补 R28 行并刷新终局、§6/§7 更新；改前 289 行 = `git show c5a44df:docs/deepseekv4p1_argue.md`。
+- **历次精简留档**：第十二轮（280→270，`e5ae48e`）；第十一轮（269→261，`6e2e2cd`）；第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
 - **压缩时间线**：
   - 2026-10-09：round-1/2 收拢；《评测兼容设计》落 `docs/p0_eval_compat_design.md`；
   - 2026-10-09/10：P0 三件套 → P0-B 矩阵 + P0-C 归因 → 审计定稿（§2.1）；
@@ -286,4 +277,5 @@
   - 2026-10-13 上午：round-24 → R21-3D（§5.17–5.18）：3D-1/2 门过（独立集 5/5）、**3D-3 小 canary 未过门 → 停止+定位（待 round-25）**；
   - 2026-10-13 中午：round-25 → R25（§5.19–5.20）：残差+解冻+动作监督；**P1 首现闭环超 legacy（succ +7.3pp）但门未全过+定位；B 行标签 bug 修复（待 round-26）**；
   - 2026-10-13 下午：round-26 → R26（§5.21–5.22）：数据 v2 契约 + Q1（delta/软锚/全镜像）；**Q1 全面生效（calib50 0.50 vs 0.40、Δp99 ≤1.25、mirror ✓）但 teacher/sat 未闭合 → 停止+定位（待 round-27）**；
-  - 2026-10-13 下午·二：round-27 → R27（§5.23–5.24）：27A 归因 + 27B 分解 + R0/R1；**R1 修好饱和（0.710<legacy 0.804）但 tmo +26pp / teacher +59.6% / plan Δκ 2.1–2.3× → 停止+定位（待 round-28）**。
+  - 2026-10-13 下午·二：round-27 → R27（§5.23–5.24）：27A 归因 + 27B 分解 + R0/R1；**R1 修好饱和（0.710<legacy 0.804）但 tmo +26pp / teacher +59.6% / plan Δκ 2.1–2.3× → 停止+定位（待 round-28）**；
+  - 2026-10-13 傍晚：round-28 → R28（§5.25–5.26）：28A 耦合归因 ✅（主轴 F3；F1/F4 命中）+ K0/K1；**K1 假设否定（ds≡legacy 未消除 tmo）+ S2 崩塌 → 停止+定位（转 lateral/tracking，待 round-29）**。
