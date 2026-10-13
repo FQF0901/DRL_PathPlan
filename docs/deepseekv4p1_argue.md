@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-14 凌晨）**：GPT round-31 宣言（`1c1d91b`，948 行）到达：全范式流水线 A→B0..B4→C0..C4 + 今晚 Stage-A-only 队列（Task1–6：契约/复核/pilot 50–100k/五探针/A4 canary + 五条自动停止规则 + decision.md 五枚举）。**§5.32=受理审阅：整体接受 + 5 条修正/前置（M1–M5）+ 排队方案；按指令本轮零实施（不动代码/不采数据），待裁。** R30 结果（§5.31）：矩阵 3 系统（S3 严格劣）、R4 接口主瓶颈（E_if/E_deploy 1.54→1.22）、TF 消歧（WM 固有 0.02–0.04 vs 部署链 0.20–0.32，8–10×）⇒ 主问题=部署链一致性。
-> **本版说明**：第十八轮（264 → 279 行）——新增 §5.32（R31 宣言受理审阅：M1–M5 + 排队方案）；§0/§7 刷新；上版 264 行 = `git show 7394a91:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第十八轮（264 → 280 行）——新增 §5.32（R31 宣言受理审阅：M1–M5 + 排队方案）；§0/§7 刷新；上版 264 行 = `git show 7394a91:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -234,7 +234,9 @@
   - **R30-6 三臂（离线）**：k≥2 起 WM 尾段动作不如 frozen-hold（WM 更优 50%→10%→0%），oracle 平坦 0.40；机制=**尾段 ds 上冲**（2.56→3.64 vs mu 1.94/expert 2.30）+ δ-方向 2–3 步失配 + 幅度膨胀（overshoot drift）。
   - **R30-6b TF 消歧（全量 35,695 anchors、双模型）**：纯 WM TF 误差 ego 1−cos = **0.021→0.042**（pri512；M0 0.032→0.074），比 R4 部署链小 **8–10×** ⇒ **WM 固有能力 OK；根因=部署链一致性**（策略动作/状态分布漂移 + 0.5s 重规划替换尾参考（open-loop 语义）+ LQR 跟踪残差）。
 - **问题（round-31 裁决单，待裁）**：①**链路一致性修复三支**：训练分布（learner-state/DAgger）、协议侧（cadence/参考消费语义审计）、监督侧（overshoot drift 指标化后预注册）；②**Stage C 口径**：S3≪S2 结构级 ⇒ 键级 fail-fast + 口径重选（Exact 主训练前置=§5.30 注记 2）；③**工程尾巴**：mirror 门重造（全场景镜像）、配置 fail-fast/删键批次、road_class 旁记。
-- **产物**：`runs/p1_v2/round30/`（matrix×8 + v2 复跑[reward]、r4_K1e2、wm_action_probe_M0、grad_ledger、wm_tf_check×2、matrix_report）、`docs/round30_audit.md`（全文）、`docs/stage_a_config_consumption.md`、`.slim/deepwork/p1_v2/round30/`（journal/monitor/run_*.sh）### 5.32 round-31 宣言（GPT `1c1d91b`）受理审阅：范式流水线受理 + 5 条修正/前置 + 排队方案（待裁；本轮零实施）
+- **产物**：`runs/p1_v2/round30/`（matrix×8 + v2 复跑[reward]、r4_K1e2、wm_action_probe_M0、grad_ledger、wm_tf_check×2、matrix_report）、`docs/round30_audit.md`（全文）、`docs/stage_a_config_consumption.md`、`.slim/deepwork/p1_v2/round30/`（journal/monitor/run_*.sh）；零训练、零生产代码改动。
+
+### 5.32 round-31 宣言（GPT `1c1d91b`）受理审阅：范式流水线受理 + 5 条修正/前置 + 排队方案（待裁；本轮零实施）
 
 - **受理总判（整体接受）**：全范式流水线（A[WM]→B0 单步 IL→B1 oracle-state rollout IL→B2 预测态一致性→B3 DAgger→B4 MoE→C0 Value warmup→C1 ExactTracker PPO→C2 部署同构 canary→C3 MoE-RL→C4 GRPO）+ 执行器政策（Exact=采集/上界/C0；LQR=部署+晋级门）+ 今晚 Stage-A-only 队列（Task1 契约修复 / Task2 复核 / Task3 pilot 50–100k / Task4 五探针 / Task5 动作忠实度+whole-scene mirror / Task6 A4 canary）+ 五条自动停止规则 + decision.md 五枚举。
 - **与 R30 结果的适配核验（逐条）**：S3≪S2 → Exact/LQR 用途政策=吸收 §5.30 注记 2 前置精神 ✓；WM 固有 TF 0.02–0.04 → A2.2（policy 态一步退化）成 A4 前提的关键上界 ✓（细则 M1）；链误差 8–10×/overshoot → A2.3/A2.4+A4 目标 ✓（归因前置 M2）；账本三布尔 → A5 的 2-step BPTT canary 三条件一致 ✓；mirror 不可判 → 升级 whole-scene mirror ✓（**工具已有**：`r26_mirror.py::mirror_obs` 对合+实测校验）；配置漂移（F5）→ Task1 白名单/fail-fast ✓（细化 M5）。
@@ -265,7 +267,7 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第十八轮（本版；264 → 279 行）**：新增 §5.32（R31 宣言受理审阅：M1–M5 + 排队方案）；§0/§7 刷新；上版 264 行 = `git show 7394a91:docs/deepseekv4p1_argue.md`。
+- **第十八轮（本版；264 → 280 行）**：新增 §5.32（R31 宣言受理审阅：M1–M5 + 排队方案）；§0/§7 刷新；上版 264 行 = `git show 7394a91:docs/deepseekv4p1_argue.md`。
 - **历次精简留档**：第十七轮（299→264，`5ed40e4`）；第十六轮（276→299，未单独提交、并入第十七轮）；第十五轮（255→276，`fdc6d2d`）；第十三轮（随 R28/R29 新增；`c5a44df`/`711bc47`）；第十二轮（280→270，`e5ae48e`）；第十一轮（269→261，`6e2e2cd`）；第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
 - **压缩时间线**：
   - 2026-10-09/10：round-1/2 收拢；P0 三件套（兼容设计/矩阵/归因，§2.1）→ 排摸收官（§2.2）→ round-3–8 与 P1 锁板（§2.4）；
