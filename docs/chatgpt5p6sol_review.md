@@ -1,194 +1,161 @@
-你说得对。之前的优化和负结果都很宝贵，但现在到了必须重新核对“设计意图、代码真实行为、训练梯度、部署链路”是否一致的节点。不能一边假设 Stage A/B/C 按理想方式工作，一边继续追加 loss 或结构。
+总体裁决
 
-我已结合最新 DRL_PathPlan_Code.txt 和 PPOGRPO.docx 做了第一轮代码级排摸。下面给出的是“先审计、再定架构、最后分阶段优化”的完整开工方案。
+Coding Agent 这轮攻防质量较高，纠正了我上一版审计中的多处不精确表述。尤其是：
 
-一、先锁定本轮的架构原则
-1. 唯一动作生成者是 PolicyHead
+Stage A 不是“只训练一步”，而是六步 free-running latent 输入 + 每步局部监督 + 跨步梯度截断；
+Stage A 的实际优化范围不是 YAML 声明的 trainable，而是代码中的排除式过滤；
+Stage B 的未来五步确实在预测 latent 上产生，但没有逐步动作硬标签；
+Stage C 当前并没有使用 ExactTracker，而是 LQR + repeat sampled action； -部署则是 LQR + WM rollout plan。
 
-正式定义：
+这些代码事实基本可信。
 
-ak=πϕ(zk)a_k=\pi_\phi(z_k)
+但我不同意 Coding Agent 将处置收缩为“已有材料很多，只补 R4、动作干预和梯度账本，同时 Round-30 原议题继续并行”。目前已经发现两个可能改变整个新一轮优化方向的重大结构事实：
 
-其中：
+Stage B 的未来动作监督与预测状态存在结构性错配风险；
+Stage C 的训练执行口径与部署执行口径明显不同。
 
-a_k = 当前0.5秒的单步规划动作
+所以我的最终裁决是：
 
+批准缩减版 Reality Audit 开工，但暂停 T2 蒸馏、首尾 Δκ 等 Round-30 训练议题。先完成四个决定性证据包，再决定 Stage A/B/C 的真正改造方向。
 
-当前动作可继续使用：
+一、对 Coding Agent 逐项攻防
+1. C1：Stage A 配置与真实训练目标漂移
+Coding Agent 的纠正
 
-(ds, dθ)
+config/train.yaml 中仍写着：
 
+loss: direct_multi_step
+ego_condition: expert_gt_actions
+targets: future_od_ld_lookup
+slot_matching: nearest_neighbor_t0
 
-或者内部重参数化为：
 
-(ds, κ)，再转换 dθ=κ·ds
+但真实代码中：
 
+-主监督是 latent consistency，权重 1.0；
 
-但无论如何：
+OD 物理解码权重 0.1；
+LD 物理解码权重 0.02； -若干 YAML 键实际未被 run_stage_a 消费。
+裁决
 
-World Model 不产生动作；
-PlanHead 不产生另一条独立轨迹；
-K-anchor 不产生独立尾部；
-projector 不成为第二规划器； -六步计划全部由同一个 PolicyHead 被调用六次产生。
+完全同意，并将其升级为配置契约 bug。
 
-六步链是：
+这不是单纯注释过时。它会让后续使用者误以为：
 
-a0=π(z0)a_0=\pi(z_0) z^1=WM(z0,a0),a1=π(z^1)\hat z_1=WM(z_0,a_0), \quad a_1=\pi(\hat z_1)
+配置改变了 Stage A 的训练行为
 
-一直到：
 
-z^5=WM(z^4,a4),a5=π(z^5)\hat z_5=WM(\hat z_4,a_4), \quad a_5=\pi(\hat z_5)
-2. World Model 只负责预测世界状态
+但实际上改动无效。
 
-World Model 的职责：
+必须处理
 
-z^k+1=fθ(zk,ak)\hat z_{k+1}=f_\theta(z_k,a_k)
+审计阶段不立刻改训练行为，但必须生成：
 
-它负责：
+docs/stage_a_config_consumption.md
 
-ego future state； -周车 future state； -lane-relative state； -presence/entry； -上下文随动作演化后的状态。
 
-它不负责判断 action 好不好。
+每个配置键标记为：
 
-PolicyHead 才负责：
+CONSUMED
+IGNORED
+LEGACY
+DERIVED
 
-π(z)→a\pi(z)\rightarrow a
 
-但二者必须通过接口验收：
+审计结束后：
 
-π(z^kWM)≈π(zkreal)\pi(\hat z_k^{WM}) \approx \pi(z_k^{real})
+-删除无效键，或 -在入口遇到无效键直接 fail-fast。
 
-这不是让 WM 为 Policy 的准确性负责，而是检验预测状态是否保留了 Policy 决策所需的信息。
+不能继续让配置“看起来生效”。
 
-3. Stage C 使用 ExactTracker 训练单步 Policy
+2. C2：Detach 的真实作用
+Coding Agent 的纠正
 
-你对 Stage C 的定义是合理的：
+当前 Stage A 的状态链是：
 
-真实环境状态
-→ PolicyHead输出单步action
-→ ExactTracker精确执行
-→ 环境真实转移
-→ reward
-→ PPO更新PolicyHead
+预测 latent 作为下一步输入
+但进入下一步前 detach
 
 
-这样能够：
+因此：
 
--隔离规划与控制； -不让 Policy 为 LQR 跟踪误差负责； -建立清晰的 action-to-reward 因果链； -训练同一个单步 PolicyHead。
+h2–h6 的输入处于 free-running 模型分布； -共享 transition 参数仍会从每个 horizon 的局部 loss 获得梯度； -但 h6 loss 无法通过状态链修正 h1–h5 的 transition 决策。
+裁决
 
-部署时再通过 World Model 把同一个 PolicyHead 展开六次：
+同意。这比我此前“一步 transition 训练”的表述更准确。
 
-Policy–WM–Policy–WM × 6
-→ 六步规划
-→ 固定LQR
+准确名称应是：
 
+Free-running inputs with truncated cross-step credit assignment
 
-因此 Stage C 的 PPO 不需要把 action 扩成 12 维。RL 直接训练一步 action，六步能力来自参数共享和准确的 WM rollout。
+即：
 
-4. LQR 完全冻结
+前向：六步自由滚动
+反向：每步局部监督，跨状态链截断
 
-本轮不再修改：
+这意味着什么？
 
-LQR gain
-lookahead
-Riccati参数
-steer gain
-speed gain
-controller frequency
-curvature feedforward
+不能简单推导：
 
+detach一定错误
 
-规划端必须适配固定 LQR 的输入契约。
 
-最终应分别报告：
+因为共享权重在每个 horizon 都受到监督，可能已经足够。
 
-ExactTracker：
-Planner自身能力上界
+也不能简单推导：
 
-Fixed LQR：
-可部署闭环性能
+所有horizon有loss，所以多步信用已经闭合
 
 
-不能用 ExactTracker 指标直接宣称系统超过 IDM+Pure Pursuit。
+因为共享参数的局部梯度，与通过状态链链式传播的多步梯度并不等价。
 
-二、当前 Repo 已确认的代码事实
+裁决
 
-这些是初步排摸后的事实，不是最终推断。
+先做 h1/h3/h6 独立 backward 账本，不直接删 detach。
 
-1. Stage A 当前是专家动作 teacher forcing
+3. C3：WM 动作条件化方式
+当前事实
 
-config/train.yaml 中 Stage A 的实际配置为：
+动作进入 WM 的路径主要是：
 
-name = world_model_teacher_forcing
-ego_condition = expert_gt_actions
-targets = future_od_ld_lookup
-loss = direct_multi_step
-rollout_steps = 6
+action
+→ ego累积pose
+→ 图边几何
+→ ST-GNN transition
 
 
-真实流程是：
+另外 nav 会随预计 ego pose 重建。
 
-t0 observation
-+ 专家六步 action chain
-→ 逐步推进 latent
-→ 与真实 future observation latent 对齐
+但 transition 没有显式 action embedding。
 
+Coding Agent 的态度
 
-这符合你的 Stage A 原始意图。
+“是否足够尚未证明，接受动作干预 probe。”
 
-2. Stage A 当前每步会 detach latent
+裁决
 
-当前实现中：
+完全同意。
 
-z_ego, z_od, z_ld = (
-    z_ego_next.detach(),
-    z_od_next.detach(),
-    z_ld_next.detach(),
-)
+这里不应凭架构审美直接增加 action token。Pose-mediated conditioning 可能已经足够表达当前任务。
 
+但 probe 必须覆盖的不只是 ego pose，还包括：
 
-因此当前 Stage A 虽然连续预测六步，但训练图不是完整六步 BPTT。
+future latent
+future physical decoder
+next Policy action
 
-实际更接近：
 
-一步transition训练
-→ 把预测latent作为下一步输入
-→ 但切断后续误差对前一步transition的梯度
+否则只能证明运动学积分变了，不能证明 WM transition 真正理解了动作。
 
+4. C4：Stage A optimizer 与 YAML trainable 不一致
+当前事实
 
-后果：
+实际 optimizer 是：
 
-h5/h6 错误不能修正 h1/h2 transition； -一步准确不代表六步稳定； -误差可能在 free rollout 中累积； -配置中的 direct_multi_step 不能自动等价为端到端六步优化。
+除 policy.* / value.* 外的全部参数
 
-这必须先形成实证，而不是立即删 detach。
 
-3. 当前 Action 对 WM 的条件化主要是间接的
-
-当前链路是：
-
-(ds,dθ)
-→ arc_step
-→ 累积ego pose
-→ pose进入ST-GNN图关系
-→ latent transition
-
-
-ST-GNN transition 没有显式接收 action token。
-
-因此需要验证：
-
-这种pose-mediated action conditioning是否足够？
-
-
-不能直接假定一定不足，也不能直接假定配置里的 conditioned_on: ego 已完整实现：
-
-WM(z,a)WM(z,a)
-
-自动驾驶 World Model 尤其需要验证 action fidelity，仅有视觉、latent 或平均预测指标不足以证明模型遵循动作条件。ACT-Bench 也专门将 action controllability 与一般生成质量分开评估。
-
-4. Stage A 不训练 PolicyHead
-
-Stage A 当前可训练模块包括：
+而不是严格读取 YAML 的：
 
 encoders
 mem_encoder
@@ -196,834 +163,577 @@ plan_head
 st_gnn
 
 
-不包括：
+同时 MoE 被关闭，所以部分参数虽然进 optimizer，却没有梯度。
 
-policy
-value
+裁决
 
+这是必须修复的工程契约问题，不只是文档问题。
 
-Stage A 的 PlanHead 主要通过 ego_next 辅助目标获得梯度。
+风险包括：
 
-这符合“WM 与 Policy 分阶段训练”的思想，但必须核查：
+-未来某模块意外获得非零梯度； -以为冻结但其实进入 optimizer； -恢复 optimizer state 时发生隐性状态变化； -配置和代码长期继续分叉。
 
-Stage A 预测 latent 的坐标系和统计尺度；
-Stage B Policy 消费该 latent 时是否分布一致；
-Stage B 是否在 predicted latent 上获得过监督。
-5. 当前 PlanHead 实际不是动作输出头
+建议
 
-当前代码职责大致是：
+审计期间只记录，不改行为。审计后采用白名单式建组：
 
-PlanHead：
-ego/OD/LD/semantic/nav/signal融合
-+ Primary/MoE
-→ policy context latent
-→ ego_next辅助预测
+trainable_prefixes = resolved_stage_config["trainable"]
 
-PolicyHead：
-context tokens
-→ action_mu / action_logstd
 
-ValueHead：
-context tokens
-→ state value
+并强制：
 
-
-因此 PlanHead 更准确的概念名称应是：
-
-PolicyBackbone
-PolicyContextEncoder
-SceneDecisionBackbone
-
-
-先只修文档，不立刻改 class/checkpoint key。
-
-正式契约锁定：
-
-PolicyHead 是唯一动作输出器。
-
-K-anchor 继续保持关闭。
-
-6. Stage B 虽然传 world_model=False，仍可能运行 latent rollout
-
-当前 model(..., rollout=True, world_model=False) 的含义不是关闭 WM transition，而是：
-
--仍运行六步 latent rollout； -仍生成六步 action plan； -只是不返回 OD/LD/latent 预测诊断输出。
-
-所以 Stage B 的未来五步仍依赖 ST-GNN transition。
-
-目前必须继续核查：
-
-Stage B 中 ST-GNN 是否冻结；
-step 1–5 的 action loss 能否回到 ST-GNN；
-action chain label 属于哪个真实状态； -真实 latent 与 predicted latent 的混用方式； -是否存在新的 state-label mismatch 风险。
-7. Stage C 文档显示走 cheap path
-
-pipeline\README.md 说明 PPO collect/update 使用 cheap path。
-
-当前 cheap path 通常是：
-
-rollout=False
-world_model=False
-
-
-这很可能意味着 Stage C：
-
-真实状态
-→ PolicyHead当前action
-→ ExactTracker
-→ PPO
-
-
-这本身符合你的设计。
-
-但必须核实：
-
--环境实际执行的是 action0 还是 plan； -PPO buffer 保存的是哪个 action； -Stage C update 是否只更新 Policy； -MoE、WM、Encoder、Value 的实际梯度； -Stage C checkpoint 部署时，WM rollout+LQR 是否与训练时动作口径一致。
-
-三、新一轮不能先改网络，先做 Stage A/B/C Reality Audit
-
-Coding Agent 第一任务不是训练，而是提交两份真实契约：
-
-docs/stage_abc_reality_audit.md
-docs/stage_abc_execution_contract.md
-
-
-所有结论必须来源于：
-
-实际CLI入口
-实际forward调用
-运行时hook
-gradient/update ledger
-
-
-不能用 README 或配置注释代替运行事实。
-
-四、审计工作包 1：Stage A/B/C 真正的数据流
-Stage A 要回答
-1. 输入的6步动作来自哪里？
-2. 每一步future target来自哪里？
-3. future slot如何匹配？
-4. ego/OD/LD分别监督什么？
-5. latent target如何生成？
-6. 哪一步detach？
-7. 哪些loss能更新哪些模块？
-8. action噪声如何注入？
-9. teacher-forced与free rollout是否同口径？
-10. validation是否只测teacher-forced？
-
-
-输出：
-
-runs/reality_audit/stage_a_execution.json
-runs/reality_audit/stage_a_gradient_ledger.csv
-
-Stage B 要回答
-1. a0...a5是否全部来自同一个PolicyHead？
-2. predicted latent从哪一步开始使用？
-3. 每一步action label属于哪个物理状态？
-4. 六步action-chain loss如何定义？
-5. trajectory loss监督位置还是action？
-6. ST-GNN是否冻结？
-7. Stage B loss能否更新WM？
-8. Primary和specific experts何时开关？
-9. DAgger数据如何与普通BC数据并入？
-10. predicted-state训练是否存在标签错配？
-
-
-重点是：
-
-z^kWM\hat z_k^{WM}
-
-对应的监督 action 必须属于其代表的同一个物理状态。
-
-不能再次发生：
-
-预测状态 / 扰动状态
-×
-另一个时间或恢复后的expert label
-
-Stage C 要回答
-1. PPO sampled action是什么？
-2. ExactTracker实际执行什么？
-3. action/log_prob/value存入buffer的是什么？
-4. Stage C更新哪些参数？
-5. WM是否完全冻结？
-6. Policy更新后部署tail如何变化？
-7. collect/update/eval是否同一Policy口径？
-8. MoE在Stage C是on还是off？
-9. PPO entropy/clip/GAE的实际配置？
-10. Stage C checkpoint如何进入WM rollout+LQR部署评测？
-
-
-输出：
-
-runs/reality_audit/stage_c_effective_action.jsonl
-runs/reality_audit/stage_c_gradient_ledger.csv
-runs/reality_audit/stage_c_deployment_gap.json
-
-五、审计工作包 2：参数与梯度账本
-
-对每个 Stage 自动生成：
-
-parameter_name
-module
-requires_grad
-optimizer_group
-learning_rate
-weight_decay
-grad_norm
-update_norm
-checkpoint_loaded
-checkpoint_changed
-
-
-必须能直接回答：
-
-Stage A：
-Policy是否真的0更新？
-
-Stage B：
-WM是否真的冻结？
-step5 action loss能否触达step1 transition？
-
-Stage C：
-只更新Policy/Value还是也更新Backbone/MoE？
-WM是否有漂移？
-
-必须增加的梯度探针
-
-分别对：
-
-h1 loss
-h3 loss
-h6 loss
-
-
-单独 backward，记录到：
-
-encoder
-mem_encoder
-plan_head / policy backbone
-st_gnn transition
-policy head
-value head
-primary
-specific experts
-router
-
-
-这会证明 detach 后的真实梯度可达范围。
-
-六、审计工作包 3：World Model 能力四分法
-
-Stage A 不能只看一个总 loss。
-
-A. Teacher-forced one-step
-
-真实状态 + 专家 action：
-
-z_t, a_t → z_hat_(t+1)
-
-
-报告：
-
-ego pose/speed/heading/yaw
-OD position/velocity
-lane-relative state
-presence/entry
-latent error
-
-B. Teacher-action free latent rollout
-
-动作仍使用真实 expert chain，但状态来自前一步预测：
-
-z_hat_(k+1)=WM(z_hat_k,a_expert_k)
-
-
-这隔离：
-
-WM 多步累计误差。
-
-C. Policy-action free rollout
-
-动作也来自 Policy：
-
-a_hat_k=Policy(z_hat_k)
-z_hat_(k+1)=WM(z_hat_k,a_hat_k)
-
-
-这是部署链的真实近似。
-
-D. Oracle-state Policy
-
-每步使用真实未来 observation 编码出的 latent：
-
-a_oracle_k=Policy(Encoder(obs_real_k))
-
-
-这隔离：
-
-WM问题
-vs
-Policy问题
-
-七、审计工作包 4：核心 Rollout Consistency Probe
-
-这是连接 Stage C 单步 RL 与部署六步计划的核心。
-
-真实环境链
-
-Stage C使用ExactTracker运行，记录：
-
-z_t, a_t
-z_(t+1), a_(t+1)
-...
-z_(t+5), a_(t+5)
-
-
-对应：
-
-at+kreal=π(zt+kreal)a_{t+k}^{real}=\pi(z_{t+k}^{real})
-WM链
-
-从相同 z_t 开始：
-
-a^0=π(zt)\hat a_0=\pi(z_t) z^1=WM(zt,a^0)\hat z_1=WM(z_t,\hat a_0) a^1=π(z^1)\hat a_1=\pi(\hat z_1)
-
-直到第六步。
-
-每个 horizon 报告三类误差
-状态预测误差
-Ez(k)=d(z^k,zkreal)E_z(k)=d(\hat z_k,z_k^{real})
-Policy 接口误差
-Eπ(k)=∥π(z^k)−π(zkreal)∥E_\pi(k)= \|\pi(\hat z_k)-\pi(z_k^{real})\|
-动作链误差
-Ea(k)=∥a^k−akreal∥E_a(k)= \|\hat a_k-a_k^{real}\|
-
-输出：
-
-runs/reality_audit/rollout_consistency_h1_h6.json
-
-
-分层：
-
-普通直道
-弯道
-tollgate
-merge
-roundabout
-成功
-off-road
-collision
-timeout
-
-八、审计工作包 5：Action Conditioning Fidelity
-
-同一真实状态输入动作反事实：
-
-ds × {0.8, 1.0, 1.2}
-dθ ± perturbation
-κ ± perturbation
-zero action
-左右镜像 action
-
-
-对 horizon 1–6 观测：
-
-future ego pose
-future heading
-future speed
-OD relative state
-lane-relative state
-next policy action
-latent distance
-
-
-通过条件：
-
-ds增加 → future progress单调增大
-左转 → yaw/lateral响应方向正确
-镜像action → future状态近似镜像
-不同动作 → future latent可区分
-action影响不能只停留在pose字段
-
-
-如果 pose-conditioned WM 已通过，就不加 action token。
-
-如果失败，再进入最小改造：
-
-action embedding
+配置声明可训练参数集
 =
-MLP(normalized ds, dθ, κ, speed intent)
-
-
-并将 action embedding 接到：
-
-ego transition
-OD transition
-可选graph message conditioning
-
-
-先不加容量。
-
-九、审计工作包 6：WM/no-WM/oracle 对照
-
-同一 a0，比较未来尾段：
-
-W0：当前WM rollout
-W1：frozen-t0 latent + step embedding
-W2：oracle真实未来state + Policy
-W3：expert action chain
-W4：几何可行tail，仅作诊断下界
-
-
-固定 LQR，不修改控制器。
-
-比较：
-
-六步action error
-plan κ / Δκ
-重规划一致性
-LQR preview step
-raw steer
-steer saturation
-timeout
-off-road
-success
-
-
-判定：
-
-W2明显好于W0
-
-World Model 是主要瓶颈。
-
-W0≈W2，但都不好
-
-Policy/Stage B 是主要瓶颈。
-
-W1≥W0
-
-当前 WM transition 在伤害 rollout。
-
-W4明显好于W0
-
-当前 WM/Policy tail 未达到基本规划可行性，但 W4 不能直接替代正式路线 A。
-
-十、Stage A 新训练方案只能在审计后按分支启动
-情况 A：一步准，多步漂移
-
-不改架构，优化训练：
-
-A0：1-step teacher forcing
-A1：2-step truncated BPTT
-A2：3-step truncated BPTT
-A3：6-step free rollout validation
-
-
-不直接六步全 BPTT，避免训练不稳定。
-
-推荐 curriculum：
-
-Epoch 1–3：1-step
-Epoch 4–6：2-step
-Epoch 7–10：3-step
-最终：6-step只作验证
-
-
-只有 3-step 稳定后才尝试 6-step 梯度。
-
-情况 B：Action fidelity 不足
-
-增加显式 action token：
-
-action_embed = MLP(ds, dθ, κ, ds/dt)
-
-
-但保留：
-
--原 pose conditioning； -原 ST-GNN； -原参数规模； -现有 checkpoint 可残差初始化。
-
-结构：
-
-transition_input
+optimizer实际参数集
 =
-[z, graph_context, action_embed]
-
-情况 C：WM 物理预测准，但 Policy action-chain 差
-
-不改 WM，修 Stage B：
-
-B0：real-state BC
-B1：oracle-future-state BC
-B2：WM-predicted-state distillation
-B3：真实环境DAgger
+具有非零梯度的允许参数集
 
 
-关键：
+死参数不应进入 optimizer。
 
-预测latent上的动作监督
-必须与其对应的真实future state action对齐
+5. C5：PolicyHead 是唯一动作生成器
+当前事实
+PlanHead 输出融合 latent 和 ego_next；
+PolicyHead 输出动作；
+K-anchor 当前关闭。
+裁决
 
-情况 D：WM 与 Policy 都好，但六步 plan 不可跟踪
+完全同意。
 
-问题在：
+正式架构文档应写：
 
-动作参数化
-六步chain平滑性
-可行性监督
-固定LQR输入契约
-
-
-此时才考虑内部：
-
-(ds,κ)
-
-
-以及：
-
-κ continuity
-speed profile
-replanning consistency
+PlanHead：历史命名，实际职责为 PolicyBackbone / ContextFusion
+PolicyHead：唯一动作输出器
+World Model：唯一状态预测器
+Rollout Orchestrator：重复调用 Policy 与 WM
 
 
-外部仍转换成：
+暂不改 class 名和 checkpoint key。
 
-(ds,dθ)
+二、最大的两个结构性问题
+1. Stage B 的未来动作监督存在真实的状态标签错配风险
 
-十一、Stage B 新训练方案
+Coding Agent 已确认：
 
-在 Stage A 过门后执行。
+a1...a5 是 Policy 在预测 latent 上输出的；
+ST-GNN 在 Stage B 冻结； -状态链 detach； -尾五步没有直接 action label； -只有权重 0.1 的 traj6 位置监督； -phase3 才有 action_chain: 0.2。
 
-B1：Primary 单步 IL
-真实状态
-→ PolicyHead
-→ expert current action
+这比原先想象更严重。
 
+为什么是结构错配？
 
-Primary 先掌握：
+部署链是：
 
-lane keeping
-route following
-普通曲率跟随
-普通前车跟随
-轻微纠偏
+z^k+1=WM(z^k,a^k)\hat z_{k+1}=WM(\hat z_k,\hat a_k) a^k+1=π(z^k+1)\hat a_{k+1}=\pi(\hat z_{k+1})
 
+但 traj6 标签来自真实专家轨迹：
 
-MoE 暂时关闭。
+PkexpertP_{k}^{expert}
 
-B2：六步 rollout IL
-real z0
-→ Policy-WM ×6
-→ action chain
+当预测 latent 已偏离真实专家状态时，要求：
+
+Policy(预测状态)
+→ 仍然生成专家真实状态下的后续累计位置
 
 
-监督：
+不一定是合法监督。
 
-h1当前动作高权重
-h2–h6逐步衰减
+这和此前 B-label v1 的 bug 并不完全相同，因为这里不是简单拿错时间戳，而是：
 
+预测状态与专家轨迹目标所在状态不一致。
 
-建议第一版权重：
+轨迹级监督有可能绕过这一点，因为累计位置仍提供弱终点方向，但不能将其默认视为同状态 action supervision。
 
-1.00, 0.50, 0.25, 0.15, 0.10, 0.05
+必须通过 R4 分解
 
+对同一真实序列，逐 horizon 计算：
 
-但不能只看 chain action MAE，还要看：
+a_real(k) = Policy(Encoder(real_obs_k))
 
-WM-state vs real-state action consistency
-plan κ
-plan Δκ
-重规划一致性
-固定LQR闭环
+a_wm(k) = Policy(WM_rollout_latent_k)
 
-B3：Mixed latent
-
-逐步扩大 predicted latent 比例：
-
-20% → 50% → 80%
+a_expert(k) = expert current action at real_obs_k
 
 
-不允许一步切成100% imagined latent。
+拆成：
 
-B4：DAgger
+Policy真实状态误差：
+|a_real - a_expert|
 
-只有满足：
+接口误差：
+|a_wm - a_real|
 
-WM rollout consistency过门
-primary clean150 >=0.50
-teacher-state不显著退化
-
-
-才启动真实 learner-state DAgger。
-
-B5：MoE
-
-Primary 达到稳定 lanekeep 后再启用。
-
-MoE 只负责：
-
-tollgate
-merge/yield
-roundabout
-复杂交互
-避障
-特殊恢复
-
-
-不允许 experts 补偿日常 lanekeep。
-
-十二、Stage C 新训练方案
-C0：ExactTracker PPO baseline
-
-训练：
-
-单步 PolicyHead
-ValueHead
-可选冻结 PolicyBackbone
-
-
-World Model 冻结。
-
-PPO 使用：
-
--步级 reward； -Critic； -GAE； -clipped objective； -KL gate； -entropy regularization。
-
-这符合 PPOGRPO.docx 对 PPO 在连续、逐时间步控制和细粒度信用分配上的定位。
-
-C1：每个 PPO checkpoint 的部署迁移 Gate
-
-每次 PPO 更新后必须同时通过：
-
-ExactTracker真实闭环
-WM rollout consistency
-固定LQR闭环
+总部署动作误差：
+|a_wm - a_expert|
 
 
 如果：
 
-Exact提升
-但WM+LQR退化
+a_real≈expert
+a_wm差
 
 
-该 checkpoint 不得进入下一轮。
+问题在 WM/latent interface。
 
-C2：GRPO 暂不实施
+如果：
 
-PPOGRPO.docx 中的结论仍然成立：
-
--候选组内比较适合评估“哪条完整轨迹更好”； -但原生 GRPO 对轨迹内部时间信用分配较粗； -自动驾驶仍需要 Critic+GAE 的 step-level advantage。
-
-因此本轮：
-
-PPO主线
-GRPO只做未来候选级辅助
+a_real也差
 
 
-等单策略稳定后，才考虑：
+问题在 Policy/Stage B。
 
-候选级Group Advantage
+如果：
+
+单步都不错，但累计traj差
+
+
+问题在 action integration、chain consistency 或轨迹监督。
+
+这是下一阶段的第一决定性证据。
+
+2. Stage C 当前训练口径与原设计不一致
+当前代码事实
+
+Coding Agent 核验：
+
+collect/update：cheap path
+sample：单步 a_t
+执行参考：repeat(a_t, 6)
+执行器：LqrTracker
+buffer：a_t / logprob / value / reward
+部署：WM rollout六步plan + LQR
+
+
+所以 Stage C 当前训练的是：
+
+Policy当前动作
+→ 重复六次
+→ LQR
+→ 环境reward
+
+
+而部署是：
+
+Policy–WM rollout六步不同动作
+→ LQR
+
+
+这不是小差异，而是 effective action mapping 不一致。
+
+与你的原始设计差在哪里？
+
+你定义的 Stage C 应该是：
+
+Policy单步action
+→ ExactTracker精确执行
+→ 环境真实next state
+→ PPO训练单步Policy
+
+
+当前实现却是：
+
+单步action重复六次
+→ LQR预瞄整条恒动作plan
+→ 控制跟踪误差进入reward
+
+
+因此当前 PPO 实际同时在适配：
+
+Policy 单步决策；
+repeat-tail 几何； -LQR preview； -控制误差； -横纵耦合。
+
+这与“规划端 RL 与控制端解耦”的设计目标不一致。
+
+三、我对 Coding Agent 反驳的回应
+反驳 1：“无需暂停新主模型训练”
+
+Coding Agent 说最近主要是零训练和小 canary，因此无需暂停。
+
+我的回应
+
+字面上可以接受，但工程上仍需锁定：
+
+Reality Audit完成前
+不得开始任何新主模型训练或蒸馏
+
+
+这不影响已经停止的 Round-29，也不应继续并行 T2 蒸馏。
+
+原因是：
+
+R4 可能证明主瓶颈在 WM；
+Stage C 可能需要先修执行契约；
+T2 的正向也可能只是补偿当前 WM tail 或 LQR preview，而非真正改善路线 A。
+
+所以“没有正在训练”不等于“无需冻结令”。
+
+反驳 2：“绝对物理门与 latent WM 目标不符”
+
+Coding Agent 认为 ego P90 等绝对门暂不应直接锁定。
+
+我的回应
+
+同意阈值不应提前锁死，但不同意退化成只看 latent consistency。
+
+原因是 latent consistency 可能出现共适应：
+
+Encoder(real future)
+与
+WM predicted latent
+很接近
+
+但二者都丢了Policy真正需要的物理信息
+
+
+Stage A 必须同时有三类指标：
+
+表示指标
+latent cosine
+latent L2
+
+物理指标
+ego / OD / lane-relative / presence
+
+决策充分性指标
+π(z_hat) vs π(z_real)
+
+
+正确做法是：
+
+先实测 current baseline 分布； 2.再以 baseline、constant-velocity 和 oracle gap 锁门； 3.绝对阈值只作为辅助，不在开工前主观拍定。
+反驳 3：“BPTT curriculum 与固定 detach 规格冲突”
+我的回应
+
+同意不能在只读审计前预注册完整 BPTT 课程。
+
+正确顺序应为：
+
+逐horizon梯度账本
+→ WM多步误差增长
+→ R4真实/预测动作一致性
+→ 一次最小2-step no-detach canary
+
+
+只有同时满足：
+
+horizon误差明显累积
+接口误差随horizon增长
+当前detach无法校正前段transition
+
+
+才批准 2-step truncated BPTT。
+
+不直接规划 1→2→3→6 全课程。
+
+反驳 4：“先量化，再定部署迁移阈值”
+
+同意。
+
+不能先拍 +5pp 或固定误差门。应先获得：
+
+Exact / LQR
+×
+plan / repeat_action
+
+
+的配对矩阵，再锁门。
+
+但这里有一个修正：
+
+由于你的正式设计明确要求 Stage C 使用 ExactTracker，当前 LQR+repeat 不能只是“训练口径之一”，而应标记为实现偏差。
+
+审计后若确认无隐藏依赖，应修成 ExactTracker 主训练。LQR+repeat 保留为历史对照。
+
+四、对处置建议的最终修订
+
+Coding Agent 给出的优先级是：
+
+R4
+> 部署迁移矩阵
+> WM动作条件化
+> 梯度账本
+
+
+我建议调整为：
+
+Priority 0：Stage C 执行契约复现
+
+首先建立当前四格矩阵：
+
+Exact + repeat_action
+Exact + WM plan
+LQR + repeat_action
+LQR + WM plan
+
+
+使用相同 checkpoint、相同 episode、相同起始状态。
+
+目的不是调整 LQR，而是确认：
+
+当前 Stage C 实际优化的系统； -原设计 Exact 单步执行的系统； -正式部署系统； -三者差距。
+
+这是架构契约问题，应与 R4 同优先级。
+
+Priority 1：R4 Rollout Consistency
+
+输出：
+
+E_z(h1...h6)
+E_policy(h1...h6)
+E_action_total(h1...h6)
+
+
+按路型和结局分层。
+
+这直接回答路线 A 是否闭合。
+
+Priority 2：WM Action Fidelity
+
+测试：
+
+ds × {0.8,1.0,1.2}
+dθ / κ 左右扰动
+zero action
+mirror action
+
+
+必须对比：
+
+predicted next physical state
+predicted latent
+next Policy action
+
+Priority 3：h1/h3/h6 梯度账本
+
+分别构造单 horizon loss，独立 backward。
+
+需要验证：
+
+共享transition是否在每个horizon获得有效梯度
+早期transition是否无法获得后段credit
+Policy action loss能否更新WM
+Stage B是否完全冻结WM
+
+Priority 4：Oracle-state / frozen-t0 对照
+
+不能无限 backlog。R4 发现明显接口误差后，必须立即用：
+
+oracle real future state
+frozen-t0 latent
+current WM latent
+
+
+做三臂。
+
+否则无法判断 WM 到底是有益、无益还是有害。
+
+五、Stage C 的正式裁决
+
+针对你的设计意图，我建议审计文档明确区分：
+
+现状
+Stage C current:
+single sampled action
+→ repeated six times
+→ LQR
+→ PPO
+
+目标设计
+Stage C intended:
+single sampled action
+→ ExactTracker
+→ real next state
+→ PPO
+
+部署
+Policy–WM ×6
+→ six-step plan
+→ fixed LQR
+
+
+三者不是同一执行口径。
+
+审计后建议
+
+若 ExactTracker 环境步骤和奖励口径没有隐藏问题：
+
+将 Stage C 主训练修正为 ExactTracker。
+
+然后每个 PPO checkpoint 强制做部署迁移 Gate：
+
+Exact PPO KPI
 +
-时间步Critic/GAE
-
-十三、必须新增的只读 Hooks
-
-所有 hook：
-
-默认关闭
-零行为变化
-不进入checkpoint
-不改变模型输出
-
-World Model Hook
-
-每个 horizon 保存：
-
-action_in
-z_ego_in/out
-z_od_in/out
-z_ld_in/out
-ego_pose
-nav_token
-step_embedding
-od_pred
-ld_pred
-presence
-entry
-
-Policy Hook
-policy input tokens
-PolicyBackbone latent
-Primary output
-MoE expert outputs
-router weights
-action_mu/logstd
-value
-semantic contribution
-
-Gradient Hook
-h1/h3/h6 loss到各模块的grad norm
-参数update norm
-optimizer state
-
-Rollout Consistency Hook
-real_state_latent
-predicted_state_latent
-real_state_action
-predicted_state_action
-horizon
-episode/step
-road class
-outcome
-
-Effective Action Hook
-
-Stage C 保存：
-
-sampled_action
-executed_exact_action
-old_log_prob
-value
-reward
-next_real_state
-deployment_rollout_plan[6]
-fixed_LQR_reference[30]
+R4 rollout consistency
++
+WM-plan + fixed-LQR KPI
 
 
-此 hook 用于分析，不要求 Stage C 实际执行 LQR。
+这样符合你的设计：
 
-十四、阶段性验收门
-Stage A-R Gate
-action intervention方向正确率 >=95%
-左右镜像一致率 >=95%
-horizon误差不指数爆炸
-WM tail优于frozen-t0 tail
-困难路型无系统性坍塌
+RL 训练单步 Policy；
+WM 将单步能力展开六步； -LQR只在部署评测中消费六步计划。
+六、Round-29 的 T2 怎么处理？
 
+T2 是目前唯一正向 projector：
 
-绝对门建议作为初始开发门：
-
-ego position P90：
-h1 <=0.20m
-h3 <=0.60m
-h6 <=1.20m
-
-heading P90：
-h1 <=2°
-h3 <=5°
-h6 <=10°
+success 0.52 → 0.58
+方向 0.737 → 0.967
+saturation下降
+timeout下降
 
 
-这些门需要结合 simulator 尺度复核，可在审计后调整一次，之后锁定。
+但它仍未过 collision、off-road 和 timeout 门。
 
-Stage B-R Gate
-real-state current-action误差过门
-WM-state action误差接近real-state
-六步action chain无指数漂移
-plan Δκ <= expert P95×1.25
-clean150 >=0.50
-off-road显著下降
+我的裁决：
 
-Stage C-R Gate
-ExactTracker PPO显著正向
-rollout consistency不退化
-固定LQR clean150同步正向
-teacher-state能力不显著退化
+保留为诊断 oracle，不进入蒸馏，不成为正式规划器，不与 Reality Audit 并行训练。
+
+它能说明：
+
+当前尾段若向target-lane curvature收敛，
+比简单Δκ平滑更合理
 
 
-达到后才跑 eval500。
+但在路线 A 中，正确结论应该是：
 
-十五、本轮明确禁止事项
+WM+Policy rollout 应自己学会产生类似的尾段，而不是永久外挂 T2 生成器。
 
-审计结束前不得：
+等 R4 得到结果后：
 
-修改LQR
-新增tail生成器
-一次输出6个action
-启用K-anchor
-增加World Model容量
-直接删除detach
-直接开启6步BPTT
-启动DAgger
-启动MoE重训
-启动PPO/GRPO
+-若 oracle-state Policy 尾段接近 T2，而 WM 尾段差，修 WM； -若 oracle-state Policy 尾段也不如 T2，修 Stage B/Policy； -若二者都好但 LQR差，才追 plan feasibility。
+
+七、批准的 Round-30 工作范围
+批准立即执行
+R30-0：现状冻结与产物复用索引
+R30-1：Stage C四格执行口径矩阵
+R30-2：R4 real-state vs WM-state rollout consistency
+R30-3：WM action-conditioning intervention
+R30-4：h1/h3/h6 gradient reachability
+R30-5：训练/部署执行契约文档
+
+条件触发
+
+若 R4 显示 WM 接口误差显著：
+
+R30-6：
+oracle-state / current-WM / frozen-t0 三臂
+
+本轮不执行
+T2蒸馏
+2-step BPTT
+显式action token
+Stage C重写
+DAgger
+MoE重训
+PPO/GRPO
+新增loss
 扩大数据
-新增大量loss
+修改LQR
 
-十六、给 Coding Agent 的正式开工指令
-启动“Stage A/B/C Repo Reality Audit”，暂停新主模型训练。
+八、建议验收方式
 
-目标：
-确认当前repo是否真实实现：
-PolicyHead单步action
-→ World Model预测下一状态
-→ 同一PolicyHead继续决策
-→ rollout六步
-→ 固定LQR部署；
-以及Stage C ExactTracker PPO是否能通过该接口迁移到部署六步计划。
+不先设绝对 WM 米制门，先用相对分解。
 
-第一批交付：
+R4 接口门
 
-1. docs/stage_abc_reality_audit.md
-2. docs/stage_abc_execution_contract.md
-3. Stage A/B/C真实调用图
-4. Stage A/B/C参数、optimizer、gradient ledger
-5. h1/h3/h6梯度可达性报告
-6. teacher/free/policy/oracle/frozen-t0 rollout报告
-7. action-conditioning intervention probe
-8. real-state vs WM-state Policy action consistency
-9. Stage C sampled-action / executed-action / deployment-plan契约
-10. 当前代码与原始Stage A/B/C设计逐项差异
-11. 唯一推荐的下一步和Go/No-Go依据
+对 horizon 1–6，定义：
 
-必须核实：
+Ereal(k)=∥π(zkreal)−akexpert∥E_{real}(k)= \|\pi(z_k^{real})-a_k^{expert}\| Einterface(k)=∥π(z^kWM)−π(zkreal)∥E_{interface}(k)= \|\pi(\hat z_k^{WM})-\pi(z_k^{real})\| Edeploy(k)=∥π(z^kWM)−akexpert∥E_{deploy}(k)= \|\pi(\hat z_k^{WM})-a_k^{expert}\|
 
-- PolicyHead是否唯一动作输出器；
-- PlanHead实际职责；
-- K-anchor是否全程关闭；
-- Stage A每步detach的真实影响；
-- WM是否对action具备足够敏感性；
-- Stage B predicted latent对应的动作标签是否同状态；
-- Stage C cheap path与部署rollout的迁移关系；
-- PPO checkpoint更新后WM rollout consistency是否退化。
+重点报告：
 
-纪律：
+interface error / deploy error
 
-- 所有probe/hook默认关闭、零行为变化；
-- 不修改LQR；
-- 不新增网络容量；
-- 不训练新主模型；
-- 不启动DAgger/MoE/RL；
-- 不扩大数据；
-- 结论以运行时hook和actual gradient为准，不以README注释代替。
+
+解释：
+
+-小于 20%：WM接口不是主瓶颈； -20%–50%：共同瓶颈； -超过 50%：WM/预测latent是主瓶颈。
+
+这些只作为首轮分层参考，实测后锁定。
+
+WM action-fidelity 门
+
+至少要求：
+
+方向正确率 >=95%
+mirror consistency >=95%
+progress对ds扰动单调
+yaw/lat对dθ或κ扰动单调
+future latent可区分
+Policy next-action响应不退化为常数
+
+Stage C 四格矩阵
+
+必须报告：
+
+success
+off-road
+collision
+timeout
+route completion
+reward
+
+
+并做 paired episode 转换：
+
+翻正
+翻负
+双方成功
+双方失败
+
+
+不能只比较总体均值。
+
+九、给 Coding Agent 的攻防答复
+总体接受 §5.29 的代码核验与四项措辞修正。
+
+确认：
+1. Stage A 是六步 free-running输入、跨步梯度截断，而非单步前向；
+2. 共享transition受到六步局部监督；
+3. PlanHead非动作输出器，PolicyHead唯一生成action；
+4. Stage B尾五步位于预测latent，只有弱traj监督；
+5. Stage C现状为LQR+repeat sampled action，不是设计意图中的ExactTracker；
+6. WM动作敏感性、R4一致性、逐horizon梯度、oracle/frozen臂仍为空白。
+
+不同意：
+1. Reality Audit与T2蒸馏/首尾Δκ议题并行；
+2. 仅以latent consistency作为WM主门；
+3. 将Stage C执行差异降级为普通部署gap；
+4. 将oracle-state/frozen-t0长期留作backlog。
+
+Round-30批准范围：
+A. Stage C四格口径：
+   Exact/LQR × repeat_action/WM_plan；
+B. R4：
+   E_z/E_policy/E_action × h1...h6；
+C. WM action intervention：
+   ds scale、dθ/κ perturb、zero、mirror；
+D. h1/h3/h6独立backward梯度账本；
+E. 更新execution contract。
+
+若R4接口误差显著，自动追加：
+oracle-state / WM-state / frozen-t0三臂。
+
+本轮禁止：
+训练新主模型、T2蒸馏、删detach、BPTT、action token、
+DAgger、MoE、PPO/GRPO、LQR修改、扩大数据。
 
 最终判断
 
-新一大轮优化的目标不是再寻找一个局部技巧，而是重新闭合整条因果链：
+Coding Agent 的攻防没有推翻 Reality Audit，反而证明审计需要更聚焦。
 
-Stage A：
-World Model真正预测准确、action-sensitive、可滚动
+目前最关键的新事实是：
 
-Stage B：
-唯一PolicyHead在真实/预测/learner状态上都能做正确单步决策
+Stage C 现状与用户定义的 Stage C 不一致；Stage B 未来五步缺少同状态动作监督；而连接 Stage C 单步 Policy 与部署六步计划的 R4 一致性至今完全没有实证。
 
-Stage C：
-ExactTracker真实环境PPO提高单步Policy
+因此，本轮不要再围绕 tail loss、投影或曲率平滑打转。先回答唯一核心问题：
 
-部署：
-同一Policy经准确WM展开六步，
-固定LQR闭环性能同步提升
+π(z^kWM)≈?π(zkreal),k=1,…,5\boxed{ \pi(\hat z_k^{WM}) \stackrel{?}{\approx} \pi(z_k^{real}), \quad k=1,\ldots,5 }
 
+如果成立，路线 A 的主链有坚实基础，可以继续优化 Stage B/C。
 
-等 Repo Reality Audit 完成后，再根据唯一根因选择：
+如果不成立，再根据分解结果决定：
 
-显式action conditioning
-多步BPTT
-mixed latent IL
-DAgger
-MoE
-PPO
-或之后的候选级GRPO
+-修 World Model； -修预测 latent 接口； -修 Stage B 的 predicted-state Policy 训练； -或修 Stage C 更新后的部署迁移。
 
-
-这能最大限度避免再次出现“方案理论正确，但代码实际上没有按该方案运行”的方向性偏差。
+这才是新一大轮优化的正确起点。
