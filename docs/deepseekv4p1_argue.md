@@ -1,9 +1,9 @@
-# deepseek-v4.1 argue / 主文档（R25：P1 首现闭环超 legacy · 门未全过+定位 · round-26 待裁）
+# deepseek-v4.1 argue / 主文档（R26：Q1 全面生效 · teacher/sat 未闭合+停止 · round-27 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-13 下午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；round-25 R25（§5.19–5.20）；**round-26 R26：Q1 全面优于 Q0（pert/learner MAE −50%+、Δp99× ≤1.25 ✓、mirror ✓、calib50 0.50 vs legacy 0.40）——但硬门仍未全过（teacher +40~44%、sat +14.5pp）⇒ 按预注册停止+定位（§5.22）；待 round-27**；正式采集/DAgger/MoE/RL 仍冻结。
 > **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ round-26：R26 执行（Q1 改进全面生效、teacher/sat 未闭合+停止）（§5.21–5.22）。
-> **本版说明**：第十轮精简（267 → ~250 行）：§5.19 并入残档、§5.18/5.16/5.14/5.13/5.5/5.3/5.10/§2.1/§4 收缩、§0 补 R25 行、§6/§7 更新；**当前状态=R25：P1 首现闭环超 legacy、门未全过+定位（§5.20）、round-26 待裁**；改前 267 行 = `git show 6e4fc79:docs/deepseekv4p1_argue.md`。历版全文见 §7。
+> **本版说明**：第十一轮精简（269 → 261 行）：§5.21 并入残档、§5.20/5.18/5.16 收缩、§0 表合并 Steps 行并补 R26 行、§6/§7 更新；**当前状态=R26：Q1 全面生效（calib50 0.50 vs 0.40、Δp99 ≤1.25、mirror ✓）、teacher/sat 未闭合+停止（§5.22）、round-27 待裁**；改前 269 行 = `git show 9c6a3a2:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
 
@@ -14,9 +14,7 @@
 
 | 步 | 结果 | 判定 |
 |---|---|---|
-| Step 1 可辨识性探针 | 正式 Gate 过（F1 0.934）；公平 progress 匹配 **0.682/0.731**（`no_increment`）；F2m 自车特征 **0.804/0.843** | 条件重开（特征级） |
-| Step 2 recovery_v2 采集 | 2,693 行；**六硬门全 PASS**；v1 根因数值实证（k≥1 vs Pass-1 中位差 33.2） | PASS → Step 3 |
-| Step 3 gated residual pilot | clean150 gated **0.3067 vs 基线 0.3400（−3.33pp）**；其余门全过 | **FAIL（停止）** |
+| Steps 1–3（P1-v2；后由 12A 关闭） | 1a 过（F1 0.934）→ 1b **`no_increment`**（F1 0.682）→ 1c F2m **0.804/0.843 重开**；recovery_v2 2,693 行、六门 PASS（v1 根因 33.2）；gated pilot **−3.33pp FAIL** | 条件轨（12A 关闭） |
 | **Round-12A 诊断** | 15 配置全未过九条件；**gate 无选择性**；后端 6/40 集翻转 | **NO-GO → 主线关闭** |
 | **Round-15A 零训练批次** | A1 共变量偏移（6.4×/16.5×）；A2 硬上限未触发、repeat 最优 **0.778**；C1 FAIL；P1-3 FAIL | A3/A4 条件满足（§5.3） |
 | **Round-17 A3** | 确定性尾全线 succ **0**；同 ckpt chain **0.3533**（隔离=动作可持性）；远期链监督无有害证据；A1 复跑 learner 无改善 | **FAIL → round-18（§5.5）** |
@@ -24,9 +22,10 @@
 | **Round-22 + R21-0..2** | 四臂 Outcome D（α≈1.3%、近均匀、几何响应未达 5×；e002 回落）；R21 三阶段门全过（措辞经 §5.15 更正） | → R21-3 接线+复测（§5.15–5.16） |
 | **R21-3A..3C** | 接线+契约 **925 passed**；canary 门过；3C 表示 3/3 + action 4/5（曲率 20.1% 近门） | → R21-3D（§5.17–5.18） |
 | **R21-3D** | **3D-1/2 门过**（独立集 **5/5**：曲率 **25.0%**、lane 6.17×、target 1.00/1.00）；**3D-3 小 canary 未过门（S0 −8.7pp / S1 −8.0pp）** | → R25（§5.19–5.20） |
-| **Round-25（R25）** | Gate A 全过（β=0 逐位）；**P1 首现闭环超 legacy：succ 0.400（+7.3pp）/ off 0.347（−20.7pp）**；B/C/D 未全过（mirror-lat 0.891、teacher +57%、tmo +14pp、sat 0.894）；**修复 R21-1 遗留 B 行标签错配（corr −0.156→+0.606）** | **停止+定位：采纳已装但量级过强不对称 → 待 round-26（幅度锚定+镜像 paired）（§5.20）** |
+| **Round-25（R25）** | Gate A 全过（β=0 逐位）；**P1 首现闭环超 legacy：succ 0.400（+7.3pp）/ off 0.347（−20.7pp）**；B/C/D 未全过（mirror-lat 0.891、teacher +57%、tmo +14pp、sat 0.894）；**修复 R21-1 遗留 B 行标签错配（corr −0.156→+0.606）** | → R26（§5.21–5.22） |
+| **Round-26（R26）** | 26A 数据 ✅（v1 暴露 0）；**Q1 全面优于 Q0：pert −53.6% / learner −51.5%、Δp99× 1.017、mirror ✓、calib50 0.50 vs 0.40**；硬门未全过（**teacher +43.7%、sat +14.5pp**） | **停止+定位：teacher 保持性 + 饱和 → 待 round-27（§5.22）** |
 
-- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ **R25 残差+动作监督成功安装"采纳"、首现闭环超 legacy（succ +7.3pp / off 减半）——但量级过强 + 镜像交互未覆盖 ⇒ 停止+定位，待 round-26（§5.20）**。
+- **旁线（D/E）**：dθ-only 0.728（+2.2pp，V1=组合效应确认）；常态 μ 无系统性 bias。均不改训练 target。**终局**：条件轨已关闭；A3 判负（**动作可持性**）；LD 架构排摸结束（Outcome D）；R21 0..3D 全链验证（含独立集）→ R25 首现超 legacy（+7.3pp / off 减半）→ **R26 Q1 全面生效（calib50 0.50 vs 0.40、Δp99× ≤1.25、mirror ✓；pert/learner −50%+）——teacher 保持性 + steer 饱和尚未闭合 ⇒ 停止+定位，待 round-27（§5.22）**。
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
 ---
@@ -191,8 +190,7 @@
 
 ### 5.16 R21-3A..3C 结果（2026-10-13 01:0x）：**接线+契约+Canary 全过；3C 表示 3/3 过、action 4/5（曲率 20.1% 近门）——首现强正向；门后停止待裁决（round-24）**
 
-- **3A/3B（门过）**：三项修正（归一化单一出处+逐位单测、`distance_to_target_lane_end` 改名值逐位不变、margin 降级）+ 接线（target_lane_token〔mask/valid=0⇒严格 0〕+ LD 逐槽增广 + 显式分组池化 + `build_geometry_context` 统一消费/禁均值回退/断言）；16 新测、**925 passed**；canary（冻结主干、只训 299,909 参数、15.1s）门过。
-- **3C（首现强正向）**：target token 解码 **1.000/0.998/1.000**；**sign 99.4%/99.2%**（旧 73%）、lane **4.31×**、hist/lane **0.243**（旧口径 36.5）；**曲率 20.1%（门 25%，近门）**；解码器 R² 0.33/0.36。→ 曲率近门成为 3D 直接动因（§5.17–5.18）；产物 `runs/p1_v2/round23/`；零正式采集。
+- **3A/3B/3C（门过；3C 首现强正向）**：三项修正（归一化单一出处、改名值逐位不变、margin 降级）+ 接线（target_lane_token 严格零 + 逐槽增广 + 分组池化 + `build_geometry_context` 统一消费）；16 新测、**925 passed**；3C：token 解码 1.000/0.998/1.000、**sign 99.4/99.2%**（旧 73%）、lane **4.31×**、hist/lane 0.243、**曲率 20.1%（近门）**；→ 催生 3D；产物 `runs/p1_v2/round23/`。
 
 ### 5.17 round-24 裁决：**批准 R21-3D（代码语义一致性 + 独立集复测 + 小规模闭环 canary）；正式采集仍后置——已开工**
 
@@ -202,8 +200,7 @@
 
 - **3D-1（门过）**：chain 更优（lane 4.65× vs 2.47×、curv 22.1% vs 9.8%；冻结栈混淆在案）⇒ 保留链；**static_role_only 最优**（lane 6.75×、curv 29.9%、late_share 0.149）⇒ 默认；target correctness 983 状态 **1.00/1.00/严重 0.00**。
 - **3D-2（全过）**：独立集 8,953 行（未见 spec、B 100% 连续真实 history、traffic mixed）；**sign 99.6/99.8%、mirror 98.4/99.6%、lane 6.17×、hist/lane 0.227、curv 25.0%**。
-- **3D-3（未过门 → 停止）**：3d3 53,765 行；S0 0.240 / S1 0.247（−8~9pp）、sat 0.21；独立集 sign 0.56/0.54；定位=**替换式初始化代价 + 语义未被 action 采用**（三嫌疑 chain/rollout/target 全清除）→ 直接催生 R25（§5.19–5.20）。
-- 产物：`runs/p1_v2/round24/`；零 20 万级采集、DAgger/MoE/RL 未动。
+- **3D-3（未过门 → 停止）**：3d3 53,765 行；S0 0.240 / S1 0.247（−8~9pp）、sat 0.21；独立集 sign 0.56/0.54；定位=**替换式初始化代价 + 语义未被 action 采用**（三嫌疑 chain/rollout/target 全清除）→ 直接催生 R25（§5.19–5.20）；产物 `runs/p1_v2/round24/`，零 20 万级采集。
 
 ### 5.19 round-25 裁决残档（`8b35e84`；已并入执行）
 
@@ -211,21 +208,15 @@
 
 ### 5.20 Round-25 结果（2026-10-13 12:3x）：**残差平滑接入成功安装"采纳"；P1 首现闭环超 legacy（succ +7.3pp、off −20.7pp）但门未全过 → 按预注册停止+定位；另发现并修复 R21-1 遗留 B 行标签状态错配**
 
-- **25A/Gate A（全过）**：`geometry = legacy + β_context·Δ`、`target_token_eff = β_token·token`（β 初值 0 进账本）；**target token 折叠进 summary 槽**（T 恒 39、invalid 逐位无影响）；β=0 全链 max|Δ|=**0.0**（rollout 三态×5 输出）+ 残差路径/β 先行梯度/ledger 全过；6 新测、**937 passed**。
-- **重大数据 bug（R21-1 遗留）**：B 行 obs=置位态但标签在**恢复窗口之后**查询（状态错配；3d3 `corr(perturb_lat, expert_dθ)=−0.156`）；**修复=置位后立即查询**（重放 2,000 eps、**10,803 行**、覆盖 99.96%、`corr=+0.606`）；R25 训练/监控/Gate C 全部切换修复标签。**追注：3B/3C canary、3D-3 S0/S1 与本轮首跑 P0/P1 均受污染——其扰动相关结论需在修复标签下再审视。**
-- **三臂（S1 semantic path → S2 末层解冻）**：轨迹=**P1 βc +0.10~+0.12、sign ~1.0、lane 106–184×、curv 0.35–0.61、hist/lane ~0.02**；P2 类似；**P0（纯 BC）βc −0.06、lane× 0.13–0.6、hist/lane 2.3–9.4 ⇒ 语义仍不被采纳**（复现 3D-3 结论并定位：**动作级监督是采纳的必要条件**）。
-- **门**：**B**——P1 4/5（sign 0.994/1.000、lane **97.9×**、curv **0.694**、hist **0.023**；**mirror-lat 0.891 <0.95**）、P2 4/5、P0 0/5；**"连续两 epoch"三臂均 False**；**C**——P1 3/4（pert −31%、learner −24%、sign err −58%；**teacher +57%**）、P2 1/4、P0 0/4；**D**——P1 **succ 0.400（+7.3pp ✓）/ off 0.347（−20.7pp ✓）/ coll ✓**，但 **tmo +14pp ✗、sat 0.894（+0.123）✗**；P2 同类；P0 全否。**⇒ A 过、B/C/D 未全过 → 停止**（不扩数据、不 DAgger/MoE/RL）。
-- **定位（预注册）**：采纳已安装且**首现闭环超越 legacy**（succ +7.3pp、off 减半），但**量级过强且不对称**（|Δdθ|/m ≈2–4× expert、teacher +57%、tmo ×2.5、sat 0.89–0.94）；**mirror-lat 在大 |heading| 行退化 0.51–0.73 = lat×heading 交互未被 lat-only paired 构造覆盖**。
-- **待裁决（round-26）**：定向修正——**幅度锚定**（|Δdθ| 上限/软锚）+ **镜像状态 paired（lat+heading 同镜像）**；P2 劣于 P1 ⇒ **Primary 保持冻结**；修正方案不属本轮、需批准。
-- 产物：`runs/p1_v2/round25/`（报告 / A–D 门表 / 逐 epoch 轨迹 / selection / clean150×3）；生产提交见 git log。
+- **25A/Gate A（全过）**：`geometry = legacy + β·Δ`、`target_token_eff = β_token·token`（β 初值 0 进账本）；target token 折叠进 summary 槽（T 恒 39）；β=0 全链 max|Δ|=**0.0** + 残差路径/β 先行梯度/ledger 全过；**937 passed**。
+- **重大数据 bug（R21-1 遗留）**：B 行 obs=置位态 × 标签=恢复窗口后（3d3 corr **−0.156**）；**修复=置位后立即查询**（10,803 行、99.96%、corr **+0.606**）；**追注：3B/3C、3D-3 S0/S1 与首跑 P0/P1 均受污染**。
+- **三臂+门**：P1 βc +0.10~0.12、sign ~1.0、lane 106–184×、hist ~0.02 vs **P0 不采纳**（lane×0.13–0.6、hist 2.3–9.4）⇒ **动作级监督=采纳必要条件**；B P1 4/5（mirror-lat 0.891✗）；C P1 3/4（teacher +57%✗）；D **succ 0.400（+7.3pp✓）/ off 0.347（−20.7pp✓）** 但 tmo +14pp✗、sat 0.894✗；连续两 epoch 均 False。
+- **定位**：采纳已装且首现超 legacy，但**量级过强不对称**（|Δ|/m 2–4× expert）+ **lat×heading 交互未覆盖**（mirror 在大 |heading| 行 0.51–0.73）⇒ 定向修正（软锚 + 全镜像）待 round-26；P2 劣于 P1 ⇒ Primary 冻结。
+- 产物：`runs/p1_v2/round25/`；生产提交见 git log。
 
-### 5.21 round-26 裁决：**批准 Round-26（Q0 正确标签重跑 + Q1 delta 监督/幅度软锚/全镜像 paired；Primary 冻结）——已开工**
+### 5.21 round-26 裁决残档（`1427ed3`；已并入执行）
 
-- **核验（代码项成立）**：残差接管 β=0 逐位 ✓；**target token 折叠式**（`ld_slot = ld_pool + target_proj(β_token·raw_target)`、T 恒 39）✓——比追加+mask 更稳健，保留"invalid ⇒ 逐位 legacy"测试。
-- **接受四项根因（关键反驳认账）**：不当把问题归为"单点幅度过强"；四项同改=① B 标签状态错配（v1 永久禁用：训练/验证/选择/probe/mirror 全链 fail-fast `label_state_version=same_state_v2`）；② **监督目标=相对 legacy 的修正量**（delta_expert=expert−legacy；L_delta=SmoothL1；正常态自然≈0）；③ **幅度软锚**（分组〔速度/曲率/lat/heading〕expert 修正 P95/P99；`relu(|Δθ|−limit)²`；部署上限=expert P99）；④ **全镜像 paired**（lat+heading+curv+flags+margins+LD/role/OD 全部同镜；`Δds 等、Δdθ 反号`；5×5 网格 + 四象限报告）。
-- **Q0/Q1 双候选**：Q0=P1 重跑（v2 标签，必要基准）；Q1=Q0+②③④（唯一改进候选）；**Primary 冻结**；Stage1 semantic path→Stage2 PlanHead/Policy 末层低 LR；硬门筛选（sign/mirror≥95%、curv≥25%、hist≤1、teacher≤+10%、ΔP99≤1.25×）后按 calibration50 选 epoch；clean150 终验。门 A 数据（v1 暴露=0）→B 采用（连续两 epoch）→C 幅度/基础（sat ≤legacy+5pp）→D clean150（**succ ≥0.42 且 +7pp**、off ≤0.35、coll ≤+2pp、tmo ≤+3pp）→E 才放扩容。未过门=停 semantic loss 扩充、不转 DAgger/MoE/RL。
-- **我方执行注记**：① **L_delta 绑定对象**——若对全模型输出计算则平移不变 ⇒ 与全动作 SmoothL1 数学等价；"正常态零修正"须来自**目标** + **基底冻结**。落地=把 delta 监督施加在**语义 delta 变量**（legacy 基底冻结/detach），并加正常态 |Δ|≈0 显式项；② **独立集 B 行标签亦须升 v2**（其 expert 分母进 probe/mirror 统计）+ 统一 errata；③ R25 终版 P1（0.400）**已用 v2 标签**（首跑 11:06 污染版已被 11:44 重跑取代）⇒ Q0 为全链洁净版再确认；26D 网格在既有状态上重放构造（状态再构造，非数据扩容）；④ β 分组效应（×road/speed/lat/heading）按其 §1.3 记录（本轮不加条件门）。
-- **开工**：R26 lane 已派发（复用 R21 session；`runs/p1_v2/round26/`）。
+- **核验成立**（残差 β=0 逐位；target token 折叠式 T 恒 39）⇒ 批准 **R26 四项同改**：① B 标签 v1 全链禁用 + v2 fail-fast；② 监督=相对 legacy 的修正量；③ 分组幅度软锚（P95/P99）；④ 5×5 全镜像 paired。Q0=P1 v2 重跑（基准）/ Q1=Q0+②③④（改进候选）；Primary 冻结；硬门筛选→calibration50；门 A–E（D：succ ≥0.42 且 +7pp）。注记：L_delta 绑定语义 delta + 基底冻结 + 正常态零修正项；独立集 B 行升 v2；β 分组记录。——**已执行，结果见 §5.22。**
 
 ### 5.22 Round-26 结果（2026-10-13 14:0x）：**Q1 全面优于 Q0（26B/C/D 均生效）；硬门仍未全过（teacher +40~44%、sat +14.5pp）→ 按预注册停止+定位**
 
@@ -243,17 +234,17 @@
 - **决策/契约**：`docs/p1_v2_decision.md`（P1-v2 决策 + Round-12A 结果）、`docs/recovery_v2_contract.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`
 - **报告**：`docs/p1_0_report.md`（P1-0 FINAL）、`docs/p1_2_diagnosis.md`（P1-2 FINAL）、`docs/recovery_v1_dataset_card.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`
 - **数据**：`datasets/recovery_v1/`、`datasets/recovery_v2/`（samples / manifest / split / data_gate_report / _verify）、`datasets/semantic_v1_pilot/`（9,515 行）、`datasets/semantic_v1_independent/`（8,953）、`datasets/semantic_v1_3d3/`（53,765）
-- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/round21/`（契约审计 / 可行性 / R21-2 表示 probe）、`runs/p1_v2/round23/`（3A 审计 / 3C 探针 / canary）、`runs/p1_v2/round24/`（3D 报告 / 5 探针 / rollout diag / clean150）、`runs/p1_v2/round25/`（残差 / 三臂 / 门表 / selection）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
-- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a / round18a / round20 / round21 / round23 / round24 / round25 脚本 + logs）
+- **产物**：`runs/p1_v2/round12a/`（trace/探针/15 配置/归因/九条件）、`runs/p1_v2/round15a/`（A1 审计 / A2 尾族 oracle / Track C / P1-3 FP 门）、`runs/p1_v2/round17/`（两臂 ckpt / 三尾 clean150 / a3_report）、`runs/p1_v2/round18a/`（probes/审计/断点）、`runs/p1_v2/round20/`（20A 置换 / 20B matched-case / M0-M2 / 结构门）、`runs/p1_v2/round22/`（四臂 / LdAggregate / 契约 / report）、`runs/p1_v2/round21/`（契约审计 / 可行性 / R21-2 表示 probe）、`runs/p1_v2/round23/`（3A 审计 / 3C 探针 / canary）、`runs/p1_v2/round24/`（3D 报告 / 5 探针 / rollout diag / clean150）、`runs/p1_v2/round25/`（残差 / 三臂 / 门表 / selection）、`runs/p1_v2/round26/`（Q0/Q1 / 契约 / calib / gate C）、`runs/p1_v2/`（intervention_probe*、probe_robustness、probe_v2_check、bias_diagnostic、gated_residual_report、gated_residual_pilot/）、`runs/p1_0/`（d2_pacing_matrix、dth_sweep_summary、start_model_decision）、`runs/p1_2/`、`runs/eval/`、`runs/forensics/`
+- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`（全链流水）、`.slim/deepwork/p1_v2/`（probe / collector / gated_residual / round12a / round18a / round20 / round21 / round23 / round24 / round25 / round26 脚本 + logs）
 - **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮）
-- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）、`96df7cb`+`c71f389`（Round-18A）、`da83ce1`（LD 消融开关）、`e638b76`（§5.10）、`02ef947`+`a1986f3`（第六/七轮精简）、`69c0545`+`7fba3f5`（§5.11/§5.15）、`5e6e3e2`（LD 聚合）、`0f73b6d`+`51712bd`（R21 语义）、`11f0000`（§5.16）、`ee2651b`（第八轮精简+推送）、`bf32e23`（round-24 答复）、`eaff4d6`（§5.17）、`3e3df68`（3D 模式）、`f788fdd`（§5.18）、`8b35e84`（round-25 答复）、`19c18b1`（§5.19）、`4ec66ee`（R25 残差）、`6e4fc79`（§5.20）
+- **关键提交**：`37000ae`/`a371cc5`（过滤）、`e953f10`（P1-3）、`c20fa00`（P1-2 诊断）、`28acbcd`（dθ-only）、`1800e69`/`a42ac79`/`27ced1f`/`7b83730`（P1-v2 步）、`061bbac`/`663fedc`（argue §7/§8）、`5962848`（12A 开工）、`249c51c`（12A NO-GO）、`3b5124f`（尾族工具）、`dab85f8`（§5.3 批次结果）、`74f522f`（第三轮精简，位于 `Planner_RL_copy`）、`d70ec1b`（§5.4）、`f8169fd`（A3 配方开关）、`96df7cb`+`c71f389`（Round-18A）、`da83ce1`（LD 消融开关）、`e638b76`（§5.10）、`02ef947`+`a1986f3`（第六/七轮精简）、`69c0545`+`7fba3f5`（§5.11/§5.15）、`5e6e3e2`（LD 聚合）、`0f73b6d`+`51712bd`（R21 语义）、`11f0000`（§5.16）、`ee2651b`（第八轮精简+推送）、`bf32e23`（round-24 答复）、`eaff4d6`（§5.17）、`3e3df68`（3D 模式）、`f788fdd`（§5.18）、`8b35e84`（round-25 答复）、`19c18b1`（§5.19）、`4ec66ee`（R25 残差）、`6e4fc79`（§5.20）、`f41b06a`（§5.21）、`416e849`（R26 semantic_off）、`9c6a3a2`（§5.22）
 
 ---
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第十轮精简（本版；267 → ~250 行）**：§5.19 并入残档、§5.18/5.16/5.14/5.13/5.5/5.3/5.10/§2.1/§4 收缩、§0 补 R25 行、§6/§7 更新；改前 267 行 = `git show 6e4fc79:docs/deepseekv4p1_argue.md`。
-- **历次精简留档**：第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
+- **第十一轮精简（本版；269 → 261 行）**：§5.21 并入残档、§5.20/5.18/5.16 收缩、§0 表合并 Steps 行并补 R26 行、§6/§7 更新；改前 269 行 = `git show 9c6a3a2:docs/deepseekv4p1_argue.md`。
+- **历次精简留档**：第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
 - **压缩时间线**：
   - 2026-10-09：round-1/2 收拢；《评测兼容设计》落 `docs/p0_eval_compat_design.md`；
   - 2026-10-09/10：P0 三件套 → P0-B 矩阵 + P0-C 归因 → 审计定稿（§2.1）；
@@ -266,4 +257,5 @@
   - 2026-10-12 深夜–10-13 凌晨：round-21 复核 → round-22 四臂（Outcome D）→ **R21-0..2 三阶段门全过**（§5.11–5.14）；
   - 2026-10-13 凌晨：round-23 → R21-3A..3C（§5.15–5.16）：3A/3B 门过、**3C 表示 3/3 + action 4/5（首现强正向）**；
   - 2026-10-13 上午：round-24 → R21-3D（§5.17–5.18）：3D-1/2 门过（独立集 5/5）、**3D-3 小 canary 未过门 → 停止+定位（待 round-25）**；
-  - 2026-10-13 中午：round-25 → R25（§5.19–5.20）：残差+解冻+动作监督；**P1 首现闭环超 legacy（succ +7.3pp）但门未全过+定位；B 行标签 bug 修复（待 round-26）**。
+  - 2026-10-13 中午：round-25 → R25（§5.19–5.20）：残差+解冻+动作监督；**P1 首现闭环超 legacy（succ +7.3pp）但门未全过+定位；B 行标签 bug 修复（待 round-26）**；
+  - 2026-10-13 下午：round-26 → R26（§5.21–5.22）：数据 v2 契约 + Q1（delta/软锚/全镜像）；**Q1 全面生效（calib50 0.50 vs 0.40、Δp99 ≤1.25、mirror ✓）但 teacher/sat 未闭合 → 停止+定位（待 round-27）**。
