@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（R21-3 完成 · 首现强正向 · round-24 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 凌晨）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核（§5.11）；round-22 Outcome D（§5.13）；R21 0..3 递进（§5.14–5.16）；**round-24 批准 R21-3D（代码语义一致性 + 独立集复测 + 小规模闭环 canary）——已开工；正式采集条件后置（§5.17）**；RL 冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ **round-24：批准 R21-3D（§5.17）**。
+> **状态（2026-10-13 上午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进（§5.3/5.5/5.8/5.10）；round-21 复核（§5.11）；round-22 Outcome D（§5.13）；R21 0..3D 递进（§5.14–5.18）；**R21-3D：3D-1/2 门过（独立集含曲率 25.0%）；3D-3 小 canary 未过门（S0/S1 −8~9pp）⇒ 按预注册停止+定位（三嫌疑清除；层=初始化代价 + action 未采用语义）——待 round-25（§5.18）**；RL 冻结。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）。
 > **本版说明**：第八轮精简（300 → ~270 行）：§5.15/5.13/5.10/5.8/5.1–5.2 收缩、§0 补 R21-3 行、§6 更新；**当前状态=R21-3A..3C 首现强正向（§5.16）、round-24 待裁**；改前 300 行 = `git show 11f0000:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -228,6 +228,15 @@
 - **R21-3D 门（已锁定）**：**3D-1** 三项一致性（推荐默认+证据；后段不过度纠偏；target 正确率门）→ **3D-2** 独立集复测（全新 episode/连续 history/含 traffic/未见 spec；sign ≥95%、mirror ≥95%、lane ≥3×、hist/lane ≤1、curv ≥20%）→ **3D-3** 小 canary（45–75k 行、连续真实 history+traffic 子集+速度带+对称扰动；S0/S1 Primary-only、learned chain、MoE/WM 关；clean150：succ ≥+5pp ∧ **≥0.40**、off ≥−5pp、coll ≤+2pp、tmo ≤+3pp、饱和 −20%、反事实过；分组闭环+全监控清单；只从普通路提升而复杂路恶化 ⇒ 停）→ **3D-4 正式采集=条件批准（过门后另请；150–250k/50–80k/30–50k/20–30k）**。
 - 未达门处置（预注册）：先定位 **chain / rollout semantic / target selection**，不得转 DAgger/MoE/RL。
 - **开工**：R21-3D lane 已派发（复用 R21 session；产物 `runs/p1_v2/round24/`；零 20 万级采集、零 DAgger/MoE/RL）。
+
+### 5.18 R21-3D 结果（2026-10-13 10:1x）：**3D-1/3D-2 门过（独立集 5/5，含曲率 25.0%）；3D-3 小 canary 未过门（S0 −8.7pp/S1 −8.0pp）→ 按预注册停止并定位**
+
+- **3D-1（门过）**：① **chain vs no_chain** 单变量——同协议 **chain 明确更优**（lane 4.65× vs 2.47×、curv 22.1% vs 9.8%、sign 99.8/99.2 vs 98.0/92.2）⇒ 默认**保留链**（冻结栈混淆在案；全参复测列 fallback）；② rollout 三态——**static_role_only 最优**（lane 6.75×、curv 29.9%、late_share 0.149 vs t0_only 0.379）⇒ 默认 **static_role_only（t0 全量 + rollout 静态角色上下文）**；③ **target correctness** 983 状态：normal/complex **1.00/1.00**、严重 0.00（连通+tangent+专家未来 1–2s 三重真值）。
+- **3D-2（门全过）**：独立集 `semantic_v1_independent/` **8,953 行**（未见 spec、B 100% 连续真实 history、traffic mixed；重放 exact 100%）；复测 **sign 99.6/99.8%、mirror 98.4/99.6%、lane 6.17×、hist/lane 0.227、curv 25.0%**——3C 曲率近门在静态化 rollout 后转正。
+- **3D-3（未过门 → 停止）**：`semantic_v1_3d3/` **53,765 行**（A/B/C=35,556/10,005/8,204；exposure 有效 .534/.234/.161/.072；重放 exact 100%）；S0/S1（M0 init、3 epoch、同 seed/预算）clean150：**S0 0.240（−8.7pp）/ S1 0.247（−8.0pp）**、off +3.3pp、sat **0.21 vs 0.80**；独立集反事实 **sign 0.56/0.54（不过）**。
+- **失败定位（预注册 fail branch）**：三嫌疑（chain/rollout semantic/target selection）**全部清除**；实际层=① **替换式接线初始化代价**（S0 e001 0.093 → e003 0.240，恢复中但预算不足）；② **语义方向未被 action 采用**（monitor sign 0.93→0.70→0.60 逐 epoch 下降；独立集 sign 0.56/0.60；而表示可解码 token R²≈1.0、expert dθ 线性可解码 R²≈0.70/0.62）⇒ **BC+exposure 下动力学 shortcut 复发**；③ static_role_only 后段不纠偏/转向弱化（sat 0.21）——定向 follow-up。
+- **待裁决（round-25；不自行开工）**：follow-up 候选（不加容量、不加新损失类型需批）：**(a) 平滑初始化**（语义路径对旧 summary 残差化、初值=baseline，消除替换代价；须配 action 级监督防重蹈 α 门）；**(b) action 级方向监督**（现 S1 aux 仅表示级、loss≈0.001 过弱；改动作纠正方向/lateral-correction 直接监督+调权）；**(c) 分阶段解冻**（canary 证明冻结适配可达 sign 99%——先保适配路径、再渐进解冻）；**(d) 预算/早停**（e1 sign 0.93 vs e3 0.60 的张力：逐 epoch sign 选择，不能只看 loss）。坑：全参下 sign 随 epoch 下降；static late≈0 时 flip 为符号噪声。
+- 产物：`runs/p1_v2/round24/`（报告 + 5 canary 探针 + rollout diag + clean150×5）；零 20 万级采集、DAgger/MoE/RL 未动。
 
 ---
 
