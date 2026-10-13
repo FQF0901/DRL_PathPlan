@@ -1,453 +1,539 @@
-结论
+总结判断
 
-R21-0/1 的数据与契约实现总体合格，R21-3 方向值得推进，但我不批准按当前文档的模糊定义直接开始主模型训练。
+最新进展不是普通的小幅正向，而是第一次出现较完整的因果闭环：
 
-可以立即做：
+原始语义可计算
+→ 网络原先完全没消费
+→ 显式接线后 latent 可解码
+→ 动作方向响应从 73% 提升到约 99%
+→ history shortcut 相对影响显著下降
 
-网络显式接线；
-归一化与消费契约测试；
-用 9.5k pilot 做冻结主干的短适配和表示复测；
-并行采集正式 v7 主训练集。
 
-在表示门通过、S0/S1/S2 定义锁定后，再批准完整训练。
+因此，docs\r21_3a_semantic_wiring.md、env\obs\lane_semantic.py、net\semantic.py 这条路线是目前最有实证支持的方向。
 
-一、我核对代码后确认的事实
+但我不批准立即采集 20–30 万 expert + 3–5 万扰动并直接进行完整 S0/S1 训练。现有结果证明了 semantic wiring 有效，却还没有证明当前代码语义在 rollout 中完全一致，也没有证明它能转化为闭环增益。
 
-当前代码里：
+我的裁决是：
 
-lane_semantic 已进入 ObservationBuilder，shape 为 1×12；
-LD 的 role/group/route_associated/offset_s 已随历史保存；
-schema 已升为 v7，旧数据指纹默认 fail-fast；
-但 net/model.py 和 net/mem.py 完全没有消费lane_semantic；
-LD companions 目前也只是数据伴随项，没有进入网络；
-PlanHead 仍只使用现有 z_ld → aggregate_ld() 路径；
-target_lane_token 与 role-aware readout 在当前代码中尚不存在。
+批准进入 R21-3D“代码语义闭环 + 小规模闭环 canary”，通过后再进行正式采集。
 
-因此，R21-2 的正确表述应当是：
+一、恢复的上下文
 
-原始语义通道质量良好，但当前网络尚未接入；旧 LD 表示经过现有聚合后无法可靠读出 lane-relative 几何。
+这次提供的 docs\chatgpt5p6sol_review.md 和 docs\deepseekv4p1_argue.md 已经补齐此前缺失的讨论。当前完整链路是：
 
-不应过早下结论为“encoder 层清白、pooling 是唯一主因”。因为新语义甚至还没进入 encoder。
+Round-18A：
+发现 LD 拓扑和几何响应问题
 
-二、R21-0 代码中发现的三个实质风险
-1. 12 维语义特征没有归一化
+Round-20 / Round-22：
+M1/M2/M2a/M2b 未过闭环门
+确认不是简单 pooling/attention 可以解决
 
-当前 lane_semantic 直接输出：
+R21-0：
+增加 target-lane 与 lane-semantic 契约
 
-lateral offset             几米
-heading error              约 ±π
-curvature                  约 0.01–0.1
-margin                     几米到几十米
-confidence                 0–1
-binary flags               0/1
-distance_to_lane_end       0–数百米
-distance_to_topology       最大 200 m
+R21-1：
+完成 semantic_v1 pilot
 
+R21-2：
+发现 raw semantic 信息正确，但原模型完全不消费
 
-如果直接进入一个线性 encoder，distance_to_lane_end 和 distance_to_next_topology_change 很容易主导激活和梯度，而 curvature、heading、binary flag 被淹没。
+R21-3A：
+将 semantic 显式接入模型
 
-这是 R21-3 开训前必须解决的，不是训练后调参项。
+R21-3B：
+短 canary 训练
 
-建议在网络入口固定归一化：
+R21-3C：
+表示 3/3 通过，动作反事实 4/5 通过
 
-lateral_offset             / 5
-heading_error              / π
-curvature_near/far         / 0.1 或 ×10
-left/right margin          / 25
-confidence                 原值
-binary flags               原值
-distance_to_lane_end       / 200
-distance_to_topology       / 200
 
+因此，现在不是重新讨论“是否需要lane semantics”，而是审核其实现是否足以进入正式训练。
 
-归一化常数必须进入 schema/模型快照和单测，而不是散落在训练脚本里。
+二、值得肯定的实现
+1. lane_semantic 契约整体合理
 
-2. distance_to_next_topology_change 的当前语义不准确
+env\obs\lane_semantic.py 新增的信息抓住了此前缺失的核心：
 
-代码当前逻辑相当于：
+自车相对目标车道的 lateral offset；
+自车相对车道切向的 heading error；
+近场和远场 curvature；
+左右同向道路表面余量；
+target lane validity；
+route association confidence；
+lane-change direction；
+target lane end distance。
 
-topology = remaining if next_ref_lanes else 200.0
+这比单纯增加更多 LD 点更合理。它直接表达了规划真正需要的：
 
+我在哪
+目标车道在哪
+目标车道朝哪里
+应该往哪个方向修正
+前方道路如何弯曲
 
-只要存在 next lane，就把“当前 lane 剩余距离”当作“下一拓扑变化距离”。
 
-但 lane 结束可能只是普通直道的连续分段，并不一定是 merge、split、intersection 或 lane-count change。因此这个字段当前更接近：
+禁止把 raw map lane ID 直接输入网络，也是正确的。否则容易记忆地图内部编号，泛化性差。
 
-distance_to_route_segment_end
+2. target lane 从“ego lane 优先”改为“route 优先”
 
+这是关键修复。
 
-而不是：
+旧逻辑中，车辆偏离后 ego.lane 可能切到误入车道，网络随之把错误车道当成目标。现在：
 
-distance_to_next_topology_change
+route current
+→ route continuation
+→ route next
+→ ego lane fallback
 
 
-建议二选一：
+更符合规划语义。
 
-本轮改名为 distance_to_target_lane_end，避免模型学习错误语义；
-或真正沿 route successor 查找首次拓扑变化再计算距离。
+3. 语义终于被模型真正消费
 
-为控制复杂度，我建议本轮直接改名，不实现新的地图搜索。
+此前最大的代码问题是：
 
-3. left/right_drivable_margin 不是合法路线余量
+obs 中有 lane information
+≠
+PlanHead 真正使用 lane information
 
-代码通过同 road、同向的相邻 lane 累加宽度计算 margin。它没有检查：
 
-实线是否允许跨越； -护栏、收费岛等局部障碍；
-route 是否允许进入相邻 lane；
-footprint 是否真的处于连续可行区域。
+现在 net\semantic.py 创建：
 
-因此它可以叫：
+target_lane_token；
+role-aware LD augmentation；
+target/left/right/route/other 分组池化； -统一的 geometry_context。
 
-same-direction road-surface margin
+并在 net\model.py 中统一接入：
 
+t0 PlanHead；
+rollout step 1–6；
+policy/value tokens。
 
-但不能被解释为：
+这修复了过去“数据存在但网络不消费”的根本性问题。
 
-legal corridor margin
+4. fail-fast 与默认关闭做得很好
+旧 schema 缺键直接失败；
+semantic 模式默认关闭；
+baseline 逐位不变； -新参数支持严格白名单；
+mask 无效时 token 严格为零； -全部测试 925 个通过。
 
+这些工程契约可以保留。
 
-本轮可以作为输入特征，但不得用它直接构造安全 loss 或宣称已经显式建模合法 corridor。现有 geometry FP Gate 已失败，更说明不应把该字段升级为监督真值。
+5. 3C 结果是强机制证据
 
-三、对 R21-2 结论的质疑
-1. “pooling 丢失为主”尚未完全证明
+关键变化：
 
-R21-2 报告：
+lateral/heading/curvature 解码接近满分； -校正方向从约 73% 提升到约 99%；
+lane 几何响应是旧模型的 4.31 倍；
+history/lane 影响比从明显 history 主导下降到 0.243； -镜像一致率超过 96%。
 
-raw semantic R²≈1；
-ld_pool lateral R²=0.191；
-action 输出接近无法解码；
-history shuffle 影响为 lane perturbation 的约 15 倍。
+这证明此前的核心问题之一确实是：
 
-但这里混合了两个事实：
+车道语义没有进入规划决策主干，而不是单纯数据量不足。
 
-新 lane_semantic 根本没有进入模型；
-旧 LD token 经 pooling 后几何信息弱。
+三、我发现的三个代码级风险
+风险 1：semantic 模式仍保留错误的 LD-LD 槽位链
 
-所以更严谨的诊断是：
+net\model.py 中：
 
-缺少显式 target-lane 语义通路，同时旧 LD 聚合无法提供足够强的几何选择性。
+spatial.include_ld_chain = mode in ("baseline", "attn", "semantic")
 
-目前无法区分哪个是主要贡献。R21-3 正是用来裁决，不应在训练前写死结论。
 
-2. “history shortcut”也应谨慎表述
+也就是说，semantic 模式仍保留 LD slot-chain adjacency。
 
-history_shuffle 是明显的 OOD 干预。输出变化大可以说明模型依赖历史，但不能单独证明这种依赖是错误的。
+但前面的审计已经证明：
 
-R21-3 复测至少加入：
+相邻槽位同 lane 的比例只有约 23.5%； -约 76.5% 的 LD-LD 边连接的不是同一条连续车道。
 
-真实 6 帧历史
-复制当前帧 6 次
-最近 2 帧 + 其余复制
-逆序历史
-shuffle 历史
+即使 net\semantic.py 后续做了 role/group pooling，输入给 semantic wiring 的 z_ld 已经经过 ST-GNN，可能提前混入跨 lane 伪消息。
 
+建议
 
-其中最可信的是：
+正式训练前必须做一个极小对照：
 
-真实历史 vs 当前帧复制
+semantic_chain
+semantic_no_chain
 
 
-如果接入 semantic 后，几何反事实响应提高，同时真实历史仍优于复制历史，说明合理目标应是：
+这不是重新开启结构扫参，而是在消除已知错误拓扑。
 
-几何信号增强，而不是删除历史。
+我倾向于正式 semantic 模式默认：
 
-四、R21-3 的正确接线方案
-1. lane_semantic 独立编码成 target token
+include_ld_chain = False
 
-建议新增：
 
-lane_semantic 1×12
-→ fixed normalization
-→ 2-layer MLP
-→ target_lane_token [B,H]
+除非 semantic_chain 在同协议下明确优于 semantic_no_chain。
 
+风险 2：rollout 使用动态 latent，但 lane semantic 仍是 t0 静态值
 
-必须使用 lane_semantic_mask 和内部 target_lane_valid：
+net\model.py rollout 中，每一步重新构造：
 
-mask=0 或 valid=0 → token 严格为 0
+step_context = build_geometry_context(
+    z_ld_k,
+    z_ego_k,
+    semantic=t0_semantic
+)
 
 
-第一版不要进入 MemBank。当前语义来自当前真实 pose 和当前 route，直接作为当前 target token 更清楚。后续若证明确实需要时间平滑，再做独立 temporal ablation。
+这里：
 
-2. LD companions 应真正进入逐槽路径
+z_ego 和 z_ld 在 rollout 中变化； -但 lateral offset、heading error、margin、distance-to-lane-end 等 lane_semantic 仍来自 t0。
 
-当前伴随数组：
+这存在语义不一致。
 
-ld_lane_role
-ld_offset_s_norm
-ld_group
-ld_route_associated
+例如：
 
+t0 lateral offset = +0.8m
+模型第一步已经向中心修正
+t1 仍注入 +0.8m 的静态 offset
 
-已经随 6 帧 history 保存，但网络不消费。
 
-建议将每个 LD token 增广为：
+网络可能在尾段反复过度纠偏。
 
-z_ld_slot
-+ role embedding
-+ route-associated embedding
-+ normalized offset encoding
-+ target-group relation
+这不是小问题
 
+当前 chain 已被证明承担执行噪声缓冲。如果 rollout 中不断复用陈旧的 lateral/heading error，可能破坏刚恢复的 chain 稳定性。
 
-ld_group 不能作为数值大小使用。它只是局部 equality/group identity，应采用：
+正式训练前必须比较三种口径
+C0：semantic 仅用于 t0，rollout 后续不重复注入动态 semantic
+C1：当前实现，t0 semantic 在后续重复使用
+C2：将 semantic 拆成 static / dynamic
 
-same-group mask；
-group embedding； -或只用于 target/continuation token pooling。
-3. role-aware readout 不要再做自由注意力搜索
 
-Round-22 已显示纯 attention：
+其中：
 
-α 只学到约 1.3%； -权重近均匀； -无车道偏好； -α 增大反而性能下降。
+静态部分可复用
+target-lane role
+route confidence
+lane-change requirement
+道路拓扑身份
 
-因此 R21-3 不应重新定义成另一次 attention 实验。
-
-建议使用显式分组池化：
-
-target_pool
-continuation_pool
-left_adjacent_pool
-right_adjacent_pool
-route_pool
-other_pool
-
-
-然后融合：
-
-ld_context = MLP([
-    target_lane_token,
-    target_pool,
-    continuation_pool,
-    left_pool,
-    right_pool,
-    route_pool,
-    other_pool_mean
-])
-
-
-这样直接利用已验证的 role 契约，不要求网络从 9.5k pilot 中重新“发现 target lane”。
-
-4. 必须统一消费位置
-
-target_lane_token 和 role-aware ld_context 必须进入：
-
-PlanHead t0
-PlanHead rollout step 1–6
-policy/value head tokens
-
-
-更重要的是，必须使用同一个函数：
-
-geometry_context = build_geometry_context(...)
-
-
-禁止 plan_step() 再自行回退到 masked_mean(z_ld)。
-
-建议增加代码级断言：
-
-semantic mode 下：
-PlanHead 不能调用旧 LD mean fallback
-
-五、我反对当前文档中的 S1/S0/S2 模糊定义
-
-目前 deepseekv4p1_argue.md 只说明：
-
-S1：2 epoch 短适配；
-S0/S2：通过后补；
-S2 lane aux 保持轻量。
-
-但没有定义：
-
-冻结范围； -优化器参数； -具体 loss；
-pilot 中 A/B/C 三段的采样比例； -正式 v7 数据集规模；
-checkpoint 初始化和 fail-fast；
-S0、S1、S2 各自究竟改变哪个变量。
-
-这不足以批准主训练。
-
-六、建议锁定的 R21-3 三阶段
-R21-3A：接线与契约测试
-
-只实现网络接线，不做主训练。
-
-必须通过：
-
-semantic invalid → token=0；
-特征归一化逐位测试；
-role/group permutation 一致性；
-target-role 改变能改变 target pool；
-PlanHead t0 和 rollout 每一步都消费 semantic context；
-policy/value 消费一致； 7.旧 schema/旧 dataset/旧 ckpt fail-fast； 8.无 hidden mean fallback；
-all-invalid forward/backward finite；
-route/ego target 切换只发生在契约允许的位置。
-R21-3B：Pilot adapter canary
-
-使用 9.5k pilot，但只能作为表示验证。
-
-建议冻结：
-
-encoder 原主体
-MemBank
-ST-GNN
-MoE/router
-policy/value
-
-
-只训练：
-
-lane semantic encoder
-role embeddings
-role-aware readout
-geometry fusion adapter
-PlanHead 最后融合层，可选且低 LR
-
-
-不要全模型训练，因为 pilot 中：
-
-B 扰动占 42.7%，且 traffic=0；
-C 只有 20 episodes；
-A/B/C 分布差异很大；
-pilot 明确不足以作为主训练数据。
-Pilot loss
-
-不要新增复杂几何损失。使用：
-
-当前 action BC
-+ 原有 plan/trajectory loss
-+ 小权重 semantic reconstruction/probe loss
-
-
-其中 semantic aux 只监督：
-
+动态部分不应原样复用
 lateral offset
 heading error
-near/far curvature
-lane-change-required
+distance to lane end
+左右 margin
 
 
-暂时不要监督当前定义存在歧义的 drivable margin 和 topology distance。
+第一版无需实现完美的 C2。若不能从 latent/pose 可靠更新动态语义，我更倾向：
 
-R21-3C：表示 Gate
+t0 使用完整 semantic，rollout 后续只保留静态 lane-role context。
 
-短适配后必须复测：
+风险 3：target lane 稳定性已证明，但正确性还没有完全证明
 
-target token 解码
-role-aware context 解码
-action 对 lateral/heading/curvature 的反事实响应
-history-vs-lane 比
-lane sign / mirror consistency
+现有报告证明：
 
+-横向扰动时 target lane 不切换； -target lane valid 达到 100%； -几何计算准确。
 
-建议门：
+但：
 
-target token:
-  lat / heading / near curvature R² >= 0.80
-
-action response:
-  lateral 与 heading 扰动方向正确率 >= 90%
-  curvature response >= expert 的 25%
-  lane response 至少提升到旧模型的 3×
-
-history/lane influence ratio <= 2
+稳定选择同一条 lane
 
 
-不要沿用“必须 5×”这种孤立倍数作为唯一 Gate，更应看距 expert 的比例和闭环方向性。
+不等于：
 
-七、正式 v7 主训练数据集
-
-Pilot 通过后再批准采集正式数据。
-
-建议至少：
-
-expert normal rows        200k–300k
-controlled perturbation   30k–50k
-learner-state rows        暂不纳入第一版主训练
+选择的是正确 route lane
 
 
-首先建立稳定的 semantic BC baseline，避免再一次同时引入 covariate-shift 数据和新架构。
+尤其在：
 
-正式采集必须：
+多车道并行； -收费站；
+merge/split； -roundabout；
+current_ref_lanes 包含多条 lane；
 
-使用 CUDA 统一口径；
-train/eval specs 严格隔离；
-target selection、validity、role coverage 分层统计； -困难路型分别报告； -观测指纹 v7；
-checkpoint meta 写入 fingerprint；
-禁止 --allow-legacy-dataset 用于正式训练和评测。
-八、正式训练消融应保持极简
+route current 的候选可能不止一个。
 
-Pilot Gate 通过后，只建议两臂：
+正式采集前增加 target-lane correctness 审计
 
-S0：Semantic wiring only
-新 semantic 接线
-原有 Stage A/B loss
-不加 semantic aux
+至少对 500–1,000 个 route transition 状态，验证：
 
-
-回答：
-
-显式语义输入本身是否带来收益？
-
-S1：Semantic wiring + lightweight aux
-
-只增加：
-
-lat / heading / curvature / lane-change classification
+target lane 是否与 route waypoint/checkpoint 连通
+target lane tangent 是否指向下一导航点
+专家未来 1–2 秒是否主要沿该 lane 前进
+同一 road 多 lane 时是否选到正确 lane
 
 
-回答：
+建议门槛：
 
-显式监督是否防止语义再次被主任务忽略？
-
-不建议再设 S2 或更多臂。两臂足够，避免再次陷入组合搜索。
-
-九、闭环验收
-
-先 clean150：
-
-success >= 0.50
-off-road <= 0.35
-collision <= 0.05
-timeout <= 0.15
-steer saturation 相比 M0 明显下降
-lane transition 附近 action jump 下降 >=30%
+普通道路正确率 >=99%
+复杂拓扑 >=95%
+严重错误率 <1%
 
 
-达到后跑 eval500：
+不能只看 valid=100%。
 
-success >= 0.60
-目标 >=0.65
+四、对 3C 结果的保守解释
+
+Coding Agent 倾向：
+
+3C 基本过门，唯一未过的曲率 20.1% 是冻结栈和训练预算造成。
+
+这个解释合理，但还没有被证明。
+
+曲率响应不足也可能来自：
+
+target_lane_curvature 被辅助任务解码出来，但 policy 没真正使用；
+action label 在弯道样本不足；
+frozen policy/value 限制； 4.从 curvature 到 (ds,dθ) 的尺度映射不正确；
+rollout 静态 semantic 抵消了曲率响应；
+chain 为抑制噪声主动压低响应。
+
+所以我不同意直接将 20.1% 判定为“冻结栈伪影”。
+
+更准确的表述是：
+
+lane direction grounding 已得到强证据，曲率幅值建模仍未完全闭合。
+
+五、对 semantic_v1 pilot 的审阅
+
+docs\semantic_v1_dataset_card.md 的 pilot 适合作 probe，但不适合直接支撑正式训练，文档对此已经诚实说明。
+
+主要局限：
+
+B 段交通为零；
+B 段 history 是 reset 后 warmup；
+learner-state C 段只来自单一 checkpoint； -高速样本无覆盖； -困难路型扰动覆盖有限； -pilot 只有约 9.5k 行。
+
+尤其需要警惕：
+
+3C 的强正向可能部分来自“显式 semantic + 干净受控扰动”的容易分布。
+
+所以正式采集不能简单放大 pilot 配方。
+
+六、正式数据不建议按“30万 expert + 5万扰动”直接采
+
+若原始 expert 数据远多于扰动和 learner-state，模型可能再次选择最便宜的 shortcut：
+
+绝大多数样本都位于车道中心
+→ lane_semantic 接近零
+→ 使用历史动作即可降低总体 loss
 
 
-只有 eval500 ≥0.60 且 learner-state action error 显著下降，才重新讨论 A4 DAgger。RL 继续冻结。
+建议正式训练 exposure，而不是仅看原始行数：
 
-最终裁决
-立即批准
-R21-3A 网络显式接线； -固定归一化；
-target token；
-role-aware 显式分组读出；
-PlanHead/rollout/policy/value 统一消费； -契约单测；
-pilot adapter canary；
-pilot 后表示/反事实复测。
-条件批准
-正式 v7 主数据采集；
-S0/S1 两臂正式训练；
-clean150/eval500。
+正常 expert：50%–60%
+受控 lane perturbation：20%–25%
+learner-state：15%–20%
+复杂拓扑定向样本：5%–10%
 
-必须等待 pilot 表示门通过。
 
+原始数据可以采更多，但 batch sampler 必须维持上述训练暴露比例。
+
+同时，扰动样本必须包含：
+
+连续真实 history
+有交通扰动子集
+不同速度带
+普通道路和复杂路型
+左右对称扰动
+
+
+不应全部是 traffic=0 + reset warmup。
+
+七、建议锁定 R21-3D
+3D-1：代码语义一致性
+
+完成三项：
+
+semantic_chain vs semantic_no_chain；
+rollout static/dynamic semantic 对照；
+target-lane correctness 审计。
+通过条件
+不再依赖已知错误的 slot-chain；
+rollout 后段不会因重复 t0 lateral/heading error 而过度纠偏； -target lane 普通道路正确率 ≥99%，复杂拓扑 ≥95%。
+3D-2：独立数据上的表示验证
+
+不能继续只在 pilot train-like split 上验证。
+
+使用：
+
+全新 episode
+连续 history
+部分真实 traffic
+未参与 canary 的 map/spec
+
+
+重复 3C probes。
+
+通过条件
+sign accuracy >=95%
+mirror consistency >=95%
+lane response >=原模型3倍
+history/lane ratio <=1
+curvature response >=20%
+
+
+这里我接受 curvature 20% 作为进入小闭环 canary 的最低门，但正式训练后仍应达到 25%。
+
+3D-3：小规模闭环 canary
+
+先采：
+
+30k–50k normal expert
+10k–15k controlled perturbation
+5k–10k learner-state
+
+
+只训练一组 S0/S1 小 canary，不立即采 30 万。
+
+建议两臂
+S0：
+semantic wiring
+Primary-only
+无 lane auxiliary
+
+S1：
+semantic wiring
+Primary-only
+lane direction / lateral correction / curvature auxiliary
+
+
+保持：
+
+learned chain； -MoE experts 关闭； -WM 不改； -同一数据、epoch、seed； -相同参数预算。
+clean150 开发门
+
+相对 legacy baseline：
+
+success 至少 +5pp
+off-road 至少 -5pp
+collision 不增超过2pp
+timeout 不增超过3pp
+steer saturation 至少下降20%
+lane counterfactual 继续通过
+
+
+同时要求：
+
+success >=0.40
+
+
+这里仍低于之前计划的 0.50，但作为第一轮 semantic closed-loop canary 更现实。
+
+3D-4：只有小 canary 通过才正式采集
+
+正式采集建议：
+
+expert-state：150k–250k
+controlled perturbation：50k–80k
+learner-state：30k–50k
+targeted complex topology：20k–30k
+
+
+并通过 sampler 控制 exposure，不能让 expert centerline 样本完全淹没偏离状态。
+
+八、S0/S1 训练时必须监控
+
+每个 epoch 输出：
+
+lane semantic auxiliary loss
+target token norm
+geometry context norm
+Primary action sensitivity
+curvature response ratio
+history/lane sensitivity ratio
+teacher-state action MAE
+perturbed-state action MAE
+learner-state action MAE
+chain curvature / smoothness
+LQR steer saturation
+
+
+还要分组闭环：
+
+普通直道
+普通弯道
+tollgate
+merge
+roundabout
+lane-transition
+
+
+若总体提升只来自普通道路、复杂路型反而恶化，不得推进正式训练。
+
+九、Primary 与 MoE 的职责继续锁定
+
+当前阶段：
+
+Primary：
+lanekeep
+route following
+lane-relative correction
+正常曲率跟随
+平滑可执行 chain
+
+MoE：
+全部关闭
+
+
+直到 Primary 达到：
+
+clean150 >=0.50
+eval500 >=0.60
+
+
+才讨论 experts。
+
+否则 experts 很可能再次承担基础 lane correction，违背你的架构初衷。
+
+十、对最新进展的正式审批
+批准
+env\obs\lane_semantic.py 当前方向；
+net\semantic.py 的 target token 和分组池化；
+schema v7 和 fail-fast；
+R21-3A/3B/3C 作为机制验证成功； -进入 R21-3D； -小规模 semantic closed-loop canary。
+需要修正后再批准正式训练
+semantic 模式继续保留伪 LD-LD chain；
+rollout 重复使用 t0 动态 semantic；
+target-lane correctness 还缺复杂拓扑真值审计； 4.正式数据 exposure 尚未防止动力学 shortcut 复发； 5.曲率响应只达到 20.1%，不能直接当作已闭合。
 暂不批准
-直接用 9.5k pilot 全模型训练； -未定义的 S0/S1/S2； -把 distance_to_next_topology_change 当真实拓扑距离监督； -把 drivable_margin 当合法 corridor；
-A4 DAgger；
-PPO/GRPO；
-MoE/WM/容量改造。
-最核心的代码审阅结论
+直接采集 20–30 万 expert 后全量训练；
+A4 DAgger； -MoE experts； -RL； -WM 调整； -K-anchor； -新的 capacity sweep。
+给 Coding Agent 的下一条指令
+R21-3A/3B/3C 机制方向批准，但不直接进入大规模正式采集。
 
-R21-0 的数据与 target-lane 选择实现总体严谨，但当前代码存在三个必须在 R21-3 前处理的问题：
+先执行 R21-3D：
 
-12 维特征尺度严重不一致；
-distance_to_next_topology_change 名称强于实际语义；
-drivable margin 只是同向 road-surface margin，不是合法 corridor。
+1. 审计 semantic 模式的 LD-LD slot-chain。
+   做 semantic_chain / semantic_no_chain 单变量对照；
+   已知伪边不得未经验证进入正式配置。
 
-修正这些后，R21-3 才是在验证真正的问题：
+2. 审计 rollout semantic：
+   t0 的 lateral/heading/margin 不得在 6 步中无条件作为动态真值重复使用。
+   对比 full-static / t0-only / static-role-only 三种口径。
 
-当 target-lane 几何被明确、归一化且贯穿 PlanHead 的每一步 rollout 时，模型能否摆脱 history shortcut，形成足够强的道路几何闭环纠偏能力。
+3. 在 500–1000 个复杂 topology 状态上验证 target-lane correctness，
+   不只验证 valid 和 stability。
+
+4. 使用全新 episode、连续 history、含 traffic 的独立集复跑 3C probes。
+
+5. 采 45k–75k 行小训练集，
+   做 S0/S1 Primary-only semantic closed-loop canary。
+
+小 canary 达到：
+- success >= legacy +5pp 且 >=0.40
+- off-road >=下降5pp
+- collision <=+2pp
+- timeout <=+3pp
+- steer saturation下降>=20%
+- 反事实 probe 继续通过
+
+才允许采正式 20万级数据。
+
+未达门：
+先定位 chain / rollout semantic / target selection，
+不得直接转 DAgger、MoE 或 RL。
+
+最终判断
+
+这是目前最有希望的一条路线，但仍处于：
+
+“证明网络终于看见并使用了车道语义”
+
+
+还没有进入：
+
+“证明闭环性能因此提升”
+
+
+下一步最重要的不是继续扩大数据，而是确保语义在 图消息传递、rollout 和复杂拓扑 target selection 三处没有自相矛盾，再用一个小规模闭环 canary 完成从机制正确到性能改善的最后证据链。
