@@ -1,8 +1,8 @@
 # deepseek-v4.1 argue / 主文档（R25：P1 首现闭环超 legacy · 门未全过+定位 · round-26 待裁）
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-13 中午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；**round-25 R25：Gate A 过；P1 首现闭环超 legacy（succ 0.400/+7.3pp、off −20.7pp）但 B/C/D 未全过（mirror-lat 0.891/teacher +57%/tmo +14pp/sat 0.89）⇒ 按预注册停止+定位；另发现并修复 R21-1 遗留 B 行标签状态错配（§5.20）；待 round-26（幅度锚定 + 镜像 paired）**；正式采集/DAgger/MoE/RL 仍冻结。
-> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）。
+> **状态（2026-10-13 下午）**：P1-v2 条件轨已关闭；Round-15A/A3/18A/20 递进；round-21/22 复核与四臂（§5.11–5.13）；R21 0..3D 递进（§5.14–5.18）；round-25 R25（P1 首现闭环超 legacy、门未全过+定位、B 行标签 bug 修复）（§5.19–5.20）；**round-26 批准 R26（Q0 正确标签重跑 + Q1 delta 监督/幅度软锚/全镜像 paired；Primary 冻结）——已开工（§5.21）；正式采集/DAgger/MoE/RL 仍冻结**。
+> **沿革**：round-2 收拢 → P0 审计 + 排摸（§2.1/2.2）→ P1 计划 round-3–8 锁板（§2.4）→ P1 执行（§2.3）→ round-9/10 P1-v2 定板与共识（§3）→ round-12/13/14 讨论（§4.1）→ **Round-12A 诊断与关闭（§4）** → round-15/16 讨论（§5.1–5.2）→ Round-15A 全批次完成（§5.3）→ round-17：A3 执行/判负（§5.4–5.5）→ round-18/19：probe-first + LD 拓扑审计锁定（§5.6–5.7）→ Round-18A 完成（§5.8）→ round-20：M0/M1/M2 消融 + 因果探针（§5.9）→ Round-20 结果（§5.10）→ round-21 复核（§5.11）→ round-22 四臂 Outcome D（§5.13）→ R21-0..2 门全过（§5.14）→ round-23：R21-3A..3C 批准开工（§5.15）→ 3A/3B 门过、3C 表示 3/3+action 4/5（§5.16）→ round-24：R21-3D 执行（3D-1/2 过、3D-3 未过门+定位）（§5.17–5.18）→ round-25：R25 执行（残差+解冻+动作监督；P1 最优、门未全过；标签 bug 修复）（§5.19–5.20）→ **round-26：R26 批准开工（§5.21）**。
 > **本版说明**：第十轮精简（267 → ~250 行）：§5.19 并入残档、§5.18/5.16/5.14/5.13/5.5/5.3/5.10/§2.1/§4 收缩、§0 补 R25 行、§6/§7 更新；**当前状态=R25：P1 首现闭环超 legacy、门未全过+定位（§5.20）、round-26 待裁**；改前 267 行 = `git show 6e4fc79:docs/deepseekv4p1_argue.md`。历版全文见 §7。
 
 ---
@@ -218,6 +218,14 @@
 - **定位（预注册）**：采纳已安装且**首现闭环超越 legacy**（succ +7.3pp、off 减半），但**量级过强且不对称**（|Δdθ|/m ≈2–4× expert、teacher +57%、tmo ×2.5、sat 0.89–0.94）；**mirror-lat 在大 |heading| 行退化 0.51–0.73 = lat×heading 交互未被 lat-only paired 构造覆盖**。
 - **待裁决（round-26）**：定向修正——**幅度锚定**（|Δdθ| 上限/软锚）+ **镜像状态 paired（lat+heading 同镜像）**；P2 劣于 P1 ⇒ **Primary 保持冻结**；修正方案不属本轮、需批准。
 - 产物：`runs/p1_v2/round25/`（报告 / A–D 门表 / 逐 epoch 轨迹 / selection / clean150×3）；生产提交见 git log。
+
+### 5.21 round-26 裁决：**批准 Round-26（Q0 正确标签重跑 + Q1 delta 监督/幅度软锚/全镜像 paired；Primary 冻结）——已开工**
+
+- **核验（代码项成立）**：残差接管 β=0 逐位 ✓；**target token 折叠式**（`ld_slot = ld_pool + target_proj(β_token·raw_target)`、T 恒 39）✓——比追加+mask 更稳健，保留"invalid ⇒ 逐位 legacy"测试。
+- **接受四项根因（关键反驳认账）**：不当把问题归为"单点幅度过强"；四项同改=① B 标签状态错配（v1 永久禁用：训练/验证/选择/probe/mirror 全链 fail-fast `label_state_version=same_state_v2`）；② **监督目标=相对 legacy 的修正量**（delta_expert=expert−legacy；L_delta=SmoothL1；正常态自然≈0）；③ **幅度软锚**（分组〔速度/曲率/lat/heading〕expert 修正 P95/P99；`relu(|Δθ|−limit)²`；部署上限=expert P99）；④ **全镜像 paired**（lat+heading+curv+flags+margins+LD/role/OD 全部同镜；`Δds 等、Δdθ 反号`；5×5 网格 + 四象限报告）。
+- **Q0/Q1 双候选**：Q0=P1 重跑（v2 标签，必要基准）；Q1=Q0+②③④（唯一改进候选）；**Primary 冻结**；Stage1 semantic path→Stage2 PlanHead/Policy 末层低 LR；硬门筛选（sign/mirror≥95%、curv≥25%、hist≤1、teacher≤+10%、ΔP99≤1.25×）后按 calibration50 选 epoch；clean150 终验。门 A 数据（v1 暴露=0）→B 采用（连续两 epoch）→C 幅度/基础（sat ≤legacy+5pp）→D clean150（**succ ≥0.42 且 +7pp**、off ≤0.35、coll ≤+2pp、tmo ≤+3pp）→E 才放扩容。未过门=停 semantic loss 扩充、不转 DAgger/MoE/RL。
+- **我方执行注记**：① **L_delta 绑定对象**——若对全模型输出计算则平移不变 ⇒ 与全动作 SmoothL1 数学等价；"正常态零修正"须来自**目标** + **基底冻结**。落地=把 delta 监督施加在**语义 delta 变量**（legacy 基底冻结/detach），并加正常态 |Δ|≈0 显式项；② **独立集 B 行标签亦须升 v2**（其 expert 分母进 probe/mirror 统计）+ 统一 errata；③ R25 终版 P1（0.400）**已用 v2 标签**（首跑 11:06 污染版已被 11:44 重跑取代）⇒ Q0 为全链洁净版再确认；26D 网格在既有状态上重放构造（状态再构造，非数据扩容）；④ β 分组效应（×road/speed/lat/heading）按其 §1.3 记录（本轮不加条件门）。
+- **开工**：R26 lane 已派发（复用 R21 session；`runs/p1_v2/round26/`）。
 
 ---
 
