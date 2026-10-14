@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R35 审计完成：**外部 target-lane 规则=toll 失败集 0/10 正确的缺陷源**（原则获证据支持）；merge=横向路径几何；无 token 自主选择不可靠；hooks/数据就绪；建议诊断臂 + WP3 待令（§5.50））
+# deepseek-v4.1 argue / 主文档（WP3 批准受理：启动 Network-Internal Lane and Path Selection（车道锚定候选+曲率残差+多正例+token 三阶段迁移）；我方 3 条补充（WP3a/WP3b 分阶段/逐候选纵向目标口径/复用 K-anchor 机制）；开工（§5.51））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 凌晨·三）**：**R35 三 lane 全收口**（报告 `docs/round35_report.md` + 交付件 `docs/navigation_scope_audit.md`）——①**F1 导航审计**：**外部 target-lane 规则在 toll 失败集 0/10 正确**（规则不查障碍）⇒ GPT"外部不得决策车道/闸口"原则获**直接证据支持**；失败三分拆 **17/17=1.0**（外部错 10 全为 toll；target 正确但路径错 7 全为 merge）；swap_target 使 merge **3 例失败→成功**；**no_token 仍自行变道但 0 成功**（自主雏形、不可靠）；②**F2 hooks** 就绪（默认关 P1–P6 PASS；**候选分数接口就绪、无候选头**）；③**F3 数据**：expert5k **455/441/906/907 ≥ 目标**；缺口=独立 v7 场景 + policy 失败集；DP-1/DP-4 离线提取先行。**我方建议**：①**诊断臂=障碍感知 target 规则**（默认关、仅诊断，量化"正确 target 下 Policy 天花板"；**不作生产路径**）；②WP3 候选须含**收费站空闲闸口车道** + 车道锚定横向 + merge 保本车道续接；③DP-1+DP-4 先行。**WP3 最小原型待 CG 确认**。
-> **本版说明**：第三十七轮（243 → 253 行）——新增 §5.50（R35 审计执行完成 + 综合 + 建议）；§0/§7 刷新；上版 243 行 = `git show 74e0bf0:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 上午）**：GPT round-WP3 答复（`acd22c1`，468 行）——**批准启动 WP3 = Network-Internal Lane and Path Selection**：输入边界（外部只给 route/车道集合/几何拓扑/静态·动态 slots/ego 态；**禁 selected_lane/selected_gate/best_candidate**）；候选集（保持/本车道续接/左/右/route 续接/收费站闸口；**不得规则过滤成"最佳"**）；**横向=车道中心线锚 + near/mid/far 曲率残差**；候选评分=route 一致性/拓扑/静态余量/TTC/边界余量/曲率/变道距离/速度；**逐候选独立 s(t)/v(t)**；token 三阶段迁移（教师 dropout → 30/60/90% → 部署删除）；**多正例标签**（碰撞/越界/不连 route=负；安全且连 route=全正；专家选择仅其一）；门：数据 ≥95/95/95/99% → 网络响应 → 选择（top-1 ≥70%/top-3 ≥95%/错误 ↓≥50%）→ 闭环（0.64/off ≤0.10/coll ≤0.08/tmo ≤0.10）；**诊断臂锁定**（默认关/仅诊断/不进生产/不作 baseline）；WM 暂不扩容；数据与 hooks 先行、训练后置。**我方 3 条补充**：①**WP3a/WP3b 分阶段**（a=候选+评分+车道锚定路径〔残差 0〕+复用现 ds，先测选择+跟随；b=曲率残差+逐候选纵向）；②逐候选纵向目标口径预注册；③**复用既有 K-anchor 机制**（`PlanHead.num_anchors>0`：`plan=Σp_k(anchor_k+residual_k)`）降实现风险。**开工**（G1 数据提取+数据门 / G2 诊断臂 / G3 WP3a 骨架）。
+> **本版说明**：第三十八轮（253 → 263 行）——新增 §5.51（WP3 受理 + 3 条补充 + 开工）；§0/§7 刷新；上版 253 行 = `git show 272dd08:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35（本版）**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；hooks/数据就绪；WP3 待令。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**WP3（本版）**：批准 Network-Internal Lane and Path Selection；开工（数据门/诊断臂/骨架）。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -214,6 +214,15 @@
 - **我方建议（待裁）**：**诊断臂 = 障碍感知 target-lane 规则**（默认关、仅诊断，量化"正确 target 下 Policy 天花板"；**不作生产路径**）；**WP3 设计输入** = 候选含**收费站空闲闸口车道**（从可见车道生成）+ 车道锚定横向 + merge 保本车道中心线续接；数据 DP-1+DP-4 先行；**WP3 最小原型待 CG 确认**。
 - **产物**：`docs/round35_report.md`、`docs/navigation_scope_audit.md`、`runs/round35/{f1_nav_audit,f2_hooks,f3_data_census}.*`。
 
+### 5.51 round-WP3 批准受理（GPT `acd22c1`，468 行）：启动 Network-Internal Lane and Path Selection；我方 3 条补充；开工
+
+- **受理**：①**批准 WP3**（命名 Network-Internal Lane and Path Selection）；②**输入边界**（外部只给 route/nav、当前·下一路段可见车道集合、车道几何·拓扑连接、静态·动态 slots、ego 态；**禁 selected_lane/selected_gate/best_candidate/recommended_lane_change_direction**）；③**候选集**（保持当前/本车道中心线续接/左/右/route 续接/收费站可见闸口车道；**不得由规则过滤成"最佳候选"**，所有合法可见且 route 拓扑兼容的候选都交给网络评分）；④**横向表示 = 车道中心线锚 + 网络预测 near/mid/far 曲率残差**（非从零生成；"最新候选覆盖实验已证最佳候选全部车道锚定"）；⑤**候选评分输入**=route 一致性/拓扑/静态最小余量/TTC/边界余量/曲率·变化率/变道距离/当前速度/候选纵向；⑥**逐候选独立 s(t)/v(t)**（不共享同一 ds）；⑦**token 三阶段迁移**（教师辅助 dropout → 30/60/90% → 部署删除）；⑧**多正例标签**（碰撞/越界/不连 route=负；安全且连 route=全正；专家选择仅其一，不强制唯一）；⑨**门**：数据（≥95/95/95/99%）→ 网络响应（route/静态位置/去 token/镜像）→ 选择（top-1 ≥70%/top-3 ≥95%/错误 ↓≥50%）→ 闭环（**0.64**/off ≤0.10/coll ≤0.08/tmo ≤0.10）；未过不进 DAgger/MoE/RL；⑩**诊断臂锁定**（默认关/仅诊断/不进生产/不作 baseline）；⑪WM 暂不扩容（新表示稳定后适配）；⑫**数据提取与 hooks 先行、训练后置**。
+- **我方补充（3 条）**：
+  1. **分阶段原型 WP3a/WP3b**（降风险）：**WP3a = 候选生成 + 评分器 + 车道锚定路径（残差=0，纯中心线跟随）+ 复用现 ds**——先测"选择+车道跟随"核心假设（toll 通道选择 / merge 压线是否即被修复）；**WP3b = 曲率残差头 + 逐候选纵向头**（学习绕障与配速）。先 A 后 B，各自可回滚。
+  2. **逐候选纵向目标口径预注册**：专家数据只给"实际执行"剖面；非选中候选的 s(t)/v(t) 监督目标需明确定义（建议二选一：仅选中候选监督 + 评分器用几何特征惩罚不可行；或对可行候选用几何约束的最速安全剖面作软目标）——避免引入隐式规则。
+  3. **复用既有 K-anchor 机制**（recon 结论）：`PlanHead` 已有 `num_anchors>0` 模式（`plan = Σ p_k·(anchor_k + residual_k)`；`net/model.py:50-59/342-356/1042-1044/1346`）——**动态车道锚候选可直接接入**（anchor=车道锚定 6 步计划、p=网络评分、residual=曲率残差〔WP3b〕），显著降低实现风险；`plan[:,0]==action_mu` 与 LQR 消费契约的保持方式需在实现中明确文档化。
+- **开工**：lane G1（DP-1 离线提取 + 数据门）、lane G2（诊断臂 + 闭环天花板量化）、lane G3（WP3a 骨架：候选生成 + 评分器 + 车道锚定计划；默认关 + smoke）。
+
 ---
 
 ## 6. 文档与产物索引
@@ -230,7 +239,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第三十七轮（本版；243 → 253 行）**：新增 §5.50（R35 审计执行完成 + 综合 + 建议）；§0/§7 刷新；上版 243 行 = `git show 74e0bf0:docs/deepseekv4p1_argue.md`。
+- **第三十八轮（本版；253 → 263 行）**：新增 §5.51（WP3 受理 + 3 条补充 + 开工）；§0/§7 刷新；上版 253 行 = `git show 272dd08:docs/deepseekv4p1_argue.md`。
+- **第三十七轮（243 → 253 行）**：新增 §5.50（R35 审计执行完成 + 综合 + 建议）；§0/§7 刷新；上版 243 行 = `git show 74e0bf0:docs/deepseekv4p1_argue.md`。
 - **第三十六轮（230 → 243 行）**：新增 §5.49（R35 受理 + 6 条补充 + 开工）；§0/§7 刷新；上版 230 行 = `git show 404738d:docs/deepseekv4p1_argue.md`。
 - **第三十五轮（221 → 230 行）**：新增 §5.48（34B0 执行完成：三 lane + 综合 + 34B1 建议）；§0/§7 刷新；上版 221 行 = `git show ba11c77:docs/deepseekv4p1_argue.md`。
 - **第三十四轮（213 → 221 行）**：新增 §5.47（34B 修订受理 + nav 答复 + 3 条补充 + 34B0 开工）；§0/§7 刷新；上版 213 行 = `git show 06adf69:docs/deepseekv4p1_argue.md`。
