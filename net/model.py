@@ -361,7 +361,8 @@ class DrivingModel(nn.Module):
         )
         # ---- R32 canary：ego 物理锚 decoder（**惰性构造**，与 ld_aggregator/semantic_wiring 同口径：
         # 默认不新增参数 → 既有 ckpt 键集/冻结审计/配方分组零变化；仅 P 臂训练/评测消费，不进 forward）----
-        # ``set_ego_phys(True)`` 时构造 ``ego_phys(z_ego_next) → [delta_progress, speed, delta_heading]``。
+        # ``set_ego_phys(True)`` 时构造 ``ego_phys(z_ego_next) → [delta_progress, delta_speed, delta_heading]``
+        # （R33C v2 监督口径；R32 = ``[delta_progress, speed, delta_heading]``）。
         self.ego_phys: "nn.Sequential | None" = None
         #: R32 canary：ego 物理锚开关（普通属性，**不进 state_dict**；默认关）。
         self.enable_ego_phys = False
@@ -702,19 +703,23 @@ class DrivingModel(nn.Module):
 
     # ---------------------------------------------------------------- R32 canary 开关
     def set_action_ego(self, enabled: bool = True) -> "DrivingModel":
-        """R32 canary：ego 动作条件化开关（委托 ``st_gnn``；**惰性构造**，默认关 = 与 HEAD 逐位一致）。
+        """R33C v2：ego 动作条件化开关（委托 ``st_gnn``；**惰性构造**，默认关 = 与 HEAD 逐位一致）。
 
-        ``enabled=True`` 首次调用才在 ``st_gnn`` 内构造 ``action_ego``/``alpha_ego``
+        ``enabled=True`` 首次调用才在 ``st_gnn`` 内构造 ``action_ego``（(H+3)→H→H，隐藏层
+        正常初始化 + 输出层零初始化，**残差增益固定 1**；R33C v2 已删可学习 ``alpha_ego``）
         ⇒ 默认模型不新增参数（旧 ckpt strict 加载 0/0/0；同 ``ego_phys``/``semantic_wiring`` 口径）。
         """
         self.st_gnn.set_action_ego(bool(enabled))
         return self
 
     def set_ego_phys(self, enabled: bool = True) -> "DrivingModel":
-        """R32 canary：ego 物理锚 decoder 开关（**惰性构造**；仅训练/评测消费，不进 forward）。
+        """ego 物理锚 decoder 开关（R32 canary；**惰性构造**；仅训练/评测消费，不进 forward）。
 
-        默认关 ⇒ 模型不新增参数（既有 ckpt 键集 / 冻结审计 / 配方 LR 分组零变化）。
-        构造期保存/恢复 CPU RNG 状态（不扰动既有初始化抽样序列）。
+        输出 3 维物理量：R33C v2 训练目标 = ``[delta_progress, delta_speed, delta_heading]``
+        （R32 = ``[delta_progress, speed, delta_heading]``；模块结构/键集不变，仅监督口径更新，
+        见 ``.slim/deepwork/p1_v2/round33/canary_v2_train.py``）。默认关 ⇒ 模型不新增参数
+        （既有 ckpt 键集 / 冻结审计 / 配方 LR 分组零变化）。构造期保存/恢复 CPU RNG 状态
+        （不扰动既有初始化抽样序列）。
         """
         self.enable_ego_phys = bool(enabled)
         if enabled and self.ego_phys is None:

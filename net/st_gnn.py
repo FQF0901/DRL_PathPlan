@@ -15,13 +15,22 @@ v8（B3）规格
 
 参数（H=128、MP 2 层）≈384k：MP 199k + latent 头 148k + 物理解码 35k + step/presence/entry ~1k。
 
-R32 canary（`GO_EGO_ACTION_CONDITIONING_CANARY`；默认关、零行为变化）
-------------------------------------------------------------------
-``forward`` 新增可选 ``action (B,2)``：``enable_action_ego=True`` 时
-``z_ego_next += alpha_ego · A_ego([z_ego, feat(a)])``（**仅 ego transition**；``A_ego`` 输出层
-零初始化 + ``alpha_ego`` init 0.0 ⇒ 默认逐位恒等）。``enable_action_ego`` 为普通属性（不进
-state_dict）；``action_ego.*``（(H+4)→H→H）与 ``alpha_ego``（标量）为**惰性构造**（仅
-``set_action_ego(True)`` 后出现；默认模型键集 = HEAD ⇒ 旧 ckpt strict 加载零差异）。
+R33C v2 canary（`GO_EGO_ACTION_CONDITIONING_V2`；默认关、零行为变化）
+--------------------------------------------------------------------
+``forward`` 可选 ``action (B,2)``：``enable_action_ego=True`` 且 ``action`` 非空时
+``z_ego_next += A_ego([z_ego, feat(a)])``（**仅 ego transition**；**残差增益固定 1**——
+R33C v2 已删 R32 的可学习标量 ``alpha_ego``）。动作特征 = ``[ds/10, dθ/1.2, κ/1.2]``
+（3 维；R33C v2 删去与 ``ds/10`` 在固定 ``dt=0.5`` 下逐位共线的 speed-intent 维，见
+:func:`_action_features`）。``A_ego`` = ``(H+3)→H→H``：隐藏层 ``nn.Linear`` 默认初始化
+（Kaiming 均匀），输出层零初始化 ⇒ 初始恒等（启用 + 零初始化时逐位 = 默认关）。
+``enable_action_ego`` 为普通属性（不进 state_dict）；``action_ego.*``（4 键）为**惰性构造**
+（仅 ``set_action_ego(True)`` 后出现；默认模型键集 = HEAD ⇒ 旧 ckpt strict 加载零差异）。
+
+兼容注记（R32 AC1 ckpt）：旧 ``st_gnn.alpha_ego`` 键不在 v2 键集（默认模型载入时归
+``unexpected_keys``，``strict=False`` 容忍并记录）；旧 ``st_gnn.action_ego.0.weight``
+（输入维 H+4）与 v2（H+3）**形状不匹配**——``nn.Module.load_state_dict`` 的形状不匹配
+即便 ``strict=False`` 也会抛 ``RuntimeError`` ⇒ AC1 ckpt **不能**用于 resume v2 的
+action_ego 权重（只能以默认关模型载入，5 个 action 键全部归 unexpected）。
 """
 
 from __future__ import annotations
@@ -35,12 +44,13 @@ from net.spatial import SpatialEncoder
 OD_PRED_DIM = 5
 LD_PRED_DIM = 4
 
-#: R32 canary：动作特征维度（``[ds/10, dθ/1.2, κ/1.2, (ds/dt)/20]``，见 :func:`_action_features`）
-ACTION_FEAT_DIM = 4
+#: R33C v2 canary：动作特征维度（``[ds/10, dθ/1.2, κ/1.2]``，见 :func:`_action_features`）
+ACTION_FEAT_DIM = 3
 
 
 def _latent_head(hidden: int, in_dim: int | None = None) -> nn.Sequential:
-    """latent 转移头 ``in_dim → H → H``（缺省 ``in_dim=2H``；输出层零初始化 ⇒ 初始恒等转移）。"""
+    """latent 转移头 ``in_dim → H → H``（缺省 ``in_dim=2H``；隐藏层 = ``nn.Linear`` 默认初始化
+    （Kaiming 均匀），输出层零初始化 ⇒ 初始恒等转移）。"""
     head = nn.Sequential(
         nn.Linear(int(in_dim) if in_dim is not None else 2 * hidden, hidden),
         nn.GELU(),
@@ -51,24 +61,23 @@ def _latent_head(hidden: int, in_dim: int | None = None) -> nn.Sequential:
     return head
 
 
-def _action_features(action: Tensor, dt: float = 0.5) -> Tensor:
-    """R32 canary：动作 ``(...,2)`` 的 ``(ds, dθ)`` → 4 维归一化特征 ``(...,4)``。
+def _action_features(action: Tensor) -> Tensor:
+    """R33C v2 canary：动作 ``(...,2)`` 的 ``(ds, dθ)`` → 3 维归一化特征 ``(...,3)``。
 
     归一化口径（**与 R32-P2 探针的动作边界同源**，``net/policy.py::ACTION_HIGH`` =
     ``ds∈[0,10]``、``dθ∈[-0.6,0.6]``）：
 
     - ``ds/10``：``[0,1]``；
     - ``dθ/1.2``：``[-0.5,0.5]``（1.2 = 2·0.6）；
-    - ``κ/1.2``：``κ = dθ/max(ds, 0.5)``（ds 下限 0.5 防除零），``|κ| ≤ 1.2`` ⇒ ``[-1,1]``；
-    - ``(ds/dt)/20``：``speed_intent = ds/dt``，20 = ``10/0.5``（ds 上界速度）⇒ ``[0,1]``。
+    - ``κ/1.2``：``κ = dθ/max(ds, 0.5)``（ds 下限 0.5 防除零），``|κ| ≤ 1.2`` ⇒ ``[-1,1]``。
 
-    注：``dt=0.5``（本仓固定口径）时 ``speed_intent_norm ≡ ds_norm``（规格要求的冗余维，保留）。
+    R33C v2 删去 R32 的第 4 维 ``(ds/dt)/20``（speed-intent）：本仓 ``dt=0.5`` 固定 ⇒
+    该维与 ``ds/10`` 逐位共线（重复维），删除后 ``action_ego`` 输入维 H+4 → H+3。
     """
     ds = action[..., 0]
     dtheta = action[..., 1]
     kappa = dtheta / ds.clamp_min(0.5)
-    speed_intent = ds / float(dt)
-    return torch.stack([ds / 10.0, dtheta / 1.2, kappa / 1.2, speed_intent / 20.0], dim=-1)
+    return torch.stack([ds / 10.0, dtheta / 1.2, kappa / 1.2], dim=-1)
 
 
 class SpatioTemporalGNN(nn.Module):
@@ -116,22 +125,21 @@ class SpatioTemporalGNN(nn.Module):
         self.presence = nn.Linear(hidden, 1)
         self.entry = nn.Linear(hidden, 1)
         self._reset_heads(presence_bias, entry_bias)
-        # ---- R32 canary：ego 显式动作条件化（**惰性构造**，默认关 ⇒ 无新参数/键集不变）----
-        # ``z_ego_next += alpha_ego · A_ego([z_ego, feat(a)])``（仅 ego transition；OD/LD 不动）。
-        # ``set_action_ego(True)`` 首次调用才构造 ``action_ego``（(H+4)→H→H，输出层零初始化）与
-        # ``alpha_ego``（标量 0）；同 ``semantic_wiring``/``ego_phys`` 口径：默认模型 state_dict
-        # 与 HEAD 逐键一致（旧 ckpt strict 加载 0/0/0）。
+        # ---- R33C v2 canary：ego 显式动作条件化（**惰性构造**，默认关 ⇒ 无新参数/键集不变）----
+        # ``z_ego_next += A_ego([z_ego, feat(a)])``（仅 ego transition；**残差增益固定 1**，
+        # R33C v2 删可学习 ``alpha_ego``；OD/LD 不动）。``set_action_ego(True)`` 首次调用才构造
+        # ``action_ego``（(H+3)→H→H，隐藏层正常初始化 + 输出层零初始化）；同 ``semantic_wiring``/
+        # ``ego_phys`` 口径：默认模型 state_dict 与 HEAD 逐键一致（旧 ckpt strict 加载 0/0/0）。
         self.action_ego: "nn.Sequential | None" = None
-        self.alpha_ego: "nn.Parameter | None" = None
         #: 普通属性（**不进 state_dict**）；默认关 ⇒ ``forward`` 忽略 ``action`` 入参。
         self.enable_action_ego = False
 
     def set_action_ego(self, enabled: bool = True) -> "SpatioTemporalGNN":
-        """R32 canary：ego 动作条件化开关（**惰性构造**；默认关 = 与 HEAD 逐位一致）。
+        """R33C v2：ego 动作条件化开关（**惰性构造**；默认关 = 与 HEAD 逐位一致）。
 
-        ``enabled=True`` 首次调用构造 ``action_ego``（(H+4)→H→H，输出层零初始化）+
-        ``alpha_ego``（标量 init 0.0，随模块 device）；构造期保存/恢复 CPU RNG 状态
-        （不扰动既有初始化抽样序列）。
+        ``enabled=True`` 首次调用构造 ``action_ego``（(H+3)→H→H：隐藏层 ``nn.Linear`` 默认
+        初始化（Kaiming 均匀），输出层零初始化 ⇒ 初始恒等；**无 alpha_ego**，残差增益固定 1），
+        随模块 device；构造期保存/恢复 CPU RNG 状态（不扰动既有初始化抽样序列）。
         """
         self.enable_action_ego = bool(enabled)
         if enabled and self.action_ego is None:
@@ -140,7 +148,6 @@ class SpatioTemporalGNN(nn.Module):
             self.action_ego = _latent_head(
                 self.hidden, in_dim=self.hidden + ACTION_FEAT_DIM
             ).to(device)
-            self.alpha_ego = nn.Parameter(torch.zeros((), device=device))
             torch.random.set_rng_state(rng_state)
         return self
 
@@ -251,8 +258,8 @@ class SpatioTemporalGNN(nn.Module):
             od_anchor/ld_anchor: ``(B,S,5)/(B,L,4)`` **t0 帧**锚定状态（物理小解码先验）；
                 缺省（None）→ 先验全 0（仅诊断路径）。
             action: ``(B,2)`` 本步**已执行动作** ``(ds,dθ)``（= 生成当前步 ``pose`` 的 ``a_{k-1}``；
-                R32 canary）。仅当 ``enable_action_ego=True`` 且 ``action is not None`` 时生效
-                （残差只进 ego transition）；缺省/关闭 ⇒ 逐位等于 HEAD。
+                R33C v2 canary）。仅当 ``enable_action_ego=True`` 且 ``action is not None`` 时生效
+                （固定增益 1 的残差只进 ego transition）；缺省/关闭 ⇒ 逐位等于 HEAD。
 
         Returns:
             ``(z_ego_next (B,H), z_od_next (B,S,H), z_ld_next (B,L,H), od_pred (B,S,5),
@@ -268,12 +275,10 @@ class SpatioTemporalGNN(nn.Module):
         # (a) latent 自回归转移（残差；零初始化 ⇒ 初始恒等）
         z_ego_next = z_ego + self.ego_transition(torch.cat([h_ego, z_ego], dim=-1))
         if self.enable_action_ego and self.action_ego is not None and action is not None:
-            # R32 canary：显式动作残差**仅进 ego transition**
-            # （α₀=0 + 输出层零初始化 ⇒ 默认恒等；关闭/缺 action ⇒ 逐位不变）。
-            feat = _action_features(action.to(dtype=z_ego.dtype), self.dt)
-            z_ego_next = z_ego_next + self.alpha_ego * self.action_ego(
-                torch.cat([z_ego, feat], dim=-1)
-            )
+            # R33C v2 canary：显式动作残差**仅进 ego transition**，**残差增益固定 1**
+            # （输出层零初始化 ⇒ 初始恒等；关闭/缺 action ⇒ 逐位不变）。
+            feat = _action_features(action.to(dtype=z_ego.dtype))
+            z_ego_next = z_ego_next + self.action_ego(torch.cat([z_ego, feat], dim=-1))
         z_od_next = z_od + self.od_transition(torch.cat([h_od, z_od], dim=-1))
         z_ld_next = z_ld + self.ld_transition(torch.cat([h_ld, z_ld], dim=-1))
         # 无效槽位保持严格 0（编码器空间不变量：embed 掩码外清零）
