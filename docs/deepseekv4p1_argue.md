@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R32 提案（`910b49b`）受理——R31 全收 + WM 五弱点核验成立 + 5 条修正待裁（§5.36）；零实施）
+# deepseek-v4.1 argue / 主文档（R32 裁决（`d86e91a`）：5 修正全收 + 三级决策树批准——Level 1 开工（§5.37））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-14 凌晨·六）**：GPT 长答复（`910b49b`，1641 行）——**全面接受 R31**（S3≠Deploy 坐实、WM 固有非主问题、Stage B 非 recovery_v1 同类），并自排 WM 代码提出**五结构弱点 W1–W5**（我方逐条 file:line 核验**全部成立**）+ Round-32 探针清单（10 项）+ 联合训练 Phase 0–4 + 验收门 + **MoE-off 基线 0.56**。**§5.36=受理 + 5 条修正/补充（Q2 已答改述 / 补部署状态归因探针 / Jacobian 须有限差分 / MoE-off 基线 / mirror 门）——待裁；本轮零实施。**
-> **本版说明**：第二十二轮（319 → 334 行）——新增 §5.36（R32 提案受理 + 五弱点核验）；§0/§7 刷新；上版 319 行 = `git show 87253cf:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-14 凌晨·七）**：GPT（`d86e91a`，677 行）**接受全部 5 条修正**并**批准 Round-32 三级决策树**：Level 1=D0–D3 部署链四段归因 / 有限差分 Jacobian+Action Swap / Ego 状态充分性 / Policy Lipschitz；Level 2=WM 内部（rank/prior-residual/graph oracle/mask turnover/target drift）；Level 3=联合适配（梯度冲突/joint drift）；**decision.md 7 枚举**（+GO_POLICY_INTERFACE_ROBUSTNESS/GO_ROLLOUT_PROTOCOL_FIX/GO_DYNAMIC_GRAPH_FIX）；统一口径 **K1e2+MoE-off**、基线 0.56；禁训清单不变。**§5.37=受理 + 3 条执行注记 + Level 1 开工（4 lane 只读）。**
+> **本版说明**：第二十三轮（334 → 343 行）——新增 §5.37（R32 裁决受理 + Level 1 开工）；§0/§7 刷新；上版 334 行 = `git show cd6f1f6:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -12,7 +12,8 @@
 - **主线结果（压缩；详见 §2–§5）**：条件轨 1b `no_increment` → 12A NO-GO（关闭）；A3 确定性尾全 0（**动作可持性**）；LD 结构缺陷+响应 ~50× 弱（M2=接线缺口）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → **R25 首现闭环超 legacy（0.400/+7.3pp、off −20.7pp）** → **R26 Q1**（Δp99 1.017、calib50 0.50 vs 0.40）→ **R27 R1**（sat ✓ 但 tmo +26pp ✗）→ **R28 28A 归因 ✅**（F3 速度参考主轴；F1 κ-ds 耦合/F4 LQR 尾段）+ **K1**（teacher +1.1%、κ MAE −71.6%、sat −12.5pp、calib 0.52/0.12；ds≡legacy 未消除 tmo ⇒ 停止）→ **R29A**（代码修复 ✅；T1/T3 机制性失败、T2 正向未过门；Δκ 瓶颈=首步钉死 ⇒ 停止）。关键锚：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58（calib50）；IDM 0.756。
 - **round-30 结果（§5.31）**：Reality Audit 第一轮（R30-0..6b、零训练、零生产改动）——矩阵 3 系统（S3 训练栈严格劣：0.02/0.00）、R4 接口主瓶颈、**TF 消歧：WM 固有 0.02–0.04 vs 部署链 0.20–0.32（8–10×）⇒ 主问题=部署链一致性**（overshoot drift）；账本三布尔全实证；契约 v1 + 配置审计落档；**round-31 裁决单在 §5.31 尾**。
 - **round-31（§5.32–§5.35）**：宣言（`1c1d91b`）全范式重排（A[WM]→B0–B4[IL/DAgger/MoE]→C0–C4[RL]）→ 我方受理（M1–M5）→ 答复 2（`5872f57`）70/20/10 → 答复 3（`f4faec8`）收敛（GPT 基本站我方）→ **R31 审计包五 lane 收口（§5.35）**：Q2 判决草案（中等风险/无冲突）、**8–10× 状态分布放大**（K1 base≡M0）、WM 条件化弱（24×–5612×）、契约 I1–I7 + MoE ±2–4pp；零训练。
-- **round-32 提案（本版；§5.36）**：GPT（`910b49b`）**全面接受 R31** + 自排 WM 五结构弱点 W1–W5（核验全部成立）+ Round-32 十探针 + 联合训练 Phase 0–4 + 验收门 + **MoE-off 基线 0.56**；**我方 5 条修正/补充待裁**（Q2 已答改述 / 补部署状态归因 / Jacobian 有限差分 / 基线口径 / mirror 门）；零实施。
+- **round-32 提案（§5.36）**：GPT（`910b49b`）**全面接受 R31** + 自排 WM 五结构弱点 W1–W5（核验全部成立）+ Round-32 十探针 + 联合训练 Phase 0–4 + 验收门 + **MoE-off 基线 0.56**；我方 5 条修正/补充。
+- **round-32 裁决（本版；§5.37）**：GPT（`d86e91a`）**5 修正全收** + 批准**三级决策树**（Level 1=D0–D3 归因/Jacobian FD/Swap/Ego 充分性/Lipschitz；decision.md 7 枚举）；统一口径 K1e2+MoE-off、基线 0.56；**Level 1 已开工（4 lane 只读）**；执行注记 3 条。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp、组合效应）；常态 μ 无系统性 bias；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A 解构：F3/F1/F4）；**R28/R29 收敛：横修→六步路径→LQR 尾段×速度耦合；R30 再定位=部署链一致性（想象 vs 现实 8–10× 差、WM 固有误差小）**。
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
@@ -300,6 +301,13 @@
 - **联合训练策略（Phase 0–4）+ 验收门（W0/W1/W2/P1/J1/Deploy）**：原则接受（禁"全解冻+总 loss 端到端"；交替+梯度隔离；Phase 4 才有限联合梯度+冲突投影）；阈值按"首轮相对门、实测后锁"。
 - **开工条件**：5 条经裁（接受/修订）即可启动 Round-32 只读探针包（10+1 探针；默认 MoE-off、零训练、零生产改动、hook 默认关/不写 ckpt/不改 RNG）。
 
+### 5.37 round-32 裁决（GPT `d86e91a`，677 行）：5 修正全收 + 批准三级决策树——Level 1 开工
+
+- **受理**：GPT 接受全部 5 条修正（Q2 首轮已答→tail-specific 深化；部署状态归因升为最高优先；有限差分 Jacobian〔并确认"解析=0 只证梯度契约、不证物理不响应"〕；**MoE-off 0.56 锁定为 Round-32 开发基线**〔注：+4pp 仅 2 episode 翻转，不作稳定收益〕；mirror 首轮分解诊断、不锁 95%）。**批准 Round-32 只读审计**，重排为**三级决策树**：**Level 1**=D0–D3 部署链四段归因 / 有限差分 Jacobian+Action Swap+zero/opposite / Ego 状态充分性 / Policy Lipschitz；**Level 2**（仅当 L1 指向 WM 内部）=latent rank / prior-vs-residual / graph oracle / mask turnover / target drift；**Level 3**（仅当需联合适配）=梯度冲突 / joint drift hook。**decision.md 7 枚举**（+GO_POLICY_INTERFACE_ROBUSTNESS / GO_ROLLOUT_PROTOCOL_FIX / GO_DYNAMIC_GRAPH_FIX）。**本轮禁训**：训练/action embedding/ego physical head/predicted pose 回灌/EMA/BPTT/联合解冻/DAgger·MoE·PPO·GRPO/LQR 修改。
+- **统一口径**：K1e2 + **MoE-off** + K-anchor-off + 既有最佳 rollout_semantic + LQR 不变；baseline 0.56（仅开发参考）；hook 规则（默认关 / max_abs_diff=0 / RNG 不变 / 不写 ckpt）。
+- **我方执行注记（3 条，非阻塞）**：①**D0→D1 已有首测**（R31-lane E：Δ≤8.7% rel，MoE-on 录制）——P1 增量=D2/D3 + **统一口径（MoE-off）重录**；②**P1 录制需扩字段**（raw obs / OD·LD 原始量 / 位姿，供 D2 oracle 几何与 D3 重编码），并建议**两层法**：先 val 协议 D2/D3（数据集现成、零录制），再部署协议 D0–D3；③**A_k（Gate D）与 Lipschitz 复用现有 R4/lane A 数据**（零新录制）。
+- **开工（本轮；全只读、零训练、零生产改动）**：Level 1 四 lane 已派发——A：P1 录制器扩展 + D0–D3 replay；B：P2 有限差分 Jacobian + Action Swap/zero/opposite；C：P3 Ego 状态充分性（real/WM/frozen latent 解码）；D：P4 Policy Lipschitz + A_k 放大因子。产物 `runs/round32/*`、脚本 `.slim/deepwork/p1_v2/round32/*`。
+
 ---
 
 ## 6. 文档与产物索引
@@ -316,8 +324,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第二十二轮（本版；319 → 334 行）**：新增 §5.36（R32 提案受理 + WM 五弱点核验 + 5 条修正）；§0/§7 刷新；上版 319 行 = `git show 87253cf:docs/deepseekv4p1_argue.md`。
-- **历次精简留档**：第二十一轮（308→319，`87253cf`）；第二十轮（298→308，`440790b`）；第十九轮（281→298，`7beb7e9`）；第十八轮（264→281，`b8bb326`/`39f0569`/`278a187`）；第十七轮（299→264，`5ed40e4`）；第十六轮（276→299，未单独提交、并入第十七轮）；第十五轮（255→276，`fdc6d2d`）；第十三轮（随 R28/R29 新增；`c5a44df`/`711bc47`）；第十二轮（280→270，`e5ae48e`）；第十一轮（269→261，`6e2e2cd`）；第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
+- **第二十三轮（本版；334 → 343 行）**：新增 §5.37（R32 裁决受理 + Level 1 开工）；§0/§7 刷新；上版 334 行 = `git show cd6f1f6:docs/deepseekv4p1_argue.md`。
+- **历次精简留档**：第二十二轮（319→334，`cd6f1f6`）；第二十一轮（308→319，`87253cf`）；第二十轮（298→308，`440790b`）；第十九轮（281→298，`7beb7e9`）；第十八轮（264→281，`b8bb326`/`39f0569`/`278a187`）；第十七轮（299→264，`5ed40e4`）；第十六轮（276→299，未单独提交、并入第十七轮）；第十五轮（255→276，`fdc6d2d`）；第十三轮（随 R28/R29 新增；`c5a44df`/`711bc47`）；第十二轮（280→270，`e5ae48e`）；第十一轮（269→261，`6e2e2cd`）；第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
 - **压缩时间线**：
   - 2026-10-09/10：round-1/2 收拢；P0 三件套（兼容设计/矩阵/归因，§2.1）→ 排摸收官（§2.2）→ round-3–8 与 P1 锁板（§2.4）；
   - 2026-10-10→11：P1 执行（§2.3）→ round-9/10 定板 → P1-v2 三步 + 旁线 D/E（§3）→ **round-12A NO-GO（§4）**；
@@ -332,3 +340,4 @@
   - 2026-10-14 凌晨·三：GPT 答复 3（`f4faec8`）——**收敛：基本站我方**；批准 Q2 审计 + WM fidelity + Stage C contract（暂停一切训练）；**§5.34 受理 + R31 只读审计包开工**。
   - 2026-10-14 凌晨·五：R31 审计包**五 lane 全收口**（Q2-a/b/c、mirror、contract、M2、MoE 敏感性）——**§5.35：Q2 判决草案（中等风险/无冲突）+ 8–10× 状态分布放大 + 条件化弱 + 契约清单；下一步候选 5 项待裁**。
   - 2026-10-14 凌晨·六：GPT 长答复（`910b49b`，1641 行）——**全面接受 R31** + WM 五结构弱点（核验成立）+ Round-32 十探针 + 联合训练 Phase 0–4 + MoE-off 基线 0.56；**§5.36 受理 + 5 条修正待裁；零实施**。
+  - 2026-10-14 凌晨·七：GPT 裁决（`d86e91a`，677 行）——**5 修正全收 + 批准三级决策树**；**§5.37 受理 + Level 1 开工（4 lane 只读：D0–D3/Jacobian FD/Ego 充分性/Lipschitz）**。
