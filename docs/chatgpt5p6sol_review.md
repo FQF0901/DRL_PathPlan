@@ -1,516 +1,906 @@
 总体裁决
 
-Round-32 Level-1 审计很有价值，GO_ACTION_CONDITIONING 是目前最合理的主方向。但我不完全接受“D2→D3 占 97%，因此主瓶颈已经严格证明是 latent transition”这一表述。
+这轮 canary 的结果有价值，但暂时不能按报告原结论直接进入 C-B 或进一步放大 action conditioning。
 
-更严谨的结论应是：
+最关键的新事实有三条：
 
-当前 imagined latent 与真实未来 latent 之间的差异，几乎不能由执行 pose 偏差或当前使用的动态图几何替换解释；与此同时，WM 对动作，尤其 ds，缺乏足够辨识力。因此，显式动作条件化是首个有资格进入训练 canary 的结构修改。
+显式动作条件化确实能改变 WM 性状，Action Swap、有限差分敏感度、单调性等指标明显变化；
+动作辨识变强，没有转化成 rollout 接口改善，反而让 ds 尾段漂移和 overshoot 加重；
+AC1 闭环 success 从 0.56 到 0.60，但 collision 从 0.08 跳到 0.18，说明当前改动更像“增强进度与激进性”，还不是可靠 World Model 改进。
 
-round32_audit_summary.md 显示：
+此外，我在代码里发现一个必须优先核验的严重问题：
 
-D0→D1 只解释约 2.9%；
-D1→D2 约 0%；
-D2→D3 约 97%；
-ds 的有限差分响应比 dθ/κ 弱约 26–50 倍； -正确 action 在五个 candidate 中 top-1 只有 10.2%，top-3 为 63.8%，margin 约为零； -真实 latent 足以表达关键 ego/lane 状态，但 WM 对 lane-relative 信息的保留明显不足。
+action_ego 输出层和 alpha_ego 同时初始化为零。按当前公式，两者理论上会形成零梯度死锁。
 
-这些证据足以批准动作条件化 canary，但还不足以批准大规模 WM 重训、BPTT 或 WM–Policy 全解冻联合训练。
+所以第一步不是继续训练，而是先证明这次 canary 的新分支究竟如何学起来，以及 checkpoint 中实际的 alpha_ego、输出层参数是否确实发生变化。
 
-一、Round-32 真正证明了什么
-1. 动作条件化确实存在严重不足
+一、先审阅代码具体修改
+1. 动作特征设计存在冗余
 
-这是本轮最强证据。
+net/st_gnn.py 当前动作特征为：
 
-有限差分响应
-
-ds 对 z_ego 和后续 action 的影响远弱于 dθ/κ。例如 h1 的 z_ego 响应：
-
-ds ±0.10      0.0175
-dθ ±0.01      0.8705
-κ  ±0.01      0.8722
+[
+    ds / 10.0,
+    dtheta / 1.2,
+    kappa / 1.2,
+    (ds / dt) / 20.0,
+]
 
 
-即使考虑不同变量单位，这个差距仍然过大，且与此前部署链的 ds overshoot 相互印证。
+但当前固定：
 
-Action Swap
+dt = 0.5s
 
-若 WM 真正理解：
-
-zt+1=f(zt,at)z_{t+1}=f(z_t,a_t)
-
-那么匹配的真实 action 应比随机、反向或 zero action 更容易预测真实 next state。
-
-目前：
-
-matched top-1 = 10.2%
-matched top-3 = 63.8%
-margin ≈ 0
-
-
-五候选随机 top-1 期望约 20%，当前 matched 甚至没有表现出可靠优势。不同 action 下预测误差 spread 约 4e-3，远小于基准预测误差约 0.08。这说明预测函数几乎无法利用 action 区分 next state。
-
-因此：
-
-动作条件化不足不是推测，而是 Level-1 已经获得的最明确机制证据。
-
-这也符合成熟 World Model 的一般设计。DreamerV3 通过状态和动作预测未来表示，并利用 imagined trajectory 改善行为；TD-MPC2 同样把潜在动力学明确建模为 action-conditioned dynamics，而不是仅依赖预计位置间接编码动作。
-
-2. 不能简单说“ego dynamics 已经保留得很好”
-
-round32_audit_summary.md 将 progress、speed、heading 的 WM 保留率列为 0.91–1.10，但 frozen baseline 同样很高：
-
-progress frozen ≈1.00
-speed frozen ≈0.87
-heading frozen ≈1.08
-
-
-这说明这些量可能主要来自：
-
--静态场景相关性； -当前状态与短时间未来的强自相关； -数据集中速度变化较小； -线性 probe 可以依靠非因果 shortcut。
 
 所以：
 
-WM保留率高
+ds/dt20=ds/0.520=ds10\frac{ds/dt}{20} = \frac{ds/0.5}{20} = \frac{ds}{10}
 
+即：
 
-不等同于：
+ds_norm == speed_intent_norm
 
-WM正确预测了动作导致的ego dynamics
 
+代码注释也明确承认两维完全等价。
 
-尤其 progress 的 frozen 对照已经约为 1.0，这个 probe 无法证明 WM 对 progress 有动态预测增益。
+问题
 
-必须补一个条件化增益指标
+这不是致命 bug，但会：
 
-后续应报告：
+-重复强化 ds； -让 MLP 两个输入维实际表达同一信息； -掩盖“速度意图”和“位移”本应独立的物理语义； -可能加剧本轮看到的纵向激进性和 overshoot。
 
-ΔRWM2=RWM2−Rfrozen2\Delta R^2_{\text{WM}} = R^2_{\text{WM}} - R^2_{\text{frozen}}
+建议
 
-以及：
-
-ΔRaction2=Rcorrect action2−Rshuffled action2\Delta R^2_{\text{action}} = R^2_{\text{correct action}} - R^2_{\text{shuffled action}}
-
-如果 WM 与 frozen 几乎相同，说明所谓“保留”来自状态惯性，不是动作动力学。
-
-3. Lane-relative 信息损失是第二个真实问题
-
-真实 z_ld 逐槽表示可以很好解码：
-
-lane_lat  R² ≈0.90
-lane_head R² ≈0.93
-
-
-但 WM latent 的保留率仅：
-
-lane_lat  0.61
-lane_head 0.77
-
-
-且逐槽展开明显优于 mean pooling，说明 lane slot 结构本身很重要。
-
-更值得警惕的是：
-
-WM 的 OD/LD latent 可以高精度解码 ego progress/speed，而真实 OD/LD latent 对这些量的可解码性很低。
-
-这说明 imagined latent 可能出现语义串扰：
-
-z_ld / z_od
-被ego运动信息污染
-
-
-而不是分别保持：
-
-ego状态
-对象状态
-车道状态
-
-
-这可能解释为什么 latent cosine 尚可，但 Policy 在 imagined latent 上动作明显漂移。
-
-因此，动作条件化 canary 不能只看：
-
-E_interface有没有下降
-
-
-还必须检查：
-
-lane信息是否恢复
-OD/LD中的ego泄漏是否减少
-
-
-否则显式 action embedding 可能进一步把 ego action 广播到所有 slot，反而强化语义污染。
-
-二、对“D2→D3 97%”的保留意见
-1. D3 本身被定义为 oracle latent
-
-D3 直接使用真实未来 observation 编码出的 latent，误差被定义为零。因此：
-
-D2 → D3
-
-
-天然包含所有尚未解释的差异。
-
-所以“97%”准确表达的是：
-
-pose replay 和当前 oracle geometry 替换只解释了约 3%，其余 gap 留在 latent transition/状态更新体系中。
-
-但它不能进一步区分：
-
-transition 网络本身；
-action conditioning； -latent target 漂移； -slot identity； -mask； -step embedding； -编码器 target 共适应； -状态语义串扰； -未记录的上下文差异。
-
-所以我建议将报告措辞从：
-
-主瓶颈 = latent transition
-
-
-修正为：
-
-主瓶颈定位在 latent-state evolution block，
-其中 action conditioning 是首个获得直接失败证据的子机制。
-
-2. D1→D2 为零的证据仍有限
-
-本轮 D1/D2 无法计算完整的动作级：
-
-π(z_hat_k)
-
-
-因为录制缺失部分 t0 context 键；同时位姿置零自检表明模型本身对 OD/LD pose 通道就很不敏感。
-
-因此：
-
-Oracle geometry没有改善
-
-
-可能表示两件事：
-
-动态图确实不重要； 2.模型没有有效消费图 pose，所以换 oracle pose 也没有作用。
-
-报告已经意识到这一 caveat。因此当前可以说：
-
-不优先改动态图。
-
-但不应该永久关闭动态图支路。显式动作条件化修复后，图几何通道可能才变得可消费。
-
-三、是否批准 GO_ACTION_CONDITIONING
-批准，但只批准最小、可逆 canary
-
-round32_decision.md 提议：
-
-ds/dθ/κ归一化特征
-+ 零初始化动作残差
-+ alpha=0逐位兼容
-+ 60/40 expert/policy数据
-+ 保持detach
-+ 不BPTT
-+ 不扩容
-
-
-整体正确。
-
-但我建议不要一步把同一个 action embedding 无差别加入 ego、OD、LD 三类 transition。因为 P3 已揭示 OD/LD latent 出现 ego 运动泄漏，无差别广播 action 可能加重这个问题。
-
-四、建议的动作条件化三臂
-AC0：当前模型
-
-不训练，基线。
-
-AC1：仅 Ego Action Conditioning
-
-归一化动作：
+当前 action 特征应简化为：
 
 ds_norm
 dtheta_norm
 kappa_norm
-speed_intent = ds / dt
 
 
-生成：
+如果未来要加入速度意图，应使用不同于 ds/dt 的量，例如：
 
-a_emb = MLP(action_features)
-
-
-只进入：
-
-ego_transition
+target_speed - current_speed
+delta_speed
+longitudinal_acceleration_intent
 
 
-形式：
+这些需要当前真实 ego speed，不能用 ds 的线性重复项冒充。
 
-zego′=zego+Tego(hego,zego)+αegoAego(zego,a)z'_{ego} = z_{ego} + T_{ego}(h_{ego},z_{ego}) + \alpha_{ego}A_{ego}(z_{ego},a)
+2. kappa 特征在低 ds 区间存在人为形状
 
-初始化：
+当前：
 
-A_ego输出层全零
+kappa = dtheta / ds.clamp_min(0.5)
+
+
+这意味着：
+
+ds < 0.5m
+
+
+时，所有样本都使用固定分母 0.5。
+
+结果是：
+
+-低速曲率语义被人为压缩；
+
+ds=0.05 与 ds=0.49 的 κ 都使用同一分母； -停车、低速恢复、tollgate 区域可能获得不自然的动作 embedding； -动作干预 probe 的低速结果可能受 clamp 规则主导。
+建议
+
+首轮不要改公式，但必须按速度区间分层报告：
+
+ds < 0.5m
+0.5 <= ds < 1.5m
+1.5 <= ds < 3m
+ds >= 3m
+
+
+如果 collision 或 overshoot 主要集中在某个速度段，再修改低速表示。
+
+3. 最严重问题：双零初始化可能导致分支完全无法学习
+
+当前初始化：
+
+self.action_ego = _latent_head(...)
+self.alpha_ego = nn.Parameter(torch.zeros(()))
+
+
+而 _latent_head() 的最后一层也是：
+
+weight = 0
+bias = 0
+
+
+前向：
+
+z_ego_next += alpha_ego * action_ego(...)
+
+
+初始时：
+
 alpha_ego = 0
+action_ego(x) = 0
 
 
-优点：
+因此：
 
--直接修最弱的 ds 通道； -不会立刻把 action 广播到 lane/object latent； -便于判断 ego 动作条件化是否已经足够改善整条链。
+对 alpha_ego 的梯度
+∂L∂α=∂L∂z′Aego(x)=0\frac{\partial L}{\partial \alpha} = \frac{\partial L}{\partial z'} A_{\text{ego}}(x) = 0
 
-AC2：Ego + Relative Scene Conditioning
+因为 action_ego(x)=0。
 
-只有 AC1 的 ego action fidelity 有效，但 OD/LD 相对状态仍明显错误时才运行。
+对 action_ego 参数的梯度
+∂L∂θA=∂L∂z′α∂A∂θA=0\frac{\partial L}{\partial \theta_A} = \frac{\partial L}{\partial z'} \alpha \frac{\partial A}{\partial\theta_A} = 0
 
-不要简单将同一个 a_emb 加到每个 OD/LD slot。更合理的是使用 ego motion compensation：
+因为 alpha=0。
 
-relative_action_features:
-    delta_x_ego
-    delta_y_ego
-    delta_heading_ego
-    delta_speed_ego
+也就是说，按附件中的生产代码，理论上：
 
-
-分别作用于：
-
-od_transition
-ld_transition
+alpha_ego没有梯度
+action_ego也没有梯度
+整个分支永久为0
 
 
-这表达的是：
+但报告中 AC1 与 AC1-P 明显改变了结果。这只有几种可能：
 
-自车动作如何改变相对对象和相对车道状态。
+canary 脚本训练前手工修改了 alpha_ego； 2.脚本手工重新初始化了最后一层； 3.实际训练 checkpoint 不对应附件中的生产初始化逻辑；
+optimizer 或加载逻辑有额外操作； 5.所谓 AC1 的变化来自别的参数被意外解冻； 6.结果产物和最新源代码不在同一 commit。
+这是当前第一优先级
 
-而不是暗示道路或其他车辆本身由 ego action 驱动。
+必须立即输出：
 
-五、训练范围
+训练前：
+alpha_ego
+action_ego最后层weight norm
+action_ego最后层bias norm
 
-第一轮 AC1：
+第一次backward后：
+grad(alpha_ego)
+grad(last_weight)
+grad(last_bias)
+各模块grad norm
 
-训练
-ego action embedding
-ego transition residual支路
-必要的ego latent physical decoder
+第一次optimizer.step后：
+参数变化量
 
-冻结
-主Encoder
-原ST-GNN主体
-OD transition
-LD transition
-PolicyBackbone
-Primary
-PolicyHead
-ValueHead
-MoE
-
-
-为什么第一轮不训练整个 WM？
-
-因为我们需要回答单一因果问题：
-
-显式 action conditioning 能否修复 ds 不敏感和 rollout overshoot？
-
-如果同时解冻所有 transition，结果无法归因。
-
-六、数据建议
-第一阶段不必立刻 60/40 混合大训练
-
-先做两个小 canary。
-
-C-A：Expert transitions only
-
-验证结构本身是否能学习 action discrimination。
-
-目标：
-
-Action Swap top-1
-ds-progress monotonicity
-teacher-forced prediction
-
-C-B：Expert 60% + Policy 40%
-
-验证是否能迁移到部署分布。
-
-如果 C-A 都无法提升 Action Swap，问题在结构或监督，不是 Policy 数据不足。
-
-如果 C-A 可改善但 C-B 部署链仍无改善，问题可能在 Policy-distribution adaptation 或 Stage B 接口。
-
-七、需要新增的 ego physical anchor
-
-我建议 AC1 同时增加一个很小的 z_ego_next 物理解码头，但必须作为独立开关：
-
-z_ego_next
-→ [
-    delta_progress,
-    speed,
-    delta_heading
-]
+最终checkpoint：
+alpha_ego
+各层参数norm
 
 
-第一轮先不加入 lane-relative 目标，因为 lane-relative 状态主要在 z_ld 中，且当前正存在 slot 语义和 ego 泄漏问题。
+并进行单 batch smoke test。
 
-三个候选应分开：
+预期
+
+如果附件代码原样执行：
+
+所有新分支梯度和更新都应为0
+
+
+若实测不为零，应定位外部初始化逻辑。
+
+在这个问题闭合前，不能把本轮变化归因于 action-conditioning 架构。
+
+4. 惰性构造方式需要防止 optimizer 漏参
+
+set_action_ego(True) 调用时才创建：
+
+action_ego
+alpha_ego
+
+
+风险在于：
+
+optimizer创建在前
+set_action_ego调用在后
+
+
+那新参数不会进入 optimizer。
+
+虽然本轮训练显然做了某种专门处理，但正式实现必须 fail-fast：
+
+assert optimizer_parameter_ids == declared_trainable_parameter_ids
+
+
+并在 manifest 中写：
+
+action_ego parameter count
+alpha_ego parameter included
+ego_phys parameter included
+trainable parameter hash
+
+
+不能靠调用顺序隐式保证。
+
+5. 将新参数完全从默认 state dict 中移除，有兼容优势，但增加实验复现风险
+
+惰性构造的好处：
+
+默认关闭时旧模型键集逐位一致
+
+
+这是合理的 canary 设计。
+
+但正式进入主线后，如果 enable_action_ego 只是普通 Python 属性、不进 checkpoint，那么加载模型时可能发生：
+
+checkpoint里有action_ego参数
+但运行时忘记set_action_ego(True)
+
+
+从而静默关闭新结构。
+
+正式化前必须做到
+
+checkpoint metadata 写入：
+
+{
+  "action_ego_enabled": true,
+  "ego_phys_enabled": false,
+  "action_feature_version": "v1",
+  "action_feature_dim": 3,
+  "alpha_mode": "fixed_or_bounded"
+}
+
+
+加载时：
+
+checkpoint启用了action_ego
+但模型未构造
+→ fail-fast
+
+
+不能静默兼容。
+
+二、如何解释 Gate 1 和 Gate 2
+1. 结构确实获得了动作辨识能力，但还不够稳
 
 AC1：
-显式action conditioning
 
-AC1-P：
-action conditioning + ego physical anchor
-
-P-only：
-ego physical anchor但无action conditioning
-
-
-否则若结果改善，将无法判断来自 action 输入还是物理监督。
-
-八、canary 验收标准
-Gate 0：兼容性
-alpha=0：
-所有forward max_abs_diff = 0
-旧checkpoint missing/unexpected = 0
-训练关闭时RNG序列不变
-MoE-off baseline逐位复现
-
-Gate 1：Action Fidelity
-
-相对 AC0：
-
-Action Swap matched top-1：
-10.2% → 至少35%
+Action Swap top-1：
+0.101 → 0.284
 
 top-3：
-63.8% → 至少85%
+0.635 → 0.917
 
-matched margin：
-必须转为正
+zero−matched：
+负值 → +0.186
 
-ds FD sensitivity：
-相对 dθ/κ 的差距
-从26–50×缩小到 <=10×
-
-ds-progress单调率 >=90%
-zero/opposite action明显劣于matched
+FD dθ/ds：
+38.74 → 7.34
 
 
-第一版不要求 top-1 直接达到 70%，因为当前起点几乎随机，35% 已足以证明结构有效。
+说明新结构至少改变了 action-conditioned discrimination。
 
-Gate 2：物理语义
-progress/speed：
-WM相对frozen的增益为正
+但 top-1 仍低于 0.35 的门，而且 0.284 也只是从“明显劣于随机”上升到“略高于五候选随机的 0.20”。
 
-lane_lat/lane_head保留率不得下降超过5pp
+所以正确措辞是：
 
-OD/LD latent中的ego progress/speed泄漏
-不得增加超过10%
+动作信号开始可用，但仍不足以稳定选择真实 action。
+
+不能写成“动作条件化问题已经解决”。
+
+2. AC1 单调率反而严重恶化
+
+AC1：
+
+ds-progress 单调率：
+0.743 → 0.202
 
 
-如果 action fidelity 提升但 lane 保留继续恶化，不允许进入完整训练。
+AC1-P：
 
-Gate 3：部署接口
+0.946
+
+
+这很关键。
+
+它说明：
+
+AC1虽然更能区分action，
+但学到的动作响应不符合正确的纵向物理单调性。
+
+
+也就是动作辨识变强，但因果方向错乱。
+
+AC1-P 加入 ego physical anchor 后才恢复单调性，说明：
+
+显式动作输入本身不够，必须有物理锚约束它“如何响应动作”。
+
+这与成熟 World Model 的做法一致。动作条件化动力学通常不能仅靠 latent matching，需要由状态、奖励、物理量或控制相关目标共同约束。DreamerV3 通过动作条件化的世界模型预测未来表示并训练行为；TD-MPC2 则以控制相关的 latent dynamics 进行局部规划，而不是只要求不同动作产生不同 latent。
+
+3. Gate 2 的 lane 保留改善值得肯定，但不能过度解释
+
+AC1 的 lane 保留：
+
+lat  0.456 → 0.521
+head 0.415 → 0.601
+
+
+这说明 action conditioning 并没有简单破坏 z_ld，甚至可能通过更准确的 ego transition 改善了图消息。
+
+但同时：
+
+od_pool中的ego progress泄漏：
+AC1 +66%
+AC1-P +41%
+
+
+这支持了我们前一轮的担忧：
+
+ego 动作信息虽然只显式进入 z_ego，但仍会通过 ST-GNN 消息传递泄漏进 OD latent。
+
+因此“只给 ego transition 加 action”并不等于 OD/LD 完全不受影响。
+
+下一轮必须进一步检查：
+
+OD泄漏发生在哪个horizon
+哪些OD slot最严重
+是否集中于同车道前车
+是否与collision episode相关
+
+三、Gate 3 比 Gate 4 更能说明根因
+1. Gate 3 明确失败
+
+AC1：
+
 E_interface ds：
-h3–h5至少下降30%
++20.9%
 
 E_action ds：
-h3–h5至少下降25%
++17.2%
 
-h5 plan_ds overshoot：
-1.66m至少下降40%
-
-真实状态Policy action误差：
-退化 <=5%
-
-Gate 4：闭环
-
-使用：
-
-K1e2
-MoE-off
-WM-plan
-fixed LQR
-calib50 paired
+h5 overshoot：
++16.5%
 
 
-最低：
+AC1-P：
 
+接口与overshoot近似中性，但没有改善
+
+
+这说明动作条件化让 WM 更敏感，却没有让 rollout 更准确。
+
+最合理的解释是：
+
+Policy输出略偏大的ds
+→ WM更敏感地响应
+→ predicted ego latent推进更激进
+→ Policy在更激进latent上继续输出
+→ 尾段形成正反馈
+
+
+也就是：
+
+原来 WM 对 action 过于迟钝；现在增加灵敏度后，暴露出 rollout 缺少稳定反馈与物理约束，导致误差被更快放大。
+
+所以 AC1 不是“修复后只剩 collision 小问题”，而是：
+
+修复了动作不可辨识
+却加剧了闭环 imagined rollout instability
+
+2. Gate 4 的 success +4pp 不能覆盖 Gate 3 失败
+
+AC1：
+
+success 0.56 → 0.60
+timeout 11 → 5
+off-road 0.14 → 0.12
+collision 0.08 → 0.18
+
+
+这很像：
+
+车辆更敢走、更少超时
+但安全性显著下降
+
+
+其机制可能只是纵向更激进，而不是规划理解更准确。
+
+同时 50 episode 中：
+
+3翻正 / 1翻负
+
+
+样本太少，不足以证明稳定收益。
+
+当前正确结论
+AC1提高了进度和成功率倾向，
+但以安全退化和rollout误差增加为代价。
+
+
+它没有过最终门，也不应作为新 baseline。
+
+四、AC1-P 为什么更物理，却闭环更差？
+
+AC1-P：
+
+-动作单调性最好； -真实状态 Policy action 误差更低； -collision 最低； -但 success、timeout、route completion 更差。
+
+这可能说明 ego physical anchor 将行动约束得更保守或更接近专家数据，但当前 expert 数据本身在：
+
+配速
+进度
+低速恢复
+
+
+方面并不足以达到部署上的高成功率。
+
+也可能是 physical head 的目标尺度和权重不合适，让 latent 优先满足：
+
+局部物理预测
+
+
+却损害：
+
+Policy可消费性
+长期route progress
+
+
+因此 P-only 没有作用，而 AC1-P 有明显作用，实际上证明：
+
+physical loss 通过 action branch 改变了 latent dynamics，但当前物理目标仍不足以定义“对闭环最有用的 latent”。
+
+下一轮不能简单增加 physical loss 权重。
+
+五、代码更改的正面评价
+
+尽管结果未过门，工程实现里有几个地方做得不错：
+
+只将 action residual 接入 ego transition，没有无差别注入 OD/LD； 2.默认关闭时保持旧 checkpoint 键集； 3.在 net/model.py 部署 rollout 和 pipeline/stages.py Stage A teacher rollout 中都传入了对应 action； 4.将 ego_phys 加入 Stage B 各冻结表，避免后续 BC 意外训练；
+Gate 0 覆盖了 strict loading、前向逐位、RNG、梯度范围和完整测试； 6.P-only 逐位等于 base，为机制消融提供了可靠对照。
+
+这些值得保留。
+
+六、不要马上进入 60/40 Policy transition 训练
+
+报告遵守预注册，没有自动进入 C-B，这是正确的。
+
+原因：
+
+expert-only下rollout接口已经恶化
+
+
+此时引入 Policy transitions 可能：
+
+-帮助适配 learner distribution； -也可能进一步强化激进行为； -或让 WM 学会补偿某个固定 Policy 的错误，而不是学习真实动力学。
+
+在搞清 AC1 collision 和 overshoot 机制前，不能扩大数据。
+
+七、必须先做的 Round-33A：只读归因
+1. 双零初始化和真实梯度审计
+
+这是 P0。
+
+输出：
+
+alpha_ego init/final
+alpha_ego grad at step0/1/10
+action_ego layer norm init/final
+new branch update norm
+optimizer inclusion
+checkpoint keys
+
+
+结论必须是：
+
+分支确实按预期获得梯度
+
+
+否则整轮 canary 归因无效。
+
+2. Collision episode 配对归因
+
+对：
+
+AC1新增collision
+AC1翻正episode
+AC1公共成功
+base成功但AC1失败
+
+
+逐 episode 输出：
+
+road class
+collision object type
+collision time
+route completion
+actual speed
+planned ds[0:6]
+planned dtheta[0:6]
+planned kappa[0:6]
+TTC
+front gap
+LQR throttle/steer
+horizon-wise z/action error
+OD leakage
+
+
+重点判断 collision 来自：
+
+纵向追尾
+交叉口冲突
+merge/cutin
+弯道侧碰
+静态障碍物
+
+
+如果主要是追尾，问题是纵向动作条件化缺少对象交互，而不只是残差幅度过大。
+
+3. alpha_ego 和 residual 贡献分解
+
+每个 horizon 保存：
+
+legacy ego-transition delta norm
+action residual norm
+action residual / legacy delta
+alpha_ego
+
+
+分层：
+
+normal success
+new collision
+timeout fixed
+off-road
+
+
+目标是确认是否存在：
+
+action residual逐horizon累积膨胀
+
+
+而不是盲目加 alpha 上限。
+
+4. Action feature 消融，只读或极小 probe
+
+比较：
+
+F0 = [ds, dtheta, kappa, duplicate speed]
+F1 = [ds, dtheta, kappa]
+F2 = [ds, dtheta]
+F3 = [ds, kappa]
+
+
+不需要四臂完整闭环训练。先在已训练 branch 上做输入归因或通过小 probe 评估。
+
+重点检查：
+
+重复ds维是否放大纵向激进性
+kappa在低ds时是否主导异常
+
+八、把上轮讨论的 ego-motion 解耦正式并入下一步
+
+当前结果进一步支持显式 ego-motion 解耦，但仍然要先做零训练验证。
+
+为什么？
+
+AC1 将 action 信息写入 z_ego 后：
+
+OD ego-progress泄漏增加66%
+
+
+这正是“ego action 通过消息传递污染 OD latent”的证据之一。
+
+更物理的结构应该是：
+
+ego action
+→ 解析计算ego SE(2)位姿变化
+→ 显式warp OD/LD physical anchors
+→ latent transition只学习剩余语义和动态
+
+
+这与 SparseDrive / Sparse4D 使用“实例 feature + 显式 geometry anchor + temporal instance propagation”的原则相近。SparseDrive 将动态对象表示为实例特征与包含位置、航向、速度的 anchor，将地图表示为实例特征与 polyline anchor；历史实例依赖几何 anchor 进行时间传播，而不是让 latent 独自承担全部坐标变化。
+
+但 SparseDrive 是并行多模态轨迹规划，不是与你项目完全相同的 action-conditioned rollout WM，所以只能借鉴“几何与语义分离”的原则，不能直接照搬。
+
+九、Round-33B：Analytic Ego-Warp Oracle Probe
+
+不训练，不改 LQR。
+
+W0：当前实现
+ego累计pose进入图
+OD使用t0恒速外推
+LD保持t0 anchor
+
+W1：显式 LD Ego Warp
+
+对 LD 物理 anchor 做：
+
+pld′=R(−Δθego)(pld−Δpego)p'_{ld} = R(-\Delta\theta_{ego}) (p_{ld}-\Delta p_{ego})
+
+方向：
+
+ψld′=ψld−Δθego\psi'_{ld} = \psi_{ld}-\Delta\theta_{ego}
+
+曲率保持不变。
+
+W2：显式 OD Ego Warp + 对象运动先验
+pod′=Tego−1(pod+vodΔt)p'_{od} = T^{-1}_{ego} (p_{od}+v_{od}\Delta t)
+W3：W1 + W2
+W4：Oracle future anchors
+
+使用真实未来 ego、OD 和 lane geometry。
+
+比较：
+
+lane信息保留
+OD ego-motion泄漏
+E_interface h1–h5
+E_action h1–h5
+ds overshoot
+action swap
+
+Ego-Warp Gate
+
+如果 W3 相对 W0：
+
+OD progress泄漏下降 >=30%
+lane-relative保留提升 >=15%
+E_interface h3–h5下降 >=15%
+overshoot下降 >=20%
+
+
+则批准：
+
+GO_ANALYTIC_EGO_WARP
+
+
+如果仅 W4 有效，说明：
+
+显式坐标变换方向正确
+但对象自身运动、slot或地图更新仍不足
+
+
+如果 W1–W4 都无效，则 ST-GNN 没有有效消费 geometry anchor，应转向图消费结构，而不是继续加 warp。
+
+十、Round-33C：修正版动作条件化 canary
+
+只有完成归因和 warp probe 后执行。
+
+首先修初始化
+
+不要同时：
+
+branch最后层=0
+alpha=0
+
+
+推荐二选一。
+
+方案一，优先推荐
+branch最后层=0
+alpha固定为1
+
+
+这样：
+
+-初始前向逐位不变； -输出层第一步就有梯度； -不引入自由缩放标量； -结构最简单。
+
+方案二
+branch小随机初始化
+alpha=0
+
+
+这样 alpha 第一轮有梯度，但 branch 初始方向随机，不如方案一稳。
+
+动作特征改为
+ds_norm
+dtheta_norm
+kappa_norm
+
+
+删除重复的 speed-intent。
+
+低 ds 通过：
+
+valid_kappa mask
+
+
+而不是让 clamp 结果无条件主导。
+
+三臂即可
+B0：base
+
+B1：ego action conditioning v2
+    无physical head
+
+B2：ego action conditioning v2
+    + ego physical anchor
+
+
+P-only 已经证明不会影响主链，不必重复完整闭环。
+
+Ego physical target 应增加一个关键量
+
+现有：
+
+delta_progress
+speed
+delta_heading
+
+
+建议加入：
+
+delta_speed
+
+
+因为：
+
+speed本身
+
+
+容易被 frozen/current-state shortcut 预测；
+
+delta_speed
+
+
+更能监督动作导致的纵向变化。
+
+第一版仍不加入 lane-relative target，避免重新混淆 ego 和 LD 职责。
+
+十一、修正版训练门
+Gate A：训练可达性
+新分支step0梯度非零
+首个optimizer step参数变化非零
+仅声明参数更新
+alpha/残差norm可追踪
+
+Gate B：动作因果
+top-1 >=0.35
+top-3 >=0.85
+ds-progress单调 >=0.90
+zero/opposite显著差于matched
+FD dtheta/ds比 <=10
+
+Gate C：接口稳定
+
+这次应比上一轮更严格：
+
+E_interface h3–h5至少不恶化
+E_action h3–h5至少不恶化
+overshoot至少不恶化
+
+任何一项恶化 >5%
+→ 停止
+
+
+只有先做到“不放大”，才谈 30% 改善。
+
+Gate D：安全闭环
 success >=0.58
-相对0.56至少+2pp
 off-road <=0.14
 collision <=0.08
-timeout不高于当前
+timeout <=11
+route completion >=0.862
 
 
-由于 50 episodes 的 +2pp 只是一个 episode，只能作为继续许可，不能作为收益结论。
+必须全过，不能再用 success +4pp 抵消 collision 翻倍。
 
-进入 clean150 的门应更高：
+Gate E：clean150
 
-calib50 success >=0.60
-或
-接口/动作链指标达到Gate 3强门
+进入条件：
 
-九、什么时候允许 Policy–WM 交替训练？
-
-动作条件化 canary 通过之后，才进入：
-
-W-step
-Policy冻结
-WM在expert + policy transitions上更新
-
-P-step
-WM冻结
-Policy接受real latent和WM latent训练
+calib50全门通过
++
+接口指标改善
 
 
-损失：
+clean150：
 
-Lreal-action=∥π(zreal)−aexpert∥L_{\text{real-action}} = \|\pi(z^{real})-a^{expert}\| Linterface=∥π(z^WM)−sg⁡(π(zreal))∥L_{\text{interface}} = \|\pi(\hat z^{WM})-\operatorname{sg}(\pi(z^{real}))\|
+success >=0.58
+至少相对base +5pp
+collision不劣
+timeout不劣
+3 seeds前先做paired置信区间
 
-先交替，不跨模块反传。
+十二、后续训练顺序
 
-成熟的 World Model 方法也通常保持“模型学习”和“行为学习”的职责边界。DreamerV3 从真实经验学习世界模型，再利用 imagined trajectories 改善行为；TD-MPC2 则使用明确 action-conditioned latent dynamics，并通过控制相关目标约束模型。二者都不是把全部模块无约束地用单一损失一起拖动。
+如果修正版 action conditioning 与 analytic warp 均有效：
 
-十、对 round32_decision.md 的最终修改建议
+1. Ego action conditioning v2
+2. Analytic ego-motion warp
+3. Expert-only WM训练
+4. Policy-transition 60/40 WM适配
+5. 冻结WM，训练Policy real/predicted latent一致性
+6. WM-step / Policy-step交替训练，梯度隔离
+7. DAgger
+8. MoE
+9. Exact PPO vs deployment-isomorphic PPO
 
-建议把 decision 从：
 
-GO_ACTION_CONDITIONING
+仍然不允许：
 
+WM/Policy全量解冻
+单一总loss端到端训练
 
-细化为：
+十三、给 Coding Agent 的正式下一步指令
+Round-32 canary不晋级C-B；AC1/AC1-P均不作为新baseline。
 
-GO_EGO_ACTION_CONDITIONING_CANARY
+先执行Round-33A/B，只读归因：
 
+A. 梯度与初始化审计
+- alpha_ego及action_ego各层init/grad/update/final；
+- optimizer membership；
+- checkpoint/source hash；
+- 解释双零初始化为何仍出现训练效果。
 
-并锁定：
+B. AC1 collision/overshoot配对归因
+- episode级road class、对象类型、速度、TTC；
+- plan ds/dtheta/kappa h0-h5；
+- residual norm/legacy transition norm；
+- OD leakage随horizon；
+- 翻正/翻负/新增collision分类。
 
-1. 先只给ego transition显式动作残差；
-2. AC0 / AC1 / P-only / AC1-P四臂；
-3. 不解冻原WM主体；
-4. 不改OD/LD transition；
-5. 不BPTT；
-6. 不训练Policy；
-7. MoE-off；
-8. Action Fidelity + lane retention + leakage必须同时验收；
-9. AC1通过后才采60/40 policy transition做第二阶段；
-10. 未过门不自动扩大模型或数据。
+C. Action feature审计
+- 删除重复speed-intent前先量化贡献；
+- 按ds速度带报告kappa clamp效应。
+
+D. Analytic ego-warp oracle probe
+- W0 current；
+- W1 LD ego warp；
+- W2 OD ego warp+CV；
+- W3 combined；
+- W4 oracle future anchors；
+- 比较lane retention、OD leakage、E_interface、overshoot。
+
+本阶段禁止：
+- C-B 60/40；
+- 扩大数据；
+- 改LQR；
+- BPTT；
+- 解冻Policy；
+- DAgger/MoE/PPO/GRPO；
+- 将AC1设为默认。
+
+若梯度审计不闭合：
+decision=BLOCKED_CANARY_VALIDITY。
+
+若warp通过门：
+decision=GO_ANALYTIC_EGO_WARP。
+
+若warp无效但action结构仍成立：
+decision=GO_EGO_ACTION_CONDITIONING_V2。
+
+不得自动进入训练。
 
 最终判断
 
-Round-32 已经把最大根因缩小到足够动刀的程度：
+这轮不是失败，反而回答了一个非常关键的问题：
 
-真实状态表示基本充分
-执行pose差异不是主因
-当前动态图不是首要解释
-Policy中位敏感性不是主因
-latent evolution block解释绝大多数gap
-其中动作条件化几乎失效，尤其ds通道
+让 WM“更能感知 action”并不等于让 rollout 更正确。
+
+AC1 证明动作条件化方向有真实作用，但同时暴露了更深层问题：
+
+动作敏感度增强
+→ imagined latent推进更激进
+→ Policy继续放大
+→ ds overshoot与collision增加
 
 
-因此动作条件化 canary 是对的。
+因此下一步不能简单做：
 
-但要防止从一个错误走向另一个错误：
+加正则、限幅alpha、再训更多数据
 
-不能因为 action conditioning 弱，就把 ego action embedding 广播给所有 ego/OD/LD latent，再全量解冻，以至于加强当前已经存在的语义串扰。
 
-正确的第一刀应非常小：
+而应先回答两个 root cause：
 
-只修 ego transition 的显式动作条件化
+这次分支在双零初始化下究竟如何获得梯度；
+ego action 是否应该主要通过显式 SE(2) warp 改变 OD/LD 几何，而不是依赖 latent 消息传播吸收坐标变化。
+
+从长期架构看，最有希望的目标仍是：
+
+显式ego运动学
 +
-独立验证 ego physical anchor
+OD/LD anchor坐标补偿
 +
-严格监控 lane 保留与 OD/LD ego 泄漏
+ego-only action-conditioned latent residual
++
+Policy分布WM适配
++
+real/predicted latent Policy一致性
 
 
-如果它能让 Action Swap 从近随机变为明确可辨，同时降低 h3–h5 的 ds overshoot，再进入 Policy 分布适配和 WM–Policy 交替训练。
+这比把更多动作信息直接塞入所有 latent 更物理，也更接近 SparseDrive 的“几何 anchor 与语义 feature 解耦”原则。
 
-这条路径比继续调 lane loss、tail projection、DAgger 或 PPO 更接近真正的 root cause，也最有希望把当前同口径 0.56 推向 0.60 以上，再逐步逼近 IDM+Pure Pursuit 的 0.756。
+只有这条链在接口、安全和闭环三个层面同时过门，才有资格从当前 0.56 稳定推到 0.60 以上，并继续逼近最终超过 IDM+Pure Pursuit 的 0.756 目标。
