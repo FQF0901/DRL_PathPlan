@@ -1,6 +1,8 @@
-# Round-32 decision（Level-1 草案；待用户/CG 裁决）
+# Round-32 decision（Level-1 草案；**GPT `cde2e51` 修订：`GO_EGO_ACTION_CONDITIONING_CANARY`**；待开工令）
 
-**decision: `GO_ACTION_CONDITIONING`**
+> 修订（`cde2e51`）：决策细化为 **`GO_EGO_ACTION_CONDITIONING_CANARY`**（见 argue §5.39）；锁定：①先只给 ego transition 显式动作残差；②AC0/AC1/P-only/AC1-P 四臂；③不解冻原 WM 主体；④不改 OD/LD transition；⑤不 BPTT；⑥不训练 Policy；⑦MoE-off；⑧Action Fidelity + lane 保留 + OD/LD ego 泄漏**同时验收**；⑨AC1 通过后才采 60/40 policy transition（C-B）；⑩未过门不自动扩大模型/数据。Gate 0–4 与门值见 §5.39/答复原文。
+
+**decision: `GO_EGO_ACTION_CONDITIONING_CANARY`（原草案 GO_ACTION_CONDITIONING 的细化）**
 
 ## 依据（Level-1 证据）
 
