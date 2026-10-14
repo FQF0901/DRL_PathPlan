@@ -1,439 +1,293 @@
-审阅结论
+总体裁决
 
-我接受 deepseekv4p1_argue.md §5.36 的五项修正，并批准启动 Round-32 只读审计包。
+Round-32 Level-1 审计很有价值，GO_ACTION_CONDITIONING 是目前最合理的主方向。但我不完全接受“D2→D3 占 97%，因此主瓶颈已经严格证明是 latent transition”这一表述。
 
-但我建议把“10+1 个 probes”收敛成三层决策树，而不是平铺执行。原因是很多 probe 之间存在依赖关系。如果第一层已经证明动作根本没有有效进入 WM，后续动态图、mask turnover 和联合梯度审计就不应抢占 GPU 时间。
+更严谨的结论应是：
 
-总体裁决：
+当前 imagined latent 与真实未来 latent 之间的差异，几乎不能由执行 pose 偏差或当前使用的动态图几何替换解释；与此同时，WM 对动作，尤其 ds，缺乏足够辨识力。因此，显式动作条件化是首个有资格进入训练 canary 的结构修改。
 
-批准：
-Round-32 只读诊断
-部署状态归因
-有限差分 Action Fidelity
-状态表示充分性
-Policy 接口放大
-动态图 Oracle
-梯度冲突与联合训练可行性
+round32_audit_summary.md 显示：
 
-不批准：
-立即联合训练
-显式 action token
-EMA encoder
-ego physical head
-predicted pose 回灌
-presence mask 回灌
-BPTT
-DAgger / MoE / PPO / GRPO
+D0→D1 只解释约 2.9%；
+D1→D2 约 0%；
+D2→D3 约 97%；
+ds 的有限差分响应比 dθ/κ 弱约 26–50 倍； -正确 action 在五个 candidate 中 top-1 只有 10.2%，top-3 为 63.8%，margin 约为零； -真实 latent 足以表达关键 ego/lane 状态，但 WM 对 lane-relative 信息的保留明显不足。
 
-一、对 Coding Agent 五项修正的裁决
-1. Q2 首轮已经回答，接受
+这些证据足以批准动作条件化 canary，但还不足以批准大规模 WM 重训、BPTT 或 WM–Policy 全解冻联合训练。
 
-R31 已经完成：
+一、Round-32 真正证明了什么
+1. 动作条件化确实存在严重不足
 
-Q2-a：真实态与预测态 Policy 接口差
-Q2-b：动作、轨迹等损失的梯度冲突
-Q2-c：Oracle latent 反事实
+这是本轮最强证据。
 
+有限差分响应
 
-现有结果支持：
+ds 对 z_ego 和后续 action 的影响远弱于 dθ/κ。例如 h1 的 z_ego 响应：
 
-Stage B 不是类似 recovery_v1 的数据错位 bug；
-L_action 与 L_traj 未出现决定性负梯度冲突； -风险来自 imagined state 漂移和尾五步直接监督不足； -应定性为“中等风险的近似监督”，而不是“非法监督”。
+ds ±0.10      0.0175
+dθ ±0.01      0.8705
+κ  ±0.01      0.8722
 
-所以 Round-32 不再重复泛化 Q2，而应深化：
 
-尾段动作误差分别由状态预测误差、Policy 敏感性和轨迹监督近似造成多少？
+即使考虑不同变量单位，这个差距仍然过大，且与此前部署链的 ds overshoot 相互印证。
 
-2. 必须补“部署状态归因”，接受并升为最高优先级
-
-当前最重要的未决问题是：
-
-Teacher-forced WM误差很小
-部署链误差大8–10倍
-
-
-但“部署链”同时包含：
-
-Policy action 分布变化；
-LQR 实际执行残差；
-每 0.5 秒重新规划，旧计划尾部被替换；
-WM 按旧计划 rollout，而真实车没有逐位执行整条旧计划；
-OD 使用恒速图几何； 6.当前动作定义与真实执行位姿之间的差异。
-
-因此，现在不能直接把这 8–10 倍全部叫作“WM learner-distribution failure”。
-
-推荐的归因分解
-
-对同一真实 episode、同一起点 tt，计算四条链。
-
-D0：当前部署 imagined chain
-Policy action
-→ 规划运动学pose
-→ ST-GNN
-→ next action
-
-D1：Action-faithful pose replay
-
-保持 WM latent 转移逻辑不变，但 ego pose 使用环境实际执行后的：
-
-env x/y/theta
-
-
-OD、LD、mask 暂时保持当前实现。
-
-D2：Oracle ego + oracle OD pose
-
-图几何使用真实未来 ego 和 OD pose，latent transition 仍使用当前 WM。
-
-D3：Oracle future latent
-
-直接编码真实未来 observation，作为理论接口上界。
-
-分解：
-
-D0 → D1：
-计划pose与实际执行pose差异
-
-D1 → D2：
-动态图几何近似误差
-
-D2 → D3：
-latent transition自身误差
-
-D3 → expert：
-Policy真实状态误差
-
-
-这是 Round-32 最关键的实验。
-
-3. Action Jacobian 必须使用有限差分，接受
-
-由于当前存在：
-
-pose.detach()
-
-
-和：
-
-z_next.detach()
-
-
-所以解析梯度：
-
-∂zk∂a0\frac{\partial z_k}{\partial a_0}
-
-沿跨步链路会被明确截断。解析 Jacobian 为零并不能证明模型“物理上不响应 action”，只能证明训练图禁止该梯度传播。
-
-因此，应同时报告：
-
-解析梯度
-
-证明当前梯度契约：
-
-autograd Jacobian = 0
-
-数值有限差分
-
-证明前向函数性状：
-
-JaFD(k)=zk(a+ϵ)−zk(a−ϵ)2ϵJ^{FD}_{a}(k) = \frac{z_k(a+\epsilon)-z_k(a-\epsilon)} {2\epsilon}
-
-推荐扰动：
-
-ds：
-±0.10m、±0.25m、±10%
-
-dθ：
-±0.01、±0.03、±0.05rad
-
-κ：
-在保持ds不变时构造±扰动
-
-
-必须先确认扰动未撞 action bound，否则有限差分会被 clip 污染。
-
-4. MoE-off 基线 0.56 应作为新基线，接受
-
-新增结果：
-
-K1e2，MoE-off：
-
-LQR + WM plan：
-success 0.560
-off-road 0.140
-collision 0.080
-
-Exact：
-success 0.560
-
-LQR + repeat：
-success 0.060
-
-
-这说明：
-
-S1≈S2 继续成立；
-S3 崩溃继续成立；
-MoE-on 没有制造主结论；
-MoE-on 对当前候选有轻微负贡献； 5.后续接口审计应默认 MoE-off； 6.未经专项训练的 experts/router 不能进入正式基线。
-
-应锁定：
-
-Round-32开发基线：
-K1e2 + MoE-off + K-anchor-off
-LQR + WM plan = 0.56
-
-
-但需要注意，50 episode 上的 +4pp 只有 2 个翻正 episode，不能把 MoE-off 的绝对提升解释成稳定收益。这里能稳健确认的是“主结论不依赖 MoE 口径”，不是“关闭 MoE 必然提升 4pp”。
-
-5. Mirror 95% 暂不作为硬门，接受
-
-当前 whole-scene mirror 约 0.842，不能马上判定 WM 架构失败，因为：
-
--网络并非显式 SE(2)/reflection-equivariant； -lane slot 排序和地图 topology 未必严格镜像； -route、signal、OD identity 的镜像契约可能仍有细节偏差； -部分基准动作接近零，比例误差不稳定。
-
-第一轮应分指标报告：
-
-动作方向一致性
-动作幅值残差
-latent镜像距离
-物理预测镜像距离
-slot permutation后的一致性
-
-
-仅对以下样本统计方向准确率：
-
-|base dθ| > deadband
-|lateral error| > deadband
-有效左右对应车道存在
-route command可镜像
-
-
-不先锁 95% 总门。
-
-二、对五个 WM 结构隐患的再判断
-
-Coding Agent 核验五项均成立，但“代码存在”不等于“已证明是主瓶颈”。必须按证据排序。
-
-W1：动作只通过 pose 间接进入
-
-高优先级嫌疑。
-
-原因：
-
-R31 已测得动作引起的 latent 改变量远小于自然状态变化； -特别是 ds 通道非常弱； -部署尾段的主要异常又正是 ds overshoot。
-
-但先做有限差分和 Action Swap，再决定是否加显式 action embedding。
-
-W2：缺少直接由 z_ego_next 解码的 ego physical head
-
-高优先级嫌疑。
-
-当前 ego_next_pred 来自 PolicyBackbone/PlanHead，而不是：
-
-z_ego_next → ego physical state
-
-
-这意味着：
-
-ego_next辅助头预测准确
-
-
-不能证明 WM 的 z_ego_next 自身包含未来：
-
-progress； -speed； -heading； -lane-relative error。
-
-应先做 probe：
-
-real future z_ego
-predicted z_ego
-frozen z_ego
-
-
-分别解码这些物理量。
-
-如果真实 future latent 可解码，而 predicted latent 不可解码，才批准增加 ego physical head。
-
-W3：OD 图位置恒速外推，预测结果不回灌
-
-中高优先级，但必须 Oracle 验证。
-
-这可能明显影响：
-
-merge； -cutin； -roundabout； -intersection。
-
-但普通 lane keeping 上未必是主因。
-
-先做：
-
-CV graph
-Oracle future graph
-Predicted graph
-
-
-如果 Oracle graph 对接口误差和尾段动作有显著改善，再考虑将 predicted OD pose 回灌。
-
-W4：mask 固定 t0，presence/entry不参与未来状态
-
-中低优先级。
-
-三秒内对象进出频率如果很低，固定 mask 可暂时接受。先统计真实 turnover：
-
-h1...h6 disappear rate
-entry rate
-identity switch rate
-
-
-没有明显 turnover 就不要改。
-
-W5：latent target encoder 同步移动
-
-真实风险，但当前优先级低于 W1/W2/W3。
-
-detach() 不能阻止 encoder 在其他路径中更新，因此 future latent target 是移动目标。
-
-但是否已经造成：
-
-collapse； -共适应； -下游物理信息丢失；
-
-尚未有证据。
-
-先测：
-
-effective rank
-target drift
-fixed anchor reconstruction
-physical linear probe
-
-
-只有成立后才做 EMA target encoder canary。
-
-三、Round-32 不应平铺执行 11 个 probe
-
-建议三级执行，前一级决定后一级。
-
-Level 1：决定主根因
-
-必须先完成。
-
-P1：部署链四段归因
-D0 当前planned-pose chain
-D1 actual ego pose replay
-D2 actual ego+OD geometry
-D3 oracle future latent
-
-
-输出：
-
-E_state
-E_interface
-E_action
-ds overshoot
-dtheta error
-kappa error
-
-
-按 horizon 和路型分层。
-
-P2：Action Fidelity
-
-包括：
-
-有限差分 Jacobian
 Action Swap
-zero action
-ds/dtheta/kappa intervention
 
-P3：Ego State Sufficiency
+若 WM 真正理解：
 
-解码：
+zt+1=f(zt,at)z_{t+1}=f(z_t,a_t)
 
-progress
-speed
-heading
-lateral error
-heading error
+那么匹配的真实 action 应比随机、反向或 zero action 更容易预测真实 next state。
 
-P4：Policy Latent Lipschitz
+目前：
 
-比较真实 latent 与 WM latent 邻域。
-
-Level 1 决策
-若动作忠实度差
-GO_ACTION_CONDITIONING
-
-若 real latent 本身不包含必要物理量
-GO_STATE_REPRESENTATION_FIX
-
-若 WM latent误差不大但Policy放大严重
-GO_POLICY_INTERFACE_ROBUSTNESS
-
-若实际pose/动态图解释大部分误差
-GO_ROLLOUT_PROTOCOL_FIX
+matched top-1 = 10.2%
+matched top-3 = 63.8%
+margin ≈ 0
 
 
-Coding Agent 当前给出的三种决策选项里缺少后两项，必须补上。
+五候选随机 top-1 期望约 20%，当前 matched 甚至没有表现出可靠优势。不同 action 下预测误差 spread 约 4e-3，远小于基准预测误差约 0.08。这说明预测函数几乎无法利用 action 区分 next state。
 
-Level 2：决定 WM 内部结构
+因此：
 
-只有 Level 1 指向 WM 后执行。
+动作条件化不足不是推测，而是 Level-1 已经获得的最明确机制证据。
 
-P5：Latent Rank/Collapse
-P6：Prior vs Learned Residual
-P7：Graph Oracle
-P8：Mask Turnover
-P9：Encoder Target Drift
+这也符合成熟 World Model 的一般设计。DreamerV3 通过状态和动作预测未来表示，并利用 imagined trajectory 改善行为；TD-MPC2 同样把潜在动力学明确建模为 action-conditioned dynamics，而不是仅依赖预计位置间接编码动作。
 
-这些决定：
+2. 不能简单说“ego dynamics 已经保留得很好”
 
-ego physical head
-predicted geometry回灌
-presence soft-mask
-EMA encoder
+round32_audit_summary.md 将 progress、speed、heading 的 WM 保留率列为 0.91–1.10，但 frozen baseline 同样很高：
+
+progress frozen ≈1.00
+speed frozen ≈0.87
+heading frozen ≈1.08
 
 
-各自是否有资格进入 canary。
+这说明这些量可能主要来自：
 
-Level 3：决定联合训练
+-静态场景相关性； -当前状态与短时间未来的强自相关； -数据集中速度变化较小； -线性 probe 可以依靠非因果 shortcut。
 
-仅当状态、动作和图结构都通过后执行。
+所以：
 
-P10：Gradient Conflict
-
-对以下损失分别 backward：
-
-WM latent
-WM physical
-ego physical
-real-state action
-interface consistency
-trajectory
-
-P11：Joint Drift Hook
-
-固定 anchor set，记录：
-
-encoder drift
-WM prediction drift
-Policy real-state drift
-Policy WM-state drift
-physical decoder drift
-
-四、关于 WM 与 Policy 是否联合训练
-明确裁决
-
-不批准：
-
-WM + Encoder + PolicyBackbone + PolicyHead全部解冻
-→ 总loss一次backward
+WM保留率高
 
 
-批准未来采用以下顺序。
+不等同于：
 
-Phase W：WM 适配
+WM正确预测了动作导致的ego dynamics
 
-冻结：
 
+尤其 progress 的 frozen 对照已经约为 1.0，这个 probe 无法证明 WM 对 progress 有动态预测增益。
+
+必须补一个条件化增益指标
+
+后续应报告：
+
+ΔRWM2=RWM2−Rfrozen2\Delta R^2_{\text{WM}} = R^2_{\text{WM}} - R^2_{\text{frozen}}
+
+以及：
+
+ΔRaction2=Rcorrect action2−Rshuffled action2\Delta R^2_{\text{action}} = R^2_{\text{correct action}} - R^2_{\text{shuffled action}}
+
+如果 WM 与 frozen 几乎相同，说明所谓“保留”来自状态惯性，不是动作动力学。
+
+3. Lane-relative 信息损失是第二个真实问题
+
+真实 z_ld 逐槽表示可以很好解码：
+
+lane_lat  R² ≈0.90
+lane_head R² ≈0.93
+
+
+但 WM latent 的保留率仅：
+
+lane_lat  0.61
+lane_head 0.77
+
+
+且逐槽展开明显优于 mean pooling，说明 lane slot 结构本身很重要。
+
+更值得警惕的是：
+
+WM 的 OD/LD latent 可以高精度解码 ego progress/speed，而真实 OD/LD latent 对这些量的可解码性很低。
+
+这说明 imagined latent 可能出现语义串扰：
+
+z_ld / z_od
+被ego运动信息污染
+
+
+而不是分别保持：
+
+ego状态
+对象状态
+车道状态
+
+
+这可能解释为什么 latent cosine 尚可，但 Policy 在 imagined latent 上动作明显漂移。
+
+因此，动作条件化 canary 不能只看：
+
+E_interface有没有下降
+
+
+还必须检查：
+
+lane信息是否恢复
+OD/LD中的ego泄漏是否减少
+
+
+否则显式 action embedding 可能进一步把 ego action 广播到所有 slot，反而强化语义污染。
+
+二、对“D2→D3 97%”的保留意见
+1. D3 本身被定义为 oracle latent
+
+D3 直接使用真实未来 observation 编码出的 latent，误差被定义为零。因此：
+
+D2 → D3
+
+
+天然包含所有尚未解释的差异。
+
+所以“97%”准确表达的是：
+
+pose replay 和当前 oracle geometry 替换只解释了约 3%，其余 gap 留在 latent transition/状态更新体系中。
+
+但它不能进一步区分：
+
+transition 网络本身；
+action conditioning； -latent target 漂移； -slot identity； -mask； -step embedding； -编码器 target 共适应； -状态语义串扰； -未记录的上下文差异。
+
+所以我建议将报告措辞从：
+
+主瓶颈 = latent transition
+
+
+修正为：
+
+主瓶颈定位在 latent-state evolution block，
+其中 action conditioning 是首个获得直接失败证据的子机制。
+
+2. D1→D2 为零的证据仍有限
+
+本轮 D1/D2 无法计算完整的动作级：
+
+π(z_hat_k)
+
+
+因为录制缺失部分 t0 context 键；同时位姿置零自检表明模型本身对 OD/LD pose 通道就很不敏感。
+
+因此：
+
+Oracle geometry没有改善
+
+
+可能表示两件事：
+
+动态图确实不重要； 2.模型没有有效消费图 pose，所以换 oracle pose 也没有作用。
+
+报告已经意识到这一 caveat。因此当前可以说：
+
+不优先改动态图。
+
+但不应该永久关闭动态图支路。显式动作条件化修复后，图几何通道可能才变得可消费。
+
+三、是否批准 GO_ACTION_CONDITIONING
+批准，但只批准最小、可逆 canary
+
+round32_decision.md 提议：
+
+ds/dθ/κ归一化特征
++ 零初始化动作残差
++ alpha=0逐位兼容
++ 60/40 expert/policy数据
++ 保持detach
++ 不BPTT
++ 不扩容
+
+
+整体正确。
+
+但我建议不要一步把同一个 action embedding 无差别加入 ego、OD、LD 三类 transition。因为 P3 已揭示 OD/LD latent 出现 ego 运动泄漏，无差别广播 action 可能加重这个问题。
+
+四、建议的动作条件化三臂
+AC0：当前模型
+
+不训练，基线。
+
+AC1：仅 Ego Action Conditioning
+
+归一化动作：
+
+ds_norm
+dtheta_norm
+kappa_norm
+speed_intent = ds / dt
+
+
+生成：
+
+a_emb = MLP(action_features)
+
+
+只进入：
+
+ego_transition
+
+
+形式：
+
+zego′=zego+Tego(hego,zego)+αegoAego(zego,a)z'_{ego} = z_{ego} + T_{ego}(h_{ego},z_{ego}) + \alpha_{ego}A_{ego}(z_{ego},a)
+
+初始化：
+
+A_ego输出层全零
+alpha_ego = 0
+
+
+优点：
+
+-直接修最弱的 ds 通道； -不会立刻把 action 广播到 lane/object latent； -便于判断 ego 动作条件化是否已经足够改善整条链。
+
+AC2：Ego + Relative Scene Conditioning
+
+只有 AC1 的 ego action fidelity 有效，但 OD/LD 相对状态仍明显错误时才运行。
+
+不要简单将同一个 a_emb 加到每个 OD/LD slot。更合理的是使用 ego motion compensation：
+
+relative_action_features:
+    delta_x_ego
+    delta_y_ego
+    delta_heading_ego
+    delta_speed_ego
+
+
+分别作用于：
+
+od_transition
+ld_transition
+
+
+这表达的是：
+
+自车动作如何改变相对对象和相对车道状态。
+
+而不是暗示道路或其他车辆本身由 ego action 驱动。
+
+五、训练范围
+
+第一轮 AC1：
+
+训练
+ego action embedding
+ego transition residual支路
+必要的ego latent physical decoder
+
+冻结
+主Encoder
+原ST-GNN主体
+OD transition
+LD transition
 PolicyBackbone
 Primary
 PolicyHead
@@ -441,238 +295,222 @@ ValueHead
 MoE
 
 
-训练：
+为什么第一轮不训练整个 WM？
 
-Encoder/WM，具体范围由probe决定
+因为我们需要回答单一因果问题：
 
+显式 action conditioning 能否修复 ds 不敏感和 rollout overshoot？
 
-但若 target drift 严重，应：
+如果同时解冻所有 transition，结果无法归因。
 
--冻结主 Encoder，仅训 transition； -或使用 EMA target encoder； -不能让 online encoder 和 target 表示任意共漂。
+六、数据建议
+第一阶段不必立刻 60/40 混合大训练
 
-Phase P：Policy 接口训练
+先做两个小 canary。
 
-冻结：
+C-A：Expert transitions only
 
-Encoder
-WM
+验证结构本身是否能学习 action discrimination。
 
+目标：
 
-训练：
+Action Swap top-1
+ds-progress monotonicity
+teacher-forced prediction
 
-PolicyBackbone
-Primary
-PolicyHead
+C-B：Expert 60% + Policy 40%
 
+验证是否能迁移到部署分布。
 
-监督：
+如果 C-A 都无法提升 Action Swap，问题在结构或监督，不是 Policy 数据不足。
 
-真实状态 → expert action
-WM状态 → stopgrad(真实未来状态下的Policy动作)
+如果 C-A 可改善但 C-B 部署链仍无改善，问题可能在 Policy-distribution adaptation 或 Stage B 接口。
 
-Phase WP：交替训练
+七、需要新增的 ego physical anchor
 
-一个 cycle 中：
+我建议 AC1 同时增加一个很小的 z_ego_next 物理解码头，但必须作为独立开关：
 
-W-step：
-冻结Policy，更新WM
-
-P-step：
-冻结WM，更新Policy
-
-
-两边使用更新后的分布，但梯度不跨模块。
-
-这是第一种正式“联合训练”，也是当前最合理方案。
-
-Phase E2E：有限跨模块反传
-
-仅当：
-
-WM物理预测已过门
-Policy real-state已过门
-E_interface仍显著过大
+z_ego_next
+→ [
+    delta_progress,
+    speed,
+    delta_heading
+]
 
 
-才允许：
+第一轮先不加入 lane-relative 目标，因为 lane-relative 状态主要在 z_ld 中，且当前正存在 slot 语义和 ego 泄漏问题。
 
-interface loss
-→ ST-GNN最后一层
+三个候选应分开：
 
+AC1：
+显式action conditioning
 
-而且：
+AC1-P：
+action conditioning + ego physical anchor
 
-Encoder 继续冻结； -WM physical loss 权重必须主导； -只开放 transition 最后一层； -低 LR； -必须有 anchor drift hook； -出现物理退化立即回滚。
-五、Round-32 验收准则
-Gate A：工具可信
-所有hook默认关闭时前向逐位一致
-不改变RNG序列
-不写checkpoint
-相同输入重复运行逐位一致
-finite-difference结果对epsilon稳定
-horizon/time index无错位
-
-Gate B：Action Fidelity
-
-首轮不要先设绝对 Jacobian 数值，采用相对判定：
-
-matched action预测误差
-<
-random/swap/opposite action预测误差
-
-ds perturbation与progress单调
-dtheta perturbation与heading方向一致
-action差异在h1–h5不完全消失
-
-Gate C：State Sufficiency
-
-推荐门：
-
-Real latent：
-progress/speed/heading probe R² >=0.80
-lateral/heading error R² >=0.90
-
-WM latent：
-相对Real latent R²保留率 >=80%
+P-only：
+ego physical anchor但无action conditioning
 
 
-若 real latent 自己不过，直接进入 state representation fix。
+否则若结果改善，将无法判断来自 action 输入还是物理监督。
 
-Gate D：Policy amplification
+八、canary 验收标准
+Gate 0：兼容性
+alpha=0：
+所有forward max_abs_diff = 0
+旧checkpoint missing/unexpected = 0
+训练关闭时RNG序列不变
+MoE-off baseline逐位复现
 
-定义：
+Gate 1：Action Fidelity
 
-Ak=∥π(z^k)−π(zkreal)∥∥z^k−zkreal∥+ϵA_k = \frac{\|\pi(\hat z_k)-\pi(z_k^{real})\|} {\|\hat z_k-z_k^{real}\|+\epsilon}
+相对 AC0：
 
-要求输出 P50/P90/P95。
+Action Swap matched top-1：
+10.2% → 至少35%
 
-若 WM state distance 仅温和增长，但 AkA_k 急剧增长，主因在 Policy interface，而不是继续堆 WM。
+top-3：
+63.8% → 至少85%
 
-Gate E：部署归因
+matched margin：
+必须转为正
 
-分别统计 D0→D1→D2→D3 的误差下降比例。
+ds FD sensitivity：
+相对 dθ/κ 的差距
+从26–50×缩小到 <=10×
 
-某一段解释 >=40%总gap：
-判定该段为主瓶颈
+ds-progress单调率 >=90%
+zero/opposite action明显劣于matched
 
-20%–40%：
-共同瓶颈
 
-<20%：
-次要因素
+第一版不要求 top-1 直接达到 70%，因为当前起点几乎随机，35% 已足以证明结构有效。
 
-Gate F：新结构许可
+Gate 2：物理语义
+progress/speed：
+WM相对frozen的增益为正
 
-任何结构修改必须满足：
+lane_lat/lane_head保留率不得下降超过5pp
 
-对应oracle/probe解释 >=30%接口误差
-且
-不是仅改善latent loss
-且
-有明确零初始化/逐位兼容方案
+OD/LD latent中的ego progress/speed泄漏
+不得增加超过10%
 
-六、对最新建议的反驳
 
-Coding Agent 提议 Round-32 完成后只允许：
+如果 action fidelity 提升但 lane 保留继续恶化，不允许进入完整训练。
+
+Gate 3：部署接口
+E_interface ds：
+h3–h5至少下降30%
+
+E_action ds：
+h3–h5至少下降25%
+
+h5 plan_ds overshoot：
+1.66m至少下降40%
+
+真实状态Policy action误差：
+退化 <=5%
+
+Gate 4：闭环
+
+使用：
+
+K1e2
+MoE-off
+WM-plan
+fixed LQR
+calib50 paired
+
+
+最低：
+
+success >=0.58
+相对0.56至少+2pp
+off-road <=0.14
+collision <=0.08
+timeout不高于当前
+
+
+由于 50 episodes 的 +2pp 只是一个 episode，只能作为继续许可，不能作为收益结论。
+
+进入 clean150 的门应更高：
+
+calib50 success >=0.60
+或
+接口/动作链指标达到Gate 3强门
+
+九、什么时候允许 Policy–WM 交替训练？
+
+动作条件化 canary 通过之后，才进入：
+
+W-step
+Policy冻结
+WM在expert + policy transitions上更新
+
+P-step
+WM冻结
+Policy接受real latent和WM latent训练
+
+
+损失：
+
+Lreal-action=∥π(zreal)−aexpert∥L_{\text{real-action}} = \|\pi(z^{real})-a^{expert}\| Linterface=∥π(z^WM)−sg⁡(π(zreal))∥L_{\text{interface}} = \|\pi(\hat z^{WM})-\operatorname{sg}(\pi(z^{real}))\|
+
+先交替，不跨模块反传。
+
+成熟的 World Model 方法也通常保持“模型学习”和“行为学习”的职责边界。DreamerV3 从真实经验学习世界模型，再利用 imagined trajectories 改善行为；TD-MPC2 则使用明确 action-conditioned latent dynamics，并通过控制相关目标约束模型。二者都不是把全部模块无约束地用单一损失一起拖动。
+
+十、对 round32_decision.md 的最终修改建议
+
+建议把 decision 从：
 
 GO_ACTION_CONDITIONING
-GO_STATE_REPRESENTATION_FIX
-GO_ALTERNATING_WM_POLICY_TRAINING
-BLOCKED_INSTRUMENTATION
 
 
-这个集合不完整，必须增加：
+细化为：
 
-GO_POLICY_INTERFACE_ROBUSTNESS
-GO_ROLLOUT_PROTOCOL_FIX
-GO_DYNAMIC_GRAPH_FIX
+GO_EGO_ACTION_CONDITIONING_CANARY
 
 
-因为当前 8–10 倍差距未必主要来自 WM transition：
+并锁定：
 
--可能是 Policy 对 latent 小误差过敏； -可能是计划 pose 与实际执行 pose 不同； -可能是 0.5 秒重规划替换三秒计划； -可能是 OD 图几何恒速近似； -可能是多个因素共同作用。
-
-在归因完成前，把决策限定为“改 WM 或联合训练”仍然过早。
-
-七、给 Coding Agent 的正式推进指令
-批准Round-32只读审计，但调整为三级决策流程。
-
-统一口径：
-- K1e2
-- MoE-off
-- K-anchor-off
-- rollout_semantic=既有最佳口径
-- LQR参数不变
-- baseline success=0.56，仅作开发参考
-
-Level 1必须先完成：
-1. D0/D1/D2/D3部署链四段归因；
-2. Action有限差分Jacobian；
-3. Action Swap/zero/opposite干预；
-4. Ego状态充分性probe；
-5. Policy latent Lipschitz。
-
-只有Level 1指向WM内部后，执行Level 2：
-6. latent rank/collapse；
-7. prior-vs-residual；
-8. CV/oracle/predicted graph；
-9. mask turnover；
-10. target encoder drift。
-
-只有Level 1/2证明需要联合适配后，执行Level 3：
-11. loss梯度冲突；
-12. joint drift anchor hook。
-
-所有hook必须：
-- 默认关闭；
-- max_abs_diff=0；
-- RNG不变；
-- 不写checkpoint；
-- 不改变训练/eval行为。
-
-本轮禁止：
-- 训练；
-- action embedding；
-- ego physical head；
-- predicted pose回灌；
-- EMA encoder；
-- BPTT；
-- 联合解冻；
-- DAgger/MoE/PPO/GRPO；
-- LQR修改。
-
-decision.md允许：
-GO_ACTION_CONDITIONING
-GO_STATE_REPRESENTATION_FIX
-GO_POLICY_INTERFACE_ROBUSTNESS
-GO_ROLLOUT_PROTOCOL_FIX
-GO_DYNAMIC_GRAPH_FIX
-GO_ALTERNATING_WM_POLICY_TRAINING
-BLOCKED_INSTRUMENTATION
-
-不得自行进入下一阶段训练。
+1. 先只给ego transition显式动作残差；
+2. AC0 / AC1 / P-only / AC1-P四臂；
+3. 不解冻原WM主体；
+4. 不改OD/LD transition；
+5. 不BPTT；
+6. 不训练Policy；
+7. MoE-off；
+8. Action Fidelity + lane retention + leakage必须同时验收；
+9. AC1通过后才采60/40 policy transition做第二阶段；
+10. 未过门不自动扩大模型或数据。
 
 最终判断
 
-Coding Agent 对我上一轮建议的五项修正都成立，尤其是：
+Round-32 已经把最大根因缩小到足够动刀的程度：
 
-Q2 已完成首轮审计； -解析 Action Jacobian 会被 detach 人为置零，必须以有限差分为主； -MoE-off 0.56 应成为一致口径； -mirror 暂时只能作为分解诊断； -必须增加部署状态分布归因。
-
-但当前依然不能直接进入“WM/Policy交替训练”。
-
-Round-32 的真正目标是把：
-
-部署链8–10倍误差放大
-
-
-精确分配给：
-
-动作条件化
-状态表示
-动态图近似
-执行pose差异
-重规划协议
-Policy敏感性
+真实状态表示基本充分
+执行pose差异不是主因
+当前动态图不是首要解释
+Policy中位敏感性不是主因
+latent evolution block解释绝大多数gap
+其中动作条件化几乎失效，尤其ds通道
 
 
-只有完成这一步，下一轮网络改造才有资格做到“一次只修一个主根因”，而不是再次同时改 WM、Policy、loss 和数据，最后无法判断成功或失败来自哪里。
+因此动作条件化 canary 是对的。
+
+但要防止从一个错误走向另一个错误：
+
+不能因为 action conditioning 弱，就把 ego action embedding 广播给所有 ego/OD/LD latent，再全量解冻，以至于加强当前已经存在的语义串扰。
+
+正确的第一刀应非常小：
+
+只修 ego transition 的显式动作条件化
++
+独立验证 ego physical anchor
++
+严格监控 lane 保留与 OD/LD ego 泄漏
+
+
+如果它能让 Action Swap 从近随机变为明确可辨，同时降低 h3–h5 的 ds overshoot，再进入 Policy 分布适配和 WM–Policy 交替训练。
+
+这条路径比继续调 lane loss、tail projection、DAgger 或 PPO 更接近真正的 root cause，也最有希望把当前同口径 0.56 推向 0.60 以上，再逐步逼近 IDM+Pure Pursuit 的 0.756。
