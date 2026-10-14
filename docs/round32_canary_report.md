@@ -7,6 +7,7 @@
 ## 0. 生产改动与 Gate 0（兼容性）
 
 - 改动（+103/−3）：`net/st_gnn.py`（`action_ego` 惰性残差 + `alpha_ego` 标量，末层零初始化；`forward(action=)`）、`net/model.py`（`_rollout` 传 `a_{k-1}`；`ego_phys` 惰性 + `set_action_ego/set_ego_phys`）、`pipeline/stages.py`（`_wm_predictions` 传 `raw_action`；5 个冻结清单增 `ego_phys.`）。
+- **α 冷启动（训练口径，非默认）**：生产默认 = 末层零初始化 + α=0（Gate 0 逐位兼容用）；**训练时**训练器对 α 冷启动置 1（`canary_train.py --alpha-init=1.0`，载入 init 后；否则为死支路）。证据：日志首行 `alpha=1.0000`；step1 `new_grad=2/5`（末层即获梯度）→ step2 `5/5`；终值 α=1.1267（AC1）/0.7743（AC1-P）；**ckpt vs M0 init 共享键逐位 0 差异**（无其他参数被改）。
 - **Gate 0 七项全 PASS**：默认模型 = HEAD 键集（168、0 新增）；旧 ckpt strict 载入 0/0/0；关闭/α=0 前向逐位；RNG 不变；梯度只流新参数；**OD/LD 不广播**；baseline↔semantic z-path 逐位等价；全仓 966 tests passed。
 
 ## 1. Gate 1（Action Fidelity；`semantic_v1_independent` N=200）
