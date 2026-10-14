@@ -1,534 +1,504 @@
-审阅结论
+你对“走廊摘要”的警惕是合理的。结合 round34a_report.md，我认为需要把两个问题分开：
 
-我接受 round33c_report.md 的实验事实，但不完全接受“下一步直接进入静态障碍显式表示 + 走廊占用 + 路径条件化纵向规划”作为唯一主线。
+当前 others[16:21] 确实是网络输入，而且属于人工构造的静态障碍摘要；
+长期方案不应把它作为主要感知或规划依据，但现在也不能直接删除，因为它已经进入现有模型的数据契约。
+一、“软走廊”是不是网络输入？
 
-更准确的结论是：
+是。
 
-动作条件化 V2 已经把 World Model 与 Policy 的接口误差改善约 10% 到 12%，证明方向有效；但它没有提升总成功率，并把失败从碰撞、超时部分转移成了 merge 和收费站 off-road。当前瓶颈已经从“WM 不理解 action”推进到了“缺少路径级横纵解耦、静态障碍表达不足，以及 ego 信息向 OD/LD latent 串扰”。
+当前岗亭等静态障碍通过：
 
-因此：
+others[16:21]
 
-B1 不晋级为新 baseline，正确； -不进入 60/40 Policy 分布适配，正确； -不启动 DAgger、MoE、RL，正确； -下一阶段应正式启动你刚锁定的两条架构主线：
-横向曲率路径 + 路径条件化纵向速度/进度
-显式 ego-motion 坐标补偿 + 结构化 OD/LD anchor
 
-但要用小规模、可回滚、具备完整 hooks 的方式推进。
+中的 5 维静态障碍特征进入网络，大致包括：
 
-一、本轮到底取得了什么进展？
-1. World Model 与 Policy 的接口确实改善了
+present
+归一化距离 gap
+相对方位 bucket
 
-相对基线，B1 得到：
 
-Policy在WM状态与真实状态上的ds差异：下降10.1%
-最终动作误差：下降11.9%
-第5步ds上冲：下降12.3%
-真实状态上的Policy误差：下降4.3%
+Round-34A 已动态验证：
 
+-收费站岗亭在 8/8 测试中都进入 observation； -识别类型均为 TollGateBuilding； -距离误差小于约 1.4e-6m； -将该输入置零后，Encoder 上下文变化约 0.71–0.81，融合 latent 变化约 0.13–0.19，说明网络确实消费了它。
 
-这与上一版 AC1 的全面恶化形成鲜明对照，说明以下修改是真正有效的：
+所以严格说，它不是完整“走廊”，而是：
 
-删除重复的speed-intent输入
-取消可学习alpha
-固定残差增益
-加入delta_progress / delta_speed / delta_heading监督
+外部模块计算出的、关于最近静态障碍物的低维摘要。
 
+二、你的担忧是否成立？
+成立：它是很强的外部先验
 
-所以 Action Conditioning V2 不是失败，而是：
+如果这些 5 维特征直接来自模拟器真值，例如：
 
-成功地把一个不稳定的动作条件分支改造成了接口稳定器。
+是否存在静态障碍
+最近障碍距离
+相对方向类别
 
-2. 但动作因果仍没有学扎实
 
-B1 的结果：
+那么确实相当于将部分任务外包给 observation builder：
 
-Action Swap top-1：0.192，未达到0.35
-top-3：0.914，通过
-ds-progress单调率：0.60，未达到0.90
+外部代码：
+识别哪个对象是静态障碍
+选择最相关对象
+计算距离和方向
+压缩成5维
 
+网络：
+只消费摘要
 
-这说明模型大体能排除明显不合理的动作，所以 top-3 很高；但要在多个相近动作中找出真正正确的一个，能力仍然较弱。
 
-更关键的是：
+这会缩减网络的实际 scope，也可能造成：
 
-对ds的敏感度已经增强
-但响应方向并不稳定
+-训练和部署依赖模拟器语义标签； -真实传感器下无法可靠生成相同字段； -多个障碍压缩成单个摘要，丢失形状和空间结构； -网络学会依赖人工 shortcut； -摘要生成规则一变，Policy 就分布漂移。
 
+因此，如果你的最终目标是：
 
-也就是：
+网络从结构化场景对象、车道和导航中自主完成规划，
 
-WM 已经“听得到 action”，但还没有稳定理解 action 导致的物理后果。
+那么静态障碍 5 维摘要不应该成为长期主输入。
 
-3. 成功率没有提高，失败模式发生了转移
+但它并没有替网络解决规划问题
 
-闭环结果：
+Round-34A 还发现一个很关键的反例：
 
-success：0.56 → 0.56
-collision：0.08 → 0.06
-timeout：11 → 9
-off-road：0.14 → 0.20
-route completion：0.862 → 0.855
+岗亭输入确实存在
+网络也确实消费
+但Policy对它的响应方向反了
 
 
-它减少了一部分碰撞和超时，但新增了：
+具体来说：
 
-merge off-road ×2
-tollgate off-road ×1
+障碍present → ds增大
+障碍进入规划走廊 → 反而加速
+将障碍输入置零 → 29/35步减速
 
 
-而收费站仍然：
+也就是说，这个外部摘要不仅没有解决问题，还被 Policy 学成了危险 shortcut。
 
-success = 0
+因此当前失败不能归纳成：
 
+外部模块已经处理好了障碍，只是网络偶尔失误
 
-这说明 B1 改善了纵向进度和部分安全响应，却没有产生更合理的路径级规划。
 
-4. 收费站问题已证明不仅是纵向制动
+更准确的是：
 
-收费站碰撞案例中，B1 已经做到：
+外部模块提供了障碍摘要，但摘要缺少形状和路径对应关系，网络又错误解释了其因果方向。
 
-碰撞前计划停车余量约 +8.84m
-min-TTC 从1.43提升到2.28
+三、长期应该怎么处理这个输入？
+不建议继续强化“软走廊”
 
+不要再增加：
 
-却仍然碰撞。
+更复杂的人工走廊分数
+手写安全等级
+手写目标通道代价
+人工规划可行性标签直接作为Policy输入
 
-这说明至少这一案例不是简单的：
 
-ds太大
-刹车太晚
+否则会逐步变成：
 
+规则规划器先做大部分决策
+→ 网络只学规则规划器的输出
 
-而更可能是：
 
-横向路径经过岗亭
-车体footprint与静态障碍冲突
-目标通道选择错误
-路径几何不合理
+这不符合你希望保留的：
 
+IL + RL + MoE + World Model + rollout
 
-所以 Coding Agent 提议做收费站/merge 的路径级归因是必要的。
 
-5. latent 语义串扰仍然严重
+总体范式。
 
-尽管 action 只显式进入 ego transition，B1 中仍出现：
+推荐改成显式结构化静态对象
 
-聚合OD/LD中的ego speed信息增加19.1%
-OD pool中的ego progress信息增加46.9%
+长期输入应是：
 
+Static-object slots:
+    类型
+    相对位置 x/y
+    朝向
+    长宽或多边形
+    mask
+    置信度
 
-这说明：
 
-ego action信息
-→ z_ego
-→ 图消息传递
-→ z_od / z_ld
+而不是单个 5 维摘要。
 
+例如收费站应至少表达：
 
-仍然发生明显泄漏。
+左岗亭几何
+右岗亭几何
+每个闸口的可通行间隙
+静态边界多边形
 
-因此，我们之前讨论的长期方案是必要的：
 
-几何坐标变化由解析层负责
-ego/OD/LD latent分别承担语义和残差
+Policy 自己根据候选路径判断：
 
+哪条路径会与哪个静态对象冲突
 
-而不能继续让 ST-GNN 自由地把 ego motion 写进所有节点。
 
-二、对 Coding Agent 下一步建议的修正
+这与 PLUTO 使用动态 agent、静态障碍物、地图等结构化输入，并显式建模横向和纵向行为的思路更接近。其工作特别强调显式横纵向建模和规划辅助约束，而不是仅消费一个总括的障碍分数。
 
-Coding Agent 推荐：
+SparseDrive 也将场景表示为稀疏实例，用实例表示连接感知、跟踪、地图、预测和规划，并使用碰撞感知的轨迹选择，而不是将场景压成一个人工安全分数。
 
-静态障碍显式表示
-+ 走廊占用
-+ path-conditioned纵向剖面
+当前 5 维摘要怎么处置？
 
+建议分三阶段。
 
-方向总体正确，但三项不能一次性全部实现，否则又会失去归因能力。
+阶段 1：保留但降级为诊断输入
 
-下一阶段应拆成两个连续工作包。
+在现有模型中先保持字段不变，避免破坏 checkpoint，但新增严格消融：
 
-Round-34A：路径级事实审计和静态障碍契约
+原始摘要
+摘要置零
+摘要随机置换
+只保留present
+只保留距离
 
-先不训练。
 
-任务 1：收费站和 merge 路径级归因
+确认现有 Policy 对它的依赖和错误因果。
 
-每个失败 episode 保存：
+阶段 2：加入显式静态对象 slots
 
-六步plan的x/y/theta
-六步ds/dtheta/kappa
-插值后的30个reference points
-车辆footprint沿轨迹扫掠区域
-目标车道中心线和边界
-岗亭、建筑、静态障碍物轮廓
-最近碰撞距离
-首次越界点
-LQR preview命中哪一段
+训练新模型时同时提供：
 
+旧5维摘要
+显式静态对象slots
 
-分类：
 
-路径本身撞障碍
-路径本身越界
-路径可行但LQR跟踪出界
-目标通道选择错误
-静态障碍未进入模型
-障碍进入模型但Policy未响应
+但对旧摘要加入高比例 dropout，例如：
 
+50% → 80% → 100%
 
-这一步非常关键，因为：
 
-收费站碰撞和 merge off-road 不能混成一个“静态障碍问题”。
+逐步迫使网络转向结构化对象。
 
-任务 2：静态障碍输入契约审计
+阶段 3：正式删除摘要
 
-目前收费站岗亭可能只存在于 others 的弱走廊摘要里，而不在 OD/LD 主体表示中。
+只有当：
 
-必须动态记录：
+显式对象模型闭环不退化
+收费站成功率提高
+静态障碍干预方向正确
 
-岗亭是否进入obs
-进入哪个字段
-字段值是否随距离变化
-Encoder输出是否变化
-Policy latent是否变化
-最终ds/kappa是否变化
 
+才从正式 schema 中移除 5 维摘要。
 
-做遮挡和干预：
+四、对 Round-34A 最新结果的审阅
 
-原始静态障碍输入
-静态障碍字段置零
-岗亭距离增减
-左右位置镜像
-障碍移入/移出规划走廊
+这轮报告非常重要，因为它推翻了几个此前假设。
 
+1. 失败几乎全部发生在规划路径层，而不是控制层
 
-如果输入字段变化明显，但 Policy 不响应，问题在网络消费。
+在 19 个失败 episode 中：
 
-如果输入里根本没有岗亭几何，才批准新增静态障碍表示。
+目标通道选择错误：6
+路径本身越界：    6
+路径本身撞障碍：  6
+未归因：          1
 
-任务 3：完善 probes/hooks
 
-我同意你强调动态 probe 优先于我单独做静态代码审查。以后所有新模块强制具备以下 hooks。
+其中：
 
-输入 hook
-raw obs
-normalized obs
-mask
-slot identity
-coordinate frame
-timestamp
-units
-valid range
+收费站失败：
+10/10属于路径级
 
-几何 hook
-ego pose delta
-OD/LD anchor before warp
-anchor after warp
-expected analytic transform
-transform residual
-slot permutation
+merge越界：
+6/7属于路径级
 
-网络 hook
-每个模块输入/输出shape
-mean/std/min/max
-effective rank
-mask ratio
-gradient norm
-update norm
-activation saturation
+路径可行但LQR跟踪失败：
+0
 
-Policy rollout hook
-真实latent
-WM latent
-PolicyBackbone latent
-action_mu
-plan 6步
-累计pose
-LQR reference
-actual executed pose
 
-数据契约 hook
+而路径预测的首次无效位置经常比车辆真正出界提前 26–837 个环境步；路径横向余量已经接近零或离道，但实际车辆仍有约 1.0–1.5 米余量。
 
-每一行保存：
+推论
 
-obs_t
-policy_action
-expert_action
-executed_action
-obs_t+1
-tracker mode
-coordinate frame
-checkpoint hash
-schema version
+之前担心 LQR 把可行计划跟坏，在本批次中没有证据。
 
+当前主要问题是：
 
-这些 hooks 默认关闭，开启时不得改变随机数序列和模型输出。
+Planner自己先规划错了
 
-Round-34A 验收
 
-只有回答以下问题后才进入结构修改：
+因此继续调 LQR 是错误方向。
 
-1. 收费站失败中，路径本身错误占比是多少？
-2. merge off-road中，横向路径与LQR跟踪各占多少？
-3. 静态障碍是否存在于输入？
-4. 存在于输入后，Encoder/Policy是否真正消费？
-5. footprint连续扫掠是否在碰撞前已判定不可行？
+2. 最大问题是目标通道选择错误
 
+收费站中最典型的失败不是没看到岗亭，而是：
 
-门建议：
+岗亭存在于输入
+前方还有空闲通道
+但路径仍选择驶入岗亭所在车道
+且未及时完成必要变道
 
-至少90%的新增失败可归因到明确类别
-所有关键输入字段的坐标系、单位、mask可验证
-遮挡干预的输出响应可重复
-工具开启/关闭bit-exact
 
-三、Round-34B：正式启动新动作表示
+这说明当前 Policy 缺少的不是单纯障碍距离，而是：
 
-你已经确认长期使用：
+目标通道选择
+路线与通道的一致性
+候选路径几何
+路径可通行性
 
-横向曲率路径
+3. 静态障碍“表示缺失”假设被否定
+
+Round-34A 明确证明：
+
+岗亭进入obs
+网络消费岗亭输入
+Policy也有横向响应
+
+
+所以不能继续说：
+
+收费站失败是因为模型完全没看到岗亭
+
+
+真正问题是：
+
+表示过于压缩
 +
-基于路径的纵向进度/速度
+响应被深层衰减
++
+纵向响应方向错误
++
+路径选择仍然错误
+
+4. ego 信息泄漏暂时没有闭环因果证据
+
+报告没有发现：
+
+OD/LD中ego信息泄漏
+→ 直接导致失败
 
 
-我认为不应再无限后置，Round-34A 审计完成后就应开始最小原型。
+相关性弱且方向不稳定，因此不能因为“语义不纯”就立刻重构整个 World Model。
 
-横向路径分支
+这不意味着长期 ego-motion 解耦方向错误，而是说：
 
-第一版不要太复杂，输出 3 个曲率控制点：
+它是正确的架构清理方向，但当前闭环第一瓶颈是路径生成，不应抢占 Round-34B 的优先级。
 
-kappa_near
-kappa_mid
-kappa_far
+五、我对 Coding Agent 的 Round-34B 提案的反驳和修订
+
+报告提出：
+
+横向曲率3控制点
++
+纵向v_ref[6]
++
+候选路径上的静态障碍距离
++
+走廊占用
 
 
-通过平滑插值形成：
+我赞成前两项，但反对直接把现有“走廊占用摘要”继续作为核心网络输入。
 
-κ(s)\kappa(s)
-
-然后积分成路径：
-
-θ(s)=θ0+∫κ(s)ds\theta(s)=\theta_0+\int\kappa(s)ds x(s)=x0+∫cos⁡θ(s)dsx(s)=x_0+\int\cos\theta(s)ds y(s)=y0+∫sin⁡θ(s)dsy(s)=y_0+\int\sin\theta(s)ds
-
-这样显式控制：
-
-最大曲率
-曲率变化率
-左右镜像
-路径连续性
-
-纵向分支
-
-不是单独输出 ds，而是读取：
-
-横向候选路径
-路径曲率
-路径上的静态障碍距离
-路径上的动态对象距离和相对速度
-可通行走廊长度
-导航意图
+推荐改为
+横向分支读取
+route / navigation
+target-lane token
+LD slots
+显式静态对象slots
+动态对象slots
 
 
 输出：
 
-v_ref[6]
-或
-s(t)[6]
+多条横向曲率路径候选
 
 
-即真正的：
+至少包括：
 
-path-conditioned longitudinal planning
+保持当前通道
+向左换道/绕行
+向右换道/绕行
 
+纵向分支读取
 
-收费站岗亭若位于当前横向路径上，纵向分支必须自动减速；如果岗亭不在候选路径上，则不应无条件减速。
+针对每条候选路径，现场计算可微或离线监督量：
 
-这正是当前 ds/dtheta 无法清楚表达的因果关系。
+路径与静态对象的最近距离
+路径与动态对象的预计TTC
+路径是否跨越道路边界
+路径上的可通行长度
+路径曲率
 
-保留现有外部接口
 
-第一阶段外部仍转换为：
+然后输出：
 
-ds_t
-dtheta_t = kappa_t × ds_t
+速度或进度剖面
 
 
-这样：
+这里的关键区别是：
 
--固定 LQR 不改； -环境接口不改； -历史评测仍可比较； -只重构 Policy 内部表示。
+不是先由外部策略选好“走廊”
+再告诉net走廊是否安全
 
-四、Round-35：结构化 World Model 与 ego-motion 解耦
+而是net产生候选路径
+几何层计算每条候选的客观关系
+net学习选择和配速
 
-解析坐标补偿长期方向正式保留。
 
-零训练 warp 只有约 2% 改善，是因为冻结旧 WM 从未在新坐标语义上训练。它只能证明：
+几何距离、碰撞检测和 footprint sweep 是确定性物理算子，不属于外部策略。它们类似神经网络中的坐标变换或可微几何层，不替网络做高层决策。
 
-zero-shot warp不能直接替换旧坐标口径
+六、下一步正式方案
+Round-34B0：先清理输入职责
 
+不训练大模型。
 
-不能否定重训后的结构化模型。
+任务 1：静态摘要因果消融
 
-新 WM 状态建议：
+测：
 
-Ego:
-  physical state
-  semantic latent
+原始5维摘要
+全零
+随机置换
+只保留present
+只保留gap
 
-OD:
-  explicit anchor
-  intent/dynamics latent
 
-LD:
-  explicit polyline/geometry anchor
-  semantic/topology latent
+输出：
 
+目标通道选择
+横向曲率候选
+未来ds/v
+收费站碰撞
+merge越界
 
-每一步：
 
-action
-→ ego运动学积分
+目标是确认是否应在新模型中直接弃用它。
 
-LD anchor
-→ SE(2)自车逆运动补偿
+任务 2：构造显式静态对象 slots
 
-OD anchor
-→ 对象运动先验
-→ SE(2)自车逆运动补偿
+第一版只需要：
 
-warped anchors
-+ latents
-→ learned residual dynamics
+type
+relative x/y
+heading
+length/width
+mask
 
 
-SparseDrive 将动态对象和地图元素都拆成显式几何 anchor 与实例 feature，并利用时间实例记忆进行传播，这支持“几何与语义分离”的原则。
+不需要复杂 polygon 网络。
 
-五、Stage A/B 联合适配也应写入实施计划
+任务 3：候选路径几何评估器
 
-你上轮认可：
+输入每条候选路径，输出：
 
-WM与Policy需要磨合
-DAgger数据同时服务WM和Policy
+footprint collision
+minimum clearance
+first invalid s
+drivable ratio
+static clearance
+dynamic TTC
 
 
-建议 Round-35 后按以下流程执行。
+这是物理计算，不做通道选择。
 
-World Model 更新步
+Round-34B1：横向路径最小原型
 
-冻结 Policy，使用：
+Policy 输出 3 个曲率控制点：
 
-真实状态
-实际执行动作
-真实下一状态
+near
+mid
+far
 
 
-训练 WM。
+但建议不是只生成一条路径，而是生成至少三种条件候选：
 
-Policy 更新步
+当前通道
+左侧候选
+右侧候选
 
-冻结 WM，使用：
 
-真实状态 → expert action
-WM状态 → 真实未来状态下的Policy动作
+否则“目标通道选择错误”仍无法被结构性解决。
 
+每条路径接收：
 
-训练 Policy。
+route条件
+target-lane条件
 
-DAgger 采集
+Round-34B2：路径条件化纵向规划
 
-同时保存：
+对每条横向候选路径，纵向头读取：
 
-Policy监督：
-obs → expert action
+路径曲率
+路径上的静态对象距离
+路径上的动态对象距离/TTC
+可通行长度
+导航条件
 
-WM监督：
-obs + executed action → next obs
 
+输出：
 
-但两种损失分别训练，不能混标签。
+s(t) 或 v(t)
 
-六、是否让 B1 晋级？
 
-不晋级。
+然后 score head 在候选间选择。
 
-原因不是它没有价值，而是：
+这种横纵向显式建模与 PLUTO 的 longitudinal-lateral aware 思路一致；该工作报告其闭环表现超过当时最高规则规划器，说明“显式横纵建模 + 规划辅助约束”对学习型规划具有现实价值。
 
-接口改善
-collision改善
-timeout改善
+SparseDrive 则进一步说明稀疏、结构化场景表示和碰撞感知轨迹选择可以同时提高安全性和效率。
 
+七、硬验证准则
+输入职责门
+静态对象slots重放误差 = 0
+坐标、单位、mask全部明确
+旧5维摘要置零后新模型不能崩溃
 
-仍不足以抵消：
+路径候选门
+收费站失败集中集：
+至少存在1条无碰撞候选路径的比例 >=95%
 
-success无提升
-off-road显著增加
-route completion下降
-top-1和单调性失败
-OD语义泄漏增加
+merge失败集中集：
+至少存在1条不越界候选路径的比例 >=95%
 
 
-round33c_report.md 将它定义为“稳定器而非推进器”是准确的。应保留 checkpoint 和代码作为诊断分支，不作为后续默认起点。
+先证明候选集合覆盖正确解，再训练 selector。
 
-七、给 Coding Agent 的下一步指令
-Round-33C结案：
-B1不晋级，不进入60/40，不启动DAgger/MoE/RL。
+路径选择门
+专家/Oracle可行候选 top-1 >=70%
+top-3 >=95%
+收费站错误通道选择下降 >=50%
 
-启动Round-34A，只读路径与输入契约审计：
+纵向门
+障碍移近 → v/s单调下降 >=95%
+障碍移远 → 不应无理由减速
+路径曲率增大 → 速度不升高
+TTC降低 → 计划进度不增加
 
-1. 收费站/merge所有失败做连续footprint路径归因；
-2. 保存plan几何、LQR reference、实际轨迹与首次无效点；
-3. 审计静态障碍是否进入obs、哪个字段、坐标系和mask；
-4. 对静态障碍输入做zero/mirror/distance/corridor干预；
-5. 逐层记录Encoder、PolicyBackbone、PolicyHead响应；
-6. 区分：
-   - 表示缺失
-   - 网络不消费
-   - 横向路径错误
-   - 纵向速度错误
-   - LQR跟踪错误。
+闭环门
 
-所有新模块和数据处理必须提供：
-- 输入输出schema hook；
-- 坐标系/单位/mask hook；
-- activation/gradient/update hook；
-- rollout真实态/预测态/action/plan hook；
-- checkpoint/config/schema hash；
-- 默认关闭bit-exact。
+相对当前约 0.56：
 
-Round-34A完成后，启动Round-34B设计：
-横向κ路径
+success >=0.62
+off-road <=0.10
+collision <=0.08
+timeout <=0.12
+route completion不下降
+
+
+达到后才进入 clean150 和三种子。
+
+最终裁决
+
+你的担忧正确：
+
+当前 others[16:21] 是网络输入，而且属于人工构造的静态障碍摘要。它不应该成为长期系统的主要“感知代理”。
+
+但 Round-34A 也证明，它没有真正替网络解决任务，反而被模型错误解释为加速信号。
+
+因此不应继续强化外部“软走廊策略”。下一步应改为：
+
+显式静态对象slots
 +
-路径条件化纵向v/s profile
+网络生成横向候选路径
 +
-外部兼容(ds,dtheta)
+确定性几何层评估每条路径
 +
-固定LQR。
-
-解析ego-motion warp保留为Round-35结构化WM重训项，
-不得用zero-shot NO-GO永久关闭。
-
-最终判断
-
-当前已经明确：
-
-Action Conditioning V2
-修复了约10%到12%的WM–Policy接口误差，
-但无法解决路径选择、静态障碍和merge几何问题。
+网络基于路径和场景决定纵向速度及最终选择
 
 
-所以继续在原 ds/dtheta 输出和纯 latent WM 上微调，收益会越来越有限。
+这保留了网络的规划 scope，同时把应该由数学完成的碰撞、距离和 footprint 几何关系从神经网络中解耦，避免重新让网络学习确定性几何。
 
-下一大步应该是：
-
-路径级失败审计
-→ 横向曲率路径
-→ 路径条件化纵向速度
-→ 显式静态障碍/走廊
-→ 结构化OD/LD anchor与ego-motion补偿
-→ WM/Policy交替适配
-→ DAgger
-→ MoE
-→ RL
-
-
-这比继续围绕单个 latent loss 或 action branch 调参，更有机会把当前 0.56 的闭环成功率推过 0.60、0.70，并最终挑战 IDM+Pure Pursuit 的 0.756。
+另外排摸一下当前输入给net的导航有哪些信息？是车道级别还是道路级别
