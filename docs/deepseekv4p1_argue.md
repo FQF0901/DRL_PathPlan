@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R36 准备完成：H1 执行头骨架（Gate 0 8/8；已入库）+ H2 given-target 数据规格（99.98% 标签、数据门 15/15）+ H3 hooks（555 键）；关键 caveat=T4 专家晚换道；DP-6 提取开工（§5.53））
+# deepseek-v4.1 argue / 主文档（R36 修正：**认账 H1 `PathExecutionHead` 结构性偏离 Route A**（第二轨迹生成器 + 绕过 Policy–WM 自回归）；受理 GPT 8 条修正 + 5 条细化；重构 `StructuredPolicyHead`（每步调用）开工（§5.55））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 上午·四）**：**R36 准备完成**（H1/H2/H3 全收口；报告 `docs/round36_report.md`）——①**H1 执行头骨架**（`net/path_head.py` 791 行；车道锚 κ_ref + near/mid/far **曲率残差** + 路径条件化纵向头〔→6 步 s〕+ 组合层；**Gate 0 8/8**：默认关三口径逐位、旧 ckpt strict 0/0/0、LQR 契约 ≤3.2e-6、**966 passed**；已入库 `6944436`）；②**H2 given-target 数据规格**：T1 保持 907 ep/53,606 步、T2 变道 2,579 ep/11,818 步、T3 merge 441 ep、T4 闸口 **317/455 ep（69.7%）**/15,543 步；全库 **265,801 usable、99.98% 标签、0 error**；数据门 15/15；**关键 caveat=T4 专家多为晚换道（p50 25.8m）⇒ 直接模仿编码"晚换道"，G4 提前换道需训练侧处理**；③**H3 hooks**（555 键；§五 7 类全覆盖；footprint 连续 + LQR 四象限；默认关 bit-exact）。**下一步**：DP-6 提取开工（I1）→ 训练接线 T1–T4 → G1–G6；待裁：G1 子集口径 + T4 晚换道策略。
-> **本版说明**：第四十一轮（287 → 296 行）——新增 §5.54（R36 实施方案登记版：阶段与门/实现约束/禁令/进展/待裁）；§0/§7 刷新；上版 287 行 = `git show 4a35dcb:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 下午）**：**GPT 修正答复（`ac78f76`，529 行）⇒ 我方认账 + 修正**——H1 的 `PathExecutionHead` 在启用时**一次输出六步 plan 并接管 rollout 尾段**（`plan_override`）：①事实上的**第二轨迹生成器**；②**绕过 Policy–WM 自回归**（后五步不读逐步更新状态）；③`plan[:,0]==action_mu` 仅表面兼容。**受理 8 条立即要求**（暂停接入正式训练/改名重构 `StructuredPolicyHead`〔lateral+longitudinal+deterministic compose〕/PolicyHead 唯一生成者/每步只消费 `a_k=(ds_k,κ_k)`、`dθ_k=κ_k·ds_k`/`a_{k+1}` 由同头读 `z_{k+1}` 重算/κ_mid·far 与未来 progress 仅辅助/保留几何·数据·hooks/产出 **`docs/architecture_contract.md`**）+ **受理 5 条细化**（当前步 ds 为主〔未来仅辅助〕/`ds_init=clamp(v·dt)`/κ 限幅数据驱动/晚换道用加权+可行性损失〔非首步约束〕/正确闸口仅课程上界）。门：**架构契约门 + 梯度门 + 消融门 + 闭环门**。我方 3 条执行注记（imagined 步几何来源/K-anchor 模式现状/J1·I1 调整）。**开工**（lane K1）。
+> **本版说明**：第四十二轮（296 → 306 行）——新增 §5.55（认账 + 8 条修正 + 5 条细化 + 3 条注记 + K1 开工）；§0/§7 刷新；上版 296 行 = `git show 8f44851:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（本版）**：**终止回退 `acd22c1`（§5.51 作废）；直接执行 `7c0186f`=执行优先**——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；DP-6 提取开工。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（§5.53/5.54）**：终止回退 `acd22c1`；直接执行 `7c0186f` 执行优先——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；**R36 修正（本版 §5.55）**：**认账 H1 `PathExecutionHead` 结构性偏离**（第二生成器+绕过自回归）⇒ 重构 `StructuredPolicyHead`（每步调用；辅助仅 κ_mid/far+未来 progress）+ `architecture_contract.md`；K1 开工。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -253,6 +253,15 @@
 - **进展（2026-10-15 上午）**：H1 ✅（已入库 `6944436`）、H2 ✅（数据门 15/15）、H3 ✅（hooks 555 键）；**I1 进行中**；J1 已派发。
 - **待裁**：①G1 普通道路子集口径（建议专用 normal 集——calib50 普通段仅 9 ep）；②T4 晚换道策略（课程/加权/首步约束）。
 
+### 5.55 round-36 修正（GPT `ac78f76`，529 行）：**认账——H1 `PathExecutionHead` 结构性偏离 Route A**；受理 8 条修正 + 5 条细化；`StructuredPolicyHead` 重构开工
+
+- **认账（偏差事实）**：H1 `PathExecutionHead` 启用时**一次输出六步 plan 并接管 rollout 尾段**（`plan_override` 模式）⇒ ①事实上的**第二轨迹生成器**；②**绕过 Policy–WM 自回归**（后五步不再读逐步更新的状态）；③`plan[:,0]==action_mu` 只是表面兼容（a0 旧头、a1–a5 新头）。H1 caveat 里记录但未作为结构问题上报 ⇒ **疏漏认账**，方向以本修正为准。
+- **受理 GPT 8 条立即要求**：①暂停把 PathExecutionHead 接入正式 rollout 训练；②重构/改名 **`StructuredPolicyHead`**（`lateral` branch + `longitudinal` branch + deterministic composition）；③PolicyHead 唯一动作生成者；④每 WM step 只消费当前动作 `a_k=(ds_k,κ_k)`、`dθ_k=κ_k·ds_k`；⑤`a_{k+1}` 必须由同一 PolicyHead 读 `z_{k+1}` 重新产生；⑥`κ_mid/far` 与未来 progress 仅辅助意图/监督；⑦保留曲率积分/footprint/LQR/数据标签/hooks；⑧产出 **`docs/architecture_contract.md`**（唯一生成器 / WM 输入输出 / 六步 rollout 调用图 / 辅助与主边界 / 训练部署同构）。
+- **受理 §七 5 条细化**：①纵向头不再默认一次六步（**当前步 ds 为主**，未来仅辅助）；②`ds_init = clamp(v_current·dt, bounds)` + 专家 ds P50/P90 校验（替代固定 3.5m）；③κ 残差限幅**数据驱动**（专家残差 P95/P99 + 速度条件化 `κ_max(v)`，替代固定 0.1）；④T4 晚换道不用人工首步约束：早期可决策状态加权 + 目标方向/路径进度监督 + **"剩余距离可行性"损失**（DAgger 后置）；⑤正确闸口仅课程/上界、**不进部署输入**。
+- **门**：**架构契约门**（生成器数=1 / a0..a5 同参数 / 每步读 z_k / WM 调用 5 次 / 辅助不进 LQR）+ **梯度门**（当前动作 loss→PolicyHead；WM loss→WM；辅助 loss→辅助分支）+ **消融门**（旧 PolicyHead+WM rollout vs Structured+WM rollout vs 一次性诊断臂〔仅诊断上界〕）+ 闭环门（分层同前）。
+- **我方执行注记（3 条）**：①**imagined 步的外源几何来源**（实现关键）：k≥1 的静态几何由"t0 静态地图 + 想象位姿"确定性重算；动态 TTC 由 WM `od_pred` 或保持当前步——写入 architecture contract；②现状注记：生产 rollout 的 **K-anchor 模式同样消费 t0 plan**（`anchor_plan[:,k,:]`）——本次只对**新结构化头**执行"每步重算"；是否同步收紧 K-anchor 模式待裁；③J1 训练器已通知按新契约调整；I1 数据继续有效（每步局部标签由 trainer 从锚系专家路径派生）。
+- **开工**：lane K1（重构 `StructuredPolicyHead` + 契约门 + `docs/architecture_contract.md` + ds/κ 数据驱动 + 梯度门 + 消融脚手架）。
+
 ---
 
 ## 6. 文档与产物索引
@@ -269,7 +278,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四十一轮（本版；287 → 296 行）**：新增 §5.54（R36 实施方案登记版：阶段与门/实现约束/禁令/进展/待裁）；§0/§7 刷新；上版 287 行 = `git show 4a35dcb:docs/deepseekv4p1_argue.md`。
+- **第四十二轮（本版；296 → 306 行）**：新增 §5.55（认账 + 8 条修正 + 5 条细化 + 3 条注记 + K1 开工）；§0/§7 刷新；上版 296 行 = `git show 8f44851:docs/deepseekv4p1_argue.md`。
+- **第四十一轮（287 → 296 行）**：新增 §5.54（R36 实施方案登记版：阶段与门/实现约束/禁令/进展/待裁）；§0/§7 刷新；上版 287 行 = `git show 4a35dcb:docs/deepseekv4p1_argue.md`。
 - **第四十轮（263 → 287 行）**：新增 §5.53（R36 准备完成 + 下一步）；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`。
 - **第三十九轮（263 → 277 行）**：新增 §5.52（CG 终止回退 + 直接执行 `7c0186f` + 4 条补充）；§5.51 加作废注记；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`。
 - **第三十八轮（253 → 263 行）**：新增 §5.51（WP3 受理 + 3 条补充 + 开工）；§0/§7 刷新；上版 253 行 = `git show 272dd08:docs/deepseekv4p1_argue.md`。
