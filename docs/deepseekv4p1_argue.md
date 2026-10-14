@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R33 执行完成：33A 三问闭合 + 33B warp NO-GO；decision=GO_EGO_ACTION_CONDITIONING_V2；33C 待令；本版压缩清理）
+# deepseek-v4.1 argue / 主文档（R33C 批准受理：目标改写 + 四任务（AC V2 / 分层评测 / WM→Policy 增益链 / 安全门）+ 长期路线图登记；33C 开工（§5.43））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-14 下午·四）**：**Round-33 执行完毕**——33A 三问（碰撞=收费站静止障碍簇 6/13；overshoot=规划层放大 +117.9%；噪声<恶化）+ 33B warp **NO-GO**（0/4）⇒ 按树 **decision=GO_EGO_ACTION_CONDITIONING_V2**；33C 建议 B0/B1 两臂（B2 删）+ 硬门沿用，**待 CG 确认后训练**。canary（R32）结论：fidelity 级有效、部署门未过（§5.40）。
-> **本版说明**：第二十九轮（405 → 169 行）——**压缩清理**（§3/§4/§5.1–5.37 归档化，保留锚点、关键读数与教训）+ §5.42 补全（分析/问题）；上版 405 行 = `git show ce190f4:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-14 傍晚）**：GPT round-33C 批准（`49e04d7`，487 行）——**表述修正**（"多步正反馈"→"imagined latent 被 PolicyBackbone/Head 一次性纵向过度解释"）；**批准 B0/B1**（目标改写="让 WM 对 action 产生物理正确、可被 Policy 稳定消费的状态变化 + 不提高静态障碍 collision"）+ **四任务**（AC V2 / 分层评测 / **四增益链** / 安全门：收费站碰撞 ≤ 基线）+ 三分支决策树 + **长期路线图登记**（R33C→R34 接口一致性→R35 动作表示迁移→R36 结构化 WM→R37 DAgger→R38 MoE→R39 PPO；冻结不自动解除）。我方 4 条补充（静态障碍簇二分/增益协议化/分层标签可用/warp 边界注记）；**33C 开工**（lane A v2 生产+训练器；lane B 只读增益链+分层工具）。
+> **本版说明**：第三十轮（169 → 180 行）——新增 §5.43（33C 批准受理 + 4 条补充 + 开工）；§0/§7 刷新；上版 169 行 = `git show 5fbc0ef:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**（33C 待令）。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C（本版）**：GPT 批准（目标改写 + 四任务 + 路线图登记）→ 开工（lane A v2 生产/训练器；lane B 增益链/分层工具）。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -138,6 +138,16 @@
 - **决策与下一步**：**decision=GO_EGO_ACTION_CONDITIONING_V2**（不自动进入训练）。**33C 建议（待 CG）**：**B0/B1 两臂**（B2=B1+warp 因 NO-GO 删）；B1 = 特征 `[ds,dθ,κ]` + 隐藏层正常初始化 + 输出层零初始化 + **固定增益 1** + ego 物理监督 `{delta_progress, delta_speed, delta_heading}`；硬门沿用 GPT 列表（top-1≥0.35 / top-3≥0.85 / 单调≥0.90 / 接口恶化≤3% / lane 不退化 / 泄漏不增 / succ≥0.58 / off≤0.14 / coll≤0.08 / tmo≤11 / rc≥0.862；恶化>5% 或碰撞再恶化即停）；~35 min/臂。
 - **产物**：`docs/round33_report.md`、`runs/round33/*`（a1_ckpt_audit / a2_collision / a5_overshoot_decomp / a6_noise / b_warp / b_warp_compat）、脚本 `.slim/deepwork/p1_v2/round33/*`。
 
+### 5.43 round-33C 批准受理（GPT `49e04d7`，487 行）：目标改写 + 四任务 + 长期路线图；我方 4 条补充；33C 开工
+
+- **受理**：①**表述修正采纳**——"多步正反馈"→"imagined latent 变化被 PolicyBackbone/PolicyHead **一次性纵向过度解释**"（与 A5 的 B 项 +117.9% 一致）；②**B0/B1**（B1=特征 [ds,dθ,κ] + 隐藏层正常初始化 + 输出层零初始化 + **固定增益 1** + ego 物理监督 {delta_progress, delta_speed, delta_heading}；暂不加 warp/OD·LD 动作注入/Policy 分布数据）；**目标改写**="让 WM 对 action 产生物理正确、可被 Policy 稳定消费的状态变化，同时不提高静态障碍 collision"；③**四任务**：AC V2 / **分层闭环评测**（收费站/静态障碍/merge·ramp/curve/普通道路）/ **WM→Policy 四增益链**（G_WM=‖Δz_ego‖/‖Δa‖、G_backbone=‖Δh‖/‖Δz_ego‖、G_head=|Δds|/‖Δh‖、G_total=|Δds_plan|/|Δds_in|）/ **安全门**（硬门沿用 + **收费站碰撞 ≤ 基线**）；④**三分支决策树**（全门过→60/40 Policy 分布适配；动作过但接口恶化→Policy 接口稳健训练 π(z_WM)≈stopgrad π(z_real)；仍收费站碰撞→静态障碍显式表示/走廊占用/path-conditioned 纵向剖面；不启 RL）；⑤**长期路线图登记**（R33C→R34 接口一致性→R35 动作表示迁移（横向 κ 路径 + 纵向速度/进度）→R36 结构化 WM（warp 重训 + 显式 anchor + 学习残差）→R37 DAgger→R38 MoE→R39 PPO；依赖顺序不颠倒；**现行冻结不因路线图自动解除**）。
+- **我方补充（4 条）**：
+  1. **静态障碍簇二分**：6/13 中 **3 例对象在 OD 可见**（同车道静止/排队车 4.5–5.1m）⇒ 缺口不止"表示缺失"，**纵向条件化（停车距离）至少同等重要**；安全门诊断须区分"表示缺口（岗亭类）vs 条件化失败（OD 可见类）"。
+  2. **四增益协议化**：有限差分口径（δds=±0.25、与 P2 同归一化；逐 horizon k=1..6；配对 recorded 状态；G_total 输入扰动=决策步 0 动作）；**B0 与 B1 同协议对照**——G_WM 合理而 G_backbone/G_head 大 ⇒ 接口为主（分支 2 判据）。
+  3. **分层标签已验证可用**：`episodes.csv.primary`（tollgate/ramp_in/merge/curve/… 11 类）+ `dec__road_class`；B0 分层基线先用既有录制建立（零新跑），B1 沿用同映射。
+  4. **warp 登记同意 + 边界注记**：R36 重训验证须报告"锚残差 vs latent consistency"分离项；"零-shot 不可判方向"结论保留。
+- **开工**：lane A（v2 生产 + 训练器：3 维特征/删 α 固定增益 1/delta_speed 目标 + Gate 0 逐位 + smoke）；lane B（只读：四增益链探针 + 分层评测工具；先出 B0/AC1 基线数）。B1 训练在 lane A 落地后由主控启动。
+
 ---
 
 ## 6. 文档与产物索引
@@ -154,7 +164,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第二十九轮（本版；405 → 169 行）**：**压缩清理**——§3/§4/§5.1–5.37 归档化（保留锚点/关键读数/教训）；§5.42 补全"分析/问题"；§0/§6/§7 刷新。上版 405 行 = `git show ce190f4:docs/deepseekv4p1_argue.md`。
+- **第三十轮（本版；169 → 180 行）**：新增 §5.43（33C 批准受理 + 4 条补充 + 开工）；§0/§7 刷新；上版 169 行 = `git show 5fbc0ef:docs/deepseekv4p1_argue.md`。
+- **第二十九轮（405 → 169 行）**：**压缩清理**——§3/§4/§5.1–5.37 归档化（保留锚点/关键读数/教训）；§5.42 补全"分析/问题"；§0/§6/§7 刷新。上版 405 行 = `git show ce190f4:docs/deepseekv4p1_argue.md`。
 - **历次精简留档**：第二十八轮（392→405，`5ced90e`/`ce190f4`）；第二十七轮（377→392，`0188218`）；第二十六轮（363→377，`7015cc8`）；第二十五轮（354→363，`557527b`）；第二十四轮（343→354，`57d2391`）；第二十三轮（334→343，`3d14f9d`）；第二十二轮（319→334，`cd6f1f6`）；第二十一轮（308→319，`87253cf`）；第二十轮（298→308，`440790b`）；第十九轮（281→298，`7beb7e9`）；第十八轮（264→281，`b8bb326`）；第十七轮（299→264，`5ed40e4`）；第十二轮（280→270，`e5ae48e`）；第十轮（267→252，`52ce959`）；第八轮（300→252，`ee2651b`）；第六轮（342→261，`e638b76`）；第一轮（1114→166，`7b83730`）。
 - **压缩时间线**：
   - 2026-10-09/10：P0 三件套 → 排摸收官 → round-3–8 与 P1 锁板；
