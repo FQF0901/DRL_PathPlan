@@ -8,7 +8,13 @@ from net.encoders import FrameEncoding, ObsEncoders
 from net.mem import EncodedMem, MemBank, MemEncoder
 from net.moe import MoEBlock, top_k_softmax
 from net.model import DrivingModel, SUPERVISED_LABELS, arc_step, interpolate_actions
-from net.path_head import PathExecutionHead, compose_path_plan
+from net.path_head import (
+    PathExecutionHead,
+    StructuredPolicyHead,
+    compose_path_plan,
+    compose_step_action,
+    step_geometry,
+)
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
 from net.spatial import SpatialEncoder
@@ -33,10 +39,13 @@ __all__ = [
     "SUPERVISED_LABELS",
     "SpatialEncoder",
     "SpatioTemporalGNN",
+    "StructuredPolicyHead",
     "TemporalAttention",
     "ValueHead",
     "arc_step",
     "compose_path_plan",
+    "compose_step_action",
     "interpolate_actions",
+    "step_geometry",
     "top_k_softmax",
 ]

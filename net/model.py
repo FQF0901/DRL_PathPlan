@@ -47,18 +47,22 @@ v8 增补（参数再分配 + lane/ttc 移除 + WM latent 重构）
 - K-anchor 保留（默认关）：``plan_anchors`` 的 ``lane_ctx`` 传 ``zeros(B,3)``（valid=0 →
   恒等变换）；``net.anchor.anchor_lane_context`` 保留但不再接线。
 
-Round-36 H1（执行优先骨架；默认关）
------------------------------------
-- ``set_path_head(True)`` 惰性构造 :class:`net.path_head.PathExecutionHead`（**车道锚定横向
-  曲率头 + 路径条件化纵向头 + 外部兼容组合层**）；**默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致**
-  （Gate 0 自证：``.slim/deepwork/p1_v2/round36/h1_compat_check.py``）。
+Round-36 K1（结构化动作生成器；默认关）
+---------------------------------------
+- ``set_path_head(True)`` 惰性构造 :class:`net.path_head.StructuredPolicyHead`
+  （**唯一动作生成器的结构化形式**：``lateral`` 分支 + ``longitudinal`` 分支 + ``compose``
+  确定性几何层）；**默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致**
+  （Gate 0 自证：``.slim/deepwork/p1_v2/round36/k1_contract_gate.py``）。
+- **每步调用**：``_rollout`` 每步用当前 ``z_k`` 调**同一**头 → ``a_k=(ds_k, κ_near_k·ds_k)``
+  → ``st_gnn`` 推进一步 → 同一头重算；6 步 ``plan`` 由逐步动作**组装**（``plan[:,0]==action_mu``
+  契约不变）。``κ_mid/κ_far``、未来 progress/ds 为辅助输出（不进动作/LQR）。影像步静态几何
+  由 t0 静态地图 + 想象位姿确定性重算（:func:`net.path_head.step_geometry`）。
 - 启用后输入契约：``obs['lane_anchor_xy'] (B,P,2)``（给定目标车道中心线折线，ego t0 系；
   可选 ``lane_anchor_mask``）；外源几何键 ``path_*`` 可选（缺省 0 且 presence 掩码随输出返回）。
-- 启用后输出契约（LQR/环境/评测接口**不变**）：``plan (B,6,2)`` = 组合层 ``(ds,dθ)``
-  （``ds_k=s_k−s_{k−1}``、``dθ_k=κ̄_k·ds_k``），``plan[:,0] == action_mu``；
-  ``traj_xy/traj_theta`` = 同 plan 的位姿链（``arc_step``/``compose_pose``，与 ``_rollout``
-  同口径）；旧 PolicyHead 输出保留为 ``policy_action_mu``（诊断；``action_logstd`` 仍来自旧头）。
-  rollout 尾段计划由组合层钉住（不再逐步策略自回归），step0 仍 = ``action_mu``。
+- 消融脚手架 ``set_path_head_ablation``：``policy``①/``structured``②（默认，生产）/
+  ``oneshot``③（一次性诊断臂，仅诊断上界，不接入生产）；``action_generator_names()``
+  给「生成器数 = 1」静态断言入口。cheap path 无 WM ⇒ ``plan`` 仅为辅助预览（``plan_from_aux=1``），
+  生产 LQR 参考走 ``rollout=True``。
 - ``set_target_lane_dropout(p)``：训练期 target-lane token dropout（20%→50% 斜坡由训练侧调度；
   默认 0 = 关；``p=0`` 不消耗 RNG；仅 ``model.training`` 且存在 target token（semantic 模式）时生效）。
 
@@ -143,9 +147,13 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
 from net.anchor import load_anchor_dictionary
 from net.path_head import (
     LAT_HORIZON_M,
-    PathExecutionHead,
+    PATH_HEAD_DEFAULT_MODE,
+    PATH_HEAD_MODES,
+    StructuredPolicyHead,
     anchor_from_obs,
     long_exog_from_obs,
+    replay_plan,
+    step_geometry,
     target_lane_valid_from_obs,
 )
 from net.plan_head import PlanHead
@@ -388,12 +396,20 @@ class DrivingModel(nn.Module):
         self.ego_phys: "nn.Sequential | None" = None
         #: R32 canary：ego 物理锚开关（普通属性，**不进 state_dict**；默认关）。
         self.enable_ego_phys = False
-        # ---- Round-36 H1：执行优先骨架（车道锚定横向曲率头 + 路径条件化纵向头 + 兼容组合层）----
+        # ---- Round-36 K1：StructuredPolicyHead（唯一动作生成器的结构化形式）----
         # **惰性构造**（``set_path_head``；默认 None ⇒ 不新增参数/键，默认路径逐位不变；
         # 构造期保存/恢复 CPU RNG，不扰动既有初始化抽样序列）。
-        self.path_head: "PathExecutionHead | None" = None
-        #: H1 开关镜像属性（普通属性，不进 state_dict）。
+        # 每步调用：``_rollout`` 用当前 ``z_k`` 调同一实例产出 ``a_k=(ds, κ_near·ds)``；
+        # 旧 ``PolicyHead`` 仅服务默认关路径/消融①（不再是第二动作生成口）。
+        self.path_head: "StructuredPolicyHead | None" = None
+        #: K1 开关镜像属性（普通属性，不进 state_dict）。
         self.enable_path_head = False
+        #: 消融脚手架模式（``policy`` | ``structured``（默认）| ``oneshot`` 诊断臂）。
+        self.path_head_ablation: str = PATH_HEAD_DEFAULT_MODE
+        #: 结构化 rollout 的逐步调用 trace（默认 None = 关；门证据用，不参与前向数值）。
+        self.path_head_trace: list[dict[str, object]] | None = None
+        #: 结构化 rollout 喂给 WM 的动作是否 stop-gradient（默认 True，梯度门：WM 预测 loss 只到 WM）。
+        self.path_head_wm_action_detach: bool = True
         #: 训练期 target-lane token dropout 概率（默认 0 = 关；0 不消耗 RNG）。
         self.target_lane_dropout_p: float = 0.0
         #: Round-20 消融（**默认 baseline = 既有行为逐位不变**）：
@@ -763,26 +779,73 @@ class DrivingModel(nn.Module):
             torch.random.set_rng_state(rng_state)
         return self
 
-    # ---------------------------------------------------------------- R36 H1 开关
+    # ---------------------------------------------------------------- R36 K1 开关
     def set_path_head(
-        self, enabled: bool = True, *, horizon: float = LAT_HORIZON_M
+        self,
+        enabled: bool = True,
+        *,
+        horizon: float = LAT_HORIZON_M,
+        mode: str | None = None,
     ) -> "DrivingModel":
-        """Round-36 H1：执行优先骨架开关（**惰性构造**；默认关 = 与 HEAD 逐位一致）。
+        """Round-36 K1：``StructuredPolicyHead`` 开关（**惰性构造**；默认关 = 与 HEAD 逐位一致）。
 
-        ``enabled=True`` 首次调用才构造 :class:`net.path_head.PathExecutionHead`
-        （横向曲率头 + 纵向路径头 + 几何特征编码层 + 外部兼容组合层）；构造期保存/恢复
-        CPU RNG 状态 ⇒ 不扰动既有初始化抽样序列（同 ``ego_phys``/``semantic_wiring`` 口径）。
-        启用后 ``forward`` 要求 ``obs['lane_anchor_xy']``（给定目标车道中心线折线），输出契约
-        见模块 docstring「Round-36 H1」节。``enabled=False`` 只关闭消费路径（已构造的 head
+        ``enabled=True`` 首次调用才构造 :class:`net.path_head.StructuredPolicyHead`
+        （横向分支 + 纵向分支 + 确定性组合层 + 两个几何特征编码层；``compose`` 无参数）；
+        构造期保存/恢复 CPU RNG ⇒ 不扰动既有初始化抽样序列（同 ``ego_phys`` 口径）。
+
+        启用后 ``forward`` 要求 ``obs['lane_anchor_xy']``（给定目标车道中心线折线），并走
+        **逐步调用**口径：``_rollout`` 每步用当前 ``z_k`` 调同一头 → ``a_k=(ds_k, κ_near_k·ds_k)``
+        → WM 单步推进 → 同一头重算；6 步 ``plan`` 由逐步动作组装（见
+        ``docs/architecture_contract.md``）。``enabled=False`` 只关闭消费路径（已构造的 head
         参数保留，不进 forward）。
         """
         self.enable_path_head = bool(enabled)
+        if mode is not None:
+            self.set_path_head_ablation(mode)
         if enabled and self.path_head is None:
             device = next(self.parameters()).device
             rng_state = torch.random.get_rng_state()
-            self.path_head = PathExecutionHead(self.hidden, horizon=float(horizon)).to(device)
+            self.path_head = StructuredPolicyHead(self.hidden, horizon=float(horizon)).to(device)
             torch.random.set_rng_state(rng_state)
         return self
+
+    def set_path_head_ablation(self, mode: str = PATH_HEAD_DEFAULT_MODE) -> "DrivingModel":
+        """K1 消融脚手架（默认 ``structured``；①②③ 在同一进程内可切换）：
+
+        - ``policy``：① 旧 ``PolicyHead`` + WM 逐步 rollout（= 默认关路径的行为）；
+        - ``structured``：② 结构化头 + WM 逐步 rollout（**生产口径**，默认）；
+        - ``oneshot``：③ H1 一次性 6 步诊断臂（``plan_override`` 钉住；**仅诊断上界，不接入生产**）。
+
+        仅影响启用后的消费路径；head 未构造/未启用时无作用（默认关逐位不变）。
+        """
+        if mode not in PATH_HEAD_MODES:
+            raise ValueError(f"path head ablation 必须是 {PATH_HEAD_MODES} 之一，收到 {mode!r}")
+        self.path_head_ablation = str(mode)
+        return self
+
+    def set_path_head_trace(self, enabled: bool = True) -> "DrivingModel":
+        """结构化 rollout 逐步调用 trace 开关（门证据用；不改变任何前向数值）。
+
+        开启后 ``forward`` 会重置 ``self.path_head_trace`` 并记录每次头调用
+        ``{step, latent, action, ds, kappa_near, wm_calls_before, wm_advance_calls}``
+        （step 0 = t0 编码期调用；step k = rollout 第 k 步调用）。默认关 ⇒ 无开销。
+        """
+        self.path_head_trace = [] if enabled else None
+        return self
+
+    def path_head_mode(self) -> str:
+        """当前生效的动作生成模式：``policy``（默认关/消融①）| ``structured`` | ``oneshot``。"""
+        if self.path_head is None or not self.enable_path_head:
+            return "policy"
+        return self.path_head_ablation
+
+    def action_generator_names(self) -> tuple[str, ...]:
+        """动作生成器模块名（架构契约门「生成器数 = 1」的静态断言入口）。
+
+        - ``policy``：``("policy",)``（旧 PolicyHead；默认关路径/消融①）；
+        - ``structured`` / ``oneshot``：``("path_head",)``（同一 ``StructuredPolicyHead`` 实例）。
+        """
+        return ("policy",) if self.path_head_mode() == "policy" else ("path_head",)
 
     def set_target_lane_dropout(self, p: float = 0.0) -> "DrivingModel":
         """训练期 target-lane token dropout 概率（默认 0 = 关；非参数，不进 state_dict）。
@@ -1123,11 +1186,17 @@ class DrivingModel(nn.Module):
         if self.num_anchors > 0:
             lane_ctx = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
             anchor = self.plan_head.plan_anchors(latent, lane_ctx)
-        # R36 H1：执行优先骨架（默认关；启用时要求 lane_anchor_xy → 组合层 (ds,dθ) 输出）
+        # R36 K1：结构化头（默认关；启用时要求 lane_anchor_xy）——这里只算 **t0 步**动作
+        # （= a0 = action_mu），并把 t0 静态几何存进 encoded 供 rollout 逐步重算（step_geometry）。
+        # 消融①（``policy``）不调用头（= 默认关路径逐位）；③（``oneshot``）走一次性诊断口径。
         path_out: dict[str, Tensor] | None = None
-        if self.path_head is not None:
+        path_ctx: dict[str, Tensor] | None = None
+        if self.path_head is not None and self.enable_path_head and self.path_head_ablation != "policy":
             anchor_xy, anchor_mask = anchor_from_obs(obs)
             long_exog, long_present = long_exog_from_obs(
+                obs, batch=mem.batch, device=latent.device
+            )
+            target_lane_valid = target_lane_valid_from_obs(
                 obs, batch=mem.batch, device=latent.device
             )
             path_out = self.path_head(
@@ -1135,12 +1204,30 @@ class DrivingModel(nn.Module):
                 anchor_xy=anchor_xy,
                 anchor_mask=anchor_mask,
                 long_exog=long_exog,
-                target_lane_valid=target_lane_valid_from_obs(
-                    obs, batch=mem.batch, device=latent.device
-                ),
+                target_lane_valid=target_lane_valid,
+                one_shot=(self.path_head_ablation == "oneshot"),
             )
             path_out["long_exog"] = long_exog
             path_out["long_present"] = long_present
+            path_ctx = {
+                "anchor_xy": anchor_xy,
+                "anchor_mask": anchor_mask,
+                "long_exog": long_exog,
+                "long_present": long_present,
+                "target_lane_valid": path_out["target_lane_valid"],
+            }
+            if self.path_head_trace is not None:
+                self.path_head_trace.append(
+                    {
+                        "step": 0,
+                        "latent": latent,
+                        "action": path_out["action"],
+                        "ds": path_out["ds_exec"],
+                        "kappa_near": path_out["kappa_near"],
+                        "wm_calls_before": 0,
+                        "wm_advance_calls": 0,
+                    }
+                )
         tokens, key_mask = self._head_tokens(
             z_ego,
             z_od,
@@ -1199,8 +1286,10 @@ class DrivingModel(nn.Module):
             "route_world_mask": route_world_mask,
             "ego_world": ego_world,
             "anchor": anchor,
-            # R36 H1：执行优先骨架（默认关 ⇒ None）与 target-lane dropout 掩码
+            # R36 K1：结构化头（默认关 ⇒ None）+ t0 静态几何上下文（rollout 逐步重算用）
+            # 与 target-lane dropout 掩码
             "path": path_out,
+            "path_ctx": path_ctx,
             "target_lane_dropout_keep": target_lane_keep,
             # R21-3A/25A：semantic 模式诊断/下游（baseline = None / 与 ld_pool 相同）
             "target_lane_token": target_token,
@@ -1227,6 +1316,12 @@ class DrivingModel(nn.Module):
         动作（step0 = action_mu 契约不变）。
         A4：每步按世界系 ego 位姿重建 nav（``_step_context``；others 上下文保持 t0 静态）；
         无 ``route_world``/``ego_world`` 输入时回退 t0 冻结上下文（旧行为逐位兼容）。
+
+        R36 K1：``path_head`` 启用且模式 = ``structured`` 时，每步在 latent 更新后用**同一**
+        :class:`~net.path_head.StructuredPolicyHead` 实例、**当前** ``z_k`` 产出
+        ``a_k=(ds_k, κ_near_k·ds_k)``（imagined 步静态几何 = t0 静态地图 + 想象位姿确定性重算，
+        :func:`~net.path_head.step_geometry`）；``plan`` 由逐步动作组装（唯一动作生成器）。
+        模式 ``oneshot`` = H1 一次性诊断臂（``plan_override`` 钉住，仅诊断上界）。
         """
         mem: MemBank = encoded["mem"]  # 只读（nav 回退锚点）；不再拷贝/滑动
         enc: EncodedMem = encoded["encoded"]
@@ -1254,11 +1349,35 @@ class DrivingModel(nn.Module):
         # v7 结构迭代 B：K-anchor 计划（t0 一次性软混合；step0 仍由 action_mu 钉住 → 输出契约不变）
         anchor = encoded.get("anchor")
         anchor_plan: Tensor | None = anchor.get("plan") if isinstance(anchor, dict) else None
-        # R36 H1：执行优先计划（组合层 t0 一次给出；默认关 ⇒ None）
+        # R36 K1：结构化头（默认关 ⇒ None）。生产模式 ``structured`` = 每步调用同一头；
+        # ``oneshot`` 诊断臂 = H1 的一次性 6 步 plan 钉住尾段（plan_override；不接入生产）。
+        path_mode = self.path_head_mode()
+        structured = path_mode == "structured" and self.path_head is not None
+        path_ctx = encoded.get("path_ctx") if isinstance(encoded.get("path_ctx"), dict) else None
         path_out = encoded.get("path")
+        if structured and path_ctx is None:
+            raise ValueError(
+                "structured 模式需要 encode() 产出的 path_ctx（t0 静态几何）；"
+                "_rollout 不应脱离 forward/encode 直接调用"
+            )
         plan_override: Tensor | None = (
-            path_out.get("plan") if isinstance(path_out, dict) else None
+            path_out.get("plan")
+            if path_mode == "oneshot" and isinstance(path_out, dict)
+            else None
         )
+        progress_s = torch.zeros((mem.batch,), dtype=latent.dtype, device=latent.device)
+        kappa_near_steps: list[Tensor] = []
+        ds_steps: list[Tensor] = []
+        kappa_mid_steps: list[Tensor] = []
+        kappa_far_steps: list[Tensor] = []
+        aux_progress_steps: list[Tensor] = []
+        if structured and path_out is not None and isinstance(path_out, dict):
+            kappa_near_steps.append(path_out["kappa_near"])
+            ds_steps.append(path_out["ds_exec"])
+            kappa_mid_steps.append(path_out["kappa_mid"])
+            kappa_far_steps.append(path_out["kappa_far"])
+            aux_progress_steps.append(path_out["aux_progress"])
+        wm_advance_calls = 0
 
         # t0 锚定状态与图位姿模板（t0 帧；来自真实 obs，不 detach —— 检测任务）
         od_anchor = self.st_gnn.od_state_from_features(enc.od_now, od_live)
@@ -1287,6 +1406,9 @@ class DrivingModel(nn.Module):
             xy.append(pose[:, :2])
             theta.append(pose[:, 2])
             actions.append(action)
+            if structured:
+                # imagined 步几何进度 = 已执行 ds 之和（几何重算的确定性输入）
+                progress_s = progress_s + ds.detach()
 
             # (a2) A4：推进世界系位姿（与教师强制同一步进语义）并逐步重建 nav/signal
             if torch.is_tensor(pose_world):
@@ -1312,6 +1434,11 @@ class DrivingModel(nn.Module):
 
             # (c) latent 自回归转移 + 物理解码（t0 帧预测，逐步堆叠）
             # R32 canary：action = 本步执行动作 a_{k-1}（与 pose 链同一动作；开关默认关 ⇒ 无变化）
+            # R36 K1 梯度门：结构化模式喂给 WM 的动作 stop-gradient（前向逐位不变）⇒
+            # WM 预测 loss 只回传到 WM，不经动作输入旁路到结构化头（WM 冻结时该旁路本无梯度）。
+            wm_action = action
+            if structured and self.path_head_wm_action_detach:
+                wm_action = action.detach()
             z_ego_next, z_od_next, z_ld_next, od_pred, ld_pred, presence_logit, entry_logit = (
                 self.st_gnn(
                     z_ego=z_ego,
@@ -1322,7 +1449,7 @@ class DrivingModel(nn.Module):
                     step_index=k,
                     od_anchor=od_anchor,
                     ld_anchor=ld_anchor,
-                    action=action,
+                    action=wm_action,
                 )
             )
             od_steps.append(od_pred)
@@ -1368,8 +1495,47 @@ class DrivingModel(nn.Module):
                     latent, _, _ = self.plan_step(
                         z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token
                     )
-                if plan_override is not None:
-                    # R36 H1：执行优先计划钉住尾段（step0 仍 = action_mu；action/pose 链可微）
+                if structured:
+                    # R36 K1（架构契约 §六步调用图）：同一头 + **当前** z_k → 当前步动作
+                    #   z_k 来自上一步 WM 推进（上面 (c)）；imagined 步静态几何由 t0 静态地图
+                    #   + 想象位姿确定性重算（geometry detach：外源确定性输入）。
+                    geometry = step_geometry(
+                        path_ctx["anchor_xy"],
+                        path_ctx["anchor_mask"],
+                        path_ctx["long_exog"],
+                        path_ctx["long_present"],
+                        pose.detach(),
+                        progress_s,
+                    )
+                    step_out = self.path_head(
+                        latent,
+                        anchor_xy=geometry["anchor_xy"],
+                        anchor_mask=geometry["anchor_mask"],
+                        long_exog=geometry["long_exog"],
+                        target_lane_valid=path_ctx["target_lane_valid"],
+                    )
+                    wm_advance_calls += 1
+                    action = step_out["action"]
+                    kappa_near_steps.append(step_out["kappa_near"])
+                    ds_steps.append(step_out["ds_exec"])
+                    kappa_mid_steps.append(step_out["kappa_mid"])
+                    kappa_far_steps.append(step_out["kappa_far"])
+                    aux_progress_steps.append(step_out["aux_progress"])
+                    if self.path_head_trace is not None:
+                        self.path_head_trace.append(
+                            {
+                                "step": k,
+                                "latent": latent,
+                                "action": action,
+                                "ds": step_out["ds_exec"],
+                                "kappa_near": step_out["kappa_near"],
+                                "wm_calls_before": k,
+                                "wm_advance_calls": wm_advance_calls,
+                            }
+                        )
+                elif plan_override is not None:
+                    # R36 消融③（**仅诊断上界**）：H1 一次性 6 步计划钉住尾段
+                    # （step0 仍 = action_mu；action/pose 链可微）。不接入生产。
                     action = plan_override[:, k, :]
                 elif anchor_plan is None:
                     tokens, key_mask = self._head_tokens(
@@ -1393,7 +1559,7 @@ class DrivingModel(nn.Module):
                     # K-anchor 方案 A：尾段计划由 t0 锚混合一次性给出（action/pose 链保持可微）
                     action = anchor_plan[:, k, :]
 
-        return {
+        result = {
             "traj_xy": torch.stack(xy, dim=1),
             "traj_theta": torch.stack(theta, dim=1),
             "plan": torch.stack(actions, dim=1),
@@ -1405,6 +1571,21 @@ class DrivingModel(nn.Module):
             "z_od_pred": torch.stack(z_od_steps, dim=1),
             "z_ld_pred": torch.stack(z_ld_steps, dim=1),
         }
+        if structured:
+            # K1 诊断/门证据：逐步执行的 κ_near/ds + 辅助 κ_mid/κ_far/progress + 调用计数。
+            # 口径：a0 来自 t0 编码期调用；a1..a5 = 5 次「WM 推进一步 → 同一头重算」。
+            result["structured_kappa_near"] = torch.stack(kappa_near_steps, dim=1)
+            result["structured_ds"] = torch.stack(ds_steps, dim=1)
+            result["structured_aux_kappa_mid"] = torch.stack(kappa_mid_steps, dim=1)
+            result["structured_aux_kappa_far"] = torch.stack(kappa_far_steps, dim=1)
+            result["structured_aux_progress"] = torch.stack(aux_progress_steps, dim=1)
+            result["structured_head_calls"] = torch.tensor(
+                float(len(ds_steps)), dtype=latent.dtype, device=latent.device
+            )
+            result["structured_wm_advances"] = torch.tensor(
+                float(wm_advance_calls), dtype=latent.dtype, device=latent.device
+            )
+        return result
 
     # ---------------------------------------------------------------- 前向
     def forward(
@@ -1431,6 +1612,9 @@ class DrivingModel(nn.Module):
         MoE 输出口径（lane U1）：``primary + Σ_{i∈top2} g_i·expert_i``，推理与训练一致、
         全场景生效（无硬切/二值门/硬掩码）；phase 1 训练由 ``set_moe(enabled=False)`` 关闭。
         """
+        if self.path_head_trace is not None:
+            # K1 门证据：每次 forward 先重置 trace（随后 encode 期的 t0 调用写入 step 0）。
+            self.path_head_trace = []
         encoded = self.encode(obs, semantic_off=bool(semantic_off))
         moe_aux: dict[str, Tensor] = encoded["moe_aux"]
         latent: Tensor = encoded["latent"]
@@ -1438,8 +1622,10 @@ class DrivingModel(nn.Module):
         key_mask: Tensor = encoded["key_mask"]
         # A1：策略/价值 = 交叉注意力头（直吃令牌集合；含 plan_head 融合 latent token）
         action_mu, action_logstd = self.policy(tokens, key_mask)
-        # R36 H1：执行优先骨架（默认关）——组合层接管 action_mu/plan（``plan[:,0]==action_mu``
-        # 契约）；旧 PolicyHead 输出保留为 ``policy_action_mu``（诊断；action_logstd 仍来自旧头）。
+        # R36 K1：结构化头（默认关）接管 action_mu（= 当前步动作；``plan[:,0]==action_mu``
+        # 契约）；旧 PolicyHead 输出保留为 ``policy_action_mu``（诊断；``action_logstd`` 仍来自旧头，
+        # RL 未接线）。消融①（``policy``）下 path_out 为 None ⇒ 与默认关路径逐位一致。
+        path_mode = self.path_head_mode()
         path_out = encoded.get("path")
         path_out = path_out if isinstance(path_out, dict) else None
         policy_action_mu: Tensor | None = None
@@ -1481,10 +1667,15 @@ class DrivingModel(nn.Module):
             out["anchor_ctx"] = anchor["ctx"]
         if not rollout:
             if path_out is not None:
-                # R36 H1：cheap path 也给出组合层 plan/位姿链（不需要 WM；LQR 消费契约不变）
-                out["plan"] = path_out["plan"]
-                out["traj_xy"] = path_out["traj_xy"]
-                out["traj_theta"] = path_out["traj_theta"]
+                # R36 K1：cheap path 无 WM ⇒ **不产生** WM 逐步 rollout 的 plan/位姿链。
+                # 只给辅助预览（同头辅助输出；``plan_from_aux=1`` 显式标注），供诊断/监控；
+                # 生产 LQR 参考必须走 rollout=True（逐步组装 plan）。
+                preview_plan = path_out["plan_aux"]
+                replay = replay_plan(preview_plan)
+                out["plan"] = preview_plan
+                out["plan_from_aux"] = torch.ones((), dtype=action_mu.dtype, device=action_mu.device)
+                out["traj_xy"] = path_out.get("traj_xy", replay["traj_xy"])
+                out["traj_theta"] = path_out.get("traj_theta", replay["traj_theta"])
             if world_model:
                 raise ValueError("world_model=True 需要 rollout=True（多步预测是 rollout 的产物）")
             return out
@@ -1492,6 +1683,20 @@ class DrivingModel(nn.Module):
         out["traj_xy"] = rolled["traj_xy"]
         out["traj_theta"] = rolled["traj_theta"]
         out["plan"] = rolled["plan"]
+        if path_out is not None:
+            # 逐步组装 plan（唯一动作生成器）+ 调用计数（契约门证据）；``plan_from_aux=0``。
+            out["plan_from_aux"] = torch.zeros((), dtype=action_mu.dtype, device=action_mu.device)
+            for key in (
+                "structured_kappa_near",
+                "structured_ds",
+                "structured_aux_kappa_mid",
+                "structured_aux_kappa_far",
+                "structured_aux_progress",
+                "structured_head_calls",
+                "structured_wm_advances",
+            ):
+                if key in rolled:
+                    out[key] = rolled[key]
         if world_model:
             out["od_pred"] = rolled["od_pred"]
             out["ld_pred"] = rolled["ld_pred"]
