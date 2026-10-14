@@ -375,6 +375,9 @@ class DrivingModel(nn.Module):
         self.ld_mode: str = "baseline"
         #: R21-3D：rollout 阶段 semantic 注入口径（``full`` = R21-3A 现状）
         self.rollout_semantic_mode: str = "full"
+        #: R33-B：rollout 图位姿 ego-motion warp 口径（``off`` = 当前实现逐位不变；
+        #: ``w1``/``w2`` = 解析 ego SE(2) 补偿，见 :meth:`set_ego_warp`）。
+        self.ego_warp: str = "off"
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
@@ -483,6 +486,57 @@ class DrivingModel(nn.Module):
             raise ValueError(f"未知 rollout_semantic={mode!r}（full | t0_only | static_role_only）")
         self.rollout_semantic_mode = mode
         return self
+
+    def set_ego_warp(self, mode: str = "off") -> "DrivingModel":
+        """R33-B：rollout 图位姿 **analytic ego-motion warp** 口径（纯推理行为开关，非参数；默认 ``off``）。
+
+        对 ``_rollout`` 第 k 步送入 ``st_gnn`` 的图位姿 ``pose_k`` 施加 ego 累积位姿
+        ``(Δp_k, Δθ_k)`` 的逆刚体变换，把 t0 帧节点位姿**重表达进 ego_k 自车系**：
+
+        ``p' = R(−Δθ)(p − Δp)``、``ψ' = ψ − Δθ``（R = 2×2 旋转矩阵）。**同一变换施加于
+        ego/OD/LD 全部节点**（几何自洽；ego 节点位姿恒为 ``(0,0,0)``）。
+
+        warp **前**的节点位姿（``[ego, OD, LD]``；ego = 累积位姿、OD 见下、LD = t0 静止）：
+
+        - ``off``（默认，逐位等于当前实现）：``[Δp, od_t0 + k·dt·v_t0, ld_t0]``（t0 帧）；
+        - ``w1``（LD anchor 的 ego SE(2) 坐标补偿）：``[Δp, od_t0, ld_t0]``——OD **不带**
+          恒速运动先验（t0 静止位姿），LD 锚点静止；
+        - ``w2``（``w1`` + OD 恒速运动先验）：``[Δp, od_t0 + k·dt·v_t0, ld_t0]``。
+
+        **等价形式**：记 ``T_k = (Δp_k, Δθ_k)``，``off`` 的图位姿 = ``T_k`` 作用在 ``w2``
+        位姿上（即 ``w2`` = 把 ``off`` 的整张图重表达进 ego_k 帧；``w1`` = 再去掉 OD
+        先验）。变换下任意两节点的相对位移旋转 ``R(−Δθ)``、相对航向平移 ``−Δθ``，距离
+        不变——故 warp 改变的是边特征 ``[Δx/scale, Δy/scale, cosΔθ, sinΔθ, ‖Δp‖/scale]``
+        中的**坐标系分量**。warp 只改图位姿（``st_gnn`` 输入）；``traj_xy/traj_theta/plan``
+        输出仍为 t0 帧累积位姿口径（动作/位姿链契约不变；轨迹输出不随 warp 重表达）。
+
+        ``off`` ⇒ 前向逐位等于改动前实现（Gate 0 自证：round33 ``b_warp_compat.py``，
+        ``max|Δ| = 0``）。
+        """
+        mode = str(mode).lower()
+        if mode not in ("off", "w1", "w2"):
+            raise ValueError(f"未知 ego_warp={mode!r}（off | w1 | w2）")
+        self.ego_warp = mode
+        return self
+
+    @staticmethod
+    def _ego_warp_pose_k(ego_pose: Tensor, od_pose: Tensor, ld_pose: Tensor) -> Tensor:
+        """R33-B：t0 帧节点位姿 → ego_k 自车系（``p' = R(−Δθ)(p − Δp)``、``ψ' = ψ − Δθ``）。
+
+        ``ego_pose (B,3)`` = 第 k 步 ego 累积位姿（t0 帧；即 warp 的 ``(Δp, Δθ)``）；
+        ``od_pose (B,S,3)`` / ``ld_pose (B,L,3)`` = warp 前的 OD/LD t0 帧位姿（w1: OD 无
+        恒速先验；w2: OD 含先验——由调用方决定）。返回 ``(B,1+S+L,3)``；ego 节点为同一
+        刚体变换作用后的 ``(0,0,0)``（与"对 ego/OD/LD 施加同一变换"自洽）。
+        """
+        slots = torch.cat([od_pose, ld_pose], dim=1)
+        dtheta = ego_pose[:, 2:3]
+        cos_t, sin_t = torch.cos(dtheta), torch.sin(dtheta)
+        rel = slots[..., :2] - ego_pose[:, None, :2]
+        x = cos_t * rel[..., 0] + sin_t * rel[..., 1]
+        y = -sin_t * rel[..., 0] + cos_t * rel[..., 1]
+        theta = wrap_angle(slots[..., 2] - dtheta)
+        ego_zero = torch.zeros_like(ego_pose)
+        return torch.cat([ego_zero.unsqueeze(1), torch.stack([x, y, theta], dim=-1)], dim=1)
 
     #: ``static_role_only`` 下 rollout 后段置零的**动态**语义特征索引
     #: （lat/heading/margins/distance_to_lane_end/distance_to_target_lane_end）。
@@ -1129,13 +1183,20 @@ class DrivingModel(nn.Module):
                 mem, pose_world, world, nav_token, nav_mask, signal_token, signal_mask, k
             )
 
-            # (b) 图位姿（t0 帧）：ego = 累积位姿（detach：WM 输出不回传动作/策略链）；
-            #     OD = t0 位姿 + k·dt·v_t0；LD 静止
+            # (b) 图位姿：ego = 累积位姿（detach：WM 输出不回传动作/策略链）；
+            #     OD = t0 位姿 + k·dt·v_t0；LD 静止。
+            #     R33-B warp（默认 off，逐位不变）：w1/w2 把整张图重表达进 ego_k 帧
+            #     （同一刚体变换施加于 ego/OD/LD；ego 恒 (0,0,0)）——见 set_ego_warp。
             offset = float(k) * self.dt
             od_pose_k = torch.cat(
                 [od_pose_t0[..., :2] + od_velocity * offset, od_pose_t0[..., 2:]], dim=-1
             )
-            pose_k = torch.cat([pose.detach().unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
+            if self.ego_warp == "off":
+                pose_k = torch.cat([pose.detach().unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
+            else:
+                # w1：OD 不带恒速先验（t0 静止位姿）；w2：OD 含先验（= off 的 OD 位姿）
+                od_pose_pre = od_pose_k if self.ego_warp == "w2" else od_pose_t0
+                pose_k = self._ego_warp_pose_k(pose.detach(), od_pose_pre, ld_pose_t0)
 
             # (c) latent 自回归转移 + 物理解码（t0 帧预测，逐步堆叠）
             # R32 canary：action = 本步执行动作 a_{k-1}（与 pose 链同一动作；开关默认关 ⇒ 无变化）

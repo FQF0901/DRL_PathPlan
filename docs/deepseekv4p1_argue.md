@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R33 答复受理：P0"双零死锁"= 已按设计冷启动规避（审计闭合）；33A/B/C 全采纳 + 3 条方法论补充；**待 CG 确认开工**（§5.41））
+# deepseek-v4.1 argue / 主文档（R33 执行完成：33A 三问闭合（碰撞=收费站静止障碍簇 6/13；overshoot=规划层放大 +117.9%；噪声<恶化）+ 33B warp **NO-GO**（0/4）；decision=GO_EGO_ACTION_CONDITIONING_V2；33C 待令（§5.42））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-14 下午·二）**：GPT round-33 答复（`c3bf69f`，905 行）——**总体裁决：canary 有价值但不晋级**（核心洞见"动作辨识变强 ≠ rollout 更正确"）；提出 P0"双零初始化 ⇒ 零梯度死锁"质疑 + 33A/B/C 计划（梯度/碰撞/特征审计 → analytic ego-warp oracle → 修正版 canary）+ Gate A–E。**我方只读审计已闭合 P0**：训练器按设计对 α 冷启动置 1（`canary_train.py:440-443`）；证据链 = 日志首行 `alpha=1.0000` / step1 `new_grad=2/5`→step2 `5/5` / 终值 α=1.1267（AC1）·0.7743（AC1-P）/**ckpt vs M0 init 168 共享键逐位 max|Δ|=0** ⇒ 归因有效、无"意外解冻"。**33A/B/C 全采纳** + 3 条方法论补充（单调率口径 / warp 探针可解释性 / 碰撞统计功效）+ A5 增项（plan-shift vs WM-response 分解）；**待 CG 确认开工**（只读项：33A-A1 已闭合）。
-> **本版说明**：第二十七轮（377 → 392 行）——新增 §5.41（round-33 答复受理 + P0 审计闭合 + 3 条补充）；§0/§7 刷新；上版 377 行 = `git show 7015cc8:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-14 下午·三）**：GPT 修订答复（`f0ebfae`，97 行）——**反驳接受、初始化结案**；批准 33A（限时只读三问）→ 33B（W0/W1/W2）→ 33C（B0/B1/B2；v2 统一：隐藏层正常初始化 + 输出层 zero-init + **残差增益固定 1（删可学习 α）**）。**执行完成（本版 §5.42）**：①碰撞=**收费站静止障碍簇 6/13**（岗亭 3 + 排队车 3；交叉口 0；双证据链 13/13 repro=exact）；②overshoot=**规划/WM 接口项主导 +117.9%**（A −20.2% 反向、C +2.3% 可忽略）；③噪声：录制确定性 ⇒ 重复噪声=0、bootstrap 半宽 6.1/6.1/8.9pp ≪ 恶化 20.9/17.2/16.5% ⇒ 恶化真实；④33B **warp NO-GO**（严格 0/4；W2 纯重表达≈0；W1 小效应来自移除 OD 恒速先验）⇒ 按树 **decision=GO_EGO_ACTION_CONDITIONING_V2**。33C 建议 B0/B1 两臂（B2 建议删）+ 硬门沿用；**待 CG 确认后训练**。
+> **本版说明**：第二十八轮（392 → 404 行）——新增 §5.42（R33 执行完成：33A 三问 + 33B NO-GO + 决策）；§0/§7 刷新；上版 392 行 = `git show 0188218:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -17,7 +17,8 @@
 - **round-32 Level-1（§5.38）**：四 lane 收口——**Gate E 主瓶颈 D2→D3=97.0%（latent transition）**、Gate B 未过（动作条件化失效）、real 充分 / WM lane 保留不足（0.61–0.77）、接口温和（A_k ×2.1）；decision 草案=`GO_ACTION_CONDITIONING`。
 - **round-32 答复（§5.39）**：GPT（`cde2e51`）接受主方向 + **批准最小可逆 canary**（AC0/AC1/P-only/AC1-P；C-A/C-B；Gate 0–4；ΔR² 增益 + 泄漏防线）；措辞精确化（latent-state evolution block）；**P3b 只读开工、canary 待令**。
 - **round-32 canary（§5.40）**：四臂执行完毕——**Gate 0 ✓**（默认关/逐位/966 tests）；**Gate 1/2 fidelity 级有效**（top-3 0.635→0.917✓、FD 38.7→2.74×✓、ds 单调 0.946✓、ΔR²_WM 全正、保留改善；泄漏单通道 ✗）；**Gate 3 全 FAIL**（AC1 E_if +20.9%/overshoot +16.5% 反向恶化；AC1-P 近中性）；**Gate 4：AC1 succ 0.600✓（+4pp 首破 0.58）但 coll 0.180✗、AC1-P 未过、P-only≡base** ⇒ **不自动进 C-B**；报告 `docs/round32_canary_report.md`。
-- **round-33 答复（本版；§5.41）**：GPT（`c3bf69f`）——canary 不晋级（"动作辨识变强 ≠ rollout 更正确"）；33A/B/C 计划 + Gate A–E；**P0"双零死锁"质疑 ⇒ 我方只读审计闭合**（冷启动 α=1 按设计；**ckpt vs M0 共享键逐位 0 差异**；step1 `2/5`→step2 `5/5`）；3 条方法论补充 + A5 增项；待 CG 确认开工。
+- **round-33 答复（§5.41）**：GPT（`c3bf69f`）——canary 不晋级（"动作辨识变强 ≠ rollout 更正确"）；33A/B/C 计划 + Gate A–E；**P0"双零死锁"质疑 ⇒ 我方只读审计闭合**（冷启动 α=1 按设计；**ckpt vs M0 共享键逐位 0 差异**；step1 `2/5`→step2 `5/5`）；3 条方法论补充 + A5 增项；待 CG 确认开工。
+- **round-33 执行（本版；§5.42）**：33A 三问闭合——碰撞=**收费站静止障碍簇 6/13**（AC1 新增 5 例 2/5 岗亭；交叉口 0；双证据链 13/13 repro=exact）；overshoot=**规划/WM 接口项 +117.9%** 主导（A −20.2% / C +2.3%；恒等式残差 0）；噪声=**重复 0 + bootstrap 半宽 6.1/6.1/8.9pp ≪ 恶化 20.9/17.2/16.5%**。33B **warp NO-GO**（严格 0/4；W2 纯重表达≈0）⇒ **decision=GO_EGO_ACTION_CONDITIONING_V2**；33C 建议 B0/B1（B2 删）+ 硬门沿用；待令。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp、组合效应）；常态 μ 无系统性 bias；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A 解构：F3/F1/F4）；**R28/R29 收敛：横修→六步路径→LQR 尾段×速度耦合；R30 再定位=部署链一致性（想象 vs 现实 8–10× 差、WM 固有误差小）**。
 - **约束**（持续有效）：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：P1-4、K-anchor、GRPO、WM/MoE、容量、recovery 扩采、几何反传；A4=冻结（条件见 §5.12）；禁制详见 §5.1/§5.4/§5.10/§5.13。
 
@@ -351,15 +352,25 @@
 - **度量噪声地板**：Gate C"恶化 >5% 停止"需先标定接口指标 run-to-run 噪声（建议 base 同协议重复录制一次）。
 - **处置**：33A-A1 已闭合（证据见上，`runs/round33/a1_ckpt_audit.json`）；33A 其余项与 33B 为只读 probe——**待 CG 确认即开工**。
 
+### 5.42 round-33 执行完成（GPT `f0ebfae` 批准后）：33A 三问闭合 + 33B warp **NO-GO**；decision=GO_EGO_ACTION_CONDITIONING_V2（33C 待令）
+
+- **33A-Q1 碰撞**（双证据链：录制启发式 + 同协议复跑读 MetaDrive 接触真值，13/13 repro=exact）：**最大簇=收费站静止障碍 6/13**（撞岗亭 3——非车辆、不在 OD/LD、仅经 others 走廊段；撞 OD 可见静止/排队车 3）；侧碰/并线 4/13；低速追尾 3/13；**交叉口冲突 0**。AC1 新增 5 例不集中单类（侧 2/静 2/追 1）但 2/5 在收费站岗亭；末步仍在给油（plan ds 2.51–3.43 m/0.5s）。
+- **33A-Q2 overshoot**（逐样本恒等式 O=A+B+C 残差=0）：h5 ΔO=+0.2736m（+16.5%）——**(ii) 规划/WM 接口项 B=plan−mu 主导（Δ=+0.3226，share +117.9% [108,141]）**；(i) A 反向（−0.0552，−20.2%；mu +0.050 但 expert +0.117）；(iii) C 可忽略（+0.0062，+2.3%；无晚段累积，Spearman NS）。h1–5 聚合 B +115.1%；速度混淆不解释。⇒ **WM 预测改变后规划层放大 ds**（与 E_if +20.9% / E_real +2.4% 互证）。
+- **33A-Q3 噪声**：录制确定性（`gate4_ac1` vs `record_ac1` 逐位一致）⇒ 重复噪声=0；episode 配对 bootstrap（B=10000）半宽 6.06/6.12/8.90pp ≪ 恶化 20.9/17.2/16.5% ⇒ **恶化真实**。
+- **33B warp（W0/W1/W2，base 模型，各 50 ep）**：**NO-GO**（严格 0/4；宽松 W1 2/4、W2 0/4）。W1：E_if −2.0%、E_action −1.7%、overshoot −2.4%、lane +3.9%（split 不稳）、OD 泄漏增加；W2（纯重表达）≈0。机制：对冻结 WM，ego 帧重表达本身几乎无效，W1 小效应来自移除 OD 恒速先验；零-shot 效应比 canary 恶化小一个数量级。自证：off 逐位（27 键 max|Δ|=0；w0 重录 vs base 50ep×40 键逐位一致）；warp 代码默认关保留。
+- **决策（按树）**：**GO_EGO_ACTION_CONDITIONING_V2**（不自动进入训练）。
+- **33C 建议（待 CG）**：**B0/B1 两臂**（B2=B1+warp 因 NO-GO 删）；B1 = 特征 [ds,dθ,κ] + 隐藏层正常初始化 + 输出层零初始化 + **固定增益 1（删可学习 α）** + ego 物理监督 {delta_progress, delta_speed, delta_heading}；硬门沿用 GPT 列表；训练 ~35 min/臂；评测建议加**收费站/静止障碍分层读数**（不新增 probe）。
+- **产物**：`docs/round33_report.md`、`runs/round33/*`（a2/a5/a6/b_warp*）、脚本 `.slim/deepwork/p1_v2/round33/*`。
+
 ---
 
 ## 6. 文档与产物索引
 
 - **决策/契约**：`docs/p1_v2_decision.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、**`docs/round30_audit.md`（R30 全审）**、**`docs/stage_a_config_consumption.md`（键级契约审计）**
-- **报告**：`docs/p1_0_report.md`、`docs/p1_2_diagnosis.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`、`docs/recovery_v1_dataset_card.md`、**`docs/round32_canary_report.md`（canary Gate 0–4 全测）**
+- **报告**：`docs/p1_0_report.md`、`docs/p1_2_diagnosis.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`、`docs/recovery_v1_dataset_card.md`、**`docs/round32_canary_report.md`（canary Gate 0–4 全测）**、**`docs/round33_report.md`（33A 三问 + 33B warp NO-GO）**
 - **数据**：`datasets/recovery_v1|v2/`、`datasets/semantic_v1_{pilot,independent,3d3}/`（9,515 / 8,953 / 53,765）
-- **产物**：`runs/p1_v2/round12a|15a|17|18a|20|21|22|23|24|25|26|27|28|29/`、**`runs/p1_v2/round30/`（matrix×8 / r4_K1e2 / wm_action_probe_M0 / grad_ledger / wm_tf_check×2）**、`runs/p1_v2/`（probe 家族）、**`runs/round32/canary/`（gate0_compat / eval_* / gate3_* / gate4_* / record_* / monitor）**、**`runs/round33/a1_ckpt_audit.json`（P0 审计）**、`runs/p1_0|p1_2/`、`runs/eval/`、`runs/forensics/`
-- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`、`.slim/deepwork/p1_v2/`（round12a→32 脚本 + logs；R30 队列=`round30/{journal,monitor,run_r30_stage1,run_r30_stage2,run_r30_r4}.sh`；canary 队列=`round32/{canary_train,canary_eval,canary_compat_check,c4_gate3_analyze,p3b_conditional_gain}.py` + `run_r32_{canary,eval,gate34}.sh`）
+- **产物**：`runs/p1_v2/round12a|15a|17|18a|20|21|22|23|24|25|26|27|28|29/`、**`runs/p1_v2/round30/`（matrix×8 / r4_K1e2 / wm_action_probe_M0 / grad_ledger / wm_tf_check×2）**、`runs/p1_v2/`（probe 家族）、**`runs/round32/canary/`（gate0_compat / eval_* / gate3_* / gate4_* / record_* / monitor）**、**`runs/round33/a1_ckpt_audit.json`（P0 审计）**、**`runs/round33/`（a2_collision / a5_overshoot_decomp / a6_noise / b_warp / b_warp_compat）**、`runs/p1_0|p1_2/`、`runs/eval/`、`runs/forensics/`
+- **流水/脚本**：`.slim/deepwork/p1_0/journal.md`、`.slim/deepwork/p1_v2/`（round12a→32 脚本 + logs；R30 队列=`round30/{journal,monitor,run_r30_stage1,run_r30_stage2,run_r30_r4}.sh`；canary 队列=`round32/{canary_train,canary_eval,canary_compat_check,c4_gate3_analyze,p3b_conditional_gain}.py` + `run_r32_{canary,eval,gate34}.sh`；R33 队列=`round33/{a2_collision_attribution,a5_overshoot_decomp,a6_noise,b_warp_compat,b_warp_record,b_warp_analyze}.py`）
 - **回合文本**：`docs/chatgpt5p6sol_review.md`（ChatGPT 各轮；`61bf7ab` 起=Reality Audit 全栈提案、`acf1b8f`=终审、`c3bf69f`=round-33 答复）
 - **关键提交**：逐轮全文=本文件 git log；近期锚点：`423ae7c`（§5.25）、`8933049`+`c5a44df`（R28/§5.26）、`62f4202`+`97e35c6`（round-29/§5.27）、`d160582`+`711bc47`（R29A/§5.28）、`15ec4fa`（第十四轮）、`61bf7ab`（CG5.6 总审输入）、`acf1b8f`（终审输入）。
 
@@ -367,7 +378,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第二十七轮（本版；377 → 394 行）**：新增 §5.41（round-33 答复受理 + P0 审计闭合 + 3 条方法论补充）；§0/§7 刷新；上版 377 行 = `git show 7015cc8:docs/deepseekv4p1_argue.md`。
+- **第二十八轮（本版；392 → 404 行）**：新增 §5.42（R33 执行完成：33A 三问 + 33B NO-GO + 决策）；§0/§7 刷新；上版 392 行 = `git show 0188218:docs/deepseekv4p1_argue.md`。
+- **第二十七轮（377 → 392 行）**：新增 §5.41（round-33 答复受理 + P0 审计闭合 + 3 条方法论补充）；§0/§7 刷新；上版 377 行 = `git show 7015cc8:docs/deepseekv4p1_argue.md`。
 - **第二十六轮（363 → 377 行）**：新增 §5.40（canary 执行 + Gate 0–4 全测 + 结论/建议）；§0/§7 刷新；上版 363 行 = `git show 557527b:docs/deepseekv4p1_argue.md`。
 - **第二十五轮（354 → 363 行）**：新增 §5.39（R32 答复受理 + P3b 开工/canary 待令）；§0/§7 刷新；上版 354 行 = `git show 57d2391:docs/deepseekv4p1_argue.md`。
 - **历次精简留档**：第二十四轮（343→354，`57d2391`）；第二十三轮（334→343，`3d14f9d`）；第二十二轮（319→334，`cd6f1f6`）；第二十一轮（308→319，`87253cf`）；第二十轮（298→308，`440790b`）；第十九轮（281→298，`7beb7e9`）；第十八轮（264→281，`b8bb326`/`39f0569`/`278a187`）；第十七轮（299→264，`5ed40e4`）；第十六轮（276→299，未单独提交、并入第十七轮）；第十五轮（255→276，`fdc6d2d`）；第十三轮（随 R28/R29 新增；`c5a44df`/`711bc47`）；第十二轮（280→270，`e5ae48e`）；第十一轮（269→261，`6e2e2cd`）；第十轮（267→252，`52ce959`）；第九轮（269→248，`48bb8be`）；第八轮（300→252，`ee2651b`）；第七轮（305→283，`a1986f3`）；第六轮（342→261，`e638b76`）；第五轮（355→310，`96df7cb`）；第四轮（299→282，`58ac4c3`）；第三轮（`74f522f`）；第二轮（262→~210，`249c51c`）；第一轮（1114→166，`7b83730`）。
@@ -390,3 +402,4 @@
   - 2026-10-14 上午·二：GPT 答复（`cde2e51`，515 行）——**接受主方向 + 批准最小可逆 canary（AC0/AC1/P-only/AC1-P；Gate 0–4）**；措辞精确化（latent-state evolution block）；**§5.39：P3b 只读开工、canary 待令**。
   - 2026-10-14 下午：**canary 执行完毕**（用户令）——基建 C1（Gate 0 七项 PASS、966 tests）+ 四臂训练（C-A expert-only）+ Gate 0–4 全测；**§5.40：fidelity 级有效（top-3 0.917✓/FD 2.74×✓/单调 0.946✓/ΔR² 全正）、部署门未过（Gate 3 全 FAIL；AC1 succ 0.600✓ 但 coll 翻倍）⇒ 不自动进 C-B；五条建议待裁**。
   - 2026-10-14 下午·二：GPT round-33 答复（`c3bf69f`，905 行）——canary 不晋级 + 33A/B/C 计划 + Gate A–E + P0"双零死锁"质疑；**§5.41：我方只读审计闭合 P0（冷启动 α=1 按设计；ckpt vs M0 共享键逐位 0 差异；step1 2/5→step2 5/5）+ 全采纳 + 3 条方法论补充 + A5 增项；待 CG 确认开工**。
+  - 2026-10-14 下午·三：GPT 修订答复（`f0ebfae`，97 行）——反驳接受、初始化结案、批准 33A/B/C 开工；**§5.42：执行完成——33A 三问闭合（碰撞=收费站静止障碍簇 6/13；overshoot=规划层 +117.9%；噪声<恶化）+ 33B warp NO-GO（0/4）⇒ decision=GO_EGO_ACTION_CONDITIONING_V2；33C 建议 B0/B1 + 硬门；待 CG 确认后训练**。
