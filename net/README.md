@@ -69,6 +69,15 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - rollout 尾段（k≥1）由 t0 锚混合驱动，step0 仍 = `action_mu`（输出契约不变）；锚字典缺文件时回退内置 K=6（`net/anchor.py:98-130`）。
 - lane 通道已从 obs v6 删除 → `plan_anchors` 的 `lane_ctx` 恒为 `zeros(B,3)`（valid=0 → 恒等变换）；`anchor_lane_context` 保留但不再接线（`net/model.py:627-632`）。
 
+## Round-36 H1 执行优先骨架（`net/path_head.py`；默认关）
+
+- **开关**：`DrivingModel.set_path_head(True)` 惰性构造 `PathExecutionHead`（构造期保存/恢复 CPU RNG）；默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致，旧 ckpt strict 载入 0/0/0。
+- **横向头**：锚 = 外部给定目标车道中心线折线 `lane_anchor_xy (B,P,2)`（ego t0 系）→ 三控制站位 `(5.25, 17.5, 29.75) m` 的 `kappa_ref (B,3)`；头输出 `κ_near/mid/far` 残差（`tanh×0.1`，末层零初始化 ⇒ 初始 κ(s)=锚中心线）；分段线性 κ(s)。
+- **纵向头**：输入 = 组合 κ_ctrl(3) + 外源几何 8 维（速度/左右余量/静态距/动态距/TTC/nav 进度/目标末端距；缺键默认 0 + presence 掩码）→ 6 步 `ds`（`sigmoid×10`，初始 3.5 m/步）。
+- **组合层**（`compose_path_plan`）：`ds_k = s_k−s_{k−1}`、`dθ_k = κ̄_k·ds_k`（段内平均曲率精确积分）→ `(B,6,2)` plan；`plan[:,0]==action_mu`、`traj_xy/traj_theta` 由 `arc_step`/`compose_pose` 重放（与 `_rollout` 同口径）；ds/dθ 截断到 policy 动作界。启用后旧 PolicyHead 输出保留为 `policy_action_mu`。
+- **训练/冻结集**（manifest：`.slim/deepwork/p1_v2/round36/h1_manifest.json`）：可训 `path_head.` + `plan_head.fusion.2.`（PolicyBackbone 末层）；WM/Encoder/Memory/旧 PolicyHead/MoE/ValueHead 全冻。target-lane token dropout：`set_target_lane_dropout(p)`（默认 0；0.2→0.5 训练侧调度）。
+- **Gate 0 证据**：`runs/round36/h1/gate0_compat.json`（逐位/strict/LQR 契约/966 tests）+ `runs/round36/h1/smoke.json`（开/关前向 + 梯度 allowlist + dropout）。
+
 ## config/model.yaml → 模型构造键（`pipeline/stages.py:152-194`）
 
 | 键 | 映射 |

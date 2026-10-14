@@ -47,6 +47,21 @@ v8 增补（参数再分配 + lane/ttc 移除 + WM latent 重构）
 - K-anchor 保留（默认关）：``plan_anchors`` 的 ``lane_ctx`` 传 ``zeros(B,3)``（valid=0 →
   恒等变换）；``net.anchor.anchor_lane_context`` 保留但不再接线。
 
+Round-36 H1（执行优先骨架；默认关）
+-----------------------------------
+- ``set_path_head(True)`` 惰性构造 :class:`net.path_head.PathExecutionHead`（**车道锚定横向
+  曲率头 + 路径条件化纵向头 + 外部兼容组合层**）；**默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致**
+  （Gate 0 自证：``.slim/deepwork/p1_v2/round36/h1_compat_check.py``）。
+- 启用后输入契约：``obs['lane_anchor_xy'] (B,P,2)``（给定目标车道中心线折线，ego t0 系；
+  可选 ``lane_anchor_mask``）；外源几何键 ``path_*`` 可选（缺省 0 且 presence 掩码随输出返回）。
+- 启用后输出契约（LQR/环境/评测接口**不变**）：``plan (B,6,2)`` = 组合层 ``(ds,dθ)``
+  （``ds_k=s_k−s_{k−1}``、``dθ_k=κ̄_k·ds_k``），``plan[:,0] == action_mu``；
+  ``traj_xy/traj_theta`` = 同 plan 的位姿链（``arc_step``/``compose_pose``，与 ``_rollout``
+  同口径）；旧 PolicyHead 输出保留为 ``policy_action_mu``（诊断；``action_logstd`` 仍来自旧头）。
+  rollout 尾段计划由组合层钉住（不再逐步策略自回归），step0 仍 = ``action_mu``。
+- ``set_target_lane_dropout(p)``：训练期 target-lane token dropout（20%→50% 斜坡由训练侧调度；
+  默认 0 = 关；``p=0`` 不消耗 RNG；仅 ``model.training`` 且存在 target token（semantic 模式）时生效）。
+
 v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 = 旧行为逐位不变）
 ---------------------------------------------------------------------------------------
 - :class:`net.plan_head.PlanHead` 增加**选择头**（latent → K 锚 logits）、**连续速度头**
@@ -126,6 +141,13 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
     _mem_world_state_from_obs = None
 
 from net.anchor import load_anchor_dictionary
+from net.path_head import (
+    LAT_HORIZON_M,
+    PathExecutionHead,
+    anchor_from_obs,
+    long_exog_from_obs,
+    target_lane_valid_from_obs,
+)
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
 from net.semantic import SemanticWiring
@@ -366,6 +388,14 @@ class DrivingModel(nn.Module):
         self.ego_phys: "nn.Sequential | None" = None
         #: R32 canary：ego 物理锚开关（普通属性，**不进 state_dict**；默认关）。
         self.enable_ego_phys = False
+        # ---- Round-36 H1：执行优先骨架（车道锚定横向曲率头 + 路径条件化纵向头 + 兼容组合层）----
+        # **惰性构造**（``set_path_head``；默认 None ⇒ 不新增参数/键，默认路径逐位不变；
+        # 构造期保存/恢复 CPU RNG，不扰动既有初始化抽样序列）。
+        self.path_head: "PathExecutionHead | None" = None
+        #: H1 开关镜像属性（普通属性，不进 state_dict）。
+        self.enable_path_head = False
+        #: 训练期 target-lane token dropout 概率（默认 0 = 关；0 不消耗 RNG）。
+        self.target_lane_dropout_p: float = 0.0
         #: Round-20 消融（**默认 baseline = 既有行为逐位不变**）：
         #: ``baseline`` | ``no_chain``（M1：关 LD↔LD 槽位链）| ``set_attn``（M2：关链 + LD set-attention）。
         #: M2 的注意力模块**惰性构造**（baseline 路径不新增参数 → 既有 ckpt 键集不变）。
@@ -733,6 +763,49 @@ class DrivingModel(nn.Module):
             torch.random.set_rng_state(rng_state)
         return self
 
+    # ---------------------------------------------------------------- R36 H1 开关
+    def set_path_head(
+        self, enabled: bool = True, *, horizon: float = LAT_HORIZON_M
+    ) -> "DrivingModel":
+        """Round-36 H1：执行优先骨架开关（**惰性构造**；默认关 = 与 HEAD 逐位一致）。
+
+        ``enabled=True`` 首次调用才构造 :class:`net.path_head.PathExecutionHead`
+        （横向曲率头 + 纵向路径头 + 几何特征编码层 + 外部兼容组合层）；构造期保存/恢复
+        CPU RNG 状态 ⇒ 不扰动既有初始化抽样序列（同 ``ego_phys``/``semantic_wiring`` 口径）。
+        启用后 ``forward`` 要求 ``obs['lane_anchor_xy']``（给定目标车道中心线折线），输出契约
+        见模块 docstring「Round-36 H1」节。``enabled=False`` 只关闭消费路径（已构造的 head
+        参数保留，不进 forward）。
+        """
+        self.enable_path_head = bool(enabled)
+        if enabled and self.path_head is None:
+            device = next(self.parameters()).device
+            rng_state = torch.random.get_rng_state()
+            self.path_head = PathExecutionHead(self.hidden, horizon=float(horizon)).to(device)
+            torch.random.set_rng_state(rng_state)
+        return self
+
+    def set_target_lane_dropout(self, p: float = 0.0) -> "DrivingModel":
+        """训练期 target-lane token dropout 概率（默认 0 = 关；非参数，不进 state_dict）。
+
+        ``p > 0`` 且 ``self.training`` 且存在 target token（semantic 模式）时按**样本**独立
+        伯努利置零 ``target_lane_token``（``keep = rand(B) >= p``；rollout 各步共用 t0 掩码）。
+        掩码经 ``encode()['target_lane_dropout_keep']`` / 前向 ``target_lane_dropout_keep``
+        暴露。**默认 0 ⇒ 不消耗 RNG、无行为变化**；``eval()`` 下不生效（确定性评测）。
+        """
+        p = float(p)
+        if not 0.0 <= p < 1.0:
+            raise ValueError(f"target-lane dropout 概率必须在 [0,1)，收到 {p}")
+        self.target_lane_dropout_p = p
+        return self
+
+    def path_head_parameter_names(self) -> tuple[str, ...]:
+        """path head（惰性构造）新增参数/buffer 名；默认关 → 空元组（旧 ckpt strict 加载不受影响）。"""
+        if self.path_head is None:
+            return ()
+        names = [f"path_head.{name}" for name, _ in self.path_head.named_parameters()]
+        names += [f"path_head.{name}" for name, _ in self.path_head.named_buffers()]
+        return tuple(sorted(names))
+
     # ---------------------------------------------------------------- 输入解析
     def _mem_from_obs(self, obs: Mapping[str, Tensor]) -> MemBank:
         """obs → 真 mem（v2 键名 + 回退，见 :func:`net.mem.mem_from_obs`）。只读，不写回。"""
@@ -1016,6 +1089,14 @@ class DrivingModel(nn.Module):
                 if self._is_semantic() else None
             )
         ld_context, target_token = head_context, target_token
+        # R36 H1：训练期 target-lane token dropout（默认关；p=0 不消耗 RNG）
+        target_lane_keep: Tensor | None = None
+        if self.target_lane_dropout_p > 0.0 and self.training and target_token is not None:
+            target_lane_keep = (
+                torch.rand((mem.batch,), dtype=target_token.dtype, device=target_token.device)
+                >= self.target_lane_dropout_p
+            )
+            target_token = target_token * target_lane_keep.unsqueeze(-1)
         ld_pool = ld_context
         if self.ld_mode == "set_attn" and self.ld_set_attn is not None:
             # Round-20 M2：LD set-attention 上下文（ego + nav + others 为 query）
@@ -1042,6 +1123,24 @@ class DrivingModel(nn.Module):
         if self.num_anchors > 0:
             lane_ctx = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
             anchor = self.plan_head.plan_anchors(latent, lane_ctx)
+        # R36 H1：执行优先骨架（默认关；启用时要求 lane_anchor_xy → 组合层 (ds,dθ) 输出）
+        path_out: dict[str, Tensor] | None = None
+        if self.path_head is not None:
+            anchor_xy, anchor_mask = anchor_from_obs(obs)
+            long_exog, long_present = long_exog_from_obs(
+                obs, batch=mem.batch, device=latent.device
+            )
+            path_out = self.path_head(
+                latent,
+                anchor_xy=anchor_xy,
+                anchor_mask=anchor_mask,
+                long_exog=long_exog,
+                target_lane_valid=target_lane_valid_from_obs(
+                    obs, batch=mem.batch, device=latent.device
+                ),
+            )
+            path_out["long_exog"] = long_exog
+            path_out["long_present"] = long_present
         tokens, key_mask = self._head_tokens(
             z_ego,
             z_od,
@@ -1100,6 +1199,9 @@ class DrivingModel(nn.Module):
             "route_world_mask": route_world_mask,
             "ego_world": ego_world,
             "anchor": anchor,
+            # R36 H1：执行优先骨架（默认关 ⇒ None）与 target-lane dropout 掩码
+            "path": path_out,
+            "target_lane_dropout_keep": target_lane_keep,
             # R21-3A/25A：semantic 模式诊断/下游（baseline = None / 与 ld_pool 相同）
             "target_lane_token": target_token,
             "geometry_context": ld_context,          # head 槽上下文（ld_ctx 基底）
@@ -1152,6 +1254,11 @@ class DrivingModel(nn.Module):
         # v7 结构迭代 B：K-anchor 计划（t0 一次性软混合；step0 仍由 action_mu 钉住 → 输出契约不变）
         anchor = encoded.get("anchor")
         anchor_plan: Tensor | None = anchor.get("plan") if isinstance(anchor, dict) else None
+        # R36 H1：执行优先计划（组合层 t0 一次给出；默认关 ⇒ None）
+        path_out = encoded.get("path")
+        plan_override: Tensor | None = (
+            path_out.get("plan") if isinstance(path_out, dict) else None
+        )
 
         # t0 锚定状态与图位姿模板（t0 帧；来自真实 obs，不 detach —— 检测任务）
         od_anchor = self.st_gnn.od_state_from_features(enc.od_now, od_live)
@@ -1261,7 +1368,10 @@ class DrivingModel(nn.Module):
                     latent, _, _ = self.plan_step(
                         z_ego, z_od, z_ld, od_live, ld_live, others_ctx, nav_token, signal_token
                     )
-                if anchor_plan is None:
+                if plan_override is not None:
+                    # R36 H1：执行优先计划钉住尾段（step0 仍 = action_mu；action/pose 链可微）
+                    action = plan_override[:, k, :]
+                elif anchor_plan is None:
                     tokens, key_mask = self._head_tokens(
                         z_ego,
                         z_od,
@@ -1328,6 +1438,14 @@ class DrivingModel(nn.Module):
         key_mask: Tensor = encoded["key_mask"]
         # A1：策略/价值 = 交叉注意力头（直吃令牌集合；含 plan_head 融合 latent token）
         action_mu, action_logstd = self.policy(tokens, key_mask)
+        # R36 H1：执行优先骨架（默认关）——组合层接管 action_mu/plan（``plan[:,0]==action_mu``
+        # 契约）；旧 PolicyHead 输出保留为 ``policy_action_mu``（诊断；action_logstd 仍来自旧头）。
+        path_out = encoded.get("path")
+        path_out = path_out if isinstance(path_out, dict) else None
+        policy_action_mu: Tensor | None = None
+        if path_out is not None:
+            policy_action_mu = action_mu
+            action_mu = path_out["action_mu"]
         out: dict[str, Tensor] = {
             "action_mu": action_mu,
             "action_logstd": action_logstd,
@@ -1337,6 +1455,15 @@ class DrivingModel(nn.Module):
             "latent": latent,
             "ego_next": encoded["ego_next"],
         }
+        if policy_action_mu is not None:
+            out["policy_action_mu"] = policy_action_mu
+            for path_key, path_value in path_out.items():
+                if torch.is_tensor(path_value):
+                    out[f"path_{path_key}"] = path_value
+        # R36 H1：target-lane dropout 掩码（默认关 → None → 不输出）
+        dropout_keep = encoded.get("target_lane_dropout_keep")
+        if dropout_keep is not None:
+            out["target_lane_dropout_keep"] = dropout_keep
         # R21-3A：semantic 诊断/下游（baseline 模式不输出 → 旧消费契约不变）
         if encoded.get("target_lane_token") is not None:
             out["target_lane_token"] = encoded["target_lane_token"]
@@ -1353,6 +1480,11 @@ class DrivingModel(nn.Module):
             out["anchor_residual"] = anchor["residual"]
             out["anchor_ctx"] = anchor["ctx"]
         if not rollout:
+            if path_out is not None:
+                # R36 H1：cheap path 也给出组合层 plan/位姿链（不需要 WM；LQR 消费契约不变）
+                out["plan"] = path_out["plan"]
+                out["traj_xy"] = path_out["traj_xy"]
+                out["traj_theta"] = path_out["traj_theta"]
             if world_model:
                 raise ValueError("world_model=True 需要 rollout=True（多步预测是 rollout 的产物）")
             return out
