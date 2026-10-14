@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R34A 执行完成：路径级归因 94.7%——**失败是路径级（通道选择 6 + 越界 6 + 撞障碍 6）；LQR 跟踪/表示缺失/未响应 0 例**；静态障碍信号存在但衰减+方向反转；泄漏非因果；34B 建议范围待确认（§5.46））
+# deepseek-v4.1 argue / 主文档（R34B0 批准受理：34B 修订采纳——弃"走廊摘要"核心化 → 显式静态对象 slots + 确定性几何层 + 多候选路径；nav=路线级排模答复；34B0 开工（§5.47））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-14 晚·二）**：**R34A 执行完毕**（三 lane 只读，验收达标：覆盖率 **94.7%**、bit-exact、干预可复现）——**①失败是路径级**（tollgate 10/10、merge 6/7；**LQR 跟踪 0 例、表示缺失 0 例、未响应 0 例**）；**②最大失败类=目标通道/车道选择错误 6/19**（路径驶入岗亭车道、未完成必需变道）+ 路径越界 6（merge）+ 路径撞障碍 6；**③静态障碍（岗亭）确实进 obs 且被消费，但 PolicyHead 衰减到 0.03–0.06m 且方向反转（presence→加速）**⇒"表示缺失"归因不成立；**④泄漏伤害闭环=无证据**（秩口径弱相关非因果）。**34B 建议范围**（κ 3 控制点→路径 + 路径条件化 v_ref + route/lane-target + 走廊占用；外部 ds/dθ=κ·ds 兼容；同预算 A/B）**待确认**。报告 `docs/round34a_report.md`。
-> **本版说明**：第三十三轮（203 → 213 行）——新增 §5.46（34A 执行完成：三 lane 结果/综合/34B 范围）；§0/§7 刷新；上版 203 行 = `git show df3760e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-14 深夜）**：GPT round-34B 答复（`5fb3718`，503 行）——**接受 34A 全部事实**；**修订 34B**：反对把 `others[16:21]`"软走廊"摘要继续作为核心输入（它没解决规划问题且被学成**危险 shortcut**：presence→加速）；长期 = **显式静态对象 slots + 网络生成多候选横向路径 + 确定性几何层评估 + 网络学选择与配速**；旧摘要三阶段处置（诊断降级 → 并存+高 dropout → 达标后删）。**34B0/34B1/34B2** + 硬门（候选覆盖 ≥95%、选择 top-1 ≥70%/top-3 ≥95%、通道错误 ↓≥50%、纵向单调 ≥95%、闭环 succ ≥0.62/off ≤0.10/coll ≤0.08/tmo ≤0.12）。**nav 排模答复**：当前导航=**路线级**（`NAV_DIM=11`：3 路线顶点自车系 x,y + 4 维命令 + rc；车道级在 LD/semantic，非 nav）⇒ 34B1 的 target-lane 条件需新增。我方 3 条补充（slots 原则=暴露几何不暴露决策/候选覆盖构造=专家轨迹+车道中心线偏移/复用 D1 工具）；**34B0 开工**（lane E1/E2/E3）。
+> **本版说明**：第三十四轮（213 → 221 行）——新增 §5.47（34B 修订受理 + nav 答复 + 3 条补充 + 34B0 开工）；§0/§7 刷新；上版 213 行 = `git show 06adf69:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A（本版）**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）+ 静态障碍信号衰减+方向反转 + 泄漏非因果 ⇒ 34B 范围待确认。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）+ 静态障碍信号衰减+方向反转 + 泄漏非因果；**R34B（本版）**：34B 修订采纳（显式 slots + 几何层 + 多候选路径）；34B0 开工。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -178,6 +178,13 @@
 - **34B 建议范围（待确认）**：横向 κ 3 控制点（near/mid/far）→ κ(s) 积分路径；纵向 v_ref[6] 路径条件化；外部 `dθ_t=κ_t·ds_t` 兼容（LQR/环境/评测不变）；同数据/同 epoch **A/B vs 现 policy**；默认关/可回滚。
 - **产物**：`docs/round34a_report.md`、`runs/round34/{d1_path_attribution,d2_static_contract,d3_leakage_causality}.*`、`runs/round34/d3_hooks_note.md`。
 
+### 5.47 round-34B0 批准受理（GPT `5fb3718`，503 行）：34B 修订采纳（弃"走廊摘要"核心化）；nav 排模答复；34B0 开工
+
+- **受理 + 修订采纳**：①**"软走廊"定性**：`others[16:21]`=人工静态障碍摘要（非完整走廊）；它**没解决规划问题**且被学成**危险 shortcut**（presence→加速/入走廊加速/置零减速）⇒ **不强化外部"软走廊策略"**；长期=**显式结构化静态对象 slots**（type/rel x·y/heading/L·W/mask/置信度）+ 网络自判候选路径冲突；②**旧摘要三阶段**：阶段1 保留但降级诊断（zero/permute/present-only/gap-only 严格消融）→ 阶段2 新模型并存 + 高 dropout（50→80→100%）→ 阶段3（闭环不退化 + 收费站成功提升 + 干预方向正确）才删；③**34B 修订（接受）**：横向=**多候选**（保持/左/右，route+target-lane 条件化）；纵向=对每条候选读**几何层客观量**（静态距离/TTC/越界/可通行长度/曲率）→ v/s 剖面 → score head 选择；**关键区别**：net 生成候选、几何层算客观关系（确定性算子≠外部策略）、net 学选择与配速；④**34B0/34B1/34B2** 顺序 + **硬门**（输入职责：slots 重放误差 0 + 旧摘要置零不崩；候选覆盖：收费站/merge 失败集 ≥95% 存在无碰撞/不越界候选；选择：oracle top-1 ≥70%/top-3 ≥95%、通道错误 ↓≥50%；纵向：障碍近→v 单调降 ≥95%、曲率增→速度不升、TTC 降→进度不增；闭环：succ ≥0.62、off ≤0.10、coll ≤0.08、tmo ≤0.12、rc 不降）。
+- **nav 排模答复（GPT 提问）**：当前给 net 的导航=**路线级（route-level）**，非车道级——`NAV_DIM=11` = 3×路线顶点（自车系 x,y；顶点=路段终点）+ 4 维命令（forward/left/right one-hot，弦向叉积）+ route_completion；来源 `net/mem.py::nav_features_from_world`（与 env NavChannel 同口径、t0 冻结、detach）。**车道级信息在 LD 通道/semantic**（`ld_lane_role`/`ld_route_associated`/`ld_offset_s_norm` + R21 target-lane token），**不在 nav** ⇒ 34B1 的 "target-lane 条件" 需**新增**。
+- **我方补充（3 条）**：①**slots 提取同属外部先验**——原则="**暴露几何、不暴露决策**"（slots 提供形状/位置/mask；不做"哪个障碍相关/是否安全"的压缩）；②**候选覆盖证明的构造**：候选集来源=专家轨迹（`dec__expert_action` 合成）+ 车道中心线左右偏移，先证 ≥95% 覆盖再训 selector；③**34B0 复用 D1 工具**（footprint/几何评估器同口径，避免分叉）。
+- **开工**：lane E1（静态摘要因果消融，闭环 5 变体）、lane E2（显式静态对象 slots 提取器 + 自证）、lane E3（候选路径几何评估器 + 覆盖证明）。
+
 ---
 
 ## 6. 文档与产物索引
@@ -194,7 +201,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第三十三轮（本版；203 → 213 行）**：新增 §5.46（34A 执行完成：三 lane 结果/综合/34B 范围）；§0/§7 刷新；上版 203 行 = `git show df3760e:docs/deepseekv4p1_argue.md`。
+- **第三十四轮（本版；213 → 221 行）**：新增 §5.47（34B 修订受理 + nav 答复 + 3 条补充 + 34B0 开工）；§0/§7 刷新；上版 213 行 = `git show 06adf69:docs/deepseekv4p1_argue.md`。
+- **第三十三轮（203 → 213 行）**：新增 §5.46（34A 执行完成：三 lane 结果/综合/34B 范围）；§0/§7 刷新；上版 203 行 = `git show df3760e:docs/deepseekv4p1_argue.md`。
 - **第三十二轮（191 → 203 行）**：新增 §5.45（34A 批准受理 + 5 条补充 + 开工）；§0/§7 刷新；上版 191 行 = `git show 6f2e6bf:docs/deepseekv4p1_argue.md`。
 - **第三十一轮（180 → 191 行）**：新增 §5.44（33C 执行完成：硬门表/增益链/分层/分析/分支判定）；§0/§7 刷新；上版 180 行 = `git show a616595:docs/deepseekv4p1_argue.md`。
 - **第三十轮（169 → 180 行）**：新增 §5.43（33C 批准受理 + 4 条补充 + 开工）；§0/§7 刷新；上版 169 行 = `git show 5fbc0ef:docs/deepseekv4p1_argue.md`。
