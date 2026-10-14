@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（**CG 指令：终止并回退 `acd22c1` 方案（§5.51 作废）；直接执行 `7c0186f`=执行优先**——给定目标车道的保持/变道/merge/收费闸口执行；车道锚定曲率残差 + 路径条件化纵向；门 G0–G6；开工（§5.52））
+# deepseek-v4.1 argue / 主文档（R36 准备完成：H1 执行头骨架（Gate 0 8/8；已入库）+ H2 given-target 数据规格（99.98% 标签、数据门 15/15）+ H3 hooks（555 键）；关键 caveat=T4 专家晚换道；DP-6 提取开工（§5.53））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 上午·二）**：**CG 指令：`acd22c1` 方案不佳 ⇒ 终止并回退**（§5.51 受理 + G1/G2/G3 队列全部作废；G2/G3 已中止，产物留档 `runs/round35/g2_diag_target/`=partial）；**直接执行 `7c0186f`（336 行；执行优先）**：先证明"**给定合法目标车道后**网络能稳定生成车道内可执行路径并完成保持/变道/merge/收费闸口执行"，再谈自主选道。规格：横向=**车道中心线锚 + near/mid/far 曲率残差**；纵向=路径条件化（曲率/边界余量/静态距/TTC/速度/nav 进度）→ 6 步 s/v；外部 `ds_k=s_k−s_{k−1}`、`dθ_k=κ_k·ds_k`（LQR/环境/评测不变）；**token dropout 20%→50%**；外部障碍感知规则=仅诊断上界；训练=横向头/纵向头/必要 PolicyBackbone 末层/几何编码（WM·Encoder 主体·Memory·旧 PolicyHead·MoE·ValueHead·LQR 冻结）；任务序 T1 保持→T2 变道→T3 merge→T4 收费站闸口执行；门 **G0–G6（G6 闭环 0.62/off ≤0.10/coll ≤0.08/tmo ≤0.10）**→clean150；禁自主选道/删 token/WM 修改/warp 重训/DAgger/MoE/RL/LQR 改/扩容。**我方 4 条补充**（G1 子集口径/given-target 监督规格/执行先行的两分支记录/G2 残留不构成结论）。**开工**（lane H1/H2/H3）。
-> **本版说明**：第三十九轮（263 → 277 行）——新增 §5.52（CG 终止回退 + 直接执行 `7c0186f` + 4 条补充）；§5.51 加作废注记；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 上午·四）**：**R36 准备完成**（H1/H2/H3 全收口；报告 `docs/round36_report.md`）——①**H1 执行头骨架**（`net/path_head.py` 791 行；车道锚 κ_ref + near/mid/far **曲率残差** + 路径条件化纵向头〔→6 步 s〕+ 组合层；**Gate 0 8/8**：默认关三口径逐位、旧 ckpt strict 0/0/0、LQR 契约 ≤3.2e-6、**966 passed**；已入库 `6944436`）；②**H2 given-target 数据规格**：T1 保持 907 ep/53,606 步、T2 变道 2,579 ep/11,818 步、T3 merge 441 ep、T4 闸口 **317/455 ep（69.7%）**/15,543 步；全库 **265,801 usable、99.98% 标签、0 error**；数据门 15/15；**关键 caveat=T4 专家多为晚换道（p50 25.8m）⇒ 直接模仿编码"晚换道"，G4 提前换道需训练侧处理**；③**H3 hooks**（555 键；§五 7 类全覆盖；footprint 连续 + LQR 四象限；默认关 bit-exact）。**下一步**：DP-6 提取开工（I1）→ 训练接线 T1–T4 → G1–G6；待裁：G1 子集口径 + T4 晚换道策略。
+> **本版说明**：第四十轮（263 → 287 行）——新增 §5.53（R36 准备完成 + 下一步）；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（本版）**：**终止回退 `acd22c1`（§5.51 作废）；直接执行 `7c0186f`=执行优先**（给定目标车道执行能力；G0–G6 门）；开工（H1/H2/H3）。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（本版）**：**终止回退 `acd22c1`（§5.51 作废）；直接执行 `7c0186f`=执行优先**——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；DP-6 提取开工。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -236,6 +236,15 @@
   4. **G2 残留**（终止前 10/50 ep）：部分 ep 行为改变（b1:7784 collision→out_of_road、b1:7789 off→off）——**不构成结论**（未完成且方案作废）；诊断上界规则依 `7c0186f` §二 3 仍允许作 G4 预测，若需可复用脚本重跑全量。
 - **开工**：lane H1（Gate-0 骨架：车道锚定横向曲率头 + 路径条件化纵向头 + 组合层；默认关/逐位）、lane H2（given-target 监督数据规格 + 数据门）、lane H3（新头 hooks 扩展）。
 
+### 5.53 round-36 执行（H1/H2/H3 全收口）：执行优先骨架 + hooks + given-target 数据规格就绪；DP-6 提取开工（报告 `docs/round36_report.md`）
+
+- **H1 骨架**（`net/path_head.py` 791 行 + `net/model.py` +134；**已入库 `6944436`**）：车道锚 κ_ref（3 控制站位）+ near/mid/far **曲率残差**（tanh×0.1、末层零初始化 ⇒ 初始 κ=锚曲率）+ 路径条件化纵向头（→6 步 s）+ 组合层（`plan[:,0]==action_mu` 逐位、`dθ=κ̄·ds` 精确积分）；**Gate 0 8/8**（默认关三口径逐位 max|Δ|=0、旧 ckpt strict 0/0/0、LQR 契约 interp ≤3.2e-6、**966 passed**）；smoke 3/3（梯度仅 allowlist 18 键=`path_head.`+`plan_head.fusion.2.`；dropout 0.2→0.5）。Caveats：曲率空间锚定（起点不搬到锚线）、dθ 截断、启用后 rollout 尾段由组合层一次给出。
+- **H2 数据规格 + 数据门**（`h2_data_spec.*` + 7 样例）：标签规格（T1 keep/T2 change/T3 merge/T4 gate/T5 junction；专家路径在**目标车道锚系**下的 lat_err/head_err/s_anchor/valid）；计数：T1 907 ep/53,606 步、T2 2,579 ep/11,818 步、T3 441 ep/24,746 步、T4 闸口 **317/455 ep（69.7%）**/15,543 步（gate gap 3.5m、匹配 p50 0.084m）、T5 906 ep；全库 **265,801 usable、99.98% 标签、0 error**；自证 15/15 与 F3 一致；新增 **DP-6**（离线提取；DP-2 不再是前置）。
+- **H3 hooks**（`h3_hooks_ext.py` 子类化复用 F2；555 键）：§五 7 类全覆盖（横向/纵向/**footprint 连续 ≤1m**〔非 6 点〕+执行侧/LQR 对照四象限〔样例 60 双好/0 路径错/**2 路径好但跟踪错**〕/dropout 状态/8 臂干预）；默认关三方逐位、开关只增不改、前向 max|Δ|=0、RNG/ckpt sha 不变。
+- **关键 caveat（训练前必须处理）**：**T4 专家多为晚换道**（换道步距闸口 p50 25.8m）⇒ 直接模仿会编码"晚换道"；G4"提前换道 ≥85%"需训练侧单独处理（课程/加权/首步约束）。
+- **待裁**：①G1 普通道路子集口径（专用 normal 集）；②T4 晚换道策略。
+- **下一步**：**DP-6 全量提取（I1 开工）** → 训练接线（T1→T2→T3→T4）与 G1–G6 评测。
+
 ---
 
 ## 6. 文档与产物索引
@@ -252,7 +261,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第三十九轮（本版；263 → 277 行）**：新增 §5.52（CG 终止回退 + 直接执行 `7c0186f` + 4 条补充）；§5.51 加作废注记；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`。
+- **第四十轮（本版；263 → 287 行）**：新增 §5.53（R36 准备完成 + 下一步）；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`。
+- **第三十九轮（263 → 277 行）**：新增 §5.52（CG 终止回退 + 直接执行 `7c0186f` + 4 条补充）；§5.51 加作废注记；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`。
 - **第三十八轮（253 → 263 行）**：新增 §5.51（WP3 受理 + 3 条补充 + 开工）；§0/§7 刷新；上版 253 行 = `git show 272dd08:docs/deepseekv4p1_argue.md`。
 - **第三十七轮（243 → 253 行）**：新增 §5.50（R35 审计执行完成 + 综合 + 建议）；§0/§7 刷新；上版 243 行 = `git show 74e0bf0:docs/deepseekv4p1_argue.md`。
 - **第三十六轮（230 → 243 行）**：新增 §5.49（R35 受理 + 6 条补充 + 开工）；§0/§7 刷新；上版 230 行 = `git show 404738d:docs/deepseekv4p1_argue.md`。
