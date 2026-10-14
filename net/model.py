@@ -359,6 +359,12 @@ class DrivingModel(nn.Module):
             hidden, od_slots, ld_slots, steps=self.rollout_steps, dt=self.dt,
             spatial_layers=spatial_layers, od_knn=od_knn,
         )
+        # ---- R32 canary：ego 物理锚 decoder（**惰性构造**，与 ld_aggregator/semantic_wiring 同口径：
+        # 默认不新增参数 → 既有 ckpt 键集/冻结审计/配方分组零变化；仅 P 臂训练/评测消费，不进 forward）----
+        # ``set_ego_phys(True)`` 时构造 ``ego_phys(z_ego_next) → [delta_progress, speed, delta_heading]``。
+        self.ego_phys: "nn.Sequential | None" = None
+        #: R32 canary：ego 物理锚开关（普通属性，**不进 state_dict**；默认关）。
+        self.enable_ego_phys = False
         #: Round-20 消融（**默认 baseline = 既有行为逐位不变**）：
         #: ``baseline`` | ``no_chain``（M1：关 LD↔LD 槽位链）| ``set_attn``（M2：关链 + LD set-attention）。
         #: M2 的注意力模块**惰性构造**（baseline 路径不新增参数 → 既有 ckpt 键集不变）。
@@ -638,6 +644,34 @@ class DrivingModel(nn.Module):
         推理默认开启（与训练 phase 2 口径一致）。
         """
         self.plan_head.set_moe(enabled=enabled, load_balance_coef=load_balance_coef)
+        return self
+
+    # ---------------------------------------------------------------- R32 canary 开关
+    def set_action_ego(self, enabled: bool = True) -> "DrivingModel":
+        """R32 canary：ego 动作条件化开关（委托 ``st_gnn``；**惰性构造**，默认关 = 与 HEAD 逐位一致）。
+
+        ``enabled=True`` 首次调用才在 ``st_gnn`` 内构造 ``action_ego``/``alpha_ego``
+        ⇒ 默认模型不新增参数（旧 ckpt strict 加载 0/0/0；同 ``ego_phys``/``semantic_wiring`` 口径）。
+        """
+        self.st_gnn.set_action_ego(bool(enabled))
+        return self
+
+    def set_ego_phys(self, enabled: bool = True) -> "DrivingModel":
+        """R32 canary：ego 物理锚 decoder 开关（**惰性构造**；仅训练/评测消费，不进 forward）。
+
+        默认关 ⇒ 模型不新增参数（既有 ckpt 键集 / 冻结审计 / 配方 LR 分组零变化）。
+        构造期保存/恢复 CPU RNG 状态（不扰动既有初始化抽样序列）。
+        """
+        self.enable_ego_phys = bool(enabled)
+        if enabled and self.ego_phys is None:
+            device = next(self.parameters()).device
+            rng_state = torch.random.get_rng_state()
+            self.ego_phys = nn.Sequential(
+                nn.Linear(self.hidden, self.hidden),
+                nn.GELU(),
+                nn.Linear(self.hidden, 3),
+            ).to(device)
+            torch.random.set_rng_state(rng_state)
         return self
 
     # ---------------------------------------------------------------- 输入解析
@@ -1104,6 +1138,7 @@ class DrivingModel(nn.Module):
             pose_k = torch.cat([pose.detach().unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
 
             # (c) latent 自回归转移 + 物理解码（t0 帧预测，逐步堆叠）
+            # R32 canary：action = 本步执行动作 a_{k-1}（与 pose 链同一动作；开关默认关 ⇒ 无变化）
             z_ego_next, z_od_next, z_ld_next, od_pred, ld_pred, presence_logit, entry_logit = (
                 self.st_gnn(
                     z_ego=z_ego,
@@ -1114,6 +1149,7 @@ class DrivingModel(nn.Module):
                     step_index=k,
                     od_anchor=od_anchor,
                     ld_anchor=ld_anchor,
+                    action=action,
                 )
             )
             od_steps.append(od_pred)

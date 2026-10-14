@@ -2086,6 +2086,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             )
             pose_k = torch.cat([pose.unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
             # (iv) latent 自回归转移 + 物理解码（t0 帧，直接多步无递归误差累积）
+            # R32 canary：action = 本步 GT 动作（`plan[:, k-1]`；st_gnn 开关默认关 ⇒ 逐位不变）
             z_ego_next, z_od_next, z_ld_next, od_pred_k, ld_pred_k, presence_k, entry_k = model.st_gnn(
                 z_ego=z_ego,
                 z_od=z_od,
@@ -2095,6 +2096,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
                 step_index=k,
                 od_anchor=anchor_od,
                 ld_anchor=anchor_ld,
+                action=raw_action,
             )
             predictions["od_pred"].append(od_pred_k)
             predictions["ld_pred"].append(ld_pred_k)
@@ -2752,6 +2754,8 @@ _PRIMARY_PHASE_FREEZE: Tuple[str, ...] = (
     "value.",
     "plan_head.moe.experts.",
     "plan_head.moe.router.",
+    # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
+    "ego_phys.",
 )
 #: K-anchor 计划头参数前缀（v7 结构迭代 B；fix-11 契约修复）：预注册 §11 要求 phase3
 #: ``specific_only`` 下锚头随 plan head 主干冻结；实现曾遗漏这 4 个前缀，使 13 个锚头参数
@@ -2777,6 +2781,8 @@ _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
     "plan_head.ego_next.",
     "plan_head.moe.primary.",
     "policy.",
+    # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
+    "ego_phys.",
 ) + _PHASE3_ANCHOR_HEAD_PREFIXES
 
 #: phase3 **安全配方**（fix-11）冻结清单：只训共享主干（encoders/mem_encoder/plan_head
@@ -2789,6 +2795,8 @@ _PHASE3_SAFE_FREEZE: Tuple[str, ...] = (
     "plan_head.moe.experts.",
     "plan_head.moe.router.",
     "plan_head.moe.residual_scale",
+    # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
+    "ego_phys.",
 ) + _PHASE3_ANCHOR_HEAD_PREFIXES
 
 #: recovery 微调（P1-2，§7.10-A6；R1 = ``freeze=recovery``）冻结清单：train = plan_head 主干
@@ -2803,6 +2811,8 @@ _RECOVERY_FREEZE: Tuple[str, ...] = (
     "plan_head.moe.experts.",
     "plan_head.moe.residual_scale",
     "policy.",
+    # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
+    "ego_phys.",
 ) + _PHASE3_ANCHOR_HEAD_PREFIXES
 
 #: recovery R2（``freeze=recovery_experts``）：R1 ∪ 既有 experts/residual_scale 可训（独立 LR 组；
@@ -2814,6 +2824,8 @@ _RECOVERY_EXPERTS_FREEZE: Tuple[str, ...] = (
     "mem_encoder.",
     "plan_head.moe.router.",
     "policy.",
+    # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
+    "ego_phys.",
 ) + _PHASE3_ANCHOR_HEAD_PREFIXES
 
 
