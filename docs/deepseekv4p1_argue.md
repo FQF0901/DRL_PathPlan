@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 下午·十）**：**R37 阶段 1 四路诊断收口**：M2（C0 0.580 vs C1 0.340，C1 不晋级）、**M3**（头在训练分布内没坏〔bias +0.056/MAE 0.149〕但**命令语义=保速**；坍缩=闭环特有自锁；**装配错配主凶=`path_dynamic_ttc` 缺键→0**〔训练 30.6 s「无冲突」vs 评测 0「立即碰撞」，占消融效应 77%〕）、**M4**（C2 warp 机制生效、**collision 0.14→0.08**、Hard 不劣化；**F3 证伪外部配速**：v 8.9 但 coll 0.48）、**M5**（A1/A2/A3 先验探针意图层生效〔v_ref 8.49/6.31/5.37、残差不变式 50/50〕但达成层不升〔v 3.56/3.01/2.85〕，**Hard 全恶化〔off-road 0.12→0.44/0.28/0.24〕**；A1 steer 饱和 0.81+蛇形）。**横向侧谱（主控复核）**：加速后 |err_ψ| 0.017→0.241、plan |κ|p90 0.023→0.081、κ 抖动 ×4.7 ⇒ **横向能力（曲率质量）是共阻塞**。**零训练通道总账：F3 ✗ / A ✗ / C2 ~中性** ⇒ **P0 定为主训练 lane（B 第一候选：教师=IDM+PP 规则专家，`tools/dagger_collect.py` 就绪；训练须在 eval 装配/指纹统一下做）**；C3（WM/想象步动力学）其后；**接口修复探针 M6 ✅ 落地**（`--long-exog-fill neutral`：**c1_fill succ 0.34→0.42，翻正 4/翻负 0**、tmo −0.04、rc +0.058、v +0.31；a1_fill off 0.38 不晋级）⇒ 零训练 +8 pp、非完整解，剩余=保速教师+@speed 横向质量（训练层）。M1 已入库 `0d63bbc`（966 tests/契约门 6/6/off 逐位）。
-> **本版说明**：第五十二轮（443 → 450 行）——新增 §5.68（GPT R38 受理：全链路瓶颈裁决 + 代码减枝；我方 5 条细化/反驳；执行分阶 R38-A/B/C；CG 包 D1–D3 重定位）；§0/§7 刷新；上版 443 行 = `git show 140a327:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第五十三轮（450 → 469 行）——新增 §5.69（R38 清理候选第一轮代码排摸：8 组可达性矩阵 + 3 条修正：C 组 oracle 先行/G 组扩至 obs legacy/A·D 组须同步 `.slim` 与契约断言）；上版 450 行 = `git show a925d07:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -395,6 +395,24 @@
 - **细化/反驳（5 条）**：①**Q1 判定表需补一分支**：我方证据=头部在真实状态/真实未来上**模仿保真度很好**（bias +0.056 / MAE 0.149 / r 0.983）但闭环爬行——根因是**监督目标语义本身=保速**（标签弦长≈v·dt + 先验 `clamp(v·dt)`）；判定应加"**真实未来上'像教师一样好'但闭环差 ⇒ 监督语义/目标参数化是主瓶颈**"，否则会误判给 WM 或含糊的"状态表示"。②**reachability 扫描必须覆盖 `.slim/deepwork/p1_v2/**` 与 runs 脚本**（我方评估/部署链 `a3/eval_a3.py`、`round32/canary_eval.py`、`round36/*` 都在 `.slim`，只扫 net/pipeline/tools/tests 会把真实引用误标 UNREACHABLE）。③**`path_*` 分类直接决定 StructuredPolicyHead 输入 schema ⇒ 与 P0-B 耦合**：链条=分类→schema 冻结→（若需）重训；且 `plan_head.fusion.2`（我方训练 allowlist 之一）**不属于** K-anchor 候选，减枝时勿混淆。④**减枝须过 966 tests + 默认关逐位**，建议"迁移→删引用→删实现"三笔独立提交（每笔可回退）；oneshot/plan_override 已有 L-A 运行时守卫与测试，删除时同步迁移测试。⑤**执行分阶提案**：**R38-A** 裁决矩阵（Q1/Q2/Q3/Q5，零训练，1–2 天）→ **R38-B** `path_*` 分类 + schema 冻结 + 四交付文档 + CI（1–2 天）→ **R38-C** 减枝实施（分笔）→ 之后重开 P0-B（输入 schema 冻结后的策略训练）。
 - **CG 包重定位（跨邮）**：`docs/r37_p0b_approval_packet.md` 写于本方案到达前——**D1 改为"裁决后放行"**、**D2 改为"按 Q4 分类裁决"**（neutral 填充降级为诊断补丁）、**D3 保持"由替换实验裁决"**（与方案 §三"是否重训 residual WM 由真值替换实验裁决"一致）、D4/D5/D6 不变、D7（风险接受）不变。
 
+### 5.69 GPT R38 清理候选：**第一轮代码排摸**（可达性侦察，只读；`.slim` 全量纳入）+ 3 条修正（供 R38-B 采用）
+
+- **侦察口径**（响应 §5.68-②）：对 GPT §七 8 组候选按引用面四类统计（prod=`net/env/pipeline/config`；eval=`tools`+`.slim` 评估链；test；slim=其余 `.slim`）。结果（refs/文件数）：
+
+| 组 | prod | eval | test | slim | 关键观察 |
+|---|---|---|---|---|---|
+| A oneshot/plan_override/别名 | 87/4（model 59、path_head 17） | — | — | **342/22**（canary_eval、a_hardening_check…） | 与主链深度交织；**22 个 `.slim` 工具依赖**（`--diagnostic-oneshot`）⇒ 迁移须同步 `.slim` |
+| B K-anchor | 80/9（plan_head 25、model 16） | `tools/fit_plan_anchors.py` 6 | test_plan_anchor 8 | 74/24 | 迁移需同步 fit 工具 + 测试 |
+| C 旧 `set_ego_warp`(w1/w2) | 28/4（model 21） | — | — | 50/12（**m1_gate_a、b_warp_compat**） | **w1/w2 是 analytic warp 的逐位判定 oracle** ⇒ 先替换 oracle 再删 |
+| D Policy/path_head 双实体 | 38/3（model 30） | — | — | 78/18（canary_eval、a_hardening_check） | L-A 运行时契约断言引用这些名字 ⇒ 收编须同步契约/Gate 证据 |
+| E `path_*` 旁路 | **14/1（仅 `net/path_head.py`）** | — | — | 217/22（m7_fill、m6/m7 报告） | **prod 爆炸半径极小** ⇒ Q4 分类在 prod 侧廉价；成本在"头输入 schema + 重训 + `.slim` 注入口" |
+| F target-lane | 133/12（model 33、path_head 28、semantic 19） | 1 | 56/8 | 420/62 | 深度嵌入 ⇒ 采纳"来源标签"（road_level/teacher/deployment）而非删除 |
+| G legacy monitoring | 64/5（monitoring 31、stages 21、**mem.py 8**） | — | 12/4 | 7/4 | **范围需扩大**：legacy 面不止 `monitoring.py`——`net/mem.py`/`encoders.py` 的 others-28 维 legacy 重排同在 |
+| H cheap-path 布尔 | `rollout=/world_model=` 组合语义 | — | — | — | 采纳显式枚举 `forward_mode`；`wm_detach` 已是 no-op（手册附录 A）需一并清语义 |
+
+- **3 条修正（供 R38-B 直接采用）**：①**C 组顺序**：legacy `set_ego_warp` 是 M1/L-D 逐位等价门的 oracle（`.slim/.../round37/m1_gate_a.py`、`round33/b_warp_compat.py` 依赖）⇒ 删除前须先"冻结 fixture 或迁入 probe 模块"，否则等价性证据链断裂；②**G 组范围扩大**：legacy 兼容还包括 obs 层 others-28 维（`net/mem.py` 8 处、`encoders.OTHERS_LEGACY_DIM`）⇒ 与 monitoring legacy 同批清理；③**A/D 组迁移必须含 `.slim`**：22 个 `.slim` 工具 + L-A 契约断言引用 oneshot/ablation/`enable_path_head` 名字，"迁 tools/legacy + 删主链"须同步改 `.slim` 评估链与契约断言（否则 Gate 证据失效）。
+- **下一步（R38-B 输入）**：按上述修正出 `docs/code_reachability_audit.md` + `docs/deprecation_manifest.yaml`（GPT §八 四交付物之两件）；Q4 `path_*` 分类与 **R38-A1（Q1/Q2 裁决矩阵，在飞）** 结果合并后**冻结 StructuredPolicyHead 输入 schema**。
+
 ---
 
 ## 6. 文档与产物索引
@@ -411,7 +429,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第五十二轮（本版；443 → 450 行）**：新增 §5.68（GPT R38 受理 + 5 条细化/反驳 + CG 包重定位）；上版 443 行 = `git show 140a327:docs/deepseekv4p1_argue.md`。
+- **第五十三轮（本版；450 → 469 行）**：新增 §5.69（清理候选可达性排摸 + 3 条修正）；上版 450 行 = `git show a925d07:docs/deepseekv4p1_argue.md`。
+- **第五十二轮（443 → 450 行）**：新增 §5.68（GPT R38 受理 + 5 条细化/反驳 + CG 包重定位）；上版 443 行 = `git show 140a327:docs/deepseekv4p1_argue.md`。
 - **第五十一轮（432 → 443 行）**：新增 §5.67（M8 取消 → CG 审批包 D1–D7 + 放行条件）；§0/§7 刷新；上版 432 行 = `git show 5e7b84d:docs/deepseekv4p1_argue.md`。
 - **第五十轮补遗2（402 → 432 行）**：新增 §5.66（阶段 1 复盘 + 四问核查结论 + 训练放开建议 + 新问题⑤⑥）；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`。
 - **第五十轮补遗（402 → 418 行）**：§5.64 追加 M3/M4/M5/M6/M7 结果 + 横向侧谱 + 零训练总账（M6 接口修复 ✅ +8pp；M7 真值：coll 0.08 最优/off 0.18 不晋级）+ P0 定案提案（B 第一候选）；§0/§7 刷新；上版 402 行 = `git show 0ecbad6:docs/deepseekv4p1_argue.md`。
