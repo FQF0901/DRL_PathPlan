@@ -9,7 +9,8 @@
 | `deepseekv4p1_argue.md` | **决策台账/主文档**（§0 一页纸 + 历轮 §5.x；GPT↔我方往来结论） | GPT、各 lane 脚本（13 处代码引用） |
 | `chatgpt5p6sol_review.md` | GPT 审阅往来原文（每轮拉取后入库） | `net/path_head.py` 等（出处引用 12 处） |
 | `architecture_contract.md` | 架构契约（生成器/辅助边界/调用图/训练部署同构） | `net/model.py`、`net/path_head.py` |
-| `round37_report.md` | 本轮全量报告（阶段 1：三层根因 + lane 索引 + 玩家讨论纪要） | 本索引 |
+| `round37_report.md` | R37 全量报告（阶段 1：三层根因 + lane 索引 + 玩家讨论纪要） | 本索引 |
+| `round38_report.md` | **R38 全量报告**（全链路瓶颈裁决 + 代码减枝：五问裁决矩阵 / 减枝 A–H / Clean500 七臂基准 / Gate A–D / 待办与放行） | 本索引、台账 §5.80 |
 | `repo_handbook.md` | **仓库手册**：网络架构 / 训练流程 / 当前问题（第 1/2 章代码核验 + 第 3 章台账依据；附录含文档-代码漂移表） | 本索引、台账 |
 | `r37_p0b_approval_packet.md` | **CG 审批包**：P0-B（IDM+PP 蒸馏）放行 + 7 项决策（D1–D7）+ 风险与放行条件（含 M8 取消披露） | 台账 §5.67 |
 | `round36_report.md`、`r36_implementation_evidence.md`、`r36_warp_layer_note.md` | 上一轮报告与证据/注记 | 台账、round36 工具 |
