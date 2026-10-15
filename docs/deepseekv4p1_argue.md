@@ -28,7 +28,8 @@
   - **A1 ✅ `ed83e57`**：正式入口 `--path-head {off,structured}`（结构化 ckpt 严格装载 186/186、18 键迁移）；ckpt migration 接入正式 loader + **LoadReport**（filled 186 / renamed 18 / 0 缺漏；mapper `r38p2b`；CI 守卫例外科化白名单）；`forward_mode` 全迁（生产布尔调用 **0**，shim 删除→fail-fast）；**四 hash 原生**（protocol `f156c2a1…`/`950e9ad2…`、model_tree `db60ba5b…`、schema `v7-6c3a7ffb…`、ckpt `5a7c6f9e…`）；入口 vs 测试入口逐位；pytest 1095。
   - **A2 ✅ `f1f52f5`**：双账本——参数四分类（default：total 1,278,879 / dormant 407,401（MoE）/ 可达 871,478；structured：total 1,510,570 / dormant 515,853 / 可达 994,717），**上限断言通过**（总 ≤+2%/激活 ≤+5%）；detach **31 项登记** + 实测可达范围（`z_next.detach` 阻断 step2→step1；`action.detach` 当前装配惰性）+ **CI 禁未登记新增 detach**。
   - **A3 ✅（读数见 §0）**：重登记三臂 + 四 hash；报告 `.slim/deepwork/p1_v2/round39/a3_report.md`。
-  - **A1b 🕐 在飞**：正式入口接入 `--ld-mode/--rollout-semantic`（使 C1_HEAD 可经 `tools/test.py` 复现）+ 入口↔a3 逐位。
+  - **A1b ✅ `ba9e456`**：正式入口装配全开（`--ld-mode/--rollout-semantic/--lane-anchor/--fill-from`）——C1_HEAD 可经 `tools/test.py` 复现；**与 eval_a3 同参逐位一致**（离线装载 206/206 strict、前向 max|Δ|=0；闭环 episodes 逐值、KPI 全等）；四 hash 对四装配轴敏感（5/5，C1_HEAD 全轴 protocol=`66bc2240f3e618ad`）；pytest **1101**。**R39-A 工程门全闭**。
+  - **验收对照（§四工程门）**：正式 loader 可载结构化 ✅；forward_mode 全迁 ✅；四 hash 完整 ✅；HEAD Clean500 可复现（A3）✅；无旧臂语义混用 ✅。
   - **验收**：入口与测试入口逐位一致；严格加载；迁移报告完整；shim 无生产调用；四 hash 齐全；参数分类无重叠/遗漏；最新基线可复现。
 - **R39-B 统一 imagined WorldState**（A 过门后）：九步循环（Policy 读 `PolicyStateView_k` → 动作 → 解析运动学 → LD ego-motion → OD 对象先验+ego-motion → WM 学习残差 → **统一 readout 重算七量** → Imagined Memory → 同一 Policy）；`A_{k+1}=AnalyticUpdate(A_k,a_k)+ΔA_θ`；**禁**脚本注入未来真值 / t0 静默 hold / 缺失填 0 / 外部未来态。臂：**B0 现状 ／ B1 analytic-only（阴性对照预期）／ B2 +学习残差 ／ B3 B2+2-step BPTT ／ B4 B2+3-step BPTT**。
   - 执行注记：B2 学习残差用 **one-step 真值监督**（analytic→**实际下一状态**；禁自产状态自洽回灌），链上配阻尼/一致性；**复用 `st_gnn` 存物理解码头**（od_pred/ld_pred/ego_next）以满足"不新增参数"。
