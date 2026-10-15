@@ -446,6 +446,14 @@
 - **减枝执行计划（队列）**：**D1（hooks，在飞）→ P1 波**（A 组：oneshot/plan_override/`PathExecutionHead` 别名 → 迁 `tools/legacy/` + 删主链引用 + 同步 22 个 `.slim` 工具与 L-A 契约断言；三笔可回退提交）**→ P2 波**（B K-anchor + C 旧 `set_ego_warp`〔先冻结等价 oracle〕+ D 双实体收编〔含 `checkpoint_migration` key mapper〕）**→ P3 波**（E `path_*`〔待 C3 分类冻结〕+ F target-lane 来源标签 + G legacy monitoring〔+`net/mem.py` others-28〕+ H `forward_mode` 枚举）。每波开工前**重跑 `c5_reach_scan.py` 刷新**（C5 快照 18:4x，D1/A4 后已漂移）；每波过 **973 tests + 默认关逐位**。
 - **CI 守卫**（audit §CI 清单：禁 legacy 引用/禁 deprecated 键/禁 forward 含 oneshot/禁双动作源/禁缺失静默填 0）→ 随 P1 波落 `tests/`。
 
+### 5.74 **R38-C2：Primary/MoE 只读消融（§二.5）结案** —— MoE 增量=0 且为负、"路由不是出路"（上界审计）；**口径校正：A1/A3 的"生产口径"= MoE-off**
+
+- **口径校正（重要）**：A1 harness 经 `j1_train.build_model_and_load` 调过 `set_moe(enabled=False)` ⇒ **A1/A3 的"生产口径"实为 MoE-off**（与生产基线 `--moe-off` 一致；C2 的 P 臂与 A1 臂 W **逐键 0 差异**〔8 键 + accel/slow_accel/slow 21 键〕）⇒ A1/A3 结论无需修正，此后"生产口径"表述以此为准。
+- **三档代理门**（keep_normal n=700 / follow n=1035 / slow_recover n=1261）：**Primary 全不过**（1/3、0/3、1/3；`primary_gate_pass_by_scenario` 全 False）⇒ GPT 判据成立 ⇒ **维持 `--moe-off`**；**learned MoE 全不过且增量显著为负**（|Σds−真实| Δ **+0.055/+0.030/+0.163 m**，CI 不含 0；slow_recover 恢复率 **−0.035**）⇒"专家不能掩盖基础能力缺陷"被直接证实。
+- **上界审计**：8 个固定 expert 最好仅 slow_recover **−0.161 m（4.4%）**；**Oracle（事后最优、不可部署）只吸收 11–24% 缺陷**（keep −0.29/−0.28；follow −0.44/−0.43；slow −0.42/−0.39）；随机 router ≈ P；learned 路由与 oracle 选择一致率仅 **0.128**（同状态可用增益 0.107 m/步）⇒ **瓶颈在状态/接口（与 A1 归因一致），路由不是出路**。
+- **路由负载**：learned mass 0.036–0.185、cv 0.374、H 0.769（场景分化存在：keep→E7、follow/slow→E3/E6；oracle 偏好 E0/E2）——有分化、无计划级收益。
+- **建议**：MoE 结构保留、**接口修复（A1/A4）前不投训练预算**；重评前置条件=Primary 过三档代理门或闭环 G1/G2/G4。
+
 ---
 
 ## 6. 文档与产物索引
