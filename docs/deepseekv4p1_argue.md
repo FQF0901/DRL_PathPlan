@@ -491,6 +491,14 @@
 - 证据：逐位 plain 25/structured 73 max|Δ|=0；**state_dict 默认 168 键逐字节一致；structured raw 差 = 恰好 18 键、经 mapper 归一后一致**（`keys_diff_is_mapper_explainable=true`）；pytest 1022→**1043**；旧 ckpt×mapper（8 代表）：t1_keep structured rename 18/0 reject/0 missing。
 - 遗留：`a3/eval_a3.py` 的 oneshot 残留（C6 冻结期跳过，解冻方案见 p2b_report §⑤）；`pipeline/`、`docs/` 的 C/D 组同步属下一批（P2b 写域外）。
 
+### 5.80 **R38 全案执行完毕**（GPT §一–§九 逐条落地；P3 收尾）+ 待办与放行项
+
+- **波次 → commit**：A4 几何缺陷 `b9d1721` ｜ Q4-A `9577078` ｜ P1 `596747c`+`48cb5eb`（+P1b 本地）｜ P2a `a226285`+`dd0a8c2` ｜ P2b `939d1a2` ｜ 文档收口 `2cfd8e8`+`71b8153` ｜ **P3 本笔**。pytest 逐波递增：987→998→1005→1022→1043→**1068**；各波均带默认路径**逐位（plain 25/structured 73 键 max|Δ|=0）**与键集 sha256 证据。
+- **§一–§九 对照（一句一条）**：§一 架构守则=唯一动作出口收编 `model.policy.structured_action`（P2b-⑤）+ `path_*` **生产者化**（Q4-A，禁"只有脚本能给"的旁路）｜§二 五问全闭合（Q1/Q2=A1；Q3=C1；Q4=C3 分类 + Q4-A 落地；Q5=C2）｜§三 裁决=latent 非杠杆、几何/接口为主项、**C3 学习型动力学必要**（解析 11 臂 FAIL 为证）｜§四 七类 hooks=D1（默认关+逐位+统一出口）｜§五 **Gate A ✅ / B ✅（量化归因）/ C 4/5**（缺"学习残差改善"⇒属 C3）/ **D ✅**（protocol hash v1 + Clean500 + 7 臂重跑，IDM 0.742 复现 v7 锚）｜§六/§八 四交付物 ✅（manifest 27 项回填 + landing 块 + CI 守卫 5 条 10 例）｜§七 **A–H 八组全落地**（A→D 删净；E 分类+生产者；F 来源标签；G legacy monitoring/others-28 迁出 + 28 维输入 fail-fast；H `forward_mode` 枚举 + 布尔 shim）｜§九.6 统一基准 ✅。
+- **P3 证据**：F 标签零行为；G `TrainingMonitor(legacy_tags=…)` fail-fast、`net/mem.py` 28 维 fail-fast；H `forward_mode` 四态 + 混用 ValueError（11 例枚举↔布尔逐位对照）；E 残留字段语义文档化 + present 与 `__present` 对齐（回退值逐位不变）；`tests/test_r38_ci_guards.py` 5 条守卫（10 例）；**eval_a3 oneshot 15 处清零**（默认口径不变）；键集与 P2b 同（零增删）。
+- **待办（非本阶段，明确挂账）**：①**B 类**：掩码进头 + `static_distance` 下沉（与下次重训同批）；②**D8/C3 训练**（学习型想象步动力学；待 CG 放行）；③**Eval500 3-seed**（paired bootstrap/McNemar）与 clean150 层级去留（CG）；④protocol hash 原生接入评测入口；⑤pin 快照（`/tmp/opencode/c6_pin`）易失，复现命令已入文档。
+- **素材**：`docs/round38_report.md`（全量报告，随本批）+ 各 lane 报告（`.slim/deepwork/p1_v2/round38/{a1,a3,a4,c1,c2,c3,c6,p1,p1b,p2a,p2b,p3,docs_sync}_report.md`）。
+
 ## 6. 文档与产物索引
 
 - **决策/契约**：`docs/p1_v2_decision.md`、`docs/archive/p1v2_reports/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、`docs/round30_audit.md`、`docs/archive/p1v2_reports/stage_a_config_consumption.md`
