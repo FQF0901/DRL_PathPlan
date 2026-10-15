@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 上午·七）**：GPT Round-37 方案（`66497a2`，551 行）——**结构化 Policy + 坐标解耦 World Model 的闭环验证**：统一基准 **C0/C1/C2/C3 四臂**（同数据/调用/Horizon/LQR/episodes）→ Calib50→Clean150→Eval500（3 seeds/paired/McNemar）；**字典序 + 安全硬门**（Primary=success；Hard=collision/off-road；Secondary=timeout/rc；Diagnostic=离线），禁模糊加权总分；代码修正 6 项（Policy 收编/均值方差同源/**warp 主路径 `ego_warp_mode off|analytic`**/**WM 学解析后 residual 分项报**/**imagined 步动态更新 + `dynamic_valid=0`**/调用口径三分）；训练序 5 步；探针 6 类；门 A–E（Gate D"**边缘行过滤规则须预先定义**"采纳我方发现）；Calib50 门槛 0.62/0.10/0.08/0.10。**我方排序提案**：**C1/C2 无需训练即可跑** ⇒ **37A 集成 → 37B C0/C1/C2 闭环分诊（小时级）→ 37C 依 37B 信号决定 WM residual 重训（C3）**。**4 条事实注记**：①L-A 已不 forward 旧头 + 运行时断言兜底（折叠=命名/ckpt 键迁移）；②调用口径已在契约 §2 记录；③Gate B 分项补 cut-in/merge；④Gate D 边缘行预定义提案（先注册后执行）。**开工**：M1（net/：warp 主路径接入 + od_velocity_t0 修正 + 五项 hook + 分项读数；off 逐位）；M2（**C0/C1 Calib50 闭环分诊**先行，C2 待 M1）。
-> **本版说明**：第四十八轮（361 → 373 行）——新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第四十八轮（361 → 369 行）——新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -335,7 +335,7 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四十八轮（本版；361 → 373 行）**：新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`。
+- **第四十八轮（本版；361 → 369 行）**：新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`。
 - **第四十七轮（351 → 361 行）**：新增 §5.61（本轮收口清单：进展/发现/结果/分析/问题）；§0/§7 刷新；上版 351 行 = `git show 0981ea1:docs/deepseekv4p1_argue.md`。
 - **第四十六轮（335 → 351 行）**：新增 §5.59（warp 层收口 + OD 速度语义发现 + 坐标门校准）+ §5.60（L-B 分析补充）；§0/§7 刷新；上版 335 行 = `git show 90eca34:docs/deepseekv4p1_argue.md`。
 - **第四十五轮（326 → 335 行）**：新增 §5.58（L-A/L-B/L-C 收口 + 门校准汇总）；§0/§7 刷新；上版 326 行 = `git show bbbe541:docs/deepseekv4p1_argue.md`。
