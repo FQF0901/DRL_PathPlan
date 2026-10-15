@@ -8,14 +8,14 @@
 | 文件 | 角色 |
 |---|---|
 | `repo_handbook.md` | **仓库手册**：网络架构 / 训练流程 / 当前问题（第 1–3 章，代码核验）+ 附录 A（漂移）/ B（纪律）/ C（索引）/ D（归档指针） |
-| `deepseekv4p1_argue.md` | **决策台账**（主文档）：§0 一页纸 + §5.x 历轮；**新事项的追加地** |
+| `deepseekv4p1_argue.md` | **决策台账**（主文档）：**按"当期快照"维护——每开新一轮可整篇重写**；旧轮一律走 git |
 | `chatgpt5p6sol_review.md` | GPT 往来原文（每轮拉取后追加入库） |
 | `architecture_contract.md` | 架构契约（生成器/辅助边界/调用图/训练-部署同构）；代码按路径引用重，保留 |
 | `README.md` | 本文件（索引 + 卫生规则） |
 
 ## 2. 卫生规则（强制执行）
 
-1. **追加制，不新建 md**：任何新结论/报告/审计/备忘 → **追加**到台账 §5.x（历轮）或手册对应章节；**禁止**在 `docs/` 新建文件或子目录（也不再设 `archive/`、`v6_reports/`、`v7_reports/`、`cleanup/` 等桶）。
+1. **当期快照制，不新建 md**：**台账（`deepseekv4p1_argue.md`）按当期快照维护——每开新一轮可整篇重写**；手册（`repo_handbook.md`）按章节就地更新；旧信息一律走 git（`git log --diff-filter=D -- <path>` / `git show <commit>:<path>`）；**禁止**在 `docs/` 新建文件或子目录（也不再设 `archive/`、`v6_reports/`、`v7_reports/`、`cleanup/` 等桶）。
 2. **历史一律走 git**（取档模板）：
    ```bash
    git log --diff-filter=D -- <oldpath>     # 找删除提交

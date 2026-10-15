@@ -12,6 +12,7 @@
 | `scenarios_train_5k.json` | 5000 | phase-3 采集整池（train ∩ expert5k 覆盖集） | `config/train.yaml:95`（`spec_pool`）；`pipeline/phase3_loop.py:435` 默认；`tools/reward_audit*.py` | KEEP |
 | `scenarios_train_dagger_r1.json` | 500 | 三轮互不重叠 DAgger/RL 采集池之 1 | `config/arms/v7_arm1_offroad.yaml:6`（pin）；v6/v7 预注册 pin（要点见 `docs/repo_handbook.md` 附录 D）；recovery_v1 采集池（已执行，`tools/controls/collect_recovery.py:66,76`） | KEEP |
 | `scenarios_eval500.json` | 500 | 统一评测集（val 分层抽样；与 train 系列零交集） | `config/eval.yaml:3`（主）；`config/train.yaml:151`（探针）；`pipeline/phase3_loop.py:444`；`pipeline/run_paths.py:78`；`tools/test.sh:19` | KEEP |
+| `scenarios_clean500.json` | 500 | **Clean500 晋级集 canonical 副本**（= `scenarios_val.json` − `scenarios_eval500.json`；sha256 `087db3f5…` 与历史真源逐字节一致） | R39-A3 / `round38/c6_*`（统一基准）；门定义见 `docs/repo_handbook.md` | KEEP |
 | `scenarios_smoke16.json` | 16 | 代码冒烟（**非协议**） | `tests/test_dagger_collect.py:390,776,885` | KEEP |
 
 ## 已删（CLEAN-2，2026-10-15；本目录 JSON 不入 git，直接删本地文件）
@@ -28,7 +29,7 @@
 
 1. **命名**：`scenarios_<split>[_<tag>][_sliceN|_5k].json`——`<split>` ∈ {train, val}；`<tag>` = 用途短标（如 `dagger_r1`）；`_sliceN` / `_5k` = 切片 / 整池量级后缀。
 2. **登记**：任何新增 spec 必须同步登记本表（用途/消费者/状态），并注明生成工具与命令；本目录 `*.json` 不入 git，**本 README 是唯一权威清单**。
-3. **Clean500 不新建**：Clean500 := `scenarios_val.json` − `scenarios_eval500.json`，历史真源副本（n=500，sha256 `087db3f5…`）已归档（取档/重建命令见 `docs/repo_handbook.md` 附录 D；逐 id 互斥/并集核验见 `runs/round38/c6/clean500_recon.json`），不得再造 `scenarios_clean500.json`。
+3. **Clean500 = val − eval500，不"另造"新内容**：本目录保留 **canonical 副本 `scenarios_clean500.json`**（n=500，sha256 `087db3f5…`，与历史真源逐字节一致；CLEAN-1 误随 docs 归档删除后于 2026-10-16 恢复，规则随之修订）。**严禁**以任何其它方式重新生成/改动其内容；重建须 `scenarios_val.json − scenarios_eval500.json` 且 sha 校验（核验见 `runs/round38/c6/clean500_recon.json`）。
 4. **删除**：删除 spec 前须以 `net env pipeline tools tests config reward_model` + 顶层 md 为引用面复核；零现役消费者才可删，删除后登记到本表"已删"节。
 
 ## schema
