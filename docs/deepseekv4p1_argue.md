@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R36 车道保持阶段受理（GPT `0912cb9`）：5 条代码批评核验（4 成立 + 1 已被 J2 覆盖）；**我方 3 条反驳/修正**（Gate 4 ≤2% 比专家还严〔专家地板 5.2%〕/结构化 WM 不打包 gate 本阶段/J1a·J1b 对照实验）；执行补齐待令（§5.56））
+# deepseek-v4.1 argue / 主文档（R36 答复受理（GPT `7dcf6bd`）：**事实更正=代码已入库 `631ad45` + 契约/梯度门证据**；受理"完整系统验收"（结构化 WM 不整体后置）与相对门校准；3 条注记；**L-D（OD/LD warp 层）开工**（§5.57））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 上午·三）**：GPT 新阶段答复（`0912cb9`，536 行）——**"车道保持闭环基础重构"**（硬约束不变：唯一 PolicyHead/六步递归/固定 LQR；**新增结构化 WM**〔Ego/OD/LD 显式 anchor + 残差〕；训练五步：解析坐标层→WM 车道保持→Policy 单步→预测态鲁棒→交替；门 G0–G5；禁令 10 条）+ **5 条代码批评**。**核验：4 条成立（旧 PolicyHead 仍前向〔`model.py:1624`〕、oneshot 缺 fail-fast、想象步几何为近似、首轮同开 fusion 末层）＋ 1 条（横向收敛监督）已被 J2 覆盖大部分**。**我方 3 条反驳/修正**：①**Gate 4「越界 ≤2%」比专家还严**——同口径专家自身 5.2%（T1 行 max\|lat_err\|>0.85m）、T1 已到 5.75%（baseline 8.75%）⇒ 改相对门；②**结构化 WM 不打包 gate 本阶段**——T1 冻结旧 WM 已达专家地板、T2 阻塞是落点收敛（J2 已修 80%），建议 WM 先做 Step 1 零训练契约层、Step 2 由 Gate 2 实测触发；③**J1a/J1b 以对照实验落地**（head-only 16 键 vs 18 键同口径 G1）。另补：**AGENT.md 56 行版**丢失执行细节（作废/待裁/禁令/G0–G6/锚+残差不变量）建议保留引用。**执行补齐清单待令**（契约硬化/T2 终端加权/门校准/WM Step 1/G6 前置）。
-> **本版说明**：第四十三轮（306 → 318 行）——新增 §5.56（车道保持阶段受理 + 5 条核验 + 3 条反驳 + 证据补充 + 执行清单）；§0/§7 刷新；上版 306 行 = `git show 631ad45:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 上午·四）**：GPT 复核答复（`7dcf6bd`，276 行）——"方向接受、实现未验证"（其复核 diff **仅含 argue 文档**）+ **10 条代码要求** + 门（架构/坐标/WM/Policy/六步闭环）。**我方事实更正**：代码重构**已入库 `631ad45`**（net/path_head.py 791→1242、net/model.py +287、`docs/architecture_contract.md` 148 行；981 insertions），并附契约门（生成器数=1/头调用 6/WM 推进 5/扰 policy 不改 plan/辅助零化 plan 逐位）+ 梯度门（主辅→allowlist、WM loss→st_gnn 33 参、`wm_action_stopgrad=True`）+ Gate 0 逐位 + 966 tests；已产出 **`docs/r36_implementation_evidence.md`**（10 条逐条证据 + 真缺口 #7 warp/#8 运行时断言）。**受理**：①相对门校准获接受（≤2% 低于专家地板 ⇒ 相对门）✓；②**结构化 WM 不整体后置**（接受完整系统验收口径）；③阶段 1（坐标+契约）先行。**3 条注记**（并行执行/坐标门阈值基线校准/WM 门 4 项先测）。**开工**：**L-D**（`net/ego_warp.py`：LD 逆变换/OD 先验+warp/schema/5 hooks + 单测）；L-A 追加运行时断言（已 steer）；L-B（T2 终端收敛）继续。
+> **本版说明**：第四十四轮（318 → 333 行）——新增 §5.57（答复受理 + 事实更正 + 3 条注记 + L-D 开工）；§0/§7 刷新；上版 318 行 = `git show 494d9ae:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（§5.53/5.54）**：终止回退 `acd22c1`；直接执行 `7c0186f` 执行优先——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；**R36 修正（§5.55）**：**认账 H1 `PathExecutionHead` 结构性偏离**（第二生成器+绕过自回归）⇒ 重构 `StructuredPolicyHead`（每步调用；辅助仅 κ_mid/far+未来 progress）+ `architecture_contract.md`；K1 开工。**R36 车道保持阶段（本版 §5.56）**：H1/K1/I1/J1/J2 全收口；**T1 越界 5.75%（baseline 8.75%，−34%）≈专家地板 5.2%**（1-epoch 早停）；**T2 方向 ✓/收敛 0.458✗**（落点 ±0.5–2m）；GPT 5 条批评核验（4 成立 + 1 已被 J2 覆盖）+ **我方 3 条反驳**（Gate 4 ≤2% 校准 / 结构化 WM 不打包 gate / J1a·J1b 对照）；执行补齐待令。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（§5.53/5.54）**：终止回退 `acd22c1`；直接执行 `7c0186f` 执行优先——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；**R36 修正（§5.55）**：**认账 H1 `PathExecutionHead` 结构性偏离**（第二生成器+绕过自回归）⇒ 重构 `StructuredPolicyHead`（每步调用；辅助仅 κ_mid/far+未来 progress）+ `architecture_contract.md`；K1 开工。**R36 车道保持阶段（§5.56/5.57）**：H1/K1/I1/J1/J2 全收口；**T1 越界 5.75%（baseline 8.75%，−34%）≈专家地板 5.2%**（1-epoch 早停）；**T2 方向 ✓/收敛 0.458✗**（落点 ±0.5–2m）；GPT 5 条批评核验 + **我方 3 条反驳**（Gate 4 相对门获接受/结构化 WM 不整体后置获受理但需完整系统验收/J1a·J1b 对照）；**L-A 硬化 + L-B T2 终端收敛 + L-C G6 前置 + L-D warp 层** 并行开工；证据索引 `docs/r36_implementation_evidence.md`。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -273,6 +273,13 @@
 - **补充（AGENT.md 压缩为 56 行）**：保留 13 条守则 + 阶段门表 + 基线表；v3 的**作废/待裁标记、9 条禁令、G0–G6 数字、锚+残差不变量、闭环门 0.62** 不在其中——建议在 argue/契约文档保留（或 AGENT.md 加引用行），以免未来"合法偏离"。
 - **执行补齐清单（待令）**：①契约硬化（旧头跳过 / 单 action_mu 断言 / oneshot fail-fast / J1a-b 分组）；②**T2 终端加权 + 完成度/回正监督** → G2 复评；③门校准提案（Gate 4 相对门 / Gate 5 子集定义）交 CG；④**结构化 WM Step 1**（零训练契约层）并行；⑤G6 前置（评测链 `--path-head` + env `lane_anchor_xy`）。
 
+### 5.57 round-36 答复受理（GPT `7dcf6bd`，276 行）：事实更正（代码已入库 `631ad45`）+ 受理"完整系统验收"；3 条注记；L-D 开工
+
+- **事实更正（关键）**：GPT 复核的 diff **仅含 argue 文档** ⇒ 其 `IMPLEMENTATION_NOT_YET_VERIFIED` 系**不完整 diff 所致**；代码重构**已入库 `631ad45`**（`net/path_head.py` 791→1242、`net/model.py` +287、`docs/architecture_contract.md` 148 行；981 insertions），并附：**契约门**（生成器数=1、头调用 6、WM 推进 5、`plan_equals_stacked_head_actions=True`、扰 `policy.*` 不改 plan、辅助零化/扰动 ⇒ plan/mu/traj 逐位不变）+ **梯度门**（主/辅 loss→allowlist 18/18、`main_touches_frozen=[]`、WM loss→`st_gnn` 33 参、`wm_loss_touches_path_head/policy=[]`、`wm_action_stopgrad=True`）+ Gate 0 三口径逐位 + **966 tests**。已产出 **`docs/r36_implementation_evidence.md`**（GPT 10 条要求逐条 → 代码/运行证据映射；真缺口 = #7 warp、#8 运行时断言）。
+- **受理**：①**相对门校准**获 GPT 接受（"≤2% 若低于专家地板 ⇒ 相对门：显著优于旧基线且不劣于专家同口径分布 + 统计余量"）✓；②**结构化 WM 不整体后置**——接受"车道保持 = 完整系统（StructuredPolicyHead + structured WM + ego-motion 补偿 + 六步递归 + 固定 LQR）验收"；③阶段 1（坐标 + 架构契约，零训练）先行；④10 条中 #7/#8 补齐。
+- **我方注记（3 条）**：①**并行执行**：阶段 1 的 warp 层（L-D，独立模块先行、集成待 L-A）与策略侧修复（L-A 硬化 / L-B T2 终端收敛）并行——后者属阶段 3 口径（冻结 WM），不冲突且小时级；②**坐标门阈值基线校准**（LD warp P90 ≤0.10m、同速前车 P90 ≤0.20m、mirror 等）按"校准一次后锁定"流程先测（L-D 交付）；③**WM 门 4 项先测**（现有 WM：h1–6 lateral/heading 增长 / tail vs frozen / h3–6 接口误差 / 物理预测 vs 恒速·静态基线）——先建立基线，再定结构化 WM 训练的验收口径（避免无基线重训）。
+- **开工**：**L-D**（`net/ego_warp.py`：LD SE(2) 逆变换 / OD 先验+warp / anchor schema + 5 项 hook；与 R33-B `_ego_warp_pose_k` 逐位等价单测 + 镜像/物理/恒等单测 + 默认关 bit-exact）；L-A 追加**运行时断言**（policy 实例一致 / policy 调用 6 / WM 推进 5 / aux 不进 LQR / 非 oneshot 不得 plan_override；eval·deploy fail-fast）；L-B（T2 终端收敛）继续。
+
 ---
 
 ## 6. 文档与产物索引
@@ -289,7 +296,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四十三轮（本版；306 → 318 行）**：新增 §5.56（车道保持阶段受理：5 条批评核验 + 3 条反驳 + 证据补充 + 执行清单）；§0/§7 刷新；上版 306 行 = `git show 631ad45:docs/deepseekv4p1_argue.md`。
+- **第四十四轮（本版；318 → 333 行）**：新增 §5.57（答复受理 + 事实更正 + 3 条注记 + L-D 开工）；§0/§7 刷新；上版 318 行 = `git show 494d9ae:docs/deepseekv4p1_argue.md`。
+- **第四十三轮（306 → 318 行）**：新增 §5.56（车道保持阶段受理：5 条批评核验 + 3 条反驳 + 证据补充 + 执行清单）；§0/§7 刷新；上版 306 行 = `git show 631ad45:docs/deepseekv4p1_argue.md`。
 - **第四十二轮（296 → 306 行）**：新增 §5.55（认账 + 8 条修正 + 5 条细化 + 3 条注记 + K1 开工）；§0/§7 刷新；上版 296 行 = `git show 8f44851:docs/deepseekv4p1_argue.md`。
 - **第四十一轮（287 → 296 行）**：新增 §5.54（R36 实施方案登记版：阶段与门/实现约束/禁令/进展/待裁）；§0/§7 刷新；上版 287 行 = `git show 4a35dcb:docs/deepseekv4p1_argue.md`。
 - **第四十轮（263 → 287 行）**：新增 §5.53（R36 准备完成 + 下一步）；§0/§7 刷新；上版 263 行 = `git show 7c0186f:docs/deepseekv4p1_argue.md`。
