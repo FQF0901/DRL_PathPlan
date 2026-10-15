@@ -1,530 +1,537 @@
-你的担心成立。根据 round36_report.md，Coding Agent 当前实现的 PathExecutionHead 已经出现了两处明显偏离原始大框架的地方：
+1. 代码中仍然物理存在旧 PolicyHead 和 path_head
 
-新增了一个独立的轨迹执行头，命名和职责都容易与唯一 PolicyHead 冲突；
-启用后一次性生成后续六步尾段，不再采用“同一个 PolicyHead + World Model”逐步自回归。
+概念上只有一个有效动作生成器，但实现仍是：
 
-报告自己也明确写了：
+Plain Text
+1
+self.policy
+2
+self.path_head
+显示更多行
 
-启用后 rollout 尾段由组合层一次给出
-不再逐步策略自回归
+启用结构化模式时，旧 PolicyHead 仍会前向计算，只是其 action_mu 被覆盖。
 
+当前模仿学习可暂时接受，但正式命名和长期归属应改成：
 
-这已经不是小的实现细节，而是从路线 A 向“一次性轨迹头”路线发生了结构偏移。
+Plain Text
+1
+policy.structured_action.*
+显示更多行
 
-一、先重申不可破坏的架构原则
+至少必须保证：
 
-我们之前约定的是：
+Plain Text
+1
+同一forward中只有一个action_mu进入环境、WM和LQR
+显示更多行
 
-PolicyHead：唯一动作生成器
+进入 RL 前必须彻底统一均值和方差来源。
 
-a0 = PolicyHead(z0)
-z1 = WorldModel(z0, a0)
+2. oneshot 诊断臂仍保留生产代码路径
 
-a1 = 同一个 PolicyHead(z1)
-z2 = WorldModel(z1, a1)
+保留诊断上界可以，但必须增加 fail-fast：
 
-...
+Plain Text
+1
+eval/deploy模式如果mode=oneshot
+2
+→ 直接报错
+3
+ 
+4
+只有带显式：
+5
+--diagnostic-oneshot
+6
+才允许运行
+显示更多行
 
-a5 = 同一个 PolicyHead(z5)
+否则未来配置误写时，仍可能复活被否决的一次性六步方案。
 
-
-最终：
-
-[a0...a5]
-→ 连续轨迹
-→ 固定LQR
-
-
-其中：
-
-World Model 只预测世界；
-PolicyHead 只根据当前或预测世界决定下一步； -六步轨迹由同一个 PolicyHead 被调用六次形成； -不得再有第二个模块直接生成完整尾段。
-
-所以“横向曲率路径 + 路径条件化纵向速度”应该是：
-
-PolicyHead 的内部动作参数化方式改变了。
-
-而不是：
-
-在 PolicyHead 旁边新增一个 PathExecutionHead，一次输出完整六步。
-
-二、PathExecutionHead 当前具体有什么问题？
-1. 它事实上是第二个轨迹生成者
-
-报告描述该模块负责：
-
-3个曲率控制点
-6步纵向进度
-曲率积分
-组合为ds/dtheta六步plan
-
-
-这就是完整轨迹生成，而不是单纯的几何转换层。
-
-因此即使它名字叫“执行头”，实际上职责是：
-
-trajectory generator
-
-
-这与“PolicyHead 是唯一轨迹决策源”的原则冲突。
-
-2. 它绕过了 World Model rollout
-
-路线 A 的价值在于：
-
-每一步动作
-→ 改变预测世界
-→ Policy重新观察预测世界
-→ 决定下一步
-
-
-当前新头一次性输出后续六步，意味着：
-
-后五步不再读取逐步更新的：
-ego状态
-周车状态
-车道状态
-未来交互状态
-
-
-这样 World Model 对尾段决策失去作用。
-
-相当于从：
-
-Policy–WM–Policy–WM
-
-
-变成：
-
-Policy/PathHead一次输出整条轨迹
-
-
-这会破坏我们坚持的主范式。
-
-3. plan[:,0] == action_mu 只是表面兼容
-
-报告强调：
-
-plan[:,0] == action_mu
-
-
-但这不能解决职责冲突。
-
-真正的问题不是第一步是否一致，而是：
-
-a1...a5由谁生成？
-
+3. imagined step 的纵向几何仍是近似值
 
 当前实现中：
 
-a0来自旧PolicyHead
-a1...a5来自PathExecutionHead
+Plain Text
+1
+static_distance：
+2
+t0距离 - 累计进度
+3
+ 
+4
+dynamic_distance / TTC：
+5
+保持t0值
+6
+ 
+7
+speed：
+8
+保持t0值
+9
+ 
+10
+nav_progress：
+11
+保持t0值
+显示更多行
+
+这还不是真正的“路径条件化纵向规划”。
+
+对于 G1 车道保持暂时可以接受；但不得直接用于证明 G5 纵向能力，因为：
+
+-障碍可能不在当前路径上； -动态对象会移动； -自车未来速度会变化； -单纯减累计进度不能表达横向换道后的障碍关系。
+
+4. 首轮训练不应同时开放 Backbone 最后一层
+
+当前白名单是：
+
+Plain Text
+1
+path_head.*
+2
+plan_head.fusion.2.*
+显示更多行
+
+这会同时改变新动作头和其输入 latent，削弱归因。
+
+建议拆成：
+
+Plain Text
+1
+J1a：
+2
+只训练StructuredPolicyHead参数
+3
+ 
+4
+J1b：
+5
+只有J1a表现为明显欠拟合，
+6
+才以0.1倍学习率开放plan_head.fusion.2
+显示更多行
+
+不能一开始两者同时训练。
+
+5. 当前横向只是“曲率锚定”，不保证位置收敛
+
+路径从自车原点开始，目标车道的横向误差和航向误差只是输入特征。
+
+必须在训练中显式加入：
+
+Plain Text
+1
+沿程车道横向误差
+2
+终点横向误差
+3
+终点航向误差
+4
+变道完成度
+5
+变道后回正
+显示更多行
+
+否则可能出现：
+
+Plain Text
+1
+曲率与目标车道相似
+2
+但路径始终平行偏离目标车道
+显示更多行
 
 
-仍然是两个生成口。
+下面这版可直接发给 Coding Agent 讨论执行。核心纠偏是：车道保持不是只训练 Policy，而是同时建立 Structured Policy、结构化 World Model、OD/LD 自车运动坐标补偿和六步递归部署链。
 
-4. 纵向头使用“外源8维”需要警惕
+下一阶段：车道保持闭环基础重构
+一、目标与架构硬约束
 
-报告写到纵向模块使用：
+本阶段只解决：
 
-κ控制点 + 外源8维
+给定合法当前车道
+→ 六步规划始终保持车道内
+→ 路径连续、速度合理
+→ 固定LQR可稳定跟踪
 
 
-但没有在总报告中清楚说明这 8 维分别是什么、来自哪里、是否包括：
+必须保持的大框架：
 
--人工走廊摘要； -外部目标车道； -障碍感知规则； -候选路径可行性结论； -外部推荐速度。
+真实状态 z0
+→ 唯一 PolicyHead 输出当前一步 a0
+→ World Model 预测 z1
+→ 同一个 PolicyHead 输出 a1
+→ 重复至 a5
+→ 固定LQR执行六步计划
 
-在没有逐字段契约前，不能允许其进入正式训练。
 
-必须清楚区分：
+硬约束：
 
-允许：
-客观距离、TTC、边界余量、路径曲率
+PolicyHead 是唯一动作生成器； -不得新增独立 PathHead、尾段生成器或一次性六步规划头；
+PlanHead 仅作为 PolicyBackbone/场景融合模块；
+World Model 只预测下一状态，不产生动作； -六步动作全部来自同一 PolicyHead 实例的六次调用； -固定 LQR 不修改。
+二、方案结构
+1. Structured PolicyHead
+
+在唯一 PolicyHead 内部增加两个子分支：
+
+横向分支：
+输出当前状态下的局部曲率意图
+κ_near / κ_mid / κ_far
+
+纵向分支：
+读取局部曲率路径、场景和当前速度
+输出当前一步 ds / v / Δv
+
+
+只有当前一步真正进入部署链：
+
+κ_current
+ds_current
+dtheta_current = κ_current × ds_current
+
+
+κ_mid/κ_far 和未来速度只能作为辅助意图或辅助监督，不得直接生成后五步并送入 LQR。
+
+2. World Model 结构化状态
+
+状态由纯 latent 调整为：
+
+EgoState:
+  ego physical state
+  ego latent
+
+ODState:
+  dynamic-object physical anchors
+  object intent/dynamics latent
+
+LDState:
+  lane/map geometric anchors
+  lane semantic/topology latent
+
+
+每一步先进行确定性几何更新，再学习未知残差。
+
+LD 坐标补偿
+
+根据当前动作解析 ego 的 SE(2) 位姿变化，对静态道路 anchor 做逆运动补偿：
+
+pLD′=R(−Δθego)(pLD−Δpego)p'_{LD} = R(-\Delta\theta_{ego}) (p_{LD}-\Delta p_{ego})
+OD 坐标补偿
+
+先按对象运动先验推进，再转换到新的 ego 坐标系：
+
+pOD′=Tego−1(pOD+vODΔt)p'_{OD} = T_{ego}^{-1} (p_{OD}+v_{OD}\Delta t)
+
+World Model 只学习：
+
+对象加减速与交互
+lane/map重采样残差
+presence/entry
+语义与意图变化
+解析模型无法解释的剩余变化
+
+
+禁止把 action embedding 无差别广播到 OD/LD latent。
+
+三、训练流程
+Step 1：解析坐标层与状态契约
+
+先不训练。
+
+完成：
+
+ego 运动学积分；
+LD 的 ego-motion warp；
+OD 的恒速先验与 ego-motion warp； -结构化 anchor schema； -旧状态链作为对照； -所有坐标、单位、mask、slot identity 的契约测试。
+Step 2：World Model 车道保持训练
+
+冻结 Policy，训练：
+
+ego transition
+OD residual transition
+LD residual transition
+physical prediction heads
+presence/entry
+
+
+输入：
+
+真实状态
+实际执行动作
+
+
+监督：
+
+下一帧ego状态
+下一帧OD anchors与latent
+下一帧LD anchors与latent
+lane-relative lateral error
+lane-relative heading error
+curvature
+
+
+保持当前跨步 detach，暂不启用多步 BPTT。
+
+Step 3：Policy 单步车道保持训练
+
+冻结 World Model，训练唯一 PolicyHead 内部的：
+
+横向曲率分支
+路径条件化纵向分支
+
+
+第一臂不解冻 PolicyBackbone。只有明确欠拟合且接口不过度漂移时，才低学习率开放最后一层。
+
+监督：
+
+真实状态下的当前专家动作
+当前局部曲率路径
+当前安全进度/速度
+
+Step 4：Policy 预测状态鲁棒训练
+
+继续冻结 World Model。
+
+使用：
+
+Lreal=∥π(zkreal)−akexpert∥L_{\text{real}} = \|\pi(z_k^{real})-a_k^{expert}\|
+
+以及：
+
+Linterface=∥π(z^kWM)−sg⁡(π(zkreal))∥L_{\text{interface}} = \| \pi(\hat z_k^{WM}) - \operatorname{sg}(\pi(z_k^{real})) \|
+
+目标是让 Policy 在略有误差的预测世界中，仍能给出与真实世界一致的车道保持动作。
+
+Step 5：World Model / Policy 交替适配
+
+采用交替更新、梯度隔离：
+
+WM-step：
+冻结Policy，用真实transition更新WM
+
+Policy-step：
+冻结WM，用真实态监督和预测态一致性更新Policy
+
 
 禁止：
-最佳通道、推荐换道方向、外部安全评分、规则速度答案
 
-三、正确的架构改法
-PolicyHead 仍然唯一，但内部改成结构化动作头
+WM + Encoder + Policy全部解冻
+→ 单一总loss共同反传
 
-建议将当前实现改名并重构为：
+四、必须部署的 Probes / Hooks
 
-StructuredPolicyHead
+所有工具默认关闭；关闭时必须 bit-exact、不改变 RNG、checkpoint 和 optimizer。
 
+1. 架构调用 Hook
 
-内部可以有两个子分支：
+每个 rollout 记录：
 
-LateralActionBranch
-LongitudinalActionBranch
+PolicyHead实例ID
+World Model实例ID
+z0...z5
+a0...a5
+每次Policy调用次数
+每次WM调用次数
+辅助输出去向
+LQR实际输入
 
 
-但它们共同构成一个 PolicyHead，不是独立规划器。
-
-每一步的输出可以改为：
-
-横向：
-局部曲率参数 κ_t
-或短局部路径参数
-
-纵向：
-基于该局部路径的 ds_t / v_t
-
-
-然后得到：
-
-at=(dst,κt)a_t=(ds_t,\kappa_t)
-
-对外兼容转换：
-
-dθt=κtdstd\theta_t=\kappa_t ds_t
-
-World Model 再根据这个单步 action 推进：
-
-z_(t+1) = WM(z_t, a_t)
-
-
-下一步继续调用同一个结构化 PolicyHead。
-
-六步仍然必须递归生成
-
-正确链路：
-
-z0
-→ StructuredPolicyHead
-→ κ0, ds0
-→ 转换成ds0,dθ0
-→ WM
-→ z1
-
-z1
-→ 同一个StructuredPolicyHead
-→ κ1, ds1
-→ WM
-→ z2
-...
-
-
-这样既实现：
-
-横向曲率
-+
-路径条件化纵向进度
-
-
-又不破坏：
-
-Policy–WM 六步自回归
-
-四、三个曲率控制点还能不能保留？
-
-可以，但语义必须收缩。
-
-可以作为“单步局部路径意图”
-
-Policy 在每个 imagined state 上输出：
-
-κ_near
-κ_mid
-κ_far
-
-
-其中：
-
-κ_near 决定当前 0.5 秒动作；
-κ_mid/far 是局部路径意图或辅助预测； -真正执行并推进 World Model 的仍然只有当前动作； -下一步重新在新 predicted state 上计算一组控制点。
-
-这种形式近似 receding-horizon planning：
-
-每一步都预测一个短局部路径
-只执行第一段
-状态更新后重新规划
-
-
-这是合理的。
-
-不允许作为一次性六步尾段生成器
-
-不能：
-
-t0预测κ_near/mid/far
-→ 一次性积分生成a0...a5
-→ 后续不再经过WM和Policy
-
-
-否则就是第二个轨迹头。
-
-五、纵向分支应该如何读取横向路径？
-
-在每一步 tt，PolicyHead 内部先产生短期横向意图：
-
-κ_near/mid/far
-
-
-基于这个局部路径，确定性几何层计算：
-
-局部路径曲率
-静态障碍余量
-动态对象TTC
-道路边界余量
-可通行距离
-
-
-纵向分支再输出当前：
-
-ds_t 或 v_t
-
-
-然后只执行当前动作：
-
-(ds_t, κ_t)
-
-
-所以路径条件化发生在 PolicyHead 内部，但每次仍只产生一个环境 action。
-
-六、哪些现有成果可以保留？
-
-Round-36 并不是全部推倒。
-
-以下内容可以保留。
-
-1. 曲率路径数学层
-曲率插值
-曲率积分
-x/y/theta生成
-ds/dtheta兼容转换
-
-
-这些是确定性几何，不是第二规划器。
-
-2. 数据标签
-
-已经提取的：
-
-车道保持
-变道
-merge
-收费站正确闸口
-路口转向
-曲率残差
-纵向进度
-
-
-仍可用于训练结构化 PolicyHead。
-
-3. Hooks
-
-新增的 555 项 hooks，包括：
-
-曲率
-轨迹
-footprint
-纵向速度
-TTC
-边界余量
-LQR跟踪
-网络激活与梯度
-
-
-都值得保留。
-
-4. 给定目标车道的课程设计
-
-先练：
-
-车道保持
-→ 给定目标变道
-→ merge
-→ 给定正确闸口
-
-
-顺序仍然正确。
-
-七、我与当前实施的其他分歧点
-1. 不应默认一次输出六步 progress_s
-
-当前纵向头直接产生六步进度，相当于一次性定义完整速度剖面。
-
-长期可以将六步速度作为辅助监督，但环境主动作仍应只取当前步：
-
-ds0
-
-
-其余：
-
-ds1...ds5
-
-
-只能作为：
-
--辅助预测；
-
-consistency loss； -短期意图； -不能直接替代 WM rollout 尾段。
-2. 初始 ds=3.5m/步 太强，需有专家分布依据
-
-报告中纵向头初始化为：
-
-3.5m / 0.5s
-≈ 7m/s
-
-
-这可能对普通道路合理，但对：
-
-收费站
-急弯
-低速merge
-静态障碍前
-
-
-可能过于激进。
-
-应按场景或当前速度初始化：
-
-ds_init = clamp(v_current × dt, bounds)
-
-
-而不是统一 3.5m。
-
-至少需验证：
-
-初始化ds与专家ds分布的P50/P90
-
-3. tanh × 0.1 曲率残差可能过强或过弱
-∣Δκ∣≤0.1 m−1|\Delta\kappa|\leq0.1\,m^{-1}
-
-对应半径约：
-
-10m
-
-
-对高速普通道路可能偏大，对收费站急转或低速绕行又可能不足。
-
-建议根据：
-
-专家曲率残差P95/P99
-道路类型
-当前速度
-
-
-确定范围，或做速度条件化限制：
-
-κmax⁡(v)\kappa_{\max}(v)
-
-不能只固定 0.1。
-
-4. 收费站标签存在“晚变道模仿”风险
-
-报告已经发现：
-
-专家开始换道距离闸口中位数约25.8m
-
-
-直接模仿可能学会晚换道。
-
-不建议通过人工“首步约束”直接规定转向动作。
-
-更合理的是：
-
--对早期可决策状态增加采样权重； -监督目标车道方向与路径进度； -加入“剩余距离是否足够完成变道”的可行性损失；
-
-DAgger 后期采集 learner 状态下的提前变道专家标签。
-5. 当前阶段不应训练收费站自主闸口选择
-
-Round-36 给定的是正确闸口，现阶段先验证：
-
-给对目标后能不能执行
-
-
-这是对的。
-
-但必须确保该目标仅用于课程训练和能力上界，不进入最终部署输入。
-
-八、立即要求 Coding Agent 修改
-1. 暂停将PathExecutionHead接入正式rollout训练。
-
-2. 将其重构/重命名为StructuredPolicyHead的内部子模块：
-   - lateral branch
-   - longitudinal branch
-   - deterministic composition layer
-
-3. PolicyHead保持唯一动作生成者。
-
-4. 每个World Model step只消费当前动作：
-   a_k = (ds_k, kappa_k)
-   dtheta_k = kappa_k * ds_k
-
-5. a_(k+1)必须由同一个PolicyHead读取z_(k+1)后重新产生。
-
-6. κ_mid/κ_far和未来progress只能作为辅助意图/监督，
-   不得直接替代后五步Policy-WM rollout。
-
-7. 保留所有曲率积分、footprint、LQR、数据标签和hooks。
-
-8. 输出一份architecture_contract.md，明确：
-   - 唯一动作生成模块
-   - WM输入输出
-   - 六步rollout调用图
-   - 辅助头与主动作的边界
-   - 训练与部署是否完全同构
-
-九、验证准则
-架构契约门
-
-必须满足：
+自动断言：
 
 动作生成器数量 = 1
-所有a0...a5都来自同一个PolicyHead参数
-每一步a_k都读取对应z_k
-World Model被调用5次推进未来状态
-辅助未来输出不直接供LQR
+a0...a5来自同一个PolicyHead
+每个a_k读取对应z_k
+World Model推进5次
+辅助未来输出未直接进入LQR
 
-梯度门
-当前动作loss → PolicyHead
-WM预测loss → World Model
-未来辅助loss → PolicyHead辅助分支
-辅助loss不得绕过WM成为第二尾段规划器
+2. 坐标解耦 Hook
 
-消融门
+每一步记录：
 
-至少比较：
-
-旧PolicyHead + WM rollout
-StructuredPolicyHead + WM rollout
-一次性PathExecutionHead诊断臂
+ego delta pose
+OD anchor warp前/后
+LD anchor warp前/后
+解析预测
+learned residual
+真实下一帧anchor
+slot ID与mask
 
 
-一次性头只能作为诊断上界，不得成为生产候选。
+并分解误差：
 
-闭环门
+解析坐标变换误差
+对象运动先验误差
+learned residual误差
+最终状态误差
 
-仍按：
+3. Policy Hook
 
-普通保持
-给定目标变道
-merge续接
-给定正确闸口
+记录：
+
+真实latent
+WM预测latent
+PolicyBackbone输出
+κ_near/mid/far
+当前κ
+当前ds/v/Δv
+最终ds/dtheta
+真实态和预测态的动作差
+
+4. World Model Hook
+
+按 horizon 1–6 保存：
+
+z_ego / z_od / z_ld in/out
+physical predictions
+lane lateral/heading
+OD relative position/velocity
+presence/entry
+latent rank
+ego信息在OD/LD中的泄漏
+
+5. 路径与 Footprint Hook
+
+将六步轨迹连续插值到约 0.5–1 米间隔，记录：
+
+x/y/theta
+κ与Δκ
+道路内比例
+首次越界位置
+最小道路余量
+首次碰撞位置
+最小障碍余量
 
 
-逐层过门。
+不能只检查六个离散点。
 
-最终判断
+6. LQR 对照 Hook
 
-你的担心是正确的。
+保存：
 
-Round-36 总报告 中的 PathExecutionHead 当前实现已经超出了“PolicyHead 内部动作重参数化”，变成第二个六步轨迹生成器，并绕过了后五步 Policy–World Model 自回归。
+六步规划
+插值后的LQR reference
+实际车辆轨迹
+横向/航向误差
+raw steer/throttle
+控制饱和
+计划错误与跟踪错误分类
 
-应立即把方向拉回大框架：
+7. 梯度与更新 Hook
 
-唯一Structured PolicyHead
-→ 当前局部曲率路径意图
-→ 路径条件化当前纵向动作
-→ World Model推进一步
-→ 同一PolicyHead重新决策
-→ 重复六次
-→ 固定LQR
+自动输出：
+
+参数名
+requires_grad
+optimizer group
+grad norm
+update norm
+checkpoint load/change
+h1/h3/h6梯度可达性
+
+五、关键干预 Probes
+
+必须包含：
+
+ds增减
+κ正负扰动
+左右完整场景镜像
+LD warp关闭/开启
+OD warp关闭/开启
+真实future anchors替换
+target-lane token置零
+Policy读取real latent / WM latent
 
 
-这样才能同时保留：
+判断：
 
--唯一 Policy 决策源；
+ds增加是否使ego progress单调增加
+κ左/右是否产生正确方向响应
+静态LD在解析warp后是否接近真实下一帧
+OD residual是否主要表达对象运动而非ego位移
+WM latent是否保留车道保持所需信息
 
-World Model 的真实作用； -横纵向解耦； -六步滚动； -固定 LQR 部署； -后续 IL、DAgger、MoE 和 RL 的一致训练契约。
+六、验收准则
+Gate 0：架构与代码契约
+
+必须全部通过：
+
+唯一动作生成器
+同一PolicyHead六次调用
+World Model推进五次
+无独立尾段生成器
+默认关闭新结构时旧模型逐位一致
+checkpoint严格加载
+optimizer参数集与声明一致
+hooks关闭时bit-exact
+
+Gate 1：坐标解耦
+静态LD解析warp误差 P90 <=0.10m
+heading误差 P90 <=1°
+同速前车相对距离误差 P90 <=0.20m
+ego progress在OD/LD latent中的泄漏较旧模型下降 >=30%
+左右镜像方向正确率 >=95%
+
+
+阈值若受 simulator schema 限制，可用当前基线分布校准一次，之后锁定。
+
+Gate 2：World Model 六步车道状态
+lane lateral误差不随horizon指数增长
+lane heading误差不随horizon指数增长
+WM tail优于frozen-t0 tail
+h3–h6 Policy接口误差较当前基线下降 >=20%
+OD/LD物理预测优于恒速/静态基线
+
+Gate 3：Policy 单步与预测态鲁棒性
+真实状态当前动作误差不退化超过5%
+WM状态与真实状态动作差 h3–h6下降 >=20%
+左右曲率方向正确率 >=95%
+ds-progress单调率 >=90%
+κ变化不超过专家P95×1.25
+
+Gate 4：六步计划质量
+连续footprint越界率 <=2%
+无障碍碰撞接近0
+计划Δκ不超过专家P95×1.25
+重规划方向翻转率 <=5%
+后五步不存在系统性ds上冲
+
+Gate 5：普通道路闭环
+
+使用固定 LQR：
+
+普通道路success >=0.90
+off-road <=0.02
+collision接近0
+timeout <=0.05
+route completion不下降
+steering saturation显著低于当前基线
+
+
+必须同时报告 ExactTracker 上界，不得用 Exact 指标替代部署闭环。
+
+七、本阶段禁止事项
+不做自主车道/闸口选择
+不新增独立PathHead
+不一次输出六步部署轨迹
+不修改LQR
+不启动DAgger
+不启用MoE
+不启动PPO/GRPO
+不扩World Model容量
+不启用完整六步BPTT
+不全量端到端解冻
+
+八、通过后的下一顺序
+1. 固定路径纵向跟车、停车和恢复加速
+2. 给定目标车道后的变道、merge和道内避让
+3. 网络内部自主车道、收费闸口和出口选择
+4. DAgger同时适配Policy与World Model
+5. MoE专项专家
+6. PPO及部署同构评测
+
+给 Coding Agent 的开工结论
+
+下一阶段只攻克完整部署链上的基础车道保持：唯一 Structured PolicyHead 每次输出当前一步曲率与路径条件化进度，结构化 World Model 使用解析 ego-motion 对 OD/LD anchors 做坐标补偿并学习残差，同一 Policy 与 World Model 递归六次，最后由固定 LQR 执行。先分训，再交替适配，禁止独立轨迹头和一次性六步尾段。
