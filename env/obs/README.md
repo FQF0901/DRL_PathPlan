@@ -34,8 +34,13 @@ LD 伴随数组（不进 feats/mask，随 ld 进 6 帧历史为 `<key>_hist`，�
 - `od_hist` 与 `od_id_hist`/`od_presence_hist` 同槽位、跨帧身份一致，不做 SE(2) 变换（`od.py:94-97`，`memory.py:16-18`）。
 - 时间戳非严格递增直接 raise（`memory.py:97-101`）。
 
-## 配置入口
-- `ObservationBuilder` 键（主要键，全部可选）：`channels`、`scope` 及 `od`/`ld` 各自的 `front_m/rear_m/left_m/right_m`（顶层扁平同名键兼容旧配置，`:106-112`）、`od.num_slots/ttc_cap_s/release_after_s/physics_dt`、`ld.num_slots/offsets`、`others.speed_limit_norm_mps/static_scan_range_m/static_lat_margin_m/static_lane_span`、`memory.frames/interval/channels`、`physics_dt`（`builder.py:34-45`）；`lane_semantic` 无参数（`builder.py:127`）。
+## t0 段纵向外源几何（`path_*`，R38-Q4A）
+- `build()` 在通道全部产出后追加 **8 列** `path_*`：`path_speed`、`path_left_margin`、`path_right_margin`、`path_static_distance`、`path_dynamic_distance`、`path_dynamic_ttc`、`path_nav_progress`、`path_distance_to_target_lane_end`，各 `(1,)` float32，并同步产出与值同源的 `<key>__present` 掩码列（`path_field.py:1-42`）。
+- 值口径：speed/left/right/nav/d2end = 同帧 `ego[:,0]` / `lane_semantic[:,4]` / `lane_semantic[:,5]` / `nav[:,-1]` / `lane_semantic[:,11]`（= 头侧既有回退口径，逐位）；static/dynamic_distance/dynamic_ttc = 真值公式（`long_exog.py`；静态 = `static.scan_static_blocker` 同函数，动态 = OD 槽矩形最近距 / `dx/(−vx)` cap 60 s）。
+- 源通道不在场 ⇒ 该列**不产出**（不留静默 0）；`static/dynamic` 三列恒产出（无真值 ⇒ 0 + `__present=0`，显式主态）。消费方 `net/path_head.long_exog_from_obs` 对 dynamic 两列**缺键 fail-fast**（R38-Q4A 禁静默 0）；`__present` 在场时用于 `long_present`（否则退回"键在场 ⇒ 1"旧口径）。
+- 该 8 列**不进** 6 帧历史、不进 `feature_spec`（非通道）；`tools/collect_expert.py` 的数据集白名单（`CURRENT_CHANNELS`/companion）不含它们 ⇒ 不改变既有数据集 schema。
+
+## 配置入口- `ObservationBuilder` 键（主要键，全部可选）：`channels`、`scope` 及 `od`/`ld` 各自的 `front_m/rear_m/left_m/right_m`（顶层扁平同名键兼容旧配置，`:106-112`）、`od.num_slots/ttc_cap_s/release_after_s/physics_dt`、`ld.num_slots/offsets`、`others.speed_limit_norm_mps/static_scan_range_m/static_lat_margin_m/static_lane_span`、`memory.frames/interval/channels`、`physics_dt`（`builder.py:34-45`）；`lane_semantic` 无参数（`builder.py:127`）。
 - `config/env.yaml::obs` 的扁平键 `topk_objects`/`topk_lanes`/`history_frames` 被 `builder` 支持为别名（`builder.py:99-105`）；`scope` 一节被 OD/LD 共用（`:106-112`）。注意：该段在标准链路下未被实际传参——训练池 `build_pool` 无 obs_config 参数（`pipeline/trainer.py:7211-7221`）；评测/采集链路透传的是 `config["env"]["obs"]`（`pipeline/eval_runner.py:1794,1832`；`tools/dagger_collect.py:1301` 等），平铺配置下无顶层 `env:` 键 → 空 dict。因此实际用 `ObservationBuilder` 内置默认，值与此镜像（见 `config/README.md` 未消费键表）。
 
 ## 已知文档与代码不一致（以代码为准，未修改）

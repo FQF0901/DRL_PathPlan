@@ -12,6 +12,12 @@
     route_world (64,2) route_world_mask (64,)  # v3：世界系路线折线（首段起点 + 各段终点）
     lane_semantic (1,12) lane_semantic_mask (1,)  # v7（R21）：target lane 相对语义
 
+    # R38-Q4A：t0 段纵向外源几何（8 列 + 同源 present 掩码；由 env/obs/path_field.py 生产，
+    # 读同帧 od/nav/lane_semantic/ego 输出 ⇒ 与头侧回退口径逐位）：
+    path_speed / path_left_margin / path_right_margin / path_static_distance /
+    path_dynamic_distance / path_dynamic_ttc / path_nav_progress /
+    path_distance_to_target_lane_end (1,)  及上述各键的 ``__present`` (1,)
+
     ego_hist (6,1,8)           ego_hist_mask (6,1)
     others_hist (6,1,21+K)     others_hist_mask (6,1)
     od_hist (6,16,9)           od_hist_mask (6,16)
@@ -65,6 +71,7 @@ from env.obs.memory import FrameMemory
 from env.obs.nav import NavChannel
 from env.obs.od import ODChannel
 from env.obs.others import OthersChannel
+from env.obs.path_field import path_long_exog_fields
 from env.obs.signal import SignalChannel
 from env.obs.world import EgoWorldChannel, RouteWorldChannel
 
@@ -178,6 +185,9 @@ class ObservationBuilder:
         for values in companions.values():
             out.update(values)
         out.update(self.memory.stack(env))
+        # R38-Q4A：t0 段纵向外源几何 8 列 ``path_*`` + 同源 ``__present`` 掩码（值读同帧
+        # 通道输出 ⇒ 与头侧既有回退口径逐位；见 env/obs/path_field.py）
+        out.update(path_long_exog_fields(env, out))
         return out
 
     # ---------------------------------------------------------------- 元信息

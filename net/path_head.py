@@ -54,9 +54,12 @@ H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 r
 - ``lane_anchor_mask (B,P)``（可选；默认全 1）；
 - ``target_lane_valid (B,)``（可选；缺省 = 锚有效；``lane_semantic`` 列 6 兜底）；
 - ``path_left_margin/path_right_margin/path_static_distance/path_dynamic_distance/
-  path_dynamic_ttc/path_nav_progress/path_distance_to_target_lane_end (B,)``（可选，缺省 0）；
-  当前速度取 ``obs['ego']`` 第 0 维（v, m/s）；``lane_semantic`` 存在时 margin/d2end/valid
-  回退其列 4/5/11/6。缺键 → 0 + presence 掩码（默认 0 不静默，H3 hook 审计）。
+  path_dynamic_ttc/path_nav_progress/path_distance_to_target_lane_end (B,)``（R38-Q4A：t0 段
+  由 env 侧生产者 ``env/obs/path_field.py`` 给出；``path_dynamic_distance`` / ``path_dynamic_ttc``
+  **缺键 = fail-fast**（禁静默 0）；static 缺键 → 0 + present=0；margin/nav/d2end 缺键回退
+  ``lane_semantic`` 列 4/5/11 与 ``nav[:,-1]``）；每列可附 ``<key>__present (B,)`` 显式掩码
+  （在场时 ``long_present`` 用它，否则退回"键在场 ⇒ 1"）；
+  当前速度取 ``obs['ego']`` 第 0 维（v, m/s）。
 
 训练/冻结集（H1 manifest 同步；K1 沿用）
 ----------------------------------------
@@ -245,6 +248,12 @@ LONG_EXOG_OBS_KEYS: tuple[str | None, ...] = (
     "path_nav_progress",
     "path_distance_to_target_lane_end",
 )
+#: 显式 present 掩码键后缀（生产者口径：``path_x__present``；R38-Q4A）
+LONG_EXOG_PRESENT_SUFFIX = "__present"
+#: **缺键即 fail-fast** 的列号（禁静默 0；R38-Q4A：0 = 训练分布外「立即碰撞」/无观测混淆）：
+#: ``dynamic_distance`` / ``dynamic_ttc``。生产者 = ``env/obs/path_field.py``（t0 段 8 列）；
+#: 「本帧无观测」的正确表达 = 值 0 + ``__present=0``，不是缺键。
+LONG_EXOG_STRICT_COLUMNS: tuple[int, ...] = (4, 5)
 
 #: 纵向头完整输入 = 当前步曲率 ``κ_near``(1) + 外源几何(8)。
 #: **只吃 κ_near**：``κ_mid/κ_far`` 是辅助输出，不进动作（架构契约门之一）。
@@ -813,14 +822,43 @@ def _vector_from_obs(
     return vector.to(device=device), 1.0
 
 
+def _present_from_obs(
+    obs: Mapping[str, Tensor], key: str, *, batch: int, device: torch.device
+) -> Tensor | None:
+    """显式 present 掩码列（``<key>__present``）→ ``(B,)`` float；缺键 → ``None``。
+
+    生产者（``env/obs/path_field.py``）与训练注入（j1/j2）都按 ``<key>__present`` 写"值是否
+    有观测"（static 无观测 = 0+present=0、dynamic 无有效槽 = 0+present=0）。缺键时退回
+    "键在场 ⇒ present=1"的旧口径（合成 obs / 旧装配兼容）。
+    """
+    name = f"{key}{LONG_EXOG_PRESENT_SUFFIX}"
+    raw = obs.get(name)
+    if not torch.is_tensor(raw):
+        return None
+    mask = raw.float()
+    if mask.ndim == 0:
+        mask = mask.reshape(1)
+    mask = squeeze_batch_singletons(mask, 1, name)
+    if int(mask.shape[0]) != batch:
+        raise ValueError(f"obs[{name!r}] B={int(mask.shape[0])} != {batch}")
+    return mask.to(device=device)
+
+
 def long_exog_from_obs(
     obs: Mapping[str, Tensor], *, batch: int, device: torch.device
 ) -> tuple[Tensor, Tensor]:
-    """``obs`` → 纵向头外源几何 ``(long_exog (B,8), present (B,8))``（缺键默认 0，记录掩码）。
+    """``obs`` → 纵向头外源几何 ``(long_exog (B,8), present (B,8))``。
 
     列序 = :data:`LONG_EXOG_FEATURE_NAMES`。速度优先取 ``obs['ego']`` 第 0 维（v, m/s），
-    否则取 ``path_speed``；margin/d2end/target 有效位在缺键时回退 ``lane_semantic``
-    （列 4/5/11/6，semantic 模式数据）；仍缺 → 0。
+    否则取 ``path_speed``；margin/d2end 缺键回退 ``lane_semantic``（列 4/5/11）、nav 缺键回退
+    ``nav[:,-1]``，仍缺 → 0。**``dynamic_distance`` / ``dynamic_ttc`` 缺键 = fail-fast**
+    （:data:`LONG_EXOG_STRICT_COLUMNS`；R38-Q4A 禁静默 0 —— t0 段必须由生产者
+    ``env/obs/path_field.py`` 给出，评测侧旧装配可用
+    ``.slim/deepwork/p1_v2/round37/m7_fill.py::truth_fill`` 回填；"本帧无观测"应写
+    0 + ``<key>__present=0``）。``static_distance`` 缺键 → 0 + present=0（诊断列）。
+
+    ``present`` 列：显式 ``<key>__present`` 掩码在场 ⇒ 用它（与生产者值同源）；否则退回
+    "键在场 ⇒ 1"（旧口径，逐位不变）。
     """
     names = LONG_EXOG_FEATURE_NAMES
     values: list[Tensor] = []
@@ -834,9 +872,10 @@ def long_exog_from_obs(
         semantic_batch_ok = sem.ndim == 2 and int(sem.shape[0]) == batch and int(sem.shape[1]) >= 12
         semantic = sem if semantic_batch_ok else None
 
-    def _push(index: int, vector: Tensor, has: float) -> None:
+    def _push(index: int, vector: Tensor, has: float, key: str | None = None) -> None:
         values.append(vector)
-        present[:, index] = float(has)
+        mask = None if key is None else _present_from_obs(obs, key, batch=batch, device=device)
+        present[:, index] = float(has) if mask is None else mask
 
     # 0) speed：obs['ego'] 第 0 维（当前帧；容忍 (B,8)/(B,1,8)/(B,T,8)）
     ego = obs.get("ego")
@@ -848,28 +887,35 @@ def long_exog_from_obs(
         if ego_t.ndim == 3:
             ego_t = ego_t[:, -1, :]
         if ego_t.ndim == 2 and tuple(ego_t.shape) == (batch, 8):
-            _push(0, ego_t[:, 0].to(device=device), 1.0)
+            _push(0, ego_t[:, 0].to(device=device), 1.0, "path_speed")
             speed_ok = True
     if not speed_ok:
         value, has = _vector_from_obs(obs, "path_speed", batch=batch, device=device)
-        _push(0, value, has)
+        _push(0, value, has, "path_speed")
 
     # 1) left_margin / 2) right_margin
     left, left_has = _vector_from_obs(obs, str(LONG_EXOG_OBS_KEYS[1]), batch=batch, device=device)
     if left_has == 0.0 and semantic_batch_ok:
         left, left_has = semantic[:, 4].to(device=device), 1.0
-    _push(1, left, left_has)
+    _push(1, left, left_has, str(LONG_EXOG_OBS_KEYS[1]))
     right, right_has = _vector_from_obs(obs, str(LONG_EXOG_OBS_KEYS[2]), batch=batch, device=device)
     if right_has == 0.0 and semantic_batch_ok:
         right, right_has = semantic[:, 5].to(device=device), 1.0
-    _push(2, right, right_has)
+    _push(2, right, right_has, str(LONG_EXOG_OBS_KEYS[2]))
 
-    # 3) static / 4) dynamic / 5) ttc
+    # 3) static / 4) dynamic / 5) ttc（4/5 缺键 = fail-fast，见 docstring）
     for index in (3, 4, 5):
-        value, has = _vector_from_obs(
-            obs, str(LONG_EXOG_OBS_KEYS[index]), batch=batch, device=device
-        )
-        _push(index, value, has)
+        key = str(LONG_EXOG_OBS_KEYS[index])
+        value, has = _vector_from_obs(obs, key, batch=batch, device=device)
+        if has == 0.0 and index in LONG_EXOG_STRICT_COLUMNS:
+            raise ValueError(
+                f"obs 缺 {key!r}（(B,) 或 (B,1)）：该列禁止静默 0（R38-Q4A）。t0 段 8 列必须由"
+                " 生产者给出（ObservationBuilder → env/obs/path_field.py）；评测侧旧装配可用"
+                " .slim/deepwork/p1_v2/round37/m7_fill.py::truth_fill 回填；本帧确实无观测 ⇒ "
+                f"写 0 + {key}{LONG_EXOG_PRESENT_SUFFIX}=0（不是缺键）。0 值 = 训练分布外的"
+                "「立即碰撞」（dynamic_ttc）/ 无观测混淆（dynamic_distance）。"
+            )
+        _push(index, value, has, key)
 
     # 6) nav_progress：显式键 → obs['nav'] 末维（route_completion）→ 0
     progress, progress_has = _vector_from_obs(
@@ -883,7 +929,7 @@ def long_exog_from_obs(
                 nav_t = nav_t.squeeze(1)
             if nav_t.ndim == 2 and int(nav_t.shape[0]) == batch and int(nav_t.shape[1]) >= 11:
                 progress, progress_has = nav_t[:, -1].to(device=device), 1.0
-    _push(6, progress, progress_has)
+    _push(6, progress, progress_has, str(LONG_EXOG_OBS_KEYS[6]))
 
     # 7) distance_to_target_lane_end
     distance, distance_has = _vector_from_obs(
@@ -891,7 +937,7 @@ def long_exog_from_obs(
     )
     if distance_has == 0.0 and semantic_batch_ok:
         distance, distance_has = semantic[:, 11].to(device=device), 1.0
-    _push(7, distance, distance_has)
+    _push(7, distance, distance_has, str(LONG_EXOG_OBS_KEYS[7]))
 
     return torch.stack(values, dim=-1).to(device=device, dtype=torch.float32), present
 

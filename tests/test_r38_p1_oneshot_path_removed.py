@@ -38,6 +38,9 @@ def _structured_obs() -> dict[str, torch.Tensor]:
         torch.stack([s, torch.zeros_like(s)], dim=-1).unsqueeze(0).expand(BATCH, -1, -1).contiguous()
     )
     obs["lane_anchor_mask"] = torch.ones(BATCH, 41)
+    # R38-Q4A：t0 段 dynamic 两列缺键 = fail-fast（禁静默 0）——本测试的观测按新契约补齐
+    obs["path_dynamic_distance"] = torch.full((BATCH, ), 30.0)
+    obs["path_dynamic_ttc"] = torch.full((BATCH, ), 8.0)
     return obs
 
 
