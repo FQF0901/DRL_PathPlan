@@ -194,6 +194,7 @@ curl -u "opencode:$PW" http://127.0.0.1:4096/api/info
 ```
 
 - 收到命令后调用 `permission/<per>/reply`（`once` / `always` / `reject`）。`always` 只对可信的低危操作开放。
+- **agent 提问（question 工具）同路径推送**：轮询 `GET /api/session/<ses>/form` 的待答表单，推送问题与选项到手机；回复 `/answer <编号>` 或 `/answer <文本>`（`/answer` 无参数可查看待答内容）。未回答时任务保持等待。
 
 ### 4.6 并发
 
@@ -237,6 +238,7 @@ curl -u "opencode:$PW" http://127.0.0.1:4096/api/info
 | `/tail [n] [brief]` | 最近 n 条消息：默认重发**完整内容**（超长按企微上限自动分片）；`brief` 只发摘要 |
 | `/abort` | 中断当前生成 |
 | `/approve per_xxx` / `/reject per_xxx` | 处理权限审批 |
+| `/answer [n]` | 回答 agent 的提问（编号或文本；无参数查看待答） |
 | `/local` | 返回本机 TUI 进入命令：`opencode -s ses_xxx` |
 | `/unbind` | 解除会话绑定 |
 | 其他文本 | 作为 prompt 发给当前 session |
