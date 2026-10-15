@@ -4,7 +4,7 @@
 ``plan_head.moe.residual_scale`` 可训；其余（encoders / mem_encoder / plan_head 主干
 fusion·norm·ego_next·primary / router / st_gnn）全部冻结。
 V8r（2026-09-30，G1 §2）：``plan_head.moe.router.*`` 移出 allowlist
-（docs/db44fefe-system-review.md:127,240 "shared/primary/router/WM 冻结"）。
+（"shared/primary/router/WM 冻结"依据见 docs/repo_handbook.md 附录 D）。
 组表 ``(前缀 → 参数量/LR)`` 与 ``build_optimizer`` 的 LR 分组同口径。
 """
 

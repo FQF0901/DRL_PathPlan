@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """评估入口（P2/N5）：冻结验证集评测（委托 ``pipeline.eval_runner``）。
 
-契约（``.slim/deepwork/p2-contract.md`` §5）：``--config --spec --ckpt --out --policy``。
+契约（本地档 ``.slim/deepwork/p2-contract.md`` §5，已随 CLEAN-1 清理）：``--config --spec --ckpt --out --policy``。
 本入口只做参数校验与转发，真正的评测在 ``pipeline.eval_runner.main``：
 
 - ``--policy baseline``：规则基线 ``PurePursuitIDMPolicy``（复现冻结参照，不需要 ``--ckpt``）；

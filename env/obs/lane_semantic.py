@@ -1,6 +1,6 @@
 """lane_semantic 通道（R21 语义重建，schema v7）+ target lane 纯函数 + LD 点补充。
 
-契约全文见 ``docs/r21_lane_semantic_contract.md`` / ``docs/r21_target_lane_selection.md``。
+契约要点（含 §6 fail-fast 方案）见 ``docs/repo_handbook.md`` 附录 D。
 本模块是唯一实现出处：
 
 1. :func:`select_target_lane` —— **唯一可测试纯函数**（无 env / 无全局状态；输入 ego 车道、
@@ -397,7 +397,7 @@ def select_target_lane(
     current_ref_lanes: Iterable[Any] | None = None,
     next_ref_lanes: Iterable[Any] | None = None,
 ) -> TargetLaneSelection:
-    """唯一 target lane 选择纯函数（契约见 ``docs/r21_target_lane_selection.md``）。
+    """唯一 target lane 选择纯函数（契约见 ``docs/repo_handbook.md`` 附录 D）。
 
     优先级（不得调换）：
 

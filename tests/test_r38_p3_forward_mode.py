@@ -1,6 +1,6 @@
 """R38-P3-H：``forward_mode`` 显式枚举 ↔ 旧 ``rollout=/world_model=`` 布尔组合**逐位对照**。
 
-出处：GPT §七-H + ``docs/code_reachability_audit.md`` H 组 + ``docs/deprecation_manifest.yaml``
+出处：GPT §七-H + ``docs/repo_handbook.md`` 附录 D（可达性审计 H 组 + R38 弃用清单）
 H 组（"旧布尔组合 → 枚举的映射表 + 每组合一次前向逐位对照"）。断言面（CPU、无 metadrive）：
 
 1. **映射表**：``FORWARD_MODE_FLAGS`` = 声明口径（``policy_single_step`` (F,F) /

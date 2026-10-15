@@ -12,7 +12,7 @@
 1. **离线诊断**：``tools/diagnostics/legacy_policy_diag.py`` 复算旧头 ``policy_action_mu`` /
    ``action_logstd``（R38-P2b 后正式 forward 不再并行计算旧头诊断）；
 2. **旧 ckpt 键面检查**：以 :class:`PolicyHead` 实例化 ``policy.*``（19–21 键）做形状/语义审计；
-3. **历史复现**：与 ``docs/checkpoint_migration_contract.md`` §4.4 的 ``policy.log_std →
+3. **历史复现**：与 ``docs/repo_handbook.md`` 附录 D §4.4 的 ``policy.log_std →
    policy.logstd`` 改名族对账。
 
 **注意**：生产 net 的 ``net/policy.py`` **未**删除（默认关路径的唯一动作出口仍用它）；

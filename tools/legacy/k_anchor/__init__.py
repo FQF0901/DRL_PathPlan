@@ -1,6 +1,6 @@
 """``tools.legacy.k_anchor``：K-anchor 计划头的历史复现快照（R38-P2a 减枝迁移）。
 
-范围（``docs/deprecation_manifest.yaml`` B 组）：``net/anchor.py``（整文件）、
+范围（R38 弃用清单 B 组）：``net/anchor.py``（整文件）、
 ``net/plan_head.py`` 的锚分支（整文件）、``tools/fit_plan_anchors.py``、锚字典
 ``plan_anchors_k6.json``。
 

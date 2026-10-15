@@ -15,7 +15,7 @@
 - 输出 ``data_gate_report.json``（§7.10-A5 数据门逐项核验：有效行 ≥10k、独立 episode ≥500、
   单 episode ≤20 行、质量通过率 ≥80%、三档 ≥4000/2500/1000、困难路型每类 ≥300 行且
   ≥30 eps——困难路型按 spec geometry / records road_class 汇总）；
-- ``--out`` 在 ``datasets/`` 下时补数据集卡模板（``docs/recovery_v1_dataset_card.md``，
+- ``--out`` 在 ``datasets/`` 下时补数据集卡模板（数据集卡要素见 ``docs/repo_handbook.md`` 附录 D，
   不存在才写）。
 
 退出码：0 = 合并成功且数据门全过；1 = 合并成功但数据门未过；2 = 合并失败（不一致/重叠等）。

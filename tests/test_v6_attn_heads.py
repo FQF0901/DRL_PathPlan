@@ -1,6 +1,6 @@
 """v6/v8 net 验收：交叉注意力头（A1/A2）、A4 nav 逐步重建、Stage C allowlist 命名契约（§5 #7）。
 
-规格：``docs/v6_net_design.md``（冻结，@031cc1c）§1/§2/§3/§5 #7；**v8 修订**（参数再分配 +
+规格：``docs/repo_handbook.md`` 附录 D（v6 设计冻结 @031cc1c）§1/§2/§3/§5 #7；**v8 修订**（参数再分配 +
 latent 重构）覆盖其中被取代的口径（t0 单次 MP 进头、参数预算、令牌组成）。纯 CPU、固定种子。
 """
 
@@ -348,7 +348,7 @@ def test_nav_rebuild_result_is_actually_used(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_rollout_switches_route_command_after_displacement(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A4 验收（docs/v6_net_design.md §3）：**model.rollout 级** route-command 切换单测。
+    """A4 验收（v6 设计 §3，要点见 docs/repo_handbook.md 附录 D）：**model.rollout 级** route-command 切换单测。
 
     场景：路线顶点 (0,0)→(10,0)→(50,0)→(60,10)（分叉顶点 (10,0)；下一段 45° 左转）。
     ego 起点 (6.43,0,0)：t0 命令 = forward；默认动作 ds=5 m/步 ⇒ 第 1 步位移跨过 (10,0)，

@@ -1,6 +1,6 @@
 """R38-P2a：K-anchor 减枝移除守卫（net 实现面；S3 = 删实现）。
 
-锁定（`docs/deprecation_manifest.yaml` B 组）：
+锁定（R38 弃用清单 B 组）：
 
 - ``net/anchor.py`` 与 ``tools/fit_plan_anchors.py`` 已删除（实现只存在于 `tools/legacy/k_anchor/`）；
 - ``PlanHead`` 无锚参数/无锚 buffer/无 ``set_anchors``/``set_anchor_mode``/``plan_anchors``；

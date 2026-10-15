@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """训练监控：tensorboard + CSV，hook 式、非侵入（P2/N5，契约 §5）。
 
-Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``）
+Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/repo_handbook.md`` 附录 D）
 --------------------------------------------------------------------
 用户只关心 **OD/EGO 的 loss 与 KPI + router 的 loss 与 KPI**，其余不再记录：
 
@@ -623,7 +623,7 @@ class TrainingMonitor:
             return
         key = _slim_tag(str(tag))
         if key is None:
-            return  # 非保留清单：TB/CSV 都不写（清单见 docs/metrics.md）
+            return  # 非保留清单：TB/CSV 都不写（清单见 docs/repo_handbook.md 附录 D）
         self._pending_group_tags[key] = (number, step)
         if self._csv_writer is not None:
             self._csv_writer.writerow(["" if step is None else int(step), key, repr(number)])

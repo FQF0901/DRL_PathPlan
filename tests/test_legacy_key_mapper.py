@@ -1,6 +1,6 @@
 """R38-P2a：``tools.legacy.legacy_key_mapper`` + ``checkpoint_migration`` 单测（ckpt 兼容）。
 
-覆盖（`docs/checkpoint_migration_contract.md` §4.2/§5/§6-1）：
+覆盖（`docs/repo_handbook.md` 附录 D §4.2/§5/§6-1）：
 
 - B 组 ignore 集 = 20 键（K-anchor 7 前缀 16 键 + ``encoders.lane/ttc`` 4 键），逐族计数；
 - 干净 ckpt：零丢弃 / 零拒绝；

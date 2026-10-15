@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Recovery 采集器（P1-1 预备；两遍确定性重放 + 专家接管，干跑默认）。
 
-机制（详见 §7.10-A5 与 docs/p1_probe_spec.md）
+机制（详见 §7.10-A5 与 docs/repo_handbook.md 附录 D 探针口径）
 -----------------------------------------------
 forensics 为"单控制器整集"架构、无接管/快照 → 本工具用**两遍确定性重放**：
 
@@ -54,7 +54,7 @@ route_progress_after_takeover（专家接管 3s 窗口内实测）；mode_label/
       split_manifest.json   episode 级 train/val（'pool:id' 键，禁泄漏）
 
 正式采集（另行授权）：``--out datasets/recovery_v1`` 并附
-``docs/recovery_v1_dataset_card.md`` 模板（本工具自动写，若不存在）。
+数据集卡（要素见 ``docs/repo_handbook.md`` 附录 D；本工具自动写，若不存在）。
 
 用法（100 集试点，多池按几何分层）::
 
@@ -62,7 +62,7 @@ route_progress_after_takeover（专家接管 3s 窗口内实测）；mode_label/
         --ckpt runs/BTC20261009-0824_sw_pri512/stage_b/ckpt_epoch020.pt \\
         --config runs/p1_0/configs/p1a_pri512.yaml \\
         --spec env/specs/scenarios_eval500.json \\
-        --spec docs/v7_reports/specs/specs_val_only500.json \\
+        --spec <clean500.json>  # 已归档；取档/重建见 docs/repo_handbook.md 附录 D \\
         --spec env/specs/scenarios_train_dagger_r1.json \\
         --stratify-per-geometry 10 --limit 100 --workers 1 --device cpu \\
         --out runs/p1_0/recovery_pilot
@@ -72,7 +72,7 @@ route_progress_after_takeover（专家接管 3s 窗口内实测）；mode_label/
     for i in 0 1 2 3 4 5; do
       tools/venv-python tools/controls/collect_recovery.py \\
         --spec env/specs/scenarios_eval500.json \\
-        --spec docs/v7_reports/specs/specs_val_only500.json \\
+        --spec <clean500.json>  # 已归档；取档/重建见 docs/repo_handbook.md 附录 D \\
         --spec env/specs/scenarios_train_dagger_r1.json \\
         --spec env/specs/scenarios_train_dagger_r2.json \\
         --spec env/specs/scenarios_train_dagger_r3.json \\

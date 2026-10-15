@@ -3,7 +3,7 @@
 出处（快照 commit = ``9577078``；源 = 删除前的 ``net/anchor.py``，371 行逐行拷贝，
 sha256 ``85506160763c45197530dfb921fd0e0b9a1897f750907d1afe5f50c3f3bbea7c``）
 ------------------------------------------------------------------------------
-- 判定出处：``docs/deprecation_manifest.yaml`` B 组（``LEGACY_REPRO``：K-anchor 长期关闭、
+- 判定出处：R38 弃用清单 B 组（``LEGACY_REPRO``：K-anchor 长期关闭、
   设计上产生独立计划候选 ⇒ 整体归档；旧 ckpt 键面经 ``tools/legacy/legacy_key_mapper`` 忽略）。
 - 复现约束：本模块自包含（仅 ``torch``），纯函数可直接复算锚混合/WTA/车道系；
   **模型内**复现（``num_anchors>0`` 的 PlanHead/rollout 尾段）需删除前 net 版本::
@@ -16,7 +16,7 @@ sha256 ``85506160763c45197530dfb921fd0e0b9a1897f750907d1afe5f50c3f3bbea7c``）
 --------------------
 K-anchor 计划头工具（v7 结构迭代 B）：形状锚字典 / WTA 分配 / 车道系变换。
 
-设计（fix-3 可行性报告 §5.2 方案 A；预注册见 ``docs/v7_program_prereg.md`` §11）
+设计（fix-3 可行性报告 §5.2 方案 A；预注册见 ``docs/repo_handbook.md`` 附录 D §11）
 -------------------------------------------------------------------------------
 - **形状锚**：K=6 条 ``(ds, dθ)`` 6 步链，锚 = expert ``cumdtheta`` KMeans 簇的物理原型
   （`tools/fit_plan_anchors.py` 拟合；簇大小与 fix-3 逐位一致）。

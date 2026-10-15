@@ -1,6 +1,6 @@
 """R21-3A 语义接线：``lane_semantic`` → ``target_lane_token`` + role-aware 分组读出。
 
-契约（round-23 §4；全文见 ``docs/r21_3a_semantic_wiring.md``）：
+契约（round-23 §4；要点与取档见 ``docs/repo_handbook.md`` 附录 D）：
 
 - **入口固定归一化**：12 维原始特征逐元素除以
   :data:`env.obs.lane_semantic.LANE_SEMANTIC_NORMALIZATION`（常数入 schema/模型快照 +

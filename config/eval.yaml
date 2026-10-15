@@ -45,5 +45,5 @@ dataset_gate:                         # 数据侧 gate，与 policy KPI 分离�
                                       # 该口径与已接受的 IDMPolicy 冷启动质量矛盾）
   min_samples_per_scenario: 10        # policy-step (2Hz)
   min_samples_per_category: 50        # 每受监督标签的正样本下限
-  # BC 过滤规则唯一出处：.slim/deepwork/p2-contract.md §8.2（终末截断 / 3s 窗口干净 / on_lane /
-  # round-trip 可复现 / 事件 fired∧actor_alive / 难度几何配平）
+  # BC 过滤规则（本地契约 `.slim/deepwork/p2-contract.md` §8.2 已随 CLEAN-1 清理）：终末截断 /
+  # 3s 窗口干净 / on_lane / round-trip 可复现 / 事件 fired∧actor_alive / 难度几何配平

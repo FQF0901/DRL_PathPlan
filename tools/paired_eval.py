@@ -9,7 +9,7 @@
 - **2×2 翻牌矩阵**：``fixed``（基线失败 → agent 成功）/ ``broken``（基线成功 → agent 失败）
   / ``both_pass`` / ``both_fail``；
 - ``net = fixed − broken``、``z = |net| / √(fixed + broken)``（与
-  ``docs/v6_program_prereg.md`` §7.3 / ``docs/rl_stage_c_experiments.md`` 同口径）；
+  ``docs/repo_handbook.md`` 附录 D §7.3 同口径）；
 - **McNemar 精确检验 p**（二项双尾精确法，无连续性校正）；
 - **配对差 95% CI**（按场景 bootstrap；默认 10000 次、固定 seed 可复现）；
 - **分层**（几何 primary × 难度，及 primary / difficulty 边际）配对差；

@@ -11,7 +11,7 @@
 - ``pipeline/monitoring.py:736-744`` → ``_write_legacy_grouped_tensorboard`` =
   :func:`write_legacy_grouped_tensorboard`（旧 ``add_scalars`` 多线族重放）。
 
-**判定**：`LEGACY_REPRO`（``docs/deprecation_manifest.yaml`` G 组：``legacy_tags`` / ``_LEGACY_*`` /
+**判定**：`LEGACY_REPRO`（R38 弃用清单 G 组：``legacy_tags`` / ``_LEGACY_*`` /
 ``_group_of_tag`` / ``_write_legacy_grouped_tensorboard`` 迁 ``tools/legacy/monitoring_reader.py``；
 正式训练只写新 schema —— ``pipeline/monitoring.py`` 的 ``_slim_tag`` = KEEP）。
 

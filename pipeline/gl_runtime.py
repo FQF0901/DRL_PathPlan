@@ -1,6 +1,6 @@
 """venv 本地 glvnd 运行库路径保障（spawn worker 的 GL 修复，p2-contract §8 前置）。
 
-背景（P0 实测，见 `.slim/deepwork/planner-rl-feasibility.md`）
+背景（P0 实测；原注 `.slim/deepwork/planner-rl-feasibility.md` 已随 CLEAN-1 清理）
 --------------------------------------------------------------
 本机没有系统 ``libGL.so.1``；MetaDrive/Panda3D 初始化 engine 时两个 GL pipe 都加载失败 →
 ``n_pipes=0`` → MetaDrive 0.4.3 的 ``logger.info("Known Pipes: {}".format(*[]))`` 抛

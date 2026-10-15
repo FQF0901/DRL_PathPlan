@@ -45,7 +45,7 @@ v8 诊断臂 A1'（2026-10-07）：采样 offset = :data:`LD_OFFSETS_M` = {5,10,
 R21（2026-10-12，语义重建，schema v7）
 --------------------------------------
 本通道新增**逐槽补充伴随数组**（不进 feats/mask，不做 SE(2) 对齐；见
-``docs/r21_lane_semantic_contract.md``）：``ld_lane_role``（target / target_continuation /
+``docs/repo_handbook.md`` 附录 D）：``ld_lane_role``（target / target_continuation /
 left_adjacent / right_adjacent / other 编码）、``ld_offset_s_norm``（s/length，同车道内严格
 递增）、``ld_group``（观测内局部同车道分组，不暴露全局 lane_id）、``ld_route_associated``
 （∈ current_ref ∪ next_ref）。计算由 :mod:`env.obs.lane_semantic` 提供（target lane 选择为
@@ -315,7 +315,7 @@ class LDChannel(ObservationChannel):
     def _build_supplements(self, ego, nav, assembled: list) -> dict[str, np.ndarray]:
         """逐槽补充数组（shape (num_slots,)；无效槽 role/group=-1、其余 0）。
 
-        见 ``docs/r21_lane_semantic_contract.md``：``ld_lane_role`` / ``ld_offset_s_norm`` /
+        见 ``docs/repo_handbook.md`` 附录 D：``ld_lane_role`` / ``ld_offset_s_norm`` /
         ``ld_group`` / ``ld_route_associated``。任何异常 → 全默认（不崩观测）。
         """
         num_slots = self.num_slots

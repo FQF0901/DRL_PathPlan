@@ -34,7 +34,7 @@
   缺省 ``plan`` = 现状逐位不变；``repeat_action`` = ``np.repeat(action_mu, 6)``
   （``pipeline.eval_runner.build_eval_references`` 同口径，供 P0-B/F 格）。
 
-逐策略步记录扩展（设计文档 ``docs/p0_eval_compat_design.md`` §4/§5，字段冻结）
+逐策略步记录扩展（设计口径 ``docs/repo_handbook.md`` 附录 D §4/§5，字段冻结）
 ----------------------------------------------------------------------------
 - ``plan_footprint_valid`` / ``exec_footprint_valid``：计划/执行车辆矩形是否整体可行驶；
 - ``plan_footprint`` / ``exec_footprint``：退化三元组 ``inside_ratio /

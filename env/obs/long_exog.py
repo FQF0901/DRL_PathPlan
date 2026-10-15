@@ -1,7 +1,7 @@
 """``path_dynamic_distance`` / ``path_dynamic_ttc`` / ``path_static_distance`` 的**公式单一出处**。
 
-出处与口径（R38-Q4A：A 类落地 = 生产者补全 + 禁静默 0；分类见
-``docs/r38_path_field_classification.md``，裁定见其 §6）
+出处与口径（R38-Q4A：A 类落地 = 生产者补全 + 禁静默 0；分类/裁定见
+``docs/repo_handbook.md`` 附录 D）
 --------------------------------------------------------------------------------
 1. OD 槽布局（``env/obs/od.py`` 的 ``_candidate_rows`` 输出，自车 t0 系 x 前 / y 左）::
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """分阶段训练入口（P2/N5）：阶段 A/B/C 的真实 CLI。
 
-契约（``.slim/deepwork/p2-contract.md`` §5）：``--config --stage {A,B,C} --spec --ckpt --out``。
+契约（本地档 ``.slim/deepwork/p2-contract.md`` §5，已随 CLEAN-1 清理）：``--config --stage {A,B,C} --spec --ckpt --out``。
 本入口只做参数校验 + 默认值解析，训练编排全部委托给 ``pipeline.stages``（N4）：
 
 - ``A`` = world model 教师强制训练（ego 条件 = 专家 GT 动作序列；目标 = ``(episode, step+k)``

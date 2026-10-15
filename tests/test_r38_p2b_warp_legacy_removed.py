@@ -1,6 +1,6 @@
 """R38-P2b-C：legacy ``set_ego_warp``（w1/w2）退役守卫（pytest 载体）。
 
-出处：`docs/deprecation_manifest.yaml` C 组（`LEGACY_REPRO`）+ `docs/code_reachability_audit.md`
+出处：R38 弃用清单 C 组（`LEGACY_REPRO`）+ `docs/repo_handbook.md` 附录 D
 §3-C + 任务 §5.69-①（**先冻结 oracle fixture，再删实现**）。断言面：
 
 1. 接口面：``DrivingModel.set_ego_warp`` / ``DrivingModel._ego_warp_pose_k`` / ``self.ego_warp``

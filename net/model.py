@@ -22,7 +22,7 @@ v8（B3）数据流（latent 世界模型）
    前 detach（预测任务不回传状态链）。被切的是"状态（latent）"，**action/pose 链保持可微**：
    ``traj_xy`` 的梯度沿 pose 链训练 plan head 的动作链。
 
-v6 增补（docs/v6_net_design.md；A1/A2 去池化仍有效）
+v6 增补（docs/repo_handbook.md 附录 D；A1/A2 去池化仍有效）
 --------------------------------------------------
 - **A1/A2 去池化**：policy/value 不再吃池化 token，改为**交叉注意力头**
   （:class:`net.policy.CrossAttnHead`）直吃令牌集合（OD/LD 逐槽 + 池化 + others + ego +

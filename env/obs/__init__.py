@@ -31,7 +31,7 @@ v7（2026-10-12，R21 语义重建）变更：新增 ``lane_semantic`` 通道（
 ``ld_offset_s_norm``/``ld_group``/``ld_route_associated``，观测内局部语义，**不含 raw
 lane_id**）。target lane 选择 = :func:`env.obs.lane_semantic.select_target_lane`（唯一纯函数，
 route current_ref → route continuation → next_ref → ego.lane 仅兜底）。指纹前缀升为 ``v7-``；
-旧数据集/旧 ckpt 的 fail-fast 方案见 ``docs/r21_lane_semantic_contract.md`` §6。
+旧数据集/旧 ckpt 的 fail-fast 方案见 ``docs/repo_handbook.md`` 附录 D。
 """
 
 from __future__ import annotations

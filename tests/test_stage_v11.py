@@ -1,6 +1,6 @@
 """v1.1 阶段契约回归：GL 路径守卫、未来窗口查表（stride）、WM detach、参数冻结。
 
-对应 `.slim/deepwork/p2-contract.md` §8 前置 + user v1.1 阶段修订：
+对应本地契约 `.slim/deepwork/p2-contract.md` §8 前置（已随 CLEAN-1 清理）+ user v1.1 阶段修订：
 
 - spawn worker 的 GL 崩溃修复（``pipeline.gl_runtime``）必须幂等且可从仓库根计算；
 - 阶段 A 未来目标 = ``(episode, step + k·stride)`` 查表 + t0 帧对齐（BC harvest 的

@@ -1,6 +1,6 @@
 """P0-A 评测安全前置：ckpt 加载 fail-fast / ``--allow-partial-load`` / 记录字段。
 
-锁定（``docs/p0_eval_compat_design.md`` §2，CPU-only，不建 env）：
+锁定（``docs/repo_handbook.md`` 附录 D §2，CPU-only，不建 env）：
 
 - 干净加载：``_load_ckpt_model`` 三计数 = 0 通过，摘要落 ``_CKPT_LOAD_SUMMARY``；
 - 部分加载（缺 1 键 + 形状 +1）：默认 fail-fast（``SystemExit(2)``，打印三计数与明细，

@@ -6,7 +6,7 @@
 - 唯一改动：``--out`` 默认 ``config/plan_anchors_k6.json`` → ``tools/legacy/k_anchor/plan_anchors_k6.json``
   （``config/`` 下的锚字典随 R38-P2a 从正式配置面移除；数学/口径零改动）。
 - 依赖：``numpy`` + ``sklearn``（拟合需 expert npz 数据集；只读）。
-- 判定出处：``docs/deprecation_manifest.yaml`` B 组（``LEGACY_REPRO``：拟合 CLI 随锚头归档）。
+- 判定出处：R38 弃用清单 B 组（``LEGACY_REPRO``：拟合 CLI 随锚头归档）。
 - 本模块**不被生产代码导入**；输出文件与 ``tools/legacy/k_anchor/plan_anchors_k6.json`` 同源。
 
 以下为逐行拷贝的原文
@@ -14,7 +14,7 @@
 拟合 K-anchor 计划头的形状锚字典（v7 结构迭代 B，离线/CPU，只读数据）。
 
 口径（与 fix-3 探针 `/tmp/opencode/kanchor_shape.py` 同源，见
-`docs/v7_program_prereg.md` §11）：
+`docs/repo_handbook.md` 附录 D §11）：
 
 1. 数据：expert 5k（默认 `datasets/BTC20261002-0941_expert5k_v41/expert_bc.npz`）；
    行过滤 = ``train_weight>0`` 且 ``action (N,6,2)`` 全有限；moving = 6 步积分路径

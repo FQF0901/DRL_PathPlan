@@ -13,7 +13,7 @@ train:                            # 运行设备 / 线程 / batch（2026-09-26 G
                                   # 此处的 1 保护 eval 多 worker spawn（避免每 worker 8 OMP 线程风暴）
   ppo:
     lam: 0.95                     # P2/P4 GAE λ（CLI --lam 覆盖）：现行 0.95；P4 预注册对照档
-                                  # 0.98（docs/v6_program_prereg.md §7.2，单变量其余 pins 一致）
+                                  # 0.98（λ 对照档；见 docs/repo_handbook.md 附录 D，单变量其余 pins 一致）
     minibatch_size: 1024          # PPO 更新 minibatch（cheap path，GPU；与 --batch-size 独立）
     target_kl: null               # v4 ② KL 守门（CLI --target-kl）：某 minibatch approx_kl > 该值时
                                   # 跳过该 epoch 剩余 minibatch（并终止本 update 后续 epoch），
@@ -162,7 +162,7 @@ stages:
                                 # stopped_guard（记录原因）。评测确定性（deterministic=True，动作=action_mu，
                                 # 无评测噪声）→ 阈值=实质显著性（0.01 = 1pt）。
                                 # 张力提示：无锚配方下 r1 可能即低于基座而触发（护栏正确工作，非 bug；
-                                # 见 docs/phase3_rootcause_analysis.md §8.1 注 / §10.5）。
+                                # 见 docs/repo_handbook.md 附录 D §8.1 注 / §10.5）。
     bc:
       epochs: *stage_b_epochs   # 总轮数（CLI --bc-epochs 优先）
       primary_phase_split: 0.5  # primary 段占比（其余为 specific 段）

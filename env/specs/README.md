@@ -2,16 +2,34 @@
 
 目的：存放生成并冻结的场景 spec（JSON）。本目录 `*.json` 已 gitignore（`.gitignore` 中的 `env/specs/*.json`），仓库只提交本说明与 `__init__.py`。
 
-## 文件清单（条数为各文件 `count` 字段实测值）
-| 文件 | 条数 | 来源/用途 |
-| --- | --- | --- |
-| `scenarios_train.json` | 10000 | `tools/gene_env.sh` 生成；训练采样池（`config/train.yaml::data.spec`，`:51`） |
-| `scenarios_val.json` | 1000 | 同上；冻结验证集（不参与训练） |
-| `scenarios_train_slice200.json` / `scenarios_val_slice50.json` | 200 / 50 | `--slice 200` 切片（冒烟）；切片为独立分层生成，非全量前缀子集 |
-| `scenarios_train_5k.json` | 5000 | `tools/make_dagger_pools.py --mode pool5k`：train ∩ expert5k 覆盖集（`config/train.yaml:95` 的 phase 3 池） |
-| `scenarios_train_dagger_r1.json` / `_r2` / `_r3` | 各 500 | `tools/make_dagger_pools.py`（默认 rounds 模式）：3 轮互不重叠 DAgger 采集池 |
-| `scenarios_eval500.json` | 500 | `tools/make_eval_spec.py --write`：val 分层抽样（`config/eval.yaml::eval.spec`，`:3`） |
-| `scenarios_smoke16.json` | 16 | 同上；**非协议**，仅代码冒烟 |
+## 文件清单（条数为各文件 `count` 字段实测值；状态：KEEP / 预留）
+
+| 文件 | 条数 | 用途 | 消费者（代码可查） | 状态 |
+| --- | --- | --- | --- | --- |
+| `scenarios_train.json` | 10000 | 训练采样池 | `config/train.yaml:51`（`data.spec`）；`pipeline/stages.py:250` 兜底；`tools/make_eval_spec.py` / `make_dagger_pools.py` 来源 | KEEP |
+| `scenarios_val.json` | 1000 | 冻结验证集（不参与训练） | `pipeline/eval_runner.py:6,1751`（缺省评测 spec）；`tools/dagger_collect.py:133` 隔离守卫 | KEEP |
+| `scenarios_train_slice200.json` | 200 | train 冒烟/短跑切片（独立分层生成，非全量前缀子集） | `pipeline/trainer.py:8337` 默认；`tools/visualize.py:825` 默认；`tools/train.py` / `collect_expert.py` / `dagger_collect.py` 示例；P0-B 采集起步池（R37 P0-B 审批包 §2.1；已归档，取档见 `docs/repo_handbook.md` 附录 D） | KEEP |
+| `scenarios_train_5k.json` | 5000 | phase-3 采集整池（train ∩ expert5k 覆盖集） | `config/train.yaml:95`（`spec_pool`）；`pipeline/phase3_loop.py:435` 默认；`tools/reward_audit*.py` | KEEP |
+| `scenarios_train_dagger_r1.json` | 500 | 三轮互不重叠 DAgger/RL 采集池之 1 | `config/arms/v7_arm1_offroad.yaml:6`（pin）；v6/v7 预注册 pin（要点见 `docs/repo_handbook.md` 附录 D）；recovery_v1 采集池（已执行，`tools/controls/collect_recovery.py:66,76`） | KEEP |
+| `scenarios_eval500.json` | 500 | 统一评测集（val 分层抽样；与 train 系列零交集） | `config/eval.yaml:3`（主）；`config/train.yaml:151`（探针）；`pipeline/phase3_loop.py:444`；`pipeline/run_paths.py:78`；`tools/test.sh:19` | KEEP |
+| `scenarios_smoke16.json` | 16 | 代码冒烟（**非协议**） | `tests/test_dagger_collect.py:390,776,885` | KEEP |
+
+## 已删（CLEAN-2，2026-10-15；本目录 JSON 不入 git，直接删本地文件）
+
+| 文件 | 条数 | 原用途 | 删除依据（零现役消费者） |
+| --- | --- | --- | --- |
+| `scenarios_val_slice50.json` | 50 | 旧验证切片（早期冒烟/取证） | 仅历史/注释引用：`tools/diagnostics/forensics_closed_loop.py:96` 为陈旧默认值（其默认 ckpt 亦早已缺失）、`tools/diagnostics/README.md:8`（同款陈旧文档）、归档版 `experiments.md`（已进 git 历史）、`runs/` 历史产物；无现役评测消费者 |
+| `scenarios_train_dagger_r2.json` | 500 | 三轮互不重叠采集池之 2 | 无现役消费者；recovery_v1 采集已执行完毕；DAgger 后续轮计划池 = slice200 → 5k（R37 P0-B 审批包 §2.1；已归档，取档见 `docs/repo_handbook.md` 附录 D）；`tools/controls/collect_recovery.py:77` 为已执行命令的历史文档行 |
+| `scenarios_train_dagger_r3.json` | 500 | 三轮互不重叠采集池之 3 | 同上（历史文档行 `collect_recovery.py:78`） |
+
+> 重生成：`bash tools/gene_env.sh --slice 200` 会同时再生成 `scenarios_train_slice200.json` + `scenarios_val_slice50.json`；`tools/venv-python tools/make_dagger_pools.py`（默认 rounds 模式，固定种子）会同时再生成 r1–r3 + 5k。按需使用、避免误覆盖。
+
+## 新增/登记规则（CLEAN-2 起）
+
+1. **命名**：`scenarios_<split>[_<tag>][_sliceN|_5k].json`——`<split>` ∈ {train, val}；`<tag>` = 用途短标（如 `dagger_r1`）；`_sliceN` / `_5k` = 切片 / 整池量级后缀。
+2. **登记**：任何新增 spec 必须同步登记本表（用途/消费者/状态），并注明生成工具与命令；本目录 `*.json` 不入 git，**本 README 是唯一权威清单**。
+3. **Clean500 不新建**：Clean500 := `scenarios_val.json` − `scenarios_eval500.json`，历史真源副本（n=500，sha256 `087db3f5…`）已归档（取档/重建命令见 `docs/repo_handbook.md` 附录 D；逐 id 互斥/并集核验见 `runs/round38/c6/clean500_recon.json`），不得再造 `scenarios_clean500.json`。
+4. **删除**：删除 spec 前须以 `net env pipeline tools tests config reward_model` + 顶层 md 为引用面复核；零现役消费者才可删，删除后登记到本表"已删"节。
 
 ## schema
 - 落盘包装 `{"schema_version": 1, "count": N, "specs": [...]}`，部分文件附 `provenance`（来源/配额/隔离断言）；`load_specs` 兼容裸列表（`env/scenario/spec.py:322-349`）。

@@ -6,7 +6,7 @@
   ``from tools.legacy.k_anchor.anchor import anchor_mixture``（删除后 net 无此模块）。
 - 依赖：``net.encoders``（``EGO_MEM_DIM``/``H``）与 ``net.moe.MoEBlock`` 为**当前仍存在**
   的模块（非本次退役对象）；其余为快照内自包含。
-- 判定出处：``docs/deprecation_manifest.yaml`` B 组（``LEGACY_REPRO``：锚选择头/速度头/
+- 判定出处：R38 弃用清单 B 组（``LEGACY_REPRO``：锚选择头/速度头/
   残差头/锚 buffer 随 ``num_anchors`` 分支整体归档；默认关时键集与旧模型逐位一致）。
 - 复现约束：**模型内**复现（``num_anchors>0`` 的 rollout 尾段 = 锚计划、``anchor_*`` 输出键）
   需删除前 net 版本::

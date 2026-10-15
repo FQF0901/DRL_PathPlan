@@ -1,54 +1,33 @@
-# docs/ 索引与维护规则（2026-10-15 整理）
+# docs/ 索引与卫生规则（CLEAN-1，2026-10-15）
 
-> 本文件 = `docs/` 的**权威导航**。整理原则：**被代码按路径引用的文档一律留在 `docs/` 根**（不移动）；历史代际/已关闭线的文档移入归档桶（`archive/`、`v6_reports/`、`v7_reports/`），并同步更新全部引用。归档件**正文不改**，只由 README 索引。
+> 本文件 = `docs/` 的**唯一索引**。`docs/` 常驻 = **5 个顶层文件（不允许子目录）**；历史文档一律走 git，不设归档桶。
+> 历史文档的**要点压缩 + 逐条取档命令**见 `repo_handbook.md` §附录 D。
 
-## 1. 现行核心（常读）
+## 1. 常驻 5 件（只读这 5 个）
 
-| 文件 | 角色 | 引用方 |
-|---|---|---|
-| `deepseekv4p1_argue.md` | **决策台账/主文档**（§0 一页纸 + 历轮 §5.x；GPT↔我方往来结论） | GPT、各 lane 脚本（13 处代码引用） |
-| `chatgpt5p6sol_review.md` | GPT 审阅往来原文（每轮拉取后入库） | `net/path_head.py` 等（出处引用 12 处） |
-| `architecture_contract.md` | 架构契约（生成器/辅助边界/调用图/训练部署同构） | `net/model.py`、`net/path_head.py` |
-| `round37_report.md` | R37 全量报告（阶段 1：三层根因 + lane 索引 + 玩家讨论纪要） | 本索引 |
-| `round38_report.md` | **R38 全量报告**（全链路瓶颈裁决 + 代码减枝：五问裁决矩阵 / 减枝 A–H / Clean500 七臂基准 / Gate A–D / 待办与放行） | 本索引、台账 §5.80 |
-| `repo_handbook.md` | **仓库手册**：网络架构 / 训练流程 / 当前问题（第 1/2 章代码核验 + 第 3 章台账依据；附录含文档-代码漂移表） | 本索引、台账 |
-| `r37_p0b_approval_packet.md` | **CG 审批包**：P0-B（IDM+PP 蒸馏）放行 + 7 项决策（D1–D7）+ 风险与放行条件（含 M8 取消披露） | 台账 §5.67 |
-| `round36_report.md`、`r36_implementation_evidence.md`、`r36_warp_layer_note.md` | 上一轮报告与证据/注记 | 台账、round36 工具 |
-| `LOCKS.md` | 锁版/冻结清单 | 清理记录 |
+| 文件 | 角色 |
+|---|---|
+| `repo_handbook.md` | **仓库手册**：网络架构 / 训练流程 / 当前问题（第 1–3 章，代码核验）+ 附录 A（漂移）/ B（纪律）/ C（索引）/ D（归档指针） |
+| `deepseekv4p1_argue.md` | **决策台账**（主文档）：§0 一页纸 + §5.x 历轮；**新事项的追加地** |
+| `chatgpt5p6sol_review.md` | GPT 往来原文（每轮拉取后追加入库） |
+| `architecture_contract.md` | 架构契约（生成器/辅助边界/调用图/训练-部署同构）；代码按路径引用重，保留 |
+| `README.md` | 本文件（索引 + 卫生规则） |
 
-## 2. 契约与规格（代码按路径引用，**勿移动**）
+## 2. 卫生规则（强制执行）
 
-`p1_v2_decision.md`（P1-v2 决策）· `p1_probe_spec.md`（探针规格 v1.1）· `p0_eval_compat_design.md`（P0 评测兼容设计）· `recovery_v2_contract.md` / `recovery_v1_dataset_card.md`（恢复线契约与卡片）· `semantic_v1_dataset_card.md`（语义数据集卡）· `r21_lane_semantic_contract.md` / `r21_target_lane_selection.md` / `r21_3a_semantic_wiring.md`（R21 语义三件套）· `rl_reward_v5.md`（奖励口径）· `v7_program_prereg.md`（v7 预注册；原引用方 `net/anchor.py` 已随 R38-P2a 迁 `tools/legacy/k_anchor/`）· `round30_audit.md`（R30 Reality Audit，现行问题框架依据）
-
-**清理/治理（R38 减枝四交付物，2026-10-15）**：`code_reachability_audit.md`（67 符号可达性审计 + 逐组判定/迁移顺序 + CI 守卫清单；**落地状态见其 §8**）· `deprecation_manifest.yaml`（46 项：ARCHITECTURE_FORBIDDEN 19 / LEGACY_REPRO 24 / CHECKPOINT_ONLY 3；**落地中**——`landing` 块已回填 A/B/C/D 的 removal_commit〔`596747c`+`48cb5eb` / `a226285`+`dd0a8c2` / `939d1a2`〕，E/F/G/H 归 P3）· `runtime_entrypoint_matrix.md`（正式入口 × `.slim` 链 × legacy 触达）· `checkpoint_migration_contract.md`（ckpt 键面普查 + 迁移映射草案 → **已实现接口契约**：`tools/legacy/legacy_key_mapper.py` / `checkpoint_migration.py`；pipeline 官方 loader 未接线）
-
-**R38 裁决/审计（2026-10-15）**：`r38_path_field_classification.md`（`path_*` 七字段最终分类 + 缺失语义 + schema 冻结建议；编排裁定已结案；**Q4-A 生产者侧已落地 `9577078`**）· `r38_unified_benchmark.md`（**已定稿**（C6）：protocol hash v1 + Clean500 定义 + 7 臂重跑表；§6/§7 为 CG 待裁项）
-
-## 3. 归档桶（只读；正文不改）
-
-| 桶 | 内容 | 索引 |
-|---|---|---|
-| `archive/p1v2_reports/`（15 件，2026-10-15 入） | R31–R35 报告/审计 + P1-v2 早期（p1_0/p1_2/p1_impl/stage_a） | `archive/README.md` §D |
-| `archive/v8_reports/`（2 件，2026-10-15 入） | v8 代网络架构与 review | `archive/README.md` §D |
-| `v7_reports/`（含 `v7_program_report.md`） | v7 代全部报告/清理记录/迁移说明 | `v7_reports/README.md` |
-| `v6_reports/` | v6 代报告 | `v6_reports/README.md` |
-| `cleanup/`、`reward_audit/`、`archive/`（A–C 批） | V8 清理/奖励审计/更早档案 | 各目录 README/MANIFEST |
-
-## 4. 迁移表（2026-10-15 批，18 项）
-
-完整"原路径 → 现路径"见 **`archive/README.md` §D**。摘要：`p1_0_report / p1_2_diagnosis / p1_implementation_contract / stage_a_config_consumption / round31_{audit_summary,stagec_contract_audit} / round32_{canary_report,decision,audit_summary} / round33_report / round33c_report / round34a_report / round34b0_report / round35_report / navigation_scope_audit` → `archive/p1v2_reports/`；`net_architecture / v8_net_review` → `archive/v8_reports/`；`v7_program_report` → `v7_reports/`。
-
-**引用同步**：迁移时已更新全部 `docs/…` 引用——**tracked 侧 19 个文件**（随迁移入 commit `d18f148`，该 commit 共 33 项 = 18 重命名 + 14 修改 + 1 新增）＋ **`.slim` 本地 7 个**（`p1_0`/`round30`/`round31`/`round32`/`round33` journal、`round35/f1_nav_audit.py::DOCS_MD`、`round34/d3_leakage_causality.py`）；`runs/round36/agent_review/*` 中的旧路径提及（历史留痕）未改，不在校验范围。（2026-10-15 勘误：原记"25 个文件"系脚本口径〔tracked+本地混计〕，已按上述分列。）
-
-## 5. 维护规则（新增文档时遵守）
-
-1. **命名**：轮次报告 `roundNN_report.md`；证据/注记 `rNN_*.md`；契约 `*_contract.md`/`*_spec.md`；数据集卡 `*_dataset_card.md`。
-2. **归位**：当轮文档放 `docs/` 根；轮次关闭 ≥2 轮后，若无代码引用 → 移入 `archive/`（更新本索引 + `archive/README.md` + 全部引用）。
-3. **移动前必跑引用扫描**（模板）：
+1. **追加制，不新建 md**：任何新结论/报告/审计/备忘 → **追加**到台账 §5.x（历轮）或手册对应章节；**禁止**在 `docs/` 新建文件或子目录（也不再设 `archive/`、`v6_reports/`、`v7_reports/`、`cleanup/` 等桶）。
+2. **历史一律走 git**（取档模板）：
    ```bash
-   grep -rn "<basename>" --include=*.py --include=*.sh --include=*.md --include=*.json \
-     net/ env/ tools/ pipeline/ tests/ config/ docs/ .slim/ 2>/dev/null | grep -v "<file itself>"
+   git log --diff-filter=D -- <oldpath>     # 找删除提交
+   git show <commit>^:<oldpath>             # 取回删除前内容
+   git ls-tree -r <commit>^ -- docs/        # 列某时点 docs 全貌
    ```
-   有代码引用 → 不移动（或先同步更新引用方）。
-4. **归档件正文不改**；索引只增补。
-5. 台账（`deepseekv4p1_argue.md`）的 §6 索引与本文件保持同步。
+   代码/流程仍引用的历史文档，其**要点与逐条取档命令**见 `repo_handbook.md` 附录 D。
+3. **runs 命名域**：official run = `runs/BTC<YYYYMMDD-HHMM>_<name>/`（官方基线/发布链，沿用既有命名）；dev/诊断/实验 = `runs/dev/roundNN/<arm>/`（本轮起新产物一律 dev 域；`runs/` 根不再新增散落目录）。
+4. **doc_stats**（工具将落地）：`tools/venv-python tools/doc_stats.py` —— 统计 `docs/` 文件/行数，并核查"代码 → docs 引用只允许指向上表 5 件；`docs/` 无非 5 件 md/子目录"；每次 docs 或引用改动后跑一次。
+5. **数据/spec 新增须登记**：数据集 → `datasets/<name>/`（数据集卡随数据集内放置），并同步 `datasets/README.md`（如未建则随首次登记创建）；spec → `env/specs/`（生成/再生成后更新 `env/specs/README.md` 清单）。**禁止**把数据/spec 放进 `docs/`。
+
+## 3. 当前状态
+
+- `docs/` 实际内容（自检）：`find docs -name '*.md'` = 5；`find docs -mindepth 1 -type d` = 0（无子目录）。
+- 本收敛批（CLEAN-1，2026-10-15）：代码引用去文档化（63 文件 +117/−117 行：70 处 `docs/*.md` 引用行 + `deprecation_manifest.yaml`、`reward_audit/`、`archive/`、`v7_reports/specs/` 等非 md 引用；含 2 个测试夹具路径迁 `config/arms/reward_drafts/`）+ 删除全部历史 md/子目录（172 项 docs 移除 = 167 删除 + 5 迁移至 `config/arms/reward_drafts/`，git 记 R）+ `.slim` 过期 md 清理（45 删 / 28 留）；全部历史走 git（`b847e51` 及之前的 docs 提交即全文，要点见 `repo_handbook.md` 附录 D）。pytest 全量仍 **1068 passed**。

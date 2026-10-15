@@ -501,6 +501,8 @@
 
 ## 6. 文档与产物索引
 
+> **CLEAN-1 注（2026-10-15）**：`docs/` 已收敛为 5 常驻文件（本台账 / `README.md` / `repo_handbook.md` / `chatgpt5p6sol_review.md` / `architecture_contract.md`）；本节以下所列历史文档已归档至 git 历史，**要点压缩与逐条取档命令见 `docs/repo_handbook.md` 附录 D**。新事项只追加到本文件 §5.x / 手册，不新建 md。
+
 - **决策/契约**：`docs/p1_v2_decision.md`、`docs/archive/p1v2_reports/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、`docs/round30_audit.md`、`docs/archive/p1v2_reports/stage_a_config_consumption.md`
 - **报告**：`docs/archive/p1v2_reports/p1_0_report.md`、`docs/archive/p1v2_reports/p1_2_diagnosis.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`、`docs/recovery_v1_dataset_card.md`、**`docs/archive/p1v2_reports/round32_canary_report.md`（canary Gate 0–4 全测）**、**`docs/archive/p1v2_reports/round33_report.md`（33A 三问 + 33B warp NO-GO）**
 - **数据**：`datasets/recovery_v1|v2/`、`datasets/semantic_v1_{pilot,independent,3d3}/`（9,515 / 8,953 / 53,765）

@@ -105,7 +105,7 @@ H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 r
 对齐口径（R38-P3）：回退列的值 = 既有回退值（逐位不变）；present 位 = **回退源可用性**
 （与生产者 ``env/obs/path_field.py`` 的 ``<key>__present`` 同规则：``lane_semantic_mask ∧
 target_lane_valid`` / ``nav_mask``）；主键在场的列，present 仍取显式 ``<key>__present``
-（或"键在场 ⇒ 1"）。掩码进头（消费 present）= B 类，未接线（见 ``docs/r38_path_field_classification.md`` §6）。
+（或"键在场 ⇒ 1"）。掩码进头（消费 present）= B 类，未接线（分类与裁定见 ``docs/repo_handbook.md`` 附录 D）。
 
 Caveats（K1 口径）
 ------------------

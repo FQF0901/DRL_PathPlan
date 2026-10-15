@@ -1,6 +1,6 @@
 """R21-3A 语义接线契约测试（round-23 §6A 十项 + 归一化逐位 + 改名一致性）。
 
-契约（全文见 ``docs/r21_3a_semantic_wiring.md``）：
+契约（要点见 ``docs/repo_handbook.md`` 附录 D）：
 
 1. semantic invalid（``lane_semantic_mask=0 ∨ target_lane_valid=0``）→ ``target_lane_token`` 严格 0；
 2. 入口固定归一化逐位（``env.obs.lane_semantic.LANE_SEMANTIC_NORMALIZATION`` 单一出处；

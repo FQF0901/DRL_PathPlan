@@ -661,7 +661,7 @@ def build_env(
 
     config = dict(
         use_render=bool(use_render),
-        log_level=50,  # CRITICAL：与 P0 recon 冻结口径一致（见 docs/p0-measurements.md）
+        log_level=50,  # CRITICAL：与 P0 recon 冻结口径一致（见 docs/repo_handbook.md 附录 D）
         num_scenarios=num_scenarios,
         start_seed=start_seed,
         map=blocks,  # str -> BIG_BLOCK_SEQUENCE（component/map/pg_map.py:28-37）

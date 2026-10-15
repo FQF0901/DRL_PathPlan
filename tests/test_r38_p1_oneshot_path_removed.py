@@ -1,6 +1,6 @@
 """R38-P1：一次性六步路径已删除（`net/` 侧"该路径不存在"的 pytest 载体）。
 
-出处：`docs/deprecation_manifest.yaml` A 组（`ARCHITECTURE_FORBIDDEN`）+ `docs/code_reachability_audit.md`
+出处：R38 弃用清单 A 组（`ARCHITECTURE_FORBIDDEN`）+ `docs/repo_handbook.md` 附录 D
 §3-A / §5 守卫 #3「禁止正式 forward 含一次性钉住路径」。断言面：
 
 1. 配置面：``set_path_head_ablation`` 写入旧模式名 ⇒ ``ValueError`` fail-fast（无 enable 开关）；

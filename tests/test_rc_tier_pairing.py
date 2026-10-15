@@ -4,7 +4,7 @@
 
 - 只改权重（CLI ``--reward-term-weight route_completion=X`` / config terms）而终局值仍
   rc=1 默认 → ``build_reward_adapter`` fail-fast（跨档复用风险）；
-- 同档配对（``docs/reward_audit/config_draft_rc*.yaml``，P4 臂配置来源）→ 通过，且该档
+- 同档配对（``config/arms/reward_drafts/config_draft_rc*.yaml``，P4 臂配置来源）→ 通过，且该档
   ``terminal_values`` 逐档生效（rc1 −23 / rc3 −24 / rc10 −29 / rc30 −42）；
 - 非 rc 项权重覆盖（``speed_ratio`` 等）不受守卫影响。
 """
@@ -20,7 +20,7 @@ import yaml
 
 from pipeline.trainer import build_reward_adapter
 
-_DRAFTS = Path(__file__).resolve().parents[1] / "docs" / "reward_audit"
+_DRAFTS = Path(__file__).resolve().parents[1] / "config" / "arms" / "reward_drafts"
 _RC1 = {
     "arrive_dest": 30.0,
     "collision": -19.0,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P2 奖励审计工具（Gate2）：pre-v6 rollout 采集 + HEAD 完整 v5 项集离线重放 + 终局值反解。
 
-规格：`docs/rl_reward_v5.md` §3/§7、`docs/v6_program_prereg.md` §3（P2/Gate2）。
+规格：`docs/repo_handbook.md` 附录 D §3/§7（奖励 v5）+ §3（P2/Gate2 口径）。
 
 结构
 ----
@@ -30,8 +30,8 @@
 
 产物（`runs/reward_audit/report/`，`runs/` 为 gitignore）：`reward_audit.md`、
 `reward_audit.json`、`config_draft_rc{tier}.yaml`、`episodes/`（采集缓存）。`--mirror-md`
-可另写验收路径。入库副本（tracked）见 `docs/reward_audit/`（原始 runs/ 路径 + sha256
-对照见该目录 `MANIFEST.md`）。
+可另写验收路径。入库副本（tracked）的配置草案见 `config/arms/reward_drafts/`；
+审计报告原件（runs/ 路径 + sha256 对照）已归档，取档见 `docs/repo_handbook.md` 附录 D。
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ DEFAULT_CKPT = ROOT / "runs/_refs_rlbase/e_beta_prime/final.pt"
 DEFAULT_POOL = ROOT / "env/specs/scenarios_val.json"
 DEFAULT_EXCLUDE = ROOT / "env/specs/scenarios_eval500.json"
 
-#: 目标剖面 C（docs/rl_reward_v5.md §3；error 不在剖面内）
+#: 目标剖面 C（docs/repo_handbook.md 附录 D；error 不在剖面内）
 TARGETS: Dict[str, float] = {
     "arrive_dest": 50.0,
     "collision": -20.0,
@@ -1167,8 +1167,8 @@ def analyze(args: argparse.Namespace) -> Dict[str, Any]:
         )
     else:
         result["meta"]["notes"].append(
-            "E-β′ vs E-β″：本报告 = E-β′（旧架构，P2/Gate2，池含 eval500 重叠，见 docs/rl_reward_v5.md §7）；"
-            "E-β″ 在 P3 重训后按 docs/v6_program_prereg.md §7.1 用同一工具复算（排除 eval500、分层随机、A/B 互换、"
+            "E-β′ vs E-β″：本报告 = E-β′（旧架构，P2/Gate2，池含 eval500 重叠，见 docs/repo_handbook.md 附录 D §7）；"
+            "E-β″ 在 P3 重训后按 docs/repo_handbook.md 附录 D §7.1 用同一工具复算（排除 eval500、分层随机、A/B 互换、"
             "每类 n≥50、max_step 接线后；P3 后、P4 前，作为 P4 奖励口径）。"
         )
     if excluded:

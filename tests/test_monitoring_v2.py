@@ -2,7 +2,7 @@
 
 - ``GroupedMetricStatistics`` 窗口统计本身不变（mean/n_updates/weighted_mean）；
 - 新口径 monitor 落盘前重命名：既有路径（KPI/episode/train/val/分组）经 ``_slim_tag``
-  过滤，只保留 ``docs/metrics.md`` 的 Tier-1 tag；
+  过滤，只保留 ``docs/repo_handbook.md`` 附录 D 的 Tier-1 tag；
 - 旧 ``legacy_tags`` 全量口径已退役（R38-P3-G）：写入即 fail-fast。
 """
 

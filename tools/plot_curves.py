@@ -8,7 +8,7 @@
         --out runs/train/<runB>/plots
 
 读取各 stage 的 ``monitor/metrics.csv``（长表 step,tag,value），按预设"面板"出图。
-**每个面板内同族多线同图**（与 tensorboard 一致），只画保留清单（``docs/metrics.md``）：
+**每个面板内同族多线同图**（与 tensorboard 一致），只画保留清单（``docs/repo_handbook.md`` 附录 D）：
 
 - Stage A：`A_wm_od_loss.png`（`loss/*` 训练损失分解）、`A_wm_od_ade.png`
   （`val/od/ade_m` h1..h6 + cv_h1..cv_h6 共 12 线）、`A_wm_od_fde.png`
@@ -20,7 +20,7 @@
   `B_ego_action_err.png`（`ego/action/err_weighted` train/val）、
   `B_router.png`（硬标签 `router/ce|acc|acc_majority` train/val）
 
-已删除的面板：slice/label 切片、median/p95、expert_util、专家混合权重（见 ``docs/metrics.md``）。
+已删除的面板：slice/label 切片、median/p95、expert_util、专家混合权重（见 ``docs/repo_handbook.md`` 附录 D）。
 旧 run 自动回退：lane B 前 v1 名（``stageB/*`` / ``val_*`` / ``wm/od/*``）与更早的
 ``horizon/*`` / ``train|val/<phase>_bc_*``；缺失的 tag 自动跳过；每个面板一个 PNG。
 """

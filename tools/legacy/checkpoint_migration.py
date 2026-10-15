@@ -1,4 +1,4 @@
-"""R38-P2a：checkpoint 迁移入口（最小实现；契约 ``docs/checkpoint_migration_contract.md`` §5）。
+"""R38-P2a：checkpoint 迁移入口（最小实现；契约 ``docs/repo_handbook.md`` 附录 D §5）。
 
 职责边界（硬约束）：
 1. **只在装载路径被调用**：``net/`` 的 forward/rollout 不得 import 本模块；

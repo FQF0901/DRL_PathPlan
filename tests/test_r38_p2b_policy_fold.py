@@ -1,7 +1,7 @@
 """R38-P2b-D：Policy/path_head 双实体收编（单实体 + 键面迁移 + 开关退役）守卫。
 
-出处：GPT §七-D（六步顺序）+ `docs/deprecation_manifest.yaml` D 组 +
-`docs/checkpoint_migration_contract.md`。断言面：
+出处：GPT §七-D（六步顺序）+ R38 弃用清单 D 组 +
+`docs/repo_handbook.md` 附录 D。断言面：
 
 1. **收编归属**：结构化头 = ``model.policy.structured_action``（键面 ``policy.structured_action.*``）；
    ``path_head`` 只读 alias；装配写入（``model.path_head = ...``）⇒ AttributeError fail-fast；

@@ -27,4 +27,4 @@
 - `forensics_offline.py` / `forensics_closed_loop.py` 默认 `--device cuda`；无 CUDA 时显式 `--device cpu`（`forensics_report.py` 为纯分析，无 device 参数）。
 - 默认 ckpt / spec 为历史路径（`forensics_closed_loop.py:95-96`），npz 为历史路径（`forensics_offline.py:228-229`），文件可能已不存在，跑前先核对。
 - 约定：新的一次性诊断脚本放本目录并在上表登记；常驻入口放 `tools/` 根。
-- P0 审计：逐策略步记录含 footprint 有效性 / `T_plan|T_track|T_cross|T_term` 时间戳 / 层级分类字段（定义见 `docs/p0_eval_compat_design.md` §4–§6）。
+- P0 审计：逐策略步记录含 footprint 有效性 / `T_plan|T_track|T_cross|T_term` 时间戳 / 层级分类字段（定义见 `docs/repo_handbook.md` 附录 D §4–§6）。

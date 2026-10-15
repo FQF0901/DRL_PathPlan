@@ -1,13 +1,13 @@
 # config/arms（RL 臂配置）
 
 > **当前状态（2026-10-15）**：本目录仅 **`v7_arm1_offroad.yaml`**（当前采用臂）+ 本 README。
-> 历史臂（v6 P4 奖励臂 / v7 奖励臂 / v7 结构臂，共 21 项）已归档到 `docs/archive/config_arms_legacy/`
-> （族说明与逐项映射见该目录 `README.md`；操作与引用检查见 `docs/cleanup/V8_CLEANUP_config_docs.md`）。
+> 历史臂（v6 P4 奖励臂 / v7 奖励臂 / v7 结构臂，共 21 项）已归档进 git 历史（取档命令见 `docs/repo_handbook.md` 附录 D）
+> （族说明与逐项映射见归档 README；操作与引用检查见 `docs/repo_handbook.md` 附录 D）。
 > 当前臂的加载/奖励守卫测试：`tests/test_arm_configs.py`。
 
 ## 当前臂：`v7_arm1_offroad.yaml`
 
-**用途**：v7 P2 首臂（`docs/v7_program_prereg.md` §9）——在 IL 底座（w1 e005）上做 RL 奖励单变量：
+**用途**：v7 P2 首臂（v7 预注册 §9；要点见 `docs/repo_handbook.md` 附录 D）——在 IL 底座（w1 e005）上做 RL 奖励单变量：
 相对 v5 bundle（同 arm0）追加 `off_road_edge` 离路距离型稠密项；KL 锚 0.05 → 0.02（慢衰减，方差控制）。
 完整口径与执行路径注意见文件头注释（`config/arms/v7_arm1_offroad.yaml:1-18`）。
 
@@ -15,7 +15,7 @@
 
 - `includes`：`config/default.yaml` + 四个叶子子配置（写法原因见下「加载语义」）；
 - `stages.C.reward.terms`：rc=1 草案项集 + **恰一个**追加项 `off_road_edge`（weight −0.5、`edge_scale_m` 1.0）；
-- `stages.C.reward.aggregation.terminal_values`：rc=1 档终局值（与 `docs/reward_audit/ebeta2/config_draft_rc1.yaml`
+- `stages.C.reward.aggregation.terminal_values`：rc=1 档终局值（与 `config/arms/reward_drafts/ebeta2/config_draft_rc1.yaml`
   逐位一致，`tests/test_arm_configs.py` 逐参数钉住）；
 - `stages.C.kl_anchor_coef` / `kl_anchor_final_coef`：0.05 / 0.02（**记录用**；实际执行由 driver CLI 承载，
   见下「加载语义」）。
@@ -55,11 +55,11 @@ base ckpt 与 spec 以当次 driver 记录为准，driver 为外部编排脚本�
 
 ## 归档（历史臂）
 
-- **位置**：`docs/archive/config_arms_legacy/`（文件内容原样，未修改）。
+- **位置**：git 历史（原 `docs/archive/config_arms_legacy/`，取档见 `docs/repo_handbook.md` 附录 D）。
 - **族**：v6 P4 奖励臂（`arm0_bundle_rc1`、rc 扫档 `arm1–3`、`arm4_lam098`、`arm5_ttc`、车道罚 `arm6–7`、
   碰撞抑制 `arm8_*`）；v7 奖励臂（`v7_arm1_ttc`、`v7_arm1_collision_suppress`、`v7_arm2_bundle_kl`、
   `v7_arm3_bundle_only`、`v7_reward_A/B/C`）；v7 结构臂 K-anchor 三件套
   （`v7_struct_b_v5_{train,model,eval}.yaml`）。
 - **退役测试快照**：`*.py.disabled` 同目录（防 pytest 收集）。
-- **索引**：`docs/archive/config_arms_legacy/README.md`（逐项原路径 → 现路径映射）；
-  归档操作、停移收尾与引用检查：`docs/cleanup/V8_CLEANUP_config_docs.md`。
+- **索引**：归档 README（逐项原路径 → 现路径映射，已入 git 历史）；
+  归档操作、停移收尾与引用检查记录见 `docs/repo_handbook.md` 附录 D。

@@ -1,6 +1,6 @@
 """监控回归（lane B）：Tier-1 tag 重命名 + tensorboard 同 run 多线。
 
-lane B 口径（``docs/metrics.md``）：
+lane B 口径（``docs/repo_handbook.md`` 附录 D）：
 - ``loss/…`` 只放**训练目标**（A：``loss/wm|od|ego_next|presence|entry``；
   B：``loss/planner/<phase>/{total,traj,action,router}``）；KPI 只放度量；
   **任何 val 口径曲线不得命名为 loss**（留出统一 ``val/`` 命名空间）；

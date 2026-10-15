@@ -4,13 +4,13 @@
 
 - 当前臂 ``v7_arm1_offroad.yaml`` 经训练侧 ``load_config``（一层平铺合并）可加载，
   ``stages.C.reward`` 经 ``build_reward_adapter`` 构造成功；
-- 单变量：项集 = rc=1 草案（``docs/reward_audit/ebeta2/config_draft_rc1.yaml``）逐参数
+- 单变量：项集 = rc=1 草案（``config/arms/reward_drafts/ebeta2/config_draft_rc1.yaml``）逐参数
   + **恰一个**追加项 ``off_road_edge``（weight −0.5 / ``edge_scale_m`` 1.0）；终局值 =
   rc=1 草案逐位（``max_step`` −46 经适配器实际结算）；
 - ``off_road_edge`` 在适配器内生效（居中 → 0；压线 → −0.5；越界 1 m → 封顶 −1.0；缺车道 ctx → 0）；
 - KL 锚参数键 0.05 → 0.02（v7 预注册 §9；实际执行由 driver CLI 承载）。
 
-历史臂（v6 P4 / v7 §9–§14）已归档至 ``docs/archive/config_arms_legacy/``，
+历史臂（v6 P4 / v7 §9–§14）已归档进 git 历史（取档见 ``docs/repo_handbook.md`` 附录 D），
 其测试快照同目录 ``*.py.disabled``（防 pytest 收集）。
 """
 
@@ -30,7 +30,7 @@ from reward_model import DEFAULT_TERM_CONFIGS
 _ROOT = Path(__file__).resolve().parents[1]
 _ARMS = _ROOT / "config" / "arms"
 _ARM = _ARMS / "v7_arm1_offroad.yaml"
-_DRAFT = _ROOT / "docs" / "reward_audit" / "ebeta2" / "config_draft_rc1.yaml"
+_DRAFT = _ROOT / "config" / "arms" / "reward_drafts" / "ebeta2" / "config_draft_rc1.yaml"
 
 _INCLUDES = [
     "config/default.yaml",

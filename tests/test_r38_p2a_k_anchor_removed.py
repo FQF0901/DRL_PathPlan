@@ -1,6 +1,6 @@
 """R38-P2a：K-anchor 减枝移除守卫（model / config / pipeline 面）。
 
-锁定（`docs/deprecation_manifest.yaml` B 组；三阶段 S2 = 删引用）：
+锁定（R38 弃用清单 B 组；三阶段 S2 = 删引用）：
 
 - ``DrivingModel`` 构造签名与 state_dict 无 K-anchor 参数/键；forward 输出无 ``anchor_*`` 键；
 - ``build_model`` 不再读取 ``plan_anchor`` 配置块（旧配置残留该键 = 被忽略，无行为）；

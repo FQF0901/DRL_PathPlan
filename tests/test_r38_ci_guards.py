@@ -1,7 +1,7 @@
 """R38-P3 收尾：**§八 CI 守卫**（GPT R38 §八五条 → pytest 载体）。
 
-出处：``docs/chatgpt5p6sol_review.md`` §八 + ``docs/code_reachability_audit.md`` §5 +
-``docs/deprecation_manifest.yaml``（A/B/D/G 组的机器冻结面）。五条守卫（CPU、无 metadrive）：
+出处：``docs/chatgpt5p6sol_review.md`` §八 + ``docs/repo_handbook.md`` 附录 D
+（可达性审计 §5 + R38 弃用清单 A/B/D/G 组的机器冻结面）。五条守卫（CPU、无 metadrive）：
 
 1. **禁生产目录重新引用 legacy 模块/符号**：``net/``、``env/``、``pipeline/``、``tools/*.py``
    （官方 CLI）对 ``tools.legacy``/``tools.diagnostics`` 零 import；生产目录不得重新定义

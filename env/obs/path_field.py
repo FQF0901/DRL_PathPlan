@@ -1,6 +1,6 @@
 """t0 段 ``path_*`` 纵向外源几何的**生产者**（8 列 + 8 present；值/present 同源）。
 
-背景（R38-Q4A，A 类落地；分类 = ``docs/r38_path_field_classification.md`` §3/§4）
+背景（R38-Q4A，A 类落地；分类 = ``docs/repo_handbook.md`` 附录 D）
 --------------------------------------------------------------------------------
 结构化头的 8 列外源几何（列序 = ``net/path_head.LONG_EXOG_FEATURE_NAMES``）此前**没有生产
 者**：eval env 的 obs 里压根没有这些键 ⇒ ``net/path_head.py::long_exog_from_obs`` 缺键回退 0

@@ -19,7 +19,7 @@
   监控（Tier-1，lane B）：``loss/planner/<phase>/{total,traj,action,router}``（留出
   ``val/loss/planner/...``）、``ego/action/err_weighted``、``ego/traj/mae_m|fde_m``（留出
   ``val/ego/...``）、``router/{ce,acc,acc_majority}``（留出 ``val/router/...``）；动作误差
-  median/p95、全部 slice/label、软目标 KL/温度/专家混合权重等已移除（``docs/metrics.md``）。
+  median/p95、全部 slice/label、软目标 KL/温度/专家混合权重等已移除（``docs/repo_handbook.md`` 附录 D）。
 - **C = PPO RL（实验口径）**：P0-1（整条 plan 执行 vs 首动作记账 / WM 解冻无信号）已按
   **A-hold** 修复（references = repeat(a_t)；WM 全期冻结），P0-2（router 标签错位）已对齐
   （标签步前取 + 终局 record/reset 分离）；W2 WM 自监督未接入；P2 性能优化进行中
@@ -221,7 +221,7 @@ def _wm_trainable(model: Any) -> bool:
     return any(parameter.requires_grad for name, parameter in model.named_parameters() if name.startswith("st_gnn."))
 
 
-#: 监控瘦身清单（docs/metrics.md）：这些阶段结果键不再进 metrics.json（CSV/TB 侧由
+#: 监控瘦身清单（docs/repo_handbook.md 附录 D）：这些阶段结果键不再进 metrics.json（CSV/TB 侧由
 #: ``pipeline.monitoring`` 的白名单过滤）。保留项示例：``bc_traj_mse*``（损失口径字段）、
 #: ``bc_load_*``（MoE 负载元数据）。
 _SLIMMED_RESULT_RES = (
@@ -604,7 +604,7 @@ def _resolve_stage_c_target_kl(args: argparse.Namespace, train_cfg: Mapping[str,
 def _resolve_stage_c_lam(args: argparse.Namespace, train_cfg: Mapping[str, Any]) -> float:
     """阶段 C GAE λ（P2/P4 λ 对照；CLI ``--lam`` 优先；config ``train.ppo.lam``）。
 
-    默认 0.95（现行）；P4 预注册对照档 = 0.98（`docs/v6_program_prereg.md` §7.2）。
+    默认 0.95（现行）；P4 预注册对照档 = 0.98（`docs/repo_handbook.md` 附录 D §7.2）。
     非法（非有限 / 不在 (0, 1]）fail-fast。
     """
     value = getattr(args, "lam", None)
@@ -3179,7 +3179,7 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         - 训练侧：``train/<phase>_*`` 标量 + ``horizon|slice|label/*``（逐 epoch 增量）；
         - 留出侧：``val/<phase>_*`` 标量 + ``val/horizon|val/slice|val/label/*``；
         - 喂入 tag 均为旧命名，由 ``pipeline.monitoring`` 按 Tier-1 清单重命名/过滤
-          （``stageB/<phase>/loss_terms`` / ``ego/*`` / ``router/*``；见 docs/metrics.md）；
+          （``stageB/<phase>/loss_terms`` / ``ego/*`` / ``router/*``；见 docs/repo_handbook.md 附录 D）；
           旧 ``--monitor-legacy-tags`` 全量口径已退役（R38-P3-G；旧日志读取见
           ``tools/legacy/monitoring_reader.py``）；
         - 阶段末只补记逐 epoch 未覆盖的标量（MoE 负载汇总/元数据），避免同 (step, tag) 重复；
@@ -5085,7 +5085,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ``design``）显式定义可训练范围——``design`` = allowlist（policy/value + MoE
     experts/residual_scale），其余含共享主干/primary/router/WM 全冻；"干净 PPO 基线"的
     冻结口径仅在 ``design`` 下成立，``all``（仅冻 st_gnn）为旧行为对照。
-    V8r（2026-09-30，G1 §2）：router 移出 design allowlist（docs/db44fefe-system-review.md:127,240）。
+    V8r（2026-09-30，G1 §2）：router 移出 design allowlist（依据见 docs/repo_handbook.md 附录 D）。
 
     ``--critic-warmup-updates N``（config ``train.critic_warmup_updates``）：前 N 个
     update 只拟合 value 头（策略/主干冻结），之后恢复常规 PPO。
@@ -5794,7 +5794,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lam", type=float, default=None, metavar="LAMBDA",
                         help="阶段 C GAE λ（P2/P4 λ 对照；默认取 config/train.yaml "
                              "train.ppo.lam=0.95）：P4 预注册对照档 0.98 = --lam 0.98；"
-                             "需在 (0, 1]（见 docs/v6_program_prereg.md §7.2）")
+                             "需在 (0, 1]（见 docs/repo_handbook.md 附录 D §7.2）")
     parser.add_argument("--minibatch-size", type=int, default=None,
                         help="默认取 config/train.yaml train.ppo.minibatch_size（1024）")
     parser.add_argument("--value-lr-scale", type=float, default=None, metavar="SCALE",

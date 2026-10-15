@@ -194,8 +194,8 @@ stub / fake 对象，训练与数据链路用合成数据集、小型模型与 s
   `tests/v2_synthetic.py`（非测试模块，不被 pytest 收集）。
 - 断言以契约为准（形状、门控、因果链、判定逻辑），不做快照式回归。
 - 一次性诊断/临时脚本不放进 `tests/`；可放 `tools/diagnostics/` 或临时目录。
-- 退役测试归档到 `docs/archive/`，用 `.disabled` 后缀防收集。例：
-  `docs/archive/config_arms_legacy/test_p4_arm_configs.py.disabled`、
-  `test_v7_reward_arms.py.disabled`。当前臂守卫是 `tests/test_arm_configs.py`
+- 退役测试归档进 git 历史（原 `docs/archive/` 已随 docs 收敛删除；取档见 `docs/repo_handbook.md` 附录 D），
+  以 `.disabled` 后缀防收集（例：`test_p4_arm_configs.py.disabled`、`test_v7_reward_arms.py.disabled`）。
+  当前臂守卫是 `tests/test_arm_configs.py`
   （由 `test_v7_p2_arm_config.py` 重命名重写而来）。
 - `__pycache__/`、`.pytest_cache/` 已在 `.gitignore`，不提交。

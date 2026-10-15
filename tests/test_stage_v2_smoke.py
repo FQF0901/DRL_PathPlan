@@ -7,7 +7,7 @@
   Tier-1 监控落盘；
 - Stage B：首步动作损失 + 6 点轨迹辅助（WM detach）+ MoE 负载均衡（lane U1），动作加权误差
   （``ego/action/err_weighted``）+ 逐 horizon ego 轨迹 MAE（``ego/traj/mae_m``）+
-  MoE 负载 KPI；median/p95/slice/label 已按监控瘦身移除（``docs/metrics.md``）。
+  MoE 负载 KPI；median/p95/slice/label 已按监控瘦身移除（``docs/repo_handbook.md`` 附录 D）。
 
 用小型 DrivingModel（hidden=16 / 8 experts）与合成 v2 数据集，CPU 数秒内完成。
 """

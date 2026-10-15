@@ -18,7 +18,7 @@
 
 判定出处
 --------
-``docs/deprecation_manifest.yaml`` A 组（``ARCHITECTURE_FORBIDDEN``：唯一动作源 + 每步单动作）：
+R38 弃用清单 A 组（``ARCHITECTURE_FORBIDDEN``：唯一动作源 + 每步单动作）：
 一次性六步 = 第二个六步轨迹生成器、绕过「决策 → WM 推进一步 → 同一头重新决策」。
 R38-P1 把实现迁到本快照并从 ``net/`` 删除（``tools/legacy/README.md`` 登记）。
 

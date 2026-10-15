@@ -6,7 +6,7 @@
   RuntimeWarning）= :func:`remap_legacy_others_28_to_33`（纯函数，无告警）；
 - ``net/encoders.py:59-61`` → ``OTHERS_LEGACY_DIM`` / ``OTHERS_HEAD_LEGACY_DIM``（随迁）。
 
-**判定**：`LEGACY_REPRO`（``docs/deprecation_manifest.yaml`` G 组：旧布局重排违反"缺失静默
+**判定**：`LEGACY_REPRO`（R38 弃用清单 G 组：旧布局重排违反"缺失静默
 填充"守则——static 段补 0 = "无静态障碍"，会静默错读）。R38-P3 起 ``net/mem.py`` 对 28 维
 输入 **fail-fast**（不再静默重排），迁移路径二选一：
 

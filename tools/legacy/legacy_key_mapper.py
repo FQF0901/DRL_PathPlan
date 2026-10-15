@@ -1,6 +1,6 @@
 """R38-P2a/P2b：旧 ckpt 键面映射（纯函数；无 torch、无 IO、无副作用）。
 
-出处：``docs/checkpoint_migration_contract.md`` §4.2（丢弃族常量）/ §4.4（改名族）/ §5（接口草案）。
+出处：``docs/repo_handbook.md`` 附录 D §4.2（丢弃族常量）/ §4.4（改名族）/ §5（接口）。
 范围（R38-P2a）：**B 组 K-anchor** 的 ignore 集 —— ``plan_head.anchor*``（16 键：``anchors``/
 ``anchor_ds``/``anchor_dth``/``anchor_embed``/``anchor_head.*``/``residual_head.*``/``speed_head.*``）
 + ``encoders.lane.*``/``encoders.ttc.*``（4 键；v8 已删通道）= 20 键（manifest B 组第 10 项）。

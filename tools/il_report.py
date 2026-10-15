@@ -10,7 +10,7 @@
 
 设计原则：**按 tag 家族模式发现**，缺什么就明确写 "缺失"，绝不编造；判定门只在数据齐备时给 PASS/FAIL。
 tag 口径（2026-09-27 监控瘦身 v2）：新 run 用 `wm/*` / `val/...` / `ego/*` / `router/*` / `planner/*`
-（见 `docs/metrics.md`）；瘦身 v1 名（`wm/od/*` / `stageB/*` / `val_*`）与更早的
+（见 `docs/repo_handbook.md` 附录 D）；瘦身 v1 名（`wm/od/*` / `stageB/*` / `val_*`）与更早的
 `horizon/*` / `train/*_bc_*` / `val/*` 序列仍可读（回退）。
 """
 from __future__ import annotations
@@ -261,7 +261,7 @@ def stage_a_section(series: Dict[str, Dict[int, float]]) -> Tuple[List[str], Dic
     lines += table(rows, ["horizon", "ADE", "CV ADE", "FDE", "CV FDE", "ADE<CV"])
     if slim:
         lines += ["", "> 监控瘦身（2026-09-27）：FDE / 有效样本计数已从曲线移除；ADE 与匀速基线"
-                      "合并为 `val/od/ade_m`（`h*` / `cv_h*`）。见 `docs/metrics.md`。"]
+                      "合并为 `val/od/ade_m`（`h*` / `cv_h*`）。见 `docs/repo_handbook.md` 附录 D。"]
     for label, candidates in (("wm_loss", ("wm/loss", "train/wm_loss")),
                               ("presence_auc", ("val/od/presence_auc", "wm/presence_auc",
                                                 "train/presence_auc")),
@@ -325,7 +325,7 @@ def stage_b_section(
     if slim:
         lines += ["", "> 监控瘦身（2026-09-27）：动作误差 median/p95 与全部 slice/label 切片已移除；"
                       "主口径 = `ego/action/err_weighted`（留出 `val/ego/action/err_weighted`）。"
-                      "见 `docs/metrics.md`。"]
+                      "见 `docs/repo_handbook.md` 附录 D。"]
     slices: Dict[str, Optional[float]] = {}
     labels: Dict[str, Optional[float]] = {}
     if not slim:
@@ -384,7 +384,7 @@ def stage_b_section(
         if slim:
             lines.append("")
             lines.append("> `ego/traj/mae_m`（留出 `val/ego/traj/mae_m`）为唯一逐 horizon 曲线；"
-                         "MSE 仅作损失口径保留在 metrics.json（不再是曲线，见 `docs/metrics.md`）。")
+                         "MSE 仅作损失口径保留在 metrics.json（不再是曲线，见 `docs/repo_handbook.md` 附录 D）。")
         if mae_estimated:
             lines.append("")
             lines.append("> 旧 run 无 MAE 序列：MAE 列由 sqrt(MSE) 近似（Jensen 上界，≥ 真 MAE）。")
@@ -619,10 +619,10 @@ def main() -> int:
               "训练/留出曲线分别在 `train/<phase>_*` / `val/<phase>_*`；本报告「留出集」段落"
               "优先读 `val/*` 序列与 metrics.json 的 `primary.val` 快照，旧 run 无 val → 显示缺失；",
               "- 监控瘦身（2026-09-27）：新 run 只记录 OD/EGO loss+KPI 与 router loss+KPI，tag 为 "
-              "`wm/*` / `val/...` / `ego/*` / `router/*` / `planner/*`（见 `docs/metrics.md`）；"
+              "`wm/*` / `val/...` / `ego/*` / `router/*` / `planner/*`（见 `docs/repo_handbook.md` 附录 D）；"
               "本报告对新 tag 优先读取、旧 tag（含瘦身 v1 名）自动回退，动作误差 median/p95、"
               "slice/label 等已移除项显示为「已移除」；",
-              "- 判定门口径见 `docs/design-v1.2.md` §5.1；缺失项显示为「缺失」而不是默认通过。",
+              "- 判定门口径见 `docs/repo_handbook.md` 附录 D §5.1；缺失项显示为「缺失」而不是默认通过。",
               f"- 生成时间：{__import__('datetime').datetime.now().isoformat(timespec='seconds')}"]
 
     md_path = os.path.join(out_dir, "il_report.md")

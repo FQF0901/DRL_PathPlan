@@ -271,7 +271,7 @@ LANE_SEMANTIC_LAYOUT: dict[str, Any] = {
     "target_lane_selection": (
         "唯一纯函数 env.obs.lane_semantic.select_target_lane：route current_ref_lane → "
         "route continuation → next_ref_lane → ego.lane 仅兜底；选择不依赖 ego 横向位置"
-        "（横向偏移不引起 target 切换）；契约见 docs/r21_target_lane_selection.md"
+        "（横向偏移不引起 target 切换）；契约见 docs/repo_handbook.md 附录 D"
     ),
     "units": (
         "lat m（MetaDrive 车道系，正=车道方向右侧）；heading_error rad（正=ego 相对切线逆时针/偏左）；"

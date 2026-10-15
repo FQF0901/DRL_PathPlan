@@ -12,7 +12,7 @@
 - ``net/ego_warp.py:154-164`` → ``advance_od_pose``（本模块重实现为 :func:`_advance_od_pose`，
   op 序逐行一致）。
 
-**判定**：`LEGACY_REPRO`（`docs/deprecation_manifest.yaml` C 组：w1/w2 = 历史 warp 实验口径；
+**判定**：`LEGACY_REPRO`（R38 弃用清单 C 组：w1/w2 = 历史 warp 实验口径；
 R37 M1 后正式接口 = ``set_ego_warp_mode(off|analytic)``，v_OD 语义修正后旧 w2（相对速度先验）
 不再是生产口径）。
 

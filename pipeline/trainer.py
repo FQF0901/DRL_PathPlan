@@ -1124,10 +1124,10 @@ def apply_freeze_prefixes(model: "nn.Module", prefixes: Sequence[str]) -> Tuple[
     return tuple(frozen)
 
 
-#: 阶段 C 可训练范围（R2/P0-6）：``design``（默认，docs/db44fefe-system-review.md P0-6/阶段C）
+#: 阶段 C 可训练范围（R2/P0-6）：``design``（默认，依据见 docs/repo_handbook.md 附录 D P0-6/阶段C）
 #: 的 allowlist = policy/value 头 + MoE specific（experts/residual_scale）；
 #: 其余（encoders/mem_encoder/plan_head 主干（fusion/norm/ego_next/primary）/st_gnn）全部冻结。
-#: 2026-09-30（V8r，G1 §2 依据 docs/db44fefe-system-review.md:127,240"shared/primary/router/WM
+#: 2026-09-30（V8r，G1 §2 依据 docs/repo_handbook.md 附录 D"shared/primary/router/WM
 #: 冻结"）：router（``plan_head.moe.router.*``）移出 allowlist——阶段 C 无 router BCE/校准信号，
 #: 行为 loss 反传 gate 会把标签语义塑造成策略附庸；router 只观测不训练。
 STAGE_C_DESIGN_PREFIXES: Tuple[str, ...] = (
@@ -1791,7 +1791,7 @@ def _guard_rc_tier_pairing(
     ``route_completion`` 权重 ≠ 1（config terms 或 CLI ``--reward-term-weight`` 覆盖）而
     ``aggregation.terminal_values`` 缺省/仍等于 rc=1 默认（:func:`default_terminal_values`）
     → 只改权重不改终局值 = 跨档复用（Gate2 实测 rc=30 只改权重时 max_step 均值 +32.5）。
-    提示按同档配置草案加载 ``terminal_values``（``docs/reward_audit/config_draft_rc*.yaml``）。
+    提示按同档配置草案加载 ``terminal_values``（``config/arms/reward_drafts/config_draft_rc*.yaml``）。
     """
     weight = _route_completion_weight(term_configs)
     if weight is None or math.isclose(weight, 1.0, rel_tol=0.0, abs_tol=1e-9):
@@ -1804,7 +1804,7 @@ def _guard_rc_tier_pairing(
         raise ValueError(
             f"[reward] rc 档配对失败：route_completion 权重={weight:g}（≠1）但终局值"
             f"仍为 rc=1 默认（{rc1}）→ 跨档复用风险（Gate2 发现④）。请同时加载同档"
-            f" terminal_values：docs/reward_audit/config_draft_rc{weight:g}.yaml 的"
+            f" terminal_values：config/arms/reward_drafts/config_draft_rc{weight:g}.yaml 的"
             f" stages.C.reward.aggregation.terminal_values（P4 臂配置由该草案生成）。"
         )
 
@@ -1824,7 +1824,7 @@ def build_reward_adapter(
     → fail-fast（防消融配置拼错静默失效）。
 
     **rc 档配对守卫（P4 前置-B）**：``route_completion`` 权重 ≠ 1 而终局值仍为 rc=1 默认 →
-    fail-fast（见 :func:`_guard_rc_tier_pairing`）；P4 臂须用 ``docs/reward_audit/
+    fail-fast（见 :func:`_guard_rc_tier_pairing`）；P4 臂须用 ``config/arms/reward_drafts/
     config_draft_rc*.yaml`` 的同档 ``terminal_values``。
     """
     overrides = {str(name): float(weight) for name, weight in dict(term_weights or {}).items()}
