@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 下午·十）**：**R37 阶段 1 四路诊断收口**：M2（C0 0.580 vs C1 0.340，C1 不晋级）、**M3**（头在训练分布内没坏〔bias +0.056/MAE 0.149〕但**命令语义=保速**；坍缩=闭环特有自锁；**装配错配主凶=`path_dynamic_ttc` 缺键→0**〔训练 30.6 s「无冲突」vs 评测 0「立即碰撞」，占消融效应 77%〕）、**M4**（C2 warp 机制生效、**collision 0.14→0.08**、Hard 不劣化；**F3 证伪外部配速**：v 8.9 但 coll 0.48）、**M5**（A1/A2/A3 先验探针意图层生效〔v_ref 8.49/6.31/5.37、残差不变式 50/50〕但达成层不升〔v 3.56/3.01/2.85〕，**Hard 全恶化〔off-road 0.12→0.44/0.28/0.24〕**；A1 steer 饱和 0.81+蛇形）。**横向侧谱（主控复核）**：加速后 |err_ψ| 0.017→0.241、plan |κ|p90 0.023→0.081、κ 抖动 ×4.7 ⇒ **横向能力（曲率质量）是共阻塞**。**零训练通道总账：F3 ✗ / A ✗ / C2 ~中性** ⇒ **P0 定为主训练 lane（B 第一候选：教师=IDM+PP 规则专家，`tools/dagger_collect.py` 就绪；训练须在 eval 装配/指纹统一下做）**；C3（WM/想象步动力学）其后；**接口修复探针 M6 ✅ 落地**（`--long-exog-fill neutral`：**c1_fill succ 0.34→0.42，翻正 4/翻负 0**、tmo −0.04、rc +0.058、v +0.31；a1_fill off 0.38 不晋级）⇒ 零训练 +8 pp、非完整解，剩余=保速教师+@speed 横向质量（训练层）。M1 已入库 `0d63bbc`（966 tests/契约门 6/6/off 逐位）。
-> **本版说明**：第六十一轮（572 → 580 行）——新增 §5.82（GPT R39 受理：统一 imagined world state〔WorldState readout/双 Memory/aligned delta/A+ΔA 动力学/detach 账本/参数账本/learner-state transition/四缺口〕+ 我方 6 条细化与**2 条事实核对**：参数预算硬冲突〔+semantic 1,510,570 >1.5M，剔除闲置 MoE 407k 后 <1.5M〕与 HEAD 臂语义重登记〔Q4-A 后 C1≈旧 c1_true〕）；上版 572 行 = `git show e4d85e0:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第六十二轮（581 → 589 行）——新增 §5.83（GPT R39 裁决受理：双账本预算〔总 ≤+2%/激活 ≤+5%，取消 1.25×〕/HEAD 重登记/双 Memory 仅隔离/delta 离线先行/D0–D3 后置/learner-state 后置；2 条执行注记〔B1 阴性对照 + B2 复用 st_gnn 解码头〕；门口径补记；**勘误：上轮 R39-A 三 lane 未实际派发，本条起真正开工**）；上版 581 行 = `git show 1e8da0a:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -516,6 +516,14 @@
  (b) **臂语义必须重登记（关键）**：Q4-A 后 **env builder 原生供真值** ⇒ **最新 HEAD 上 `c1`（结构化+旧 WM）已自动看到真实 TTC/dyn** = pin 上的 `c1_true` 语义（0.390）；旧 `c1_fill` 的"中性填充"在 HEAD 退化为 **no-op**（仅缺键触发）。⇒ HEAD Clean500 **必须重登记臂定义**（新基线=C1_HEAD；旧 C1=0.304 仅历史），否则会把"接口修复的收益"误读为新版提升。
 - **我方细化/反驳（6 条）**：①**分阶提案**（对齐 §九"本轮先修四缺口"）：**R39-A 工程+账本（零训练）**=official 结构化装载 / ckpt migration 接线+LoadReport / `forward_mode` 全迁 / 四 hash 原生接入 / param+detach 双账本（D1 已有逐损失探针；D0 现状为基线，D1–D3 预置）/ Clean500@HEAD 重登记重跑 → **R39-B 状态接口**（WorldState/readout + analytic+learned residual；Phase A 1→2/3-step TBPTT；门=状态接口门）→ **R39-C 双 Memory + 历史 delta 三臂**（过门才加容量）→ **R39-D 等预算缩放 + 交替适配 + learner-state 聚合**。理由：训练侧产物必须能被正式链消费，且 BPTT/双 Memory 都动主链，需先有账本与逐位护栏。②**Memory 门与 §二/§三 的张力（请确认优先级）**：我方 C1 已证 full≈repeat-nearest ⇒ 按 GPT 自己的门"不加容量"；故双 Memory 的必要性应表述为"**想象隔离**（WorldState API 载体）"，delta 是**表示替换**（先过门再谈扩容）。③**detach 分辨率**：D1 已覆盖"逐损失反向可达（8 断言）"；D0–D3 属真实训练实验，建议在 R39-B 内执行（现状 z_next.detach 的"多步不回传"事实已入账）、并加**显存护栏**（bs32+累积起步；12 GB 卡 2/3-step 可行）。④`forward_mode` 全迁接受（P3 shim 原为"KEEP 待后迁"）：迁移面=net/pipeline/tools/tests + `.slim` 调用点，保留明确 fail-fast 文案。⑤**历史 delta 可行性**：DP-6/v8 按帧存 feature 且 A1 harness 已能从连续行构造状态 ⇒ delta 表示可**先离线零训练证**再落 net（默认关）。⑥**执行序确认请求**：R39-A→B→C→D 排序、**"预算=激活参数"口径**、**HEAD 臂重登记**（C1_HEAD 替代旧 C1，c1_fill 降诊断）——三项请 GPT/CG 明示。
 
+### 5.83 GPT R39 裁决受理（`fe5de55`，528 行）——逐项采纳 + 2 条执行注记；**勘误：上轮报告的"R39-A 三 lane 已开工"实际未派发，本条起真正开工**
+
+- **逐项裁决（全部采纳）**：①**参数预算=总/激活双账本**：总参数冻结基线 = HEAD structured **1,510,570**（R39 期间 ≤**+2%**）、激活 ≤**+5%**；**取消 1.25× 扩容臂**（仅 1.0×/0.75× 等预算对照）；新模块优先"复用现有层/替换闲置路径"；大规模瘦身后置。②**HEAD 重登记接受**：`C0_HEAD`/`C1_HEAD`（Q4-A 后 C1≈旧 c1_true；旧 C1=0.304 仅历史；`c1_fill` 降缺键兼容诊断）；正式重测必带 **protocol/model/schema/ckpt 四 hash + git commit**。③**双 Memory=状态 API 与隔离机制**（非扩容理由；Real 只读+reset；Imagined 从真实编码复制、只存预测 anchor/latent/validity、结束销毁、**写回=0**）。④**delta 离线零训练先行**（OD slot-identity+ego-motion 对齐、LD 投影；类别字段禁减）；M1 无收益 ⇒ 停、不加容量。⑤**D0–D3 后置于统一 State 接口**（每臂记录 h1/h3/h6 loss、grad norm、显存峰值、爆炸、耗时、闭环）。⑥**learner-state transition 后置 R39-D**（必须 `executed_action`；交替冻结、禁单一 loss）。
+- **§二/§三/§四 受理**：R39-A（工程闭合 9 项+验收）→ R39-B（WorldState→PolicyStateView 九步循环；`A_{k+1}=AnalyticUpdate+ΔA_θ`；统一 readout 七量；**B0–B4 臂，B2 须优于 B1**）→ R39-C（M0/M1/M2，M1 门）→ R39-D；hooks（WorldState/StateReadout/Memory/梯度/参数；`Imagined→Real` 写回=0 硬门、字段唯一 producer）与门（工程/状态接口/Memory/Detach/参数/闭环：相对 **C1_HEAD ≥5pp** 且安全不劣、**Clean500 ≥3 seeds**、50-ep 仅"继续许可"）全部受理。
+- **执行注记（我方 2 条）**：①**B1 预期为阴性对照**——A3 已证解析式不满足双条件门（`S_gfix_self_dyn_B` slow+accel −9.1% 且全样本 +0.435 恶化）⇒ B2 学习残差须按"**analytic → 实际下一状态**"做 **one-step 真值监督**（**禁止**自产状态自洽回灌：S_self 正反馈 5.77→6.33 发散教训），链上配阻尼/一致性约束；②**B2 复用现有 `st_gnn` 物理解码头**（od_pred/ld_pred/ego_next 已在）以满足"不新增参数/替换闲置路径"。
+- **门口径补记（§四要求）**：slow+accel 子集 = `v0<4 ∧ 真实 3 s 提速 >5.69 m（超 clamp 保速先验）`，n=1261；指标 = 计划与真实 **Σds 三秒累计差（米）**；全样本 n=7133（训练行 ∧ 同 episode 连续 7 决策步，cap 300/stratum）；阈值 = slow+accel Σds ≥12.8 ∧ 全样本均值 ≤2.31。
+- **勘误（记录在案）**：§5.82 汇报中"已按 §九 开工（R39-A1/A2/A3 在飞）"**实际未派发**（无 round39 产物/进程）——本条起真正派发：**A1**=工程闭合（入口结构化装载 / ckpt migration+LoadReport / `forward_mode` 全迁删 shim / 四 hash）；**A2**=双账本（total/active/frozen/dormant/optimizer + 上限断言 + 梯度账本升级）；**A3**=Clean500@HEAD 重登记重跑（C0_HEAD/C1_HEAD/IDM+PP，pin 树 + 四 hash）。
+
 ## 6. 文档与产物索引
 
 > **CLEAN-1 注（2026-10-15）**：`docs/` 已收敛为 5 常驻文件（本台账 / `README.md` / `repo_handbook.md` / `chatgpt5p6sol_review.md` / `architecture_contract.md`）；本节以下所列历史文档已归档至 git 历史，**要点压缩与逐条取档命令见 `docs/repo_handbook.md` 附录 D**。新事项只追加到本文件 §5.x / 手册，不新建 md。
@@ -532,7 +540,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第六十一轮（本版；572 → 580 行）**：新增 §5.82（GPT R39 受理 + 2 条事实核对 + 6 条细化）；上版 572 行 = `git show e4d85e0:docs/deepseekv4p1_argue.md`。
+- **第六十二轮（本版；581 → 589 行）**：新增 §5.83（R39 裁决受理 + 勘误复工）；上版 581 行 = `git show 1e8da0a:docs/deepseekv4p1_argue.md`。
+- **第六十一轮（572 → 580 行）**：新增 §5.82（GPT R39 受理 + 2 条事实核对 + 6 条细化）；上版 572 行 = `git show e4d85e0:docs/deepseekv4p1_argue.md`。
 - **第六十轮（560 → 571 行）**：新增 §5.81（清理批 + 固化规则）；上版 560 行 = `git show 75c9d64:docs/deepseekv4p1_argue.md`。
 - **第五十九轮（515 → 524 行）**：新增 §5.75（C3 `path_*` 分类结案）；上版 515 行 = `git show fe2f11f:docs/deepseekv4p1_argue.md`。
 - **第五十八轮（506 → 515 行）**：新增 §5.74（C2 MoE 消融结案 + A1 口径校正）；上版 506 行 = `git show 802468b:docs/deepseekv4p1_argue.md`。：新增 §5.74（C2 MoE 消融结案 + A1 口径校正）；上版 506 行 = `git show 802468b:docs/deepseekv4p1_argue.md`。
