@@ -110,3 +110,17 @@
 - **口径**：本协议 C0 = 0.580/0.180/0.120（rc 0.872）与历史 kappa-compose 0.56/0.14/0.08 **不可直比**；历史锚点（legacy 0.40/Q1 0.50/K1 0.52/T2 0.58/统一基线 0.56/**IDM 0.756**）均为 calib50 口径。
 - **术语**：`ds`=每决策步（0.5 s）推进距离；`v_ref`=LQR 参考速度=plan 弦长/dt；`neutral/true`=接口填充两档；`C0/C1/C2/C3`=GPT R37 四臂；`A1–A3/F3`=零训练诊断臂。
 - **关键文件**：`docs/round37_report.md`（全量报告）、`.slim/deepwork/p1_v2/round37/{m2_c0c1,m3_report,m4_report,m5_report,m6_report,m7_report}.md`、`runs/round37/*`、`tools/dagger_collect.py`、`.slim/deepwork/p1_v2/a3/eval_a3.py`、`.slim/deepwork/p1_v2/round36/{j1_train,j1_eval,i1_extract_dataset,h2_data_spec}.py`
+
+---
+
+## 6. 追加申请 **D8：C3（学习型想象步动力学）** —— 裁决依据与设计（2026-10-15 追加）
+
+- **裁决依据（R38-A1/A3 已闭合）**：① latent 真值替换**零恢复**（A1-Q2：E0–E5 Δ≈0/更差）⇒ WM latent 通道非杠杆；② 几何/接口是**最大可恢复项**（A1：S_geo oracle slow+accel −1.32 / 全样本 −1.50～−2.81），但**解析式 11 臂全 FAIL**（A3：无组合同时满足 Σds≈13.0 ∧ 全样本不恶化；S_self 正反馈发散 v 5.77→6.33 vs 真实 5.23→4.87）；③ 头 h1 超发 +0.116 m/步在自洽链上正反馈。
+- **设计（初稿，待细化 lane 规格）**：
+  - 目标列：想象步 k≥1 的 `speed / static_distance / dynamic_distance / dynamic_ttc`（+ 可选 anchor 演化；`nav_progress`/crop 为不可得项，维持诊断）。
+  - 形态：**解析基 + 学习残差**（`A_{k+1}=A_analytic+ΔA_learned`；解析基=M7 同式运动学）；残差由小容量头（在冻结 WM/编码器之上）预测。
+  - 数据：DP-6 同 episode 连续行（A1 harness 同一口径；仅作监督，不影响 train-spec 隔离）。
+  - 预算（粗估）：单卡 1–2 h 训练 + 离线矩阵复算（分钟级）+ calib50 两臂 6 min。
+  - **门**：①**离线**：A1 矩阵 slow+accel Σds ≥12.8 且全样本 |Σds−真实| ≤2.31；②**闭环**：`c1_evo` vs C1 爬行解除（v/crawl/timeout/剖面斜率）且安全（off/coll/min_ttc）不劣化；③若①过②不过 ⇒ 转判执行契约（plan 弦长=LQR 速度指令/重规划节奏）。
+- **配套（零训练，已独立在飞）**：A4 = 两条确定性几何缺陷（foot padding 65.5%、margin 反号）默认关落地 + `c1_gfix`/`c1_fill_gfix` 闭环。
+- **备选**：若 C3 离线门不过 ⇒ **J2（策略×动力学联合，带阻尼）**；两者均不动 LQR 与评测协议。
