@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 下午·十）**：**R37 阶段 1 四路诊断收口**：M2（C0 0.580 vs C1 0.340，C1 不晋级）、**M3**（头在训练分布内没坏〔bias +0.056/MAE 0.149〕但**命令语义=保速**；坍缩=闭环特有自锁；**装配错配主凶=`path_dynamic_ttc` 缺键→0**〔训练 30.6 s「无冲突」vs 评测 0「立即碰撞」，占消融效应 77%〕）、**M4**（C2 warp 机制生效、**collision 0.14→0.08**、Hard 不劣化；**F3 证伪外部配速**：v 8.9 但 coll 0.48）、**M5**（A1/A2/A3 先验探针意图层生效〔v_ref 8.49/6.31/5.37、残差不变式 50/50〕但达成层不升〔v 3.56/3.01/2.85〕，**Hard 全恶化〔off-road 0.12→0.44/0.28/0.24〕**；A1 steer 饱和 0.81+蛇形）。**横向侧谱（主控复核）**：加速后 |err_ψ| 0.017→0.241、plan |κ|p90 0.023→0.081、κ 抖动 ×4.7 ⇒ **横向能力（曲率质量）是共阻塞**。**零训练通道总账：F3 ✗ / A ✗ / C2 ~中性** ⇒ **P0 定为主训练 lane（B 第一候选：教师=IDM+PP 规则专家，`tools/dagger_collect.py` 就绪；训练须在 eval 装配/指纹统一下做）**；C3（WM/想象步动力学）其后；**接口修复探针 M6 ✅ 落地**（`--long-exog-fill neutral`：**c1_fill succ 0.34→0.42，翻正 4/翻负 0**、tmo −0.04、rc +0.058、v +0.31；a1_fill off 0.38 不晋级）⇒ 零训练 +8 pp、非完整解，剩余=保速教师+@speed 横向质量（训练层）。M1 已入库 `0d63bbc`（966 tests/契约门 6/6/off 逐位）。
-> **本版说明**：第五十一轮（432 → 443 行）——新增 §5.67（M8 取消 → CG 审批包：D1 P0-B 放行 + D2–D7 + 放行条件/风险表）；§0/§7 刷新；上版 432 行 = `git show 5e7b84d:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第五十二轮（443 → 450 行）——新增 §5.68（GPT R38 受理：全链路瓶颈裁决 + 代码减枝；我方 5 条细化/反驳；执行分阶 R38-A/B/C；CG 包 D1–D3 重定位）；§0/§7 刷新；上版 443 行 = `git show 140a327:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -388,6 +388,13 @@
 - **放行条件（包 §4）**：①**第一步 fail-fast smoke**（采集 12 ep → 立即统计 IDM 标签"低/中速正残差"是否显著 > DP-6 基线；I1 抽取直通 DP-6 同构分片；任一不达标即停回报）；②训练在 eval 装配（obs 指纹统一 + long_exog 三键真值）；③每步 paired 留痕，未过 Calib50 门不跑 Clean150/Eval500；④纪律不变（默认关+逐位；无放行不训练）。
 - **风险表**：R1 前提未验证（高，以 smoke 缓解）/ R2 装配二次分叉 / R3 天花板=IDM 0.756 / R4 横向 @speed / R5 数据隔离（工具硬校验）/ R6 预算（粗估：首批含 Calib50 裁决 **半天–2 天**）。**待 CG 批复 D1–D7。**
 
+### 5.68 GPT R38 方案受理（`2d670cd`，646 行）：**全链路瓶颈裁决 + 代码减枝**；我方细化/反驳 5 条；CG 包重定位
+
+- **方案要点（压缩）**：架构守则（唯一动作源/每步单动作/6 调用/WM 只推进/解析变换可网外但未来决策信息须入统一 WM 状态/**禁止依赖只有训练或评测脚本能生成的 `path_*` 旁路**；DAgger/MoE/RL 暂不启动；LQR 不改）；**先不训练**，五问裁决（①真实未来 vs WM 预测状态逐 h1–h6 的曲率/纵向/车道误差/速度恢复；②**E0–E6 模态真值替换**（ego/OD/LD 逐组换真值）；③Memory 历史消融（含全 mask 输出、顺序、slot identity、OD 历史 ego-motion 对齐）；④**`path_*` 七字段逐字段分类**〔删除/并入标准 obs/WM anchors 确定性派生/仅诊断；**禁止"缺失静默填 0"**〕；⑤Primary/MoE 只读消融，Primary 不过门不训专家）；7 类强制 hook（默认关、前向逐位/不耗 RNG/不改 ckpt）；门 A–D（Gate B 要求**量化归因**，不许"多方面共同影响"）；**清理 4 判据**（可达性/契约合法性〔违反守则即 ARCHITECTURE_FORBIDDEN〕/实验价值〔迁 tools/legacy 或 experiments/archive〕/ckpt 兼容〔独立 migration layer〕）+ 8 组优先候选（oneshot·plan_override·别名 → K-anchor → 旧 `set_ego_warp` → Policy/path_head 双实体收编 → `path_*` → target-lane 生产强依赖 → legacy monitoring → cheap-path 布尔改显式 `forward_mode` 枚举）；交付四文档（reachability_audit / deprecation_manifest.yaml / runtime_entrypoint_matrix / checkpoint_migration_contract）+ CI 守卫（禁 legacy 引用/禁 deprecated 键/禁 forward 含 oneshot/禁双动作源/禁缺失静默填 0）；Clean500/Eval500 统一 protocol hash 重跑（含旧基线/当前候选/IDM+PP）。
+- **受理**：①**Q4 的 `path_*` 分类与"禁止静默填 0"与我方 M3 的 TTC 发现收敛**，且比我们的 neutral 填充更彻底 ⇒ 采纳为其裁决；②Q1/Q2 是我方 M3 的加强版（含模态级归因），应补跑；③减枝候选与 R36 L-A 契约一致；④Clean500 + protocol hash 采纳（与我方口径登记 D4 对齐）。
+- **细化/反驳（5 条）**：①**Q1 判定表需补一分支**：我方证据=头部在真实状态/真实未来上**模仿保真度很好**（bias +0.056 / MAE 0.149 / r 0.983）但闭环爬行——根因是**监督目标语义本身=保速**（标签弦长≈v·dt + 先验 `clamp(v·dt)`）；判定应加"**真实未来上'像教师一样好'但闭环差 ⇒ 监督语义/目标参数化是主瓶颈**"，否则会误判给 WM 或含糊的"状态表示"。②**reachability 扫描必须覆盖 `.slim/deepwork/p1_v2/**` 与 runs 脚本**（我方评估/部署链 `a3/eval_a3.py`、`round32/canary_eval.py`、`round36/*` 都在 `.slim`，只扫 net/pipeline/tools/tests 会把真实引用误标 UNREACHABLE）。③**`path_*` 分类直接决定 StructuredPolicyHead 输入 schema ⇒ 与 P0-B 耦合**：链条=分类→schema 冻结→（若需）重训；且 `plan_head.fusion.2`（我方训练 allowlist 之一）**不属于** K-anchor 候选，减枝时勿混淆。④**减枝须过 966 tests + 默认关逐位**，建议"迁移→删引用→删实现"三笔独立提交（每笔可回退）；oneshot/plan_override 已有 L-A 运行时守卫与测试，删除时同步迁移测试。⑤**执行分阶提案**：**R38-A** 裁决矩阵（Q1/Q2/Q3/Q5，零训练，1–2 天）→ **R38-B** `path_*` 分类 + schema 冻结 + 四交付文档 + CI（1–2 天）→ **R38-C** 减枝实施（分笔）→ 之后重开 P0-B（输入 schema 冻结后的策略训练）。
+- **CG 包重定位（跨邮）**：`docs/r37_p0b_approval_packet.md` 写于本方案到达前——**D1 改为"裁决后放行"**、**D2 改为"按 Q4 分类裁决"**（neutral 填充降级为诊断补丁）、**D3 保持"由替换实验裁决"**（与方案 §三"是否重训 residual WM 由真值替换实验裁决"一致）、D4/D5/D6 不变、D7（风险接受）不变。
+
 ---
 
 ## 6. 文档与产物索引
@@ -404,7 +411,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第五十一轮（本版；432 → 443 行）**：新增 §5.67（M8 取消 → CG 审批包 D1–D7 + 放行条件）；§0/§7 刷新；上版 432 行 = `git show 5e7b84d:docs/deepseekv4p1_argue.md`。
+- **第五十二轮（本版；443 → 450 行）**：新增 §5.68（GPT R38 受理 + 5 条细化/反驳 + CG 包重定位）；上版 443 行 = `git show 140a327:docs/deepseekv4p1_argue.md`。
+- **第五十一轮（432 → 443 行）**：新增 §5.67（M8 取消 → CG 审批包 D1–D7 + 放行条件）；§0/§7 刷新；上版 432 行 = `git show 5e7b84d:docs/deepseekv4p1_argue.md`。
 - **第五十轮补遗2（402 → 432 行）**：新增 §5.66（阶段 1 复盘 + 四问核查结论 + 训练放开建议 + 新问题⑤⑥）；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`。
 - **第五十轮补遗（402 → 418 行）**：§5.64 追加 M3/M4/M5/M6/M7 结果 + 横向侧谱 + 零训练总账（M6 接口修复 ✅ +8pp；M7 真值：coll 0.08 最优/off 0.18 不晋级）+ P0 定案提案（B 第一候选）；§0/§7 刷新；上版 402 行 = `git show 0ecbad6:docs/deepseekv4p1_argue.md`。
 - **第五十轮（377 → 402 行）**：新增 §5.64（M2 闭环分诊 + 纵向语义根因 5 证据链 + P0 优先级提案 + M3/M4 在飞）；§0/§7 刷新；上版 377 行 = `git show a0bb6e6:docs/deepseekv4p1_argue.md`。
