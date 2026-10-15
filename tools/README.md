@@ -68,3 +68,10 @@
 - **device**：训练/评测 `--device auto`（CUDA 可用则 cuda）；`diagnostics/` 的两个 rollout 诊断脚本（`forensics_offline`/`forensics_closed_loop`）默认 `--device cuda`（`forensics_report` 为纯分析、无 device 参数），无卡需显式 `--device cpu`；`debug_rollout_viz` 带显存守卫。
 - **写盘守卫**：`make_eval_spec.py` 默认 DRY-RUN，必须显式 `--write` 才落盘。
 - `test.py --out` 是输出**根**（实际写 `<out>/<name>/`），不要当 run 名用。
+
+## 治理与归档（CLEAN-4，2026-10-16）
+
+- **归档判据**（CLEAN-3 同款口径）：`tools/*.py` 或 `tools/**/*.py` 若①**整仓零引用**（文件名/模块名字面量，排除 `runs/`、`.git/`、`.venv/`、`__pycache__/` 与快照类产物）②非 config/脚本引用的入口③非 tests 引用 ⇒ 移入 `tools/legacy/` 并在 `tools/legacy/README.md` 登记。被 `train.sh` / `test.sh` / `run_config.py` 链路引用者**永不动**；`tools/legacy/**` 既有内容不动。
+- **本轮审计结论（2026-10-16）：零引用候选 0 项 → 无归档**。35 个非 legacy py 全部被引用；最少 2 处的 `probe_load_contract.py` / `probe_plan_action_contract.py` 由 `tests/test_artifacts_writer.py` 直接引用（tests 保护）；`tools/measure/*` 与 `forensics_{offline,report}.py` 仅目录 README + `.slim` 工作区文档引用（非零，不归档）。扫描器与逐文件引用来源表：`.slim/deepwork/p1_v2/round38/clean4_tools_scan.py`（gitignored，可重跑）。
+- **归档指针**：`tools/legacy/README.md`（历史实现快照登记表 + 复现约束；本目录不被生产代码导入，CI 守卫见 `docs/repo_handbook.md` 附录 D §5）。
+- **文件读写统计**：`tools/doc_stats.py`（last_write / refs / category；`--help`、`--selfcheck`、`--md` 快照落 `docs/README.md` 附录节）。

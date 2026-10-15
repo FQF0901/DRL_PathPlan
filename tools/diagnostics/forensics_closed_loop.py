@@ -74,6 +74,10 @@ footprint 几何查询出处（代码注释要求记录所用 API）
     tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr --ids 0,5,11,14,18,19,22,23,28,29,30,32,34,40,43,44,47 --out runs/forensics/closed_lqr.json
     tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode d1 --ids 0,5 --out runs/forensics/closed_d1.json
     tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr --reference repeat_action --out runs/forensics/closed_f.json
+
+约定：``--spec`` 缺省 = ``env/specs/scenarios_val.json``（**现役**冻结验证集；CLEAN-4 起，
+旧默认 ``scenarios_val_slice50.json`` 已随 CLEAN-2 删除，勿再引用）；spec 文件不存在时
+main 直接 fail-fast（显式 ``--spec`` 或重生成）。``--ckpt`` 缺省仍为历史路径，跑前核对。
 """
 
 from __future__ import annotations
@@ -93,7 +97,10 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 CKPT = "runs/train/il_v2_10x10_b_fixed/stage_b/final.pt"
-SPEC = "env/specs/scenarios_val_slice50.json"
+#: 现役 spec 默认（CLEAN-4 更新，2026-10-16）：旧默认 ``scenarios_val_slice50.json``
+#: 已随 CLEAN-2 删除（本地文件不存在）⇒ 缺省改指现役冻结验证集；文件缺失时 main
+#: 直接 fail-fast（显式 ``--spec`` 或 `bash tools/gene_env.sh --slice 200` 重生成）。
+SPEC = "env/specs/scenarios_val.json"
 
 
 def _wrap(o: object) -> object:
@@ -1499,7 +1506,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="d2 配速 V3（§7.10-A3）：仅缩放 LQR 参考速度（ref_speed_scale；几何 plan 不动）",
     )
     parser.add_argument("--speed-cap", type=float, default=8.0)
-    parser.add_argument("--spec", default=SPEC)
+    parser.add_argument("--spec", default=SPEC, help="spec 文件（缺省 env/specs/scenarios_val.json，现役冻结验证集；缺失即 fail-fast）")
     parser.add_argument("--ckpt", default=CKPT)
     parser.add_argument("--config", default="config/default.yaml")
     parser.add_argument("--tracker-json", default="{}")
@@ -1572,6 +1579,12 @@ def main(argv=None) -> int:
 
     from env.scenario.spec import load_specs
 
+    if not Path(args.spec).exists():
+        raise SystemExit(
+            f"[forensics_closed_loop] spec 不存在: {args.spec}"
+            "（缺省 = env/specs/scenarios_val.json，现役 1000 条冻结验证集；"
+            "请显式 --spec，或 `bash tools/gene_env.sh --slice 200` 重生成）"
+        )
     specs = list(load_specs(args.spec))
     wanted = [int(x) for x in args.ids.split(",") if x.strip()] if args.ids.strip() else None
     if wanted is None:

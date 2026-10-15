@@ -54,7 +54,9 @@ route_progress_after_takeover（专家接管 3s 窗口内实测）；mode_label/
       split_manifest.json   episode 级 train/val（'pool:id' 键，禁泄漏）
 
 正式采集（另行授权）：``--out datasets/recovery_v1`` 并附
-数据集卡（要素见 ``docs/repo_handbook.md`` 附录 D；本工具自动写，若不存在）。
+数据集卡（要素见 ``docs/repo_handbook.md`` 附录 D；本工具自动写，若不存在——
+CLEAN-4 起落点 = ``.slim/deepwork/p1_v2/recovery_notes/recovery_v1_dataset_card.md``，
+**运行期不写 docs/**）。
 
 用法（100 集试点，多池按几何分层）::
 
@@ -1621,11 +1623,19 @@ def _git_commit() -> str | None:
 
 
 def _maybe_write_dataset_card(out_dir: Path) -> None:
-    """正式采集（--out 在 datasets/ 下）时补数据集卡模板（不存在才写）。"""
+    """正式采集（--out 在 datasets/ 下）时补数据集卡模板（不存在才写）。
+
+    落点 = ``.slim/deepwork/p1_v2/recovery_notes/recovery_v1_dataset_card.md``
+    （CLEAN-4 裁决：运行期**不写 docs/**；原 ``docs/recovery_v1_dataset_card.md`` 已随
+    CLEAN-1 收敛，卡要素/取档见 ``docs/repo_handbook.md`` 附录 D）。
+    """
     try:
         if "datasets" not in out_dir.parts:
             return
-        card = _ROOT / "docs" / "recovery_v1_dataset_card.md"
+        card = (
+            _ROOT / ".slim" / "deepwork" / "p1_v2" / "recovery_notes"
+            / "recovery_v1_dataset_card.md"
+        )
         if card.exists():
             return
         card.parent.mkdir(parents=True, exist_ok=True)

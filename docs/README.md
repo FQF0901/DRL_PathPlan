@@ -31,3 +31,22 @@
 
 - `docs/` 实际内容（自检）：`find docs -name '*.md'` = 5；`find docs -mindepth 1 -type d` = 0（无子目录）。
 - 本收敛批（CLEAN-1，2026-10-15）：代码引用去文档化（63 文件 +117/−117 行：70 处 `docs/*.md` 引用行 + `deprecation_manifest.yaml`、`reward_audit/`、`archive/`、`v7_reports/specs/` 等非 md 引用；含 2 个测试夹具路径迁 `config/arms/reward_drafts/`）+ 删除全部历史 md/子目录（172 项 docs 移除 = 167 删除 + 5 迁移至 `config/arms/reward_drafts/`，git 记 R）+ `.slim` 过期 md 清理（45 删 / 28 留）；全部历史走 git（`b847e51` 及之前的 docs 提交即全文，要点见 `repo_handbook.md` 附录 D）。pytest 全量仍 **1068 passed**。
+
+## 附录：doc_stats 快照
+
+> 生成: 2026-10-16 00:29（CST）｜生成器: `tools/venv-python tools/doc_stats.py --json .slim/deepwork/doc_stats.json --md`｜口径: refs = 路径/basename 字面量在整仓（排除 .venv/.git/runs*/__pycache__/.pytest_cache 与本快照自身）的去重引用文件数；category = keeper > code-ref(refs>0) > stale(refs==0 且陈旧≥30d) > recent。
+> 完整逐文件明细（path/refs/last_write/age/category）: `.slim/deepwork/doc_stats.json`（gitignored）；重跑方法见工具 docstring。
+
+| root | 文件 | keeper | code-ref | recent | stale | 体积 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `docs/` | 5 | 5 | 0 | 0 | 0 | 231.1 kB |
+| `.slim/` | 974 | 1 | 463 | 510 | 0 | 45.9 MB |
+| `tools/` | 62 | 0 | 62 | 0 | 0 | 1.0 MB |
+| `tests/` | 128 | 0 | 128 | 0 | 0 | 6.2 MB |
+| `env/specs/` | 9 | 0 | 9 | 0 | 0 | 14.0 MB |
+| `datasets/` | 617 | 0 | 39 | 578 | 0 | 1.47 GB |
+| `runs/` | 12539 | 0 | 3187 | 9352 | 0 | 6.56 GB |
+
+stale 候选（refs==0 且陈旧 ≥30 天，共 0 项；**只列不删**，全量 `--stale-list`）Top-20:
+
+（无）

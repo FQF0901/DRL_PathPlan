@@ -5,7 +5,7 @@
 | 脚本 | 用途 | 典型调用与产物 |
 | --- | --- | --- |
 | `forensics_offline.py` | 离线取证：四类焦点几何（curve/roundabout/uturn/tollgate）的样本量 / 预瞄头误差（stage_b ckpt 前向 vs 数据集 traj6 / action） | `tools/venv-python tools/diagnostics/forensics_offline.py --section counts` 或 `--section plan --rows 20000`；参数 `--npz`（默认 `runs/bc_expert_2k_v2/expert_bc.npz`）、`--ckpt`（默认 `runs/train/il_v2_10x10_b_fixed/stage_b/final.pt`）、`--section {counts,plan,all}`、`--batch`(1024)、`--device`（默认 cuda）、`--out`（默认 `runs/forensics/offline.json`） |
-| `forensics_closed_loop.py` | 闭环取证：复现冻结评测协议并逐 env-step / 逐策略步记录，区分 plan 不可跟 / tracker 不适配 / 动作错误 | `tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr --ids 0,5,11 --out runs/forensics/closed_lqr.json`；参数 `--mode`（见下，含 `d1`/`d2`）、`--reference {plan,repeat_action}`（缺省 plan；仅 lqr/lqr_gain/exact 生效）、`--ids`（逗号分隔，缺省=spec 内焦点几何）、`--spec`（默认 `env/specs/scenarios_val_slice50.json`）、`--ckpt`（默认同上一行历史路径）、`--tracker-json`、`--dtheta-gain`、`--arc-radius/--arc-speed`、`--speed-mode {hold,limit}`/`--speed-cap`、`--max-steps`(1000)、`--device`（默认 cuda）、`--out`（必填） |
+| `forensics_closed_loop.py` | 闭环取证：复现冻结评测协议并逐 env-step / 逐策略步记录，区分 plan 不可跟 / tracker 不适配 / 动作错误 | `tools/venv-python tools/diagnostics/forensics_closed_loop.py --mode lqr --ids 0,5,11 --out runs/forensics/closed_lqr.json`；参数 `--mode`（见下，含 `d1`/`d2`）、`--reference {plan,repeat_action}`（缺省 plan；仅 lqr/lqr_gain/exact 生效）、`--ids`（逗号分隔，缺省=spec 内焦点几何）、`--spec`（默认 `env/specs/scenarios_val.json`，现役冻结验证集；缺失即 fail-fast）、`--ckpt`（默认同上一行历史路径）、`--tracker-json`、`--dtheta-gain`、`--arc-radius/--arc-speed`、`--speed-mode {hold,limit}`/`--speed-cap`、`--max-steps`(1000)、`--device`（默认 cuda）、`--out`（必填） |
 | `forensics_report.py` | 闭环结果分析：plan-vs-执行偏差、tracker 误差、失败形态与 baseline/exact 对比 | `tools/venv-python tools/diagnostics/forensics_report.py --in runs/forensics/closed_lqr.json --baseline-in runs/forensics/closed_baseline.json --out runs/forensics/closed_lqr_summary.json`；参数 `--in`（必填）、`--baseline-in`、`--exact-in`、`--out`（必填） |
 | `legacy_policy_diag.py` | **R38-P2b 旧 `PolicyHead` 诊断（离线）**：主 forward 不再并行计算旧头（`set_policy_diag` 已 fail-fast）⇒ 本工具在 forward 之外重算 `policy_action_mu`/`action_logstd`；`--legacy-ckpt` 用 `tools/legacy/legacy_policy.py` 独立复算旧 ckpt `policy.*` 键面 | `tools/venv-python tools/diagnostics/legacy_policy_diag.py --ckpt <full.pt> --config config/model.yaml --obs-pt /tmp/obs.pt --out /tmp/diag.json`（在网）或 `--legacy-ckpt <ckpt> --tokens-pt /tmp/tokens.pt --out ...`（独立）；产物 JSON（张量 sha256 摘要；`--dump-pt` 可存原始张量） |
 
@@ -25,6 +25,6 @@
 
 - 三个脚本都只读分析；输出 JSON 由 `--out` 指定（示例路径 `runs/forensics/`，`runs/` 为 gitignore）。
 - `forensics_offline.py` / `forensics_closed_loop.py` 默认 `--device cuda`；无 CUDA 时显式 `--device cpu`（`forensics_report.py` 为纯分析，无 device 参数）。
-- 默认 ckpt / spec 为历史路径（`forensics_closed_loop.py:95-96`），npz 为历史路径（`forensics_offline.py:228-229`），文件可能已不存在，跑前先核对。
+- 默认 ckpt 为历史路径（`forensics_closed_loop.py` 的 `CKPT`），npz 为历史路径（`forensics_offline.py:228-229`），文件可能已不存在，跑前先核对。`forensics_closed_loop.py` 的 `--spec` 缺省 = `env/specs/scenarios_val.json`（现役冻结验证集，CLEAN-4 更新；旧默认 `scenarios_val_slice50.json` 已随 CLEAN-2 删除）；spec 缺失时 main 直接 fail-fast，显式 `--spec` 或重生成（`bash tools/gene_env.sh --slice 200`）。
 - 约定：新的一次性诊断脚本放本目录并在上表登记；常驻入口放 `tools/` 根。
 - P0 审计：逐策略步记录含 footprint 有效性 / `T_plan|T_track|T_cross|T_term` 时间戳 / 层级分类字段（定义见 `docs/repo_handbook.md` 附录 D §4–§6）。

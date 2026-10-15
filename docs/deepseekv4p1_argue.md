@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 下午·十）**：**R37 阶段 1 四路诊断收口**：M2（C0 0.580 vs C1 0.340，C1 不晋级）、**M3**（头在训练分布内没坏〔bias +0.056/MAE 0.149〕但**命令语义=保速**；坍缩=闭环特有自锁；**装配错配主凶=`path_dynamic_ttc` 缺键→0**〔训练 30.6 s「无冲突」vs 评测 0「立即碰撞」，占消融效应 77%〕）、**M4**（C2 warp 机制生效、**collision 0.14→0.08**、Hard 不劣化；**F3 证伪外部配速**：v 8.9 但 coll 0.48）、**M5**（A1/A2/A3 先验探针意图层生效〔v_ref 8.49/6.31/5.37、残差不变式 50/50〕但达成层不升〔v 3.56/3.01/2.85〕，**Hard 全恶化〔off-road 0.12→0.44/0.28/0.24〕**；A1 steer 饱和 0.81+蛇形）。**横向侧谱（主控复核）**：加速后 |err_ψ| 0.017→0.241、plan |κ|p90 0.023→0.081、κ 抖动 ×4.7 ⇒ **横向能力（曲率质量）是共阻塞**。**零训练通道总账：F3 ✗ / A ✗ / C2 ~中性** ⇒ **P0 定为主训练 lane（B 第一候选：教师=IDM+PP 规则专家，`tools/dagger_collect.py` 就绪；训练须在 eval 装配/指纹统一下做）**；C3（WM/想象步动力学）其后；**接口修复探针 M6 ✅ 落地**（`--long-exog-fill neutral`：**c1_fill succ 0.34→0.42，翻正 4/翻负 0**、tmo −0.04、rc +0.058、v +0.31；a1_fill off 0.38 不晋级）⇒ 零训练 +8 pp、非完整解，剩余=保速教师+@speed 横向质量（训练层）。M1 已入库 `0d63bbc`（966 tests/契约门 6/6/off 逐位）。
-> **本版说明**：第五十九轮（515 → 524 行）——新增 §5.75（**R38-C3 `path_*` 分类结案**：3 硬 0 + 4 回退；掩码不被消费；dynamic_ttc/distance→标准 obs、margins/nav/d2end→WM 派生、static→诊断；迁移节奏先接口后掩码；Q4-A 实施并入队列）；上版 515 行 = `git show fe2f11f:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第六十轮（560 → 571 行）——新增 §5.81（**清理批 CLEAN-1–5**：≈50 GB 回收〔runs −47.63G / datasets −1.07G / /tmp −1.2G〕+ docs 收敛 **5 件**＋git 取档制 + 6 条固化规则 + `tools/doc_stats.py`）；上版 560 行 = `git show 75c9d64:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -499,6 +499,15 @@
 - **待办（非本阶段，明确挂账）**：①**B 类**：掩码进头 + `static_distance` 下沉（与下次重训同批）；②**D8/C3 训练**（学习型想象步动力学；待 CG 放行）；③**Eval500 3-seed**（paired bootstrap/McNemar）与 clean150 层级去留（CG）；④protocol hash 原生接入评测入口；⑤pin 快照（`/tmp/opencode/c6_pin`）易失，复现命令已入文档。
 - **素材**：`docs/round38_report.md`（全量报告，随本批）+ 各 lane 报告（`.slim/deepwork/p1_v2/round38/{a1,a3,a4,c1,c2,c3,c6,p1,p1b,p2a,p2b,p3,docs_sync}_report.md`）。
 
+### 5.81 清理批 **CLEAN-1–5**（用户批准；2026-10-15/16）：**≈50 GB 回收 + docs 收敛 5 件 + 6 条固化规则**
+
+- **执行账**：`/tmp/opencode` −1.2 G ｜ `datasets` **−1.07 GiB**（删 semantic_v1_3d3=906M、semantic_v1_pilot=182M、recovery_v2、dagger 死桩；保留 7 个在用）｜ **`runs` −47.63 GB**（12,329 个重资产文件：逐集巨 JSON 35.8G / npz 12,020 / tfevents / 大 log；**523 个 `.pt` 全保留**；round37/38 + official/dev + `specs_*` + 90 个受文件路径引用者逐一核验）｜ `docs` **172→5 件**（git 历史为档；手册新增附录 D：~30 条归档指针 + 逐条取档命令）｜ `env/specs` −3（7 在用）｜ `.slim` md 45 删 / 28 留 ｜ `tools` 治理：35 个非 legacy py **全被引用 ⇒ 0 归档**。
+- **新增能力**：`tools/doc_stats.py`（last_write/refs/category/stale；`--selfcheck` 6 断言、幂等 0 diff、防自指；快照写入 `docs/README.md` 附录节）+ `runs/README.md`、`datasets/README.md`、`env/specs/README.md`（登记与规则）。
+- **两条规格纠正（以代码为据，采纳）**：① `runs/official/` **不物理嵌套**——`pipeline/run_paths.py:236` 仅 `glob("runs/*")`（嵌套会让 `latest_final`/`find_unfinished`/`tools/tb.sh` 失明）；dev 只放评测/诊断臂、训练一律 official；② 窄引用面会造假候选（整仓口径下 110 项"零引用"实为 docs 引用）⇒ **引用=0 仅作必要判据，删除须"明示 zone + 批准"**。
+- **6 条固化规则（即日生效）**：① **docs ≤5 件、同文件迭代**（README/台账/GPT 往来/手册/架构契约；新事项只追加台账 §5.x 或手册，**禁止新建 md**）；② 历史一律 git 取档（`git log --diff-filter=D -- <path>`）；③ **runs 域与命名**：official=顶层 `BTC<ts>_<name>`（`official/` 仅登记）、dev=`runs/dev/roundNN/<arm>`（须带 run_meta + protocol hash）；④ **数据/spec 登记制**（`datasets/README.md`、`env/specs/README.md` 唯一清单，新增必登记；Clean500=val−eval500 不新建）；⑤ **重资产保留制**（ckpt + summary/metadata 永久；逐集/渲染/TB 类仅留最近两轮；含 `.pt` 目录删除须批准）；⑥ **doc_stats 节拍**（每轮收口跑 `--stale-list`，候选随收口裁决）。**旧规则"正式 run 不清理"作废**，由 ③⑤ 替代。
+- **配套修复（CLEAN-4）**：`collect_recovery` 数据集卡落点 → `.slim/deepwork/p1_v2/recovery_notes/`（不再写 `docs/`）；`forensics_closed_loop` 默认 spec → 现役 `env/specs/scenarios_val.json` + 缺失 fail-fast。两处旧挂账关闭。
+- **证据**：`.slim/deepwork/p1_v2/round38/clean{1..5}_report.md`、`runs/README.md`、`datasets/README.md`、`env/specs/README.md`、`docs/README.md`（含 doc_stats 快照节）；pytest 全程 **1068 passed**（每批复跑）。
+
 ## 6. 文档与产物索引
 
 > **CLEAN-1 注（2026-10-15）**：`docs/` 已收敛为 5 常驻文件（本台账 / `README.md` / `repo_handbook.md` / `chatgpt5p6sol_review.md` / `architecture_contract.md`）；本节以下所列历史文档已归档至 git 历史，**要点压缩与逐条取档命令见 `docs/repo_handbook.md` 附录 D**。新事项只追加到本文件 §5.x / 手册，不新建 md。
@@ -515,7 +524,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第五十九轮（本版；515 → 524 行）**：新增 §5.75（C3 `path_*` 分类结案）；上版 515 行 = `git show fe2f11f:docs/deepseekv4p1_argue.md`。
+- **第六十轮（本版；560 → 571 行）**：新增 §5.81（清理批 + 固化规则）；上版 560 行 = `git show 75c9d64:docs/deepseekv4p1_argue.md`。
+- **第五十九轮（515 → 524 行）**：新增 §5.75（C3 `path_*` 分类结案）；上版 515 行 = `git show fe2f11f:docs/deepseekv4p1_argue.md`。
 - **第五十八轮（506 → 515 行）**：新增 §5.74（C2 MoE 消融结案 + A1 口径校正）；上版 506 行 = `git show 802468b:docs/deepseekv4p1_argue.md`。：新增 §5.74（C2 MoE 消融结案 + A1 口径校正）；上版 506 行 = `git show 802468b:docs/deepseekv4p1_argue.md`。
 - **第五十七轮（498 → 506 行）**：新增 §5.73（C5 四交付物 + 减枝执行计划）；上版 498 行 = `git show 99fcd2f:docs/deepseekv4p1_argue.md`。
 - **第五十六轮（489 → 498 行）**：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。
