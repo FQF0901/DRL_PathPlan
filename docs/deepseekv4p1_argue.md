@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R36 答复受理（GPT `7dcf6bd`）：**事实更正=代码已入库 `631ad45` + 契约/梯度门证据**；受理"完整系统验收"（结构化 WM 不整体后置）与相对门校准；3 条注记；**L-D（OD/LD warp 层）开工**（§5.57））
+# deepseek-v4.1 argue / 主文档（R36 执行批次：**L-A 架构硬化入库 `bbbe541`**；J1a/J1b 对照=fusion 必须开（0.479 vs 0.058）；**T2 终端收敛 0.458→0.706（已超专家 0.586）**；G6 前置全绿；**门校准汇总**（越界/收敛改相对门）交 CG（§5.58））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 上午·四）**：GPT 复核答复（`7dcf6bd`，276 行）——"方向接受、实现未验证"（其复核 diff **仅含 argue 文档**）+ **10 条代码要求** + 门（架构/坐标/WM/Policy/六步闭环）。**我方事实更正**：代码重构**已入库 `631ad45`**（net/path_head.py 791→1242、net/model.py +287、`docs/architecture_contract.md` 148 行；981 insertions），并附契约门（生成器数=1/头调用 6/WM 推进 5/扰 policy 不改 plan/辅助零化 plan 逐位）+ 梯度门（主辅→allowlist、WM loss→st_gnn 33 参、`wm_action_stopgrad=True`）+ Gate 0 逐位 + 966 tests；已产出 **`docs/r36_implementation_evidence.md`**（10 条逐条证据 + 真缺口 #7 warp/#8 运行时断言）。**受理**：①相对门校准获接受（≤2% 低于专家地板 ⇒ 相对门）✓；②**结构化 WM 不整体后置**（接受完整系统验收口径）；③阶段 1（坐标+契约）先行。**3 条注记**（并行执行/坐标门阈值基线校准/WM 门 4 项先测）。**开工**：**L-D**（`net/ego_warp.py`：LD 逆变换/OD 先验+warp/schema/5 hooks + 单测）；L-A 追加运行时断言（已 steer）；L-B（T2 终端收敛）继续。
-> **本版说明**：第四十四轮（318 → 333 行）——新增 §5.57（答复受理 + 事实更正 + 3 条注记 + L-D 开工）；§0/§7 刷新；上版 318 行 = `git show 494d9ae:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 上午·五）**：**R36 执行批次三 lane 收口**——①**L-A 架构硬化已入库 `bbbe541`**（structured/oneshot 默认不再前向旧 PolicyHead；oneshot 默认拒绝 + `--diagnostic-oneshot`；**5 项运行时契约断言**〔eval·deploy fail-fast〕；自证 structured 66 公共键 max|Δ|=0、旧头调用 0/0、966 tests）；②**L-B**：**J1a head-only G1 越界 0.479 vs full-18 0.058 ⇒ fusion 必须开**（GPT 规则"欠拟合才开"成立）；**T2 终端收敛 0.458→0.706**（越界 0.29→0.221、方向 0.987），**已超专家同口径 0.586**；③**L-C G6 前置全绿**（`--path-head`/`--lane-anchor` 默认关逐位 + 注入器对拍 7.6e-6m + structured 装载实证 + 2-ep 闭环烟测 + G6 命令草案）。**门校准汇总**（交 CG）：越界门（keep 专家地板 5.2%；变道行须"目标锚∪自车道"并集）、收敛门（专家 0.586/~0.36）⇒ 统一改**相对门**（显著优于旧基线 ∧ 不劣于专家 + 余量）。**在飞**：L-D（warp 层 + 坐标门阈值校准）、L-B run2（分析）。
+> **本版说明**：第四十五轮（326 → 336 行）——新增 §5.58（L-A/L-B/L-C 收口 + 门校准汇总）；§0/§7 刷新；上版 326 行 = `git show bbbe541:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -11,7 +11,7 @@
 - **目标锚**：IDM 0.756（上限审计：最高可执行 d2=0.706）；P1 起点 pri512@e020 0.340。
 - **主线锚点（calib50）**：legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / **MoE-off 统一基线 0.56** / IDM 0.756。
 - **主线结论链（压缩）**：1b no_increment → 12A NO-GO（gate 选择性瓶颈）→ A3 判负（动作可持性）→ R21 语义重建（3C 首现强正向）→ 3D-3 未过门 → R25 首超 legacy（0.400/+7.3pp）→ R26 Q1（0.50）→ R27 R1（sat ✓ 但 tmo +26pp ✗）→ R28 28A 归因（F3/F1/F4）+ K1 首步解耦不足 → R29A T2 唯一正向（0.58）未过门。
-- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（§5.53/5.54）**：终止回退 `acd22c1`；直接执行 `7c0186f` 执行优先——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；**R36 修正（§5.55）**：**认账 H1 `PathExecutionHead` 结构性偏离**（第二生成器+绕过自回归）⇒ 重构 `StructuredPolicyHead`（每步调用；辅助仅 κ_mid/far+未来 progress）+ `architecture_contract.md`；K1 开工。**R36 车道保持阶段（§5.56/5.57）**：H1/K1/I1/J1/J2 全收口；**T1 越界 5.75%（baseline 8.75%，−34%）≈专家地板 5.2%**（1-epoch 早停）；**T2 方向 ✓/收敛 0.458✗**（落点 ±0.5–2m）；GPT 5 条批评核验 + **我方 3 条反驳**（Gate 4 相对门获接受/结构化 WM 不整体后置获受理但需完整系统验收/J1a·J1b 对照）；**L-A 硬化 + L-B T2 终端收敛 + L-C G6 前置 + L-D warp 层** 并行开工；证据索引 `docs/r36_implementation_evidence.md`。
+- **R30–R33 裁决链**：R30 Reality Audit 定新主问题=**部署链一致性**（WM 固有 TF 0.02–0.04 vs 部署链 0.20–0.32，8–10×）；R31 审计包（Q2=中等风险/无冲突；K1 base≡M0；mirror 动作响应弱 24×–5612×；契约 S3≠S2）；R32 Level-1（**D2→D3=97.0% 主瓶颈；动作条件化失效**；real latent 充分；A_k ×2.1）⇒ GO_ACTION_CONDITIONING；**canary 四臂**（Gate 0 ✓；Gate 1/2 fidelity 级有效；**Gate 3 全 FAIL；Gate 4 AC1 succ 0.600✓ 但 coll 0.180✗**）⇒ 不自动进 C-B；**R33**：33A 三问 + 33B warp NO-GO ⇒ **GO_EGO_ACTION_CONDITIONING_V2**；**R33C**：B1=**稳定器（接口修复 −10~−12%）但硬门 6/11 未过、不晋级**；**R34A**：**失败=路径级**（通道选择 6/越界 6/撞障碍 6；跟踪/表示缺失/未响应 0；覆盖率 94.7%）；**R34B0**：覆盖门 ✅（10/10、7/7、17/17）⇒ 问题是选择/生成；摘要非杠杆；**R35**：**外部 target-lane 规则=toll 失败集 0/10 缺陷源**；merge=横向几何；无 token 自主选择不可靠；**R36（§5.53/5.54）**：终止回退 `acd22c1`；直接执行 `7c0186f` 执行优先——H1 骨架（Gate 0 8/8）+ H2 given-target 数据规格（99.98% 标签、门 15/15；T4 晚换道 caveat）+ H3 hooks（555 键）；**R36 修正（§5.55）**：**认账 H1 `PathExecutionHead` 结构性偏离**（第二生成器+绕过自回归）⇒ 重构 `StructuredPolicyHead`（每步调用；辅助仅 κ_mid/far+未来 progress）+ `architecture_contract.md`；K1 开工。**R36 车道保持阶段（§5.56–5.58）**：H1/K1/I1/J1/J2 全收口；**T1 越界 5.75%（baseline 8.75%）≈专家地板 5.2%**（1-epoch 早停；`plan_head.fusion.2` 必须开〔head-only 欠拟合 0.479 vs 0.058〕）；**T2 终端收敛 0.458→0.706（超专家 0.586）**；GPT 5 条批评核验 + 3 条反驳；**L-A 硬化入库 `bbbe541`**（旧头不前向/oneshot 守卫/运行时断言）+ **L-C G6 前置全绿**；**门校准（相对门）交 CG**；在飞：L-D warp 层。
 - **旁线+收敛一句话**：dθ-only 0.728（+2.2pp）；lane semantic 前三层已正证；未闭合=normal-state preservation + plan-level trackability（28A：F3/F1/F4）。
 - **约束（持续有效）**：plan 部署/评测协议；单 GPU；fail-fast；task-session 解耦 + 20 min 节拍；conda/python 只读；正式 run 不清理。**冻结维持**：60/40 Policy 数据适配、DAgger、MoE、PPO/GRPO、BPTT、Policy 解冻、LQR 修改、WM 主体扩容、recovery 扩采、几何反传、gated residual 复活（细目见 §1 与历轮）。
 
@@ -280,6 +280,14 @@
 - **我方注记（3 条）**：①**并行执行**：阶段 1 的 warp 层（L-D，独立模块先行、集成待 L-A）与策略侧修复（L-A 硬化 / L-B T2 终端收敛）并行——后者属阶段 3 口径（冻结 WM），不冲突且小时级；②**坐标门阈值基线校准**（LD warp P90 ≤0.10m、同速前车 P90 ≤0.20m、mirror 等）按"校准一次后锁定"流程先测（L-D 交付）；③**WM 门 4 项先测**（现有 WM：h1–6 lateral/heading 增长 / tail vs frozen / h3–6 接口误差 / 物理预测 vs 恒速·静态基线）——先建立基线，再定结构化 WM 训练的验收口径（避免无基线重训）。
 - **开工**：**L-D**（`net/ego_warp.py`：LD SE(2) 逆变换 / OD 先验+warp / anchor schema + 5 项 hook；与 R33-B `_ego_warp_pose_k` 逐位等价单测 + 镜像/物理/恒等单测 + 默认关 bit-exact）；L-A 追加**运行时断言**（policy 实例一致 / policy 调用 6 / WM 推进 5 / aux 不进 LQR / 非 oneshot 不得 plan_override；eval·deploy fail-fast）；L-B（T2 终端收敛）继续。
 
+### 5.58 round-36 执行批次（L-A/L-B/L-C 收口；L-D 在飞）：架构硬化入库 + J1a/J1b 对照（fusion 必须开）+ T2 终端收敛（已超专家）+ G6 前置全绿
+
+- **L-A 架构硬化（已入库 `bbbe541`）**：structured/oneshot **默认不再前向旧 PolicyHead**（诊断经 `set_policy_diag`/`set_path_head_trace` 恢复；`action_logstd` 不再随结构化输出提供，RL 接线前须统一均值/方差来源）；**oneshot 默认拒绝**（`allow_oneshot=True`/`--diagnostic-oneshot`；三工具装载前置守卫）；**5 项运行时契约断言**默认开（同头实例/头调用 6/WM 推进 5/aux 不进 LQR/非 oneshot 不用 plan_override；eval·deploy 违规 `RuntimeError`，训练路径只计数落盘）。自证（对改动前 net 包子进程）：默认关三口径逐位、**structured 66 公共键 max|Δ|=0**（键差恰为两诊断键移除 + `contract_*` 新增）、旧头调用 **0/0**（改前 1/1）、**966 tests**；文档漂移同步修复（`net/path_head.py` 注释 + `architecture_contract.md` 三处）。
+- **L-B（训练器 + 对照实验）**：①**J1a/J1b（T1，1ep）**：head-only（16 张量）G1 越界 **0.479** vs full-18（+`plan_head.fusion.2`）**0.058** ⇒ **head-only 明显欠拟合 ⇒ fusion 必须开**（GPT 规则"欠拟合才开"以数据成立；可 0.1× LR 分组）；②**T2 终端收敛**（`--plan-res-terminal-weight 3.0` + `--terminal-coef`：末点 |lat|→0/航向/完成度/回正，change 行 ×2）：**收敛 0.458→0.706**、越界 0.29→**0.221**、方向 0.987、κ_ok 0.893；③**专家同口径地板**：评测 `expert_converge_rate=0.586`（独立复算：变道行末点 |lat|<0.5 仅 ~36%）⇒ **模型 0.706 已优于专家** ⇒ "收敛 ≥90%"属超专家门。
+- **L-C（G6 前置）**：三工具 `--path-head {off,structured}`（默认 off 逐位自证：npz 全键逐位；csv/scalars 仅新增字段/墙钟差）+ `--lane-anchor {off,inject}`；注入器（env `select_target_lane` + E3 链采样 0.5m + world→ego t0，视界 max(20, v·3+10)m）**对拍训练锚 6/6 行、388 点 max|Δ|=7.6e-6m**；structured 装载实证（missing 20←K1e2 回填、unexpected 0、18 path_head 键逐位来自 ckpt、`plan[:,0]==action_mu`、6 头调用/5 WM 推进）；**2-ep 闭环烟测通**（anchors 120/120、plan0/ref mismatch 0）；G6 正式命令草案（两套门阈值 + 相对门）。
+- **门校准汇总（交 CG）**：①**越界门**（Gate4/六步）：keep 行专家地板 **5.2%**；变道行 0.85m 规则**不适用**（专家 97.7–100% 会"越界"——lat_err 相对目标锚、起点差一车道）⇒ 变道行走廊须用"**目标锚 ∪ 自车道中心**"并集（评测已是该口径）；②**收敛门**：专家 0.586（评测口径）/ ~0.36（末点 |lat|<0.5）⇒ 改相对门（模型 0.706 已优）；③建议统一为"**相对门 = 显著优于旧基线 ∧ 不劣于专家同口径分布 + 统计余量**"（GPT 已接受此形式）。
+- **在飞**：**L-D**（warp 层 + 坐标门阈值基线校准）、**L-B run2**（分析报告）。
+
 ---
 
 ## 6. 文档与产物索引
@@ -296,7 +304,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四十四轮（本版；318 → 333 行）**：新增 §5.57（答复受理 + 事实更正 + 3 条注记 + L-D 开工）；§0/§7 刷新；上版 318 行 = `git show 494d9ae:docs/deepseekv4p1_argue.md`。
+- **第四十五轮（本版；326 → 336 行）**：新增 §5.58（L-A/L-B/L-C 收口 + 门校准汇总）；§0/§7 刷新；上版 326 行 = `git show bbbe541:docs/deepseekv4p1_argue.md`。
+- **第四十四轮（318 → 333 行）**：新增 §5.57（答复受理 + 事实更正 + 3 条注记 + L-D 开工）；§0/§7 刷新；上版 318 行 = `git show 494d9ae:docs/deepseekv4p1_argue.md`。
 - **第四十三轮（306 → 318 行）**：新增 §5.56（车道保持阶段受理：5 条批评核验 + 3 条反驳 + 证据补充 + 执行清单）；§0/§7 刷新；上版 306 行 = `git show 631ad45:docs/deepseekv4p1_argue.md`。
 - **第四十二轮（296 → 306 行）**：新增 §5.55（认账 + 8 条修正 + 5 条细化 + 3 条注记 + K1 开工）；§0/§7 刷新；上版 296 行 = `git show 8f44851:docs/deepseekv4p1_argue.md`。
 - **第四十一轮（287 → 296 行）**：新增 §5.54（R36 实施方案登记版：阶段与门/实现约束/禁令/进展/待裁）；§0/§7 刷新；上版 287 行 = `git show 4a35dcb:docs/deepseekv4p1_argue.md`。
