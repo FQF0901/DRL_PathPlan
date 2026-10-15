@@ -1,7 +1,7 @@
 """评测侧 model_config 透传守卫（2026-10-10 ``spatial`` 漏传事故）。
 
-事故：``eval_runner`` 构造评测任务时只透传 hidden_dim/moe/policy/value/world_model/
-plan_anchor，遗漏 ``spatial`` → stg3 排摸臂（``spatial.layers=3``）的 ckpt 在评测侧被按
+事故：``eval_runner`` 构造评测任务时只透传 hidden_dim/moe/policy/value/world_model，
+遗漏 ``spatial`` → stg3 排摸臂（``spatial.layers=3``）的 ckpt 在评测侧被按
 默认 2 层建模型（``unexpected=10``）；fail-fast 将其拦为 rc=2（旧行为会静默错评）。
 
 本测试钉住：``eval_runner.task_model_config`` 必须透传 ``spatial``，且构造出的模型确实
@@ -20,7 +20,6 @@ def test_spatial_forwarded_and_third_layer_present() -> None:
         "policy": {"trunk_hidden": 160, "attn_heads": 4, "attn_layers": 1},
         "value": {"net_hidden": 256},
         "world_model": {"rollout_steps": 6},
-        "plan_anchor": {"enabled": False},
         "spatial": {"type": "message_passing", "layers": 3},
     }
     mc = task_model_config(cfg)

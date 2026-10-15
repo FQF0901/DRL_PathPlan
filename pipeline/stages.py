@@ -171,10 +171,6 @@ def build_model(config: Mapping[str, Any]) -> Any:
     # v8b 参数排摸：打通 spatial 层数 / 注意力层数（此前 build_model 未读取 → 不可扫）
     spatial_cfg = dict(section.get("spatial", {}) or {})
     world_model = dict(section.get("world_model", {}) or {})
-    plan_anchor = dict(section.get("plan_anchor", {}) or {})
-    # v7 结构迭代 B：K-anchor 计划头（enabled=false → num_anchors=0 → 模型与旧版逐位一致）
-    anchor_enabled = bool(plan_anchor.get("enabled", False))
-    num_anchors = int(plan_anchor.get("num_anchors", 6)) if anchor_enabled else 0
     kwargs = {
         "hidden": int(section.get("hidden_dim", 128)),
         "num_experts": int(experts.get("count", 8)),
@@ -189,10 +185,6 @@ def build_model(config: Mapping[str, Any]) -> Any:
         "attn_heads": int(policy_cfg.get("attn_heads", 4)),
         "attn_layers": int(policy_cfg.get("attn_layers", 1)),
         "wm_steps": int(world_model.get("rollout_steps", 6)),
-        "num_anchors": num_anchors,
-        "anchor_path": plan_anchor.get("path") if anchor_enabled else None,
-        "anchor_temperature": float(plan_anchor.get("temperature", 1.0)),
-        "anchor_hard": bool(plan_anchor.get("hard", False)),
     }
     return DrivingModel(**kwargs)
 
@@ -2757,19 +2749,9 @@ _PRIMARY_PHASE_FREEZE: Tuple[str, ...] = (
     # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
     "ego_phys.",
 )
-#: K-anchor 计划头参数前缀（v7 结构迭代 B；fix-11 契约修复）：预注册 §11 要求 phase3
-#: ``specific_only`` 下锚头随 plan head 主干冻结；实现曾遗漏这 4 个前缀，使 13 个锚头参数
-#: 落入 base 组被训练（唯一监督 = chain L2）→ 锚计划系统性左偏（根因诊断
-#: ``/tmp/opencode/v7_struct_fail_diag.md`` §3：``b10+p3锚头`` = 0.0）。
-_PHASE3_ANCHOR_HEAD_PREFIXES: Tuple[str, ...] = (
-    "plan_head.anchor_head.",
-    "plan_head.speed_head.",
-    "plan_head.residual_head.",
-    "plan_head.anchor_embed",
-)
 
-#: specific 段冻结（lane U1 用户定稿；2026-10-05 fix-11 契约修复加入 K-anchor 锚头前缀）：
-#: **只训 experts + gate（router）+ residual_scale**；主干/primary 策略头/专家/policy/锚头全冻
+#: specific 段冻结（lane U1 用户定稿）：
+#: **只训 experts + gate（router）+ residual_scale**；主干/primary 策略头/专家/policy 全冻
 #: （primary 输出保持 phase 1 结束时的口径）。
 _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
     "st_gnn.",
@@ -2783,12 +2765,11 @@ _SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = (
     "policy.",
     # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
     "ego_phys.",
-) + _PHASE3_ANCHOR_HEAD_PREFIXES
+)
 
 #: phase3 **安全配方**（fix-11）冻结清单：只训共享主干（encoders/mem_encoder/plan_head
 #: fusion/norm/ego_next/primary/policy）；冻结 = WM(st_gnn)/value + specific experts/router/
-#: residual_scale（决定性破坏项）+ K-anchor 锚头（叠加破坏项）。锚 CE/WTA 损失保留 →
-#: 梯度经冻结锚头塑形共享特征（见 ``phase3_effective_config``）。
+#: residual_scale（决定性破坏项）。
 _PHASE3_SAFE_FREEZE: Tuple[str, ...] = (
     "st_gnn.",
     "value.",
@@ -2797,11 +2778,11 @@ _PHASE3_SAFE_FREEZE: Tuple[str, ...] = (
     "plan_head.moe.residual_scale",
     # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
     "ego_phys.",
-) + _PHASE3_ANCHOR_HEAD_PREFIXES
+)
 
 #: recovery 微调（P1-2，§7.10-A6；R1 = ``freeze=recovery``）冻结清单：train = plan_head 主干
 #: （fusion/norm/ego_next）+ primary（primary 低 LR）；freeze = encoders/mem_encoder/WM(st_gnn)/
-#: router/experts(+residual_scale)/K-anchor 锚头/policy/value（锚 CE/WTA 与 WM 上游监督自动降级）。
+#: router/experts(+residual_scale)/policy/value（WM 上游监督自动降级）。
 _RECOVERY_FREEZE: Tuple[str, ...] = (
     "st_gnn.",
     "value.",
@@ -2813,7 +2794,7 @@ _RECOVERY_FREEZE: Tuple[str, ...] = (
     "policy.",
     # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
     "ego_phys.",
-) + _PHASE3_ANCHOR_HEAD_PREFIXES
+)
 
 #: recovery R2（``freeze=recovery_experts``）：R1 ∪ 既有 experts/residual_scale 可训（独立 LR 组；
 #: router 仍冻、专家数/负载均衡机制不变；R2 无显著增益 → 用 R1）。
@@ -2826,7 +2807,7 @@ _RECOVERY_EXPERTS_FREEZE: Tuple[str, ...] = (
     "policy.",
     # R32 canary：ego 物理锚 decoder 不属于任何既有配方 → 全期冻结（默认关、零行为变化）
     "ego_phys.",
-) + _PHASE3_ANCHOR_HEAD_PREFIXES
+)
 
 
 def _action_mu_stats(
@@ -3060,10 +3041,6 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     # P1 iter2：动作逐维权重（单变量；缺省 [1.0, 1.0] = 旧行为）
     raw_dim_weights = bc_cfg.get("action_dim_weights", [1.0, 1.0]) or [1.0, 1.0]
     action_dim_weights = (float(raw_dim_weights[0]), float(raw_dim_weights[1]))
-    # v7 结构迭代 B：K-anchor WTA 目标（config only；0.0 = 关 = 旧行为逐位不变）
-    anchor_ce_weight = float(bc_cfg.get("anchor_ce_weight", 0.0))
-    anchor_wta_weight = float(bc_cfg.get("anchor_wta_weight", 0.0))
-    anchor_temperature = float(bc_cfg.get("anchor_temperature", 1.0))
     # lane U1：MoE 负载均衡 α + worst/mild 行权重（phase 2；CLI 优先，config 兜底）
     load_balance_coef = float(
         args.load_balance_coef
@@ -3318,9 +3295,6 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
             mild_weight=float(mild_weight),
             val_worst_flags=val_worst_flags,
             traj_aux_valid=traj_aux_valid,
-            anchor_ce_weight=anchor_ce_weight,
-            anchor_wta_weight=anchor_wta_weight,
-            anchor_temperature=anchor_temperature,
             epoch_callback=_on_epoch,
             start_epoch=int(start_epoch),
             optimizer_state=optimizer_state,
@@ -4204,15 +4178,14 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     - 起点 = ``--ckpt``（缺省读 config ``stages.B.phase3.init_ckpt``）；
     - **冻结配方** ``freeze``（lane P3-I，默认由 config 定）：
       ``specific_only`` = 只训 experts/router(gate)/residual_scale（复用 phase-2 冻结清单
-      :data:`_SPECIFIC_PHASE_FREEZE`；fix-11 起含 K-anchor 锚头），WM/ego_next 无梯度 →
-      损失自动置 0（降级）；``trunk_only`` = **安全配方**（fix-11）：只训共享主干
+      :data:`_SPECIFIC_PHASE_FREEZE`），WM/ego_next 无梯度 → 损失自动置 0（降级）；
+      ``trunk_only`` = **安全配方**（fix-11）：只训共享主干
       （encoders/mem_encoder/plan_head fusion/norm/ego_next/primary/policy），冻结 WM/value +
-      specific experts/router + 锚头，锚 CE/WTA 保留（塑形共享特征）；``recovery`` /
+      specific experts/router；``recovery`` /
       ``recovery_experts`` = **P1-2 微调配方**（§7.10-A6；R1/R2，默认关闭的开关由 config
       ``stages.B.phase3.recovery`` 提供）：只训 plan 主干 fusion/norm/ego_next + primary
       （primary 低 LR；R2 加 experts/residual_scale 独立 LR 组；router 恒冻），冻结
-      encoders/mem/WM/value/锚头/policy（锚 CE/WTA 与 WM 上游监督自动降级）；``all`` = 全参数
-      解冻（含 WM；旧行为）；
+      encoders/mem/WM/value/policy（WM 上游监督自动降级）；``all`` = 全参数解冻（含 WM；旧行为）；
     - **epoch 级 clean150 守护**（fix-11，``--phase3-guard-spec`` 给出即启用）：每 epoch 保存
       ``guard/epochNNN.pt`` → 子进程评测 clean150 → ``overall.success_rate <
       --phase3-guard-min-success``（或评测不可得）→ 抛 :class:`Phase3GuardCollapse` 立即中止
@@ -4274,24 +4247,11 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         freeze_prefixes = _RECOVERY_FREEZE
     else:  # recovery_experts（P1-2 R2）：R1 + experts/residual_scale
         freeze_prefixes = _RECOVERY_EXPERTS_FREEZE
-    # 降级清单：specific_only / recovery / recovery_experts 下锚头已冻结（fix-11 契约修复）→
-    # 锚 CE/WTA 无梯度、同规则降级（仅在权重 > 0 = 实际启用时列入清单；默认关不产生日志噪声）；
-    # trunk_only 下锚 CE/WTA **保留**（梯度经冻结锚头塑形共享主干），仅 WM/ego_next 上游监督
-    # 按配方保守降级。
-    _pre_losses = dict(p3_cfg.get("losses", {}) or {})
-
-    def _pre_loss_weight(key: str, default: float) -> float:
-        cli = getattr(args, f"phase3_{key}_weight", None)
-        return float(cli if cli is not None else _pre_losses.get(key, default))
-
-    _anchor_degrade = tuple(
-        key for key in ("anchor_ce", "anchor_wta") if _pre_loss_weight(key, 0.0) > 0.0
-    )
+    # 降级清单：非 ``all`` 配方下 WM/ego_next 上游监督无梯度 → 自动置 0
+    # （``trunk_only`` 与 specific_only/recovery 同规则；见 ``phase3_effective_config``）。
     if freeze_mode == "all":
         frozen_loss_keys: Tuple[str, ...] = ()
-    elif freeze_mode in ("specific_only", "recovery", "recovery_experts"):
-        frozen_loss_keys = PHASE3_WM_LOSS_KEYS + _anchor_degrade
-    else:  # trunk_only
+    else:
         frozen_loss_keys = PHASE3_WM_LOSS_KEYS
     anchor_enabled = (
         bool(args.phase3_anchor)
@@ -4515,9 +4475,6 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         "progress": _loss_weight("progress", 0.0),
         # P1 DAgger 前置：bias 标定项（逐维 signed-bias 惩罚；0.0 = 关闭 = 旧行为逐位不变）
         "bias_calib": _loss_weight("bias_calib", 0.0),
-        # v7 结构迭代 B：K-anchor WTA 目标（0.0 = 关闭 = 旧行为逐位不变；specific_only 下自动降级）
-        "anchor_ce": _loss_weight("anchor_ce", 0.0),
-        "anchor_wta": _loss_weight("anchor_wta", 0.0),
         "load_balance": float(
             args.load_balance_coef if args.load_balance_coef is not None else losses_cfg.get("load_balance", 0.01)
         ),
@@ -4637,13 +4594,13 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
         freeze_text = "全参数解冻（含 WM；freeze=all）"
     elif freeze_mode == "specific_only":
         freeze_text = (
-            "冻结配方=specific_only（只训 experts/router/residual_scale；锚头已冻结；"
+            "冻结配方=specific_only（只训 experts/router/residual_scale；"
             f"降级置 0：{', '.join(frozen_loss_keys)}）"
         )
     elif freeze_mode == "recovery":
         freeze_text = (
             "冻结配方=recovery/R1（只训 plan 主干 fusion/norm/ego_next + primary；"
-            "冻结 encoders/mem/WM/router/experts/锚头/policy/value；"
+            "冻结 encoders/mem/WM/router/experts/policy/value；"
             f"降级置 0：{', '.join(frozen_loss_keys)}）"
         )
     elif freeze_mode == "recovery_experts":
@@ -4654,8 +4611,8 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     else:
         freeze_text = (
             "冻结配方=trunk_only/安全配方（只训共享主干 encoders/mem_encoder/plan_head 主干/policy；"
-            "冻结 WM/value/specific experts/router/锚头；"
-            f"降级置 0：{', '.join(frozen_loss_keys)}；锚 CE/WTA 保留）"
+            "冻结 WM/value/specific experts/router；"
+            f"降级置 0：{', '.join(frozen_loss_keys)}）"
         )
     anchor_rows_log = int(anchor_info.get("anchor_rows") or 0) if anchor_enabled else 0
     anchor_text = (
@@ -5056,9 +5013,6 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
             else losses_cfg.get("ld_diag_every", 1)
         ),
         bias_calib_weight=loss_weights["bias_calib"],
-        anchor_ce_weight=loss_weights["anchor_ce"],
-        anchor_wta_weight=loss_weights["anchor_wta"],
-        anchor_temperature=float(losses_cfg.get("anchor_temperature", 1.0)),
         load_balance_coef=loss_weights["load_balance"],
         moe_enabled=True,
         lr_base_scale=lr_base_scale,
@@ -5796,13 +5750,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("all", "specific_only", "trunk_only", "recovery", "recovery_experts"),
         default=None,
         help="phase 3 冻结配方（默认取 config stages.B.phase3.freeze）："
-             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单，"
-             "fix-11 起含 K-anchor 锚头；WM od/ld/presence/entry 与 ego_next、锚 CE/WTA "
-             "无梯度 → 损失自动置 0）；"
+             "specific_only = 只训 experts/router/residual_scale（复用 phase-2 冻结清单；"
+             "WM od/ld/presence/entry 与 ego_next 无梯度 → 损失自动置 0）；"
              "trunk_only = 安全配方（fix-11）：只训共享主干，冻结 WM/value/specific "
-             "experts/router/锚头；锚 CE/WTA 保留（塑形共享特征）；"
+             "experts/router；"
              "recovery = P1-2 R1：只训 plan 主干 fusion/norm/ego_next + primary（primary 低 LR），"
-             "冻结 encoders/mem/WM/router/experts/锚头/policy/value；"
+             "冻结 encoders/mem/WM/router/experts/policy/value；"
              "recovery_experts = P1-2 R2：R1 + experts/residual_scale（独立 LR 组；router 仍冻）；"
              "all = 全参数解冻（含 WM；旧行为）",
     )
@@ -5813,18 +5766,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="锚数据集目录（默认 config …anchor.bc_dir；auto = 最新 datasets/BTC*_expert*）")
     parser.add_argument("--phase3-anchor-mild-weight", type=float, default=None,
                         help="锚行权重倍率（默认取 config …anchor.mild_weight=0.1）")
-    parser.add_argument("--phase3-anchor-ce-weight", type=float, default=None,
-                        help="K-anchor 选择头 CE 权重（默认取 config …losses.anchor_ce=0.0=关）；"
-                             "trunk_only 安全配方下保留（梯度经冻结锚头塑形共享主干）")
-    parser.add_argument("--phase3-anchor-wta-weight", type=float, default=None,
-                        help="K-anchor WTA 残差回归权重（默认取 config …losses.anchor_wta=0.0=关）")
     parser.add_argument("--phase3-guard-spec", type=str, default=None,
                         help="fix-11 epoch 级 clean150 守护 spec（给出即启用；缺省关）：每 epoch 末"
                              "保存 guard/epochNNN.pt → 子进程评测 → success < min-success（或评测"
                              "不可得）→ 立即中止（fail-closed）；逐 epoch 记录写 guard/guard.json")
     parser.add_argument("--phase3-guard-config", type=str, default=None,
-                        help="守护评测 config（默认 = 训练 --config；注意：需与训练模型口径一致，"
-                             "K-anchor 链应传评测 config，如 config/eval.yaml）")
+                        help="守护评测 config（默认 = 训练 --config；注意：需与训练模型口径一致）")
     parser.add_argument("--phase3-guard-workers", type=int, default=6,
                         help="守护评测 workers（默认 6；训练进程持物化数据时建议 ≤4 控制主机内存）")
     parser.add_argument("--phase3-guard-min-success", type=float, default=None,

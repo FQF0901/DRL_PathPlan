@@ -865,7 +865,7 @@ def task_model_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     2026-10-10 修复（fail-fast 事故记录）：此前漏传 ``spatial``，stg3 臂（``spatial.layers=3``）
     的 ckpt 在评测侧被按默认 2 层建模型 → ``unexpected=10`` 被 fail-fast 拦下（rc=2）；
     若在 fail-fast 引入前，会静默按 2 层评测出错误数字。build_model 读取键：
-    hidden_dim / moe / policy / value / world_model / plan_anchor / spatial。
+    hidden_dim / moe / policy / value / world_model / spatial。
     """
     return {
         "hidden_dim": config.get("hidden_dim", 128),
@@ -875,9 +875,6 @@ def task_model_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         "policy": dict(config.get("policy") or {}),
         "value": dict(config.get("value") or {}),
         "world_model": dict(config.get("world_model") or {}),
-        # v7 结构迭代 B：K-anchor 计划头透传（缺省/disabled → build_model num_anchors=0，
-        # 旧行为逐位不变；enabled=true 时评测模型才带锚头并消费锚计划）。
-        "plan_anchor": dict(config.get("plan_anchor") or {}),
         # 2026-10-10：spatial 层数（stg3 排摸臂）必须透传——见上方事故记录。
         "spatial": dict(config.get("spatial") or {}),
     }

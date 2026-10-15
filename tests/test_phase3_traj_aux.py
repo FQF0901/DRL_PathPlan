@@ -72,8 +72,6 @@ def _stub_terms(traj_aux_weight: float, traj_row_mask=None):
         latent_weight=0.0,
         presence_weight=0.0,
         entry_weight=0.0,
-        anchor_ce_weight=0.0,
-        anchor_wta_weight=0.0,
     )
     terms = _phase3_loss_terms(
         model,

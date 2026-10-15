@@ -12,13 +12,12 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 | `temporal.py` | `TemporalAttention`：6 帧掩码注意力池化 + 帧龄嵌入；整列全无效时 pooled=0 → 经 `out` 层（带 bias 的 Linear，`net/temporal.py:85`）后输出为该层 bias（**非严格 0**，实测范数 ≈0.5–0.6（随机初始化）；与下方 mask 约定的**已知实现偏差，待代码修正**）（`net/temporal.py:41-85`）。 |
 | `spatial.py` | 2 层消息传递（层数可配）：ego↔OD/LD、LD 槽位相邻、OD 近邻 KNN（对称化）；边特征 = 相对位姿 5 维 `[Δx,Δy,cosΔθ,sinΔθ,‖Δp‖]/scale`（`net/spatial.py:244-353`；M1/M2 消融组件 `LdSetAttention`/`LdAggregate` 见 `:61-243`）。 |
 | `st_gnn.py` | `SpatioTemporalGNN`：latent 自回归转移（3 个 `2H→H→H` 头，输出层零初始化 ⇒ 初始恒等）+ presence/entry logits（先验 bias +2/−2）+ 物理小解码头（od 5 维 / ld 4 维，先验+零初始化残差，诊断用）+ 惰性 `action_ego`（默认关）（`net/st_gnn.py:83-322`）。 |
-| `plan_head.py` | 6 个 token 融合（z_ego/od_pool/ld_pool/others/nav/signal）→ MoE → 融合 `latent` + 下一 ego 特征前 6 维（reserved 2 维由采集侧写入，`net/encoders.py:8-10`；v8 rollout 不合成 raw mem/ego）；K-anchor 计划头（默认关）（`net/plan_head.py:41-123,202-221`）。 |
+| `plan_head.py` | 6 个 token 融合（z_ego/od_pool/ld_pool/others/nav/signal）→ MoE → 融合 `latent` + 下一 ego 特征前 6 维（reserved 2 维由采集侧写入，`net/encoders.py:8-10`；v8 rollout 不合成 raw mem/ego）（`net/plan_head.py:41-89`）。K-anchor 分支（历史 `num_anchors>0`）已于 R38-P2a 删除，快照见 `tools/legacy/k_anchor/`。 |
 | `path_head.py` | R36 K1 `StructuredPolicyHead`（**唯一动作生成器**的结构化形式）：横向分支（锚 κ_ref + 残差限幅 → κ_near/mid/far）+ 纵向分支（κ_near + 外源几何 → 当前 `ds`）+ 无参组合层 `compose_step_action`；`step_geometry` 按 t0 静态地图 + 想象位姿重算 imagined 步几何；默认关（`set_path_head` 惰性构造）。R38-P1 减枝：H1 一次性六步（旧 `PathExecutionHead`/`compose_path_plan`）已删除，快照见 `tools/legacy/oneshot_path.py`（`net/path_head.py:987-1242`）。 |
 | `moe.py` | primary 恒开 + 8 个零初始化残差 expert，top-2 软混合；Switch 式负载均衡 aux（`net/moe.py:80-182`）。 |
 | `policy.py` | 交叉注意力策略/价值头（K=1 查询 × 令牌集合；4 头、默认 1 层可配）；sigmoid 压缩有界动作 `ds∈[0,10] m`、`dθ∈[-0.6,0.6] rad`，logstd clamp `[-5,0]`（`net/policy.py:43-51,119-221`）。 |
 | `semantic.py` | R21-3A 语义接线（`ld_mode=semantic`，默认关，惰性构造）：`lane_semantic → target_lane_token`（固定归一化 + 2 层 MLP，mask=0 ⇒ 严格 0）；LD 逐槽增广（role/route/offset/group-relation embed）+ 六组 masked mean 读出 → `ld_context`（`net/semantic.py:73-191`）。 |
 | `ego_warp.py` | R36 L-D / R37 M1 坐标层（纯函数、无状态）：t0 → ego_k 逆变换、OD 恒速先验（`od_velocity_t0` = 相对速度 + ego t0 速度）、`assemble_pose_k(off/w1/w2)`、anchor schema（`AnchorBatch`/`validate_anchor`）+ 5 项 hook（`WarpHooks`，默认关零开销）（`net/ego_warp.py:119-220,254-390`）。 |
-| `anchor.py` | K-anchor 工具：锚字典加载/内置默认 K=6、lane↔ego 航向剖面、WTA 分配、软混合（`net/anchor.py:98-130,294-327`）。 |
 | `model.py` | 装配与惰性开关（`set_moe/set_ld_mode/set_ego_warp_mode/set_path_head/set_warp_hooks`）、`arc_step` 运动学、`encode/plan_step/_rollout/forward/rollout`、`SUPERVISED_LABELS`（`net/model.py:210-218,225-275,392,880,923,1292,1503,1864`）。 |
 | `param_probe.py` | 参数探针 + 前向/rollout 形状冒烟；断言总参数 ≤1.5M（`net/param_probe.py:29-34,114`：预算 + 断言）。 |
 | `probes.py` | R38-D1 §四 七类强制 probes/hooks 统一容器（**默认全关**）：①状态来源 ②Policy ③World Model ④Memory ⑤六步调用链（含 ST-GNN 总调用单列）只读 hook + 统一出口 `ProbeRecorder.write`（张量字典 + JSON）；⑥ plan 连续 footprint 首次越界/碰撞纯函数；⑦ 逐参数梯度账本 `grad_ledger`（第 1/3/6 步 loss 单独反向）。默认关 ⇒ 前向逐位一致/零 RNG/不改 optimizer/ckpt（`net/probes.py:1-100` 契约 + `.slim/deepwork/p1_v2/round38/d1_off_bitwise.py` 自证）。 |
@@ -49,7 +48,6 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - 恒有：`action_mu/action_logstd (B,2)`、`value (B,1)`、`latent (B,H)`、`ego_next (B,6)`、`router_logits (B,8)`、`expert_weights (B,8)`（top-2 混合权重）；MoE 开启且 `α>0` 时 `load_balance_loss`
 - `rollout=True`：`traj_xy (B,6,2)`（t=0.5..3.0 s 端点，t0 自车系）、`traj_theta (B,6)`、`plan (B,6,2)`（实际执行的 6 个动作，`plan[:,0] == action_mu`）
 - `world_model=True`（必须同时 `rollout=True`）另返回：`od_pred (B,6,16,5)`、`ld_pred (B,6,16,4)`、`od_presence_pred/od_entry_pred (B,6,16)`（logits）、`z_ego_pred/z_od_pred/z_ld_pred`（latent 诊断）
-- K-anchor 开启（`num_anchors>0`）另返回：`anchor_logits/anchor_probs/anchor_plan/anchor_speed/anchor_residual/anchor_ctx`
 - `forward(rollout=False, world_model=False)` 是 **PPO cheap path**：不跑任何 st_gnn 消息传递，`action_mu/action_logstd/value/router_logits/expert_weights/latent` 与完整前向逐位一致（`net/model.py:1970-1985`）；`rollout=True, world_model=False` 仍跑 rollout 但不返回预测键。
 - R36 K1（结构化头启用时，非默认）：`plan_from_aux/structured_*` 逐步组装证据键 + `contract_*` 契约断言键；`policy_action_mu`/`action_logstd` 仅在 `set_policy_diag(True)`/`set_path_head_trace(True)` 诊断时产出（`net/model.py:1997-2052`）。
 - R37 M1（`set_warp_readout(True)` 时，非默认）：`warp_readout_valid/warp_prior_err/warp_residual_contrib/warp_final_err`（`net/model.py:1988-1996`）。
@@ -69,11 +67,13 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - 负载均衡 aux = `α·E·Σ f_i·P_i`（`f` detach、`P` 可微；值域 `[1,E]`）；`α>0` 时输出 `load_balance_loss`；诊断 `expert_load/load_cv/gate_entropy`（`net/moe.py:63-77,131-146`）。
 - 固定监督标签顺序 `SUPERVISED_LABELS`（8 项，必须与 `config/model.yaml::moe.router.supervised_labels` 一致；`net/model.py:210-218`）。
 
-## K-anchor 计划头（默认关）
+## K-anchor 计划头（R38-P2a 已退役）
 
-- `num_anchors>0` 时 PlanHead 增加选择头（零初始化 ⇒ 初始均匀）、连续速度头（初始 ≈3.5 m/步）、逐锚 6×2 残差头（零初始化）；`plan = Σ p_k(anchor_k+residual_k)`，`p=softmax(logits/τ)`，推理可 argmax（`net/plan_head.py:82-123,161-200`）。
-- rollout 尾段（k≥1）由 t0 锚混合驱动，step0 仍 = `action_mu`（输出契约不变）；锚字典缺文件时回退内置 K=6（`net/anchor.py:98-130`）。
-- lane 通道已从 obs v6 删除 → `plan_anchors` 的 `lane_ctx` 恒为 `zeros(B,3)`（valid=0 → 恒等变换）；`anchor_lane_context` 保留但不再接线（`net/model.py:1369-1371`）。
+- 历史 `num_anchors>0` 分支 = 选择头 + 连续速度头 + 逐锚 6×2 残差头 + 锚 buffer，
+  `plan = Σ p_k(anchor_k+residual_k)`；默认关（`num_anchors=0`）时键集/前向与旧模型逐位一致。
+- 判定 `LEGACY_REPRO`（长期关闭 + 独立计划候选）⇒ 实现与字典整体迁 `tools/legacy/k_anchor/`
+  （`anchor.py` / `plan_head.py` / `fit_plan_anchors.py` / `plan_anchors_k6.json`，出处与复现约束见其
+  README）；旧 ckpt 的 `plan_head.anchor*` 键由 `tools/legacy/legacy_key_mapper.py` 登记忽略。
 
 ## Round-36 K1 结构化动作头（`net/path_head.py`；默认关）
 
@@ -100,7 +100,6 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 | `policy.attn_heads / attn_layers` | 注意力头数（缺省 4）/ 层数（缺省 1）；**同时用于 value 头** |
 | `value.net_hidden` | value 头隐藏维（缺省 256） |
 | `world_model.rollout_steps` | `wm_steps`（缺省 6） |
-| `plan_anchor.enabled / num_anchors / path / temperature / hard` | K-anchor（`enabled=false` → `num_anchors=0`，模型与旧版逐位一致） |
 | `moe.router.supervised_labels` | 不由 build_model 读取；由 `pipeline.trainer.load_supervised_labels` 校验 BC 数据集标签顺序 |
 
 未读取的段：`temporal.*`、`world_model.enabled/conditioned_on/loss`、`moe.primary.enabled/router_gated`、`moe.experts.init`、`moe.router.type/supervision/top_k`（top-2 在 DrivingModel 默认值固定为 2）、`spatial.type/hidden_dim`（build_model 只读 `spatial.layers`）、`policy.rollout_steps`、`policy.action.*`、`value.*`（除 `value.net_hidden`）、`param_budget_estimate`（预算以 `net/param_probe.py` 实测为准，见「规模与测试入口」）。
@@ -108,7 +107,7 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 ## 规模与测试入口
 
 - 参数预算 ≤1.5M 由 `net/param_probe.py` 断言。实测（`tools/venv-python net/param_probe.py`）：默认构造（H=96、expert_hidden=192）= **1,000,639**；H=128 / expert=76（primary/router/trunk/net 取代码缺省）= **1,278,879**。实际规模随 `config/model.yaml`（如 `moe.primary.hidden_dim`、`policy.attn_layers`）变化。
-- 测试：`tools/venv-python -m pytest tests/test_net_shapes.py tests/test_mem_rollout.py tests/test_v6_attn_heads.py tests/test_v6_world_nav.py tests/test_plan_anchor.py tests/test_od_pose_grad.py -q`。
+- 测试：`tools/venv-python -m pytest tests/test_net_shapes.py tests/test_mem_rollout.py tests/test_v6_attn_heads.py tests/test_v6_world_nav.py tests/test_legacy_k_anchor.py tests/test_od_pose_grad.py -q`。
 
 ## 约定与坑
 

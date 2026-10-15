@@ -44,8 +44,9 @@ slot_id (B,N) int64 OD = track id（-1 = 空槽）；LD 恒 -1（固定几何槽
 
 字段来源（现网 obs 通道）：OD = ``env/obs/od.py`` 9 维 ``[dx,dy,vx,vy,cosθ,sinθ,L,W,type_id]``；
 LD = ``env/obs/ld.py`` 7 维 ``[dx,dy,heading_rel,curvature,speed_limit,left_line_type,right_line_type]``。
-**注意区分** ``net/anchor.py`` 的 plan 形状锚 ``(ds,dθ)``（K-anchor 字典；动作形状锚，非几何
-anchor，不属本 schema）。路点/车道锚的 ``type_id``、``curvature``、线型等语义字段**不进**本
+**注意区分** 已退役的 K-anchor plan 形状锚 ``(ds,dθ)``（历史快照
+``tools/legacy/k_anchor/anchor.py``；动作形状锚，非几何 anchor，不属本 schema）。
+路点/车道锚的 ``type_id``、``curvature``、线型等语义字段**不进**本
 schema（保持坐标层最小：位姿 + 速度 + 尺寸 + 掩码 + 身份）。
 
 5 项 hook（``WarpHooks``；**默认关 + bit-exact**）

@@ -70,13 +70,13 @@ def test_parse_freeze_constants_supports_annassign_and_concat(tmp_path) -> None:
     source = tmp_path / "stages_stub.py"
     source.write_text(
         "from typing import Tuple\n"
-        '_PHASE3_ANCHOR_HEAD_PREFIXES: Tuple[str, ...] = ("a.",)\n'
-        '_SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = ("b.",) + _PHASE3_ANCHOR_HEAD_PREFIXES\n'
+        '_PRIMARY_PHASE_FREEZE: Tuple[str, ...] = ("a.",)\n'
+        '_SPECIFIC_PHASE_FREEZE: Tuple[str, ...] = ("b.",) + _PRIMARY_PHASE_FREEZE\n'
         '_PHASE3_SAFE_FREEZE = ("c.",) + _SPECIFIC_PHASE_FREEZE\n',
         encoding="utf-8",
     )
     constants = parse_freeze_constants(source)
-    assert constants["_PHASE3_ANCHOR_HEAD_PREFIXES"] == ("a.",)
+    assert constants["_PRIMARY_PHASE_FREEZE"] == ("a.",)
     assert constants["_SPECIFIC_PHASE_FREEZE"] == ("b.", "a.")
     assert constants["_PHASE3_SAFE_FREEZE"] == ("c.", "b.", "a.")
 
@@ -93,7 +93,7 @@ def test_audit_stub_specific_only_pass() -> None:
     assert expected["encoder"] == "freeze"
     assert expected["experts"] == "train"
     assert expected["router"] == "train"
-    assert expected["anchor"] == "empty"
+    assert "anchor" not in expected, "K-anchor 组已随 R38-P2a 退役"
     for group in ("encoder", "mem", "st_gnn", "fusion", "plan_head.primary", "policy", "value"):
         stat = groups[group]
         assert stat["n_params"] > 0

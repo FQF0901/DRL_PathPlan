@@ -284,7 +284,6 @@ def _zero_cfg(**overrides) -> Phase3Config:
     base = dict(
         bias_calib_weight=0.0, ego_next_weight=0.0, od_weight=0.0, ld_weight=0.0,
         latent_weight=0.0, presence_weight=0.0, entry_weight=0.0,
-        anchor_ce_weight=0.0, anchor_wta_weight=0.0,
     )
     base.update(overrides)
     return Phase3Config(**base)
@@ -299,8 +298,8 @@ def test_default_off_terms_are_zero_and_raw_empty() -> None:
     assert terms["_raw"] == {}
     assert terms["geom_diag"] == {}
     # 总损失 = 旧组件和（三项贡献 0）
-    total = terms["action"] + terms["action_chain"] + terms["bias_calib"] + terms["anchor_ce"]
-    total = total + terms["anchor_wta"] + terms["ego_next"] + terms["od"] + terms["ld"]
+    total = terms["action"] + terms["action_chain"] + terms["bias_calib"]
+    total = total + terms["ego_next"] + terms["od"] + terms["ld"]
     total = total + terms["latent"] + terms["presence"] + terms["entry"] + terms["load_balance"]
     for key in ("ld_margin", "curvature", "progress"):
         total = total + terms[key]

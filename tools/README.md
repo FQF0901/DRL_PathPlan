@@ -33,7 +33,6 @@
 | `make_dagger_pools.py` | 生成 DAgger 采集池 | `tools/venv-python tools/make_dagger_pools.py --mode pool5k`（→ `env/specs/scenarios_train_5k.json`）或 `--mode rounds`（默认，→ `env/specs/scenarios_train_dagger_r{1,2,3}.json`）；`--out` 仅 pool5k 生效。依赖 `datasets/BTC20260926-2343_expert5k/report.json`（代码常量） |
 | `make_eval_spec.py` | 生成 eval500 / smoke16 spec；**默认 DRY-RUN 不写盘** | `tools/venv-python tools/make_eval_spec.py --write`（→ `env/specs/scenarios_eval500.json`、`env/specs/scenarios_smoke16.json`）；`--dry-run` 与 `--write` 互斥 |
 | `mine_hard.py` | 冻结 primary 的 worst-50% 行权重挖掘 → sidecar npz | `tools/venv-python tools/mine_hard.py --ckpt runs/<run>/stage_b/primary.pt --bc-dir datasets/BTC<ts>_expert5k --out runs/<run>/stage_b/weight_sidecar.npz`；`--hard-frac`(0.5)/`--hard-weight`(1.0)/`--mild-weight`(0.1)；产物供阶段 B `--weight-sidecar` |
-| `fit_plan_anchors.py` | 拟合 K-anchor 形状锚字典（离线/CPU，只读数据） | `tools/venv-python tools/fit_plan_anchors.py --dataset datasets/BTC<ts>_expert5k/expert_bc.npz --k 6 --out config/plan_anchors_k6.json`；注意输出是 tracked 配置，覆盖前先确认 |
 
 ## 评测与报告
 
@@ -67,5 +66,5 @@
 - **资源纪律**：MetaDrive 每进程只能有一个 engine；任一时刻只跑一个 env-heavy 多进程任务（`pipeline/stages.py:31-32`）。`collect_expert` 每 worker 峰值 ≈1.3–1.5 GB，本机 15 GB 建议 `--workers<=8`；`--workers 0`=auto（CPU 核数取半、上限 `MAX_RECOMMENDED_WORKERS=10`）。评测与训练池互斥，`test.sh` workers 默认 2。
 - **spec 隔离**：`dagger_collect.py` 与 `make_dagger_pools.py` 都硬校验训练池 ∩ `scenarios_eval500.json` / `scenarios_val.json` = ∅，命中即 `SystemExit`，不要绕过。
 - **device**：训练/评测 `--device auto`（CUDA 可用则 cuda）；`diagnostics/` 的两个 rollout 诊断脚本（`forensics_offline`/`forensics_closed_loop`）默认 `--device cuda`（`forensics_report` 为纯分析、无 device 参数），无卡需显式 `--device cpu`；`debug_rollout_viz` 带显存守卫。
-- **写盘守卫**：`make_eval_spec.py` 默认 DRY-RUN，必须显式 `--write` 才落盘；`fit_plan_anchors.py` 会覆盖 tracked 的 `config/plan_anchors_k6.json`。
+- **写盘守卫**：`make_eval_spec.py` 默认 DRY-RUN，必须显式 `--write` 才落盘。
 - `test.py --out` 是输出**根**（实际写 `<out>/<name>/`），不要当 run 名用。

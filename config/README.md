@@ -23,7 +23,6 @@
 | `model.yaml` | 网络结构 | `pipeline.stages.build_model`（`pipeline/stages.py:152-194`）；`pipeline.vector_env.load_supervised_labels`（`pipeline/vector_env.py:104-131`）；评测/采集侧 model_config 透传（`pipeline/eval_runner.py:1808,1831`、`tools/dagger_collect.py:1284-1300`） |
 | `train.yaml` | 运行开关 / 分阶段训练 / 监控 | `pipeline.stages`（`_resolve_*` 与各 stage 段）、`tools/run_config.py:56-166`、`pipeline/phase3_loop.py`（`stages.B.phase3` 段，`Phase3LoopConfig.from_config` = `:473-548`） |
 | `eval.yaml` | 评测 spec / KPI / 阈值 / dataset_gate | `pipeline.eval_runner.py`（`1754`、`1762-1764`、`1866-1869`；阈值判定 `406-470`） |
-| `plan_anchors_k6.json` | K-anchor 计划头锚字典（K=6） | `net.anchor.load_anchor_dictionary`（`net/anchor.py:98-115`） |
 | `arms/` | 可执行 RL 臂配置 | 见 `config/arms/README.md` |
 
 ### env.yaml
@@ -41,14 +40,14 @@
 
 ### model.yaml
 
-- `build_model` 读取的键（`pipeline/stages.py:176-194`）：`hidden_dim`、`moe.primary.hidden_dim`、
+- `build_model` 读取的键（`pipeline/stages.py:152-190`）：`hidden_dim`、`moe.primary.hidden_dim`、
   `moe.experts.count/hidden_dim`、`moe.router.hidden_dim`、`policy.trunk_hidden`、`value.net_hidden`、
-  `spatial.layers`、`policy.attn_heads/attn_layers`、`world_model.rollout_steps`、
-  `plan_anchor.enabled/num_anchors/path/temperature/hard`。
+  `spatial.layers`、`policy.attn_heads/attn_layers`、`world_model.rollout_steps`。
 - `moe.router.supervised_labels` 由 `pipeline.vector_env.load_supervised_labels` 读取（8 标签固定顺序，
   路由监控/数据集契约用；`pipeline/vector_env.py:104-131`）。
-- `plan_anchor.enabled=false`（默认）→ `num_anchors=0`，模型与旧版逐位一致（`pipeline/stages.py:172-174`）；
-  锚字典路径缺失时回退 `net/anchor.py` 内置默认，文件非法则报错不静默回退（`net/anchor.py:98-115`）。
+- K-anchor 计划头（历史 `plan_anchor` 块 + `plan_anchors_k6.json`）已随 R38-P2a 减枝退役：实现迁
+  `tools/legacy/k_anchor/`，旧 ckpt 的 `plan_head.anchor*` 键由 `tools/legacy/legacy_key_mapper.py`
+  登记忽略；`build_model` 不再读取 `plan_anchor` 键（旧配置中残留该键 = 被忽略，无行为）。
 
 ### train.yaml
 
@@ -65,15 +64,6 @@
   `recycle_every_specs`（`1762-1764`）、`thresholds`（顶层键优先，回退 `eval.thresholds`：`1866-1869`；
   判定公式见 `judge_group` / `evaluate_verdicts`，`pipeline/eval_runner.py:406-470`）；`deterministic`（`1899`）与
   `process`（`1905`）仅原样记入 `metrics.json`，无行为分支。
-
-### plan_anchors_k6.json
-
-- 用途：K-anchor 计划头（`model.yaml::plan_anchor`）的形状锚字典，`anchors[k] = {ds[6], dtheta_lane[6]}`
-  + 来源元数据（K=6、dt=0.5、拟合数据集等）。
-- 生成：`tools/fit_plan_anchors.py`（expert 5k 数据 → KMeans → 写 `config/plan_anchors_k6.json`；用法见其
-  docstring 的示例命令）。
-- 加载：`net.anchor.load_anchor_dictionary`（`net/anchor.py:98-115`）；仅当 `plan_anchor.enabled=true`
-  时构造锚头（`pipeline/stages.py:172-174`）。
 
 ## 未被代码消费的键（速查，以代码为准）
 

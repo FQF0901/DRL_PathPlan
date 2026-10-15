@@ -33,15 +33,15 @@
 
 - 轮数按 `bc.primary_phase_split` 切两段（`stages.py:3036`）：
   - **phase 1（primary）**：MoE 关闭、冻结 `st_gnn/value/experts/router`（`_PRIMARY_PHASE_FREEZE`，`stages.py:2752-2759`）；产出 `primary.pt`。
-  - **phase 2（specific）**：MoE 开 + **worst/mild 行权重**（全量曝光）+ Switch 负载均衡 aux；冻结 `st_gnn/value/encoders/mem_encoder/plan_head 主干(primary/fusion/norm/ego_next)/policy` + K-anchor 锚头（`_SPECIFIC_PHASE_FREEZE`，`stages.py:2774-2786`）；可训 = experts/router/residual_scale。
-- 损失（`trainer.pretrain_bc`，`trainer.py:4361-4366`）：`traj_weight·轨迹 + action_weight·首步动作 + load_balance + anchor_ce/wta（默认 0）`；轨迹目标 = `traj6`（6 点端点，与 rollout 对齐），动作目标 = 专家即时 `action[:,0]`（`trainer.py:4276-4296`）。
+  - **phase 2（specific）**：MoE 开 + **worst/mild 行权重**（全量曝光）+ Switch 负载均衡 aux；冻结 `st_gnn/value/encoders/mem_encoder/plan_head 主干(primary/fusion/norm/ego_next)/policy`（`_SPECIFIC_PHASE_FREEZE`，`stages.py:2760-2774`）；可训 = experts/router/residual_scale。
+- 损失（`trainer.pretrain_bc`）：`traj_weight·轨迹 + action_weight·首步动作 + load_balance`；轨迹目标 = `traj6`（6 点端点，与 rollout 对齐），动作目标 = 专家即时 `action[:,0]`。
 - **router 无聚类监督**（lane U1）：无簇标签/router CE；`--dagger-dir` 可向 specific 段合并 DAgger 行并掩掉其 traj 损失（`stages.py:3465`；合并实现 `stages.py:296-425`）。
 
 ### B phase 3 — 迭代恢复训练（`--phase3 <dagger_dir>`）
 
 - 数据 = 当轮 DAgger 失败窗口目录单独使用（无 worst/mild、无 mining）；`anchor.enabled=true`（默认关）时并入 5k 锚行（`stages.py:4435`；合并实现 `stages.py:3557-3640`）。
-- **冻结配方** `freeze`：`specific_only`（`config/train.yaml:138` 默认；代码兜底 `all`，`stages.py:4261-4262`）= 只训 experts/router/residual_scale，WM/ego_next 与锚 CE/WTA 自动降级为 0；`trunk_only` = 只训共享主干、冻结 WM/value/specific/锚头（锚 CE/WTA 保留塑形）；`recovery` / `recovery_experts`（P1-2，config `stages.B.phase3.recovery` 开关，默认关）= 只训 plan 主干 fusion/norm/ego_next + primary（+ experts/residual_scale），router 恒冻；`all` = 全参数解冻（`stages.py:4257-4295`；降级逻辑 `trainer.py:5054-5087`）。
-- 损失项（`trainer._phase3_loss_terms`，`trainer.py:5380-5611`；总装键 `5784-5801`）：action + action_chain + tail_smooth/tail_curv（默认 0）+ bias_calib（默认 0）+ anchor_ce/wta（默认 0）+ ego_next + od + ld + latent + presence + entry + load_balance + P1-3 几何三项 ld_margin/curvature/progress（默认 0）；`traj` 只监控不进损失（`traj_aux_weight` 默认 0）。
+- **冻结配方** `freeze`：`specific_only`（`config/train.yaml:138` 默认；代码兜底 `all`）= 只训 experts/router/residual_scale，WM/ego_next 自动降级为 0；`trunk_only` = 只训共享主干、冻结 WM/value/specific；`recovery` / `recovery_experts`（P1-2，config `stages.B.phase3.recovery` 开关，默认关）= 只训 plan 主干 fusion/norm/ego_next + primary（+ experts/residual_scale），router 恒冻；`all` = 全参数解冻（降级逻辑 `trainer.phase3_effective_config`）。
+- 损失项（`trainer._phase3_loss_terms`）：action + action_chain + tail_smooth/tail_curv（默认 0）+ bias_calib（默认 0）+ ego_next + od + ld + latent + presence + entry + load_balance + P1-3 几何三项 ld_margin/curvature/progress（默认 0）；`traj` 只监控不进损失（`traj_aux_weight` 默认 0）。
 - 动作链目标来源 `action_chain_source=auto`：新 dagger 标签用逐行 `action[0:6]` 真实教师链；旧数据回退同 episode 未来行查表（`stages.py:1684-1713` 解析 + `4552-4558` 接线）。
 - 可选 epoch 级 clean150 守护（`--phase3-guard-spec`，fail-closed）；LR 分组 base ×`lr_scale.base` / specific ×`lr_scale.specific`。
 

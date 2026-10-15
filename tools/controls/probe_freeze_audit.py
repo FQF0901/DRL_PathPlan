@@ -7,7 +7,7 @@ a) ``requires_grad`` 参数数；b) optimizer 参数数；c) 小批 backward 后
 d) ``optimizer.step()`` 后参数变化计数（前后 snapshot 比较）。
 
 - **静态层**：``ast`` 只读解析 ``pipeline/stages.py`` 的冻结前缀清单
-  （``_PRIMARY_PHASE_FREEZE`` / ``_SPECIFIC_PHASE_FREEZE`` / ``_PHASE3_ANCHOR_HEAD_PREFIXES``
+  （``_PRIMARY_PHASE_FREEZE`` / ``_SPECIFIC_PHASE_FREEZE``
   / ``_PHASE3_SAFE_FREEZE``），并与运行时导入的常量交叉核对（``static_match_runtime``）；
 - **构建层**：``pipeline.stages.load_config`` + ``build_model``（只读调用）→
   ``pipeline.trainer.apply_freeze_prefixes`` → ``build_phase3_optimizer``（与 phase3
@@ -58,7 +58,6 @@ GROUP_ORDER = (
     "fusion",
     "policy",
     "value",
-    "anchor",
     "other",
 )
 #: 组前缀（最长/更具体优先由组内互斥保证；``residual_scale`` 归入 experts——
@@ -73,22 +72,12 @@ _GROUP_PREFIXES = (
     ("fusion", ("plan_head.fusion.",)),
     ("policy", ("policy.",)),
     ("value", ("value.",)),
-    (
-        "anchor",
-        (
-            "plan_head.anchor_head.",
-            "plan_head.speed_head.",
-            "plan_head.residual_head.",
-            "plan_head.anchor_embed",
-        ),
-    ),
 )
 
 #: 静态解析的模块级冻结常量（pipeline/stages.py）
 STATIC_CONSTANT_NAMES = (
     "_PRIMARY_PHASE_FREEZE",
     "_SPECIFIC_PHASE_FREEZE",
-    "_PHASE3_ANCHOR_HEAD_PREFIXES",
     "_PHASE3_SAFE_FREEZE",
     "_RECOVERY_FREEZE",
     "_RECOVERY_EXPERTS_FREEZE",
@@ -105,7 +94,7 @@ RECIPE_CONSTANT = {
 PARAM_REG_COEF = 1e-3
 
 #: recovery 配方建议清单（尚未实现；§7.10-A6：train = fusion/norm/ego_next/primary（± experts/
-#: residual，R2）；freeze = encoder/mem/WM(st_gnn)/router/anchor 头/policy/value；A9：
+#: residual，R2）；freeze = encoder/mem/WM(st_gnn)/router/policy/value；A9：
 #: encoder/mem/WM/router 更新严格为零、fusion/primary 确实更新、experts 随 R1/R2 变化）
 RECOVERY_SUGGESTION = {
     "doc_ref": "docs/deepseekv4p1_argue.md §7.10-A4/A6/A9 + round-7（R1/R2 两档消融）",
@@ -124,10 +113,6 @@ RECOVERY_SUGGESTION = {
             "plan_head.moe.router.",
             "plan_head.moe.experts.",
             "plan_head.moe.residual_scale",
-            "plan_head.anchor_head.",
-            "plan_head.speed_head.",
-            "plan_head.residual_head.",
-            "plan_head.anchor_embed",
             "policy.",
             "value.",
         ],
@@ -146,10 +131,6 @@ RECOVERY_SUGGESTION = {
             "mem_encoder.",
             "st_gnn.",
             "plan_head.moe.router.",
-            "plan_head.anchor_head.",
-            "plan_head.speed_head.",
-            "plan_head.residual_head.",
-            "plan_head.anchor_embed",
             "policy.",
             "value.",
         ],

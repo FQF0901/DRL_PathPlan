@@ -1,13 +1,10 @@
-"""fix-11 phase3 安全配方回归（freeze 契约修复 + trunk_only + clean150 守护）。
+"""fix-11 phase3 安全配方回归（freeze 契约 + trunk_only + clean150 守护）。
 
 背景（根因诊断 ``/tmp/opencode/v7_struct_fail_diag.md`` §3）：
 
-① ``_SPECIFIC_PHASE_FREEZE`` 曾漏 4 个 K-anchor 锚头前缀 → phase3 ``specific_only`` 下
-   13 个锚头参数落入 base 组被训练（唯一监督 = chain L2）→ 锚计划左偏；契约修复 =
-   锚头加入冻结清单，**测试断言 phase3 后锚头权重逐位不变（两 ckpt 比对）**；
-② specific experts/router 训练是决定性破坏项 → 安全配方 ``freeze=trunk_only``：只训共享主干，
-   冻结 experts/router/residual_scale + 锚头 + WM/value，**锚 CE/WTA 保留**（塑形共享特征）；
-③ epoch 级 clean150 守护：``--phase3-guard-spec`` + ``--phase3-guard-min-success`` →
+① specific experts/router 训练是决定性破坏项 → 安全配方 ``freeze=trunk_only``：只训共享主干，
+   冻结 experts/router/residual_scale + WM/value；
+② epoch 级 clean150 守护：``--phase3-guard-spec`` + ``--phase3-guard-min-success`` →
    每 epoch 评测、崩塌（或评测不可得）即中止（fail-closed）。
 """
 
@@ -24,7 +21,6 @@ from pipeline.stages import (
     FrameWindows,
     Phase3GuardCollapse,
     _BC_STEP_STRIDE,
-    _PHASE3_ANCHOR_HEAD_PREFIXES,
     _PHASE3_SAFE_FREEZE,
     _SPECIFIC_PHASE_FREEZE,
     _bc_channel_keys,
@@ -49,34 +45,25 @@ from tests.v2_synthetic import TINY_MODEL_YAML, make_v2_arrays, write_v2_dataset
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
-_ANCHOR_YAML = TINY_MODEL_YAML + "plan_anchor:\n  enabled: true\n  num_anchors: 6\n"
-
 
 def _tiny_model():
     from net.model import DrivingModel
 
     torch.manual_seed(0)
-    return DrivingModel(hidden=16, num_experts=8, expert_hidden=16)
-
-
-def _tiny_anchor_model():
-    from net.model import DrivingModel
-
-    torch.manual_seed(0)
-    model = DrivingModel(hidden=16, num_experts=8, expert_hidden=16, num_anchors=6)
+    model = DrivingModel(hidden=16, num_experts=8, expert_hidden=16)
     with torch.no_grad():
-        # 打散锚头/专家参数（零初始化末层会掩盖"未更新"断言）；policy.mu 非零（action 梯度可到主干）
+        # 打散专家参数（零初始化末层会掩盖"未更新"断言）；policy.mu 非零（action 梯度可到主干）
         for name, parameter in model.named_parameters():
-            if name.startswith(_PHASE3_ANCHOR_HEAD_PREFIXES) or name.startswith("plan_head.moe.experts."):
+            if name.startswith("plan_head.moe.experts."):
                 parameter.normal_(0.0, 0.05)
         model.policy.mu.weight.normal_(0.0, 0.1)
         model.policy.mu.bias.normal_(0.0, 0.1)
     return model
 
 
-def _model_cfg(tmp_path: Path, *, anchors: bool = True) -> Path:
-    path = tmp_path / ("model_anchor.yaml" if anchors else "model.yaml")
-    path.write_text(_ANCHOR_YAML if anchors else TINY_MODEL_YAML, encoding="utf-8")
+def _model_cfg(tmp_path: Path) -> Path:
+    path = tmp_path / "model.yaml"
+    path.write_text(TINY_MODEL_YAML, encoding="utf-8")
     return path
 
 
@@ -99,10 +86,6 @@ def _future_fn_for(dataset: BCDataset):
     return _phase3_future_fn(dataset, windows, wm_valid)
 
 
-def _is_anchor_param(name: str) -> bool:
-    return name.startswith(_PHASE3_ANCHOR_HEAD_PREFIXES)
-
-
 def _phase3_cfg(**overrides) -> Phase3Config:
     base = dict(
         epochs=1, batch_size=8, micro_batch_size=4, device="cpu", shuffle=False, seed=0,
@@ -113,23 +96,25 @@ def _phase3_cfg(**overrides) -> Phase3Config:
 
 
 # --------------------------------------------------------------------------- #
-# ① freeze 契约修复：锚头前缀进 specific_only 冻结清单 + 两 ckpt 逐位比对
+# ① freeze 契约：specific_only 冻结清单内容（无锚头参数在列）
 # --------------------------------------------------------------------------- #
 
-def test_specific_phase_freeze_includes_anchor_head_prefixes() -> None:
-    assert _PHASE3_ANCHOR_HEAD_PREFIXES == (
-        "plan_head.anchor_head.",
-        "plan_head.speed_head.",
-        "plan_head.residual_head.",
-        "plan_head.anchor_embed",
-    )
-    for prefix in _PHASE3_ANCHOR_HEAD_PREFIXES:
-        assert prefix in _SPECIFIC_PHASE_FREEZE, f"fix-11 契约：{prefix} 必须在冻结清单"
-    model = _tiny_anchor_model()
+def test_specific_phase_freeze_content() -> None:
+    """specific_only 冻结清单 = 主干/primary/policy 全冻（specific experts/router 可训）。"""
+    for prefix in (
+        "st_gnn.", "value.", "encoders.", "mem_encoder.",
+        "plan_head.fusion.", "plan_head.norm.", "plan_head.ego_next.",
+        "plan_head.moe.primary.", "policy.",
+    ):
+        assert prefix in _SPECIFIC_PHASE_FREEZE, prefix
+    # K-anchor 锚头前缀已随 R38-P2a 退役（不得复活）
+    assert not any("anchor" in prefix or "speed_head" in prefix or "residual_head" in prefix
+                   for prefix in _SPECIFIC_PHASE_FREEZE)
+    model = _tiny_model()
     apply_freeze_prefixes(model, _SPECIFIC_PHASE_FREEZE)
     for name, parameter in model.named_parameters():
-        if _is_anchor_param(name):
-            assert not parameter.requires_grad, f"锚头参数 {name} 未冻结"
+        if name.startswith(_SPECIFIC_PHASE_FREEZE):
+            assert not parameter.requires_grad, f"冻结参数 {name} 未冻结"
     # specific_only 语义不变：experts/router/residual_scale 仍可训
     assert any(
         parameter.requires_grad and name.startswith(_PHASE3_SPECIFIC_PREFIXES)
@@ -137,60 +122,41 @@ def test_specific_phase_freeze_includes_anchor_head_prefixes() -> None:
     )
 
 
-def test_phase3_specific_only_anchor_weights_bitwise_unchanged_two_ckpts(tmp_path: Path) -> None:
-    """契约（fix-11）：phase3 specific_only 训练后锚头权重逐位不变（两 ckpt 比对）。"""
+def test_phase3_specific_only_frozen_loss_keys() -> None:
+    """specific_only：上游监督（WM/ego_next）自动降级；冻结主干无梯度、specific 可训。"""
     dataset = _dataset()
-    model = _tiny_anchor_model()
-    before_ckpt = tmp_path / "before.pt"
-    save_checkpoint(before_ckpt, model)
+    model = _tiny_model()
     cfg = _phase3_cfg(
         freeze_mode="specific_only",
         freeze_prefixes=_SPECIFIC_PHASE_FREEZE,
         val_indices=np.arange(dataset.count, dtype=np.int64),
-        # 即使锚损失权重 > 0（配置层），specific_only 下也应自动降级 → 锚头无任何监督
-        anchor_ce_weight=1.0,
-        anchor_wta_weight=1.0,
     )
     metrics = pretrain_bc_phase3(
         model, dataset, cfg, logger=lambda _: None, future_fn=_future_fn_for(dataset)
     )
-    after_ckpt = tmp_path / "after.pt"
-    save_checkpoint(after_ckpt, model)
-
-    assert tuple(metrics["frozen_loss_keys"]) == PHASE3_WM_LOSS_KEYS + ("anchor_ce", "anchor_wta")
-    assert float(metrics["bc_anchor_ce_loss"] if "bc_anchor_ce_loss" in metrics else 0.0) == 0.0
-
-    before = torch.load(before_ckpt, map_location="cpu", weights_only=False)["model"]
-    after = torch.load(after_ckpt, map_location="cpu", weights_only=False)["model"]
-    anchor_names = [name for name in before if _is_anchor_param(name)]
-    assert anchor_names, "测试模型必须带锚头参数"
-    for name in anchor_names:
-        assert torch.equal(before[name], after[name]), f"锚头参数 {name} 被更新（契约违反）"
-    # 对照：被冻结的锚头不更新，而 specific 专家确实更新（否则断言无信息量）
+    assert tuple(metrics["frozen_loss_keys"]) == PHASE3_WM_LOSS_KEYS
     assert any(
-        not torch.equal(before[name], after[name])
-        for name in before
-        if name.startswith("plan_head.moe.experts.")
+        parameter.requires_grad and name.startswith(_PHASE3_SPECIFIC_PREFIXES)
+        for name, parameter in model.named_parameters()
     )
-    for name, parameter in model.named_parameters():
-        if _is_anchor_param(name):
-            assert parameter.grad is None, f"冻结锚头 {name} 不应有梯度"
+    assert not any(
+        parameter.requires_grad and name.startswith(("encoders.", "plan_head.fusion."))
+        for name, parameter in model.named_parameters()
+    )
 
 
 # --------------------------------------------------------------------------- #
-# ② 安全配方 trunk_only：只训共享主干 + 锚 CE/WTA 保留
+# ② 安全配方 trunk_only：只训共享主干
 # --------------------------------------------------------------------------- #
 
-def test_phase3_trunk_only_freezes_specific_and_keeps_anchor_losses() -> None:
+def test_phase3_trunk_only_freezes_specific() -> None:
     dataset = _dataset()
-    model = _tiny_anchor_model()
+    model = _tiny_model()
     before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     cfg = _phase3_cfg(
         freeze_mode="trunk_only",
         freeze_prefixes=_PHASE3_SAFE_FREEZE,
         val_indices=np.arange(dataset.count, dtype=np.int64),
-        anchor_ce_weight=1.0,
-        anchor_wta_weight=1.0,
     )
     metrics = pretrain_bc_phase3(
         model, dataset, cfg, logger=lambda _: None, future_fn=_future_fn_for(dataset)
@@ -200,11 +166,11 @@ def test_phase3_trunk_only_freezes_specific_and_keeps_anchor_losses() -> None:
     assert tuple(metrics["frozen_loss_keys"]) == PHASE3_WM_LOSS_KEYS
     assert metrics["frozen_params"] > 0 and metrics["trainable_params"] > 0
     assert metrics["trainable_param_groups"] == ["base"], "trunk_only 只应有 base 优化器组"
-    # 可训集合 = 共享主干（不含 specific/锚头）
+    # 可训集合 = 共享主干（不含 specific）
     for name, parameter in model.named_parameters():
         if parameter.requires_grad:
             assert not name.startswith(_PHASE3_SAFE_FREEZE), f"{name} 不应在 trunk_only 下可训"
-    # 冻结项逐位不变（experts/router/residual_scale/锚头/WM/value）
+    # 冻结项逐位不变（experts/router/residual_scale/WM/value）
     for name, parameter in model.named_parameters():
         if name.startswith(_PHASE3_SAFE_FREEZE):
             assert torch.equal(before[name], parameter.detach()), f"冻结参数 {name} 被更新"
@@ -217,28 +183,23 @@ def test_phase3_trunk_only_freezes_specific_and_keeps_anchor_losses() -> None:
         name.startswith(("encoders.", "mem_encoder.", "plan_head.fusion.", "policy."))
         for name in changed
     ), "trunk_only 必须更新共享主干"
-    # 锚 CE/WTA 保留（有梯度/有记录）；WM/ego_next 上游监督降级为 0
-    assert float(metrics["bc_anchor_ce_loss"]) > 0.0
-    assert float(metrics["bc_anchor_wta_loss"]) > 0.0
+    # WM/ego_next 上游监督降级为 0
     for key in ("bc_ego_next_loss", "bc_od_loss", "bc_ld_loss", "bc_presence_loss", "bc_entry_loss"):
         assert float(metrics[key]) == 0.0, f"{key} 应在 trunk_only 下保守降级"
         assert float(metrics["val"][key]) == 0.0
 
 
-def test_phase3_trunk_only_effective_config_keeps_anchor_keys() -> None:
-    cfg = Phase3Config(
-        freeze_mode="trunk_only", anchor_ce_weight=1.0, anchor_wta_weight=1.0, od_weight=0.005
-    )
+def test_phase3_trunk_only_effective_config_degrades_wm_only() -> None:
+    cfg = Phase3Config(freeze_mode="trunk_only", od_weight=0.005)
     effective, zeroed = phase3_effective_config(cfg)
     assert tuple(zeroed) == PHASE3_WM_LOSS_KEYS
-    assert float(effective.anchor_ce_weight) == pytest.approx(1.0)
-    assert float(effective.anchor_wta_weight) == pytest.approx(1.0)
     assert float(effective.od_weight) == 0.0
-    assert cfg.anchor_ce_weight == pytest.approx(1.0), "helper 不得修改调用方 config"
+    assert float(effective.action_weight) == pytest.approx(1.0), "action 项保留"
+    assert not hasattr(cfg, "anchor_ce_weight"), "K-anchor 损失键已随 R38-P2a 退役"
 
 
 def test_phase3_trunk_only_optimizer_contract() -> None:
-    model = _tiny_anchor_model()
+    model = _tiny_model()
     frozen = apply_freeze_prefixes(model, _PHASE3_SAFE_FREEZE)
     assert frozen
     optimizer = build_phase3_optimizer(model, 1e-3, freeze_mode="trunk_only")
@@ -246,9 +207,7 @@ def test_phase3_trunk_only_optimizer_contract() -> None:
     assert optimizer.param_groups[0]["lr"] == pytest.approx(2.5e-4)
     trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     assert trainable
-    assert not any(
-        name.startswith(_PHASE3_SPECIFIC_PREFIXES) or _is_anchor_param(name) for name in trainable
-    )
+    assert not any(name.startswith(_PHASE3_SPECIFIC_PREFIXES) for name in trainable)
     # 冻结契约被绕过（experts 被解冻）→ trunk_only 拒绝静默带病训练
     for name, parameter in model.named_parameters():
         if name.startswith("plan_head.moe.experts."):
@@ -313,12 +272,12 @@ def _guard_args(tmp_path: Path, window: Path, ckpt: Path, *, epochs: int) -> lis
     spec.write_text("[]", encoding="utf-8")
     return [
         "--phase3", str(window), "--ckpt", str(ckpt), "--out", str(tmp_path / "out"),
-        "--model-config", str(_model_cfg(tmp_path, anchors=False)), "--device", "cpu",
+        "--model-config", str(_model_cfg(tmp_path)), "--device", "cpu",
         "--seed", "0", "--phase3-epochs", str(epochs), "--batch-size", "8", "--val-frac", "0",
         "--no-monitor", "--ckpt-every", "1",
         "--phase3-freeze", "specific_only",
         "--phase3-guard-spec", str(spec),
-        "--phase3-guard-config", str(_model_cfg(tmp_path, anchors=False)),
+        "--phase3-guard-config", str(_model_cfg(tmp_path)),
         "--phase3-guard-workers", "1",
         "--phase3-guard-min-success", "0.5",
     ]
@@ -367,7 +326,7 @@ def test_phase3_guard_requires_min_success(tmp_path: Path) -> None:
     spec.write_text("[]", encoding="utf-8")
     args = _parse_args([
         "--phase3", str(window), "--ckpt", str(ckpt), "--out", str(tmp_path / "out"),
-        "--model-config", str(_model_cfg(tmp_path, anchors=False)), "--device", "cpu",
+        "--model-config", str(_model_cfg(tmp_path)), "--device", "cpu",
         "--seed", "0", "--phase3-epochs", "1", "--batch-size", "8", "--val-frac", "0",
         "--no-monitor", "--phase3-guard-spec", str(spec),
     ])

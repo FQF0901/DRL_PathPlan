@@ -21,7 +21,6 @@ import torch
 from pipeline.stages import (
     FrameWindows,
     _BC_STEP_STRIDE,
-    _PHASE3_ANCHOR_HEAD_PREFIXES,
     _PHASE3_SAFE_FREEZE,
     _RECOVERY_EXPERTS_FREEZE,
     _RECOVERY_FREEZE,
@@ -52,28 +51,12 @@ from pipeline.trainer import (
 from tests.v2_synthetic import TINY_MODEL_YAML, make_v2_arrays
 from tools.controls.probe_freeze_audit import audit_model
 
-_ANCHOR_YAML = TINY_MODEL_YAML + "plan_anchor:\n  enabled: true\n  num_anchors: 6\n"
-
 
 def _tiny_model():
     from net.model import DrivingModel
 
     torch.manual_seed(0)
     return DrivingModel(hidden=16, num_experts=8, expert_hidden=16)
-
-
-def _tiny_anchor_model():
-    from net.model import DrivingModel
-
-    torch.manual_seed(0)
-    model = DrivingModel(hidden=16, num_experts=8, expert_hidden=16, num_anchors=6)
-    with torch.no_grad():
-        for name, parameter in model.named_parameters():
-            if name.startswith(_PHASE3_ANCHOR_HEAD_PREFIXES) or name.startswith("plan_head.moe.experts."):
-                parameter.normal_(0.0, 0.05)
-        model.policy.mu.weight.normal_(0.0, 0.1)
-        model.policy.mu.bias.normal_(0.0, 0.1)
-    return model
 
 
 def _dataset(episodes: int = 4, steps_per_episode: int = 6) -> BCDataset:
@@ -116,8 +99,9 @@ def test_recovery_freeze_lists_content() -> None:
     for prefix in ("plan_head.moe.experts.", "plan_head.moe.residual_scale"):
         assert prefix in _RECOVERY_FREEZE, "R1 冻结 experts/residual_scale"
         assert prefix not in _RECOVERY_EXPERTS_FREEZE, "R2 解冻 experts/residual_scale"
-    for prefix in _PHASE3_ANCHOR_HEAD_PREFIXES:
-        assert prefix in _RECOVERY_FREEZE and prefix in _RECOVERY_EXPERTS_FREEZE
+    # K-anchor 锚头前缀已随 R38-P2a 退役（不得复活）
+    assert not any("anchor" in prefix or "speed_head" in prefix for prefix in _RECOVERY_FREEZE)
+    assert not any("anchor" in prefix or "speed_head" in prefix for prefix in _RECOVERY_EXPERTS_FREEZE)
     # train 前缀不得在冻结清单
     for prefix in ("plan_head.fusion.", "plan_head.norm.", "plan_head.ego_next.", "plan_head.moe.primary."):
         assert prefix not in _RECOVERY_FREEZE and prefix not in _RECOVERY_EXPERTS_FREEZE
@@ -380,36 +364,31 @@ def test_phase3_config_defaults_and_validation() -> None:
     Phase3Config(recovery_mix_ratio=0.3, recovery_indices=np.array([0, 1]))
 
 
-def test_phase3_effective_config_recovery_degrades_wm_and_anchor() -> None:
-    config = Phase3Config(
-        freeze_mode="recovery", anchor_ce_weight=1.0, anchor_wta_weight=1.0, od_weight=0.005
-    )
+def test_phase3_effective_config_recovery_degrades_wm() -> None:
+    config = Phase3Config(freeze_mode="recovery", od_weight=0.005)
     effective, zeroed = phase3_effective_config(config)
-    assert tuple(zeroed) == PHASE3_WM_LOSS_KEYS + ("anchor_ce", "anchor_wta")
+    assert tuple(zeroed) == PHASE3_WM_LOSS_KEYS
     assert float(effective.od_weight) == 0.0
-    assert float(effective.anchor_ce_weight) == 0.0
-    assert float(config.anchor_ce_weight) == pytest.approx(1.0), "helper 不得修改调用方 config"
+    assert float(config.od_weight) == pytest.approx(0.005), "helper 不得修改调用方 config"
 
 
 def test_phase3_recovery_end_to_end_freezes_and_updates() -> None:
     dataset = _dataset()
-    model = _tiny_anchor_model()
+    model = _tiny_model()
     before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
     cfg = _phase3_cfg(
         freeze_mode="recovery",
         freeze_prefixes=_RECOVERY_FREEZE,
         recovery_chain_decay=DEFAULT_RECOVERY_CHAIN_DECAY,
-        anchor_ce_weight=1.0,
-        anchor_wta_weight=1.0,
     )
     metrics = pretrain_bc_phase3(
         model, dataset, cfg, logger=lambda _: None, future_fn=_future_fn_for(dataset)
     )
     assert metrics["freeze_mode"] == "recovery"
-    assert tuple(metrics["frozen_loss_keys"]) == PHASE3_WM_LOSS_KEYS + ("anchor_ce", "anchor_wta")
+    assert tuple(metrics["frozen_loss_keys"]) == PHASE3_WM_LOSS_KEYS
     assert metrics["trainable_param_groups"] == ["trunk", "primary"]
     assert math.isfinite(float(metrics["bc_loss"]))
-    # 冻结参数逐位不变（含 experts/router/锚头/WM/encoders/policy/value）
+    # 冻结参数逐位不变（含 experts/router/WM/encoders/policy/value）
     for name, parameter in model.named_parameters():
         if name.startswith(_RECOVERY_FREEZE):
             assert torch.equal(before[name], parameter.detach()), f"冻结参数 {name} 被更新"
@@ -427,7 +406,7 @@ def test_phase3_recovery_end_to_end_freezes_and_updates() -> None:
 
 def test_phase3_recovery_mix_end_to_end_logs_and_runs() -> None:
     dataset = _dataset(episodes=4, steps_per_episode=6)  # count = 24
-    model = _tiny_anchor_model()
+    model = _tiny_model()
     messages: list = []
     cfg = _phase3_cfg(
         freeze_mode="recovery",
@@ -444,7 +423,7 @@ def test_phase3_recovery_mix_end_to_end_logs_and_runs() -> None:
 
 def test_phase3_recovery_mix_guard_fail_closed() -> None:
     dataset = _dataset()  # count = 24
-    model = _tiny_anchor_model()
+    model = _tiny_model()
     # 越界索引 → 明确报错
     cfg = _phase3_cfg(
         freeze_mode="recovery",

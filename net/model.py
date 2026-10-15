@@ -44,8 +44,6 @@ v8 增补（参数再分配 + lane/ttc 移除 + WM latent 重构）
 - **监督口径**：WM 主损失 = **latent consistency**（``z_k`` vs 未来帧编码目标，掩码加权
   smooth_l1，见 ``pipeline.trainer.weighted_latent_consistency_loss``）；物理小解码与
   presence/entry/ego_next 为辅助/诊断项。
-- K-anchor 保留（默认关）：``plan_anchors`` 的 ``lane_ctx`` 传 ``zeros(B,3)``（valid=0 →
-  恒等变换）；``net.anchor.anchor_lane_context`` 保留但不再接线。
 
 Round-36 K1（结构化动作生成器；默认关）
 ---------------------------------------
@@ -109,19 +107,6 @@ Round-37 M1（warp 主路径接入 + OD 速度语义修正 + 五项 hook + 分�
   ``obs['warp_anchor_residual_learned']``（逐 step learned residual）。缺省 ⇒ 诊断按 n/a/0。
 - 默认全关 ⇒ 前向逐位不变（``warp_mode="off"`` 的 ``assemble_pose_k`` 已由 R36 L-D
   pre-hook 门逐位验证；Gate A：M0/cheap/structured/遗留 w1/w2 全输出 ``max|Δ|=0``）。
-
-v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 = 旧行为逐位不变）
----------------------------------------------------------------------------------------
-- :class:`net.plan_head.PlanHead` 增加**选择头**（latent → K 锚 logits）、**连续速度头**
-  （latent → 6 步 ds）与**逐锚 6×2 残差头**；方案 A 软混合
-  ``plan = Σ_k p_k·(anchor_k + residual_k)``（``p = softmax(logits/τ)``；推理可 argmax），
-  见 :mod:`net.anchor` 与 ``docs/v7_program_prereg.md`` §11。
-- **rollout**：t0 一次算出的锚计划驱动尾段（step0 仍 = ``action_mu``，输出契约
-  ``plan[:,0] == action_mu`` 不变；``traj_xy`` 与 ``plan`` 一致）；额外输出
-  ``anchor_logits/anchor_probs/anchor_plan/anchor_speed/anchor_residual/anchor_ctx``。
-- **PPO 兼容**：policy/PPO 路径（``action_mu/action_logstd/value/sample/logprob``）零改动；
-  阶段 C 的 ``trainable_scope=design`` allowlist 不含锚头 → 计划头随阶段 B/phase3 训练后
-  在 Stage C 默认冻结（WTA/CE 损失项在 ``freeze_mode=specific_only`` 下自动降级为 0）。
 
 动作与运动学
 ------------
@@ -188,7 +173,6 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
     _mem_nav_features_from_world = None
     _mem_world_state_from_obs = None
 
-from net.anchor import load_anchor_dictionary
 from net.ego_warp import WarpHooks, assemble_pose_k, masked_pose_error, od_velocity_t0
 from net.path_head import (
     LAT_HORIZON_M,
@@ -417,10 +401,6 @@ class DrivingModel(nn.Module):
         attn_layers: int = 1,
         trunk_hidden: int = 160,
         net_hidden: int = 256,
-        num_anchors: int = 0,
-        anchor_path: str | None = None,
-        anchor_temperature: float = 1.0,
-        anchor_hard: bool = False,
     ):
         super().__init__()
         self.hidden = int(hidden)
@@ -430,8 +410,6 @@ class DrivingModel(nn.Module):
         self.others_dim = int(others_dim)
         self.rollout_steps = int(wm_steps)
         self.dt = float(wm_dt)
-        #: v7 结构迭代 B：K-anchor 计划头（0 = 关闭 = 旧行为逐位不变）
-        self.num_anchors = int(num_anchors)
 
         self.encoders = ObsEncoders(hidden, od_slots, ld_slots, others_dim=others_dim)
         self.mem_encoder = MemEncoder(hidden)
@@ -442,15 +420,7 @@ class DrivingModel(nn.Module):
             router_hidden,
             primary_hidden=primary_hidden,
             top_k=moe_top_k,
-            num_anchors=self.num_anchors,
-            anchor_temperature=anchor_temperature,
-            anchor_hard=anchor_hard,
         )
-        if self.num_anchors > 0:
-            # 锚字典：文件优先，缺失 → 内置默认（K=6 fix-3 原型）；非法文件直接报错。
-            self.plan_head.set_anchors(
-                load_anchor_dictionary(anchor_path, expected_k=self.num_anchors)
-            )
         self.st_gnn = SpatioTemporalGNN(
             hidden, od_slots, ld_slots, steps=self.rollout_steps, dt=self.dt,
             spatial_layers=spatial_layers, od_knn=od_knn,
@@ -1409,12 +1379,6 @@ class DrivingModel(nn.Module):
             nav_token, signal_token,
             geometry_context=plan_context,
         )
-        # v7 结构迭代 B：K-anchor 计划（v8：lane 通道已删除 → lane_ctx 恒为 zeros(B,3)，
-        # valid=0 → 锚混合恒等变换；anchor_lane_context 保留但不再接线）
-        anchor: dict[str, Tensor] | None = None
-        if self.num_anchors > 0:
-            lane_ctx = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
-            anchor = self.plan_head.plan_anchors(latent, lane_ctx)
         # R36 K1：结构化头（默认关；启用时要求 lane_anchor_xy）——这里只算 **t0 步**动作
         # （= a0 = action_mu），并把 t0 静态几何存进 encoded 供 rollout 逐步重算（step_geometry）。
         # 消融①（``policy``）不调用头（= 默认关路径逐位）；每次调用只产**当前步**动作（R38-P1
@@ -1544,7 +1508,6 @@ class DrivingModel(nn.Module):
             "route_world": route_world,
             "route_world_mask": route_world_mask,
             "ego_world": ego_world,
-            "anchor": anchor,
             # R36 K1：结构化头（默认关 ⇒ None）+ t0 静态几何上下文（rollout 逐步重算用）
             # 与 target-lane dropout 掩码
             "path": path_out,
@@ -1583,8 +1546,8 @@ class DrivingModel(nn.Module):
         :class:`~net.path_head.StructuredPolicyHead` 实例、**当前** ``z_k`` 产出
         ``a_k=(ds_k, κ_near_k·ds_k)``（imagined 步静态几何 = t0 静态地图 + 想象位姿确定性重算，
         :func:`~net.path_head.step_geometry`）；``plan`` 由逐步动作组装（唯一动作生成器）。
-        R38-P1：H1 一次性六步钉住（第二动作源）已删除 ⇒ 本函数的动作出口只有三个：
-        structured 头 / 旧 policy / K-anchor 锚计划（后两者 = 消融/历史口径）。
+        R38-P1：H1 一次性六步钉住（第二动作源）已删除；R38-P2a：K-anchor 锚计划出口已删除
+        ⇒ 本函数的动作出口只有两个：structured 头 / 旧 policy（后者 = 消融口径）。
 
         R37 M1：``ego_warp_mode`` 决定 ``pose_k`` 口径（``off`` = 逐位不变 / ``analytic`` =
         解析 warp + OD t0 场景系速度）；``warp_hooks`` / ``warp_readout``（默认全关，零开销）
@@ -1618,9 +1581,6 @@ class DrivingModel(nn.Module):
         }
         pose_world = encoded.get("ego_world")  # A4 世界系位姿锚点（t0）；每步 advance_pose_world
         action = action0  # 第 1 个计划动作 = action_mu（与 cheap path 逐位一致）
-        # v7 结构迭代 B：K-anchor 计划（t0 一次性软混合；step0 仍由 action_mu 钉住 → 输出契约不变）
-        anchor = encoded.get("anchor")
-        anchor_plan: Tensor | None = anchor.get("plan") if isinstance(anchor, dict) else None
         # R36 K1：结构化头（默认关 ⇒ None）。生产模式 ``structured`` = 每步调用同一头。
         # R38-P1：H1 一次性六步的尾段钉住分支已删除 ⇒ 不再有第二个动作源。
         path_mode = self.path_head_mode()
@@ -1904,7 +1864,8 @@ class DrivingModel(nn.Module):
                                 "wm_advance_calls": wm_advance_calls,
                             }
                         )
-                elif anchor_plan is None:
+                else:
+                    # 默认关 / 消融①（``policy``）路径：旧 PolicyHead（唯一剩余非结构化出口）
                     tokens, key_mask = self._head_tokens(
                         z_ego,
                         z_od,
@@ -1922,9 +1883,6 @@ class DrivingModel(nn.Module):
                         encoded.get("target_lane_token"),
                     )
                     action, _ = self.policy(tokens, key_mask)
-                else:
-                    # K-anchor 方案 A：尾段计划由 t0 锚混合一次性给出（action/pose 链保持可微）
-                    action = anchor_plan[:, k, :]
 
         result = {
             "traj_xy": torch.stack(xy, dim=1),
@@ -2072,15 +2030,6 @@ class DrivingModel(nn.Module):
             out["geometry_context"] = encoded["geometry_context"]
         if "load_balance_loss" in moe_aux:
             out["load_balance_loss"] = moe_aux["load_balance_loss"]
-        # v7 结构迭代 B：K-anchor 计划输出（num_anchors=0 时不存在 → 旧契约逐位不变）
-        anchor = encoded.get("anchor")
-        if isinstance(anchor, dict):
-            out["anchor_logits"] = anchor["logits"]
-            out["anchor_probs"] = anchor["probs"]
-            out["anchor_plan"] = anchor["plan"]
-            out["anchor_speed"] = anchor["speed_ds"]
-            out["anchor_residual"] = anchor["residual"]
-            out["anchor_ctx"] = anchor["ctx"]
         if not rollout:
             if path_out is not None:
                 # R36 K1：cheap path 无 WM ⇒ **不产生** WM 逐步 rollout 的 plan/位姿链。

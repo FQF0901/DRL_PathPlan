@@ -84,7 +84,6 @@ def _stub_terms(smooth_weight: float, curv_weight: float):
         tail_curv_weight=curv_weight,
         bias_calib_weight=0.0, ego_next_weight=0.0, od_weight=0.0, ld_weight=0.0,
         latent_weight=0.0, presence_weight=0.0, entry_weight=0.0,
-        anchor_ce_weight=0.0, anchor_wta_weight=0.0,
     )
     terms = _phase3_loss_terms(
         model, {}, future_t, targets, targets["train_weight"], config, traj_row_mask=None
