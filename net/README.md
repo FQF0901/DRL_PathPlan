@@ -19,8 +19,8 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 | `semantic.py` | R21-3A 语义接线（`ld_mode=semantic`，默认关，惰性构造）：`lane_semantic → target_lane_token`（固定归一化 + 2 层 MLP，mask=0 ⇒ 严格 0）；LD 逐槽增广（role/route/offset/group-relation embed）+ 六组 masked mean 读出 → `ld_context`（`net/semantic.py:73-191`）。 |
 | `ego_warp.py` | R36 L-D / R37 M1 坐标层（纯函数、无状态）：t0 → ego_k 逆变换、OD 恒速先验（`od_velocity_t0` = 相对速度 + ego t0 速度）、`assemble_pose_k(off/analytic)`（R38-P2b：legacy w1/w2 已退役，逐位参照 = `tests/fixtures/r38_p2b_warp/`，快照 = `tools/legacy/legacy_ego_warp.py`）、anchor schema（`AnchorBatch`/`validate_anchor`）+ 5 项 hook（`WarpHooks`，默认关零开销）（`net/ego_warp.py:119-220,254-390`）。 |
 | `model.py` | 装配与惰性开关（`set_moe/set_ld_mode/set_ego_warp_mode/set_path_head/set_warp_hooks`（R38-P2b：`set_ego_warp`/`enable_path_head`/`path_head_ablation` 已删；`path_head` = 只读 alias，`set_policy_diag` fail-fast 指离线工具））、`arc_step` 运动学、`encode/plan_step/_rollout/forward/rollout`、`SUPERVISED_LABELS`（`net/model.py:210-218,225-275,392,880,923,1292,1503,1864`）。 |
-| `param_probe.py` | 参数探针 + 前向/rollout 形状冒烟；断言总参数 ≤1.5M（`net/param_probe.py:29-34,114`：预算 + 断言）。 |
-| `probes.py` | R38-D1 §四 七类强制 probes/hooks 统一容器（**默认全关**）：①状态来源 ②Policy ③World Model ④Memory ⑤六步调用链（含 ST-GNN 总调用单列）只读 hook + 统一出口 `ProbeRecorder.write`（张量字典 + JSON）；⑥ plan 连续 footprint 首次越界/碰撞纯函数；⑦ 逐参数梯度账本 `grad_ledger`（第 1/3/6 步 loss 单独反向）。默认关 ⇒ 前向逐位一致/零 RNG/不改 optimizer/ckpt（`net/probes.py:1-100` 契约 + `.slim/deepwork/p1_v2/round38/d1_off_bitwise.py` 自证）。 |
+| `param_probe.py` | R39-A2 参数账本：两配置（default(H=128) / structured=`set_path_head(True)`+`set_ld_mode("semantic")`）四分类（total/active/frozen/dormant）+ per-module 表 + 上限断言（total ≤ HEAD 基线 **+2%** / active ≤ **+5%**，GPT §5.83）+ optimizer allowlist 检查 + 训练时 update norm 接口（`module_update_norms`）+ 前向/rollout 形状冒烟（`net/param_probe.py`）。 |
+| `probes.py` | R38-D1 §四 七类强制 probes/hooks 统一容器（**默认全关**）：①状态来源 ②Policy ③World Model ④Memory ⑤六步调用链（含 ST-GNN 总调用单列）只读 hook + 统一出口 `ProbeRecorder.write`（张量字典 + JSON）；⑥ plan 连续 footprint 首次越界/碰撞纯函数；⑦ 逐参数梯度账本 `grad_ledger`（第 1/3/6 步 loss 单独反向）。**R39-A2 新增**：生产 detach **登记表** `DETACH_REGISTRY`（31 项：tensor/file:line/stage/预期阻断对象/实际可达范围）+ `scan_detaches`/`check_detach_registry`（AST 扫描 `net/**`，CI 禁未登记新增 detach；纯新增函数/常量，运行路径零触碰）。默认关 ⇒ 前向逐位一致/零 RNG/不改 optimizer/ckpt（`net/probes.py:1-100` 契约 + `.slim/deepwork/p1_v2/round38/d1_off_bitwise.py` 自证）。 |
 
 ## 数据流（v8，latent 世界模型）
 
@@ -107,7 +107,18 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 
 ## 规模与测试入口
 
-- 参数预算 ≤1.5M 由 `net/param_probe.py` 断言。实测（`tools/venv-python net/param_probe.py`）：默认构造（H=96、expert_hidden=192）= **1,000,639**；H=128 / expert=76（primary/router/trunk/net 取代码缺省）= **1,278,879**。实际规模随 `config/model.yaml`（如 `moe.primary.hidden_dim`、`policy.attn_layers`）变化。
+- 参数预算（R39 双账本，GPT §5.83）：`net/param_probe.py` 打印两配置四分类并断言
+  **total ≤ HEAD 基线 +2%**（default **1,278,879** / structured **1,510,570**）、
+  **active ≤ 基线 +5%**（同口径实测：default **871,478** / structured **994,717**；= MoE 关 +
+  当前模式单头，即 GPT §一「≈0.995M–1.103M」下界）。structured = `set_path_head(True)` +
+  `set_ld_mode("semantic")`；dormant = 关闭 MoE（407,401）+ 模式死路径（structured 下旧头
+  108,452）。optimizer 仅声明模块（allowlist，structured = `net/path_head.TRAIN_ALLOWLIST_PREFIXES`）。
+  实测（`tools/venv-python net/param_probe.py`，revision pin 见
+  `.slim/deepwork/p1_v2/round39/a2.json::revision`）。实际规模随 `config/model.yaml`
+  （如 `moe.primary.hidden_dim`、`policy.attn_layers`）变化。
+- detach 账本（R39-A2）：`net/**` 全部 `.detach()` 逐项登记于
+  `net/probes.py::DETACH_REGISTRY`（含 `z_*_next`/`wm_action`/`pose`/`progress` 等载重项与实际
+  可达范围实测）；CI 守卫 = `tests/test_r39_a2_ledgers.py`（未登记新增/陈旧 ⇒ fail）。
 - 测试：`tools/venv-python -m pytest tests/test_net_shapes.py tests/test_mem_rollout.py tests/test_v6_attn_heads.py tests/test_v6_world_nav.py tests/test_legacy_k_anchor.py tests/test_od_pose_grad.py -q`。
 
 ## 约定与坑

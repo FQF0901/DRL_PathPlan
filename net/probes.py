@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -47,15 +48,18 @@ from torch import Tensor
 
 __all__ = [
     "ChainHooks",
+    "DETACH_REGISTRY",
     "MemoryHooks",
     "PolicyHooks",
     "ProbeRecorder",
     "StateSourceHooks",
     "WorldModelHooks",
+    "check_detach_registry",
     "first_boundary_breach",
     "first_od_contact",
     "grad_ledger",
     "interpolate_plan_poses",
+    "scan_detaches",
     "state_dict_hash",
 ]
 
@@ -1054,3 +1058,500 @@ def grad_ledger(
         ledger["ckpt"]["changed"] = ledger["ckpt"]["hash_after"] != ledger["ckpt"]["hash_before"]
 
     return ledger
+
+
+# --------------------------------------------------------------------------- #
+# R39-A2：生产 detach 登记表 + AST 扫描（CI 禁未登记的新增 detach）
+# --------------------------------------------------------------------------- #
+#: 登记表字段（逐 detach：tensor / 调用位置 file:line / stage / 预期阻断对象 / 实际可达范围）：
+#: - ``tensor``：代码源文本（= AST 匹配键之一，逐字面匹配；空白已归一）；
+#: - ``file`` / ``function``：相对仓库路径 + 限定函数名（AST 匹配键之二/之三）；
+#: - ``line``：登记时行号（**informational**：移动不算回归，漂移记录在 check 报告）；
+#: - ``stage``：所属阶段；``blocks``：**预期阻断对象**；``reach``：**实际可达范围**
+#:   （``a2_reach:*`` 证据 = ``.slim/deepwork/p1_v2/round39/a2.json`` 实测；``static`` =
+#:   只读/诊断语义，无参数量梯度对象）。
+DETACH_REGISTRY: tuple[dict[str, Any], ...] = (
+    {
+        "id": "D-WM01",
+        "tensor": "z_ego_next.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1834,
+        "stage": "rollout/state-chain（latent 自回归切断；v8 固定语义）",
+        "blocks": "跨步链：t+1..t+6 步输出 → 本步 WM transition 与上游编码（a_{k+1} 不经 z_k 回传 WM/编码）",
+        "reach": "实测（a2_reach:z_next_cross_step；hook 直取捕获张量，避开 stack 的 0-grad 假阳性）：step-2 输出对 step-1 z 的 autograd.grad = None（阻断成立；同图恒等对照 = 32.0）；z_*_pred 输出自身可达 st_gnn 本步（grad 126.3）；动作链 loss 对 st_gnn = 空集（另一面佐证）、对动作头可达（1300/25.3）",
+        "evidence": "a2_reach:z_next_cross_step",
+    },
+    {
+        "id": "D-WM02",
+        "tensor": "z_od_next.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1834,
+        "stage": "rollout/state-chain",
+        "blocks": "同 D-WM01（OD latent 通道）",
+        "reach": "同 D-WM01（三通道同一行同一语义；实测 z 通道代表 + 同表达式三通道同口径）",
+        "evidence": "a2_reach:z_next_cross_step",
+    },
+    {
+        "id": "D-WM03",
+        "tensor": "z_ld_next.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1834,
+        "stage": "rollout/state-chain",
+        "blocks": "同 D-WM01（LD latent 通道）",
+        "reach": "同 D-WM01（三通道同一行同一语义；实测 z 通道代表 + 同表达式三通道同口径）",
+        "evidence": "a2_reach:z_next_cross_step",
+    },
+    {
+        "id": "D-WM04",
+        "tensor": "action.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1783,
+        "stage": "rollout/wm-action（structured 梯度门 path_head_wm_action_detach=True）",
+        "blocks": "WM 输入动作 a_{k-1} → 结构化头（WM 预测 loss 不经动作输入旁路回 policy 头；R36 K1 梯度门）",
+        "reach": "实测 A/B（a2_reach:wm_action_detach_ab）：**当前装配（enable_action_ego=False）实测本 detach 不改变任何梯度**（wm_action 无消费者；detach True/False 头 grad 均 =0.0）⇒ 预留守卫；**反事实装配**（set_action_ego(True)+解阻末层）detach=True ⇒ 头 grad=0.0 / detach=False ⇒ 4.71（阻断语义成立、因果实证）；st_gnn 本体始终可达",
+        "evidence": "a2_reach:wm_action_detach_ab",
+    },
+    {
+        "id": "D-WM05",
+        "tensor": "pose.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1739,
+        "stage": "rollout/warp-ego-pose（图位姿 ego_pose_det，warp off/analytic 共用）",
+        "blocks": "WM 图位姿 pose_k → 动作/位姿链（ego 累积位姿）；WM 输出不回传动作/策略链",
+        "reach": "实测（a2_reach:pose_warp_detach）：pose_k（= ego_pose_det + t0 anchors + t0 速度先验）**requires_grad=False ⇒ 对任何参数无梯度**（两配置同）；同图 traj_xy 链对动作头可达（policy 23549 / structured_action 444）作对照 ⇒ 阻断来自本 detach 而非整链断",
+        "evidence": "a2_reach:pose_warp_detach",
+    },
+    {
+        "id": "D-WM06",
+        "tensor": "ds.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1724,
+        "stage": "rollout/geometry-progress（structured 想象步几何进度 Σds）",
+        "blocks": "想象几何 progress_s → 动作 ds 链（几何重算视为确定性外源输入）",
+        "reach": "实测（a2_reach:progress_detach，rollout 步头输出 loss）：对 plan/动作链 grad=None、对 st_gnn=空集（阻断成立）；可达集 = 头自身 + 本步 plan_head 链（latent 的 t0 上下文经 encoders 1.65 / mem_encoder 3.61 / semantic_wiring 0.04 可达）",
+        "evidence": "a2_reach:progress_detach",
+    },
+    {
+        "id": "D-WM07",
+        "tensor": "pose.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel._rollout",
+        "line": 1877,
+        "stage": "rollout/structured-step-geometry（step_geometry 想象位姿输入）",
+        "blocks": "结构化头几何（anchor/margin 重算所用想象位姿）→ 位姿链",
+        "reach": "实测（a2_reach:step_geometry_detach）：同 D-WM06（同一检查的同一 loss）；几何输入（pose/progress 双 detach）为外源确定性量：对 plan=g None、st_gnn=空集",
+        "evidence": "a2_reach:step_geometry_detach",
+    },
+    {
+        "id": "D-NV01",
+        "tensor": "_squeeze_pose(ego_pose_world).detach()",
+        "file": "net/mem.py",
+        "function": "nav_features_from_world",
+        "line": 479,
+        "stage": "A4/nav-rebuild（世界系 nav 重建）",
+        "blocks": "nav 重建 → 世界系位姿输入（外源数据；nav 为上下文条件，不向位姿链回传）",
+        "reach": "实测（a2_reach:nav_features_detach_unit）：grad(nav_feats.sum()) 对输入 pose = None；（值上）nav token 只经 encoders.nav 自身权重进入图",
+        "evidence": "a2_reach:nav_features_detach_unit",
+    },
+    {
+        "id": "D-NV02",
+        "tensor": "_squeeze_route(route_world).detach()",
+        "file": "net/mem.py",
+        "function": "nav_features_from_world",
+        "line": 480,
+        "stage": "A4/nav-rebuild",
+        "blocks": "nav 重建 → 世界系路线输入",
+        "reach": "实测（a2_reach:nav_features_detach_unit）：grad(nav_feats.sum()) 对输入 route = None",
+        "evidence": "a2_reach:nav_features_detach_unit",
+    },
+    {
+        "id": "D-NV03",
+        "tensor": "mask.detach()",
+        "file": "net/mem.py",
+        "function": "nav_features_from_world",
+        "line": 494,
+        "stage": "A4/nav-rebuild（route_world_mask 布尔化）",
+        "blocks": "route 有效性掩码的梯度（布尔比较不可微）",
+        "reach": "实测（a2_reach:nav_features_detach_unit）：grad 对 mask 输入 = None（掩码仅作 0/1 选择；无参数梯度对象）",
+        "evidence": "a2_reach:nav_features_detach_unit",
+    },
+    {
+        "id": "D-NV04",
+        "tensor": "mem.others[:, -1, : int(nav_dim)].detach()",
+        "file": "net/mem.py",
+        "function": "rebuild_nav_from_world",
+        "line": 574,
+        "stage": "A4/nav-fallback（缺世界系键/整批不可用 ⇒ t0 冻结 nav）",
+        "blocks": "回退 nav（t0 冻结上下文）→ mem.others",
+        "reach": "实测（a2_reach:nav_fallback_detach_unit）：grad(fallback.sum()) 对 mem.others = None；回退口径 = 只读 t0 冻结值",
+        "evidence": "a2_reach:nav_fallback_detach_unit",
+    },
+    {
+        "id": "D-NV05",
+        "tensor": "mem.others[:, -1, :NAV_DIM].detach()",
+        "file": "net/model.py",
+        "function": "rebuild_nav_from_world",
+        "line": 439,
+        "stage": "A4/nav-fallback（net.model 内联回退 helper；逐行不可用时 where 回退）",
+        "blocks": "回退 nav 行 → mem.others",
+        "reach": "同 D-NV04（同一语义的 model 侧内联实现；只在部分行不可用时触发）",
+        "evidence": "a2_reach:nav_fallback_detach_unit",
+    },
+    {
+        "id": "D-SD01",
+        "tensor": "final.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel.semantic_action_decomposition",
+        "line": 2241,
+        "stage": "diagnostics/semantic-action-decomposition（@torch.no_grad 只读监控）",
+        "blocks": "监控读出 → 计算图（防御性；方法整体 no_grad）",
+        "reach": "实测（a2_reach:semantic_decomposition_nograd）：返回张量 requires_grad 全 False（纯监控，不参与任何训练目标）",
+        "evidence": "a2_reach:semantic_decomposition_nograd",
+    },
+    {
+        "id": "D-SD02",
+        "tensor": "self.forward(obs, forward_mode=str(forward_mode), semantic_off=True)[\"action_mu\"].detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel.semantic_action_decomposition",
+        "line": 2246,
+        "stage": "diagnostics/semantic-action-decomposition（legacy 基底前向读出）",
+        "blocks": "legacy（semantic_off）基底动作 → 计算图",
+        "reach": "同 D-SD01（no_grad 只读；delta = final − legacy 不参与训练目标）",
+        "evidence": "a2_reach:semantic_decomposition_nograd",
+    },
+    {
+        "id": "D-SD03",
+        "tensor": "self.beta_context.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel.semantic_action_decomposition",
+        "line": 2256,
+        "stage": "diagnostics/semantic-action-decomposition（β 标量读出）",
+        "blocks": "β 标量 → 计算图",
+        "reach": "static：float() 标量读出（刷新到 CPU float；无梯度语义）",
+        "evidence": "static",
+    },
+    {
+        "id": "D-SD04",
+        "tensor": "self.beta_token.detach()",
+        "file": "net/model.py",
+        "function": "DrivingModel.semantic_action_decomposition",
+        "line": 2257,
+        "stage": "diagnostics/semantic-action-decomposition（β 标量读出）",
+        "blocks": "β 标量 → 计算图",
+        "reach": "static：同 D-SD03",
+        "evidence": "static",
+    },
+    {
+        "id": "D-SM01",
+        "tensor": "self.lane_encoder.normalization.detach()",
+        "file": "net/semantic.py",
+        "function": "SemanticWiring.normalization_constants",
+        "line": 230,
+        "stage": "diagnostics/semantic（固定归一化除数读出）",
+        "blocks": "归一化 buffer → 计算图",
+        "reach": "实测（a2_reach:semantic_norm_readout_unit）：返回 python float 元组（.detach().cpu().tolist()），无张量出口、无梯度语义",
+        "evidence": "a2_reach:semantic_norm_readout_unit",
+    },
+    {
+        "id": "D-SP01",
+        "tensor": "self.alpha.detach()",
+        "file": "net/spatial.py",
+        "function": "LdAggregate.forward",
+        "line": 234,
+        "stage": "diagnostics/attn（LdAggregate 统计读数；ld_mode=attn 系才构造）",
+        "blocks": "alpha 标量 → 计算图",
+        "reach": "static：float() 统计读出（if self.stats_enabled；不影响前向值）",
+        "evidence": "static",
+    },
+    {
+        "id": "D-WH01",
+        "tensor": "anchor_pre.detach()",
+        "file": "net/ego_warp.py",
+        "function": "WarpHooks.capture",
+        "line": 400,
+        "stage": "R37 warp hooks（默认关；只读诊断）",
+        "blocks": "warp ① anchor_pre 快照 → 计算图",
+        "reach": "实测（a2_reach:warp_hooks_detach_unit）：record 内张量 requires_grad 全 False（detach().clone() 只读快照）",
+        "evidence": "a2_reach:warp_hooks_detach_unit",
+    },
+    {
+        "id": "D-WH02",
+        "tensor": "anchor_analytic.detach()",
+        "file": "net/ego_warp.py",
+        "function": "WarpHooks.capture",
+        "line": 401,
+        "stage": "R37 warp hooks",
+        "blocks": "warp ② anchor_analytic 快照 → 计算图",
+        "reach": "同 D-WH01",
+        "evidence": "a2_reach:warp_hooks_detach_unit",
+    },
+    {
+        "id": "D-WH03",
+        "tensor": "anchor_actual_next.detach()",
+        "file": "net/ego_warp.py",
+        "function": "WarpHooks.capture",
+        "line": 402,
+        "stage": "R37 warp hooks",
+        "blocks": "warp ③ anchor_actual 快照 → 计算图",
+        "reach": "同 D-WH01",
+        "evidence": "a2_reach:warp_hooks_detach_unit",
+    },
+    {
+        "id": "D-WH04",
+        "tensor": "residual_learned.detach()",
+        "file": "net/ego_warp.py",
+        "function": "WarpHooks.capture",
+        "line": 403,
+        "stage": "R37 warp hooks",
+        "blocks": "warp ④ learned residual 快照 → 计算图（接口留给 WM residual 训练，本 detach 只影响快照）",
+        "reach": "同 D-WH01",
+        "evidence": "a2_reach:warp_hooks_detach_unit",
+    },
+    {
+        "id": "D-WH05",
+        "tensor": "final.detach()",
+        "file": "net/ego_warp.py",
+        "function": "WarpHooks.capture",
+        "line": 404,
+        "stage": "R37 warp hooks",
+        "blocks": "warp ⑤ anchor_final 快照 → 计算图",
+        "reach": "同 D-WH01",
+        "evidence": "a2_reach:warp_hooks_detach_unit",
+    },
+    {
+        "id": "D-PR01",
+        "tensor": "value.detach()",
+        "file": "net/probes.py",
+        "function": "_clone",
+        "line": 79,
+        "stage": "R38-D1 probes 内部（统一出口快照；默认关/只读）",
+        "blocks": "探针快照 → 被观测图（只读副本）",
+        "reach": "实测（a2_reach:probe_internal_detach_unit）：micro 检查 requires_grad(输入)=True ⇒ 快照 False；探针默认全关，不触碰生产图",
+        "evidence": "a2_reach:probe_internal_detach_unit",
+    },
+    {
+        "id": "D-PR02",
+        "tensor": "tensor.detach()",
+        "file": "net/probes.py",
+        "function": "state_dict_hash",
+        "line": 101,
+        "stage": "R38-D1 probes 内部（ckpt 内容 sha256）",
+        "blocks": "状态字典读出 → 计算图",
+        "reach": "static：hash 只读（.detach().cpu().numpy().tobytes()）",
+        "evidence": "static",
+    },
+    {
+        "id": "D-PR03",
+        "tensor": "value.detach()",
+        "file": "net/probes.py",
+        "function": "_HookBase._flatten",
+        "line": 150,
+        "stage": "R38-D1 probes 内部（hook 张量扁平化落盘）",
+        "blocks": "hook 记录张量 → 计算图",
+        "reach": "同 D-PR01（只读快照）",
+        "evidence": "a2_reach:probe_internal_detach_unit",
+    },
+    {
+        "id": "D-PR04",
+        "tensor": "grad.detach()",
+        "file": "net/probes.py",
+        "function": "grad_ledger",
+        "line": 1012,
+        "stage": "R39-D1 probes 内部（逐 loss autograd.grad 读数）",
+        "blocks": "梯度读数 → 计算图（读数即终点）",
+        "reach": "static：norm 读数（float），只读账本",
+        "evidence": "static",
+    },
+    {
+        "id": "D-PR05",
+        "tensor": "loss.detach()",
+        "file": "net/probes.py",
+        "function": "grad_ledger",
+        "line": 1017,
+        "stage": "R38-D1 probes 内部（loss 值读数）",
+        "blocks": "loss 标量 → 计算图",
+        "reach": "static：float 读数",
+        "evidence": "static",
+    },
+    {
+        "id": "D-PR06",
+        "tensor": "parameter.grad.detach()",
+        "file": "net/probes.py",
+        "function": "grad_ledger",
+        "line": 1045,
+        "stage": "R38-D1 probes 内部（update step 后 grad norm 读数）",
+        "blocks": "优化器梯度 → 计算图",
+        "reach": "static：norm 读数",
+        "evidence": "static",
+    },
+    {
+        "id": "D-PR07",
+        "tensor": "parameter.detach()",
+        "file": "net/probes.py",
+        "function": "grad_ledger",
+        "line": 1046,
+        "stage": "R38-D1 probes 内部（step 前参数快照）",
+        "blocks": "参数快照 → 计算图",
+        "reach": "static：副本快照（update norm = ‖Δθ‖）",
+        "evidence": "static",
+    },
+    {
+        "id": "D-PR08",
+        "tensor": "parameter.detach()",
+        "file": "net/probes.py",
+        "function": "grad_ledger",
+        "line": 1050,
+        "stage": "R38-D1 probes 内部（step 后 Δθ 读数）",
+        "blocks": "参数差 → 计算图",
+        "reach": "static：update norm 读数",
+        "evidence": "static",
+    },
+)
+
+#: 登记表键 = (file, function, tensor)；`line` 仅为登记时行号（漂移不判失败，记入报告）
+DETACH_REGISTRY_FIELDS: tuple[str, ...] = (
+    "id",
+    "tensor",
+    "file",
+    "function",
+    "line",
+    "stage",
+    "blocks",
+    "reach",
+    "evidence",
+)
+
+
+def _detach_qualname_scan(source: str, filename: str) -> list[dict[str, Any]]:
+    """单个 Python 源文件的 ``.detach()`` 调用点（AST；含限定函数名与源文本）。"""
+    tree = ast.parse(source, filename=filename)
+    occurrences: list[dict[str, Any]] = []
+
+    def visit(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "detach"
+                and not child.args
+                and not child.keywords
+            ):
+                text = ast.get_source_segment(source, child) or ""
+                occurrences.append(
+                    {
+                        "file": filename,
+                        "function": scope or "<module>",
+                        "tensor": " ".join(text.split()),
+                        "line": int(child.lineno),
+                    }
+                )
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, f"{scope}.{child.name}" if scope else child.name)
+            else:
+                visit(child, scope)
+
+    visit(tree, "")
+    return occurrences
+
+
+def scan_detaches(root: str | Path | None = None, *, net_dir: str = "net") -> list[dict[str, Any]]:
+    """扫描 ``<root>/<net_dir>/**/*.py`` 的 ``.detach()`` 调用（AST 口径；忽略注释/字符串）。
+
+    返回按 ``(file, line, tensor)`` 排序的调用点列表；``file`` = 相对 root 的 POSIX 路径。
+    """
+    base = Path(__file__).resolve().parents[1] if root is None else Path(root)
+    target = base / net_dir
+    if not target.is_dir():
+        raise FileNotFoundError(f"scan_detaches: 目录不存在 {target}")
+    occurrences: list[dict[str, Any]] = []
+    for path in sorted(target.rglob("*.py")):
+        relative = path.relative_to(base).as_posix()
+        source = path.read_text(encoding="utf-8")
+        occurrences.extend(_detach_qualname_scan(source, relative))
+    return sorted(occurrences, key=lambda row: (row["file"], row["line"], row["tensor"]))
+
+
+def check_detach_registry(
+    root: str | Path | None = None, *,
+    registry: Sequence[Mapping[str, Any]] | None = None,
+    net_dir: str = "net",
+) -> dict[str, Any]:
+    """CI 守卫：``net/**`` 全部 ``.detach()`` 必须逐项登记（未登记/失配 ⇒ ``ok=False``）。
+
+    - ``unregistered``：代码中存在但登记表缺失的调用点（**新增未登记 detach** ⇒ fail）；
+    - ``stale``：登记表存在但代码中已不存在（反向陈旧 ⇒ fail，防账本腐烂）；
+    - ``duplicate_registry``：登记表键重复；``invalid_entries``：字段缺失/为空；
+    - ``line_drift``：键匹配但行号漂移（informational，不判失败）。
+    """
+    entries = tuple(DETACH_REGISTRY if registry is None else registry)
+    occurrences = scan_detaches(root, net_dir=net_dir)
+
+    def keys(rows: Iterable[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
+        return [(str(row["file"]), str(row["function"]), str(row["tensor"])) for row in rows]
+
+    code_keys = keys(occurrences)
+    registry_keys = keys(entries)
+    code_count: dict[tuple[str, str, str], int] = {}
+    for key in code_keys:
+        code_count[key] = code_count.get(key, 0) + 1
+    registry_count: dict[tuple[str, str, str], int] = {}
+    for key in registry_keys:
+        registry_count[key] = registry_count.get(key, 0) + 1
+
+    # 多集差：同一 (file, function, tensor) 在代码里出现多次（如同一行 3 个 z_*_next）时，
+    # 登记表也必须逐次登记；超出/不足都判 fail（未登记新增 / 账本腐烂）。
+    unregistered_counter = dict(registry_count)
+    unregistered: list[dict[str, Any]] = []
+    for row in occurrences:
+        key = (row["file"], row["function"], row["tensor"])
+        if unregistered_counter.get(key, 0) <= 0:
+            unregistered.append(row)
+        else:
+            unregistered_counter[key] -= 1
+    stale_counter = dict(code_count)
+    stale: list[dict[str, Any]] = []
+    for entry in entries:
+        key = (str(entry["file"]), str(entry["function"]), str(entry["tensor"]))
+        if stale_counter.get(key, 0) <= 0:
+            stale.append(entry)
+        else:
+            stale_counter[key] -= 1
+    invalid_entries = [
+        {"id": entry.get("id"), "missing": [field for field in DETACH_REGISTRY_FIELDS if not entry.get(field)]}
+        for entry in entries
+        if any(not entry.get(field) for field in DETACH_REGISTRY_FIELDS)
+    ]
+    registered_lines: dict[tuple[str, str, str], list[int]] = {}
+    for entry in entries:
+        key = (str(entry["file"]), str(entry["function"]), str(entry["tensor"]))
+        registered_lines.setdefault(key, []).append(int(entry["line"]))
+    actual_lines: dict[tuple[str, str, str], list[int]] = {}
+    for row in occurrences:
+        key = (row["file"], row["function"], row["tensor"])
+        actual_lines.setdefault(key, []).append(int(row["line"]))
+    line_drift = [
+        {
+            "file": key[0],
+            "function": key[1],
+            "tensor": key[2],
+            "registered_lines": sorted(registered_lines[key]),
+            "actual_lines": sorted(actual_lines[key]),
+        }
+        for key in sorted(registered_lines)
+        if key in actual_lines and sorted(registered_lines[key]) != sorted(actual_lines[key])
+    ]
+    return {
+        "ok": not unregistered and not stale and not invalid_entries,
+        "n_code_detaches": len(occurrences),
+        "n_registry_entries": len(entries),
+        "unregistered": unregistered,
+        "stale": stale,
+        "invalid_entries": invalid_entries,
+        "line_drift": line_drift,
+    }
