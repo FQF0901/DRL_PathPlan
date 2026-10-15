@@ -37,30 +37,36 @@
    仅 ``--allow-partial-load``（显式）放行，放行时强制在日志与 ``metrics.json::meta.ckpt_load``
    记录三计数与 missing 列表；``metrics.json::meta`` 另落版本戳（evaluator / git commit /
    argv / ckpt sha256；config 快照由入口层 manifest 落盘）。干净加载行为逐位不变。
-7. **R39-A1 工程闭合**（GPT §二-A 任务 1/2/4，零训练）：
-   - ``--path-head {off,structured}``（默认 off = 既有装配逐位不变）：``structured`` 在装载前
-     惰性构造 ``policy.structured_action`` 结构化头（``set_path_head(True)`` +
-     ``set_path_head_ablation("structured")``，对齐 ``.slim/deepwork/p1_v2/a3/eval_a3.py``）；
+7. **R39-A1 工程闭合 + A1b 装配全开**（GPT §二-A 任务 1/2/4；遗留 2 关闭，零训练）：
+   - **装配开关（全部默认 = 生产口径，逐位不变）**：``--path-head {off,structured}``、
+     ``--ld-mode {baseline,…,semantic,semantic_no_chain}``、``--rollout-semantic
+     {full,t0_only,static_role_only}``、``--lane-anchor {off,inject}``、``--fill-from <ckpt>``
+     —— 口径对齐 ``.slim/deepwork/p1_v2/a3/eval_a3.py``（C1_HEAD = structured + semantic +
+     ``--moe-off`` + fill K1e2 + inject 可经 ``tools/test.py`` 复现）；
+   - ``--path-head structured`` 在装载前惰性构造 ``policy.structured_action`` 结构化头
+     （``set_path_head(True)`` + ``set_path_head_ablation("structured")``，对齐 eval_a3）；``--ld-mode``/
+     ``--rollout-semantic`` 非默认时先 ``set_ld_mode``/``set_rollout_semantic`` 再装载
+     （惰性模块必须先建，否则 ckpt 键成 unexpected）；``--fill-from`` 只回填 migrate 后
+     ``missing`` 中存在的键（口径 = a3 canary ``fill_from``）；
    - **正式加载路径接入 ckpt migration**（``tools.legacy.legacy_key_mapper`` +
-     ``checkpoint_migration.migrate_state_dict``）：已登记族（K-anchor 丢弃族 /
+     ``checkpoint_migration.migrate_state_dict``；干净无回填路径经统一原语
+     ``load_checkpoint_migrated(strict=True)``）：已登记族（K-anchor 丢弃族 /
      ``path_head.*→policy.structured_action.*`` 改名族）逐族计数，未登记 unexpected 仍拒绝；
-     **严格加载语义**：已登记迁移后 missing/unexpected/shape_mismatch 全零 ⇒ ``strict=True``
+     **严格加载语义**：迁移 + 回填后 missing/unexpected/shape_mismatch 全零 ⇒ ``strict=True``
      语义装载；任一非零 ⇒ 默认 fail-fast（``--allow-partial-load`` 显式放行时才 ``strict=False``）；
    - **LoadReport**（missing/unexpected/filled/rejected/renamed/dropped 计数 + 全量键列表 +
-     逐族计数 + ckpt 路径/sha256 + mapper 版本 + strict 判定）随加载摘要落
+     逐族计数 + ckpt 路径/sha256 + mapper 版本 + 装配轴/回填报告 + strict 判定）随加载摘要落
      ``metrics.json::meta`` 与 ``run_meta.json``；
    - **四 hash 原生**：``run_meta.json``（+ 既有 ``manifest.txt`` 追加 ``r39a1_hashes:`` 行）
      记录 ``evaluation_protocol_hash``（口径复用 ``.slim/deepwork/p1_v2/round38/c6_protocol.py``；
-     正式入口轴映射：tracker/tail(=eval-reference)/moe/path_head 入 hash）、``model_tree_hash``
-     （``net/**/*.py`` 树指纹，m2 口径）、``schema_hash``（``env.obs.obs_fingerprint()``）、
-     ``checkpoint_hash``（ckpt 内容 sha256）；
-   - **``lane_anchor_xy`` 口径（选项 a：缺键明确报错 + 文档化注入）**：结构化头前向要求
-     ``obs['lane_anchor_xy']``（目标车道中心线折线，ego t0 系），本入口的 obs builder 不生产
-     该键 ⇒ 缺键在 forward 由 ``net/path_head.py::anchor_from_obs`` **fail-fast**（不静默回退）。
-     注入方式（评测侧，二选一，均不改本文件）：① ``.slim/deepwork/p1_v2/a3/eval_a3.py
-     --lane-anchor inject``（R36 C lane 注入器：``select_target_lane`` + E3 采样器口径）；
-     ② 自定义 controller 子类在决策步 builder.build 后写入 ``lane_anchor_xy (1,P,2)`` +
-     ``lane_anchor_mask (1,P)``（同 a3 口径）。**缺键报错文案已同步指路此注入方式**。
+     正式入口轴映射：tracker/tail(=eval-reference)/moe/path_head + **ld_mode/rollout_semantic/
+     lane_anchor/fill_from_sha16 入 hash**）、``model_tree_hash``（``net/**/*.py`` 树指纹，m2 口径）、
+     ``schema_hash``（``env.obs.obs_fingerprint()``）、``checkpoint_hash``（ckpt 内容 sha256）；
+   - **``lane_anchor_xy`` 口径（选项 a：缺键明确报错 + 显式注入开关）**：结构化头前向要求
+     ``obs['lane_anchor_xy']``（目标车道中心线折线，ego t0 系），本入口 obs builder 不生产该键 ⇒
+     ``--lane-anchor inject`` 显式开启（R36 C lane 注入器同源：``select_target_lane`` + E3 采样器；
+     决策步 builder.build 后写入，与 a3 ``--lane-anchor inject`` 同点同口径）；不开注入而缺键 ⇒
+     ``net/path_head.py::anchor_from_obs`` **fail-fast**（不静默回退），报错文案指路本开关与 a3。
 
 关键实现事实（先核对源码再写码）
 ------------------------------
@@ -702,25 +708,48 @@ def _build_ckpt_model(model_cls: Any, config: Mapping[str, Any]) -> Any:
         return model_cls(**kwargs)
 
 
-_CKPT_MODEL_CACHE: Dict[Tuple[str, str], Any] = {}
-#: P0-A 版本戳/审计：每个 ``(ckpt, device[, path_head])`` 最近一次成功加载的摘要
+_CKPT_MODEL_CACHE: Dict[Tuple, Any] = {}
+#: P0-A 版本戳/审计：每个装配键（见 :func:`_model_cache_key`）最近一次成功加载的摘要
 #: （含三计数、明细列表与 R39-A1 migration LoadReport）。
-_CKPT_LOAD_SUMMARY: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_CKPT_LOAD_SUMMARY: Dict[Tuple, Dict[str, Any]] = {}
 
 
-#: R39-A1（GPT §二-A 任务 1）：正式入口结构化装配开关（``--path-head``）。
-#: ``off``（默认）= 既有装配逐位不变；``structured`` = 惰性构造
-#: ``policy.structured_action`` 结构化头并启用结构化动作出口（口径对齐
-#: ``.slim/deepwork/p1_v2/a3/eval_a3.py`` 的结构化装载顺序）。
+#: R39-A1（GPT §二-A 任务 1）/ A1b（遗留 2 关闭）：正式入口**模型装配开关**——口径对齐
+#: ``.slim/deepwork/p1_v2/a3/eval_a3.py`` 的 canary 装载顺序；全默认 = 生产口径（逐位不变）。
+#: - ``--path-head``：结构化头 ``policy.structured_action``（off=默认旧 PolicyHead）；
+#: - ``--ld-mode``：LD 消融（ckpt 必须与训练同模式装载；semantic = R21-3A 语义接线）；
+#: - ``--rollout-semantic``：rollout 阶段 semantic 注入口径；
+#: - ``--lane-anchor``：``lane_anchor_xy`` 注入器（选项 a 的显式开关；off=默认不触达）；
+#: - ``--fill-from``：缺键回填源 ckpt（K1e2 血统语义键；显式给出才触达）。
 LOAD_PATH_HEAD_CHOICES: tuple[str, ...] = ("off", "structured")
+LOAD_LD_MODES: tuple[str, ...] = (
+    "baseline", "no_chain", "set_attn", "attn", "attn_no_chain", "semantic", "semantic_no_chain",
+)
+LOAD_ROLLOUT_SEMANTIC_MODES: tuple[str, ...] = ("full", "t0_only", "static_role_only")
+LOAD_LANE_ANCHOR_MODES: tuple[str, ...] = ("off", "inject")
 
 
-def _path_head_cache_key(ckpt: str, device: str, path_head: str) -> Tuple[str, str]:
-    """缓存/加载摘要键：``off`` 保持旧键 ``(ckpt, device)``（历史调用点逐位不变）；
-    ``structured`` 加第三段避免与默认装配互撞（a3 预填缓存仍按旧键命中）。"""
-    if str(path_head or "off") == "off":
-        return (str(ckpt), str(device))
-    return (str(ckpt), str(device), f"path_head={path_head}")  # type: ignore[return-value]
+def _model_cache_key(
+    ckpt: str,
+    device: str,
+    *,
+    path_head: str = "off",
+    ld_mode: str = "baseline",
+    rollout_semantic: str = "full",
+    fill_from: Optional[str] = None,
+) -> Tuple:
+    """缓存/加载摘要键：**全默认装配 = 旧键 ``(ckpt, device)``**（历史调用点逐位不变；
+    a3 controller 的 canary 预填缓存按该旧键命中）；任何非默认轴追加一段避免互撞。"""
+    key: Tuple = (str(ckpt), str(device))
+    if str(path_head or "off") != "off":
+        key += (("path_head", str(path_head)),)
+    if str(ld_mode or "baseline") != "baseline":
+        key += (("ld_mode", str(ld_mode)),)
+    if str(rollout_semantic or "full") != "full":
+        key += (("rollout_semantic", str(rollout_semantic)),)
+    if fill_from:
+        key += (("fill_from", str(fill_from)),)
+    return key
 
 
 def _sha256_file(path: str) -> str:
@@ -791,6 +820,10 @@ def _formal_entry_protocol(
     eval_reference: str,
     moe_off: bool,
     path_head: str,
+    ld_mode: str = "baseline",
+    rollout_semantic: str = "full",
+    lane_anchor: str = "off",
+    fill_from_sha16: Optional[str] = None,
     workers: int,
     max_steps: int,
     device: Optional[str],
@@ -800,8 +833,10 @@ def _formal_entry_protocol(
 
     轴映射（正式入口 → c6 协议字段；记录在 ``notes``）：
     ``control.tracker ← --tracker``；``control.tail ← --eval-reference``（正式入口参考口径）；
-    ``model.ld_mode/rollout_semantic`` = 正式入口固定装配（``baseline``/``full``，本入口不提供
-    开关）；``model.moe ← --moe-off``；R39-A1 追加 ``model.path_head``（结构化装配开关，**入 hash**）。
+    ``model.ld_mode ← --ld-mode`` / ``model.rollout_semantic ← --rollout-semantic``（R39-A1b 起为
+    正式入口开关，**入 hash**）；``model.moe ← --moe-off``；``model.path_head ← --path-head``；
+    R39-A1b 追加 ``model.lane_anchor``（``--lane-anchor`` 注入开关）与 ``model.fill_from_sha16``
+    （``--fill-from`` 源 ckpt 内容指纹；none）—— 均**入 hash**（模型输入/权重装配的可辨识性）。
     """
     module = _load_readonly_script("r39a1_c6_protocol", R39_PROTOCOL_HASH_SCRIPT)
     protocol = module.build_protocol(
@@ -811,20 +846,22 @@ def _formal_entry_protocol(
         entry="pipeline/eval_runner.py",
         tracker=str(tracker),
         tail=str(eval_reference),
-        ld_mode="baseline",
-        rollout_semantic="full",
+        ld_mode=str(ld_mode),
+        rollout_semantic=str(rollout_semantic),
         moe=("off" if moe_off else "on"),
         workers=int(workers),
         max_steps=int(max_steps),
         device=str(device or ""),
         net_tree_sha16=str(net_tree_sha16),
         notes=(
-            "R39-A1 正式入口协议（tools/test.py / pipeline.eval_runner.py）："
-            "model.ld_mode=baseline / model.rollout_semantic=full 为正式入口固定装配；"
-            "model.path_head = --path-head 结构化装配开关（R39-A1 入 hash）"
+            "R39-A1/A1b 正式入口协议（tools/test.py / pipeline.eval_runner.py）："
+            "ld_mode/rollout_semantic/path_head/lane_anchor/fill_from_sha16 均为正式入口装配开关"
+            "（入 hash；缺省 = 生产口径 baseline/full/off/off/none）"
         ),
     )
     protocol["model"]["path_head"] = str(path_head)
+    protocol["model"]["lane_anchor"] = str(lane_anchor)
+    protocol["model"]["fill_from_sha16"] = (str(fill_from_sha16) if fill_from_sha16 else "none")
     protocol["hashes"] = {
         "protocol_hash": module.hash_protocol(protocol),
         "protocol_hash_full": module.hash_protocol(protocol, full=True),
@@ -842,6 +879,10 @@ def _evaluation_hashes(
     eval_reference: str,
     moe_off: bool,
     path_head: str,
+    ld_mode: str = "baseline",
+    rollout_semantic: str = "full",
+    lane_anchor: str = "off",
+    fill_from: Optional[str] = None,
     workers: int,
     max_steps: int,
     device: Optional[str],
@@ -850,10 +891,13 @@ def _evaluation_hashes(
     net_tree = _net_tree_digest()
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint  # 轻量（stdlib only）
 
+    fill_sha = _sha256_file(str(fill_from)) if fill_from else None
     protocol = _formal_entry_protocol(
         spec_path=spec_path, policy=policy, tracker=tracker, eval_reference=eval_reference,
-        moe_off=moe_off, path_head=path_head, workers=workers, max_steps=max_steps,
-        device=device, net_tree_sha16=str(net_tree["tree_sha16"]),
+        moe_off=moe_off, path_head=path_head, ld_mode=ld_mode, rollout_semantic=rollout_semantic,
+        lane_anchor=lane_anchor, fill_from_sha16=(fill_sha[:16] if fill_sha else None),
+        workers=workers, max_steps=max_steps, device=device,
+        net_tree_sha16=str(net_tree["tree_sha16"]),
     )
     ckpt_sha = _sha256_file(str(ckpt)) if ckpt is not None else None
     return {
@@ -867,6 +911,8 @@ def _evaluation_hashes(
         "evaluation_protocol_common_hash": protocol["hashes"]["protocol_common_hash"],
         "checkpoint_hash16": (ckpt_sha[:16] if isinstance(ckpt_sha, str) and len(ckpt_sha) == 64 else None),
         "checkpoint_path": str(ckpt) if ckpt is not None else None,
+        "fill_from": ({"path": str(fill_from), "sha256": fill_sha,
+                       "sha16": (fill_sha[:16] if fill_sha else None)} if fill_from else None),
         "model_tree": {"root": "net", "n_files": int(net_tree["n_files"]),
                        "tree_sha16": str(net_tree["tree_sha16"]),
                        "tool": R39_NET_SHA_SCRIPT},
@@ -903,9 +949,19 @@ def _record_run_meta(out_dir: Path, payload: Dict[str, Any]) -> Path:
     return meta_path
 
 
-def _ckpt_load_summary(ckpt: str, device: str = "cpu", path_head: str = "off") -> Optional[Dict[str, Any]]:
+def _ckpt_load_summary(
+    ckpt: str,
+    device: str = "cpu",
+    path_head: str = "off",
+    ld_mode: str = "baseline",
+    rollout_semantic: str = "full",
+    fill_from: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
-    return _CKPT_LOAD_SUMMARY.get(_path_head_cache_key(ckpt, device, path_head))
+    return _CKPT_LOAD_SUMMARY.get(_model_cache_key(
+        ckpt, device, path_head=path_head, ld_mode=ld_mode,
+        rollout_semantic=rollout_semantic, fill_from=fill_from,
+    ))
 
 
 def _filter_checkpoint_state(model: Any, state: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str], List[str], List[str]]:
@@ -947,34 +1003,50 @@ def _load_ckpt_model(
     *,
     allow_partial: bool = False,
     path_head: str = "off",
+    ld_mode: str = "baseline",
+    rollout_semantic: str = "full",
+    fill_from: Optional[str] = None,
 ) -> Any:
-    """worker 内按 ``(ckpt, device[, path_head])`` 缓存模型（回收前后各加载一次，不会每 spec 重载）。
+    """worker 内按装配键（``_model_cache_key``；全默认 = ``(ckpt, device)``）缓存模型。
 
-    R39-A1（GPT §二-A 任务 1/2）：正式加载路径接入 ckpt migration
+    R39-A1（GPT §二-A 任务 1/2）+ A1b（遗留 2 关闭）：正式加载路径接入 ckpt migration
     （``tools.legacy.legacy_key_mapper`` + ``checkpoint_migration.migrate_state_dict``）：
 
+    - **装配（装载前，顺序对齐 a3 canary ``load_model_ce``）**：
+      ``set_ld_mode``（非 baseline）→ ``set_rollout_semantic``（非 full）→
+      ``--path-head structured`` 惰性构造 ``policy.structured_action``；
+      ``--lane-anchor inject`` 属 controller 侧（每决策步注入 ``lane_anchor_xy``，见
+      :class:`_CkptController`）；
     - **已登记族**（K-anchor 丢弃族 / ``path_head.*→policy.structured_action.*`` 改名族）从
       unexpected 里移走并逐族计数（LoadReport）；未登记 unexpected 键仍 = 拒绝（reject）；
-    - ``--path-head structured``：装载前先 ``set_path_head(True)`` + ``set_path_head_ablation
-      ("structured")``（对齐 ``.slim/deepwork/p1_v2/a3/eval_a3.py`` 的 canary 装载顺序；
-      默认 ``off`` = 既有装配逐位不变）；``lane_anchor_xy`` 由**评测侧注入**（本入口不生产该键；
-      缺键 ⇒ ``net/path_head.py::anchor_from_obs`` fail-fast，注入方式见模块 docstring）；
-    - **严格加载语义（明确）**：应用已登记迁移后，``missing/unexpected/shape_mismatch`` 任一
-      非零 ⇒ **默认 fail-fast**（``raise SystemExit(2)``，打印三计数与明细）；三者全零时以
-      ``strict=True`` 装载（= 与严格装载逐位同结果）；仅 ``--allow-partial-load``（显式）
-      放行并以 ``strict=False`` 装载，同时强制在日志与 ``metrics.json::meta.ckpt_load``
-      记录三计数、missing 列表与 LoadReport。干净加载行为逐位不变；
-    - **LoadReport**（``summary["load_report"]``；R39-A1）：missing/unexpected/filled/
-      rejected/renamed/dropped 计数 + 全量键列表 + 逐族计数 + ckpt 路径/sha256 +
-      mapper 版本 + strict 判定，供 run_meta/manifest 落盘审计。
+    - **缺键回填（``--fill-from``，显式）**：migrate 后 ``missing`` 中的键若存在于回填 ckpt
+      且形状一致 ⇒ 装载并计入 LoadReport ``fill_from``（口径 = a3 canary ``fill_from``；
+      不给则零触达）；
+    - **严格加载语义（明确）**：迁移 + 回填后 ``missing/unexpected/shape_mismatch`` 任一非零 ⇒
+      **默认 fail-fast**（``raise SystemExit(2)``，打印三计数与明细）；三者全零时以
+      ``strict=True`` 语义装载（无回填 ⇒ 统一原语 ``load_checkpoint_migrated(strict=True)``；
+      有回填 ⇒ 合并子集 ``strict=True``）；仅 ``--allow-partial-load``（显式）放行并以
+      ``strict=False`` 装载（形状过滤子集）。干净加载行为逐位不变；
+    - **LoadReport**（``summary["load_report"]``）：missing/unexpected/filled/rejected/
+      renamed/dropped 计数 + 全量键列表 + 逐族计数 + ckpt 路径/sha256 + mapper 版本 +
+      装配轴/回填报告 + strict 判定，供 run_meta/manifest 落盘审计。
     """
     path_head = str(path_head or "off")
+    ld_mode = str(ld_mode or "baseline")
+    rollout_semantic = str(rollout_semantic or "full")
     if path_head not in LOAD_PATH_HEAD_CHOICES:
+        raise ValueError(f"未知 path_head={path_head!r}（可选 {'/'.join(LOAD_PATH_HEAD_CHOICES)}）")
+    if ld_mode not in LOAD_LD_MODES:
+        raise ValueError(f"未知 ld_mode={ld_mode!r}（可选 {'/'.join(LOAD_LD_MODES)}）")
+    if rollout_semantic not in LOAD_ROLLOUT_SEMANTIC_MODES:
         raise ValueError(
-            f"未知 path_head={path_head!r}（可选 {'/'.join(LOAD_PATH_HEAD_CHOICES)}）"
+            f"未知 rollout_semantic={rollout_semantic!r}（可选 {'/'.join(LOAD_ROLLOUT_SEMANTIC_MODES)}）"
         )
-    cache_key = _path_head_cache_key(ckpt, device, path_head)
-    cached = _CKPT_MODEL_CACHE.get(cache_key)  # type: ignore[arg-type]
+    cache_key = _model_cache_key(
+        ckpt, device, path_head=path_head, ld_mode=ld_mode,
+        rollout_semantic=rollout_semantic, fill_from=fill_from,
+    )
+    cached = _CKPT_MODEL_CACHE.get(cache_key)
     if cached is not None:
         return cached
     import torch
@@ -983,6 +1055,10 @@ def _load_ckpt_model(
     from tools.legacy.checkpoint_migration import migrate_state_dict
 
     model = _build_model_from_config(config)
+    if ld_mode != "baseline":
+        model.set_ld_mode(ld_mode)  # M2/R21 惰性构造（默认关 = 不新增参数/键）
+    if rollout_semantic != "full":
+        model.set_rollout_semantic(rollout_semantic)
     if path_head == "structured":
         model.set_path_head(True)  # 惰性构造（默认关 = 不新增参数/键）
         model.set_path_head_ablation("structured")
@@ -998,6 +1074,52 @@ def _load_ckpt_model(
     # R38-P2a/P2b → R39-A1：已登记丢弃族/改名族在分类层应用（逐族计数；未登记键仍 reject）。
     migrated, migration = migrate_state_dict(state, model.state_dict().keys())
     filtered, missing, unexpected, shape_mismatch = _filter_checkpoint_state(model, migrated)
+    # R39-A1b：缺键回填（--fill-from；口径 = a3 canary fill_from —— 只回填 missing 中存在的键）
+    fill_report: Optional[Dict[str, Any]] = None
+    if fill_from:
+        fill_path = str(fill_from)
+        if not Path(fill_path).is_file():
+            raise FileNotFoundError(f"[eval_runner] --fill-from 缺文件 {fill_path}")
+        fill_payload = torch.load(fill_path, map_location="cpu", weights_only=False)
+        fill_state = fill_payload
+        if isinstance(fill_payload, Mapping):
+            for key in ("model", "state_dict", "model_state_dict", "net"):
+                if key in fill_payload and isinstance(fill_payload[key], Mapping):
+                    fill_state = fill_payload[key]
+                    break
+        if not isinstance(fill_state, Mapping):
+            raise ValueError(
+                f"[eval_runner] --fill-from {fill_path!r} 不含可识别的 state_dict"
+                f"（顶层键 {list(fill_payload)[:5]}）"
+            )
+        missing_set = set(missing)
+        model_state = model.state_dict()
+        fill_loaded: Dict[str, Any] = {}
+        fill_shape_mismatch: List[str] = []
+        for key, value in fill_state.items():
+            if key not in missing_set:
+                continue
+            target = model_state.get(key)
+            if target is None:
+                continue
+            try:
+                same_shape = tuple(target.shape) == tuple(value.shape)
+            except AttributeError:
+                same_shape = False
+            if same_shape:
+                fill_loaded[key] = value
+            else:
+                fill_shape_mismatch.append(str(key))
+        filtered.update(fill_loaded)
+        missing = [key for key in missing if key not in fill_loaded]
+        fill_report = {
+            "path": fill_path,
+            "sha256": _sha256_file(fill_path),
+            "n_filled": len(fill_loaded),
+            "filled_keys": sorted(str(key) for key in fill_loaded),
+            "candidate_keys": sorted(str(key) for key in missing_set),
+            "shape_mismatch": fill_shape_mismatch,
+        }
     counts = {
         "missing": len(missing),
         "unexpected": len(unexpected),
@@ -1030,10 +1152,13 @@ def _load_ckpt_model(
             "version": str(getattr(_key_mapper, "MAPPER_VERSION", "unknown")),
         },
         "path_head": path_head,
+        "ld_mode": ld_mode,
+        "rollout_semantic": rollout_semantic,
+        "fill_from": fill_report,
         "strict": bool(not blocked),
         "loader": None,  # 实际装载原语（干净 ⇒ load_checkpoint_migrated(strict=True)；逃生门 ⇒ 本地子集）
         "strict_semantics": (
-            "已登记迁移应用后 missing/unexpected/shape_mismatch 全零 ⇒ strict=True 语义装载；"
+            "已登记迁移（+显式回填）后 missing/unexpected/shape_mismatch 全零 ⇒ strict=True 语义装载；"
             "任一非零 ⇒ 默认 fail-fast（--allow-partial-load 显式放行时 strict=False）"
         ),
         "allow_partial_load": bool(allow_partial),
@@ -1045,6 +1170,9 @@ def _load_ckpt_model(
         "device": str(device),
         "allow_partial_load": bool(allow_partial),
         "path_head": path_head,
+        "ld_mode": ld_mode,
+        "rollout_semantic": rollout_semantic,
+        "fill_from": (fill_report or {}).get("path"),
         "loaded_keys": len(filtered),
         "model_keys": len(model.state_dict()),
         "ckpt_keys": len(state),
@@ -1060,13 +1188,21 @@ def _load_ckpt_model(
     print(
         f"[eval_runner] ckpt 载入 {ckpt}: loaded={len(filtered)}/{len(model.state_dict())} "
         f"ckpt_keys={len(state)} missing={counts['missing']} shape_mismatch={counts['shape_mismatch']} "
-        f"unexpected={counts['unexpected']} path_head={path_head} renamed={migration.n_rename} "
-        f"dropped={migration.n_drop} device={device} torch_threads={torch.get_num_threads()}",
+        f"unexpected={counts['unexpected']} path_head={path_head} ld_mode={ld_mode} "
+        f"rollout_semantic={rollout_semantic} fill_from={(fill_report or {}).get('n_filled', 0)} "
+        f"renamed={migration.n_rename} dropped={migration.n_drop} device={device} "
+        f"torch_threads={torch.get_num_threads()}",
         flush=True,
     )
     for label, keys in (("missing", missing), ("shape_mismatch", shape_mismatch), ("unexpected", unexpected)):
         if keys:
             print(f"[eval_runner]   {label}（{len(keys)}，示例 {list(keys)[:5]}）", flush=True)
+    if fill_report:
+        print(
+            f"[eval_runner]   回填族（--fill-from；missing 中命中 {fill_report['n_filled']} 键）："
+            f"{fill_report['path']}",
+            flush=True,
+        )
     if migration.dropped_by_family:
         print(f"[eval_runner]   已登记丢弃族（逐族计数）：{dict(migration.dropped_by_family)}", flush=True)
     if migration.renamed_by_family:
@@ -1091,8 +1227,8 @@ def _load_ckpt_model(
         # 逃生门（显式）：按调用点形状过滤后的子集 strict=False（形状门由本 loader 承担；
         # tools.legacy 原语不做形状过滤 —— 见其 docstring）
         model.load_state_dict(filtered, strict=False)
-    else:
-        # R39-A1：**干净迁移 ⇒ 统一迁移装载原语**（tools.legacy.checkpoint_migration.
+    elif fill_report is None:
+        # R39-A1：**干净迁移（无回填）⇒ 统一迁移装载原语**（tools.legacy.checkpoint_migration.
         # load_checkpoint_migrated，strict=True）——正式装载路径的严格语义钉住口径。
         from tools.legacy.checkpoint_migration import load_checkpoint_migrated
 
@@ -1103,10 +1239,18 @@ def _load_ckpt_model(
                 f" missing={info['missing_keys'][:5]} unexpected={info['unexpected_keys'][:5]}"
             )
         load_report["loader"] = "tools.legacy.checkpoint_migration.load_checkpoint_migrated(strict=True)"
+    else:
+        # 有回填（显式）：migrate + fill 合并子集，缺失已清零 ⇒ strict=True 语义装载
+        # （统一原语不支持 fill；见 checkpoint_migration.load_checkpoint_migrated docstring）
+        model.load_state_dict(filtered, strict=True)
+        load_report["loader"] = (
+            "pipeline.eval_runner（migrate + --fill-from 合并子集，strict=True；"
+            "无回填时走 tools.legacy.checkpoint_migration.load_checkpoint_migrated）"
+        )
     load_report["loader"] = load_report.get("loader", "pipeline.eval_runner（形状过滤子集，strict=False）")
     model.to(device).eval()
-    _CKPT_LOAD_SUMMARY[cache_key] = summary  # type: ignore[index]
-    _CKPT_MODEL_CACHE[cache_key] = model  # type: ignore[index]
+    _CKPT_LOAD_SUMMARY[cache_key] = summary
+    _CKPT_MODEL_CACHE[cache_key] = model
     return model
 
 
@@ -1185,6 +1329,22 @@ def build_eval_references(
     return tail
 
 
+# --------------------------------------------------------------------------- #
+# R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；口径单一出处 = R36 C lane）
+# --------------------------------------------------------------------------- #
+#: R36 C lane 注入器（``select_target_lane`` + E3 车道链采样；与 a3 ``--lane-anchor inject`` 同源）。
+LANE_ANCHOR_SCRIPT = ".slim/deepwork/p1_v2/round36/c_lane_anchor.py"
+_LANE_ANCHOR_MODULE: Any = None
+
+
+def _lane_anchor_module() -> Any:
+    """只读装载 ``round36/c_lane_anchor.py``（注入口径单一出处；仅 ``--lane-anchor inject`` 触达）。"""
+    global _LANE_ANCHOR_MODULE
+    if _LANE_ANCHOR_MODULE is None:
+        _LANE_ANCHOR_MODULE = _load_readonly_script("r39a1b_lane_anchor", LANE_ANCHOR_SCRIPT)
+    return _LANE_ANCHOR_MODULE
+
+
 class _CkptController:
     """ckpt 策略：每 0.5 s 用 ``DrivingModel`` 出 ``(ds, dθ)``，交给 N3 跟踪器逐步执行。
 
@@ -1198,24 +1358,46 @@ class _CkptController:
       ``policy_wm_rollout``（R39-A1 枚举口径）；
     - ``repeat_action``：参考 = ``repeat(action_mu, 6)``（训练 A-hold 同构）→ ``policy_single_step``
       cheap path（R39-A1 枚举口径，不消费 plan）。
+
+    ``task["model_assembly"]``（R39-A1b；正式入口 ``main`` 装配）：``{path_head, ld_mode,
+    rollout_semantic, fill_from, lane_anchor}`` —— 透传 :func:`_load_ckpt_model` 与注入器；
+    **缺省（无该键，如 a3 controller 自己的 canary 预填路径）= 全默认装配**，缓存键仍为
+    ``(ckpt, device)``（旧行为逐位不变）。
     """
 
     kind = "ckpt"
     speed_limit_units = "mps"
     fallback_speed_limit_mps = DEFAULT_SPEED_LIMIT_FALLBACK
     decision_interval = 5  # 0.5 s / 0.1 s
+    #: R39-A1b：注入器/模式的类级默认（``object.__new__`` 构造的测试实例亦有默认值）
+    anchor_injector: Any = None
+    lane_anchor_mode: str = "off"
 
     def __init__(self, env: Any, spec: Any, task: Mapping[str, Any]):
         import torch
 
         self.spec = spec
         self.device = torch.device(str(task.get("device") or "cpu"))
+        assembly = dict(task.get("model_assembly") or {})
         self.model = _load_ckpt_model(
             str(task["ckpt"]),
             task.get("model_config") or {},
             str(self.device),
             allow_partial=bool(task.get("allow_partial_load")),
-            path_head=str(task.get("path_head") or "off"),
+            path_head=str(assembly.get("path_head") or "off"),
+            ld_mode=str(assembly.get("ld_mode") or "baseline"),
+            rollout_semantic=str(assembly.get("rollout_semantic") or "full"),
+            fill_from=(str(assembly["fill_from"]) if assembly.get("fill_from") else None),
+        )
+        # R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；默认 off ⇒ None，不触达任何新代码路径）
+        self.lane_anchor_mode = str(assembly.get("lane_anchor") or "off")
+        if self.lane_anchor_mode not in LOAD_LANE_ANCHOR_MODES:
+            raise ValueError(
+                f"未知 lane_anchor={self.lane_anchor_mode!r}（可选 {'/'.join(LOAD_LANE_ANCHOR_MODES)}）"
+            )
+        self.anchor_injector = (
+            _lane_anchor_module().LaneAnchorInjector()
+            if self.lane_anchor_mode == "inject" else None
         )
         if bool(task.get("moe_off")):
             # A/B：primary-only 臂 —— 专家分支不参与（评测侧关闭 MoE）
@@ -1314,6 +1496,10 @@ class _CkptController:
         if measured is not None:
             env.prev_policy_action = measured  # 供本次决策的 obs（ego reserved 6:8）
         obs = self.builder.build(env, self.spec)
+        if self.anchor_injector is not None and self._steps % self.decision_interval == 0:
+            # R39-A1b：lane_anchor_xy 注入（默认 off ⇒ 不触达；只在决策步写 obs，与 a3 同点
+            # 同口径 —— builder.build 之后、_tensors 之前；口径见 round36/c_lane_anchor.py）
+            self.anchor_injector.apply(env, obs)
         if self._steps % self.decision_interval == 0:
             # 参考口径（--eval-reference，默认 plan=现状）：
             #   plan：需要 6 步规划预览（跟踪器参考：首步执行动作 + 后 5 步 WM/plan 预览）；
@@ -2007,9 +2193,24 @@ def build_parser() -> argparse.ArgumentParser:
                              "structured=惰性构造结构化头 policy.structured_action 并启用结构化动作"
                              "出口（口径对齐 .slim/deepwork/p1_v2/a3/eval_a3.py 的结构化装载顺序）。"
                              "结构化头前向需要 obs['lane_anchor_xy']（目标车道中心线折线，ego t0 系）："
-                             "本入口不生产该键 —— 缺键会在 forward fail-fast（net/path_head.py::"
-                             "anchor_from_obs），评测侧注入方式见模块 docstring）。"
+                             "本入口用 --lane-anchor inject 显式注入（缺键否则在 forward fail-fast；"
+                             "net/path_head.py::anchor_from_obs）。"
                              "装载失败面（missing/unexpected/shape_mismatch）仍由 P0-A fail-fast 把关")
+    parser.add_argument("--ld-mode", choices=LOAD_LD_MODES, default="baseline",
+                        help="LD 消融装配（R39-A1b；口径对齐 eval_a3/a3 canary；默认 baseline=生产口径）。"
+                             "ckpt 必须与训练同模式装载：semantic=惰性构造 semantic_wiring"
+                             "（K1e2 血统缺键用 --fill-from 回填）；其余档位见 net/model.py::set_ld_mode")
+    parser.add_argument("--rollout-semantic", choices=LOAD_ROLLOUT_SEMANTIC_MODES, default="full",
+                        help="rollout 阶段 semantic 注入口径（R39-A1b；默认 full=生产口径；"
+                             "static_role_only = R37 §1.3 协议口径）")
+    parser.add_argument("--lane-anchor", choices=LOAD_LANE_ANCHOR_MODES, default="off",
+                        help="lane_anchor_xy 注入器（R39-A1b 选项 a 的显式开关；默认 off=不触达）："
+                             "inject=每决策步从活 env 采目标车道中心线（R36 C lane 注入器同源，"
+                             ".slim/deepwork/p1_v2/round36/c_lane_anchor.py）写入 obs")
+    parser.add_argument("--fill-from", type=Path, default=None,
+                        help="缺键回填源 ckpt（R39-A1b；显式给出才触达）：migrate 后 missing 中存在于"
+                             "回填源且形状一致的键装载并计入 LoadReport.fill_from；"
+                             "K1e2 血统语义键例 = runs/p1_v2/round28/K1/ckpt_epoch002.pt")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
@@ -2098,26 +2299,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     model_config: Dict[str, Any] = task_model_config(config)
 
+    # R39-A1b：模型装配开关（口径对齐 a3 canary；缺省 = 生产口径逐位不变）
+    model_assembly: Dict[str, Any] = {
+        "path_head": str(args.path_head),
+        "ld_mode": str(args.ld_mode),
+        "rollout_semantic": str(args.rollout_semantic),
+        "lane_anchor": str(args.lane_anchor),
+        "fill_from": (str(args.fill_from) if args.fill_from is not None else None),
+    }
+
     # ---- P0-A 评测安全前置：ckpt 加载 fail-fast（默认开；父进程 CPU 预检，干净加载零行为变化）----
     ckpt_load_summary: Optional[Dict[str, Any]] = None
     if args.policy == "ckpt":
         print(
             f"[eval_runner] ckpt 加载预检（fail-fast={'off' if args.allow_partial_load else 'on'}, "
-            f"path_head={args.path_head}）: {args.ckpt}",
+            f"assembly={model_assembly}）: {args.ckpt}",
             flush=True,
         )
         _load_ckpt_model(
             str(args.ckpt), model_config, "cpu",
-            allow_partial=bool(args.allow_partial_load), path_head=str(args.path_head),
+            allow_partial=bool(args.allow_partial_load),
+            path_head=model_assembly["path_head"],
+            ld_mode=model_assembly["ld_mode"],
+            rollout_semantic=model_assembly["rollout_semantic"],
+            fill_from=model_assembly["fill_from"],
         )
-        ckpt_load_summary = _ckpt_load_summary(str(args.ckpt), "cpu", str(args.path_head))
+        ckpt_load_summary = _ckpt_load_summary(
+            str(args.ckpt), "cpu",
+            path_head=model_assembly["path_head"],
+            ld_mode=model_assembly["ld_mode"],
+            rollout_semantic=model_assembly["rollout_semantic"],
+            fill_from=model_assembly["fill_from"],
+        )
 
     # ---- R39-A1：四 hash 原生记录（protocol / model tree / schema / checkpoint）→ run_meta ----
     eval_hashes = _evaluation_hashes(
         spec_path=spec_path, policy=str(args.policy),
         ckpt=str(args.ckpt) if args.ckpt is not None else None,
         tracker=str(args.tracker), eval_reference=str(args.eval_reference),
-        moe_off=bool(getattr(args, "moe_off", False)), path_head=str(args.path_head),
+        moe_off=bool(getattr(args, "moe_off", False)), path_head=model_assembly["path_head"],
+        ld_mode=model_assembly["ld_mode"], rollout_semantic=model_assembly["rollout_semantic"],
+        lane_anchor=model_assembly["lane_anchor"], fill_from=model_assembly["fill_from"],
         workers=int(workers), max_steps=int(args.max_steps), device=device,
     )
     run_meta: Dict[str, Any] = {
@@ -2133,7 +2355,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "spec": str(spec_path),
         "tracker": str(args.tracker) if args.policy == "ckpt" else None,
         "eval_reference": str(args.eval_reference) if args.policy == "ckpt" else None,
-        "path_head": str(args.path_head),
+        "path_head": model_assembly["path_head"],
+        "model_assembly": model_assembly,
+        "fill_from": eval_hashes["fill_from"],
         "hashes": {
             "evaluation_protocol_hash": eval_hashes["evaluation_protocol_hash"],
             "evaluation_protocol_hash_full": eval_hashes["evaluation_protocol_hash_full"],
@@ -2175,7 +2399,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "eval_reference": str(args.eval_reference),
             "moe_off": bool(getattr(args, "moe_off", False)),
             "allow_partial_load": bool(args.allow_partial_load),
-            "path_head": str(args.path_head),
+            # R39-A1b：模型装配（controller 装载 + lane_anchor 注入的唯一透传口）
+            "model_assembly": dict(model_assembly),
         }
         for spec in specs
     ]
@@ -2229,6 +2454,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          if args.policy == "baseline" else "net.model.DrivingModel"),
         "tracker": str(args.tracker) if args.policy == "ckpt" else None,
         "eval_reference": str(args.eval_reference) if args.policy == "ckpt" else None,
+        # R39-A1b：模型装配开关（ld_mode/rollout_semantic/path_head/lane_anchor/fill_from）
+        "model_assembly": dict(model_assembly) if args.policy == "ckpt" else None,
+        "fill_from": eval_hashes["fill_from"],
         "policy_params_effective": effective_params,
         "workers": workers,
         "recycle_every_specs": recycle_every,

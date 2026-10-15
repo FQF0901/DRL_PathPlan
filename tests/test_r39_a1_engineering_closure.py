@@ -15,7 +15,11 @@
 4. **四 hash**：``_evaluation_hashes`` 原生产出 evaluation_protocol_hash / model_tree_hash /
    schema_hash / checkpoint_hash；``_record_run_meta`` 写 ``run_meta.json`` 并在既有
    ``manifest.txt`` 追加幂等 ``r39a1_hashes:`` 行；
-5. **lane_anchor_xy 选项 a**：结构化前向缺键 ⇒ ``ValueError``（文案含注入指路）。
+5. **lane_anchor_xy 选项 a**：结构化前向缺键 ⇒ ``ValueError``（文案含注入指路）；
+6. **R39-A1b 装配全开**（遗留 2 关闭）：``--ld-mode`` / ``--rollout-semantic`` /
+   ``--lane-anchor`` / ``--fill-from`` 声明并转发；``semantic`` 装配的 K1e2 血统缺键由
+   ``--fill-from`` 严严格回填；protocol hash 记录全部装配轴；controller 经
+   ``task["model_assembly"]`` 读装配（a3 风格 top-level 键不再被消费 ⇒ 预填缓存兼容）。
 """
 
 from __future__ import annotations
@@ -145,10 +149,18 @@ def test_tools_test_entry_forwards_path_head(monkeypatch, tmp_path: Path) -> Non
         "--policy", "baseline",
         "--out", str(tmp_path),
         "--path-head", "structured",
+        "--ld-mode", "semantic",
+        "--rollout-semantic", "static_role_only",
+        "--lane-anchor", "inject",
+        "--fill-from", str(_ROOT / "config/default.yaml"),
     ])
     assert rc == 0
     argv = captured["argv"]
     assert argv[argv.index("--path-head") + 1] == "structured"
+    assert argv[argv.index("--ld-mode") + 1] == "semantic"
+    assert argv[argv.index("--rollout-semantic") + 1] == "static_role_only"
+    assert argv[argv.index("--lane-anchor") + 1] == "inject"
+    assert argv[argv.index("--fill-from") + 1] == str(_ROOT / "config/default.yaml")
 
 
 # --------------------------------------------------------------------------- #
@@ -366,3 +378,156 @@ def test_checkpoint_hash_matches_sha256_and_run_meta_written(tmp_path: Path) -> 
     # 幂等：二次写入不重复追加 manifest 行
     eval_runner._record_run_meta(out_dir, {"hashes": hashes, "ckpt_load": {"load_report": {}}})
     assert (out_dir / "manifest.txt").read_text(encoding="utf-8").count("r39a1_hashes:") == 1
+
+
+# --------------------------------------------------------------------------- #
+# 6. R39-A1b：装配开关（ld_mode / rollout_semantic / lane_anchor / fill_from）
+# --------------------------------------------------------------------------- #
+
+def _save_semantic_split_ckpts(tmp_path: Path) -> tuple[str, str, list[str]]:
+    """产出 ``(ckpt, fill_source, gap_keys)``：完整 semantic+structured 装配存 fill_source；
+    ckpt 删除 semantic_wiring/target_proj/beta_*（模拟 K1e2 血统缺键，形状与装配一致）。"""
+    model = build_model(_tiny_model_config())
+    model.set_ld_mode("semantic")
+    model.set_path_head(True)
+    model.set_path_head_ablation("structured")
+    full = {key: value.clone() for key, value in model.state_dict().items()}
+    gap = [
+        key for key in full
+        if key.startswith(("semantic_wiring.", "target_proj.")) or key in ("beta_context", "beta_token")
+    ]
+    assert gap, "tiny 模型无 semantic 族键（装配未生效）"
+    ckpt_state = {key: value for key, value in full.items() if key not in set(gap)}
+    ckpt = tmp_path / "ckpt_semantic_gap.pt"
+    fill = tmp_path / "fill_source.pt"
+    torch.save({"model": ckpt_state}, ckpt)
+    torch.save({"model": full}, fill)
+    return str(ckpt), str(fill), gap
+
+
+def test_a1b_cli_declares_assembly_switches_and_defaults() -> None:
+    args = build_parser().parse_args([])
+    assert args.ld_mode == "baseline" and args.rollout_semantic == "full"
+    assert args.lane_anchor == "off" and args.fill_from is None
+    assert build_parser().parse_args(["--ld-mode", "semantic"]).ld_mode == "semantic"
+    assert build_parser().parse_args(
+        ["--rollout-semantic", "static_role_only"]).rollout_semantic == "static_role_only"
+    assert build_parser().parse_args(["--lane-anchor", "inject"]).lane_anchor == "inject"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--ld-mode", "nope"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--lane-anchor", "auto"])
+    import tools.test as test_entry
+
+    tools_args = test_entry.build_parser().parse_args(
+        ["--ld-mode", "semantic", "--rollout-semantic", "static_role_only", "--lane-anchor", "inject"]
+    )
+    assert (tools_args.ld_mode, tools_args.rollout_semantic, tools_args.lane_anchor) == (
+        "semantic", "static_role_only", "inject")
+
+
+def test_a1b_ld_mode_semantic_without_fill_fails_fast(tmp_path: Path, capsys) -> None:
+    ckpt, _fill, gap = _save_semantic_split_ckpts(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        _load_ckpt_model(ckpt, _tiny_model_config(), "cpu", ld_mode="semantic", path_head="structured")
+    assert excinfo.value.code == 2
+    out = capsys.readouterr().out
+    assert "FAIL-FAST" in out and f"missing={len(gap)}" in out
+
+
+def test_a1b_fill_from_resolves_missing_keys_strict(tmp_path: Path) -> None:
+    ckpt, fill, gap = _save_semantic_split_ckpts(tmp_path)
+    model = _load_ckpt_model(
+        ckpt, _tiny_model_config(), "cpu",
+        ld_mode="semantic", path_head="structured", rollout_semantic="static_role_only",
+        fill_from=fill,
+    )
+    assert model.path_head_mode() == "structured"
+    assert str(model.rollout_semantic_mode) == "static_role_only"
+    summary = eval_runner._ckpt_load_summary(
+        ckpt, "cpu", "structured", "semantic", "static_role_only", fill)
+    assert summary is not None
+    report = summary["load_report"]
+    counts = report["counts"]
+    assert counts["missing"] == 0 and counts["unexpected"] == 0 and counts["rejected"] == 0
+    assert summary["counts"]["shape_mismatch"] == 0
+    assert counts["filled"] == len(model.state_dict())  # 全键装载（ckpt + 回填）
+    assert report["strict"] is True
+    assert report["fill_from"]["n_filled"] == len(gap)
+    assert sorted(report["fill_from"]["filled_keys"]) == sorted(gap)
+    assert "fill-from" in str(report["loader"])
+    assert report["ld_mode"] == "semantic" and report["rollout_semantic"] == "static_role_only"
+    # 回填源逐位 = 手工全键装载
+    manual = build_model(_tiny_model_config())
+    manual.set_ld_mode("semantic")
+    manual.set_path_head(True)
+    manual.set_path_head_ablation("structured")
+    manual.load_state_dict(torch.load(fill, map_location="cpu", weights_only=False)["model"], strict=True)
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, manual.state_dict()[name]), name
+
+
+def test_a1b_protocol_hash_records_assembly_axes(tmp_path: Path) -> None:
+    ckpt, fill, _gap = _save_semantic_split_ckpts(tmp_path)
+    spec = _tiny_spec_file(tmp_path)
+    base = dict(spec_path=spec, policy="ckpt", ckpt=ckpt, tracker="exact",
+                eval_reference="plan", moe_off=False, workers=1, max_steps=10, device="cpu")
+
+    def _hash(**axes) -> tuple[str, dict]:
+        payload = eval_runner._evaluation_hashes(**base, **axes)
+        return payload["evaluation_protocol_hash"], payload["protocol"]["model"]
+
+    h_off, model_off = _hash(ld_mode="baseline", rollout_semantic="full", path_head="off",
+                             lane_anchor="off", fill_from=None)
+    h_ld, model_ld = _hash(ld_mode="semantic", rollout_semantic="full", path_head="off",
+                           lane_anchor="off", fill_from=None)
+    h_rs, _ = _hash(ld_mode="baseline", rollout_semantic="static_role_only", path_head="off",
+                    lane_anchor="off", fill_from=None)
+    h_la, model_la = _hash(ld_mode="baseline", rollout_semantic="full", path_head="off",
+                           lane_anchor="inject", fill_from=None)
+    h_fill, model_fill = _hash(ld_mode="baseline", rollout_semantic="full", path_head="off",
+                               lane_anchor="off", fill_from=fill)
+    hashes = {h_off, h_ld, h_rs, h_la, h_fill}
+    assert len(hashes) == 5, f"装配轴未全部入 hash：{hashes}"
+    assert model_off["ld_mode"] == "baseline" and model_ld["ld_mode"] == "semantic"
+    assert model_la["lane_anchor"] == "inject"
+    assert model_fill["fill_from_sha16"] != "none"
+
+
+def test_a1b_controller_reads_model_assembly_and_lane_anchor(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    ckpt = _save_structured_ckpt(tmp_path, old_naming=True)
+    task = {
+        "ckpt": ckpt, "device": "cpu", "model_config": _tiny_model_config(),
+        "tracker": "lqr", "eval_reference": "plan",
+        "model_assembly": {
+            "path_head": "structured", "ld_mode": "baseline", "rollout_semantic": "full",
+            "lane_anchor": "inject", "fill_from": None,
+        },
+    }
+    controller = eval_runner._CkptController(None, SimpleNamespace(id=0, seed=0), task)
+    assert controller.model.path_head_mode() == "structured"
+    assert controller.lane_anchor_mode == "inject" and controller.anchor_injector is not None
+    assert eval_runner._lane_anchor_module().LaneAnchorInjector is not None
+
+
+def test_a1b_controller_a3_prefill_compat_ignores_toplevel_keys(tmp_path: Path) -> None:
+    """a3 controller 兼容：预填 ``(ckpt, device)`` 缓存 + a3 风格 top-level 键（含 path_head/ld_mode）
+    必须命中预填模型（不重建、不 fail-fast）——a3 结构化/semantic 运行路径回归。"""
+    from types import SimpleNamespace
+
+    ckpt = _save_structured_ckpt(tmp_path, old_naming=True)
+    config = _tiny_model_config()
+    sentinel = build_model(dict(config))
+    sentinel.set_path_head(True)
+    sentinel.set_path_head_ablation("structured")
+    _CKPT_MODEL_CACHE[(ckpt, "cpu")] = sentinel  # a3 预填键（2 元组）
+    task = {
+        "ckpt": ckpt, "device": "cpu", "model_config": config,
+        "tracker": "lqr", "eval_reference": "plan",
+        "path_head": "structured", "ld_mode": "semantic",  # a3 风格 top-level（本 controller 不消费）
+    }
+    controller = eval_runner._CkptController(None, SimpleNamespace(id=0, seed=0), task)
+    assert controller.model is sentinel
+    assert controller.anchor_injector is None

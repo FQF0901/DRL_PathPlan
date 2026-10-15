@@ -58,9 +58,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help="动作头装配（R39-A1；透传 pipeline.eval_runner）：off=默认旧 PolicyHead"
                              "（逐位不变）；structured=结构化头 policy.structured_action（口径对齐 "
                              ".slim/deepwork/p1_v2/a3/eval_a3.py）。结构化前向需要 obs['lane_anchor_xy']"
-                             "（ego t0 系目标车道折线）：本入口不生产该键，缺键在 forward fail-fast；"
-                             "注入方式见 pipeline/eval_runner.py 模块 docstring §7（a3 --lane-anchor "
-                             "inject 或自定义 controller 决策步注入）")
+                             "：用 --lane-anchor inject 显式注入（否则缺键在 forward fail-fast）")
+    parser.add_argument("--ld-mode", default="baseline",
+                        choices=("baseline", "no_chain", "set_attn", "attn", "attn_no_chain",
+                                 "semantic", "semantic_no_chain"),
+                        help="LD 消融装配（R39-A1b；透传 runner；默认 baseline=生产口径）。"
+                             "semantic 需 K1e2 血统语义键 ⇒ 配 --fill-from")
+    parser.add_argument("--rollout-semantic", default="full",
+                        choices=("full", "t0_only", "static_role_only"),
+                        help="rollout semantic 注入口径（R39-A1b；默认 full=生产口径）")
+    parser.add_argument("--lane-anchor", choices=("off", "inject"), default="off",
+                        help="lane_anchor_xy 注入器（R39-A1b；默认 off=不触达）：inject=每决策步从"
+                             "活 env 采目标车道中心线写入 obs（R36 C lane 注入器同源，与 a3 同口径）")
+    parser.add_argument("--fill-from", type=Path, default=None,
+                        help="缺键回填源 ckpt（R39-A1b；显式给出才触达；K1e2 血统例 = "
+                             "runs/p1_v2/round28/K1/ckpt_epoch002.pt）")
     return parser
 
 
@@ -114,7 +126,11 @@ def main(argv: "list[str] | None" = None) -> int:
     )
 
     forward = ["--config", str(args.config), "--policy", args.policy, "--out", str(args.out),
-               "--name", run_name, "--path-head", str(args.path_head)]
+               "--name", run_name, "--path-head", str(args.path_head),
+               "--ld-mode", str(args.ld_mode), "--rollout-semantic", str(args.rollout_semantic),
+               "--lane-anchor", str(args.lane_anchor)]
+    if args.fill_from is not None:
+        forward += ["--fill-from", str(args.fill_from)]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
     if args.ckpt is not None:
