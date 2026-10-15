@@ -66,6 +66,25 @@ Round-36 K1（结构化动作生成器；默认关）
 - ``set_target_lane_dropout(p)``：训练期 target-lane token dropout（20%→50% 斜坡由训练侧调度；
   默认 0 = 关；``p=0`` 不消耗 RNG；仅 ``model.training`` 且存在 target token（semantic 模式）时生效）。
 
+Round-36 L-A（架构硬化：旧头消歧 + oneshot 守卫）
+------------------------------------------------
+- **旧头消歧**（GPT ``0912cb9`` 批评 #1）：``path_head_mode()`` ∈ {``structured``, ``oneshot``}
+  时 ``forward`` **不再前向旧 ``PolicyHead``** —— 同一 forward 只有一个动作源（结构化头），
+  旧头输出（``policy_action_mu`` 诊断）与 ``action_logstd`` **从输出 dict 中移除**（显式
+  KeyError 优于静默 NaN）。显式诊断开关 ``set_policy_diag(True)``（或
+  ``set_path_head_trace(True)``）恢复旧头前向，产出与改动前逐位一致的 ``policy_action_mu`` /
+  ``action_logstd``。``action_logstd`` 来源 = 旧 ``PolicyHead``（**RL 未接线**：方差来源与
+  ``action_mu`` 不同源，RL 接线前必须统一）。
+- **oneshot 守卫**（批评 #2）：``set_path_head_ablation("oneshot", allow_oneshot=...)`` 的
+  ③ 诊断臂**默认拒绝**（``ValueError``；一次性 6 步不接入生产），必须显式
+  ``allow_oneshot=True``；评测/部署工具侧对应 ``--diagnostic-oneshot`` fail-fast 守卫
+  （``.slim/deepwork/p1_v2/round32/canary_eval.py::check_path_head_oneshot_guard``）。
+- **运行时契约断言**（GPT ``7dcf6bd`` §四.1/§四.8；``set_contract_asserts``，**默认开**）：
+  structured + ``rollout=True`` 时每 forward 常数开销地校验 ① 同一头实例（a0..a5）、
+  ② 头调用 6 次、③ WM 推进 5 次、④ 辅助未来输出不进 LQR（``plan`` 逐步组装且
+  ``plan[:,0]==action_mu``）、⑤ structured 不使用 ``plan_override``；eval/deploy 违反 ⇒
+  ``RuntimeError`` fail-fast，训练路径只落盘 ``contract_*`` 输出键。
+
 v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 = 旧行为逐位不变）
 ---------------------------------------------------------------------------------------
 - :class:`net.plan_head.PlanHead` 增加**选择头**（latent → K 锚 logits）、**连续速度头**
@@ -406,8 +425,18 @@ class DrivingModel(nn.Module):
         self.enable_path_head = False
         #: 消融脚手架模式（``policy`` | ``structured``（默认）| ``oneshot`` 诊断臂）。
         self.path_head_ablation: str = PATH_HEAD_DEFAULT_MODE
-        #: 结构化 rollout 的逐步调用 trace（默认 None = 关；门证据用，不参与前向数值）。
+        #: 结构化 rollout 的逐步调用 trace（默认 None = 关；门证据用，不参与前向数值；
+        #: 开启时同时打开旧头诊断前向，见 ``set_policy_diag``）。
         self.path_head_trace: list[dict[str, object]] | None = None
+        #: R36 L-A：旧 ``PolicyHead`` 诊断前向开关（默认 False ⇒ structured/oneshot **不跑旧头**，
+        #: 不产出 ``policy_action_mu``/``action_logstd``；True 恢复产出，默认关逐位不变）。
+        self.policy_diag_enabled: bool = False
+        #: R36 L-A：运行时契约断言开关（**默认开**；仅 structured 模式 + rollout=True；每
+        #: forward 常数次整数比较 ⇒ 零可测开销；eval/deploy（``training=False``）违反 ⇒
+        #: fail-fast RuntimeError；训练路径只计数落盘（``contract_*`` 输出键）。默认关路径不触碰。
+        self.contract_asserts_enabled: bool = True
+        #: 本次 forward 的 structured 头调用实例 id 收集（契约①；每次 forward 重置）。
+        self._path_head_call_ids: list[int] = []
         #: 结构化 rollout 喂给 WM 的动作是否 stop-gradient（默认 True，梯度门：WM 预测 loss 只到 WM）。
         self.path_head_wm_action_detach: bool = True
         #: 训练期 target-lane token dropout 概率（默认 0 = 关；0 不消耗 RNG）。
@@ -809,17 +838,28 @@ class DrivingModel(nn.Module):
             torch.random.set_rng_state(rng_state)
         return self
 
-    def set_path_head_ablation(self, mode: str = PATH_HEAD_DEFAULT_MODE) -> "DrivingModel":
+    def set_path_head_ablation(
+        self, mode: str = PATH_HEAD_DEFAULT_MODE, *, allow_oneshot: bool = False
+    ) -> "DrivingModel":
         """K1 消融脚手架（默认 ``structured``；①②③ 在同一进程内可切换）：
 
         - ``policy``：① 旧 ``PolicyHead`` + WM 逐步 rollout（= 默认关路径的行为）；
         - ``structured``：② 结构化头 + WM 逐步 rollout（**生产口径**，默认）；
         - ``oneshot``：③ H1 一次性 6 步诊断臂（``plan_override`` 钉住；**仅诊断上界，不接入生产**）。
 
-        仅影响启用后的消费路径；head 未构造/未启用时无作用（默认关逐位不变）。
+        R36 L-A 守卫（GPT ``0912cb9`` 批评 #2）：``oneshot`` **默认拒绝**（``ValueError``）——
+        评测/部署误写会复活被否决的一次性 6 步方案；确需诊断必须显式 ``allow_oneshot=True``
+        （工具侧 ``--diagnostic-oneshot``）。仅影响启用后的消费路径；head 未构造/未启用时无作用
+        （默认关逐位不变）。
         """
         if mode not in PATH_HEAD_MODES:
             raise ValueError(f"path head ablation 必须是 {PATH_HEAD_MODES} 之一，收到 {mode!r}")
+        if mode == "oneshot" and not allow_oneshot:
+            raise ValueError(
+                "path_head_ablation='oneshot' 是一次性 6 步诊断臂（不接入生产）：默认拒绝。"
+                "确需诊断请显式 set_path_head_ablation('oneshot', allow_oneshot=True)"
+                "（工具侧 --diagnostic-oneshot）。"
+            )
         self.path_head_ablation = str(mode)
         return self
 
@@ -829,8 +869,40 @@ class DrivingModel(nn.Module):
         开启后 ``forward`` 会重置 ``self.path_head_trace`` 并记录每次头调用
         ``{step, latent, action, ds, kappa_near, wm_calls_before, wm_advance_calls}``
         （step 0 = t0 编码期调用；step k = rollout 第 k 步调用）。默认关 ⇒ 无开销。
+        R36 L-A：trace 开启同时打开旧头诊断前向（R36 契约门 ``policy_action_mu`` 证据依赖），
+        即等价于 ``set_policy_diag(True)``。
         """
         self.path_head_trace = [] if enabled else None
+        return self
+
+    def set_policy_diag(self, enabled: bool = True) -> "DrivingModel":
+        """R36 L-A：旧 ``PolicyHead`` 诊断前向开关（默认关）。
+
+        ``path_head_mode()`` ∈ {``structured``, ``oneshot``} 时旧头默认**不再前向**（唯一动作
+        生成器 = 结构化头；输出 dict 无 ``policy_action_mu``/``action_logstd``）。本开关恢复
+        旧头前向以产出这两项诊断（数值与改动前逐位一致）；仅诊断用途（``action_logstd`` RL
+        未接线），``action_mu/plan/traj`` 不受影响（诊断开关不改变任何动作数值）。
+        """
+        self.policy_diag_enabled = bool(enabled)
+        return self
+
+    def set_contract_asserts(self, enabled: bool = True) -> "DrivingModel":
+        """R36 L-A：structured 运行时契约断言开关（**默认开**；GPT ``7dcf6bd`` §四.1/§四.8）。
+
+        断言项（仅 ``path_head_mode()=="structured"`` 且 ``rollout=True`` 时评估）：
+
+        ① ``policy_instance_ids_are_identical``：a0..a5 来自同一 ``StructuredPolicyHead`` 实例；
+        ② ``policy_call_count_is_six``：6 次头调用；③ ``world_model_call_count_is_five``：
+        WM 推进 5 次；④ ``auxiliary_future_outputs_not_consumed_by_lqr``：``plan`` 由逐步头动作
+        组装（``plan_from_aux=0``）且 ``plan[:,0]==action_mu``（进环境/LQR 的动作源唯一）；
+        ⑤ ``deployment_does_not_use_plan_override``：structured 模式不得走 ``plan_override``。
+
+        eval/deploy 路径（``training=False``）违反 ⇒ ``RuntimeError`` fail-fast；训练路径
+        **不抛**，仅以 ``contract_*`` 输出键计数落盘。开销 = 每 forward 常数次整数/张量比较
+        （无逐 step 钩子）；``set_contract_asserts(False)`` 关闭后不收集、不产出这些键。
+        默认关路径（path head 未启用）不受影响。
+        """
+        self.contract_asserts_enabled = bool(enabled)
         return self
 
     def path_head_mode(self) -> str:
@@ -1207,6 +1279,9 @@ class DrivingModel(nn.Module):
                 target_lane_valid=target_lane_valid,
                 one_shot=(self.path_head_ablation == "oneshot"),
             )
+            if self.contract_asserts_enabled:
+                # R36 L-A 契约①：t0 期头调用实例 id（a0 的来源；rollout 逐步调用同源断言用）
+                self._path_head_call_ids.append(id(self.path_head))
             path_out["long_exog"] = long_exog
             path_out["long_present"] = long_present
             path_ctx = {
@@ -1514,6 +1589,8 @@ class DrivingModel(nn.Module):
                         long_exog=geometry["long_exog"],
                         target_lane_valid=path_ctx["target_lane_valid"],
                     )
+                    if self.contract_asserts_enabled:
+                        self._path_head_call_ids.append(id(self.path_head))
                     wm_advance_calls += 1
                     action = step_out["action"]
                     kappa_near_steps.append(step_out["kappa_near"])
@@ -1585,6 +1662,10 @@ class DrivingModel(nn.Module):
             result["structured_wm_advances"] = torch.tensor(
                 float(wm_advance_calls), dtype=latent.dtype, device=latent.device
             )
+            # R36 L-A 契约⑤：structured 模式不得走 plan_override（诊断臂专属；0 = 合规）。
+            result["structured_plan_override_used"] = torch.tensor(
+                float(plan_override is not None), dtype=latent.dtype, device=latent.device
+            )
         return result
 
     # ---------------------------------------------------------------- 前向
@@ -1611,38 +1692,67 @@ class DrivingModel(nn.Module):
 
         MoE 输出口径（lane U1）：``primary + Σ_{i∈top2} g_i·expert_i``，推理与训练一致、
         全场景生效（无硬切/二值门/硬掩码）；phase 1 训练由 ``set_moe(enabled=False)`` 关闭。
+
+        R36 L-A 旧头消歧（键契约）
+        -------------------------
+        - ``path_head_mode() == "policy"``（默认关 / 消融①）：旧 ``PolicyHead`` 前向，
+          输出 ``action_mu/action_logstd``（默认口径逐位不变）。
+        - ``structured`` / ``oneshot``：旧头**默认不前向**，输出 dict **无** ``policy_action_mu``
+          与 ``action_logstd``（唯一动作源 = 结构化头；需要诊断时显式 ``set_policy_diag(True)``
+          或 ``set_path_head_trace(True)`` 恢复，产出与改动前逐位一致；``action_logstd`` RL
+          未接线）。``path_*`` 辅助键不受影响照常输出。
+        - ``contract_*``（``set_contract_asserts``，默认开；仅 structured + rollout=True）：
+          ``contract_policy_instance_ids_are_identical``/``contract_policy_call_count_is_six``/
+          ``contract_world_model_call_count_is_five``/
+          ``contract_auxiliary_future_outputs_not_consumed_by_lqr``/
+          ``contract_deployment_does_not_use_plan_override``/``contract_runtime_ok``；
+          eval/deploy 违反 ⇒ ``RuntimeError``（训练路径只落盘）。
         """
         if self.path_head_trace is not None:
             # K1 门证据：每次 forward 先重置 trace（随后 encode 期的 t0 调用写入 step 0）。
             self.path_head_trace = []
+        if self.contract_asserts_enabled:
+            # R36 L-A 契约①：头调用实例 id 收集（本 forward 生命周期；默认关路径不触碰）
+            self._path_head_call_ids = []
         encoded = self.encode(obs, semantic_off=bool(semantic_off))
         moe_aux: dict[str, Tensor] = encoded["moe_aux"]
         latent: Tensor = encoded["latent"]
         tokens: Tensor = encoded["tokens"]
         key_mask: Tensor = encoded["key_mask"]
         # A1：策略/价值 = 交叉注意力头（直吃令牌集合；含 plan_head 融合 latent token）
-        action_mu, action_logstd = self.policy(tokens, key_mask)
-        # R36 K1：结构化头（默认关）接管 action_mu（= 当前步动作；``plan[:,0]==action_mu``
-        # 契约）；旧 PolicyHead 输出保留为 ``policy_action_mu``（诊断；``action_logstd`` 仍来自旧头，
-        # RL 未接线）。消融①（``policy``）下 path_out 为 None ⇒ 与默认关路径逐位一致。
-        path_mode = self.path_head_mode()
+        # R36 L-A：structured/oneshot 下旧 PolicyHead 默认**不再前向**（GPT 0912cb9 批评 #1：
+        # 同一 forward 只有一个动作源）；诊断开关（set_policy_diag / set_path_head_trace）
+        # 显式恢复旧头前向以产出 policy_action_mu（诊断）与 action_logstd（RL 未接线）。
+        # 消融①（``policy``）/ 默认关：path_out 为 None ⇒ 与旧行为逐位一致（旧头照常前向）。
         path_out = encoded.get("path")
         path_out = path_out if isinstance(path_out, dict) else None
+        policy_diag = bool(self.policy_diag_enabled) or self.path_head_trace is not None
+        old_head_runs = path_out is None or policy_diag
         policy_action_mu: Tensor | None = None
-        if path_out is not None:
+        action_logstd: Tensor | None = None
+        if old_head_runs:
+            action_mu, action_logstd = self.policy(tokens, key_mask)
+        else:
+            action_mu = path_out["action_mu"]  # 旧头未前向 ⇒ 无 logstd 来源（文档化）
+        if path_out is not None and old_head_runs:
             policy_action_mu = action_mu
+        if path_out is not None:
             action_mu = path_out["action_mu"]
         out: dict[str, Tensor] = {
             "action_mu": action_mu,
-            "action_logstd": action_logstd,
             "value": self.value(tokens, key_mask),
             "router_logits": moe_aux["router_logits"],
             "expert_weights": moe_aux["expert_weights"],
             "latent": latent,
             "ego_next": encoded["ego_next"],
         }
-        if policy_action_mu is not None:
-            out["policy_action_mu"] = policy_action_mu
+        if action_logstd is not None:
+            # R36 L-A：structured/oneshot 默认跳过旧头 ⇒ 无 logstd 来源（键不输出，显式失败）。
+            out["action_logstd"] = action_logstd
+        if path_out is not None:
+            if policy_action_mu is not None:
+                # 旧头诊断（仅诊断开关开启时产出；默认结构化模式无此键）。
+                out["policy_action_mu"] = policy_action_mu
             for path_key, path_value in path_out.items():
                 if torch.is_tensor(path_value):
                     out[f"path_{path_key}"] = path_value
@@ -1694,9 +1804,46 @@ class DrivingModel(nn.Module):
                 "structured_aux_progress",
                 "structured_head_calls",
                 "structured_wm_advances",
+                "structured_plan_override_used",
             ):
                 if key in rolled:
                     out[key] = rolled[key]
+        if (
+            self.contract_asserts_enabled
+            and rollout
+            and path_out is not None
+            and self.path_head_mode() == "structured"
+        ):
+            # R36 L-A 运行时契约断言（GPT 7dcf6bd §四.1/§四.8；默认开，常数开销）：
+            # eval/deploy（``training=False``）违反 ⇒ fail-fast；训练路径只计数落盘（不抛）。
+            head_calls = float(rolled["structured_head_calls"])
+            wm_advances = float(rolled["structured_wm_advances"])
+            head_instances = float(len(set(self._path_head_call_ids)))
+            override_used = float(rolled["structured_plan_override_used"])
+            plan0_ok = bool(torch.equal(rolled["plan"][:, 0, :], action_mu))
+            checks = {
+                "policy_instance_ids_are_identical": head_instances == 1.0,
+                "policy_call_count_is_six": head_calls == 6.0,
+                "world_model_call_count_is_five": wm_advances == 5.0,
+                "auxiliary_future_outputs_not_consumed_by_lqr": plan0_ok and override_used == 0.0,
+                "deployment_does_not_use_plan_override": override_used == 0.0,
+            }
+            failed = sorted(name for name, ok in checks.items() if not ok)
+            for name, ok in checks.items():
+                out[f"contract_{name}"] = torch.tensor(
+                    float(ok), dtype=action_mu.dtype, device=action_mu.device
+                )
+            out["contract_runtime_ok"] = torch.tensor(
+                float(not failed), dtype=action_mu.dtype, device=action_mu.device
+            )
+            if failed and not self.training:
+                raise RuntimeError(
+                    f"[R36 L-A] structured 运行时契约断言失败（eval/deploy fail-fast）：{failed}；"
+                    f"head_calls={head_calls} wm_advances={wm_advances} "
+                    f"head_instances={head_instances} plan_override_used={override_used} "
+                    f"plan0_equals_action_mu={plan0_ok}"
+                    f"（可用 model.set_contract_asserts(False) 关闭）"
+                )
         if world_model:
             out["od_pred"] = rolled["od_pred"]
             out["ld_pred"] = rolled["ld_pred"]

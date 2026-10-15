@@ -17,8 +17,8 @@
 | 生成器 | `net.path_head.StructuredPolicyHead`（模型属性 `model.path_head`；参数前缀 `path_head.`） |
 | 内部结构 | `lateral` 分支（锚 κ_ref + 残差 → `κ_near/mid/far`）+ `longitudinal` 分支（`[latent, 几何(κ_near, 外源几何(8))]` → 当前 `ds`，另出 5 步辅助 ds）+ `compose` 确定性几何层（`a=(ds, κ_near·ds)`；**无参数**） |
 | 上游（特征） | `plan_head.fusion.2.`（PolicyBackbone 末层）→ `latent`；Encoder/WM 全冻 |
-| 旧 `PolicyHead` | **仅服务**默认关路径（`enable_path_head=False`）与消融①；启用结构化头时其输出只作为 `policy_action_mu` 诊断（`action_logstd` 仍来自旧头，RL 未接线） |
-| 静态断言 | `model.action_generator_names() == ("path_head",)`（`path_head_mode()=="structured"`）；`set_path_head_ablation` 只允许 `policy|structured|oneshot` |
+| 旧 `PolicyHead` | **仅服务**默认关路径（`enable_path_head=False`）与消融①；**structured/oneshot 默认不再前向**（R36 L-A；诊断经 `set_policy_diag(True)`/`set_path_head_trace(True)` 恢复；`action_logstd` 不再随输出提供，RL 未接线） |
+| 静态断言 | `model.action_generator_names() == ("path_head",)`（`path_head_mode()=="structured"`）；`set_path_head_ablation` 只允许 `policy\|structured\|oneshot`，且 **`oneshot` 默认拒绝**（须 `allow_oneshot=True` / `--diagnostic-oneshot`）；**运行时契约断言默认开**（`contract_asserts_enabled`：同头实例/头调用 6/WM 推进 5/aux 不进 LQR/非 oneshot 不用 plan_override；eval·deploy 违规 `RuntimeError`，训练路径只计数落盘） |
 | 动作口径 | 每步 `a_k = (ds_k, dθ_k = κ_near_k·ds_k)`；`ds∈[0,10]`、`dθ∈[−0.6,0.6]`（掩码 `ds_clamped/dtheta_clamped`） |
 | 6 步 `plan` | 由**逐步动作组装**（`_rollout` 内 `torch.stack(actions)`；`plan[:,0] == action_mu`）；供 LQR/评测（`env/tracking.interpolate` → 30 点） |
 
@@ -119,7 +119,7 @@ _rollout(encoded, a0):                          # k = 1..6
   一次性 6 步捷径）。`rollout=False` 的 cheap path（PPO/BC collect）**只**给 `action_mu` 与
   **辅助预览**（`plan_from_aux=1`，无 WM），**不得**作为 LQR 参考。
 - **不同构之处（显式声明）**：① 消融①②③ 只用于对照/诊断，不参与部署；② `action_logstd`
-  仍来自旧 `PolicyHead`（RL 分布口径未接线）；③ 训练期 target-lane dropout（默认 0）与
+  不再随 structured 输出提供（旧 `PolicyHead` 默认不前向；RL 分布口径未接线）；③ 训练期 target-lane dropout（默认 0）与
   训练侧 DAgger/采样权重不属于前向图；④ 部署端 `lane_anchor_xy`/`path_*` 由环境/数据侧
   提供（H2 规格），与训练同一键集。
 
@@ -144,5 +144,5 @@ _rollout(encoded, a0):                          # k = 1..6
    不参与动作生成（§2）。
 4. 锚折线需覆盖 6 步前瞻（≈25 m + 控制站位 29.75 m）；过短时 `_interp_nodes` 端点常数延伸。
 5. `dθ` 截断 `±0.6`、`ds` 截断 `[0,10]` 会截断极端 `ds×κ` 组合（掩码随输出返回）。
-6. 旧 `PolicyHead` 的 `action_logstd` 仍参与分布式动作（RL 未接线；RL 口径由后续 lane 决定）。
+6. `action_logstd` 当前不提供（structured 默认不前向旧头）；RL 接线时须统一均值/方差来源（RL 口径由后续 lane 决定）。
 7. 训练/部署端 `long_exog` 的动态列覆盖率由 H3 hook 审计（缺键 ⇒ 0 + presence 掩码）。

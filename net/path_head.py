@@ -67,7 +67,7 @@ Caveats（K1 口径）
   高速桶（>12 m/s）无数据 ⇒ 最近桶 + ``a_y`` 外推。
 - 想象步的动态列（dynamic_distance/ttc）与 nav/speed **保持 t0/当前步**；静态距/末端距按
   **路径进度**收缩（近似：不走 lane 坐标系还原）；静态距/末端距的 lane 级精确重算待 H2/H3。
-- ``action_logstd`` 仍来自旧 ``PolicyHead``（启用模式下与 ``action_mu`` 不同源；RL 未接线）。
+- R36 L-A 后：structured/oneshot 模式**默认不再前向旧 ``PolicyHead``**（诊断经 ``set_policy_diag(True)``/``set_path_head_trace(True)`` 恢复）；``action_logstd`` 不再随结构化输出提供（RL 未接线；接线时必须统一均值/方差来源）。
 """
 
 from __future__ import annotations
