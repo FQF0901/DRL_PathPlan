@@ -1,277 +1,552 @@
-审阅结论
+你说得对。Round-36 的离线结果只能证明新结构“值得进入闭环验证”，不能替代闭环性能。下一阶段必须围绕统一闭环基准推进，同时修复当前代码中的动作头归属、World Model 坐标语义和动态场景更新问题。
 
-这次提交主要是文档纠偏，不是功能实现进展。积极的一面是 Coding Agent 已正式承认 PathExecutionHead 偏离路线 A，并接受“唯一 PolicyHead、逐步 Policy–WM 自回归”的架构契约；但附件里没有 net/model.py、net/policy.py、World Model 或训练代码的实际 diff，因此目前只能批准“方向纠正”，不能认定重构已经完成或可以开始正式训练。
+下面这版可直接交给 Coding Agent。
 
-一、这次正确纠正了什么？
+Round-37：结构化 Policy + 坐标解耦 World Model 闭环验证
+一、总目标
 
-Coding Agent 已认账原 PathExecutionHead 的三个结构性问题：
+保持唯一部署链：
 
-1. 它事实上是第二个轨迹生成器；
-2. 它通过 plan_override 一次产生六步计划；
-3. 后五步绕过了 Policy → World Model → Policy 的逐步自回归。
+真实状态
+→ 唯一 Structured PolicyHead 输出当前一步动作
+→ World Model 预测下一状态
+→ 同一个 PolicyHead 重新决策
+→ 递归六步
+→ 固定 LQR
+→ 闭环评测
 
 
-同时接受改为：
+本轮目标不是继续优化单个离线指标，而是回答：
 
-唯一 StructuredPolicyHead
+新的曲率和纵向动作表示，配合 OD/LD 自车运动坐标补偿，能否真正提升固定 LQR 下的闭环 success，并降低 off-road、collision 和 timeout？
+
+二、统一评价体系
+
+所有后续版本必须使用同一基准、同一随机种子和同一统计字段。阶段性专项指标只能解释结果，不能代替统一指标。
+
+1. 固定评测层级
+开发集：Calib50
+
+用途：
+
+快速淘汰明显失败版本
+paired episode逐例比较
+
+
+不能用于正式收益声明。
+
+晋级集：Clean150
+
+用途：
+
+确定模型是否具备继续扩评资格
+
+正式集：Eval500
+
+用途：
+
+与历史模型及IDM + Pure Pursuit比较
+
+最终声明
+至少3 seeds
+paired bootstrap
+McNemar成功/失败翻转检验
+
+
+最终超越目标继续保持：
+
+3-seed mean success >= 0.80
+worst seed >= 0.77
+collision和off-road不劣于IDM
+
+2. 所有版本统一输出
+主指标
+success
+off-road
+collision
+timeout
+route completion
+
+安全和执行指标
+min-TTC
+首次计划越界距离
+首次计划碰撞距离
+steer saturation
+throttle saturation
+LQR横向误差
+LQR航向误差
+
+World Model 接口指标
+真实状态 vs WM状态的Policy动作差
+h1...h6的ego/OD/LD误差
+lane-relative误差
+ds overshoot
+OD/LD中的ego-motion泄漏
+
+3. 不使用模糊加权总分
+
+不同版本的主排名建议使用带安全约束的字典序：
+
+第一：必须满足collision/off-road硬门
+第二：在安全门内比较success
+第三：比较timeout和route completion
+第四：用离线指标解释差异
+
+
+避免出现：
+
+success提高
+但collision翻倍
+却因加权总分仍然晋级
+
+
+统一版本摘要可明确写成：
+
+Primary = success
+Hard constraints = collision, off-road
+Secondary = timeout, route completion
+Diagnostic = offline/path/WM metrics
+
+三、当前代码必须修正的问题
+1. 将结构化动作分支真正收编进唯一 Policy
+
+当前运行时已经做到单一动作源，但代码仍有：
+
+model.policy
+model.path_head
+
+
+两个实体，容易再次误接线。
+
+修改要求
+
+正式结构应统一为：
+
+model.policy
+  ├─ backbone adapter
   ├─ lateral branch
   ├─ longitudinal branch
-  └─ deterministic composition
-
-每一步：
-z_k → 同一个PolicyHead → (ds_k, κ_k)
-dθ_k = κ_k × ds_k
-→ World Model → z_(k+1)
+  ├─ action distribution
+  └─ auxiliary intent outputs
 
 
-并明确 κ_mid/κ_far 和未来 progress 只能作为辅助监督，不能直接接入 LQR。这个方向完全符合我们的总守则。
+过渡期若不能改 checkpoint key，也至少做到：
 
-二、当前进展不能被高估
-
-附件只修改了：
-
-docs/deepseekv4p1_argue.md
+path_head改为policy内部子模块
+外部不得直接调用path_head
+model.forward只暴露policy action
 
 
-没有看到以下关键文件的代码变更：
+保留旧 Policy 仅作版本兼容和离线消融，不进入正式 rollout。
 
-net/model.py
-net/policy.py
-net/st_gnn.py
-pipeline/stages.py
-pipeline/trainer.py
-docs/architecture_contract.md
+2. 统一 Policy 均值与方差来源
 
+当前结构化模式：
 
-因此当前尚未证明：
-
-plan_override 已从正式 rollout 删除； -旧 PolicyHead 是否被真正替换或收编； -六步动作是否全部来自同一 PolicyHead； -每一步是否读取对应的 World Model 状态； -辅助未来输出是否无法进入 LQR； -训练器是否只优化唯一 Policy 内部的新分支；
-World Model 和 OD/LD 坐标解耦是否已经接线。
-
-所以当前状态应标记为：
-
-ARCHITECTURE_DIRECTION_ACCEPTED
-IMPLEMENTATION_NOT_YET_VERIFIED
+action mean来自StructuredPolicyHead
+action logstd来自旧PolicyHead
 
 
-而不是“重构完成”。
+因此 Coding Agent 暂时移除了 action_logstd，这是正确的防错，但强化学习尚不可用。
 
-三、我与 Coding Agent 仍有一个关键分歧
+修改要求
 
-旧版 §5.56 曾主张：
+在同一个 Structured Policy 内定义：
 
-先用冻结旧World Model闭合Policy门，
-结构化World Model只做零训练契约层，
-是否重训等Gate 2实测触发。
+action_mu
+action_logstd
 
 
-这部分虽然在本次 diff 中被删除，但必须防止它以实施策略继续存在。
+两者必须共享同一状态表示和同一动作参数化：
 
-你已经明确，车道保持是完整系统能力：
+ds / κ
 
-StructuredPolicyHead
-+
-World Model
-+
-OD/LD ego-motion坐标解耦
-+
-六步递归
-+
+
+在本轮闭环 IL 验证中可以暂不启用采样，但应补齐接口和 fail-fast：
+
+若RL请求logstd但结构化分支未实现
+→ 直接报错
+
+3. 接入 OD/LD 坐标补偿主路径
+
+net/ego_warp.py 当前只是独立数学模块，尚未进入 World Model。
+
+必须增加配置：
+
+ego_warp_mode:
+  off
+  analytic
+
+
+默认 off 保持旧模型逐位兼容。
+
+analytic 模式下：
+
+LD：
+静态anchor做ego SE(2)逆变换
+
+OD：
+使用对象场景速度推进
+再做ego SE(2)逆变换
+
+
+关键修复：
+
+OD场景速度
+=
+OD相对速度 + ego当前速度
+
+
+禁止使用相对速度推进后再扣一次自车运动。
+
+4. World Model 学习解析补偿后的 residual
+
+主路径不能只改变图 pose，还应明确区分：
+
+解析anchor
+学习residual
+最终anchor
+
+
+形式：
+
+Ak+1=Warp⁡(Ak,ak)+ΔAθA_{k+1} = \operatorname{Warp}(A_k,a_k) + \Delta A_\theta
+
+训练分别报告：
+
+解析先验误差
+学习残差贡献
+最终anchor误差
+
+
+防止 latent 再次把确定性自车运动复制到 OD/LD 中。
+
+5. 更新 imagined step 的动态场景信息
+
+当前 step_geometry(dynamic_mode="hold") 会固定：
+
+动态对象距离
+TTC
+其他纵向上下文
+
+
+这使后续 imagined step 的纵向动作依赖过期动态信息。
+
+修改要求
+
+优先使用 World Model 的物理预测更新：
+
+OD relative position
+OD relative velocity
+nearest dynamic distance
+TTC
+
+
+若对应预测不可用：
+
+显式标记dynamic_valid=0
+
+
+不得静默使用 t0 值并当成已更新数据。
+
+第一版只读对照：
+
+hold
+vs
+WM-updated
+vs
+oracle future
+
+
+实测后再决定生产模式。
+
+6. 精确区分 World Model 调用口径
+
+统一记录：
+
+Policy调用：6次
+用于下一动作的WM推进：5次
+ST-GNN总调用：6次
+
+
+第六次状态预测只用于：
+
+终端World Model监督或诊断
+
+
+不能在报告中混写为“WM只调用5次”。
+
+四、实验架构
+
+本轮至少保留四个严格对照。
+
+C0：旧正式基线
+旧Policy
+旧World Model坐标口径
 固定LQR
 
 
-因此不能用：
+当前可靠基线约为 success 0.56。
 
-T1在冻结旧WM下接近某个专家越界地板
+C1：Structured Policy + 旧 World Model
 
+验证：
 
-就推断 World Model 暂时不需要参与。
+新动作表示单独贡献
 
-理由很简单：
+C2：Structured Policy + analytic ego warp
 
-T1 只能证明某个离线或短期路径指标有所改善； -不能证明后五步 predicted-state 仍保持 lane-relative 信息； -不能证明新 Structured Policy 在 predicted latent 上与真实 latent 决策一致； -不能证明 OD/LD 的坐标变化已经从 latent 中解耦； -更不能证明固定 LQR 下的完整部署闭环已过门。
+使用：
 
-结论：结构化 World Model 不应被推迟到所有 Policy 能力之后。
-
-四、下一步必须先交付的代码，而不是继续写原则文档
-1. 唯一 Policy 契约落地
-
-必须提交实际代码 diff，证明：
-
-旧PathExecutionHead不再接管正式rollout
-plan_override不能出现在训练或部署主路径
-StructuredPolicyHead每次只输出当前一步
-a0...a5来自同一个PolicyHead实例
-World Model在六步链中实际执行5次
+新动作表示
+OD/LD解析坐标补偿
+旧WM residual能力
 
 
-建议加入运行时断言：
+用于判断坐标补偿直接贡献。
 
-assert policy_instance_ids_are_identical
-assert world_model_call_count == 5
-assert policy_call_count == 6
-assert auxiliary_future_outputs_not_consumed_by_lqr
-assert not deployment_uses_plan_override
+C3：Structured Policy + 重训后的 residual World Model
 
-2. architecture_contract.md
+使用：
 
-必须明确写出：
-
-唯一动作生成模块是谁
-PolicyBackbone职责是什么
-StructuredPolicyHead内部子分支是什么
-每次forward输出什么
-辅助输出能进入哪些loss
-辅助输出不得进入哪些部署路径
-World Model输入输出是什么
-六步rollout调用图
-LQR最终消费什么
-训练与部署是否同构
-
-3. OD/LD 坐标解耦最小实现
-
-不能仅停留在文档里。至少实现并保留旧路径对照：
-
-LD：
-静态anchor按ego SE(2)逆变换
-
-OD：
-对象恒速先验
-→ ego SE(2)逆变换
-
-World Model：
-只学习warp后的残差
+新动作表示
+解析warp
+在新坐标规范下训练的World Model residual
 
 
-第一版暂不扩容，也不做六步 BPTT，但必须有：
+这是本轮正式候选。
 
-warp前anchor
-解析warp后anchor
-真实下一帧anchor
-learned residual
-最终预测anchor
+所有臂：
 
-
-五项 hook。
+同一数据
+同一Policy调用次数
+同一World Model horizon
+同一固定LQR
+同一评测episodes
 
 五、训练顺序
-阶段 1：坐标和架构契约
+1. 坐标层验证
 
 不训练，完成：
 
--唯一 Policy 调用链；
+OD/LD warp接入
+速度语义修复
+bit-exact off模式
+解析几何单元测试
 
-OD/LD anchor schema；
-ego-motion warp； -旧路径与新路径的等价性、镜像和物理单测； -hooks 默认关闭 bit-exact。
-阶段 2：World Model 车道保持状态转移
+2. World Model residual 训练
 
-冻结 Policy，训练：
+冻结 Policy，只训练：
 
 ego transition
 OD residual transition
 LD residual transition
-physical heads
+physical prediction heads
 
 
-先保持跨步 detach，不启用 BPTT。
+暂时保留跨步 detach，不启用完整六步反向传播。
 
-阶段 3：Structured Policy 当前动作
+3. Structured Policy 训练
 
-冻结 WM，只训练唯一 PolicyHead 内部：
+冻结 World Model，训练：
 
-lateral branch
-longitudinal branch
-deterministic composition无参数
+Policy内部横向分支
+Policy内部纵向分支
+PolicyBackbone最后融合层
 
 
-不预先开放 PolicyBackbone。
+PolicyBackbone 最后一层已由实验确认需要适配，但使用独立低学习率，例如：
 
-阶段 4：预测状态鲁棒训练
+Structured Policy分支：1.0× LR
+PolicyBackbone最后一层：0.1× LR
 
-冻结 WM，训练：
 
-π(zWM)≈sg⁡π(zreal)\pi(z^{WM})\approx \operatorname{sg}\pi(z^{real})
-阶段 5：交替适配
+不得扩大到整个 Backbone。
+
+4. 预测状态一致性训练
+
+冻结 World Model：
+
+π(zkWM)≈stopgrad⁡π(zkreal)\pi(z_k^{WM}) \approx \operatorname{stopgrad}\pi(z_k^{real})
+5. 交替适配
 WM-step：冻结Policy
 Policy-step：冻结WM
 
 
-不得全解冻、单一总损失反传。
+禁止全部解冻后共同反传。
 
-六、强制验证准则
-架构门
-动作生成器数量 = 1
-Policy调用次数 = 6
-World Model调用次数 = 5
-每个a_k读取对应z_k
-没有plan_override正式路径
-辅助未来预测不能进入LQR
+六、强制 Probes / Hooks
+1. 唯一动作链
 
-坐标门
-静态LD warp误差 P90 <= 0.10m
-LD heading误差 P90 <= 1°
-同速前车相对距离误差 P90 <= 0.20m
-左右镜像正确率 >= 95%
-OD/LD中的ego-motion泄漏下降 >= 30%
+记录并断言：
+
+Policy实例ID
+Policy调用6次
+WM决策推进5次
+ST-GNN总调用6次
+a0...a5及其输入z0...z5
+辅助输出没有进入LQR
+
+2. Warp 五项
+
+每一步记录：
+
+anchor_pre
+anchor_analytic
+anchor_actual_next
+residual_learned
+anchor_final
+
+3. 动态场景更新
+
+记录：
+
+t0 dynamic distance/TTC
+WM-updated distance/TTC
+oracle distance/TTC
+longitudinal branch实际消费值
+valid mask
+
+4. Policy 增益链
+
+记录：
+
+WM latent变化
+PolicyBackbone变化
+横向κ变化
+纵向ds/v变化
+最终六步plan变化
+
+5. 连续路径与 LQR
+
+记录：
+
+六步plan
+30点reference
+连续footprint扫掠
+首次越界/碰撞点
+实际轨迹
+raw steer/throttle
+跟踪误差
+
+6. 梯度和参数账本
+
+输出：
+
+trainable参数
+optimizer分组
+学习率
+grad norm
+update norm
+冻结参数grad=0
+checkpoint hash
+
+七、验收准则
+Gate A：代码契约
+off模式旧模型逐位一致
+动作生成器数量=1
+正式路径无oneshot/plan_override
+Policy调用6次
+WM决策推进5次
+辅助输出不能进入LQR
+
+Gate B：坐标补偿
+静态LD warp误差接近数值精度或显著优于旧先验
+同速前车相对距离误差显著下降
+OD/LD ego-motion泄漏下降 >=30%
+左右镜像正确率 >=95%
 
 
-阈值可用基线样本校准一次，之后锁定。
+不能只用全 OD 集平均，必须单独报告：
 
-World Model 门
-h1...h6 lane lateral/heading误差不指数增长
+恒速对象
+同速前车
+加减速对象
+cut-in/merge对象
+
+Gate C：World Model
+h1...h6 lane-relative误差不指数增长
+C3优于C2和C1
 WM tail优于frozen-state tail
 h3...h6 Policy接口误差下降 >=20%
-物理预测优于静态/恒速基线
 
-Policy 门
-真实状态动作误差退化 <=5%
-预测状态与真实状态动作差下降 >=20%
-曲率方向正确率 >=95%
-纵向进度单调率 >=90%
+Gate D：离线路径指标
 
-六步和闭环门
+仅作晋级前提：
 
-原先“连续越界率 ≤2%”若低于同口径专家数据地板，应改为相对门：
-
-显著优于旧基线
-且不劣于专家同口径分布 + 统计余量
+车道保持路径越界不劣于专家同口径地板
+给定目标变道收敛显著优于旧基线
+重复换道不劣于专家同口径
+曲率与曲率变化率可执行
 
 
-最终普通道路固定 LQR：
+所有“投影边缘行”必须预先定义过滤规则，不能在看到结果后剔除。
 
-success >=0.90
-collision接近0
-timeout <=0.05
-off-road显著低于现有基线
-计划错误与LQR跟踪错误分别报告
+Gate E：统一闭环指标
+Calib50
 
-七、给 Coding Agent 的正式回复
-接受对PathExecutionHead结构性偏离的认账，
-以及重构为唯一StructuredPolicyHead、逐步Policy–WM自回归的方向。
+候选必须同时满足：
 
-但当前提交仅为文档更新，不代表实现完成。
-正式训练继续暂停，先提交代码与运行证据：
+success >=0.62
+off-road <=0.10
+collision <=0.08
+timeout <=0.10
+route completion不下降
 
-1. 删除正式路径中的plan_override；
-2. StructuredPolicyHead每次只生成当前一步(ds, kappa)；
-3. a0...a5由同一Policy实例读取z0...z5逐步生成；
-4. WM实际推进5次；
-5. 辅助kappa/progress不得直接进入LQR；
-6. 完成architecture_contract.md；
-7. 接入OD/LD显式anchors和ego-motion解析warp最小路径；
-8. 添加Policy调用、WM调用、anchor warp、residual和LQR输入断言；
-9. hooks关闭时bit-exact；
-10. 提交旧链/新链的调用图、参数账本和梯度账本。
+Clean150
+success >=0.60
+相对C0提升 >=5pp
+off-road和collision不恶化
+普通道路、弯道、merge至少各有正向
 
-结构化WM不能整体后置。
-车道保持必须以：
-StructuredPolicyHead + structured WM + ego-motion compensation
-+ 六步递归 + fixed LQR
-作为完整系统验收。
+Eval500
 
-在架构门、坐标门和调用链门通过前，
-不得开始正式主训练。
+只有 Clean150 过门才运行：
+
+3 seeds
+paired bootstrap
+McNemar翻转检验
+与IDM + Pure Pursuit统一口径
+
+八、给 Coding Agent 的正式开工指令
+Round-36离线结果只作为闭环候选筛选，不作性能结论。
+
+立即进入Round-37：
+Structured Policy + analytic OD/LD ego warp
++ residual World Model + fixed LQR闭环验证。
+
+必须完成：
+
+1. 将StructuredPolicyHead收编为唯一Policy内部模块；
+2. RL方差接口同源化或fail-fast；
+3. ego_warp以off/analytic配置接入model主路径；
+4. 修复OD速度口径：v_world = v_rel + v_ego；
+5. World Model预测并更新imagined step动态距离/TTC；
+6. 在新坐标规范下训练World Model residual；
+7. 冻结WM训练Structured Policy；
+8. real/WM latent决策一致性训练；
+9. WM-step与Policy-step交替适配；
+10. 跑C0/C1/C2/C3四臂的Calib50闭环配对评测。
+
+统一主指标：
+success；
+硬约束：
+off-road、collision；
+次指标：
+timeout、route completion；
+离线路径与WM指标仅用于归因和晋级解释。
+
+在Calib50达到：
+success>=0.62、
+off-road<=0.10、
+collision<=0.08、
+timeout<=0.10
+之前，不进入Clean150、DAgger、MoE或RL。
 
 最终判断
 
-方向已经纠正，可以继续开工；但下一回合必须看到代码、运行时调用链和断言结果，不能再以文档“接受原则”代替真实实施。当前最有价值的动作是把唯一 Policy 与结构化 World Model 的契约真正落到代码主路径中。
+Round-36 的离线结果和代码契约是有价值的，但现在必须把项目重新拉回终极目标：
+
+任何结构改动都必须最终证明它提高了 Policy–World Model × 6 → 固定 LQR 的闭环成功率，而不是只改善离线曲率、越界或收敛指标。
+
+下一步要同时完成坐标层、World Model residual 和 Structured Policy 的系统集成，并用统一的 C0/C1/C2/C3 闭环矩阵裁决。
