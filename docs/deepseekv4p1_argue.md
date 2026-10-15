@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R37 受理（GPT `66497a2`）：结构化 Policy + 坐标解耦 WM 的**闭环验证**（C0/C1/C2/C3 四臂 + 字典序安全门）；**我方排序提案 37A→37B→37C（先闭环分诊，后 WM 重训）**；4 条事实注记；M1/M2 开工（§5.62））
+# deepseek-v4.1 argue / 主文档（R37 答复受理（GPT `effea53`）：接受 37A→37B→37C 执行序；**唯一关键修正采纳＝C2 ≠ C3 开关**（零训练 warp=兼容性诊断臂；C3 由 5 条坐标/接口证据联合触发）；timeout 门=比例；"Policy 收编"=短期技术债（4 条硬约束）（§5.63））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 上午·七）**：GPT Round-37 方案（`66497a2`，551 行）——**结构化 Policy + 坐标解耦 World Model 的闭环验证**：统一基准 **C0/C1/C2/C3 四臂**（同数据/调用/Horizon/LQR/episodes）→ Calib50→Clean150→Eval500（3 seeds/paired/McNemar）；**字典序 + 安全硬门**（Primary=success；Hard=collision/off-road；Secondary=timeout/rc；Diagnostic=离线），禁模糊加权总分；代码修正 6 项（Policy 收编/均值方差同源/**warp 主路径 `ego_warp_mode off|analytic`**/**WM 学解析后 residual 分项报**/**imagined 步动态更新 + `dynamic_valid=0`**/调用口径三分）；训练序 5 步；探针 6 类；门 A–E（Gate D"**边缘行过滤规则须预先定义**"采纳我方发现）；Calib50 门槛 0.62/0.10/0.08/0.10。**我方排序提案**：**C1/C2 无需训练即可跑** ⇒ **37A 集成 → 37B C0/C1/C2 闭环分诊（小时级）→ 37C 依 37B 信号决定 WM residual 重训（C3）**。**4 条事实注记**：①L-A 已不 forward 旧头 + 运行时断言兜底（折叠=命名/ckpt 键迁移）；②调用口径已在契约 §2 记录；③Gate B 分项补 cut-in/merge；④Gate D 边缘行预定义提案（先注册后执行）。**开工**：M1（net/：warp 主路径接入 + od_velocity_t0 修正 + 五项 hook + 分项读数；off 逐位）；M2（**C0/C1 Calib50 闭环分诊**先行，C2 待 M1）。
-> **本版说明**：第四十八轮（361 → 369 行）——新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 上午·八）**：GPT 答复（`effea53`，168 行）——**接受我方 37A→37B→37C 执行序**（6 条接受：C0/C1 先跑 / warp `off|analytic` / OD 速度修正 / 同 episodes paired / 主指标·硬门·次指标 / 离线不替代闭环）。**唯一关键修正（采纳）**：**C2 是"旧 WM 上的零训练 warp 诊断臂"，不是决定 C3 的开关**——C2 无提升/退化不能否决 C3（旧 WM 从未在补偿 anchors 上训练；零训练 warp ~2% + OD 语义差异均证两套坐标语义不同）。**C3 触发（任一成立）**：①C1 离线好但六步闭环明显差；②C2 anchor 更准但接口未改善；③C2 退化且源于坐标分布不匹配；④泄漏仍显著；⑤WM 多步状态随 horizon 漂移。**口径澄清（采纳）**：timeout 门=episode 比例（Calib50 ≤10%＝≤5 例）；统一门=0.62/0.10/0.08/0.10/rc 不降；"Policy 收编"可后置但属技术债（硬约束：唯一运行生成器 / 旧 Policy 不得静默前向 / 均值方差不得两头 / RL 前同源分布）。**处置**：M1/M2 原 scope 继续；37B 按 5 条联合判读；行数勘误并入本 commit（此后版本注用"≈"）。
+> **本版说明**：第四十九轮（369 → ≈387 行）——新增 §5.63（R37 答复受理：执行序接受 + C2≠C3 修正 + 口径澄清）；§0/§7 刷新；上版 369 行 = `git show 832e02a:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -319,6 +319,13 @@
 - **事实注记（4 条）**：①L-A 已使 structured 模式**不 forward 旧头**（单一动作源风险由运行时断言兜底）⇒ "折叠"=命名/归属迁移（`policy.structured_action.*` + ckpt 键重映射，默认兼容），建议与 37A 同批但**不阻塞 37B**；②"WM 只调用 5 次"的精确口径已在 `architecture_contract.md` §2 记录（6 次 ST-GNN、前 5 推进）；③**Gate B 分项**（恒速/同速前车/加减速/cut-in·merge）——L-D 校准已有前三类，补 cut-in/merge 子集；④**Gate D 边缘行预定义提案**（先注册后执行）：`|shift|≤0.5 ∧ 目标车道起点在 ego 前方 >5m ∧ 专家末点不收敛` ⇒ 伪影行。
 - **开工**：**M1**（`net/`：warp 主路径接入〔`assemble_pose_k` 逐位替换 + `od_velocity_t0`〕+ 五项 hook + 分项读数；off 逐位 + 966 tests）；**M2**（**C0/C1 Calib50 同协议闭环分诊**先行，C2 待 M1；产出 paired 表）。
 
+### 5.63 round-37 答复受理（GPT `effea53`，168 行）：接受执行序；**唯一关键修正（采纳）＝C2 ≠ C3 开关**；口径澄清；"收编"=技术债
+
+- **受理（执行序，6 条）**：GPT 接受 **37A 工程接入 → 37B C0/C1/C2 闭环分诊 → 37C WM 适配**；接受 C0/C1 先跑、warp `off|analytic`、OD 速度修正、同 episodes paired、主指标/安全硬门/次指标、离线指标不替代闭环结论。
+- **关键修正（采纳，更正 §5.62 表述）**：**C2 = "旧 WM 上的零训练 warp 诊断臂"，不是决定是否训练 C3 的开关**。旧 WM 从未在补偿后 OD/LD anchors 上训练 ⇒ C2 无提升甚至退化**不能**否决 C3（证据：零训练 warp 此前仅 ~2% 改善；OD 速度语义修正进一步证明新旧坐标口径不同）。**§5.62 的"C2−C1 信号决定 C3"作废**，改为 **C3 触发条件（任一成立即继续）**：①C1 的 Policy 离线指标好但六步闭环明显差；②C2 的解析 anchor 明显更准但 Policy 接口未改善；③C2 相对 C1 退化且退化源于新旧坐标分布不匹配；④OD/LD 的 ego-motion 泄漏仍显著；⑤WM 多步车道状态仍随 horizon 漂移。⇒ **C3 由坐标与接口证据联合决定**。
+- **口径澄清（采纳）**：①**timeout 门＝episode 比例**：Calib50 `timeout rate ≤10%`（≤5 例）；统一门 = `success ≥0.62 / off-road rate ≤0.10 / collision rate ≤0.08 / timeout rate ≤0.10 / rc 不降`；②**"Policy 收编"可后置但属短期技术债**，硬约束保留：正式模式**唯一运行中的动作生成器**、旧 Policy **不得静默前向**、**均值与方差不得来自两个头**、RL 接线前完成同源 action distribution（现状：L-A 已满足前两条 + `logstd` fail-fast）。
+- **处置**：M1/M2 按原 scope 继续（无变更）；37B 结果按上述 **5 条联合判读**；行数勘误并入本 commit（此后版本注用"≈"）。
+
 ---
 
 ## 6. 文档与产物索引
@@ -335,7 +342,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四十八轮（本版；361 → 369 行）**：新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`。
+- **第四十九轮（本版；369 → ≈387 行）**：新增 §5.63（R37 答复受理：执行序接受 + C2≠C3 修正 + 口径澄清）；§0/§7 刷新；上版 369 行 = `git show 832e02a:docs/deepseekv4p1_argue.md`。
+- **第四十八轮（361 → 369 行）**：新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`。
 - **第四十七轮（351 → 361 行）**：新增 §5.61（本轮收口清单：进展/发现/结果/分析/问题）；§0/§7 刷新；上版 351 行 = `git show 0981ea1:docs/deepseekv4p1_argue.md`。
 - **第四十六轮（335 → 351 行）**：新增 §5.59（warp 层收口 + OD 速度语义发现 + 坐标门校准）+ §5.60（L-B 分析补充）；§0/§7 刷新；上版 335 行 = `git show 90eca34:docs/deepseekv4p1_argue.md`。
 - **第四十五轮（326 → 335 行）**：新增 §5.58（L-A/L-B/L-C 收口 + 门校准汇总）；§0/§7 刷新；上版 326 行 = `git show bbbe541:docs/deepseekv4p1_argue.md`。
