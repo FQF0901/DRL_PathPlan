@@ -5,9 +5,9 @@
 ``docs/chatgpt5p6sol_review.md`` §八/§九（GPT ``ac78f76``）+ ``docs/architecture_contract.md``
 （本 lane 交付的架构契约，含六步调用图 / 辅助与主边界 / 训练部署同构声明 / 门定义）。
 
-H1 的 ``PathExecutionHead`` 一次调用给出 6 步 plan 并在 rollout 里**钉住**尾段
-（``plan_override``）——等价于第二个六步轨迹生成器、绕过了「决策 → WM 推进一步 → 同一头重新
-决策」。本 lane 重构为 ``StructuredPolicyHead``：
+H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 rollout 里**钉住**尾段——等价于
+第二个六步轨迹生成器、绕过了「决策 → WM 推进一步 → 同一头重新决策」（R38-P1 减枝已把该
+一次性路径整体删除并迁 ``tools/legacy/oneshot_path.py``）。本模块的 ``StructuredPolicyHead``：
 
 1. **每步调用**：同一实例、同一参数，用**当前** ``z_k`` 产出 ``a_k = (ds_k, dθ_k = κ_near_k·ds_k)``；
    ``st_gnn`` 推进一步得到 ``z_{k+1}`` 后**同一头**重算下一步（6 次调用 = 6 个动作 a0..a5）；
@@ -33,9 +33,11 @@ H1 的 ``PathExecutionHead`` 一次调用给出 6 步 plan 并在 rollout 里**�
 消融脚手架（默认关；``DrivingModel.set_path_head_ablation``）
 -------------------------------------------------------------
 - ``policy``：① 旧 ``PolicyHead`` + WM rollout（= 默认关路径的行为）；
-- ``structured``（**默认**，生产口径）：② 结构化头 + WM 逐步 rollout；
-- ``oneshot``：③ H1 一次性 6 步诊断臂（``one_shot=True`` + ``plan_override`` 钉住）。
-  **仅诊断上界，不接入生产**。
+- ``structured``（**默认**，生产口径）：② 结构化头 + WM 逐步 rollout。
+
+③ H1 一次性 6 步诊断臂（头内一次性开关 + 尾段钉住）**已删除**（R38-P1 减枝）；
+``DrivingModel.set_path_head_ablation`` 写入该模式名即 ``ValueError`` fail-fast，
+历史复现快照见 ``tools/legacy/oneshot_path.py``。
 
 默认关 / 逐位兼容
 -----------------
@@ -70,7 +72,9 @@ Caveats（K1 口径）
   高速桶（>12 m/s）无数据 ⇒ 最近桶 + ``a_y`` 外推。
 - 想象步的动态列（dynamic_distance/ttc）与 nav/speed **保持 t0/当前步**；静态距/末端距按
   **路径进度**收缩（近似：不走 lane 坐标系还原）；静态距/末端距的 lane 级精确重算待 H2/H3。
-- R36 L-A 后：structured/oneshot 模式**默认不再前向旧 ``PolicyHead``**（诊断经 ``set_policy_diag(True)``/``set_path_head_trace(True)`` 恢复）；``action_logstd`` 不再随结构化输出提供（RL 未接线；接线时必须统一均值/方差来源）。
+- R36 L-A 后：``structured`` 模式**默认不再前向旧 ``PolicyHead``**（诊断经 ``set_policy_diag(True)``/``set_path_head_trace(True)`` 恢复）；``action_logstd`` 不再随结构化输出提供（RL 未接线；接线时必须统一均值/方差来源）。
+- R38-P1：一次性 6 步（H1）路径已删除（唯一动作源守则）⇒ 本模块只导出逐步口径
+  （``compose_step_action`` + ``aux_preview``）与几何/标定件。
 """
 
 from __future__ import annotations
@@ -121,13 +125,11 @@ __all__ = [
     "STEP_GEOMETRY_DEFAULT_MODE",
     "STEP_GEOMETRY_MODES",
     "TRAIN_ALLOWLIST_PREFIXES",
-    "PathExecutionHead",
     "PathGeometryEncoder",
     "StructuredComposeLayer",
     "StructuredPolicyHead",
     "anchor_from_obs",
     "anchor_reference",
-    "compose_path_plan",
     "compose_step_action",
     "ds_init_from_speed",
     "get_step_geometry",
@@ -257,8 +259,9 @@ TRAIN_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "plan_head.fusion.2.",
 )
 
-#: 消融脚手架模式（默认 ``structured``；见模块 docstring「消融脚手架」）
-PATH_HEAD_MODES: tuple[str, ...] = ("policy", "structured", "oneshot")
+#: 消融脚手架模式（默认 ``structured``；见模块 docstring「消融脚手架」）。
+#: R38-P1 减枝：H1 一次性 6 步诊断臂已删除 ⇒ 枚举只剩两档（写入旧模式名 = fail-fast）。
+PATH_HEAD_MODES: tuple[str, ...] = ("policy", "structured")
 PATH_HEAD_DEFAULT_MODE = "structured"
 
 #: R38-A4：想象步几何（:func:`step_geometry`）口径开关（进程级；**默认 ``production`` = 逐位不变**）：
@@ -522,15 +525,6 @@ def anchor_reference(
     }
 
 
-def _check_ctrl_stations(s_ctrl: Tensor) -> None:
-    """控制站位校验：``(B,3)``、升序、最小间隔 ≥1e-3（分块积分前提）。"""
-    if s_ctrl.ndim != 2 or int(s_ctrl.shape[-1]) != 3:
-        raise ValueError(f"s_ctrl 形状应为 (B,3)，收到 {tuple(s_ctrl.shape)}")
-    gaps = s_ctrl[:, 1:] - s_ctrl[:, :-1]
-    if not bool((gaps > 1e-3).all()):
-        raise ValueError(f"s_ctrl 必须严格升序且间隔 ≥1e-3，收到 {s_ctrl.detach().tolist()[:2]}")
-
-
 def kappa_at(kappa_ctrl: Tensor, s_ctrl: Tensor, s_query: Tensor) -> Tensor:
     """分段线性 κ(s)：``s<s0`` 取 κ0、``s>s2`` 取 κ2（常数延伸）。
 
@@ -544,32 +538,6 @@ def kappa_at(kappa_ctrl: Tensor, s_ctrl: Tensor, s_query: Tensor) -> Tensor:
     kappa01 = k0.unsqueeze(-1) + (k1 - k0).unsqueeze(-1) * t01
     kappa12 = k1.unsqueeze(-1) + (k2 - k1).unsqueeze(-1) * t12
     return torch.where(s <= s1.unsqueeze(-1), kappa01, kappa12)
-
-
-def _integrate_kappa(kappa_ctrl: Tensor, s_ctrl: Tensor, lo: Tensor, hi: Tensor) -> Tensor:
-    """``∫_lo^hi κ(s) ds``（分段线性**精确**；要求 ``lo ≤ hi``）。
-
-    口径 = :func:`kappa_at`：``s<s0`` 常数 κ0、``s>s2`` 常数 κ2、``[s0,s2]`` 分段线性。
-    实现 = 三段拼装（下常数段 + 内部在 ``s1`` 切分的两段梯形 + 上常数段）；
-    内部子区间内 κ 严格线性 ⇒ 梯形=精确积分。
-    """
-    s0, s1, s2 = (station.unsqueeze(-1) for station in s_ctrl.unbind(-1))
-    k0, k1, k2 = (value.unsqueeze(-1) for value in kappa_ctrl.unbind(-1))
-    below = (torch.minimum(hi, s0) - lo).clamp_min(0.0) * k0
-    above = (hi - torch.maximum(lo, s2)).clamp_min(0.0) * k2
-    inner_lo = torch.maximum(lo, s0)
-    inner_hi = torch.minimum(hi, s2)
-    mid = torch.minimum(torch.maximum(s1, inner_lo), inner_hi)
-
-    def _trapezoid(k_a: Tensor, k_b: Tensor, s_a: Tensor, s_b: Tensor, start: Tensor, end: Tensor) -> Tensor:
-        span = (s_b - s_a).clamp_min(_EPS)
-        value_start = k_a + (k_b - k_a) * (start - s_a) / span
-        value_end = k_a + (k_b - k_a) * (end - s_a) / span
-        return 0.5 * (value_start + value_end) * (end - start).clamp_min(0.0)
-
-    first = _trapezoid(k0, k1, s0, s1, inner_lo, mid)
-    second = _trapezoid(k1, k2, s1, s2, mid, inner_hi)
-    return below + first + second + above
 
 
 def replay_plan(plan: Tensor, theta0: Tensor | None = None) -> dict[str, Tensor]:
@@ -635,70 +603,6 @@ def compose_step_action(ds: Tensor, kappa_near: Tensor, *, dt: float = DT) -> di
         "kappa_seg_raw": kappa_seg_raw,
         "ds_clamped": ds_clamped_mask,
         "dtheta_clamped": dtheta_clamped_mask,
-    }
-
-
-def compose_path_plan(
-    kappa_ctrl: Tensor,
-    s_ctrl: Tensor,
-    ds: Tensor,
-    *,
-    dt: float = DT,
-) -> dict[str, Tensor]:
-    """**一次性 6 步组合层**（H1 口径；**只服务 ``oneshot`` 诊断臂**，不接入生产）。
-
-    ``plan (B,K,2)``，``ds_k = s_k − s_{k−1}``（``s_0≡0``）、``dθ_k = κ̄_k·ds_k``
-    （``κ̄_k`` = 段内平均曲率 = 分段线性精确积分 / ds_k）；``action_mu = plan[:,0]``；
-    ``ds/dθ`` 截断 + 掩码；``traj_xy/traj_theta`` = 同 plan 的位姿链（:func:`replay_plan`）。
-    生产口径的逐步动作见 :func:`compose_step_action`（§八.4）。
-    """
-    if kappa_ctrl.ndim != 2 or int(kappa_ctrl.shape[-1]) != 3:
-        raise ValueError(f"kappa_ctrl 形状应为 (B,3)，收到 {tuple(kappa_ctrl.shape)}")
-    if ds.ndim != 2 or int(ds.shape[-1]) < 1:
-        raise ValueError(f"ds 形状应为 (B,K)（K≥1），收到 {tuple(ds.shape)}")
-    if int(kappa_ctrl.shape[0]) != int(ds.shape[0]):
-        raise ValueError(
-            f"kappa_ctrl B={int(kappa_ctrl.shape[0])} != ds B={int(ds.shape[0])}"
-        )
-    _check_ctrl_stations(s_ctrl)
-    if int(s_ctrl.shape[0]) != int(ds.shape[0]):
-        raise ValueError(f"s_ctrl B={int(s_ctrl.shape[0])} != ds B={int(ds.shape[0])}")
-
-    ds_raw = ds.float()
-    ds_clamped = torch.where(
-        torch.isfinite(ds_raw), ds_raw.clamp(0.0, DS_HIGH), torch.zeros_like(ds_raw)
-    )
-    ds_clamped_mask = (ds_raw < 0.0) | (ds_raw > DS_HIGH) | ~torch.isfinite(ds_raw)
-    s_cum = torch.cat(
-        [torch.zeros((int(ds.shape[0]), 1), dtype=ds.dtype, device=ds.device), torch.cumsum(ds_clamped, dim=1)],
-        dim=1,
-    )
-    lo, hi = s_cum[:, :-1], s_cum[:, 1:]
-    dtheta_raw = _integrate_kappa(kappa_ctrl.float(), s_ctrl.float(), lo, hi)
-    dtheta = dtheta_raw.clamp(DTHETA_LOW, DTHETA_HIGH)
-    dtheta_clamped_mask = (dtheta_raw < DTHETA_LOW) | (dtheta_raw > DTHETA_HIGH)
-    kappa_seg = torch.where(
-        ds_clamped > 1e-3, dtheta / ds_clamped.clamp_min(_EPS), torch.zeros_like(dtheta)
-    )
-    kappa_seg_raw = torch.where(
-        ds_clamped > 1e-3, dtheta_raw / ds_clamped.clamp_min(_EPS), torch.zeros_like(dtheta_raw)
-    )
-    plan = torch.stack([ds_clamped, dtheta], dim=-1)
-    replay = replay_plan(plan)
-    return {
-        "plan": plan,
-        "action_mu": plan[:, 0, :],
-        "ds": ds_clamped,
-        "dtheta": dtheta,
-        "progress_s": s_cum[:, 1:],
-        "speed": ds_clamped / float(dt),
-        "kappa_seg": kappa_seg,
-        "kappa_seg_raw": kappa_seg_raw,
-        "ds_clamped": ds_clamped_mask,
-        "dtheta_clamped": dtheta_clamped_mask,
-        "s_clamped": (lo, hi),
-        "traj_xy": replay["traj_xy"],
-        "traj_theta": replay["traj_theta"],
     }
 
 
@@ -1024,8 +928,9 @@ class StructuredComposeLayer(nn.Module):
     """**确定性几何层**（无参数）：``lateral``/``longitudinal`` 分支 → 动作 / 辅助预览。
 
     - :meth:`step_action`：``(ds, κ_near)`` → 执行动作 ``(ds, κ_near·ds)``（生产逐步口径）；
-    - :meth:`aux_preview`：未来 5 步 ``(ds_aux, κ_near)`` → 辅助 plan（**仅供参考/监督**）；
-    - :meth:`one_shot_plan`：H1 口径的 6 步 plan（``κ̄`` 积分；**只服务 oneshot 诊断臂**）。
+    - :meth:`aux_preview`：未来 5 步 ``(ds_aux, κ_near)`` → 辅助 plan（**仅供参考/监督**）。
+
+    R38-P1：H1 一次性 6 步方法已删除并迁 ``tools/legacy/oneshot_path.py``。
     """
 
     def __init__(self, *, dt: float = DT, horizon: float = LAT_HORIZON_M):
@@ -1049,10 +954,6 @@ class StructuredComposeLayer(nn.Module):
         plan = torch.stack([ds_aux, dtheta], dim=-1)
         progress = torch.cumsum(ds_aux, dim=-1)
         return {"plan": plan, "progress_s": progress}
-
-    def one_shot_plan(self, kappa_ctrl: Tensor, s_ctrl: Tensor, ds: Tensor) -> dict[str, Tensor]:
-        return compose_path_plan(kappa_ctrl, s_ctrl, ds, dt=self.dt)
-
 
 class StructuredPolicyHead(nn.Module):
     """唯一动作生成器的结构化形式：``lateral`` + ``longitudinal`` + ``compose``。
@@ -1166,7 +1067,6 @@ class StructuredPolicyHead(nn.Module):
         anchor_mask: Tensor | None = None,
         long_exog: Tensor | None = None,
         target_lane_valid: Tensor | None = None,
-        one_shot: bool = False,
     ) -> dict[str, Tensor]:
         """``latent (B,H)`` + 锚折线 + 外源几何 → **当前步**动作 + 辅助输出（见模块 docstring）。
 
@@ -1176,9 +1076,8 @@ class StructuredPolicyHead(nn.Module):
         kappa_seg_raw/ds_clamped/dtheta_clamped``；辅助 ``aux_progress/aux_plan/plan_aux/
         progress_aux``；几何 ``s_ctrl/anchor_lateral_offset/anchor_heading_error/anchor_total_s/
         anchor_valid/target_lane_valid/anchor_features/long_features``。
-        ``one_shot=True``（**诊断臂**）额外给 H1 口径的 6 步 ``plan/dtheta/progress_s/speed/
-        traj_xy/traj_theta``，且 ``action == plan[:,0]``。
-        重复调用（同输入）逐位一致（无 RNG/全局状态）。
+        **每次调用只产当前步动作**（R38-P1 后不存在一次性 6 步口径；H1 快照见
+        ``tools/legacy/oneshot_path.py``）。重复调用（同输入）逐位一致（无 RNG/全局状态）。
         """
         if latent.ndim != 2 or int(latent.shape[-1]) != self.hidden:
             raise ValueError(f"latent 形状应为 (B,{self.hidden})，收到 {tuple(latent.shape)}")
@@ -1285,28 +1184,4 @@ class StructuredPolicyHead(nn.Module):
             "anchor_features": anchor_features,
             "long_features": long_features,
         }
-        if one_shot:
-            composed = self.compose.one_shot_plan(kappa_ctrl, anchor["s_ctrl"], ds)
-            output.update(
-                {
-                    "plan": composed["plan"],
-                    "action": composed["action_mu"],
-                    "action_mu": composed["action_mu"],
-                    "dtheta": composed["dtheta"],
-                    "progress_s": composed["progress_s"],
-                    "speed": composed["speed"],
-                    "kappa_seg": composed["kappa_seg"],
-                    "kappa_seg_raw": composed["kappa_seg_raw"],
-                    "ds_clamped": composed["ds_clamped"],
-                    "dtheta_clamped": composed["dtheta_clamped"],
-                    "traj_xy": composed["traj_xy"],
-                    "traj_theta": composed["traj_theta"],
-                }
-            )
         return output
-
-
-#: 向后兼容别名（H1 名字；**同一类、同一参数**——不是第二个动作生成器）。
-#: 一次性 6 步语义（H1 行为）只在 ``DrivingModel.set_path_head_ablation("oneshot")``
-#: 诊断臂里启用（``one_shot=True``），不接入生产。
-PathExecutionHead = StructuredPolicyHead
