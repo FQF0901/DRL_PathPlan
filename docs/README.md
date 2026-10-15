@@ -21,6 +21,8 @@
 
 **清理/治理（R38 减枝四交付物，2026-10-15）**：`code_reachability_audit.md`（67 符号可达性审计 + 逐组判定/迁移顺序 + CI 守卫清单）· `deprecation_manifest.yaml`（46 项：ARCHITECTURE_FORBIDDEN 19 / LEGACY_REPRO 24 / CHECKPOINT_ONLY 3）· `runtime_entrypoint_matrix.md`（正式入口 × `.slim` 链 × legacy 触达）· `checkpoint_migration_contract.md`（ckpt 键面普查 + 迁移映射草案）
 
+**R38 裁决/审计（2026-10-15）**：`r38_path_field_classification.md`（`path_*` 七字段最终分类 + 缺失语义 + schema 冻结建议；编排裁定已结案）· `r38_unified_benchmark.md`（protocol hash + Clean500 定义 + 重跑表，草稿待收口）
+
 ## 3. 归档桶（只读；正文不改）
 
 | 桶 | 内容 | 索引 |

@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 下午·十）**：**R37 阶段 1 四路诊断收口**：M2（C0 0.580 vs C1 0.340，C1 不晋级）、**M3**（头在训练分布内没坏〔bias +0.056/MAE 0.149〕但**命令语义=保速**；坍缩=闭环特有自锁；**装配错配主凶=`path_dynamic_ttc` 缺键→0**〔训练 30.6 s「无冲突」vs 评测 0「立即碰撞」，占消融效应 77%〕）、**M4**（C2 warp 机制生效、**collision 0.14→0.08**、Hard 不劣化；**F3 证伪外部配速**：v 8.9 但 coll 0.48）、**M5**（A1/A2/A3 先验探针意图层生效〔v_ref 8.49/6.31/5.37、残差不变式 50/50〕但达成层不升〔v 3.56/3.01/2.85〕，**Hard 全恶化〔off-road 0.12→0.44/0.28/0.24〕**；A1 steer 饱和 0.81+蛇形）。**横向侧谱（主控复核）**：加速后 |err_ψ| 0.017→0.241、plan |κ|p90 0.023→0.081、κ 抖动 ×4.7 ⇒ **横向能力（曲率质量）是共阻塞**。**零训练通道总账：F3 ✗ / A ✗ / C2 ~中性** ⇒ **P0 定为主训练 lane（B 第一候选：教师=IDM+PP 规则专家，`tools/dagger_collect.py` 就绪；训练须在 eval 装配/指纹统一下做）**；C3（WM/想象步动力学）其后；**接口修复探针 M6 ✅ 落地**（`--long-exog-fill neutral`：**c1_fill succ 0.34→0.42，翻正 4/翻负 0**、tmo −0.04、rc +0.058、v +0.31；a1_fill off 0.38 不晋级）⇒ 零训练 +8 pp、非完整解，剩余=保速教师+@speed 横向质量（训练层）。M1 已入库 `0d63bbc`（966 tests/契约门 6/6/off 逐位）。
-> **本版说明**：第五十七轮（498 → 506 行）——新增 §5.73（**R38-C5 四交付物**：零纯 UNREACHABLE/46 项 manifest〔19 禁/24 旧复现/3 ckpt-only〕；结构化链只在 `.slim`、正式入口缺装配开关；减枝 P1/P2/P3 波计划 + CI 守卫）；上版 498 行 = `git show 99fcd2f:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第五十九轮（515 → 524 行）——新增 §5.75（**R38-C3 `path_*` 分类结案**：3 硬 0 + 4 回退；掩码不被消费；dynamic_ttc/distance→标准 obs、margins/nav/d2end→WM 派生、static→诊断；迁移节奏先接口后掩码；Q4-A 实施并入队列）；上版 515 行 = `git show fe2f11f:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -456,6 +456,14 @@
 
 ---
 
+### 5.75 **R38-C3：`path_*` 七字段分类结案（§二.4）** —— 口径修正：**3 硬 0 + 4 确定性回退**；head 不消费 present 掩码；分类 + 迁移节奏裁定
+
+- **口径修正（评测侧实测，3 ep×300 step 只读探针）**：7 键 present 0/180，但 `lane_semantic`/`nav` 在场率 1.0 ⇒ 头**实收** margin 5.25/5.25、rc 0.12、d2end 22.0（回退）；**仅 static/dyn/ttc 恒 0**（与 M3/M6/M7"三键"吻合）；且 **head 不消费 present 掩码**（列 3/4/5/7 上"缺键"≡"静默 0"逐位）。
+- **最终分类（`docs/r38_path_field_classification.md`，已定稿）**：`left/right_margin` → **WM anchors 确定性派生**（须成对；W 耦合）；`nav_progress`/`d2end` → **WM anchors 派生**（回退=真值；**A3"nav 不可得"修订为可算**：route 重建 t0 恒等 MAE 0.0079）；**`dynamic_ttc`/`dynamic_distance` → 并入标准 observation**（真值优先；**0 = 禁止**）；`static_distance` → **仅诊断**（present 2.6%、效应 ≤0.001/步）。
+- **优先级**：`dynamic_ttc`（唯一有量级：Δds0 +0.123、|Δds| ≤0.482/步、ΔΣds −1.816、Δ|Σds−真| +0.757〔slow+accel +1.725〕；M6 闭环 +8pp）＞ `dynamic_distance`（eval 真缺陷、ΔΣds −0.335）＞ 其余。
+- **编排裁定（文档 §6 已结案）**：①static 保诊断；②nav 取派生；③**迁移节奏=先接口后掩码**（(a) 生产者补全 + 禁 0 + fail-fast〔零训练可验，附逐位 off〕→(b) 掩码进头 + static 下沉〔与下次重训同批〕）；④`c3_eval_probe.py` 纳入常规"头入口雷达"；⑤索引登记已更新。
+- **并入串行队列**：**Q4-A 实施 lane**（生产者补全 `path_*` 8 列 + 移除静默 0〔fail-fast/mask+中性〕+ 同公式真值、eval 与训练共享 builder；零训练、默认关/逐位）——`net/` 队列排在 **P1 之后**；B 段与下次训练同批。
+
 ## 6. 文档与产物索引
 
 - **决策/契约**：`docs/p1_v2_decision.md`、`docs/archive/p1v2_reports/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、`docs/round30_audit.md`、`docs/archive/p1v2_reports/stage_a_config_consumption.md`
@@ -470,8 +478,10 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第五十七轮（本版；498 → 506 行）**：新增 §5.73（C5 四交付物 + 减枝执行计划）；上版 498 行 = `git show 99fcd2f:docs/deepseekv4p1_argue.md`。
-- **第五十六轮（489 → 498 行）**：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。
+- **第五十九轮（本版；515 → 524 行）**：新增 §5.75（C3 `path_*` 分类结案）；上版 515 行 = `git show fe2f11f:docs/deepseekv4p1_argue.md`。
+- **第五十八轮（506 → 515 行）**：新增 §5.74（C2 MoE 消融结案 + A1 口径校正）；上版 506 行 = `git show 802468b:docs/deepseekv4p1_argue.md`。：新增 §5.74（C2 MoE 消融结案 + A1 口径校正）；上版 506 行 = `git show 802468b:docs/deepseekv4p1_argue.md`。
+- **第五十七轮（498 → 506 行）**：新增 §5.73（C5 四交付物 + 减枝执行计划）；上版 498 行 = `git show 99fcd2f:docs/deepseekv4p1_argue.md`。
+- **第五十六轮（489 → 498 行）**：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。
 - **第五十五轮（478 → 489 行）**：新增 §5.71（A3 FAIL 裁决 + C3 升 P0 + CG 包 D8）；上版 478 行 = `git show 1302dc5:docs/deepseekv4p1_argue.md`。
 - **第五十四轮（469 → 478 行）**：新增 §5.70（R38-A1 裁决 + 优先级重排）；上版 469 行 = `git show 0fae739:docs/deepseekv4p1_argue.md`。
 - **第五十三轮（450 → 469 行）**：新增 §5.69（清理候选可达性排摸 + 3 条修正）；上版 450 行 = `git show a925d07:docs/deepseekv4p1_argue.md`。
