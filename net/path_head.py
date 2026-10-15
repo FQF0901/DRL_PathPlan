@@ -42,6 +42,9 @@ H1 的 ``PathExecutionHead`` 一次调用给出 6 步 plan 并在 rollout 里**�
 - 本模块**不被** :class:`net.model.DrivingModel` 默认构造（``set_path_head(True)`` 惰性构造，
   构造期保存/恢复 CPU RNG ⇒ 不扰动既有初始化抽样序列）；默认关时模型键集/前向逐位不变。
 - ``forward`` 只在模型启用结构化头时被调用；纯函数（几何/组合/标定）无全局状态、不消耗 RNG。
+- R38-A4 想象步几何口径开关（:func:`set_step_geometry`；默认 ``production`` ⇒ 逐位不变）：
+  ``fixed`` = 两条确定性几何缺陷修复（foot 排除 ``mask=0`` 段；margin 符号 = 数据集口径），
+  仅影响 ``step_geometry``；证据与验收见 ``.slim/deepwork/p1_v2/round38/a4_report.md``。
 
 输入契约（启用时；``obs`` 键）
 ------------------------------
@@ -115,6 +118,8 @@ __all__ = [
     "NUM_STEPS",
     "PATH_HEAD_DEFAULT_MODE",
     "PATH_HEAD_MODES",
+    "STEP_GEOMETRY_DEFAULT_MODE",
+    "STEP_GEOMETRY_MODES",
     "TRAIN_ALLOWLIST_PREFIXES",
     "PathExecutionHead",
     "PathGeometryEncoder",
@@ -125,11 +130,13 @@ __all__ = [
     "compose_path_plan",
     "compose_step_action",
     "ds_init_from_speed",
+    "get_step_geometry",
     "kappa_at",
     "kappa_limit_by_speed",
     "load_head_calibration",
     "long_exog_from_obs",
     "replay_plan",
+    "set_step_geometry",
     "step_geometry",
     "target_lane_valid_from_obs",
 ]
@@ -253,6 +260,41 @@ TRAIN_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 #: 消融脚手架模式（默认 ``structured``；见模块 docstring「消融脚手架」）
 PATH_HEAD_MODES: tuple[str, ...] = ("policy", "structured", "oneshot")
 PATH_HEAD_DEFAULT_MODE = "structured"
+
+#: R38-A4：想象步几何（:func:`step_geometry`）口径开关（进程级；**默认 ``production`` = 逐位不变**）：
+#: - ``production``：产线口径（重锚 foot 搜索不看 ``anchor_mask``；margin 符号 ``left=W/2−lat_k``）；
+#: - ``fixed``：两条确定性几何缺陷修复（出处 = R38-A3 逐位隔离 + R38-A4 落地）：
+#:   ① 重锚 foot 搜索排除 ``anchor_mask=0`` 段（零填充锚的"原点簇 + 桥接段"把 foot 吸到
+#:   padding ⇒ 锚几何整段零化；链上 65.5% 想象步命中 ⇒ 修后 0%）；
+#:   ② margin 符号改数据集口径 ``left=W/2+lat_k``、``right=W/2−lat_k``（产线把 row 的
+#:   t0 left/right 互换；出处 = I1 ``_long_exog_row`` 公式 + A3 行级实测）。
+#: 证据（foot_pad 67.9%→0 / ``valid_agree`` 0.302→0.881 / κ_ref MAE 0.098→0.027 /
+#: c1,c2 对齐 MAE 3.617/3.690→2.928/3.028）见 ``.slim/deepwork/p1_v2/round38/a3_report.md``
+#: §2.3/§2.4 与 ``a4_report.md``。非参数开关，不进 state_dict/ckpt。
+STEP_GEOMETRY_MODES: tuple[str, ...] = ("production", "fixed")
+STEP_GEOMETRY_DEFAULT_MODE = "production"
+_STEP_GEOMETRY_MODE = STEP_GEOMETRY_DEFAULT_MODE
+
+
+def set_step_geometry(mode: str = STEP_GEOMETRY_DEFAULT_MODE) -> str:
+    """设置想象步几何口径（进程级；返回旧值）；未知取值 ``ValueError``（fail-fast）。
+
+    默认 ``production`` ⇒ :func:`step_geometry` 逐位 = 历史产线口径；``fixed`` = R38-A4
+    两条确定性几何修复（foot 排除 ``mask=0`` 段 + 数据集 margin 符号）。纯开关，无 RNG/
+    参数副作用；``step_geometry(..., geometry_mode=...)`` 可就地覆盖（不读本全局）。
+    """
+    global _STEP_GEOMETRY_MODE
+    if mode not in STEP_GEOMETRY_MODES:
+        raise ValueError(f"未知 step_geometry 口径 {mode!r}（{' | '.join(STEP_GEOMETRY_MODES)}）")
+    previous = _STEP_GEOMETRY_MODE
+    _STEP_GEOMETRY_MODE = mode
+    return previous
+
+
+def get_step_geometry() -> str:
+    """当前想象步几何口径（``production`` / ``fixed``；见 :func:`set_step_geometry`）。"""
+    return _STEP_GEOMETRY_MODE
+
 
 _GEOM_EMB_DIM = 64
 
@@ -670,6 +712,7 @@ def step_geometry(
     progress_s: Tensor,
     *,
     dynamic_mode: str = "hold",
+    geometry_mode: str | None = None,
 ) -> dict[str, Tensor]:
     """t0 静态地图 + **想象位姿** → 想象步的静态几何（确定性重算；无 RNG）。
 
@@ -680,14 +723,22 @@ def step_geometry(
       （零长前缀段由 ``anchor_reference`` 的 pair_valid/首个有效段规则排除）⇒ 横向偏移/
       航向误差/``κ_ref``/控制站位前瞻均以想象位姿为基准；
     - **边界余量**：``W = left_t0 + right_t0``（路面容宽，t0 静态地图）+ 新横向偏移
-      ``lat_k = −anchor_k[0,1]``（自车相对车道中心线，左正；MetaDrive ``lat`` 口径正 = 右
-      ⇒ ``lat_right = −lat_k``）⇒ ``left_k = clamp(W/2 − lat_k, 0)``、``right_k =
-      clamp(W/2 + lat_k, 0)``（与 ``_same_direction_road_surface_margins`` 同源：t0 恒等）；
-      t0 缺 margin ⇒ 保持 0/present=0；
+      ``lat_k = −anchor_k[0,1]``（自车相对车道中心线，左正）⇒ ``left_k = clamp(W/2 − lat_k, 0)``、
+      ``right_k = clamp(W/2 + lat_k, 0)``（``production`` 口径；与
+      ``_same_direction_road_surface_margins`` 同源：t0 恒等）；t0 缺 margin ⇒ 保持 0/present=0；
     - **静态距 / 目标车道末端距**：``clamp(d_t0 − progress_s, 0)``（障碍/lane 末端沿路径的
       位置 = t0 静态地图已编码 ⇒ 按累计路径进度收缩；不走 lane 坐标精确还原，见 caveats）；
     - **动态距离/TTC/nav_progress/speed**：``dynamic_mode="hold"`` = 保持当前步（t0）值
       （允许分支；WM ``od_pred`` 变体未接入）。
+
+    R38-A4 几何口径开关（``geometry_mode``；**默认 = 进程级** :func:`get_step_geometry`，
+    缺省 ``production`` ⇒ 逐位 = 历史产线口径）：
+    ``fixed`` = 两条确定性几何缺陷修复（证据 = R38-A3 逐位隔离 / R38-A4 落地）：
+
+    ① 重锚 foot 搜索排除 ``anchor_mask=0`` 段 —— obs 锚为零填充（padding = ``(0,0)``）时，
+    padding 点与末有效点构成的"桥接段"穿过自车 ⇒ foot 被吸到 padding，锚几何整段零化；
+    ② margin 符号 = **数据集口径** ``left = W/2 + lat_k``、``right = W/2 − lat_k``
+    （``production`` 把 row 的 t0 left/right 互换；出处 = I1 ``_long_exog_row`` + A3 行级实测）。
 
     Args:
         anchor_xy: ``(B,P,2)`` t0 锚折线（ego t0 系）。
@@ -697,6 +748,8 @@ def step_geometry(
         pose: ``(B,3)`` 想象位姿（ego t0 系；调用方通常传 ``detach``：几何是外源确定性输入）。
         progress_s: ``(B,)`` 累计路径进度（= Σ 已执行 ds）。
         dynamic_mode: 目前仅支持 ``hold``（显式 fail-fast，防静默变体）。
+        geometry_mode: ``None``（默认）= 读进程级口径（:func:`set_step_geometry`）；显式
+            ``production``/``fixed`` 覆盖（未知取值 fail-fast）。
 
     Returns:
         dict：``anchor_xy/anchor_mask/long_exog/long_present``（想象步输入）+ 诊断
@@ -704,6 +757,11 @@ def step_geometry(
     """
     if dynamic_mode != "hold":
         raise ValueError(f"dynamic_mode 仅支持 'hold'（当前），收到 {dynamic_mode!r}")
+    mode = get_step_geometry() if geometry_mode is None else str(geometry_mode)
+    if mode not in STEP_GEOMETRY_MODES:
+        raise ValueError(
+            f"未知 geometry_mode={mode!r}（{' | '.join(STEP_GEOMETRY_MODES)}；None = 进程级口径）"
+        )
     if not torch.is_tensor(anchor_xy):
         raise TypeError(f"anchor_xy 必须是 Tensor，收到 {type(anchor_xy).__name__}")
     xy = anchor_xy.float()
@@ -740,7 +798,13 @@ def step_geometry(
     param = -(xy_k[:, :-1] * segment_vec).sum(dim=-1) / denom
     param = param.clamp(0.0, 1.0)
     foot = xy_k[:, :-1] + segment_vec * param.unsqueeze(-1)
-    foot_index = (foot * foot).sum(dim=-1).argmin(dim=-1)
+    foot_d2 = (foot * foot).sum(dim=-1)
+    if mode == "fixed" and mask is not None:
+        # R38-A4 ①：foot 搜索排除 anchor_mask=0 段（零填充锚的"原点簇 + 桥接段"伪影；
+        # production 不看 mask ⇒ 67.9% 想象步 foot 落 padding、锚几何整段零化）
+        segment_valid = (mask[:, 1:] > 0.5) & (mask[:, :-1] > 0.5)
+        foot_d2 = torch.where(segment_valid, foot_d2, torch.full_like(foot_d2, float("inf")))
+    foot_index = foot_d2.argmin(dim=-1)
     keep = (
         torch.arange(int(xy_k.shape[1]), device=xy_k.device).unsqueeze(0)
         > foot_index.unsqueeze(1)
@@ -754,9 +818,15 @@ def step_geometry(
     zero = torch.zeros_like(lat_k)
 
     exog_k = exog.clone()
-    # lat_right = −lat_k（MetaDrive 口径）；t0 恒等：left_0 = W/2 − lat_0（见 docstring）
-    exog_k[:, 1] = torch.where(margins_present, (0.5 * lane_width - lat_k).clamp_min(0.0), zero)
-    exog_k[:, 2] = torch.where(margins_present, (0.5 * lane_width + lat_k).clamp_min(0.0), zero)
+    if mode == "fixed":
+        # R38-A4 ②：数据集口径（I1 _long_exog_row + A3 行级实测）：left = W/2 + lat_k、
+        # right = W/2 − lat_k（production 反号 ⇒ 把 row 的 t0 left/right 互换）
+        exog_k[:, 1] = torch.where(margins_present, (0.5 * lane_width + lat_k).clamp_min(0.0), zero)
+        exog_k[:, 2] = torch.where(margins_present, (0.5 * lane_width - lat_k).clamp_min(0.0), zero)
+    else:
+        # lat_right = −lat_k（MetaDrive 口径）；t0 恒等：left_0 = W/2 − lat_0（见 docstring）
+        exog_k[:, 1] = torch.where(margins_present, (0.5 * lane_width - lat_k).clamp_min(0.0), zero)
+        exog_k[:, 2] = torch.where(margins_present, (0.5 * lane_width + lat_k).clamp_min(0.0), zero)
     for column in (3, 7):  # static_distance / distance_to_target_lane_end：按进度收缩
         has = present[:, column] > 0.5
         exog_k[:, column] = torch.where(has, (exog[:, column] - progress).clamp_min(0.0), zero)
