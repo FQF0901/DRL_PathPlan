@@ -82,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--world-residual-head", type=Path, default=None,
                         help="学习残差头 ckpt（R39-B2c；learned 档专用，如 "
                              "runs/round39/b2/residual_head.pt）")
+    parser.add_argument("--world-residual-scale", type=float, default=None,
+                        help="学习残差缩放（R39-B2d；透传 pipeline.eval_runner）：默认 None=零触达"
+                             "（与 B2c 口径逐字节同 hash）；仅 --world-state-api analytic_learned "
+                             "生效；∈[0,4]")
     return parser
 
 
@@ -143,6 +147,8 @@ def main(argv: "list[str] | None" = None) -> int:
         forward += ["--fill-from", str(args.fill_from)]
     if args.world_residual_head is not None:
         forward += ["--world-residual-head", str(args.world_residual_head)]
+    if args.world_residual_scale is not None:
+        forward += ["--world-residual-scale", str(args.world_residual_scale)]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
     if args.ckpt is not None:

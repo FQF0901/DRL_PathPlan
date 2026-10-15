@@ -745,6 +745,7 @@ def _model_cache_key(
     fill_from: Optional[str] = None,
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
+    world_residual_scale: Optional[float] = None,
 ) -> Tuple:
     """缓存/加载摘要键：**全默认装配 = 旧键 ``(ckpt, device)``**（历史调用点逐位不变；
     a3 controller 的 canary 预填缓存按该旧键命中）；任何非默认轴追加一段避免互撞。"""
@@ -761,6 +762,9 @@ def _model_cache_key(
         # R39-B2c：非默认档单独缓存（默认 off 时不改旧键 ⇒ 历史调用点逐位不变）
         key += (("world_state_api", str(world_state_api)),
                 ("world_residual_head", (str(world_residual_head) if world_residual_head else None)))
+        if world_residual_scale is not None and float(world_residual_scale) != 1.0:
+            # R39-B2d：非默认残差缩放单独缓存（默认 None / 1.0 时不改旧键）
+            key += (("world_residual_scale", float(world_residual_scale)),)
     return key
 
 
@@ -842,6 +846,7 @@ def _formal_entry_protocol(
     net_tree_sha16: str,
     world_state_api: str = "off",
     world_residual_head_sha16: Optional[str] = None,
+    world_residual_scale: Optional[float] = None,
 ) -> Dict[str, Any]:
     """正式入口 evaluation protocol（口径复用 c6：``build_protocol`` + canonical JSON sha256 hex16）。
 
@@ -885,6 +890,9 @@ def _formal_entry_protocol(
         protocol["model"]["world_residual_head_sha16"] = (
             str(world_residual_head_sha16) if world_residual_head_sha16 else "none"
         )
+        if world_residual_scale is not None and float(world_residual_scale) != 1.0:
+            # R39-B2d：残差缩放入 hash（默认 None / 1.0 ⇒ 不追加键，保持逐字节可比）
+            protocol["model"]["world_residual_scale"] = float(world_residual_scale)
     protocol["hashes"] = {
         "protocol_hash": module.hash_protocol(protocol),
         "protocol_hash_full": module.hash_protocol(protocol, full=True),
@@ -911,11 +919,13 @@ def _evaluation_hashes(
     device: Optional[str],
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
+    world_residual_scale: Optional[float] = None,
 ) -> Dict[str, Any]:
     """R39-A1 四 hash（+ 完整 protocol dict；供 run_meta/manifest 与 metrics 记录）。
 
     R39-B2c：``world_state_api`` / ``world_residual_head`` 可选装配轴（默认 off/none ⇒ 与
     A1b 口径逐字节相同；非默认档入 protocol hash，见 :func:`_formal_entry_protocol`）。
+    R39-B2d：``world_residual_scale``（默认 none ⇒ 不触达；非默认 ≠1.0 入 hash 轴）。
     """
     net_tree = _net_tree_digest()
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint  # 轻量（stdlib only）
@@ -930,6 +940,7 @@ def _evaluation_hashes(
         net_tree_sha16=str(net_tree["tree_sha16"]),
         world_state_api=str(world_state_api or "off"),
         world_residual_head_sha16=(head_sha[:16] if head_sha else None),
+        world_residual_scale=world_residual_scale,
     )
     ckpt_sha = _sha256_file(str(ckpt)) if ckpt is not None else None
     return {
@@ -950,11 +961,14 @@ def _evaluation_hashes(
                        "tool": R39_NET_SHA_SCRIPT},
         "schema": {"tool": "env.obs.obs_fingerprint", "obs_schema_version": int(OBS_SCHEMA_VERSION)},
         # R39-B2c：WorldState API 轴留痕（默认 off/none ⇒ {"api": "off", "residual_head": None}）
+        # R39-B2d：residual_scale 仅非默认（≠None/1.0）时追加（默认 payload 逐字节不变）
         "world_state": {
             "api": str(world_state_api or "off"),
             "residual_head": ({"path": str(world_residual_head), "sha256": head_sha,
                                "sha16": (head_sha[:16] if head_sha else None)}
                               if world_residual_head else None),
+            **({"residual_scale": float(world_residual_scale)}
+               if world_residual_scale is not None and float(world_residual_scale) != 1.0 else {}),
         },
         "protocol": protocol,
     }
@@ -998,12 +1012,14 @@ def _ckpt_load_summary(
     *,
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
+    world_residual_scale: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
     return _CKPT_LOAD_SUMMARY.get(_model_cache_key(
         ckpt, device, path_head=path_head, ld_mode=ld_mode,
         rollout_semantic=rollout_semantic, fill_from=fill_from,
         world_state_api=world_state_api, world_residual_head=world_residual_head,
+        world_residual_scale=world_residual_scale,
     ))
 
 
@@ -1051,6 +1067,7 @@ def _load_ckpt_model(
     fill_from: Optional[str] = None,
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
+    world_residual_scale: Optional[float] = None,
 ) -> Any:
     """worker 内按装配键（``_model_cache_key``；全默认 = ``(ckpt, device)``）缓存模型。
 
@@ -1107,10 +1124,22 @@ def _load_ckpt_model(
         raise ValueError(
             "[eval_runner] --world-residual-head 只对 --world-state-api analytic_learned 有意义"
         )
+    # R39-B2d：残差缩放轴（默认 None ⇒ 零触达；仅 learned 档；∈[0,4] = net 契约）
+    if world_residual_scale is not None:
+        world_residual_scale = float(world_residual_scale)
+        if not 0.0 <= world_residual_scale <= 4.0:
+            raise ValueError(
+                f"[eval_runner] --world-residual-scale 必须 ∈ [0,4]，收到 {world_residual_scale}"
+            )
+        if world_state_api != "analytic_learned":
+            raise ValueError(
+                "[eval_runner] --world-residual-scale 只对 --world-state-api analytic_learned 有意义"
+            )
     cache_key = _model_cache_key(
         ckpt, device, path_head=path_head, ld_mode=ld_mode,
         rollout_semantic=rollout_semantic, fill_from=fill_from,
         world_state_api=world_state_api, world_residual_head=world_residual_head,
+        world_residual_scale=world_residual_scale,
     )
     cached = _CKPT_MODEL_CACHE.get(cache_key)
     if cached is not None:
@@ -1326,6 +1355,11 @@ def _load_ckpt_model(
 
             head, head_meta = load_residual_head(str(world_residual_head), device=str(device))
             model.set_world_residual_head(head)
+            if world_residual_scale is not None:
+                # R39-B2d：残差缩放（默认 None ⇒ 不调用；1.0 = net 默认逐位，不记新键）
+                model.set_world_residual_scale(world_residual_scale)
+                if float(world_residual_scale) != 1.0:
+                    ws_record["residual_scale"] = float(world_residual_scale)
             ws_record["residual_head"] = {
                 "path": str(world_residual_head),
                 "sha256": _sha256_file(str(world_residual_head)),
@@ -1338,6 +1372,8 @@ def _load_ckpt_model(
             f"[eval_runner] WorldState API={world_state_api}"
             + (f"（residual head {ws_record['residual_head']['head_params']} params ← "
                f"{world_residual_head}）" if ws_record["residual_head"] else "")
+            + (f"（residual scale ×{ws_record['residual_scale']}）"
+               if ws_record.get("residual_scale") is not None else "")
             + "：k≥1 想象步几何 = 统一 readout",
             flush=True,
         )
@@ -1452,7 +1488,8 @@ class _CkptController:
       cheap path（R39-A1 枚举口径，不消费 plan）。
 
     ``task["model_assembly"]``（R39-A1b；正式入口 ``main`` 装配）：``{path_head, ld_mode,
-    rollout_semantic, fill_from, lane_anchor}`` —— 透传 :func:`_load_ckpt_model` 与注入器；
+    rollout_semantic, fill_from, lane_anchor, world_state_api, world_residual_head,
+    world_residual_scale}`` —— 透传 :func:`_load_ckpt_model` 与注入器；
     **缺省（无该键，如 a3 controller 自己的 canary 预填路径）= 全默认装配**，缓存键仍为
     ``(ckpt, device)``（旧行为逐位不变）。
     """
@@ -1483,6 +1520,8 @@ class _CkptController:
             world_state_api=str(assembly.get("world_state_api") or "off"),
             world_residual_head=(str(assembly["world_residual_head"])
                                  if assembly.get("world_residual_head") else None),
+            world_residual_scale=(float(assembly["world_residual_scale"])
+                                  if assembly.get("world_residual_scale") is not None else None),
         )
         # R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；默认 off ⇒ None，不触达任何新代码路径）
         self.lane_anchor_mode = str(assembly.get("lane_anchor") or "off")
@@ -2318,6 +2357,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "如 runs/round39/b2/residual_head.pt）。仅 --world-state-api "
                              "analytic_learned 生效（其余组合 fail-fast）；state_dict 装载后挂载"
                              "（不影响 base ckpt 键面/LoadReport）")
+    parser.add_argument("--world-residual-scale", type=float, default=None,
+                        help="R39-B2d：学习残差缩放（net.model.set_world_residual_scale；默认 None="
+                             "零触达、与 B2c 口径逐字节同 hash）。仅 --world-state-api "
+                             "analytic_learned 生效（其余组合 fail-fast）；∈[0,4]；非默认（≠1.0）"
+                             "追加 protocol hash 轴 model.world_residual_scale")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
@@ -2417,6 +2461,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "world_state_api": str(args.world_state_api),
         "world_residual_head": (str(args.world_residual_head)
                                 if args.world_residual_head is not None else None),
+        "world_residual_scale": (float(args.world_residual_scale)
+                                 if args.world_residual_scale is not None else None),
     }
     if str(args.world_state_api) != "off" and args.policy != "ckpt":
         print("[eval_runner] 警告：--world-state-api 非默认只在 --policy ckpt 生效（基线臂忽略）",
@@ -2439,6 +2485,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[eval_runner] WorldState API FAIL-FAST：缺 residual head ckpt "
                   f"{args.world_residual_head}", file=sys.stderr)
             return 2
+    # R39-B2d：残差缩放轴 fail-fast（默认 None ⇒ 零触达）
+    if args.world_residual_scale is not None:
+        if str(args.world_state_api) != "analytic_learned":
+            print("[eval_runner] WorldState API FAIL-FAST：--world-residual-scale 只对 "
+                  "--world-state-api analytic_learned 有意义", file=sys.stderr)
+            return 2
+        if not 0.0 <= float(args.world_residual_scale) <= 4.0:
+            print(f"[eval_runner] WorldState API FAIL-FAST：--world-residual-scale 必须 ∈ [0,4]，"
+                  f"收到 {args.world_residual_scale}", file=sys.stderr)
+            return 2
 
     # ---- P0-A 评测安全前置：ckpt 加载 fail-fast（默认开；父进程 CPU 预检，干净加载零行为变化）----
     ckpt_load_summary: Optional[Dict[str, Any]] = None
@@ -2457,6 +2513,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             fill_from=model_assembly["fill_from"],
             world_state_api=model_assembly["world_state_api"],
             world_residual_head=model_assembly["world_residual_head"],
+            world_residual_scale=model_assembly["world_residual_scale"],
         )
         ckpt_load_summary = _ckpt_load_summary(
             str(args.ckpt), "cpu",
@@ -2466,6 +2523,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             fill_from=model_assembly["fill_from"],
             world_state_api=model_assembly["world_state_api"],
             world_residual_head=model_assembly["world_residual_head"],
+            world_residual_scale=model_assembly["world_residual_scale"],
         )
 
     # ---- R39-A1：四 hash 原生记录（protocol / model tree / schema / checkpoint）→ run_meta ----
@@ -2479,6 +2537,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         workers=int(workers), max_steps=int(args.max_steps), device=device,
         world_state_api=model_assembly["world_state_api"],
         world_residual_head=model_assembly["world_residual_head"],
+        world_residual_scale=model_assembly["world_residual_scale"],
     )
     run_meta: Dict[str, Any] = {
         "schema": "r39a1-run-meta/v1",
