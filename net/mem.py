@@ -685,7 +685,7 @@ class MemEncoder(nn.Module):
         self.od_attn = TemporalAttention(hidden)
         self.others_attn = TemporalAttention(hidden)
 
-    def encode(self, encoders: ObsEncoders, mem: MemBank) -> EncodedMem:
+    def encode(self, encoders: ObsEncoders, mem: MemBank, *, hooks: "MemoryHooks | None" = None) -> EncodedMem:
         """编码 mem。
 
         LD 不做时序（规格第 2 条）：直接取当前帧 ``ld_hist[:, -1]`` 的嵌入。
@@ -694,16 +694,26 @@ class MemEncoder(nn.Module):
         SE(2) 变换，而车道几何本身不随时间变化；因此历史帧几乎不提供额外信息
         （反而引入 ego 运动补偿误差）。前提是 env 的对齐/槽位排序一致（同一槽位
         对应同一条车道线）；若对齐不可靠，需要改为对 LD 也做时序聚合。
+
+        ``hooks``（R38-D1 ④ Memory hook，**默认 None = 关**）：零开销；开启后只读记录
+        逐帧 mask / slot identity / attention 权重 / 历史帧贡献 / 全 mask 输出 / 历史顺序
+        （见 :class:`net.probes.MemoryHooks`）。
         """
+        capture = hooks if (hooks is not None and hooks.enabled) else None
         od_h = encoders.embed_od(mem.od, mem.od_mask, ids=mem.od_id)
         ld_h = encoders.embed_ld(mem.ld, mem.ld_mask)
         ego_h = encoders.embed_ego(mem.ego, mem.ego_mask).unsqueeze(2)  # (B,T,1,H)
         others_h = encoders.embed_others(mem.others, mem.others_mask).unsqueeze(2)
 
-        ego_ctx = self.ego_attn(ego_h, None, mem.ego_valid)[:, 0]
-        od_ctx = self.od_attn(od_h, mem.od_mask, mem.od_valid)
+        ego_ctx = self.ego_attn(ego_h, None, mem.ego_valid, capture=capture, capture_name="ego")[:, 0]
+        od_ctx = self.od_attn(od_h, mem.od_mask, mem.od_valid, capture=capture, capture_name="od")
         ld_ctx = ld_h[:, -1]  # LD：不做时序，直接用当前帧
-        others_ctx = self.others_attn(others_h, None, mem.others_valid)[:, 0]
+        others_ctx = self.others_attn(
+            others_h, None, mem.others_valid, capture=capture, capture_name="others"
+        )[:, 0]
+        if capture is not None:
+            # ④ 编码期：逐帧 mask / slot identity（od_id）/ presence / 历史顺序
+            capture.capture_encode(mem)
 
         od_live = (mem.od_mask[:, -1] > 0.5) & (mem.od_presence[:, -1] > 0.5)
         ld_live = mem.ld_mask[:, -1] > 0.5

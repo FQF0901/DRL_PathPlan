@@ -21,6 +21,7 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 | `anchor.py` | K-anchor 工具：锚字典加载/内置默认 K=6、lane↔ego 航向剖面、WTA 分配、软混合（`net/anchor.py:98-130,294-327`）。 |
 | `model.py` | 装配与惰性开关（`set_moe/set_ld_mode/set_ego_warp_mode/set_path_head/set_warp_hooks`）、`arc_step` 运动学、`encode/plan_step/_rollout/forward/rollout`、`SUPERVISED_LABELS`（`net/model.py:210-218,225-275,392,880,923,1292,1503,1864`）。 |
 | `param_probe.py` | 参数探针 + 前向/rollout 形状冒烟；断言总参数 ≤1.5M（`net/param_probe.py:29-34,114`：预算 + 断言）。 |
+| `probes.py` | R38-D1 §四 七类强制 probes/hooks 统一容器（**默认全关**）：①状态来源 ②Policy ③World Model ④Memory ⑤六步调用链（含 ST-GNN 总调用单列）只读 hook + 统一出口 `ProbeRecorder.write`（张量字典 + JSON）；⑥ plan 连续 footprint 首次越界/碰撞纯函数；⑦ 逐参数梯度账本 `grad_ledger`（第 1/3/6 步 loss 单独反向）。默认关 ⇒ 前向逐位一致/零 RNG/不改 optimizer/ckpt（`net/probes.py:1-100` 契约 + `.slim/deepwork/p1_v2/round38/d1_off_bitwise.py` 自证）。 |
 
 ## 数据流（v8，latent 世界模型）
 

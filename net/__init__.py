@@ -25,6 +25,19 @@ from net.path_head import (
 )
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
+from net.probes import (
+    ChainHooks,
+    MemoryHooks,
+    PolicyHooks,
+    ProbeRecorder,
+    StateSourceHooks,
+    WorldModelHooks,
+    first_boundary_breach,
+    first_od_contact,
+    grad_ledger,
+    interpolate_plan_poses,
+    state_dict_hash,
+)
 from net.spatial import SpatialEncoder
 from net.st_gnn import LD_PRED_DIM, OD_PRED_DIM, SpatioTemporalGNN
 from net.temporal import TemporalAttention
@@ -33,15 +46,26 @@ __all__ = [
     "ACTION_HIGH",
     "ACTION_LOW",
     "AnchorBatch",
+    "ChainHooks",
     "DrivingModel",
     "EncodedMem",
     "FrameEncoding",
     "LD_PRED_DIM",
+    "MemoryHooks",
+    "PolicyHooks",
+    "ProbeRecorder",
+    "StateSourceHooks",
     "WARP_MODES",
     "WarpHooks",
+    "WorldModelHooks",
     "assemble_pose_k",
+    "first_boundary_breach",
+    "first_od_contact",
+    "grad_ledger",
+    "interpolate_plan_poses",
     "masked_pose_error",
     "od_velocity_t0",
+    "state_dict_hash",
     "MemBank",
     "MemEncoder",
     "MoEBlock",

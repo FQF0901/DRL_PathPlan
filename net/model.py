@@ -202,6 +202,7 @@ from net.path_head import (
 )
 from net.plan_head import PlanHead
 from net.policy import ACTION_HIGH, ACTION_LOW, PolicyHead, ValueHead
+from net.probes import ProbeRecorder
 from net.semantic import SemanticWiring
 from net.spatial import LdAggregate, LdSetAttention, wrap_angle
 from net.st_gnn import SpatioTemporalGNN
@@ -506,6 +507,9 @@ class DrivingModel(nn.Module):
         self.warp_hooks: WarpHooks | None = None
         #: R37 M1：warp 分项读数开关（默认 False；诊断输出，训练/评测可关）。
         self.warp_readout: bool = False
+        #: R38-D1：§四 ①..⑤ 强制 probes/hooks 统一容器（默认 None = 关 ⇒ 前向逐位一致、
+        #: 零开销、不消耗 RNG；只读诊断，不参与数值；见 :meth:`set_probes`）。
+        self.probes: ProbeRecorder | None = None
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
@@ -701,6 +705,22 @@ class DrivingModel(nn.Module):
         （部署侧）⇒ ``warp_readout_valid=0``（n/a，不产出误差键）。
         """
         self.warp_readout = bool(enabled)
+        return self
+
+    def set_probes(self, probes: ProbeRecorder | None = None) -> "DrivingModel":
+        """R38-D1：装载 ①..⑤ 强制 probes/hooks 统一容器（默认 ``None``/``enabled=False`` = 关）。
+
+        默认关 ⇒ 全链零短路（每次 ``capture`` 首行返回）：前向逐位一致、输出键集不变、
+        不消耗额外随机数、不改 optimizer/ckpt（Gate A 自证：``d1_off_bitwise.py`` 双跑
+        HEAD/改动后 net 包 ``max|Δ|=0``）。开启后每步经 :mod:`net.probes` 记 ①状态来源 /
+        ②Policy / ③World Model（warp 五项仍由 :class:`net.warp_hooks` 单列）/ ④Memory /
+        ⑤六步调用链（``probes.chain.st_gnn_total_calls`` = **ST-GNN 总调用**单列）；
+        输出 dict 契约不变，探针经 :meth:`net.probes.ProbeRecorder.write` 统一出口落盘。
+        传容器时同步 ⑤ 期望 ST-GNN 总调用 = ``rollout_steps``。
+        """
+        self.probes = probes
+        if probes is not None:
+            probes.chain.expected_st_gnn_calls = int(self.rollout_steps)
         return self
 
     @staticmethod
@@ -1300,12 +1320,37 @@ class DrivingModel(nn.Module):
         """
         mem = self._mem_from_obs(obs)
         nav_token, nav_mask, signal_token, signal_mask = self._context_tokens(obs, mem.batch)
-        encoded = self.mem_encoder.encode(self.encoders, mem)
+        # R38-D1：④ Memory hook（默认 None/关 ⇒ 零开销；只读记录 mask/身份/注意力/历史顺序）
+        probes = self.probes
+        probes_on = bool(probes is not None and probes.enabled)
+        encoded = self.mem_encoder.encode(
+            self.encoders, mem, hooks=probes.memory if probes_on else None
+        )
         # v8（B3）：状态 latent = 当前帧编码（单帧，非时序聚合）
         ones = torch.ones((mem.batch, ), dtype=encoded.ego_now.dtype, device=encoded.ego_now.device)
         z_ego = self.encoders.embed_ego(encoded.ego_now, ones)
         z_od = self.encoders.embed_od(encoded.od_now, encoded.od_live, ids=encoded.od_id_now)
         z_ld = self.encoders.embed_ld(encoded.ld_now, encoded.ld_live)
+        if probes_on:
+            # R38-D1 ①：t0 状态来源（real）+ ego/OD/LD/nav/Memory latent（只读 detach-clone）
+            if probes.state.enabled:
+                probes.state.capture(
+                    step=0,
+                    source="real",
+                    z_ego=z_ego,
+                    z_od=z_od,
+                    z_ld=z_ld,
+                    nav=nav_token,
+                    memory={
+                        "ego_ctx": encoded.ego_ctx,
+                        "od_ctx": encoded.od_ctx,
+                        "ld_ctx": encoded.ld_ctx,
+                        "others_ctx": encoded.others_ctx,
+                    },
+                )
+            # R38-D1 ⑤：linkage 锚点 z_t0（供 check() 断言 a0 读的是 t0 状态）
+            if probes.chain.enabled:
+                probes.chain.note_z_t0({"z_ego": z_ego, "z_od": z_od, "z_ld": z_ld})
         # 上下文 token（t0 静态）：池化来自时序聚合 ctx
         od_pool = _masked_mean(encoded.od_ctx, encoded.od_live)
         # R21-3A/25A：semantic 输入（current frame；缺键报错 = 旧数据 fail-fast）
@@ -1393,6 +1438,24 @@ class DrivingModel(nn.Module):
             if self.contract_asserts_enabled:
                 # R36 L-A 契约①：t0 期头调用实例 id（a0 的来源；rollout 逐步调用同源断言用）
                 self._path_head_call_ids.append(id(self.path_head))
+            if probes_on and probes.policy.enabled:
+                # R38-D1 ②：t0 步头调用（backbone latent / κ / ds,dθ / 辅助 / 输入 valid mask）
+                probes.policy.capture(
+                    step=0,
+                    latent=latent,
+                    outputs=path_out,
+                    masks={
+                        "anchor_mask": anchor_mask,
+                        "target_lane_valid": path_out["target_lane_valid"],
+                        "long_present": long_present,
+                    },
+                )
+            if probes_on and probes.chain.enabled:
+                # R38-D1 ⑤：调用链（a0 的来源；rollout 逐步调用同源/linkage 断言）
+                probes.chain.on_policy_call(
+                    step=0, instance=id(self.path_head), z={"z_ego": z_ego, "z_od": z_od, "z_ld": z_ld}
+                )
+                probes.chain.note_flags(oneshot=self.path_head_ablation == "oneshot")
             path_out["long_exog"] = long_exog
             path_out["long_present"] = long_present
             path_ctx = {
@@ -1525,9 +1588,14 @@ class DrivingModel(nn.Module):
         R37 M1：``ego_warp_mode`` 决定 ``pose_k`` 口径（``off`` = 逐位不变 / ``analytic`` =
         解析 warp + OD t0 场景系速度）；``warp_hooks`` / ``warp_readout``（默认全关，零开销）
         逐步产出 5 项 hook 与分项读数（见 :meth:`set_warp_hooks` / :meth:`set_warp_readout`）。
+
+        R38-D1：``probes``（默认 None/关，零开销）逐步只读采集 ①状态来源 / ②Policy /
+        ③World Model / ⑤调用链（**ST-GNN 总调用单列**）；输出契约不变，探针经统一出口落盘。
         """
         mem: MemBank = encoded["mem"]  # 只读（nav 回退锚点）；不再拷贝/滑动
         enc: EncodedMem = encoded["encoded"]
+        probes = self.probes
+        probes_on = bool(probes is not None and probes.enabled)
         frame = encoded["frame"]
         z_ego: Tensor = encoded["z_ego"]
         z_od: Tensor = encoded["z_od"]
@@ -1696,6 +1764,9 @@ class DrivingModel(nn.Module):
             wm_action = action
             if structured and self.path_head_wm_action_detach:
                 wm_action = action.detach()
+            if probes_on and probes.chain.enabled:
+                # R38-D1 ⑤：ST-GNN **实际总调用**（单列；含最后一步不推进决策的调用）
+                probes.chain.on_st_gnn_call(k)
             z_ego_next, z_od_next, z_ld_next, od_pred, ld_pred, presence_logit, entry_logit = (
                 self.st_gnn(
                     z_ego=z_ego,
@@ -1709,6 +1780,31 @@ class DrivingModel(nn.Module):
                     action=wm_action,
                 )
             )
+            if probes_on and probes.wm.enabled:
+                # R38-D1 ③：输入 action / z in（detach 前）/ z out / 物理解码 / presence/entry
+                probes.wm.capture(
+                    step=k,
+                    action=wm_action,
+                    z_in={"z_ego": z_ego, "z_od": z_od, "z_ld": z_ld},
+                    z_out={"z_ego": z_ego_next, "z_od": z_od_next, "z_ld": z_ld_next},
+                    od_pred=od_pred,
+                    ld_pred=ld_pred,
+                    presence_logit=presence_logit,
+                    entry_logit=entry_logit,
+                )
+            if probes_on and probes.state.enabled:
+                # R38-D1 ①：状态 z_k（= WM 第 k 步输出；决策 a_k 在循环末读取它）+ 本步 nav_k。
+                # z_0 = t0 真实编码（encode 期已记，source=real）；k≥1 = state_source_label
+                # （predicted；E1..E6 真值替换实验由脚本置 substituted）。Memory latent 为
+                # t0 上下文（逐帧 mask/注意力在 ④ Memory hook）。
+                probes.state.capture(
+                    step=k,
+                    source=probes.state_source_label,
+                    z_ego=z_ego_next,
+                    z_od=z_od_next,
+                    z_ld=z_ld_next,
+                    nav=nav_token,
+                )
             od_steps.append(od_pred)
             ld_steps.append(ld_pred)
             presence_steps.append(presence_logit)
@@ -1774,6 +1870,26 @@ class DrivingModel(nn.Module):
                     if self.contract_asserts_enabled:
                         self._path_head_call_ids.append(id(self.path_head))
                     wm_advance_calls += 1
+                    if probes_on and probes.policy.enabled:
+                        # R38-D1 ②：逐步头调用（latent = plan 融合 backbone；κ/纵向/辅助/mask）
+                        probes.policy.capture(
+                            step=k,
+                            latent=latent,
+                            outputs=step_out,
+                            masks={
+                                "anchor_mask": geometry["anchor_mask"],
+                                "target_lane_valid": path_ctx["target_lane_valid"],
+                                "long_present": geometry["long_present"],
+                            },
+                        )
+                    if probes_on and probes.chain.enabled:
+                        # R38-D1 ⑤：a_k 读 z_k（linkage 断言）+ WM 决策推进（应为 5）
+                        probes.chain.on_policy_call(
+                            step=k,
+                            instance=id(self.path_head),
+                            z={"z_ego": z_ego, "z_od": z_od, "z_ld": z_ld},
+                        )
+                        probes.chain.on_wm_advance()
                     action = step_out["action"]
                     kappa_near_steps.append(step_out["kappa_near"])
                     ds_steps.append(step_out["ds_exec"])
@@ -1795,6 +1911,8 @@ class DrivingModel(nn.Module):
                 elif plan_override is not None:
                     # R36 消融③（**仅诊断上界**）：H1 一次性 6 步计划钉住尾段
                     # （step0 仍 = action_mu；action/pose 链可微）。不接入生产。
+                    if probes_on and probes.chain.enabled:
+                        probes.chain.note_flags(plan_override=True)
                     action = plan_override[:, k, :]
                 elif anchor_plan is None:
                     tokens, key_mask = self._head_tokens(
@@ -1982,6 +2100,21 @@ class DrivingModel(nn.Module):
                 raise ValueError("world_model=True 需要 rollout=True（多步预测是 rollout 的产物）")
             return out
         rolled = self._rollout(encoded, action_mu)
+        if bool(self.probes is not None and self.probes.enabled) and self.probes.chain.enabled:
+            # R38-D1 ⑤：统一出口 flags（plan 逐步组装 ⇒ plan_from_aux=0；plan0 == action_mu；
+            # linkage 期望 z_pred = 逐步堆叠预测 latent）
+            probes = self.probes
+            probes.chain.note_flags(
+                plan_from_aux=0.0,
+                plan0_equals_action_mu=bool(torch.equal(rolled["plan"][:, 0, :], action_mu)),
+            )
+            probes.chain.note_z_pred(
+                {
+                    "z_ego": rolled.get("z_ego_pred"),
+                    "z_od": rolled.get("z_od_pred"),
+                    "z_ld": rolled.get("z_ld_pred"),
+                }
+            )
         out["traj_xy"] = rolled["traj_xy"]
         out["traj_theta"] = rolled["traj_theta"]
         out["plan"] = rolled["plan"]

@@ -56,6 +56,9 @@ class TemporalAttention(nn.Module):
         x: Tensor,
         slot_mask: Tensor | None = None,
         valid: Tensor | None = None,
+        *,
+        capture: "MemoryHooks | None" = None,
+        capture_name: str = "attn",
     ) -> Tensor:
         """``x (B,T,N,H)`` -> ``(B,N,H)``。
 
@@ -63,6 +66,9 @@ class TemporalAttention(nn.Module):
             x: 编码后的 mem 帧（无效槽位应为 0，由编码器保证）。
             slot_mask: ``(B,T,N)`` 槽位掩码；``None`` 表示无槽位维（ego/others）。
             valid: ``(B,T)`` 帧有效性（``hist_valid``）；``None`` 表示全部有效。
+            capture: R38-D1 ④ Memory hook（**默认 None = 关**：零张量操作、不消耗 RNG、
+                不改写输入/输出；开启后只读记录权重/掩码/历史帧贡献，见
+                :meth:`net.probes.MemoryHooks.capture_attention`）。
         """
         if x.ndim != 4:
             raise ValueError(f"TemporalAttention 期望 (B,T,N,H)，收到 {tuple(x.shape)}")
@@ -81,5 +87,19 @@ class TemporalAttention(nn.Module):
         logits = (self.key(x) * self.query).sum(dim=-1) / math.sqrt(self.key_dim)
         logits = torch.where(ok, logits, torch.full_like(logits, _MASK_FILL))
         alpha = torch.softmax(logits, dim=1) * ok.to(logits.dtype)
-        pooled = (alpha.unsqueeze(-1) * self.value(x)).sum(dim=1)
-        return self.out(pooled)
+        value_x = self.value(x)
+        pooled = (alpha.unsqueeze(-1) * value_x).sum(dim=1)
+        output = self.out(pooled)
+        if capture is not None:
+            # R38-D1 ④：只读快照（detach/clone 在 capture 内做；不改写上方任何张量）
+            capture.capture_attention(
+                name=str(capture_name),
+                x=x,
+                weights=alpha,
+                ok=ok,
+                valid=valid,
+                contribution=alpha.unsqueeze(-1) * value_x,
+                pooled=pooled,
+                output=output,
+            )
+        return output
