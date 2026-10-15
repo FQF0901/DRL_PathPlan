@@ -9,7 +9,7 @@
 - **总目标**：闭环 success **超越 IDM+Pure Pursuit**；最终门 = Eval500 3-seeds > IDM 且 collision/off-road 不劣。
 - **三级集（禁混比）**：
   - **Calib50**（开发；train split；历史锚 legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / 统一基线 0.56 / **IDM 0.756** 均 calib50 口径）；
-  - **Clean500**（晋级级）= `scenarios_val.json − scenarios_eval500.json`，n=500，canonical 副本 `env/specs/scenarios_clean500.json`（sha256 `087db3f5…`，与历史真源逐字节一致；pin 表：IDM **0.742** / C0 **0.588**〔pin@48cb5eb〕）；
+  - **Clean500**（晋级级）= `scenarios_val.json − scenarios_eval500.json`，n=500，canonical 副本 `env/specs/scenarios_clean500.json`（sha256 `087db3f5…`）；**@HEAD 重登记（R39-A3，pin `8cc6862`，plan 协议 `c082b57d7063be20`／IDM 入口 `3b76e52f…`）**：**IDM+PP 0.742 ／ C0_HEAD 0.588 ／ C1_HEAD 0.390**（C1_HEAD ≡ pin 的 c1_true，逐位同 ⇒ Q4-A 原生 obs 语义验证；旧 pin 表仅历史）；
   - **Eval500**（正式：3 seeds + paired bootstrap/McNemar）。
 - **协议与 hash**：`evaluation_protocol_hash`（v1；工具 `.slim/deepwork/p1_v2/round38/c6_protocol.py`）+ **model/schema/ckpt 四 hash**；正式重测必带四 hash + git commit。
 - **口径更新（Q4-A 起）**：env builder **原生供真值**（dynamic_ttc/dyn/static + present）⇒ **`C1_HEAD`（结构化+旧 WM+原生 obs）≠ 旧 C1（pin，三键=0）**；旧 C1=0.304 仅历史；`c1_fill` 降缺键兼容诊断。
@@ -24,10 +24,11 @@
 
 ## 2. R39 计划与执行状态（A→B→C→D）
 
-- **R39-A 工程闭合（零训练；🕐 在飞）**
-  - **A1**：正式入口装载 Structured Policy；ckpt migration 接入正式 loader + **LoadReport**；`forward_mode` 全迁（删布尔 shim，保留 fail-fast）；**四 hash 原生**记录。
-  - **A2**：**双账本**——参数 total/active/frozen/dormant/optimizer（上限断言 总≤+2%/激活≤+5%；optimizer 仅声明模块）；detach 逐项登记 + **CI 禁未登记新增 detach**。
-  - **A3**：**Clean500@HEAD 重登记重跑**（pin 树）：`IDM+PP` / `C0_HEAD` / `C1_HEAD`；四 hash 表。
+- **R39-A 工程闭合（零训练；✅ 全绿）**
+  - **A1 ✅ `ed83e57`**：正式入口 `--path-head {off,structured}`（结构化 ckpt 严格装载 186/186、18 键迁移）；ckpt migration 接入正式 loader + **LoadReport**（filled 186 / renamed 18 / 0 缺漏；mapper `r38p2b`；CI 守卫例外科化白名单）；`forward_mode` 全迁（生产布尔调用 **0**，shim 删除→fail-fast）；**四 hash 原生**（protocol `f156c2a1…`/`950e9ad2…`、model_tree `db60ba5b…`、schema `v7-6c3a7ffb…`、ckpt `5a7c6f9e…`）；入口 vs 测试入口逐位；pytest 1095。
+  - **A2 ✅ `f1f52f5`**：双账本——参数四分类（default：total 1,278,879 / dormant 407,401（MoE）/ 可达 871,478；structured：total 1,510,570 / dormant 515,853 / 可达 994,717），**上限断言通过**（总 ≤+2%/激活 ≤+5%）；detach **31 项登记** + 实测可达范围（`z_next.detach` 阻断 step2→step1；`action.detach` 当前装配惰性）+ **CI 禁未登记新增 detach**。
+  - **A3 ✅（读数见 §0）**：重登记三臂 + 四 hash；报告 `.slim/deepwork/p1_v2/round39/a3_report.md`。
+  - **A1b 🕐 在飞**：正式入口接入 `--ld-mode/--rollout-semantic`（使 C1_HEAD 可经 `tools/test.py` 复现）+ 入口↔a3 逐位。
   - **验收**：入口与测试入口逐位一致；严格加载；迁移报告完整；shim 无生产调用；四 hash 齐全；参数分类无重叠/遗漏；最新基线可复现。
 - **R39-B 统一 imagined WorldState**（A 过门后）：九步循环（Policy 读 `PolicyStateView_k` → 动作 → 解析运动学 → LD ego-motion → OD 对象先验+ego-motion → WM 学习残差 → **统一 readout 重算七量** → Imagined Memory → 同一 Policy）；`A_{k+1}=AnalyticUpdate(A_k,a_k)+ΔA_θ`；**禁**脚本注入未来真值 / t0 静默 hold / 缺失填 0 / 外部未来态。臂：**B0 现状 ／ B1 analytic-only（阴性对照预期）／ B2 +学习残差 ／ B3 B2+2-step BPTT ／ B4 B2+3-step BPTT**。
   - 执行注记：B2 学习残差用 **one-step 真值监督**（analytic→**实际下一状态**；禁自产状态自洽回灌），链上配阻尼/一致性；**复用 `st_gnn` 存物理解码头**（od_pred/ld_pred/ego_next）以满足"不新增参数"。
@@ -37,7 +38,7 @@
 
 ## 3. 挂账（逐项明确）
 
-1. R39-A1/A2/A3 在飞；B/C/D 未开始；
+1. **R39-A ✅**（A1/A2/A3 三线全绿；A1b=semantic 装配接入正式入口 🕐）；**R39-B/C/D 未开始**（B 门：B2 必须优于 B1）；
 2. **B 类**（掩码进头 + `static_distance` 下沉）与 B 阶段同批；
 3. **Eval500 3-seeds** 与 clean150 层级去留（CG）；
 4. protocol hash 原生接入（含在 A1）；
