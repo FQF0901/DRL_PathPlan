@@ -73,6 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fill-from", type=Path, default=None,
                         help="缺键回填源 ckpt（R39-A1b；显式给出才触达；K1e2 血统例 = "
                              "runs/p1_v2/round28/K1/ckpt_epoch002.pt）")
+    parser.add_argument("--world-state-api", default="off",
+                        choices=("off", "analytic", "analytic_learned"),
+                        help="统一 imagined WorldState API（R39-B2c；透传 pipeline.eval_runner）："
+                             "off=默认不触达（与 A1b 口径逐字节同 hash）；analytic/analytic_learned"
+                             "需 --path-head structured + --lane-anchor inject；learned 档需 "
+                             "--world-residual-head")
+    parser.add_argument("--world-residual-head", type=Path, default=None,
+                        help="学习残差头 ckpt（R39-B2c；learned 档专用，如 "
+                             "runs/round39/b2/residual_head.pt）")
     return parser
 
 
@@ -128,9 +137,12 @@ def main(argv: "list[str] | None" = None) -> int:
     forward = ["--config", str(args.config), "--policy", args.policy, "--out", str(args.out),
                "--name", run_name, "--path-head", str(args.path_head),
                "--ld-mode", str(args.ld_mode), "--rollout-semantic", str(args.rollout_semantic),
-               "--lane-anchor", str(args.lane_anchor)]
+               "--lane-anchor", str(args.lane_anchor),
+               "--world-state-api", str(args.world_state_api)]
     if args.fill_from is not None:
         forward += ["--fill-from", str(args.fill_from)]
+    if args.world_residual_head is not None:
+        forward += ["--world-residual-head", str(args.world_residual_head)]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
     if args.ckpt is not None:

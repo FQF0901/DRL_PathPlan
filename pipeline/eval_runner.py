@@ -720,13 +720,19 @@ _CKPT_LOAD_SUMMARY: Dict[Tuple, Dict[str, Any]] = {}
 #: - ``--ld-mode``：LD 消融（ckpt 必须与训练同模式装载；semantic = R21-3A 语义接线）；
 #: - ``--rollout-semantic``：rollout 阶段 semantic 注入口径；
 #: - ``--lane-anchor``：``lane_anchor_xy`` 注入器（选项 a 的显式开关；off=默认不触达）；
-#: - ``--fill-from``：缺键回填源 ckpt（K1e2 血统语义键；显式给出才触达）。
+#: - ``--fill-from``：缺键回填源 ckpt（K1e2 血统语义键；显式给出才触达）；
+#: - ``--world-state-api`` / ``--world-residual-head``：R39-B2c 统一 WorldState API
+#:   （off=默认不触达，与 A1b 口径逐字节同 hash；非默认需 ``--path-head structured``，
+#:   learned 档由独立头 ckpt 提供 ΔA_θ；装配轴非默认时入 hash）。
 LOAD_PATH_HEAD_CHOICES: tuple[str, ...] = ("off", "structured")
 LOAD_LD_MODES: tuple[str, ...] = (
     "baseline", "no_chain", "set_attn", "attn", "attn_no_chain", "semantic", "semantic_no_chain",
 )
 LOAD_ROLLOUT_SEMANTIC_MODES: tuple[str, ...] = ("full", "t0_only", "static_role_only")
 LOAD_LANE_ANCHOR_MODES: tuple[str, ...] = ("off", "inject")
+#: R39-B2c：WorldState API 档位（net 侧 ``net.model.WORLD_STATE_API_MODES`` 的闭环子集；
+#: ``analytic_residual`` 属离线诊断面不开放）。``off`` = 生产口径（逐位不变）。
+LOAD_WORLD_STATE_API_MODES: tuple[str, ...] = ("off", "analytic", "analytic_learned")
 
 
 def _model_cache_key(
@@ -737,6 +743,8 @@ def _model_cache_key(
     ld_mode: str = "baseline",
     rollout_semantic: str = "full",
     fill_from: Optional[str] = None,
+    world_state_api: str = "off",
+    world_residual_head: Optional[str] = None,
 ) -> Tuple:
     """缓存/加载摘要键：**全默认装配 = 旧键 ``(ckpt, device)``**（历史调用点逐位不变；
     a3 controller 的 canary 预填缓存按该旧键命中）；任何非默认轴追加一段避免互撞。"""
@@ -749,6 +757,10 @@ def _model_cache_key(
         key += (("rollout_semantic", str(rollout_semantic)),)
     if fill_from:
         key += (("fill_from", str(fill_from)),)
+    if str(world_state_api or "off") != "off":
+        # R39-B2c：非默认档单独缓存（默认 off 时不改旧键 ⇒ 历史调用点逐位不变）
+        key += (("world_state_api", str(world_state_api)),
+                ("world_residual_head", (str(world_residual_head) if world_residual_head else None)))
     return key
 
 
@@ -828,6 +840,8 @@ def _formal_entry_protocol(
     max_steps: int,
     device: Optional[str],
     net_tree_sha16: str,
+    world_state_api: str = "off",
+    world_residual_head_sha16: Optional[str] = None,
 ) -> Dict[str, Any]:
     """正式入口 evaluation protocol（口径复用 c6：``build_protocol`` + canonical JSON sha256 hex16）。
 
@@ -837,6 +851,9 @@ def _formal_entry_protocol(
     正式入口开关，**入 hash**）；``model.moe ← --moe-off``；``model.path_head ← --path-head``；
     R39-A1b 追加 ``model.lane_anchor``（``--lane-anchor`` 注入开关）与 ``model.fill_from_sha16``
     （``--fill-from`` 源 ckpt 内容指纹；none）—— 均**入 hash**（模型输入/权重装配的可辨识性）。
+    R39-B2c：``model.world_state_api`` / ``model.world_residual_head_sha16`` **条件入 hash**——
+    默认口径（``off``/none）时 protocol dict 与上面口径**逐字节相同**（历史 hash 可比性保持），
+    非默认档才追加两键（装配轴敏感，避免不同档共享同一 hash）。
     """
     module = _load_readonly_script("r39a1_c6_protocol", R39_PROTOCOL_HASH_SCRIPT)
     protocol = module.build_protocol(
@@ -862,6 +879,12 @@ def _formal_entry_protocol(
     protocol["model"]["path_head"] = str(path_head)
     protocol["model"]["lane_anchor"] = str(lane_anchor)
     protocol["model"]["fill_from_sha16"] = (str(fill_from_sha16) if fill_from_sha16 else "none")
+    # R39-B2c：WorldState API 轴条件入 hash（默认 off/none ⇒ 不追加键 ⇒ 与 A1b 口径逐字节同）
+    if str(world_state_api or "off") != "off":
+        protocol["model"]["world_state_api"] = str(world_state_api)
+        protocol["model"]["world_residual_head_sha16"] = (
+            str(world_residual_head_sha16) if world_residual_head_sha16 else "none"
+        )
     protocol["hashes"] = {
         "protocol_hash": module.hash_protocol(protocol),
         "protocol_hash_full": module.hash_protocol(protocol, full=True),
@@ -886,18 +909,27 @@ def _evaluation_hashes(
     workers: int,
     max_steps: int,
     device: Optional[str],
+    world_state_api: str = "off",
+    world_residual_head: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """R39-A1 四 hash（+ 完整 protocol dict；供 run_meta/manifest 与 metrics 记录）。"""
+    """R39-A1 四 hash（+ 完整 protocol dict；供 run_meta/manifest 与 metrics 记录）。
+
+    R39-B2c：``world_state_api`` / ``world_residual_head`` 可选装配轴（默认 off/none ⇒ 与
+    A1b 口径逐字节相同；非默认档入 protocol hash，见 :func:`_formal_entry_protocol`）。
+    """
     net_tree = _net_tree_digest()
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint  # 轻量（stdlib only）
 
     fill_sha = _sha256_file(str(fill_from)) if fill_from else None
+    head_sha = _sha256_file(str(world_residual_head)) if world_residual_head else None
     protocol = _formal_entry_protocol(
         spec_path=spec_path, policy=policy, tracker=tracker, eval_reference=eval_reference,
         moe_off=moe_off, path_head=path_head, ld_mode=ld_mode, rollout_semantic=rollout_semantic,
         lane_anchor=lane_anchor, fill_from_sha16=(fill_sha[:16] if fill_sha else None),
         workers=workers, max_steps=max_steps, device=device,
         net_tree_sha16=str(net_tree["tree_sha16"]),
+        world_state_api=str(world_state_api or "off"),
+        world_residual_head_sha16=(head_sha[:16] if head_sha else None),
     )
     ckpt_sha = _sha256_file(str(ckpt)) if ckpt is not None else None
     return {
@@ -917,6 +949,13 @@ def _evaluation_hashes(
                        "tree_sha16": str(net_tree["tree_sha16"]),
                        "tool": R39_NET_SHA_SCRIPT},
         "schema": {"tool": "env.obs.obs_fingerprint", "obs_schema_version": int(OBS_SCHEMA_VERSION)},
+        # R39-B2c：WorldState API 轴留痕（默认 off/none ⇒ {"api": "off", "residual_head": None}）
+        "world_state": {
+            "api": str(world_state_api or "off"),
+            "residual_head": ({"path": str(world_residual_head), "sha256": head_sha,
+                               "sha16": (head_sha[:16] if head_sha else None)}
+                              if world_residual_head else None),
+        },
         "protocol": protocol,
     }
 
@@ -956,11 +995,15 @@ def _ckpt_load_summary(
     ld_mode: str = "baseline",
     rollout_semantic: str = "full",
     fill_from: Optional[str] = None,
+    *,
+    world_state_api: str = "off",
+    world_residual_head: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
     return _CKPT_LOAD_SUMMARY.get(_model_cache_key(
         ckpt, device, path_head=path_head, ld_mode=ld_mode,
         rollout_semantic=rollout_semantic, fill_from=fill_from,
+        world_state_api=world_state_api, world_residual_head=world_residual_head,
     ))
 
 
@@ -1006,6 +1049,8 @@ def _load_ckpt_model(
     ld_mode: str = "baseline",
     rollout_semantic: str = "full",
     fill_from: Optional[str] = None,
+    world_state_api: str = "off",
+    world_residual_head: Optional[str] = None,
 ) -> Any:
     """worker 内按装配键（``_model_cache_key``；全默认 = ``(ckpt, device)``）缓存模型。
 
@@ -1034,6 +1079,7 @@ def _load_ckpt_model(
     path_head = str(path_head or "off")
     ld_mode = str(ld_mode or "baseline")
     rollout_semantic = str(rollout_semantic or "full")
+    world_state_api = str(world_state_api or "off")
     if path_head not in LOAD_PATH_HEAD_CHOICES:
         raise ValueError(f"未知 path_head={path_head!r}（可选 {'/'.join(LOAD_PATH_HEAD_CHOICES)}）")
     if ld_mode not in LOAD_LD_MODES:
@@ -1042,9 +1088,29 @@ def _load_ckpt_model(
         raise ValueError(
             f"未知 rollout_semantic={rollout_semantic!r}（可选 {'/'.join(LOAD_ROLLOUT_SEMANTIC_MODES)}）"
         )
+    # R39-B2c：WorldState API 轴（默认 off ⇒ 零触达；非默认需结构化头；learned 需头 ckpt）
+    if world_state_api not in LOAD_WORLD_STATE_API_MODES:
+        raise ValueError(
+            f"未知 world_state_api={world_state_api!r}（可选 {'/'.join(LOAD_WORLD_STATE_API_MODES)}）"
+        )
+    if world_state_api != "off":
+        if path_head != "structured":
+            raise ValueError(
+                f"[eval_runner] --world-state-api {world_state_api} 需要 --path-head structured"
+                "（net 契约：readout = 结构化头想象步几何输入）"
+            )
+        if world_state_api == "analytic_learned" and not world_residual_head:
+            raise ValueError(
+                "[eval_runner] --world-state-api analytic_learned 需要 --world-residual-head <ckpt>"
+            )
+    elif world_residual_head:
+        raise ValueError(
+            "[eval_runner] --world-residual-head 只对 --world-state-api analytic_learned 有意义"
+        )
     cache_key = _model_cache_key(
         ckpt, device, path_head=path_head, ld_mode=ld_mode,
         rollout_semantic=rollout_semantic, fill_from=fill_from,
+        world_state_api=world_state_api, world_residual_head=world_residual_head,
     )
     cached = _CKPT_MODEL_CACHE.get(cache_key)
     if cached is not None:
@@ -1249,6 +1315,32 @@ def _load_ckpt_model(
         )
     load_report["loader"] = load_report.get("loader", "pipeline.eval_runner（形状过滤子集，strict=False）")
     model.to(device).eval()
+    # R39-B2c：WorldState API（默认 off ⇒ 零触达，不调用任何 net API）。时序刻意放在
+    # state_dict 装载 + ``model.state_dict()`` 计数（model_keys）之后：残差头挂载不影响
+    # 键面/LoadReport（头 = 独立 ckpt、装配面非参数开关）。
+    if world_state_api != "off":
+        model.set_world_state_api(world_state_api)
+        ws_record: Dict[str, Any] = {"mode": world_state_api, "residual_head": None}
+        if world_state_api == "analytic_learned":
+            from net.world_residual import load_residual_head  # 仅 learned 档触达
+
+            head, head_meta = load_residual_head(str(world_residual_head), device=str(device))
+            model.set_world_residual_head(head)
+            ws_record["residual_head"] = {
+                "path": str(world_residual_head),
+                "sha256": _sha256_file(str(world_residual_head)),
+                "head_params": int(sum(p.numel() for p in head.parameters())),
+                "meta": dict(head_meta or {}),
+            }
+        load_report["world_state"] = ws_record
+        summary["world_state"] = ws_record
+        print(
+            f"[eval_runner] WorldState API={world_state_api}"
+            + (f"（residual head {ws_record['residual_head']['head_params']} params ← "
+               f"{world_residual_head}）" if ws_record["residual_head"] else "")
+            + "：k≥1 想象步几何 = 统一 readout",
+            flush=True,
+        )
     _CKPT_LOAD_SUMMARY[cache_key] = summary
     _CKPT_MODEL_CACHE[cache_key] = model
     return model
@@ -1388,6 +1480,9 @@ class _CkptController:
             ld_mode=str(assembly.get("ld_mode") or "baseline"),
             rollout_semantic=str(assembly.get("rollout_semantic") or "full"),
             fill_from=(str(assembly["fill_from"]) if assembly.get("fill_from") else None),
+            world_state_api=str(assembly.get("world_state_api") or "off"),
+            world_residual_head=(str(assembly["world_residual_head"])
+                                 if assembly.get("world_residual_head") else None),
         )
         # R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；默认 off ⇒ None，不触达任何新代码路径）
         self.lane_anchor_mode = str(assembly.get("lane_anchor") or "off")
@@ -2211,6 +2306,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="缺键回填源 ckpt（R39-A1b；显式给出才触达）：migrate 后 missing 中存在于"
                              "回填源且形状一致的键装载并计入 LoadReport.fill_from；"
                              "K1e2 血统语义键例 = runs/p1_v2/round28/K1/ckpt_epoch002.pt")
+    parser.add_argument("--world-state-api", choices=LOAD_WORLD_STATE_API_MODES, default="off",
+                        help="R39-B2c：统一 imagined WorldState API（默认 off=不触达、与 A1b 口径"
+                             "逐字节同 hash）；analytic=k≥1 想象步几何改由 WorldState 统一 readout"
+                             "（需 --path-head structured + --lane-anchor inject；与 a3 "
+                             "--world-state-api 同口径）；analytic_learned=再加学习残差头 ΔA_θ"
+                             "（需 --world-residual-head）。非默认档追加 protocol hash 轴 "
+                             "model.world_state_api")
+    parser.add_argument("--world-residual-head", type=Path, default=None,
+                        help="R39-B2c：学习残差头 ckpt（net.world_residual.load_residual_head 口径；"
+                             "如 runs/round39/b2/residual_head.pt）。仅 --world-state-api "
+                             "analytic_learned 生效（其余组合 fail-fast）；state_dict 装载后挂载"
+                             "（不影响 base ckpt 键面/LoadReport）")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
@@ -2300,13 +2407,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     model_config: Dict[str, Any] = task_model_config(config)
 
     # R39-A1b：模型装配开关（口径对齐 a3 canary；缺省 = 生产口径逐位不变）
+    # R39-B2c：追加 world_state_api / world_residual_head（默认 off/none ⇒ 不触达任何 net API）
     model_assembly: Dict[str, Any] = {
         "path_head": str(args.path_head),
         "ld_mode": str(args.ld_mode),
         "rollout_semantic": str(args.rollout_semantic),
         "lane_anchor": str(args.lane_anchor),
         "fill_from": (str(args.fill_from) if args.fill_from is not None else None),
+        "world_state_api": str(args.world_state_api),
+        "world_residual_head": (str(args.world_residual_head)
+                                if args.world_residual_head is not None else None),
     }
+    if str(args.world_state_api) != "off" and args.policy != "ckpt":
+        print("[eval_runner] 警告：--world-state-api 非默认只在 --policy ckpt 生效（基线臂忽略）",
+              flush=True)
+    if str(args.world_state_api) != "off" and str(args.path_head) != "structured":
+        print("[eval_runner] WorldState API FAIL-FAST：--world-state-api "
+              f"{args.world_state_api} 需要 --path-head structured（readout = 结构化头想象步几何输入）",
+              file=sys.stderr)
+        return 2
+    if str(args.world_state_api) == "analytic_learned" and args.world_residual_head is None:
+        print("[eval_runner] WorldState API FAIL-FAST：--world-state-api analytic_learned 需要 "
+              "--world-residual-head <ckpt>", file=sys.stderr)
+        return 2
+    if str(args.world_state_api) == "off" and args.world_residual_head is not None:
+        print("[eval_runner] WorldState API FAIL-FAST：--world-residual-head 只对 "
+              "--world-state-api analytic_learned 有意义", file=sys.stderr)
+        return 2
+    if str(args.world_state_api) != "off" and args.world_residual_head is not None:
+        if not Path(str(args.world_residual_head)).is_file():
+            print(f"[eval_runner] WorldState API FAIL-FAST：缺 residual head ckpt "
+                  f"{args.world_residual_head}", file=sys.stderr)
+            return 2
 
     # ---- P0-A 评测安全前置：ckpt 加载 fail-fast（默认开；父进程 CPU 预检，干净加载零行为变化）----
     ckpt_load_summary: Optional[Dict[str, Any]] = None
@@ -2323,6 +2455,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ld_mode=model_assembly["ld_mode"],
             rollout_semantic=model_assembly["rollout_semantic"],
             fill_from=model_assembly["fill_from"],
+            world_state_api=model_assembly["world_state_api"],
+            world_residual_head=model_assembly["world_residual_head"],
         )
         ckpt_load_summary = _ckpt_load_summary(
             str(args.ckpt), "cpu",
@@ -2330,6 +2464,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ld_mode=model_assembly["ld_mode"],
             rollout_semantic=model_assembly["rollout_semantic"],
             fill_from=model_assembly["fill_from"],
+            world_state_api=model_assembly["world_state_api"],
+            world_residual_head=model_assembly["world_residual_head"],
         )
 
     # ---- R39-A1：四 hash 原生记录（protocol / model tree / schema / checkpoint）→ run_meta ----
@@ -2341,6 +2477,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ld_mode=model_assembly["ld_mode"], rollout_semantic=model_assembly["rollout_semantic"],
         lane_anchor=model_assembly["lane_anchor"], fill_from=model_assembly["fill_from"],
         workers=int(workers), max_steps=int(args.max_steps), device=device,
+        world_state_api=model_assembly["world_state_api"],
+        world_residual_head=model_assembly["world_residual_head"],
     )
     run_meta: Dict[str, Any] = {
         "schema": "r39a1-run-meta/v1",
@@ -2358,6 +2496,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "path_head": model_assembly["path_head"],
         "model_assembly": model_assembly,
         "fill_from": eval_hashes["fill_from"],
+        "world_state": {**eval_hashes["world_state"],
+                        "protocol_model": {
+                            k: v for k, v in eval_hashes["protocol"]["model"].items()
+                            if str(k).startswith("world_")}},
         "hashes": {
             "evaluation_protocol_hash": eval_hashes["evaluation_protocol_hash"],
             "evaluation_protocol_hash_full": eval_hashes["evaluation_protocol_hash_full"],
