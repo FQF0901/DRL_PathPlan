@@ -13,12 +13,12 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 | `spatial.py` | 2 层消息传递（层数可配）：ego↔OD/LD、LD 槽位相邻、OD 近邻 KNN（对称化）；边特征 = 相对位姿 5 维 `[Δx,Δy,cosΔθ,sinΔθ,‖Δp‖]/scale`（`net/spatial.py:244-353`；M1/M2 消融组件 `LdSetAttention`/`LdAggregate` 见 `:61-243`）。 |
 | `st_gnn.py` | `SpatioTemporalGNN`：latent 自回归转移（3 个 `2H→H→H` 头，输出层零初始化 ⇒ 初始恒等）+ presence/entry logits（先验 bias +2/−2）+ 物理小解码头（od 5 维 / ld 4 维，先验+零初始化残差，诊断用）+ 惰性 `action_ego`（默认关）（`net/st_gnn.py:83-322`）。 |
 | `plan_head.py` | 6 个 token 融合（z_ego/od_pool/ld_pool/others/nav/signal）→ MoE → 融合 `latent` + 下一 ego 特征前 6 维（reserved 2 维由采集侧写入，`net/encoders.py:8-10`；v8 rollout 不合成 raw mem/ego）（`net/plan_head.py:41-89`）。K-anchor 分支（历史 `num_anchors>0`）已于 R38-P2a 删除，快照见 `tools/legacy/k_anchor/`。 |
-| `path_head.py` | R36 K1 `StructuredPolicyHead`（**唯一动作生成器**的结构化形式）：横向分支（锚 κ_ref + 残差限幅 → κ_near/mid/far）+ 纵向分支（κ_near + 外源几何 → 当前 `ds`）+ 无参组合层 `compose_step_action`；`step_geometry` 按 t0 静态地图 + 想象位姿重算 imagined 步几何；默认关（`set_path_head` 惰性构造）。R38-P1 减枝：H1 一次性六步（旧 `PathExecutionHead`/`compose_path_plan`）已删除，快照见 `tools/legacy/oneshot_path.py`（`net/path_head.py:987-1242`）。 |
+| `path_head.py` | R36 K1 `StructuredPolicyHead`（**唯一动作生成器**的结构化形式）：横向分支（锚 κ_ref + 残差限幅 → κ_near/mid/far）+ 纵向分支（κ_near + 外源几何 → 当前 `ds`）+ 无参组合层 `compose_step_action`；`step_geometry` 按 t0 静态地图 + 想象位姿重算 imagined 步几何；默认关（`set_path_head` 惰性构造）。**R38-P2b 收编**：结构化头注册为 `model.policy.structured_action`（键面 `policy.structured_action.*`；旧 `path_head.*` 键经 `tools/legacy/legacy_key_mapper` 重映射），`output_groups` 给出 `structured_action/action_distribution/auxiliary_intent` 三子结构。R38-P1 减枝：H1 一次性六步（旧 `PathExecutionHead`/`compose_path_plan`）已删除，快照见 `tools/legacy/oneshot_path.py`。 |
 | `moe.py` | primary 恒开 + 8 个零初始化残差 expert，top-2 软混合；Switch 式负载均衡 aux（`net/moe.py:80-182`）。 |
 | `policy.py` | 交叉注意力策略/价值头（K=1 查询 × 令牌集合；4 头、默认 1 层可配）；sigmoid 压缩有界动作 `ds∈[0,10] m`、`dθ∈[-0.6,0.6] rad`，logstd clamp `[-5,0]`（`net/policy.py:43-51,119-221`）。 |
 | `semantic.py` | R21-3A 语义接线（`ld_mode=semantic`，默认关，惰性构造）：`lane_semantic → target_lane_token`（固定归一化 + 2 层 MLP，mask=0 ⇒ 严格 0）；LD 逐槽增广（role/route/offset/group-relation embed）+ 六组 masked mean 读出 → `ld_context`（`net/semantic.py:73-191`）。 |
-| `ego_warp.py` | R36 L-D / R37 M1 坐标层（纯函数、无状态）：t0 → ego_k 逆变换、OD 恒速先验（`od_velocity_t0` = 相对速度 + ego t0 速度）、`assemble_pose_k(off/w1/w2)`、anchor schema（`AnchorBatch`/`validate_anchor`）+ 5 项 hook（`WarpHooks`，默认关零开销）（`net/ego_warp.py:119-220,254-390`）。 |
-| `model.py` | 装配与惰性开关（`set_moe/set_ld_mode/set_ego_warp_mode/set_path_head/set_warp_hooks`）、`arc_step` 运动学、`encode/plan_step/_rollout/forward/rollout`、`SUPERVISED_LABELS`（`net/model.py:210-218,225-275,392,880,923,1292,1503,1864`）。 |
+| `ego_warp.py` | R36 L-D / R37 M1 坐标层（纯函数、无状态）：t0 → ego_k 逆变换、OD 恒速先验（`od_velocity_t0` = 相对速度 + ego t0 速度）、`assemble_pose_k(off/analytic)`（R38-P2b：legacy w1/w2 已退役，逐位参照 = `tests/fixtures/r38_p2b_warp/`，快照 = `tools/legacy/legacy_ego_warp.py`）、anchor schema（`AnchorBatch`/`validate_anchor`）+ 5 项 hook（`WarpHooks`，默认关零开销）（`net/ego_warp.py:119-220,254-390`）。 |
+| `model.py` | 装配与惰性开关（`set_moe/set_ld_mode/set_ego_warp_mode/set_path_head/set_warp_hooks`（R38-P2b：`set_ego_warp`/`enable_path_head`/`path_head_ablation` 已删；`path_head` = 只读 alias，`set_policy_diag` fail-fast 指离线工具））、`arc_step` 运动学、`encode/plan_step/_rollout/forward/rollout`、`SUPERVISED_LABELS`（`net/model.py:210-218,225-275,392,880,923,1292,1503,1864`）。 |
 | `param_probe.py` | 参数探针 + 前向/rollout 形状冒烟；断言总参数 ≤1.5M（`net/param_probe.py:29-34,114`：预算 + 断言）。 |
 | `probes.py` | R38-D1 §四 七类强制 probes/hooks 统一容器（**默认全关**）：①状态来源 ②Policy ③World Model ④Memory ⑤六步调用链（含 ST-GNN 总调用单列）只读 hook + 统一出口 `ProbeRecorder.write`（张量字典 + JSON）；⑥ plan 连续 footprint 首次越界/碰撞纯函数；⑦ 逐参数梯度账本 `grad_ledger`（第 1/3/6 步 loss 单独反向）。默认关 ⇒ 前向逐位一致/零 RNG/不改 optimizer/ckpt（`net/probes.py:1-100` 契约 + `.slim/deepwork/p1_v2/round38/d1_off_bitwise.py` 自证）。 |
 
@@ -49,7 +49,7 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - `rollout=True`：`traj_xy (B,6,2)`（t=0.5..3.0 s 端点，t0 自车系）、`traj_theta (B,6)`、`plan (B,6,2)`（实际执行的 6 个动作，`plan[:,0] == action_mu`）
 - `world_model=True`（必须同时 `rollout=True`）另返回：`od_pred (B,6,16,5)`、`ld_pred (B,6,16,4)`、`od_presence_pred/od_entry_pred (B,6,16)`（logits）、`z_ego_pred/z_od_pred/z_ld_pred`（latent 诊断）
 - `forward(rollout=False, world_model=False)` 是 **PPO cheap path**：不跑任何 st_gnn 消息传递，`action_mu/action_logstd/value/router_logits/expert_weights/latent` 与完整前向逐位一致（`net/model.py:1970-1985`）；`rollout=True, world_model=False` 仍跑 rollout 但不返回预测键。
-- R36 K1（结构化头启用时，非默认）：`plan_from_aux/structured_*` 逐步组装证据键 + `contract_*` 契约断言键；`policy_action_mu`/`action_logstd` 仅在 `set_policy_diag(True)`/`set_path_head_trace(True)` 诊断时产出（`net/model.py:1997-2052`）。
+- R36 K1（结构化头启用时，非默认）：`plan_from_aux/structured_*` 逐步组装证据键 + `contract_*` 契约断言键；`structured` 下旧头**永不前向**（`policy_action_mu` 不再产出；R38-P2b 诊断离线化 = `tools/diagnostics/legacy_policy_diag.py`，`set_policy_diag` fail-fast）；默认关路径照常产出 `action_logstd`。
 - R37 M1（`set_warp_readout(True)` 时，非默认）：`warp_readout_valid/warp_prior_err/warp_residual_contrib/warp_final_err`（`net/model.py:1988-1996`）。
 
 ## rollout / detach 语义（固定，无消融开关）
@@ -57,7 +57,7 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - v8 不再拷贝/滑动 raw mem，直接迭代 latent 状态；真 mem 仅作 nav 回退锚点（`net/model.py:1519-1523`）。
 - 来自真实 obs 的 t0 状态**不 detach**（检测任务）；rollout 合成的后续 latent 进入下一步前 detach（预测任务）；**action/pose 链保持可微**（`net/model.py:1627,1720-1721`）。
 - `wm_detach` 形参保留但**恒为 no-op**（`net/model.py:1883`）。
-- 图位姿（t0 帧口径）：ego = 累积位姿（detach）、OD = t0 位姿 + `k·dt·v_t0`、LD 静止（`net/model.py:1646-1663`；R37 M1 `set_ego_warp_mode("analytic")` 时改由 `assemble_pose_k(w2)` + `od_velocity_t0` 组装，默认 `off` 逐位不变）。
+- 图位姿（t0 帧口径）：ego = 累积位姿（detach）、OD = t0 位姿 + `k·dt·v_t0`、LD 静止（`net/model.py:1646-1663`；R37 M1 `set_ego_warp_mode("analytic")` 时改由 `assemble_pose_k(analytic)` + `od_velocity_t0` 组装，默认 `off` 逐位不变；R38-P2b 单状态机）。
 - 物理解码先验：OD 匀速外推 / LD 静止，t0 帧口径（`net/st_gnn.py:276-311`）。
 
 ## MoE 口径
@@ -78,13 +78,13 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 ## Round-36 K1 结构化动作头（`net/path_head.py`；默认关）
 
 - **开关**：`DrivingModel.set_path_head(True)` 惰性构造 `StructuredPolicyHead`（构造期保存/恢复 CPU RNG ⇒ 不扰动既有初始化抽样序列）；默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致，旧 ckpt strict 载入 0/0/0（`net/model.py:923-950`）。
-- **每步调用（唯一动作生成器）**：`structured` 模式（默认）下 `_rollout` 每步用**同一实例、当前** `z_k` 产出 `a_k=(ds_k, κ_near_k·ds_k)` → WM 单步推进 → 同一头重算；6 步 `plan` 由逐步动作**组装**供 LQR/环境（`plan[:,0]==action_mu`），辅助 `κ_mid/κ_far/未来 progress` 不进动作（`net/path_head.py:1-70`，`net/model.py:1616-1721`）。消融脚手架：`policy`①（旧头 + WM rollout）/`structured`②（生产默认）；③ H1 一次性 6 步诊断臂（第二轨迹生成器）已于 R38-P1 删除——`set_path_head_ablation` 写入旧模式名即 `ValueError` fail-fast，历史复现见 `tools/legacy/oneshot_path.py`（`net/path_head.py:254-255`，`net/model.py:952-975`）。
+- **每步调用（唯一动作生成器）**：`structured` 模式（默认）下 `_rollout` 每步用**同一实例、当前** `z_k` 产出 `a_k=(ds_k, κ_near_k·ds_k)` → WM 单步推进 → 同一头重算；6 步 `plan` 由逐步动作**组装**供 LQR/环境（`plan[:,0]==action_mu`），辅助 `κ_mid/κ_far/未来 progress` 不进动作（`net/path_head.py:1-70`，`net/model.py:1616-1721`）。消融脚手架：`policy`①（旧头 + WM rollout）/`structured`②（生产默认）；③ H1 一次性 6 步诊断臂（第二轨迹生成器）已于 R38-P1 删除（历史复现 = `tools/legacy/oneshot_path.py`）。R38-P2b：`path_head_ablation` 属性与 `enable_path_head` 镜像已删；`set_path_head_ablation` 降为 legacy 诊断入口（`policy`/`structured` 两档，`oneshot` fail-fast）。
 - **横向头**：锚 = 外部给定目标车道中心线折线 `lane_anchor_xy (B,P,2)`（ego t0 系）→ 三控制站位 `KAPPA_CTRL_S = (5.25, 17.5, 29.75) m`（= `KAPPA_CTRL_FRACTIONS (0.15, 0.50, 0.85) × LAT_HORIZON_M 35.0`）的 `κ_ref (B,3)`；头输出 `κ_near/mid/far` 残差 = `clamp(tanh(raw)·κ_p95(v), ±κ_p99(v))`（速度条件化数据驱动限幅，标定 `runs/round36/k1/calibration.json`；数据不足回退常量 `KAPPA_LIMIT_FALLBACK = tanh×0.1`），末层零初始化 ⇒ 初始 `κ(s) = κ_ref`（锚中心线）；分段线性 κ(s)（`net/path_head.py:139-190,281-360`）。
 - **纵向头**：输入 = `κ_near`(1) + 外源几何 8 维（速度/左右余量/静态距/动态距/TTC/nav 进度/目标末端距；t0 段由 env 生产者 `env/obs/path_field.py` 给出，`<key>__present` 同源掩码 ⇒ `long_present`；`dynamic_distance`/`dynamic_ttc` **缺键 = fail-fast**（禁静默 0，R38-Q4A），static 缺键 ⇒ 0+present=0，margin/nav/d2end 缺键回退 `lane_semantic` 列 4/5/11 与 `nav[:,-1]`）→ 当前步 `ds`（有界 `[0,10]`；末层零初始化 ⇒ 初始 `ds = clamp(v_current·dt, bounds)`，速度缺失回退常量 3.5 m/步）（`net/path_head.py:193-245,316-335`）。
 - **组合层**：`compose_step_action` → `a=(ds, κ_near·ds)`（策略动作界截断，无参数）；`aux_preview` → 未来 5 步辅助 plan（不进动作）。R38-P1：H1 一次性 `compose_path_plan`（段内平均曲率精确积分）已删除并迁 `tools/legacy/oneshot_path.py`（`net/path_head.py:562-663`）。
 - **imagined 步几何**（:func:`step_geometry`）：k≥1 的车道锚/边界余量/静态距/目标车道末端距由 **t0 静态地图 + 想象位姿**确定性重算；动态距离/TTC/nav/speed 保持当前步（`net/path_head.py:664-777`）。
-- **R36 L-A 旧头消歧**：`structured` 下旧 `PolicyHead` 默认**不再前向**，输出 dict 无 `policy_action_mu`/`action_logstd`（诊断经 `set_policy_diag(True)`/`set_path_head_trace(True)` 恢复）；`set_contract_asserts`（默认开）在 eval/deploy 违反「6 次头调用 / 5 次 WM 推进 / 唯一动作源 / 一次性钉住路径不存在」契约时 fail-fast（`net/model.py:989-1017,2018-2052`）。
-- **训练/冻结集**（manifest：`.slim/deepwork/p1_v2/round36/h1_manifest.json`）：可训 `path_head.` + `plan_head.fusion.2.`（PolicyBackbone 末层；`TRAIN_ALLOWLIST_PREFIXES`，`net/path_head.py:248-251`）；WM/Encoder/Memory/旧 PolicyHead/MoE/ValueHead 全冻。target-lane token dropout：`set_target_lane_dropout(p)`（默认 0；20%→50% 斜坡由训练侧调度）（`net/model.py:1033-1044`）。
+- **R36 L-A 旧头消歧（R38-P2b 收编后）**：`structured` 下旧 `PolicyHead` 不前向，输出 dict 无 `policy_action_mu`/`action_logstd`；正式 forward 只保留一个动作出口，旧头诊断离线化（`tools/diagnostics/legacy_policy_diag.py`）；`set_contract_asserts`（默认开）在 eval/deploy 违反「6 次头调用 / 5 次 WM 推进 / 唯一动作源 / 一次性钉住路径不存在」契约时 fail-fast（`net/model.py:989-1017,2018-2052`）。
+- **训练/冻结集**（manifest：`.slim/deepwork/p1_v2/round36/h1_manifest.json`）：可训 `policy.structured_action.` + `plan_head.fusion.2.`（PolicyBackbone 末层；`TRAIN_ALLOWLIST_PREFIXES`；旧 `path_head.` 前缀经 key mapper 映射）；WM/Encoder/Memory/旧 PolicyHead/MoE/ValueHead 全冻。target-lane token dropout：`set_target_lane_dropout(p)`（默认 0；20%→50% 斜坡由训练侧调度）（`net/model.py:1033-1044`）。
 - **Gate 0 证据**：`runs/round36/h1/gate0_compat.json`（逐位/strict/LQR 契约/966 tests）+ `runs/round36/h1/smoke.json`（开/关前向 + 梯度 allowlist + dropout）。
 
 ## config/model.yaml → 模型构造键（`pipeline/stages.py:155-197`）

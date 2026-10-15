@@ -30,14 +30,33 @@ H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 r
      ``runs/round36/k1/calibration.json``）。数据不足 → 常量 fallback：``ds_init=3.5``、
      ``κ_limit=0.1``（:data:`DS_INIT_FALLBACK` / :data:`KAPPA_LIMIT_FALLBACK`，显式标注）。
 
-消融脚手架（默认关；``DrivingModel.set_path_head_ablation``）
--------------------------------------------------------------
-- ``policy``：① 旧 ``PolicyHead`` + WM rollout（= 默认关路径的行为）；
-- ``structured``（**默认**，生产口径）：② 结构化头 + WM 逐步 rollout。
+消融脚手架（R38-P2b：模式枚举已删除；``DrivingModel.set_path_head_ablation`` = legacy 诊断入口）
+--------------------------------------------------------------------------------------------------
+- ``policy``：① 旧 ``PolicyHead`` + WM rollout（= 默认关路径的行为；历史口径名）；
+- ``structured``（**默认**，生产口径）：② 结构化头（``model.policy.structured_action``）+ WM 逐步 rollout。
 
 ③ H1 一次性 6 步诊断臂（头内一次性开关 + 尾段钉住）**已删除**（R38-P1 减枝）；
 ``DrivingModel.set_path_head_ablation`` 写入该模式名即 ``ValueError`` fail-fast，
 历史复现快照见 ``tools/legacy/oneshot_path.py``。
+
+双实体收编（R38-P2b；GPT §七-D）
+--------------------------------
+- 结构化头**归属** ``model.policy``（子结构 ``structured_action``）：state_dict 键面
+  ``policy.structured_action.*``（旧 ``path_head.*`` 18 键经 ``tools/legacy/legacy_key_mapper``
+  重映射，默认装配零变化）；
+- ``model.policy`` 单实体的三个输出子结构（``StructuredPolicyHead.output_groups``）：
+  ``structured_action``（执行动作/逐步几何主输出）/ ``action_distribution``（分布口；``log_std``
+  在 RL 同源方差接线前 fail-fast——**均值与方差不得来自两个头**）/ ``auxiliary_intent``
+  （κ_mid/κ_far/aux 预览等辅助意图，不进 LQR）；
+- 旧 ``PolicyHead`` 仅在默认关路径前向；structured 模式下旧头诊断**已离线化**
+  （``tools/diagnostics/legacy_policy_diag.py``），不在主 forward 并行计算。
+
+训练/冻结集（H1 manifest 同步；K1 沿用；R38-P2b 键面前缀更新）
+--------------------------------------------------------------
+- **可训**：``policy.structured_action.`` + ``plan_head.fusion.2.``（:data:`TRAIN_ALLOWLIST_PREFIXES`；
+  旧训练脚本的 ``path_head.`` 前缀经 legacy_key_mapper 映射，见 ``tools/legacy/README.md``）；
+- **冻结**：WM(``st_gnn.``)/``encoders.``/``mem_encoder.``/旧 ``policy.``/``value.``/
+  ``plan_head.moe.`` 等（LQR 不在模型内）。
 
 默认关 / 逐位兼容
 -----------------
@@ -61,12 +80,6 @@ H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 r
   （在场时 ``long_present`` 用它，否则退回"键在场 ⇒ 1"）；
   当前速度取 ``obs['ego']`` 第 0 维（v, m/s）。
 
-训练/冻结集（H1 manifest 同步；K1 沿用）
-----------------------------------------
-- **可训**：``path_head.`` + ``plan_head.fusion.2.``（:data:`TRAIN_ALLOWLIST_PREFIXES`）；
-- **冻结**：WM(``st_gnn.``)/``encoders.``/``mem_encoder.``/旧 ``policy.``/``value.``/
-  ``plan_head.moe.`` 等（LQR 不在模型内）。
-
 Caveats（K1 口径）
 ------------------
 - 曲率空间锚定（起点不搬到锚线上）：横向偏移/航向误差只作特征；偏移修正由残差头学习。
@@ -75,7 +88,9 @@ Caveats（K1 口径）
   高速桶（>12 m/s）无数据 ⇒ 最近桶 + ``a_y`` 外推。
 - 想象步的动态列（dynamic_distance/ttc）与 nav/speed **保持 t0/当前步**；静态距/末端距按
   **路径进度**收缩（近似：不走 lane 坐标系还原）；静态距/末端距的 lane 级精确重算待 H2/H3。
-- R36 L-A 后：``structured`` 模式**默认不再前向旧 ``PolicyHead``**（诊断经 ``set_policy_diag(True)``/``set_path_head_trace(True)`` 恢复）；``action_logstd`` 不再随结构化输出提供（RL 未接线；接线时必须统一均值/方差来源）。
+- R36 L-A 后：``structured`` 模式**不前向旧 ``PolicyHead``**；``action_logstd`` 不随结构化输出提供
+  （RL 未接线；接线时必须统一均值/方差来源）。**R38-P2b**：旧头诊断开关 ``set_policy_diag`` 已
+  fail-fast（离线工具 ``tools/diagnostics/legacy_policy_diag.py``）。
 - R38-P1：一次性 6 步（H1）路径已删除（唯一动作源守则）⇒ 本模块只导出逐步口径
   （``compose_step_action`` + ``aux_preview``）与几何/标定件。
 """
@@ -260,11 +275,13 @@ LONG_EXOG_STRICT_COLUMNS: tuple[int, ...] = (4, 5)
 LONG_HEAD_FEATURE_NAMES: tuple[str, ...] = ("kappa_near",) + LONG_EXOG_FEATURE_NAMES
 LONG_HEAD_NORMALIZATION: tuple[float, ...] = (0.1,) + LONG_EXOG_NORMALIZATION
 
-#: K1 训练 allowlist（与 ``pipeline.trainer.apply_trainable_allowlist`` 同口径）：
-#: - ``path_head.`` = 结构化头的横向/纵向分支 + 几何编码（``compose`` 无参数）；
+#: K1 训练 allowlist（与 ``pipeline.trainer.apply_trainable_allowlist`` 同口径；
+#: R38-P2b 双实体收编后前缀 = ``policy.structured_action.``）：
+#: - ``policy.structured_action.`` = 结构化头的横向/纵向分支 + 几何编码（``compose`` 无参数；
+#:   旧 ``path_head.`` 键面经 ``legacy_key_mapper.PREFIX_RENAME_MAP`` 重映射）；
 #: - ``plan_head.fusion.2.`` = PolicyBackbone 末层（供给 latent）；其余全冻。
 TRAIN_ALLOWLIST_PREFIXES: tuple[str, ...] = (
-    "path_head.",
+    "policy.structured_action.",
     "plan_head.fusion.2.",
 )
 
@@ -1231,3 +1248,63 @@ class StructuredPolicyHead(nn.Module):
             "long_features": long_features,
         }
         return output
+
+    # ------------------------------------------------------------------ R38-P2b 子结构（GPT §七-D）
+    #: ``structured_action`` 子结构：执行动作 + 逐步几何主输出（进 WM/LQR 的唯一动作源相关键）。
+    STRUCTURED_ACTION_KEYS: tuple[str, ...] = (
+        "action",
+        "action_mu",
+        "ds_exec",
+        "dtheta",
+        "kappa_near",
+        "kappa_seg",
+        "ds_clamped",
+        "dtheta_clamped",
+        "speed",
+        "s_ctrl",
+    )
+    #: ``action_distribution`` 子结构：分布口（当前只有均值）。方差来源在 RL 同源接线前
+    #: **不得**由旧 ``PolicyHead`` 的 ``logstd`` 供给（硬约束：均值与方差不得来自两个头）。
+    ACTION_DISTRIBUTION_KEYS: tuple[str, ...] = ("action_mu",)
+    #: ``auxiliary_intent`` 子结构：辅助意图（κ_mid/κ_far、未来 progress/plan 预览；不进 LQR）。
+    AUXILIARY_INTENT_KEYS: tuple[str, ...] = (
+        "kappa_mid",
+        "kappa_far",
+        "aux_plan",
+        "aux_progress",
+        "progress_aux",
+        "plan_aux",
+        "target_lane_valid",
+    )
+
+    def output_groups(self, outputs: Mapping[str, Tensor]) -> dict[str, dict[str, Tensor]]:
+        """头输出 → ``model.policy`` 单实体三子结构分组（R38-P2b 收编；GPT §七-D）。
+
+        平铺输出键集**不变**（forward 契约零改动）；本方法给逐组的只读视图：
+        ``{"structured_action": {...}, "action_distribution": {...}, "auxiliary_intent": {...}}``。
+        缺键跳过（如 ``kappa_seg`` 在旧口径下不在输出中）。
+        """
+        groups: dict[str, dict[str, Tensor]] = {}
+        for name, keys in (
+            ("structured_action", self.STRUCTURED_ACTION_KEYS),
+            ("action_distribution", self.ACTION_DISTRIBUTION_KEYS),
+            ("auxiliary_intent", self.AUXILIARY_INTENT_KEYS),
+        ):
+            groups[name] = {key: outputs[key] for key in keys if key in outputs}
+        return groups
+
+    def action_distribution(
+        self, outputs: Mapping[str, Tensor], *, request_log_std: bool = False
+    ) -> dict[str, Tensor]:
+        """分布口（均值/方差**同源**前的单一口）：默认只给均值 ``action_mu``。
+
+        ``request_log_std=True`` ⇒ ``NotImplementedError`` fail-fast：结构化头尚未产出方差，
+        且**硬约束**为"均值与方差不得来自两个头"（不得回退到旧 ``PolicyHead.logstd``）。
+        """
+        if request_log_std:
+            raise NotImplementedError(
+                "结构化头的 action_distribution 尚无同源 log_std（RL 未接线）："
+                "均值与方差不得来自两个头（R36 L-A 硬约束）；接线前请用离线诊断工具。"
+            )
+        return {key: outputs[key] for key in self.ACTION_DISTRIBUTION_KEYS if key in outputs}
+

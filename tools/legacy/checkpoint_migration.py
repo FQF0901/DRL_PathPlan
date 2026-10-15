@@ -3,13 +3,16 @@
 职责边界（硬约束）：
 1. **只在装载路径被调用**：``net/`` 的 forward/rollout 不得 import 本模块；
 2. **默认 fail-fast 不变**：未登记 unexpected / missing → 默认拒绝（``LoadError``）；
-   本层只把**已登记族**（``legacy_key_mapper.IGNORE_PREFIXES``）从 unexpected 里移走，
-   并逐族计数（``dropped_by_family``）；
+   本层只把**已登记族**（``legacy_key_mapper.IGNORE_PREFIXES``）与**已登记改名族**
+   （精确 ``RENAME_MAP`` + 前缀 ``PREFIX_RENAME_MAP``，目标键存在时）从 unexpected 里移走，
+   并逐族计数（``dropped_by_family`` / ``renamed_by_family``）；
 3. **不参与 forward**：装载后模型输入/输出键集合与"干净加载"路径逐位一致；
 4. 逃生门 ``on_partial="record"`` 必须显式给出，报告含 ``explicit_escape=True``。
 
-当前接入状态（R38-P2a）：**模块与单测就位、loader 尚未接线**（eval_runner/trainer 的既有
-fail-fast 行为零改动；接线属 D 组/后续清洗波，见 ``p2a_report.md`` ④）。
+当前接入状态（R38-P2a/P2b）：**模块与单测就位、pipeline loader 尚未接线**（eval_runner/trainer 的既有
+fail-fast 行为零改动）。R38-P2b 补：改名族（``policy.log_std→policy.logstd`` +
+``path_head.→policy.structured_action.`` 双实体收编）在分类层应用；.slim 评估链的装载调用点
+（``pipeline.trainer.load_checkpoint``）若需读旧 ckpt，可在调用点显式经本模块（见 p2b_report）。
 """
 
 from __future__ import annotations
@@ -32,7 +35,10 @@ class LoadReport:
     n_drop: int = 0
     n_reject: int = 0
     n_missing: int = 0
+    n_rename: int = 0
+    rename_map: Mapping[str, str] = field(default_factory=dict)
     dropped_by_family: Mapping[str, int] = field(default_factory=dict)
+    renamed_by_family: Mapping[str, int] = field(default_factory=dict)
     dropped_keys: tuple[str, ...] = ()
     reject_keys: tuple[str, ...] = ()
     missing_keys: tuple[str, ...] = ()
@@ -49,7 +55,10 @@ class LoadReport:
             "n_drop": self.n_drop,
             "n_reject": self.n_reject,
             "n_missing": self.n_missing,
+            "n_rename": self.n_rename,
+            "rename_map": dict(self.rename_map),
             "dropped_by_family": dict(self.dropped_by_family),
+            "renamed_by_family": dict(self.renamed_by_family),
             "dropped_keys": list(self.dropped_keys),
             "reject_keys": list(self.reject_keys),
             "missing_keys": list(self.missing_keys),
@@ -62,11 +71,20 @@ class LoadReport:
 def migrate_state_dict(
     state: Mapping[str, Any], model_keys: Iterable[str]
 ) -> tuple[dict[str, Any], LoadReport]:
-    """ckpt state_dict → 过滤后 state_dict + 报告（只应用**已登记**丢弃族；纯字典操作）。"""
+    """ckpt state_dict → 过滤后 state_dict + 报告（应用**已登记**丢弃族 + 改名族；纯字典操作）。
+
+    R38-P2b：改名族（``policy.log_std→policy.logstd`` 精确 + ``path_head.→policy.structured_action.``
+    前缀）在目标键存在于模型时应用（键名重写、张量原样）；改名目标缺席（条件族，如默认装配无
+    结构化头）⇒ 该键进 ``dropped`` 并逐族计数（``rename_target_absent``，不静默）。
+    """
     keys = tuple(str(key) for key in model_keys)
     plan = classify_keys(state.keys(), keys)
     drop_set = set(plan.drop)
-    filtered = {key: value for key, value in state.items() if key not in drop_set}
+    filtered: dict[str, Any] = {}
+    for key, value in state.items():
+        if key in drop_set:
+            continue
+        filtered[str(plan.rename.get(key, key))] = value
     report = LoadReport(
         ckpt_keys=len(state),
         model_keys=len(keys),
@@ -74,7 +92,10 @@ def migrate_state_dict(
         n_drop=len(plan.drop),
         n_reject=len(plan.reject),
         n_missing=len(plan.missing),
+        n_rename=len(plan.rename),
+        rename_map=dict(plan.rename),
         dropped_by_family=dict(plan.dropped_by_family),
+        renamed_by_family=dict(plan.renamed_by_family),
         dropped_keys=tuple(plan.drop),
         reject_keys=tuple(plan.reject),
         missing_keys=tuple(plan.missing),
@@ -131,4 +152,41 @@ def load_checkpoint_state(
     return report
 
 
-__all__ = ["LoadError", "LoadReport", "migrate_state_dict", "load_checkpoint_state"]
+def load_checkpoint_migrated(
+    path: str, model: Any, *, strict: bool = False
+) -> dict[str, Any]:
+    """实用装载入口（.slim 评估/训练链调用点）：旧键面经 migration 后装载（R38-P2b）。
+
+    流程：``torch.load`` → ``migrate_state_dict``（已登记族 drop + 改名族 rename）→
+    ``model.load_state_dict(filtered, strict=strict)`` → 返回
+    ``{"meta", "missing_keys", "unexpected_keys", "migration"}``。
+    ``migration`` = :meth:`LoadReport.to_dict`（逐族计数；供调用点落盘/审计）。
+    **注意**：未登记 unexpected 键仍会出现在 ``unexpected_keys``（默认 fail-fast 语义不弱化，
+    由调用点决定拒绝或记录）。
+    """
+    import torch
+
+    payload = torch.load(str(path), map_location="cpu", weights_only=False)
+    state = payload
+    if isinstance(payload, Mapping):
+        for key in ("model", "state_dict", "model_state_dict", "net"):
+            if key in payload and isinstance(payload[key], Mapping):
+                state = payload[key]
+                break
+    filtered, report = migrate_state_dict(state, model.state_dict().keys())
+    missing, unexpected = model.load_state_dict(filtered, strict=bool(strict))
+    return {
+        "meta": dict(payload.get("meta") or {}) if isinstance(payload, Mapping) else {},
+        "missing_keys": list(missing),
+        "unexpected_keys": list(unexpected),
+        "migration": report.to_dict(),
+    }
+
+
+__all__ = [
+    "LoadError",
+    "LoadReport",
+    "load_checkpoint_migrated",
+    "load_checkpoint_state",
+    "migrate_state_dict",
+]

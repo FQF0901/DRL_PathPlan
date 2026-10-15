@@ -182,3 +182,97 @@ def test_real_clean_ckpt_has_no_registered_drops() -> None:
     state = payload["model"] if "model" in payload else payload
     plan = classify_keys(state.keys(), state.keys())
     assert plan.drop == () and plan.reject == () and plan.missing == ()
+
+
+# --------------------------------------------------------------------------- #
+# R38-P2b（D 组双实体收编）：前缀改名 / meta 键 / 装载入口
+# --------------------------------------------------------------------------- #
+_STRUCT_OLD_KEYS = (
+    "path_head.lateral.0.weight",
+    "path_head.lateral.0.bias",
+    "path_head.lateral_geom.normalization",
+)
+_STRUCT_NEW_KEYS = (
+    "policy.structured_action.lateral.0.weight",
+    "policy.structured_action.lateral.0.bias",
+    "policy.structured_action.lateral_geom.normalization",
+)
+
+
+def test_dual_entity_prefix_rename_and_assembly_missing() -> None:
+    from tools.legacy.legacy_key_mapper import PREFIX_RENAME_MAP, renamed_key
+
+    assert PREFIX_RENAME_MAP == (("path_head.", "policy.structured_action."),)
+    assert renamed_key("path_head.lateral.0.weight") == "policy.structured_action.lateral.0.weight"
+
+    plan = classify_keys(_STRUCT_OLD_KEYS, _STRUCT_NEW_KEYS)
+    assert plan.rename == dict(zip(_STRUCT_OLD_KEYS, _STRUCT_NEW_KEYS))
+    assert plan.renamed_by_family == {"path_head.->policy.structured_action.": 3}
+    assert not plan.reject and not plan.drop and not plan.missing
+    assert plan.ok_without_escape
+
+    # 目标装配缺席（默认模型无结构化头）⇒ 条件族 drop + 逐族计数（不静默、不 reject）
+    plain_plan = classify_keys(_STRUCT_OLD_KEYS, ("policy.mu.weight",))
+    assert len(plain_plan.drop) == 3 and not plain_plan.reject
+    assert plain_plan.dropped_by_family == {
+        "path_head.->policy.structured_action.(assembly_missing)": 3
+    }
+    assert plain_plan.reasons["path_head.lateral.0.weight"].startswith("rename_target_absent:")
+
+
+def test_log_std_rename_and_meta_keys() -> None:
+    from tools.legacy.legacy_key_mapper import LEGACY_META_KEYS, classify_meta
+
+    plan = classify_keys(("policy.log_std", "policy.trunk.0.weight"), ("policy.logstd", "policy.trunk.0.weight"))
+    assert plan.rename == {"policy.log_std": "policy.logstd"}
+    assert plan.renamed_by_family == {"policy.log_std->policy.logstd": 1}
+    assert not plan.missing  # 改名目标已计入，不计 missing
+
+    # 目标缺席（当前模型为 policy.logstd.weight/bias，无裸键）⇒ 保持 P2a 口径 = reject（fail-fast）
+    absent = classify_keys(("policy.log_std",), ("policy.logstd.weight", "policy.logstd.bias"))
+    assert absent.reject == ("policy.log_std",)
+    assert absent.reasons["policy.log_std"].startswith("rename_target_absent:")
+
+    assert tuple(LEGACY_META_KEYS) == ("path_head_ablation", "path_head_mode")
+    meta = classify_meta({"path_head_ablation": "oneshot", "path_head_mode": "oneshot", "other": 1})
+    assert meta["oneshot_declared"] is True
+    assert meta["recognized"] == {"path_head_ablation": "oneshot", "path_head_mode": "oneshot"}
+    assert classify_meta({})["oneshot_declared"] is False
+
+
+def test_migrate_state_dict_applies_rename_values() -> None:
+    state = {
+        "path_head.lateral.0.weight": torch.full((2, 2), 3.5),
+        "policy.mu.weight": torch.full((2, 2), 1.0),
+    }
+    filtered, report = migrate_state_dict(state, _STRUCT_NEW_KEYS + ("policy.mu.weight",))
+    assert set(filtered) == {"policy.structured_action.lateral.0.weight", "policy.mu.weight"}
+    assert torch.equal(filtered["policy.structured_action.lateral.0.weight"], torch.full((2, 2), 3.5))
+    assert report.n_rename == 1 and report.rename_map == {
+        "path_head.lateral.0.weight": "policy.structured_action.lateral.0.weight"
+    }
+
+
+def test_load_checkpoint_migrated_round_trip(tmp_path: Path) -> None:
+    from tools.legacy.checkpoint_migration import load_checkpoint_migrated
+
+    class _Toy(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.policy = nn.Module()
+            self.policy.structured_action = nn.Linear(2, 2)
+
+    model = _Toy()
+    new_state = model.state_dict()
+    old_state = {
+        ("path_head." + key[len("policy.structured_action."):]): value.clone()
+        for key, value in new_state.items()
+    }
+    path = tmp_path / "old_struct.pt"
+    torch.save({"model": old_state, "meta": {"path_head_ablation": "structured"}}, path)
+    fresh = _Toy()
+    info = load_checkpoint_migrated(str(path), fresh)
+    assert not info["missing_keys"] and not info["unexpected_keys"]
+    assert info["migration"]["n_rename"] == 2
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, fresh.state_dict()[key]), key

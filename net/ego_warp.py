@@ -1,11 +1,19 @@
 """OD/LD 显式 anchor + ego-motion warp（R36 L-D 最小实现；R37 M1 接入 ``net/model.py`` 主路径）。
 
-依据：GPT ``7dcf6bd`` §四.3/§五 阶段 1（坐标层先行）+ R33-B 已验证口径（``net/model.py``
-``set_ego_warp`` / ``DrivingModel._ego_warp_pose_k``）。本模块**只含纯函数/无状态**：导入无
+依据：GPT ``7dcf6bd`` §四.3/§五 阶段 1（坐标层先行）+ R33-B 已验证口径（旧 ``net/model.py``
+``set_ego_warp`` / ``DrivingModel._ego_warp_pose_k``；legacy 快照 =
+``tools/legacy/legacy_ego_warp.py``）。本模块**只含纯函数/无状态**：导入无
 副作用、无全局状态。R37 M1 集成（GPT ``66497a2`` §三.3/§三.4）后：``DrivingModel`` 的
-``set_ego_warp_mode("analytic")`` 经 :func:`assemble_pose_k`（``w2`` + :func:`od_velocity_t0`
+``set_ego_warp_mode("analytic")`` 经 :func:`assemble_pose_k`（``analytic`` + :func:`od_velocity_t0`
 场景系速度）接管 rollout ``pose_k``；``off``（默认）经 :func:`assemble_pose_k`（``off``）逐位
 等于旧内联分支；5 项 hook / 分项读数由模型侧 ``set_warp_hooks`` / ``set_warp_readout`` 门控。
+
+R38-P2b（C 组减枝）：legacy ``set_ego_warp``（``w1``/``w2``）与 ``_ego_warp_pose_k`` 已从生产
+net 删除（`LEGACY_REPRO`）⇒ :data:`WARP_MODES` 收为 ``("off", "analytic")``，``w1`` 路径不再
+存在（``ValueError`` fail-fast）；旧 ``w2`` 的 op 序 = 现 ``analytic``（仅速度入参语义不同：
+w2 旧口径用通道相对速度，analytic 用 t0 场景系速度）。w1/w2 的**逐位参照物**已冻结在
+``tests/fixtures/r38_p2b_warp/``（生成器 ``.slim/deepwork/p1_v2/round38/p2b_oracle_freeze.py``），
+legacy 快照见 ``tools/legacy/legacy_ego_warp.py``。
 
 语义（与 R33-B **逐位**一致；等价性单测见 ``.slim/deepwork/p1_v2/round36/d1_ego_warp_tests.py``）
 ----------------------------------------------------------------------------------------
@@ -17,7 +25,8 @@
   **``v`` 必须是对象在 t0（场景）系的速度**——即 ``od`` 通道的**相对速度 + ego t0 速度**（见
   :func:`od_velocity_t0`）：warp 把 t0 系当作**静态场景**（LD 静态锚成立的前提），因此节点自身
   运动要按世界速度推进；直接用通道相对速度会把 ego 自身位移重复扣一次（本仓 round34 录制实测
-  同速前车系统性偏移 ≈ ``|Δp|``：P50 0.98 m / P90 1.95 m，正确口径 P50 0.05 m / P90 0.43 m）。
+  同速前车系统性偏移 ≈ ``|Δp|``：P50 0.98 m / P90 1.95 m，正确口径 P50 0.05 m / P90 0.43 m。
+  旧 w2 即"相对速度推进"口径，R38-P2b 起不再存在于本模块；逐位期望见 fixture）。
   注：``mode="off"``（生产路径）把 t0 系当作**随体（body）坐标系**消费，那里 ``v_rel`` 先验才是
   正确的漂移模型（同速对象保持随体坐标），两种口径不可混用；
 - **整图等价**：同一刚体变换施加于 ego/OD/LD 全部节点 ⇒ ego 节点恒 ``(0,0,0)``；任意两节点
@@ -89,9 +98,9 @@ __all__ = [
 #: anchor schema 版本（本模块局部标识；与 obs ``schema_version`` / 录制 schema 独立）
 ANCHOR_SCHEMA_VERSION = "r36d.anchor.v1"
 
-#: 图位姿组装模式：``off``（现状 = R33-B 改动前口径）/ ``w1``（LD 静止锚逆变换，OD 不带恒速
-#: 先验）/ ``w2``（w1 + OD 恒速先验 = ``off`` 整图的 ego_k 系重表达）。
-WARP_MODES: tuple[str, ...] = ("off", "w1", "w2")
+#: 图位姿组装模式（正式接口；R38-P2b 收为两档）：``off``（现状 = R33-B 改动前口径）/
+#: ``analytic``（解析 ego-motion warp = 旧 ``w2`` 的 op 序 + t0 场景系速度先验；w1 已退役）。
+WARP_MODES: tuple[str, ...] = ("off", "analytic")
 
 #: anchor schema ↔ 既有 pose/anchor 契约字段映射（文档化数据；见模块 docstring 表）。
 FIELD_MAP: Mapping[str, Mapping[str, str]] = {
@@ -136,9 +145,13 @@ def warp_pose_t0_to_ego_k(ego_pose: Tensor, pose_t0: Tensor) -> Tensor:
 def warp_pose_k(ego_pose: Tensor, od_pose: Tensor, ld_pose: Tensor) -> Tensor:
     """R33-B ``DrivingModel._ego_warp_pose_k`` 的等价纯函数（ego + OD + LD 同一刚体变换）。
 
+    R38-P2b：模型静态方法 ``_ego_warp_pose_k`` 已退役；逐行快照 =
+    ``tools/legacy/legacy_ego_warp.legacy_ego_warp_pose_k``（两者逐位等价，单测锁定）。
+
     Args:
         ego_pose: ``(B,3)`` 第 k 步 ego 累积位姿（t0 帧）。
-        od_pose: ``(B,S,3)`` **warp 前** OD 位姿（w1: 无恒速先验；w2: 含先验——由调用方决定）。
+        od_pose: ``(B,S,3)`` **warp 前** OD 位姿（legacy ``w1``: 无恒速先验；``analytic``/旧
+            ``w2``: 含先验——由调用方决定）。
         ld_pose: ``(B,L,3)`` warp 前 LD 位姿（t0 静止）。
 
     Returns:
@@ -151,7 +164,7 @@ def warp_pose_k(ego_pose: Tensor, od_pose: Tensor, ld_pose: Tensor) -> Tensor:
 
 
 # --------------------------------------------------------------------------- #
-# OD：恒速先验推进 + 组装（off / w1 / w2）
+# OD：恒速先验推进 + 组装（off / analytic）
 # --------------------------------------------------------------------------- #
 def advance_od_pose(od_pose: Tensor, od_vel: Tensor, dt: float, steps: int = 1) -> Tensor:
     """OD 恒速先验推进（t0 场景系）：``p' = p + v·(steps·dt)``，航向不变。
@@ -196,17 +209,22 @@ def assemble_pose_k(
     dt: float = 0.5,
     steps: int = 1,
 ) -> Tensor:
-    """按 ``mode`` 组装 ``st_gnn`` 图位姿 ``(B,1+S+L,3)``（R33-B 三种口径）。
+    """按 ``mode`` 组装 ``st_gnn`` 图位姿 ``(B,1+S+L,3)``（R33-B 两档口径；R38-P2b 收为 off|analytic）。
 
-    - ``off``（默认；**逐位等于 rollout 现状**）：``[Δp_k, od_t0 + k·dt·v_t0, ld_t0]``（t0 帧）；
-    - ``w1``：``off`` 的整图 ego_k 系重表达，且 OD **不带**恒速先验（t0 静止位姿）；
-    - ``w2``：``off`` 的整图 ego_k 系重表达（OD 含恒速先验）。
+    - ``off``（默认；**逐位等于 rollout 现状**）：``[Δp_k, od_t0 + k·dt·v_t0, ld_t0]``（t0 帧；
+      ``v`` = 调用方传入，生产 = 通道相对速度）；
+    - ``analytic``（R37 M1 主路径；op 序 = 旧 ``w2``）：``off`` 的整图 ego_k 系重表达
+      （OD 含恒速先验；``v`` 应为 **t0 场景系对象速度** :func:`od_velocity_t0`）。
+
+    旧 ``w1``（OD 不带恒速先验的 ego_k 重表达）已退役（R38-P2b，`LEGACY_REPRO`）：
+    传入 ``w1`` ⇒ ``ValueError`` fail-fast；逐位参照见 ``tests/fixtures/r38_p2b_warp/``，
+    纯函数快照见 ``tools/legacy/legacy_ego_warp.py``。
 
     Args:
         ego_pose: ``(B,3)`` 第 k 步 ego 累积位姿（t0 帧）= ``(Δp_k, Δθ_k)``。
         od_pose_t0/ld_pose_t0: ``(B,S,3)/(B,L,3)`` t0 帧节点位姿。
         od_vel: ``(B,S,2)`` 恒速先验速度（**off**：守卫生产路径 bit-exact ⇒ 传 od 通道的相对速度
-            ``od_now[..., 2:4] * od_live``；**w1/w2**：warp 把 t0 系当静态场景 ⇒ 应传 t0 场景系
+            ``od_now[..., 2:4] * od_live``；**analytic**：warp 把 t0 系当静态场景 ⇒ 传 t0 场景系
             对象速度 :func:`od_velocity_t0`）。
         dt/steps: 步长 [s] / 步数 k（``off`` 的先验视界 = ``steps·dt``）。
     """
@@ -216,14 +234,17 @@ def assemble_pose_k(
             [ego_pose.unsqueeze(1), advance_od_pose(od_pose_t0, od_vel, dt, steps), ld_pose_t0],
             dim=1,
         )
-    od_pose_pre = od_pose_t0 if mode == "w1" else advance_od_pose(od_pose_t0, od_vel, dt, steps)
+    od_pose_pre = advance_od_pose(od_pose_t0, od_vel, dt, steps)
     return warp_pose_k(ego_pose, od_pose_pre, ld_pose_t0)
 
 
 def _check_mode(mode: str) -> str:
     mode = str(mode).lower()
     if mode not in WARP_MODES:
-        raise ValueError(f"未知 warp mode={mode!r}（off | w1 | w2）")
+        raise ValueError(
+            f"未知 warp mode={mode!r}（off | analytic）；legacy w1/w2 已退役（R38-P2b）——"
+            "逐位参照 = tests/fixtures/r38_p2b_warp/，纯函数快照 = tools/legacy/legacy_ego_warp.py"
+        )
     return mode
 
 

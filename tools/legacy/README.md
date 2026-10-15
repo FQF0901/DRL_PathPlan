@@ -13,10 +13,13 @@ tools/venv-python -m tools.legacy.oneshot_path
 # 单测
 tools/venv-python -m pytest tests/test_legacy_oneshot_path.py -q
 tools/venv-python -m pytest tests/test_legacy_k_anchor.py -q      # R38-P2a K-anchor 快照
-tools/venv-python -m pytest tests/test_legacy_key_mapper.py -q    # R38-P2a 旧 ckpt 键映射
+tools/venv-python -m pytest tests/test_legacy_key_mapper.py -q    # R38-P2a/P2b 旧 ckpt 键映射
+tools/venv-python -m pytest tests/test_r38_p2b_warp_legacy_removed.py -q   # R38-P2b warp 快照
+tools/venv-python -m pytest tests/test_r38_p2b_policy_fold.py -q           # R38-P2b 双实体收编
 
 # 历史复现需旧 net（模型内 oneshot 诊断臂）
 git worktree add /tmp/old_net 74f0bd4     # 或 git show 74f0bd4:net/path_head.py
+git worktree add /tmp/legacy_net dd0a8c2  # R38-P2b：legacy set_ego_warp(w1/w2) 整臂复现
 ```
 
 ## 清单
@@ -25,8 +28,10 @@ git worktree add /tmp/old_net 74f0bd4     # 或 git show 74f0bd4:net/path_head.p
 | --- | --- | --- | --- |
 | `oneshot_path.py` | `compose_path_plan` (`net/path_head.py:641-702`)、`one_shot_plan` (`:1053-1054`)、`forward(one_shot=True)` 叠加块 (`:1288-1305`)、`plan_override` 钉住尾段 (`net/model.py:1911-1916`)、装载守卫 (`net/model.py:986-993`)、`_integrate_kappa` (`:549-572`)、`replay_plan`+圆弧数学 (`:575-601` / `net/model.py:226-247`) | `ARCHITECTURE_FORBIDDEN`（`docs/deprecation_manifest.yaml` A 组：唯一动作源 + 每步单动作；一次性六步 = 第二轨迹生成器） | 快照自包含（仅 torch）可直接复算 6 步 plan；**模型内** 复现需删除前 net（`74f0bd4`） |
 | `k_anchor/`（`anchor.py` / `plan_head.py` / `fit_plan_anchors.py` / `plan_anchors_k6.json`） | `net/anchor.py` 整文件（371 行）、`net/plan_head.py` 锚分支（`num_anchors`/`set_anchors`/`plan_anchors`/锚 buffer）、`tools/fit_plan_anchors.py`、`config/plan_anchors_k6.json` | `LEGACY_REPRO`（B 组：K-anchor 长期关闭 + 独立计划候选；旧 ckpt 键经 `legacy_key_mapper` 忽略） | `anchor.py` 自包含；`plan_head.py` 需当前 `net/encoders.py`+`net/moe.py`；**模型内**复现需删除前 net（`9577078`）。详见 `k_anchor/README.md` |
-| `legacy_key_mapper.py` | 旧 ckpt 键面三档分类（`IGNORE_PREFIXES` = B 组 20 键；`classify_keys`） | `CHECKPOINT_ONLY`（契约 §4.2/§5；`docs/deprecation_manifest.yaml` B 组第 10 项） | 纯函数（无 torch/IO）；B 组 ignore 集 + 预留 rename/init 接口 |
-| `checkpoint_migration.py` | 最小装载入口（`migrate_state_dict`/`load_checkpoint_state`；默认 fail-fast 不变） | 同上（契约 §5 硬约束 1-4） | 未接线（loader 接入属 D 组）；单测 `tests/test_legacy_key_mapper.py` |
+| `legacy_key_mapper.py` | 旧 ckpt 键面分类（`IGNORE_PREFIXES` = B 组 20 键；**R38-P2b 双实体**：`PREFIX_RENAME_MAP` = `path_head.* → policy.structured_action.*`，`RENAME_MAP` = `policy.log_std → policy.logstd`，`LEGACY_META_KEYS` = `path_head_ablation/path_head_mode`；`classify_keys`/`classify_meta`） | `CHECKPOINT_ONLY`（契约 §4.2/§4.4/§5；`docs/deprecation_manifest.yaml` B/D 组） | 纯函数（无 torch/IO）；含 rename/drop/reject 三档 + 条件族（改名目标缺席）逐族计数 |
+| `checkpoint_migration.py` | 最小装载入口（`migrate_state_dict`/`load_checkpoint_state`；默认 fail-fast 不变；R38-P2b 起应用改名族） | 同上（契约 §5 硬约束 1-4） | pipeline loader 仍**未接线**（.slim 评估链可在调用点显式使用）；单测 `tests/test_legacy_key_mapper.py` |
+| `legacy_ego_warp.py` | `set_ego_warp`（w1/w2 模式 setter，`net/model.py:593-628`@dd0a8c2）、`_ego_warp_pose_k`（`:697-717`）、`assemble_pose_k` w1/w2 口径（`net/ego_warp.py:189-227`@dd0a8c2） | `LEGACY_REPRO`（C 组：w1/w2 = 历史 warp 实验口径；R37 M1 正式接口 = `set_ego_warp_mode(off\|analytic)`） | 纯函数自包含（仅 torch）；**逐位参照物 = `tests/fixtures/r38_p2b_warp/`**（m1_gate_a/b_warp_compat/d1_ego_warp_tests 改读 fixture）；模型内整臂复现需删除前 net（`dd0a8c2`） |
+| `legacy_policy.py` | 旧 `PolicyHead`/`ValueHead`/`CrossAttnHead` 整模块（`net/policy.py`@dd0a8c2；唯一改动 = `H` 本地化） | D 组"旧 PolicyHead 迁 legacy 模型加载器"落点（正式 net 仍保留 `net/policy.py` 供默认关路径前向） | 自包含（仅 torch）；消费 = 离线诊断 `tools/diagnostics/legacy_policy_diag.py`（`--legacy-ckpt` 独立复算）/ 旧 ckpt `policy.*` 键面审计 |
 
 ## 纪律
 

@@ -45,11 +45,13 @@ v8 增补（参数再分配 + lane/ttc 移除 + WM latent 重构）
   smooth_l1，见 ``pipeline.trainer.weighted_latent_consistency_loss``）；物理小解码与
   presence/entry/ego_next 为辅助/诊断项。
 
-Round-36 K1（结构化动作生成器；默认关）
----------------------------------------
+Round-36 K1（结构化动作生成器；默认关）＋ R38-P2b 双实体收编
+-----------------------------------------------------------
 - ``set_path_head(True)`` 惰性构造 :class:`net.path_head.StructuredPolicyHead`
   （**唯一动作生成器的结构化形式**：``lateral`` 分支 + ``longitudinal`` 分支 + ``compose``
-  确定性几何层）；**默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致**
+  确定性几何层），收编后注册为 ``self.policy.structured_action``（键面
+  ``policy.structured_action.*``；旧 ``path_head.*`` 键经 ``legacy_key_mapper`` 重映射）；
+  **默认关 ⇒ 键集/前向/RNG 与 HEAD 逐位一致**
   （Gate 0 自证：``.slim/deepwork/p1_v2/round36/k1_contract_gate.py``）。
 - **每步调用**：``_rollout`` 每步用当前 ``z_k`` 调**同一**头 → ``a_k=(ds_k, κ_near_k·ds_k)``
   → ``st_gnn`` 推进一步 → 同一头重算；6 步 ``plan`` 由逐步动作**组装**（``plan[:,0]==action_mu``
@@ -57,22 +59,29 @@ Round-36 K1（结构化动作生成器；默认关）
   由 t0 静态地图 + 想象位姿确定性重算（:func:`net.path_head.step_geometry`）。
 - 启用后输入契约：``obs['lane_anchor_xy'] (B,P,2)``（给定目标车道中心线折线，ego t0 系；
   可选 ``lane_anchor_mask``）；外源几何键 ``path_*`` 可选（缺省 0 且 presence 掩码随输出返回）。
-- 消融脚手架 ``set_path_head_ablation``：``policy``①/``structured``②（默认，生产）；③ 一次性
-  六步诊断臂（H1）已于 R38-P1 删除（`ARCHITECTURE_FORBIDDEN`：唯一动作源 + 每步单动作），
-  写入该模式名即 fail-fast，历史复现看 ``tools/legacy/oneshot_path.py``；``action_generator_names()``
-  给「生成器数 = 1」静态断言入口。cheap path 无 WM ⇒ ``plan`` 仅为辅助预览（``plan_from_aux=1``），
+- **R38-P2b 收编口径**：``model.policy`` 单实体（GPT §七-D）——``structured_action`` 子结构 =
+  结构化头；动作分布 / 辅助意图为头部**输出分组**（``StructuredPolicyHead.output_groups``；
+  ``action_distribution`` 的 ``log_std`` 在 RL 同源方差接线前 fail-fast，均值与方差不得来自两个头）。
+  ``enable_path_head`` 镜像属性与 ``path_head_ablation`` 模式枚举**已删除**；``path_head`` 兼容
+  只读 alias、``set_path_head_ablation`` 降为 legacy 诊断入口（``policy``/``structured`` 两档，
+  ③ 一次性六步臂 R38-P1 已删，写入即 fail-fast，历史复现看 ``tools/legacy/oneshot_path.py``）；
+  ``action_generator_names()`` 给「生成器数 = 1」静态断言入口（structured ⇒
+  ``("policy.structured_action",)``）。cheap path 无 WM ⇒ ``plan`` 仅为辅助预览（``plan_from_aux=1``），
   生产 LQR 参考走 ``rollout=True``。
 - ``set_target_lane_dropout(p)``：训练期 target-lane token dropout（20%→50% 斜坡由训练侧调度；
   默认 0 = 关；``p=0`` 不消耗 RNG；仅 ``model.training`` 且存在 target token（semantic 模式）时生效）。
 
-Round-36 L-A（架构硬化：旧头消歧 + 一次性六步守卫）
---------------------------------------------------
+Round-36 L-A（架构硬化：旧头消歧 + 一次性六步守卫；R38-P2b 收编后）
+------------------------------------------------------------------
 - **旧头消歧**（GPT ``0912cb9`` 批评 #1）：``path_head_mode() == "structured"`` 时 ``forward``
-  **不再前向旧 ``PolicyHead``** —— 同一 forward 只有一个动作源（结构化头），旧头输出
+  **不前向旧 ``PolicyHead``** —— 同一 forward 只有一个动作源（结构化头），旧头输出
   （``policy_action_mu`` 诊断）与 ``action_logstd`` **从输出 dict 中移除**（显式 KeyError 优于
-  静默 NaN）。显式诊断开关 ``set_policy_diag(True)``（或 ``set_path_head_trace(True)``）恢复
-  旧头前向，产出与改动前逐位一致的 ``policy_action_mu`` / ``action_logstd``。``action_logstd``
-  来源 = 旧 ``PolicyHead``（**RL 未接线**：方差来源与 ``action_mu`` 不同源，RL 接线前必须统一）。
+  静默 NaN）。``action_logstd`` 来源 = 旧 ``PolicyHead``（**RL 未接线**：方差来源与
+  ``action_mu`` 不同源，RL 接线前必须统一）。
+- **R38-P2b：旧头诊断离线化**（`LEGACY_REPRO`）：``set_policy_diag`` 已 fail-fast（
+  ``RuntimeError``，指路 ``tools/diagnostics/legacy_policy_diag.py``）；``set_path_head_trace``
+  只记 trace、不再恢复旧头前向；正式 forward **只保留一个动作出口**（structured ⇒ 结构化头 /
+  默认关 ⇒ 旧头），不在主 forward 并行计算旧头诊断。
 - **一次性六步路径已删除**（R38-P1 减枝；= 原 L-A 守卫的 ③ 诊断臂）：该路径是第二个六步轨迹
   生成器（绕过一个决策步一次头调用）⇒ `ARCHITECTURE_FORBIDDEN`；实现迁
   ``tools/legacy/oneshot_path.py``，模式名写入 ``set_path_head_ablation`` 即 ``ValueError``
@@ -87,12 +96,15 @@ Round-36 L-A（架构硬化：旧头消歧 + 一次性六步守卫）
 Round-37 M1（warp 主路径接入 + OD 速度语义修正 + 五项 hook + 分项读数；默认全关）
 ------------------------------------------------------------------------------------
 - ``set_ego_warp_mode("off"|"analytic")``（默认 ``off``）：``analytic`` 时 rollout ``pose_k``
-  构造走 :func:`net.ego_warp.assemble_pose_k` ``w2``——t0 系当**静态场景**，OD 先验速度必须是
-  **t0 场景系对象速度** ``v_OD = v_rel + v_ego``（:func:`net.ego_warp.od_velocity_t0`；
-  ``v_ego = enc.ego_now[..., 0]``），LD 静止锚做 ego SE(2) 逆变换；整图重表达进 ego_k 帧
-  （ego 槽恒 ``(0,0,0)``）。**禁止**用相对速度推进后再扣自车运动（重复扣 ``|Δp|`` 的集成错误）。
-  ``off`` 经同一函数（``mode="off"``，相对速度=随体坐标语义）逐位复现旧内联分支；遗留实验
-  开关 ``set_ego_warp``（``w1``/``w2``）保留（与 ``analytic`` 互斥，见 setter）。
+  构造走 :func:`net.ego_warp.assemble_pose_k` ``analytic``（op 序 = 旧 ``w2`` 口径）——t0 系当
+  **静态场景**，OD 先验速度必须是 **t0 场景系对象速度** ``v_OD = v_rel + v_ego``
+  （:func:`net.ego_warp.od_velocity_t0`；``v_ego = enc.ego_now[..., 0]``），LD 静止锚做 ego
+  SE(2) 逆变换；整图重表达进 ego_k 帧（ego 槽恒 ``(0,0,0)``）。**禁止**用相对速度推进后再扣
+  自车运动（重复扣 ``|Δp|`` 的集成错误）。``off`` 经同一函数（``mode="off"``，相对速度=随体
+  坐标语义）逐位复现旧内联分支。**R38-P2b**：legacy 实验开关 ``set_ego_warp``（``w1``/``w2``）
+  已删除（`LEGACY_REPRO`；生产 net 只有一套 warp 状态机）——逐位参照物 = 
+  ``tests/fixtures/r38_p2b_warp/``（生成器 ``round38/p2b_oracle_freeze.py``），legacy 纯函数
+  快照 = ``tools/legacy/legacy_ego_warp.py``；``w1``/``w2`` 模式名一律 ``ValueError`` fail-fast。
 - ``set_warp_hooks(WarpHooks)``（默认 ``None`` = 关）：每步经
   :meth:`net.ego_warp.WarpHooks.capture` 记录 ① ``anchor_pre``（warp 前 t0 帧）/②
   ``anchor_analytic``（ego_k 帧）/③ ``anchor_actual_next``（真实下一帧，由 ``obs`` 提供；缺省
@@ -433,21 +445,19 @@ class DrivingModel(nn.Module):
         #: R32 canary：ego 物理锚开关（普通属性，**不进 state_dict**；默认关）。
         self.enable_ego_phys = False
         # ---- Round-36 K1：StructuredPolicyHead（唯一动作生成器的结构化形式）----
-        # **惰性构造**（``set_path_head``；默认 None ⇒ 不新增参数/键，默认路径逐位不变；
+        # **R38-P2b 双实体收编**：结构化头注册为 ``self.policy.structured_action``（键面
+        # ``policy.structured_action.*``；旧 ``path_head.*`` 经 legacy_key_mapper 重映射）——
+        # 单策略实体 = ``model.policy``（``structured_action`` 子结构；动作分布 / 辅助意图为其
+        # 输出分组，见 ``net.path_head.StructuredPolicyHead.output_groups``）。
+        # **惰性构造**（``set_path_head``；默认不注册/不新增参数 ⇒ 默认路径逐位不变；
         # 构造期保存/恢复 CPU RNG，不扰动既有初始化抽样序列）。
-        # 每步调用：``_rollout`` 用当前 ``z_k`` 调同一实例产出 ``a_k=(ds, κ_near·ds)``；
-        # 旧 ``PolicyHead`` 仅服务默认关路径/消融①（不再是第二动作生成口）。
-        self.path_head: "StructuredPolicyHead | None" = None
-        #: K1 开关镜像属性（普通属性，不进 state_dict）。
-        self.enable_path_head = False
-        #: 消融脚手架模式（``policy`` | ``structured``（默认）；一次性六步臂已删除）。
-        self.path_head_ablation: str = PATH_HEAD_DEFAULT_MODE
-        #: 结构化 rollout 的逐步调用 trace（默认 None = 关；门证据用，不参与前向数值；
-        #: 开启时同时打开旧头诊断前向，见 ``set_policy_diag``）。
+        # 每步调用：``_rollout`` 用当前 ``z_k`` 调同一子模块产出 ``a_k=(ds, κ_near·ds)``；
+        # 旧 ``PolicyHead`` 仅服务默认关路径（不再是第二动作生成口）。
+        #: R36 K1 结构化头启用开关（单状态：``set_path_head``；R38-P2b 删除 ``enable_path_head``
+        #: 镜像属性与 ``path_head_ablation`` 模式枚举）。
+        self._path_head_enabled: bool = False
+        #: 结构化 rollout 的逐步调用 trace（默认 None = 关；门证据用，不参与前向数值）。
         self.path_head_trace: list[dict[str, object]] | None = None
-        #: R36 L-A：旧 ``PolicyHead`` 诊断前向开关（默认 False ⇒ structured **不跑旧头**，
-        #: 不产出 ``policy_action_mu``/``action_logstd``；True 恢复产出，默认关逐位不变）。
-        self.policy_diag_enabled: bool = False
         #: R36 L-A：运行时契约断言开关（**默认开**；仅 structured 模式 + rollout=True；每
         #: forward 常数次整数比较 ⇒ 零可测开销；eval/deploy（``training=False``）违反 ⇒
         #: fail-fast RuntimeError；训练路径只计数落盘（``contract_*`` 输出键）。默认关路径不触碰。
@@ -468,11 +478,9 @@ class DrivingModel(nn.Module):
         self.ld_mode: str = "baseline"
         #: R21-3D：rollout 阶段 semantic 注入口径（``full`` = R21-3A 现状）
         self.rollout_semantic_mode: str = "full"
-        #: R33-B：rollout 图位姿 ego-motion warp 口径（``off`` = 当前实现逐位不变；
-        #: ``w1``/``w2`` = 解析 ego SE(2) 补偿，见 :meth:`set_ego_warp`）。遗留实验开关。
-        self.ego_warp: str = "off"
         #: R37 M1：warp **主路径**口径（``off`` = 逐位不变；``analytic`` = 解析 warp +
-        #: OD t0 场景系速度先验，见 :meth:`set_ego_warp_mode`）。与遗留 ``ego_warp`` 互斥。
+        #: OD t0 场景系速度先验，见 :meth:`set_ego_warp_mode`）。
+        #: R38-P2b：legacy ``ego_warp`` 属性（``w1``/``w2`` 第二状态机）已删除（`LEGACY_REPRO`）。
         self.ego_warp_mode: str = "off"
         #: R37 M1：5 项 warp hook 容器（默认 None ⇒ 零开销；见 :meth:`set_warp_hooks`）。
         self.warp_hooks: WarpHooks | None = None
@@ -590,66 +598,29 @@ class DrivingModel(nn.Module):
         self.rollout_semantic_mode = mode
         return self
 
-    def set_ego_warp(self, mode: str = "off") -> "DrivingModel":
-        """R33-B：rollout 图位姿 **analytic ego-motion warp** 口径（纯推理行为开关，非参数；默认 ``off``）。
-
-        对 ``_rollout`` 第 k 步送入 ``st_gnn`` 的图位姿 ``pose_k`` 施加 ego 累积位姿
-        ``(Δp_k, Δθ_k)`` 的逆刚体变换，把 t0 帧节点位姿**重表达进 ego_k 自车系**：
-
-        ``p' = R(−Δθ)(p − Δp)``、``ψ' = ψ − Δθ``（R = 2×2 旋转矩阵）。**同一变换施加于
-        ego/OD/LD 全部节点**（几何自洽；ego 节点位姿恒为 ``(0,0,0)``）。
-
-        warp **前**的节点位姿（``[ego, OD, LD]``；ego = 累积位姿、OD 见下、LD = t0 静止）：
-
-        - ``off``（默认，逐位等于当前实现）：``[Δp, od_t0 + k·dt·v_t0, ld_t0]``（t0 帧）；
-        - ``w1``（LD anchor 的 ego SE(2) 坐标补偿）：``[Δp, od_t0, ld_t0]``——OD **不带**
-          恒速运动先验（t0 静止位姿），LD 锚点静止；
-        - ``w2``（``w1`` + OD 恒速运动先验）：``[Δp, od_t0 + k·dt·v_t0, ld_t0]``。
-
-        **等价形式**：记 ``T_k = (Δp_k, Δθ_k)``，``off`` 的图位姿 = ``T_k`` 作用在 ``w2``
-        位姿上（即 ``w2`` = 把 ``off`` 的整张图重表达进 ego_k 帧；``w1`` = 再去掉 OD
-        先验）。变换下任意两节点的相对位移旋转 ``R(−Δθ)``、相对航向平移 ``−Δθ``，距离
-        不变——故 warp 改变的是边特征 ``[Δx/scale, Δy/scale, cosΔθ, sinΔθ, ‖Δp‖/scale]``
-        中的**坐标系分量**。warp 只改图位姿（``st_gnn`` 输入）；``traj_xy/traj_theta/plan``
-        输出仍为 t0 帧累积位姿口径（动作/位姿链契约不变；轨迹输出不随 warp 重表达）。
-
-        ``off`` ⇒ 前向逐位等于改动前实现（Gate 0 自证：round33 ``b_warp_compat.py``，
-        ``max|Δ| = 0``）。
-        """
-        mode = str(mode).lower()
-        if mode not in ("off", "w1", "w2"):
-            raise ValueError(f"未知 ego_warp={mode!r}（off | w1 | w2）")
-        if mode in ("w1", "w2") and self.ego_warp_mode == "analytic":
-            raise ValueError(
-                "ego_warp='w1'|'w2' 与 ego_warp_mode='analytic' 互斥（w2 旧口径用通道相对速度"
-                "推进，analytic 用 t0 场景系速度）；请先 set_ego_warp_mode('off')。"
-            )
-        self.ego_warp = mode
-        return self
-
     def set_ego_warp_mode(self, mode: str = "off") -> "DrivingModel":
         """R37 M1：warp **主路径**口径（纯推理行为开关，非参数；默认 ``off`` = 逐位不变）。
 
         - ``off``（默认）：rollout 图位姿 = 现行 t0 帧口径（OD 先验用通道**相对速度** =
           随体坐标语义）——经 :func:`net.ego_warp.assemble_pose_k` ``mode="off"`` 逐位复现旧
           内联分支；
-        - ``analytic``：解析 ego-motion warp（``assemble_pose_k`` ``w2``）——t0 系当**静态
-          场景**，OD 先验速度 = **t0 场景系对象速度** ``v_OD = v_rel + v_ego``
+        - ``analytic``：解析 ego-motion warp（``assemble_pose_k`` ``analytic``；op 序 = 旧 ``w2``）
+          ——t0 系当**静态场景**，OD 先验速度 = **t0 场景系对象速度** ``v_OD = v_rel + v_ego``
           （:func:`net.ego_warp.od_velocity_t0`；``v_ego = enc.ego_now[..., 0]`` 沿自车 x 轴），
           LD 静止锚做 ego SE(2) 逆变换，整图重表达进 ego_k 帧（ego 槽恒 ``(0,0,0)``）。
           **禁止**用相对速度推进后再扣自车运动（系统性重复扣 ``|Δp|``；R36 L-D 实测同速前车
           P90 1.95 m → 0.43 m）。几何自洽不变量：任意两节点距离/相对航向不变。
 
-        与遗留实验开关 :meth:`set_ego_warp`（``w1``/``w2``；w2 的 OD 先验是相对速度旧口径）
-        互斥：同时设非默认值 ⇒ ``ValueError``（两种速度口径不可混用）。
+        R38-P2b：legacy ``set_ego_warp``（``w1``/``w2``）已删除（`LEGACY_REPRO`）——生产 net
+        只有这一套 warp 状态机；传入 ``w1``/``w2`` ⇒ ``ValueError`` fail-fast，逐位参照物 =
+        ``tests/fixtures/r38_p2b_warp/``（legacy 纯函数快照 = ``tools/legacy/legacy_ego_warp.py``）。
         """
         mode = str(mode).lower()
         if mode not in ("off", "analytic"):
-            raise ValueError(f"未知 ego_warp_mode={mode!r}（off | analytic）")
-        if mode == "analytic" and self.ego_warp != "off":
             raise ValueError(
-                f"ego_warp_mode='analytic' 与遗留 ego_warp={self.ego_warp!r} 互斥"
-                "（w1/w2 旧口径用通道相对速度推进）；请先 set_ego_warp('off')。"
+                f"未知 ego_warp_mode={mode!r}（off | analytic）；legacy w1/w2 已退役（R38-P2b）"
+                "——逐位参照 = tests/fixtures/r38_p2b_warp/，纯函数快照 = "
+                "tools/legacy/legacy_ego_warp.py"
             )
         self.ego_warp_mode = mode
         return self
@@ -693,28 +664,6 @@ class DrivingModel(nn.Module):
         if probes is not None:
             probes.chain.expected_st_gnn_calls = int(self.rollout_steps)
         return self
-
-    @staticmethod
-    def _ego_warp_pose_k(ego_pose: Tensor, od_pose: Tensor, ld_pose: Tensor) -> Tensor:
-        """R33-B：t0 帧节点位姿 → ego_k 自车系（``p' = R(−Δθ)(p − Δp)``、``ψ' = ψ − Δθ``）。
-
-        ``ego_pose (B,3)`` = 第 k 步 ego 累积位姿（t0 帧；即 warp 的 ``(Δp, Δθ)``）；
-        ``od_pose (B,S,3)`` / ``ld_pose (B,L,3)`` = warp 前的 OD/LD t0 帧位姿（w1: OD 无
-        恒速先验；w2: OD 含先验——由调用方决定）。返回 ``(B,1+S+L,3)``；ego 节点为同一
-        刚体变换作用后的 ``(0,0,0)``（与"对 ego/OD/LD 施加同一变换"自洽）。
-
-        R37 M1：rollout 已改经 :func:`net.ego_warp.assemble_pose_k`（同 op 序 ⇒ 逐位等价；
-        R36 L-D pre-hook 门 18/18 验证）；本静态方法保留为逐位等价参照（单测消费）。
-        """
-        slots = torch.cat([od_pose, ld_pose], dim=1)
-        dtheta = ego_pose[:, 2:3]
-        cos_t, sin_t = torch.cos(dtheta), torch.sin(dtheta)
-        rel = slots[..., :2] - ego_pose[:, None, :2]
-        x = cos_t * rel[..., 0] + sin_t * rel[..., 1]
-        y = -sin_t * rel[..., 0] + cos_t * rel[..., 1]
-        theta = wrap_angle(slots[..., 2] - dtheta)
-        ego_zero = torch.zeros_like(ego_pose)
-        return torch.cat([ego_zero.unsqueeze(1), torch.stack([x, y, theta], dim=-1)], dim=1)
 
     #: ``static_role_only`` 下 rollout 后段置零的**动态**语义特征索引
     #: （lat/heading/margins/distance_to_lane_end/distance_to_target_lane_end）。
@@ -911,6 +860,17 @@ class DrivingModel(nn.Module):
         return self
 
     # ---------------------------------------------------------------- R36 K1 开关
+    @property
+    def path_head(self) -> "StructuredPolicyHead | None":
+        """R38-P2b 兼容别名（只读）：结构化头 = ``self.policy.structured_action``（收编后单实体）。
+
+        旧 ``path_head.*`` 键面已 fold 到 ``policy.structured_action.*``（legacy_key_mapper
+        负责旧 ckpt 键名重映射）。本属性保留为**读访问**迁移 alias（.slim 评估链 / probes /
+        测试）；写入（``model.path_head = ...``）⇒ ``AttributeError`` fail-fast——装配必须经
+        :meth:`set_path_head`（构造参数），不再有第二实体开关。
+        """
+        return self.policy._modules.get("structured_action")  # type: ignore[return-value]
+
     def set_path_head(
         self,
         enabled: bool = True,
@@ -921,47 +881,54 @@ class DrivingModel(nn.Module):
         """Round-36 K1：``StructuredPolicyHead`` 开关（**惰性构造**；默认关 = 与 HEAD 逐位一致）。
 
         ``enabled=True`` 首次调用才构造 :class:`net.path_head.StructuredPolicyHead`
-        （横向分支 + 纵向分支 + 确定性组合层 + 两个几何特征编码层；``compose`` 无参数）；
+        （横向分支 + 纵向分支 + 确定性组合层 + 两个几何特征编码层；``compose`` 无参数），
+        注册为 ``self.policy.structured_action``（键面 ``policy.structured_action.*``）；
         构造期保存/恢复 CPU RNG ⇒ 不扰动既有初始化抽样序列（同 ``ego_phys`` 口径）。
+
+        R38-P2b：``enable_path_head`` 镜像属性已删除（单状态 = ``self._path_head_enabled`` +
+        ``self.policy.structured_action``）；``mode`` 形参保留走 :meth:`set_path_head_ablation`
+        legacy 入口（``policy``/``structured``）。
 
         启用后 ``forward`` 要求 ``obs['lane_anchor_xy']``（给定目标车道中心线折线），并走
         **逐步调用**口径：``_rollout`` 每步用当前 ``z_k`` 调同一头 → ``a_k=(ds_k, κ_near_k·ds_k)``
         → WM 单步推进 → 同一头重算；6 步 ``plan`` 由逐步动作组装（见
-        ``docs/architecture_contract.md``）。``enabled=False`` 只关闭消费路径（已构造的 head
+        ``docs/architecture_contract.md``）。``enabled=False`` 只关闭消费路径（已构造的头
         参数保留，不进 forward）。
         """
-        self.enable_path_head = bool(enabled)
+        self._path_head_enabled = bool(enabled)
         if mode is not None:
             self.set_path_head_ablation(mode)
-        if enabled and self.path_head is None:
+        if enabled and self.policy._modules.get("structured_action") is None:
             device = next(self.parameters()).device
             rng_state = torch.random.get_rng_state()
-            self.path_head = StructuredPolicyHead(self.hidden, horizon=float(horizon)).to(device)
+            head = StructuredPolicyHead(self.hidden, horizon=float(horizon)).to(device)
+            self.policy.structured_action = head  # type: ignore[assignment]
             torch.random.set_rng_state(rng_state)
         return self
 
     def set_path_head_ablation(
         self, mode: str = PATH_HEAD_DEFAULT_MODE
     ) -> "DrivingModel":
-        """K1 消融脚手架（默认 ``structured``；①② 在同一进程内可切换）：
+        """R38-P2b：**legacy 诊断入口**（原消融脚手架模式枚举已删除；单实体 = ``model.policy``）。
 
-        - ``policy``：① 旧 ``PolicyHead`` + WM 逐步 rollout（= 默认关路径的行为）；
-        - ``structured``：② 结构化头 + WM 逐步 rollout（**生产口径**，默认）。
+        - ``structured``（生产口径）：开启结构化头消费路径（``set_path_head(True)`` 等价；
+          头未构造时仅登记开关，构造仍由 ``set_path_head`` 惰性完成）；
+        - ``policy``（消融①，历史口径）：``set_path_head(False)``（关闭消费路径 = 默认关路径）。
+          注意：R38-P2b 起 structured 模式旧头**永不前向**（诊断已离线化，见
+          :meth:`set_policy_diag`）；``policy`` 只是"不启用结构化头"的历史名称。
 
-        R38-P1 减枝（原 R36 L-A 守卫的 ③）：H1 一次性六步诊断臂**已删除**（第二个六步轨迹
-        生成器，违反「唯一动作源 + 每步单动作」）—— 写入该模式名一律 ``ValueError``
-        fail-fast，**不提供 enable 开关**；历史复现见 ``tools/legacy/oneshot_path.py``。
-        仅影响启用后的消费路径；head 未构造/未启用时无作用（默认关逐位不变）。
+        一次性六步诊断臂（H1）已于 R38-P1 删除（第二个六步轨迹生成器）⇒ 写入该模式名一律
+        ``ValueError`` fail-fast，历史复现见 ``tools/legacy/oneshot_path.py``。
         """
         if mode == "oneshot":
             raise ValueError(
                 "path_head_ablation='oneshot'（H1 一次性六步诊断臂）已在 R38-P1 减枝删除"
-                "（ARCHITECTURE_FORBIDDEN：唯一动作源 + 每步单动作）；仅支持 "
-                "policy | structured。历史复现见 tools/legacy/oneshot_path.py。"
+                "（ARCHITECTURE_FORBIDDEN：唯一动作源 + 每步单动作）；仅支持 policy | structured。"
+                "历史复现见 tools/legacy/oneshot_path.py。"
             )
         if mode not in PATH_HEAD_MODES:
             raise ValueError(f"path head ablation 必须是 {PATH_HEAD_MODES} 之一，收到 {mode!r}")
-        self.path_head_ablation = str(mode)
+        self._path_head_enabled = str(mode) == "structured"
         return self
 
     def set_path_head_trace(self, enabled: bool = True) -> "DrivingModel":
@@ -970,22 +937,24 @@ class DrivingModel(nn.Module):
         开启后 ``forward`` 会重置 ``self.path_head_trace`` 并记录每次头调用
         ``{step, latent, action, ds, kappa_near, wm_calls_before, wm_advance_calls}``
         （step 0 = t0 编码期调用；step k = rollout 第 k 步调用）。默认关 ⇒ 无开销。
-        R36 L-A：trace 开启同时打开旧头诊断前向（R36 契约门 ``policy_action_mu`` 证据依赖），
-        即等价于 ``set_policy_diag(True)``。
+        R38-P2b：trace 不再隐式打开旧头诊断前向（诊断已离线化；见 :meth:`set_policy_diag`）。
         """
         self.path_head_trace = [] if enabled else None
         return self
 
     def set_policy_diag(self, enabled: bool = True) -> "DrivingModel":
-        """R36 L-A：旧 ``PolicyHead`` 诊断前向开关（默认关）。
+        """R38-P2b：旧 ``PolicyHead`` 诊断前向**已离线化**——本入口 fail-fast。
 
-        ``path_head_mode() == "structured"`` 时旧头默认**不再前向**（唯一动作
-        生成器 = 结构化头；输出 dict 无 ``policy_action_mu``/``action_logstd``）。本开关恢复
-        旧头前向以产出这两项诊断（数值与改动前逐位一致）；仅诊断用途（``action_logstd`` RL
-        未接线），``action_mu/plan/traj`` 不受影响（诊断开关不改变任何动作数值）。
+        原语义（R36 L-A）：structured 模式下显式恢复旧头前向以产出 ``policy_action_mu`` /
+        ``action_logstd``（诊断键）。R38-P2b 双实体收编后：正式 forward **只有一个动作出口**
+        （structured ⇒ 结构化头；默认关 ⇒ 旧头），旧头诊断改为离线工具
+        ``tools/diagnostics/legacy_policy_diag.py``（不占主 forward、不并行计算）。
         """
-        self.policy_diag_enabled = bool(enabled)
-        return self
+        raise RuntimeError(
+            "set_policy_diag 已离线化（R38-P2b 双实体收编：正式 forward 只保留一个动作出口）："
+            "旧头诊断请用离线工具 tools/diagnostics/legacy_policy_diag.py "
+            "（policy_action_mu/action_logstd 离线复算，不改变任何前向数值）。"
+        )
 
     def set_contract_asserts(self, enabled: bool = True) -> "DrivingModel":
         """R36 L-A：structured 运行时契约断言开关（**默认开**；GPT ``7dcf6bd`` §四.1/§四.8）。
@@ -1008,18 +977,22 @@ class DrivingModel(nn.Module):
         return self
 
     def path_head_mode(self) -> str:
-        """当前生效的动作生成模式：``policy``（默认关/消融①）| ``structured``（生产）。"""
-        if self.path_head is None or not self.enable_path_head:
+        """当前生效的动作生成模式：``policy``（默认关）| ``structured``（生产）。
+
+        R38-P2b：模式由**派生**得到（``self.policy.structured_action`` 是否构造 +
+        ``_path_head_enabled``）；不再有 ``path_head_ablation`` 模式枚举属性。
+        """
+        if self.policy._modules.get("structured_action") is None or not self._path_head_enabled:
             return "policy"
-        return self.path_head_ablation
+        return "structured"
 
     def action_generator_names(self) -> tuple[str, ...]:
         """动作生成器模块名（架构契约门「生成器数 = 1」的静态断言入口）。
 
-        - ``policy``：``("policy",)``（旧 PolicyHead；默认关路径/消融①）；
-        - ``structured``：``("path_head",)``（同一 ``StructuredPolicyHead`` 实例）。
+        - ``policy``：``("policy",)``（旧 PolicyHead；默认关路径）；
+        - ``structured``：``("policy.structured_action",)``（收编后单实体内的结构化头子结构）。
         """
-        return ("policy",) if self.path_head_mode() == "policy" else ("path_head",)
+        return ("policy",) if self.path_head_mode() == "policy" else ("policy.structured_action",)
 
     def set_target_lane_dropout(self, p: float = 0.0) -> "DrivingModel":
         """训练期 target-lane token dropout 概率（默认 0 = 关；非参数，不进 state_dict）。
@@ -1036,11 +1009,15 @@ class DrivingModel(nn.Module):
         return self
 
     def path_head_parameter_names(self) -> tuple[str, ...]:
-        """path head（惰性构造）新增参数/buffer 名；默认关 → 空元组（旧 ckpt strict 加载不受影响）。"""
-        if self.path_head is None:
+        """path head（惰性构造）新增参数/buffer 名；默认关 → 空元组（旧 ckpt strict 加载不受影响）。
+
+        R38-P2b：键面前缀 = ``policy.structured_action.``（收编后命名空间）。
+        """
+        head = self.policy._modules.get("structured_action")
+        if head is None:
             return ()
-        names = [f"path_head.{name}" for name, _ in self.path_head.named_parameters()]
-        names += [f"path_head.{name}" for name, _ in self.path_head.named_buffers()]
+        names = [f"policy.structured_action.{name}" for name, _ in head.named_parameters()]
+        names += [f"policy.structured_action.{name}" for name, _ in head.named_buffers()]
         return tuple(sorted(names))
 
     # ---------------------------------------------------------------- 输入解析
@@ -1385,7 +1362,8 @@ class DrivingModel(nn.Module):
         # 后不存在一次性六步口径）。
         path_out: dict[str, Tensor] | None = None
         path_ctx: dict[str, Tensor] | None = None
-        if self.path_head is not None and self.enable_path_head and self.path_head_ablation != "policy":
+        path_head = self.path_head
+        if path_head is not None and self._path_head_enabled:
             anchor_xy, anchor_mask = anchor_from_obs(obs)
             long_exog, long_present = long_exog_from_obs(
                 obs, batch=mem.batch, device=latent.device
@@ -1393,7 +1371,7 @@ class DrivingModel(nn.Module):
             target_lane_valid = target_lane_valid_from_obs(
                 obs, batch=mem.batch, device=latent.device
             )
-            path_out = self.path_head(
+            path_out = path_head(
                 latent,
                 anchor_xy=anchor_xy,
                 anchor_mask=anchor_mask,
@@ -1402,7 +1380,7 @@ class DrivingModel(nn.Module):
             )
             if self.contract_asserts_enabled:
                 # R36 L-A 契约①：t0 期头调用实例 id（a0 的来源；rollout 逐步调用同源断言用）
-                self._path_head_call_ids.append(id(self.path_head))
+                self._path_head_call_ids.append(id(path_head))
             if probes_on and probes.policy.enabled:
                 # R38-D1 ②：t0 步头调用（backbone latent / κ / ds,dθ / 辅助 / 输入 valid mask）
                 probes.policy.capture(
@@ -1583,8 +1561,10 @@ class DrivingModel(nn.Module):
         action = action0  # 第 1 个计划动作 = action_mu（与 cheap path 逐位一致）
         # R36 K1：结构化头（默认关 ⇒ None）。生产模式 ``structured`` = 每步调用同一头。
         # R38-P1：H1 一次性六步的尾段钉住分支已删除 ⇒ 不再有第二个动作源。
+        # R38-P2b：结构化头 = ``self.policy.structured_action``（收编后单实体；兼容属性 ``path_head``）。
         path_mode = self.path_head_mode()
-        structured = path_mode == "structured" and self.path_head is not None
+        path_head = self.path_head
+        structured = path_mode == "structured" and path_head is not None
         path_ctx = encoded.get("path_ctx") if isinstance(encoded.get("path_ctx"), dict) else None
         path_out = encoded.get("path")
         if structured and path_ctx is None:
@@ -1668,20 +1648,20 @@ class DrivingModel(nn.Module):
 
             # (b) 图位姿：ego = 累积位姿（detach：WM 输出不回传动作/策略链）；LD 静止。
             #     ego_warp_mode="off"（默认，逐位不变）= assemble_pose_k(off)：现行 t0 帧口径
-            #     （OD 先验 = 通道相对速度，随体语义）；"analytic"（R37 M1）= assemble_pose_k(w2)：
+            #     （OD 先验 = 通道相对速度，随体语义）；"analytic"（R37 M1）= assemble_pose_k(analytic)：
             #     t0 系当静态场景，OD 先验用 **t0 场景系速度** od_velocity_t0（v_rel+v_ego），
             #     整图再重表达进 ego_k 帧（同一刚体变换施加于 ego/OD/LD；ego 恒 (0,0,0)）。
-            #     遗留 R33-B ego_warp=w1/w2（相对速度旧口径）经同一函数复现（L-D pre-hook 门逐位）。
+            #     R38-P2b：legacy w1/w2 第二状态机已删（w1 只存于 fixture/legacy 快照）。
             ego_pose_det = pose.detach()
             if self.ego_warp_mode == "analytic":
                 ego_speed = enc.ego_now[..., 0:1]  # t0 自车速度（沿自身 x 轴）
                 ego_vel_t0 = torch.cat([ego_speed, torch.zeros_like(ego_speed)], dim=-1)
                 # v_OD = v_rel + v_ego（掩码外槽位清零；禁止用相对速度推进后再扣自车运动）
                 od_prior_vel = od_velocity_t0(od_velocity, ego_vel_t0) * od_live.unsqueeze(-1)
-                warp_mode = "w2"
+                warp_mode = "analytic"
             else:
                 od_prior_vel = od_velocity
-                warp_mode = self.ego_warp
+                warp_mode = "off"
             pose_k = assemble_pose_k(
                 ego_pose_det, od_pose_t0, od_prior_vel, ld_pose_t0,
                 mode=warp_mode, dt=self.dt, steps=k,
@@ -1690,13 +1670,10 @@ class DrivingModel(nn.Module):
             if warp_diag:
                 # R37 M1 五项 hook / 分项读数（默认关 ⇒ 零张量操作）：
                 # ① warp 前 anchor（t0 帧；与 pose_k 同一 OD 先验与 ego 累积位姿，仅缺 warp）。
-                if warp_mode == "w1":
-                    anchor_pre = torch.cat([ego_pose_det.unsqueeze(1), od_pose_t0, ld_pose_t0], dim=1)
-                else:
-                    anchor_pre = assemble_pose_k(
-                        ego_pose_det, od_pose_t0, od_prior_vel, ld_pose_t0,
-                        mode="off", dt=self.dt, steps=k,
-                    )
+                anchor_pre = assemble_pose_k(
+                    ego_pose_det, od_pose_t0, od_prior_vel, ld_pose_t0,
+                    mode="off", dt=self.dt, steps=k,
+                )
                 actual_k = None if warp_actual_steps is None else warp_actual_steps[:, k - 1]
                 residual_k = None if warp_residual_steps is None else warp_residual_steps[:, k - 1]
                 if warp_hooks_on:
@@ -1816,7 +1793,7 @@ class DrivingModel(nn.Module):
                         pose.detach(),
                         progress_s,
                     )
-                    step_out = self.path_head(
+                    step_out = path_head(
                         latent,
                         anchor_xy=geometry["anchor_xy"],
                         anchor_mask=geometry["anchor_mask"],
@@ -1824,7 +1801,7 @@ class DrivingModel(nn.Module):
                         target_lane_valid=path_ctx["target_lane_valid"],
                     )
                     if self.contract_asserts_enabled:
-                        self._path_head_call_ids.append(id(self.path_head))
+                        self._path_head_call_ids.append(id(path_head))
                     wm_advance_calls += 1
                     if probes_on and probes.policy.enabled:
                         # R38-D1 ②：逐步头调用（latent = plan 融合 backbone；κ/纵向/辅助/mask）
@@ -1957,14 +1934,14 @@ class DrivingModel(nn.Module):
         MoE 输出口径（lane U1）：``primary + Σ_{i∈top2} g_i·expert_i``，推理与训练一致、
         全场景生效（无硬切/二值门/硬掩码）；phase 1 训练由 ``set_moe(enabled=False)`` 关闭。
 
-        R36 L-A 旧头消歧（键契约）
-        -------------------------
-        - ``path_head_mode() == "policy"``（默认关 / 消融①）：旧 ``PolicyHead`` 前向，
+        R36 L-A 旧头消歧（键契约）＋ R38-P2b 收编
+        ----------------------------------------
+        - ``path_head_mode() == "policy"``（默认关）：旧 ``PolicyHead`` 前向，
           输出 ``action_mu/action_logstd``（默认口径逐位不变）。
-        - ``structured``：旧头**默认不前向**，输出 dict **无** ``policy_action_mu``
-          与 ``action_logstd``（唯一动作源 = 结构化头；需要诊断时显式 ``set_policy_diag(True)``
-          或 ``set_path_head_trace(True)`` 恢复，产出与改动前逐位一致；``action_logstd`` RL
-          未接线）。``path_*`` 辅助键不受影响照常输出。
+        - ``structured``：旧头**不前向**，输出 dict **无** ``policy_action_mu``
+          与 ``action_logstd``（唯一动作源 = 结构化头；旧头诊断已离线化：
+          ``set_policy_diag`` fail-fast，离线工具 ``tools/diagnostics/legacy_policy_diag.py``）。
+          ``path_*`` 辅助键不受影响照常输出。正式 forward 只保留这一个动作出口切换。
         - ``contract_*``（``set_contract_asserts``，默认开；仅 structured + rollout=True）：
           ``contract_policy_instance_ids_are_identical``/``contract_policy_call_count_is_six``/
           ``contract_world_model_call_count_is_five``/
@@ -1984,24 +1961,16 @@ class DrivingModel(nn.Module):
         tokens: Tensor = encoded["tokens"]
         key_mask: Tensor = encoded["key_mask"]
         # A1：策略/价值 = 交叉注意力头（直吃令牌集合；含 plan_head 融合 latent token）
-        # R36 L-A：structured 下旧 PolicyHead 默认**不再前向**（GPT 0912cb9 批评 #1：
-        # 同一 forward 只有一个动作源）；诊断开关（set_policy_diag / set_path_head_trace）
-        # 显式恢复旧头前向以产出 policy_action_mu（诊断）与 action_logstd（RL 未接线）。
-        # 消融①（``policy``）/ 默认关：path_out 为 None ⇒ 与旧行为逐位一致（旧头照常前向）。
+        # R38-P2b：正式 forward **只保留一个动作出口**——structured ⇒ 结构化头（旧 PolicyHead
+        # 不跑；诊断已离线化，见 set_policy_diag / tools/diagnostics/legacy_policy_diag.py）；
+        # 默认关 ⇒ 旧 PolicyHead（默认口径逐位不变）。
         path_out = encoded.get("path")
         path_out = path_out if isinstance(path_out, dict) else None
-        policy_diag = bool(self.policy_diag_enabled) or self.path_head_trace is not None
-        old_head_runs = path_out is None or policy_diag
-        policy_action_mu: Tensor | None = None
         action_logstd: Tensor | None = None
-        if old_head_runs:
+        if path_out is None:
             action_mu, action_logstd = self.policy(tokens, key_mask)
         else:
             action_mu = path_out["action_mu"]  # 旧头未前向 ⇒ 无 logstd 来源（文档化）
-        if path_out is not None and old_head_runs:
-            policy_action_mu = action_mu
-        if path_out is not None:
-            action_mu = path_out["action_mu"]
         out: dict[str, Tensor] = {
             "action_mu": action_mu,
             "value": self.value(tokens, key_mask),
@@ -2011,12 +1980,9 @@ class DrivingModel(nn.Module):
             "ego_next": encoded["ego_next"],
         }
         if action_logstd is not None:
-            # R36 L-A：structured 默认跳过旧头 ⇒ 无 logstd 来源（键不输出，显式失败）。
+            # 默认关路径：旧头提供 logstd（RL 未接线，方差来源与结构化头不同源）。
             out["action_logstd"] = action_logstd
         if path_out is not None:
-            if policy_action_mu is not None:
-                # 旧头诊断（仅诊断开关开启时产出；默认结构化模式无此键）。
-                out["policy_action_mu"] = policy_action_mu
             for path_key, path_value in path_out.items():
                 if torch.is_tensor(path_value):
                     out[f"path_{path_key}"] = path_value

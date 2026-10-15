@@ -340,9 +340,13 @@ def test_grad_ledger_per_step_reachability() -> None:
         entry = ledger["steps"][key]
         assert entry["nonzero_grad_params"] > 0
         prefixes = entry["touched_prefixes"]
-        assert any(p.startswith("path_head.lateral") for p in prefixes)
-        assert any(p.startswith("path_head.longitudinal") for p in prefixes)
+        grads = entry["grad_norms"]
+        # depth=2 前缀 = policy.structured_action / plan_head / encoders / mem_encoder...
+        assert any(p.startswith("policy.structured_action") for p in prefixes)
         assert any(p.startswith(("encoders", "mem_encoder", "plan_head")) for p in prefixes)
+        # 分支级（全名）可达：κ 支 / ds 支
+        assert any(name.startswith("policy.structured_action.lateral") for name in grads)
+        assert any(name.startswith("policy.structured_action.longitudinal") for name in grads)
     assert ledger["update"] is None
     assert ledger["ckpt"]["changed"] is None
     assert state_dict_hash(model) == ckpt_before  # 只读账本不改参数
