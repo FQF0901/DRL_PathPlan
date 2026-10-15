@@ -121,6 +121,21 @@ Round-37 M1（warp 主路径接入 + OD 速度语义修正 + 五项 hook + 分�
 - 默认全关 ⇒ 前向逐位不变（``warp_mode="off"`` 的 ``assemble_pose_k`` 已由 R36 L-D
   pre-hook 门逐位验证；Gate A：M0/cheap/structured/遗留 w1/w2 全输出 ``max|Δ|=0``）。
 
+Round-39 B1（统一 imagined WorldState → PolicyStateView；默认关）
+--------------------------------------------------------------
+- ``set_world_state_api("off"|"analytic"|"analytic_residual")``（默认 ``off``）：
+  ``analytic`` 时 ``_rollout`` 的 k≥1 步由 :class:`net.world_state.WorldState` 统一推进
+  （``A_{k+1} = AnalyticUpdate(A_k, a_k) [+ ΔA_θ]``）并由 :func:`net.world_state.readout`
+  **重算七量**（speed / left·right margin / static / dynamic distance / TTC / route
+  progress / distance-to-end）作为结构化头的几何输入；逐字段 ``source``
+  （``analytic/learned/held/missing``）+ present + producer（唯一写点断言）经
+  ``net.probes.WorldStateHooks``（默认关）落盘；
+- ``analytic_residual`` 追加 ``st_gnn`` 解码残差 ``ΔA_θ = od_pred/ld_pred − 自身先验``
+  （**零新增参数**；解码头未按 A+ΔA 口径训练 ⇒ B2 训练接口面 = ``net.world_state.residual_loss``）；
+- **默认 ``off`` ⇒ plain/structured 前向逐位不变**（d1 双跑证据
+  ``.slim/deepwork/p1_v2/round39/b1_bitwise.json``）；开关只对结构化头生效
+  （非 structured + 非 off ⇒ ``_rollout`` fail-fast）。
+
 动作与运动学
 ------------
 动作 ``(ds, dθ)`` = 下一个 0.5 s 的弧长 + 航向变化；:func:`arc_step` 是 net 内部唯一
@@ -214,6 +229,13 @@ from net.probes import ProbeRecorder
 from net.semantic import SemanticWiring
 from net.spatial import LdAggregate, LdSetAttention, wrap_angle
 from net.st_gnn import SpatioTemporalGNN
+from net.world_state import (
+    WORLD_STATE_API_MODES,
+    WorldState,
+    analytic_update,
+    od_decode_prior,
+    readout,
+)
 
 #: router 监督标签（固定顺序，必须与 config/model.yaml::moe.router.supervised_labels 一致）
 SUPERVISED_LABELS: tuple[str, ...] = (
@@ -573,6 +595,18 @@ class DrivingModel(nn.Module):
         #: R38-D1：§四 ①..⑤ 强制 probes/hooks 统一容器（默认 None = 关 ⇒ 前向逐位一致、
         #: 零开销、不消耗 RNG；只读诊断，不参与数值；见 :meth:`set_probes`）。
         self.probes: ProbeRecorder | None = None
+        #: R39-B1：统一 imagined WorldState → PolicyStateView 开关（``off`` 默认 ⇒ **逐位不变**；
+        #: ``analytic`` = 七量全解析（阻尼 speed + 对象先验 + ego-motion 补偿 + 统一 readout）；
+        #: ``analytic_residual`` = 解析 + ``st_gnn`` 解码残差 ΔA_θ（零新增参数）。见
+        #: :meth:`set_world_state_api` 与 ``net/world_state.py``。
+        self.world_state_api: str = "off"
+        #: R39-B1：speed 阻尼系数 α（``v' = v + α·(ds/dt − v)``；A3 教训：α=1 纯自洽正反馈
+        #: 发散 5.77→6.33 m/s ⇒ 暴露参数供 B2 阻尼/一致性训练）。
+        self.world_state_speed_alpha: float = 1.0
+        #: R39-B1：speed 上限（clamp [0, v_max]；默认 = 动作上界换算 10 m/0.5 s = 20 m/s）。
+        self.world_state_speed_max: float = 20.0
+        #: R39-B1：本 forward 的想象世界状态（``world_state_api != "off"`` 时构造；off = None）。
+        self._world_state: WorldState | None = None
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
@@ -747,6 +781,38 @@ class DrivingModel(nn.Module):
         self.probes = probes
         if probes is not None:
             probes.chain.expected_st_gnn_calls = int(self.rollout_steps)
+        return self
+
+    def set_world_state_api(self, mode: str = "off", *, speed_alpha: float = 1.0,
+                            speed_max: float = 20.0) -> "DrivingModel":
+        """R39-B1：统一 imagined WorldState 开关（**默认 ``off`` ⇒ 前向逐位不变**）。
+
+        ``mode``：
+
+        - ``off``（默认）：``_rollout`` 不构造 WorldState、不 import 触碰 ``net/world_state``
+          运行路径 ⇒ 与 HEAD 逐位一致；
+        - ``analytic``：k≥1 步的 Policy 几何输入由 **WorldState 统一 readout** 给出
+          （七量全解析：阻尼 speed / margin / static / dynamic distance / TTC / route
+          progress / distance-to-end；来源逐字段标注，见 ``net/world_state.py``）；
+        - ``analytic_residual``：在 ``analytic`` 基础上加 ``st_gnn`` 解码残差
+          ΔA_θ = ``od_pred/ld_pred`` − 其自身先验（**零新增参数**；当前解码头未按 A+ΔA
+          口径训练 ⇒ 属 B2 训练接口面）。
+
+        ``speed_alpha`` / ``speed_max``：speed 阻尼解析更新参数（见属性说明）。仅结构化头
+        生效（``path_head_mode=structured``；否则 ``_rollout`` fail-fast）。
+        """
+        if mode not in WORLD_STATE_API_MODES:
+            raise ValueError(
+                f"[world_state] 未知 mode={mode!r}（{' | '.join(WORLD_STATE_API_MODES)}）"
+            )
+        if not 0.0 <= float(speed_alpha) <= 1.0:
+            raise ValueError(f"[world_state] speed_alpha 必须 ∈ [0,1]，收到 {speed_alpha}")
+        if float(speed_max) <= 0.0:
+            raise ValueError(f"[world_state] speed_max 必须 > 0，收到 {speed_max}")
+        self.world_state_api = str(mode)
+        self.world_state_speed_alpha = float(speed_alpha)
+        self.world_state_speed_max = float(speed_max)
+        self._world_state = None
         return self
 
     #: ``static_role_only`` 下 rollout 后段置零的**动态**语义特征索引
@@ -1656,6 +1722,25 @@ class DrivingModel(nn.Module):
                 "structured 模式需要 encode() 产出的 path_ctx（t0 静态几何）；"
                 "_rollout 不应脱离 forward/encode 直接调用"
             )
+        # R39-B1：统一 WorldState 开关（默认 off ⇒ 以下整段短路 / 零张量操作 / 不消耗 RNG）
+        ws_mode = str(self.world_state_api)
+        if ws_mode not in WORLD_STATE_API_MODES:
+            raise ValueError(
+                f"[world_state] world_state_api={ws_mode!r} 非法（{' | '.join(WORLD_STATE_API_MODES)}）"
+            )
+        if ws_mode != "off" and not structured:
+            raise ValueError(
+                f"[world_state] set_world_state_api({ws_mode!r}) 需要结构化头"
+                "（path_head_mode=structured）：统一 readout 是结构化头的几何输入契约"
+            )
+        ws_on = ws_mode != "off"
+        if not ws_on:
+            self._world_state = None
+        ws_hook = (
+            self.probes.world_state
+            if (ws_on and self.probes is not None and self.probes.world_state.enabled)
+            else None
+        )
         progress_s = torch.zeros((mem.batch,), dtype=latent.dtype, device=latent.device)
         kappa_near_steps: list[Tensor] = []
         ds_steps: list[Tensor] = []
@@ -1677,6 +1762,36 @@ class DrivingModel(nn.Module):
         od_pose_t0 = frame.pose[:, 1 : 1 + self.od_slots]
         ld_pose_t0 = frame.pose[:, 1 + self.od_slots :]
         od_velocity = enc.od_now[..., 2:4] * od_live.unsqueeze(-1)  # (B,S,2) t0 相对速度
+
+        # R39-B1：t0 → WorldState（只由真实 t0 编码 + t0 静态地图构造；Imagined Memory
+        # 在此复制 t0 帧，source=real）。默认 off ⇒ 不构造、不触碰 net/world_state 运行路径。
+        ws_od_t0: Tensor | None = None
+        ws_ld_t0: Tensor | None = None
+        ws_view: dict[str, object] | None = None
+        if ws_on:
+            ws_od_t0 = od_anchor
+            ws_ld_t0 = ld_anchor
+            self._world_state = WorldState.t0(
+                ego_speed=enc.ego_now[..., 0],
+                od_anchor=od_anchor,
+                od_feat=enc.od_now,
+                od_latent=z_od,
+                od_valid=od_live,
+                ld_anchor=ld_anchor,
+                ld_latent=z_ld,
+                ld_valid=ld_live,
+                lane_anchor=path_ctx["anchor_xy"],
+                lane_mask=path_ctx["anchor_mask"],
+                lane_target_valid=path_ctx["target_lane_valid"],
+                t0_exog=path_ctx["long_exog"],
+                t0_present=path_ctx["long_present"],
+                dt=self.dt,
+                speed_alpha=self.world_state_speed_alpha,
+                speed_max=self.world_state_speed_max,
+            )
+            if ws_hook is not None:
+                # t0 记录（identity 位姿口径；供 readout 自洽证据：t0 列重算对照）
+                ws_hook.capture(step=0, state=self._world_state, view=readout(self._world_state))
 
         # R37 M1：warp 诊断（5 项 hook + 分项读数；默认全关 ⇒ 零张量操作、不消耗 RNG）
         warp_hooks = self.warp_hooks
@@ -1833,6 +1948,29 @@ class DrivingModel(nn.Module):
             # (d) 状态链切断：预测 latent detach 后作为下一步输入（动作/位姿链不受影响）
             z_ego, z_od, z_ld = z_ego_next.detach(), z_od_next.detach(), z_ld_next.detach()
 
+            # (d2) R39-B1：统一 WorldState 推进（解析 + 可选 ΔA_θ）+ readout（默认 off ⇒ 短路）。
+            #      时序：a_{k-1}（= 本步 action）→ AnalyticUpdate → 第 k 步 readout；
+            #      残差 = st_gnn 本步解码 − 其自身先验（零新增参数；未按 A+ΔA 口径训练 ⇒ B2 面）。
+            if ws_on:
+                od_residual = ld_residual = None
+                if ws_mode == "analytic_residual":
+                    od_residual = od_pred - od_decode_prior(ws_od_t0, step=k, dt=self.dt)
+                    ld_residual = ld_pred - ws_ld_t0
+                analytic_update(
+                    self._world_state,
+                    ds=ds,
+                    dtheta=dtheta,
+                    pose=pose,
+                    z_od=z_od,
+                    z_ld=z_ld,
+                    od_residual=od_residual,
+                    ld_residual=ld_residual,
+                    step=k,
+                )
+                ws_view = readout(self._world_state)
+                if ws_hook is not None:
+                    ws_hook.capture(step=k, state=self._world_state, view=ws_view)
+
             # (e) 下一轮 plan head + 注意力头（最后一步之后不需要）
             if k < self.rollout_steps:
                 semantic = encoded.get("semantic_inputs")
@@ -1869,21 +2007,32 @@ class DrivingModel(nn.Module):
                     # R36 K1（架构契约 §六步调用图）：同一头 + **当前** z_k → 当前步动作
                     #   z_k 来自上一步 WM 推进（上面 (c)）；imagined 步静态几何由 t0 静态地图
                     #   + 想象位姿确定性重算（geometry detach：外源确定性输入）。
-                    geometry = step_geometry(
-                        path_ctx["anchor_xy"],
-                        path_ctx["anchor_mask"],
-                        path_ctx["long_exog"],
-                        path_ctx["long_present"],
-                        pose.detach(),
-                        progress_s,
-                    )
-                    step_out = path_head(
-                        latent,
-                        anchor_xy=geometry["anchor_xy"],
-                        anchor_mask=geometry["anchor_mask"],
-                        long_exog=geometry["long_exog"],
-                        target_lane_valid=path_ctx["target_lane_valid"],
-                    )
+                    #   R39-B1（ws_on）：几何输入 = WorldState 统一 readout（七量全解析 +
+                    #   逐字段 source/present；默认 off 时走原 step_geometry 逐位路径）。
+                    if ws_on:
+                        geometry = ws_view
+                        head_kwargs = {
+                            "anchor_xy": ws_view["anchor_xy"],
+                            "anchor_mask": ws_view["anchor_mask"],
+                            "long_exog": ws_view["long_exog"],
+                            "target_lane_valid": ws_view["target_lane_valid"],
+                        }
+                    else:
+                        geometry = step_geometry(
+                            path_ctx["anchor_xy"],
+                            path_ctx["anchor_mask"],
+                            path_ctx["long_exog"],
+                            path_ctx["long_present"],
+                            pose.detach(),
+                            progress_s,
+                        )
+                        head_kwargs = {
+                            "anchor_xy": geometry["anchor_xy"],
+                            "anchor_mask": geometry["anchor_mask"],
+                            "long_exog": geometry["long_exog"],
+                            "target_lane_valid": path_ctx["target_lane_valid"],
+                        }
+                    step_out = path_head(latent, **head_kwargs)
                     if self.contract_asserts_enabled:
                         self._path_head_call_ids.append(id(path_head))
                     wm_advance_calls += 1
@@ -1944,6 +2093,10 @@ class DrivingModel(nn.Module):
                         encoded.get("target_lane_token"),
                     )
                     action, _ = self.policy(tokens, key_mask)
+
+        if ws_on and self._world_state is not None and self._world_state.memory is not None:
+            # R39-B1：Imagined Memory rollout 结束销毁（GPT §二.2；Real Memory 从未被引用/写回）
+            self._world_state.memory.destroy()
 
         result = {
             "traj_xy": torch.stack(xy, dim=1),

@@ -54,6 +54,7 @@ __all__ = [
     "ProbeRecorder",
     "StateSourceHooks",
     "WorldModelHooks",
+    "WorldStateHooks",
     "check_detach_registry",
     "first_boundary_breach",
     "first_od_contact",
@@ -316,6 +317,140 @@ class WorldModelHooks(_HookBase):
             "entry_logit": _clone(entry_logit),
         }
         return self._append(record)
+
+
+# --------------------------------------------------------------------------- #
+# ③b R39-B1 统一 imagined WorldState / StateReadout
+# --------------------------------------------------------------------------- #
+class WorldStateHooks(_HookBase):
+    """R39-B1：统一 ``WorldState → PolicyStateView`` 逐帧 hook（只读；**默认关**）。
+
+    每步记录（GPT §八「状态接口 Hook」口径）：
+
+    - 七量字段值 + **逐行 source**（``analytic/learned/held/missing``）+ present/valid mask；
+    - **producer（唯一写点）** 与 source 覆盖统计；
+    - WorldState 来源面：ego pose/speed、OD/LD anchor（t0 帧）与 ego 帧重表达、progress、
+      route length（``inf`` = 不可推断）；
+    - Imagined Memory 摘要（帧数/帧龄/来源/writeback = 0）。
+
+    自动断言（:meth:`check`；machine-readable）：① 字段集 = ``net/world_state.POLICY_STATE_FIELDS``；
+    ② 每字段 producer 唯一（跨帧不得变化）且 = ``FIELD_PRODUCERS``；③ source ∈ ``SOURCES``；
+    ④ ``held`` 仅限 ``HELD_ALLOWED``；⑤ ``missing`` ⇒ ``present=0``；⑥ Imagined Memory
+    ``writeback == 0``（Real Memory 无写回）。
+    """
+
+    prefix = "world_state"
+
+    def capture(self, *, step: int, state: Any, view: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        assertions = view.get("diagnostics", {}).get("producer_assert_ok")
+        record: dict[str, Any] = {
+            "step": int(step),
+            "fields": {name: _clone(value) for name, value in view["fields"].items()},
+            "sources": {name: dict(counts) for name, counts in view["sources"].items()},
+            "present": {name: _clone(value) for name, value in view["present"].items()},
+            "producers": dict(view["producers"]),
+            "source_codes": _clone(view.get("source_codes")),
+            "producer_assert_ok": bool(assertions),
+            "ego_pose": _clone(state.ego_pose),
+            "ego_speed": _clone(state.ego_speed),
+            "progress_s": _clone(state.progress_s),
+            "route_length": _clone(state.route_length),
+            "od_anchor": _clone(state.od_anchor),
+            "od_valid": _clone(state.od_valid),
+            "ld_anchor": _clone(state.ld_anchor),
+            "ld_valid": _clone(state.ld_valid),
+            "od_ego_k": _clone(view.get("diagnostics", {}).get("od_ego_k")),
+            "ld_ego_k": _clone(view.get("diagnostics", {}).get("ld_ego_k")),
+            "lateral_offset": _clone(view.get("diagnostics", {}).get("lateral_offset")),
+            "lane_width": _clone(view.get("diagnostics", {}).get("lane_width")),
+            "long_exog": _clone(view.get("long_exog")),
+            "long_present": _clone(view.get("long_present")),
+            "memory": None
+            if getattr(state, "memory", None) is None
+            else {
+                "summary": state.memory.summary(),
+                "writeback": int(state.memory.writeback),
+            },
+        }
+        return self._append(record)
+
+    def check(self) -> dict[str, Any]:
+        from net.world_state import (
+            FIELD_PRODUCERS,
+            HELD_ALLOWED,
+            POLICY_STATE_FIELDS,
+            SOURCE_CODES,
+            SOURCES,
+        )
+
+        violations: list[str] = []
+        steps: list[int] = []
+        producer_ok = True
+        fields_ok = True
+        source_ok = True
+        held_ok = True
+        missing_ok = True
+        writeback_ok = True
+        expected = tuple(POLICY_STATE_FIELDS)
+        for record in self.records:
+            step = int(record.get("step", -1))
+            steps.append(step)
+            fields = record.get("fields") or {}
+            if tuple(fields.keys()) != expected:
+                fields_ok = False
+                violations.append(f"step{step}: 字段集/列序漂移 {tuple(fields.keys())}")
+            producers = record.get("producers") or {}
+            if producers != dict(FIELD_PRODUCERS):
+                producer_ok = False
+                violations.append(f"step{step}: producer 表 ≠ FIELD_PRODUCERS")
+            for name, counts in (record.get("sources") or {}).items():
+                for source in counts:
+                    if source not in SOURCES:
+                        source_ok = False
+                        violations.append(f"step{step}: 字段 {name} 未知 source {source!r}")
+                    if source == "held" and name not in HELD_ALLOWED:
+                        held_ok = False
+                        violations.append(f"step{step}: 字段 {name} 违规 held（白名单 {HELD_ALLOWED}）")
+                    if source == "missing":
+                        present = (record.get("present") or {}).get(name)
+                        codes = record.get("source_codes")
+                        if torch.is_tensor(present) and torch.is_tensor(codes) and name in expected:
+                            # 逐行断言（同字段混源合法：该行 missing ⇒ 该行 present 必须 0）
+                            column = codes[:, expected.index(name)] == SOURCE_CODES["missing"]
+                            if column.shape[0] == present.shape[0] and bool((present[column] > 0.5).any()):
+                                missing_ok = False
+                                violations.append(f"step{step}: 字段 {name} source=missing 但 present>0")
+                        elif torch.is_tensor(present) and bool((present > 0.5).any()):
+                            missing_ok = False
+                            violations.append(f"step{step}: 字段 {name} source=missing 但 present>0")
+            memory = record.get("memory")
+            if isinstance(memory, Mapping) and int(memory.get("writeback", 0)) != 0:
+                writeback_ok = False
+                violations.append(f"step{step}: Imagined Memory writeback != 0")
+            if record.get("producer_assert_ok") is not True:
+                producer_ok = False
+                violations.append(f"step{step}: readout producer 断言未通过")
+        return {
+            "checks": {
+                "fields_complete": bool(fields_ok),
+                "producer_unique": bool(producer_ok),
+                "sources_legal": bool(source_ok),
+                "held_whitelist": bool(held_ok),
+                "missing_implies_absent": bool(missing_ok),
+                "imagined_writeback_zero": bool(writeback_ok),
+            },
+            "violations": violations,
+            "steps": steps,
+            "source_codes_legal": source_ok,
+        }
+
+    def summary(self) -> dict[str, Any]:
+        base = super().summary()
+        base.update(self.check())
+        base["field_producers"] = dict(self.records[0].get("producers") or {}) if self.records else {}
+        return base
 
 
 # --------------------------------------------------------------------------- #
@@ -669,23 +804,24 @@ class ProbeRecorder:
         self.state = StateSourceHooks(enabled=self.enabled, max_records=max_records)
         self.policy = PolicyHooks(enabled=self.enabled, max_records=max_records)
         self.wm = WorldModelHooks(enabled=self.enabled, max_records=max_records)
+        self.world_state = WorldStateHooks(enabled=self.enabled, max_records=max_records)
         self.memory = MemoryHooks(enabled=self.enabled, max_records=max_records)
         self.chain = ChainHooks(enabled=self.enabled)
 
     # ------------------------------------------------------------------ 工具
     def set_enabled(self, enabled: bool) -> "ProbeRecorder":
         self.enabled = bool(enabled)
-        for hook in (self.state, self.policy, self.wm, self.memory, self.chain):
+        for hook in (self.state, self.policy, self.wm, self.world_state, self.memory, self.chain):
             hook.enabled = self.enabled
         return self
 
     def clear(self) -> None:
-        for hook in (self.state, self.policy, self.wm, self.memory, self.chain):
+        for hook in (self.state, self.policy, self.wm, self.world_state, self.memory, self.chain):
             hook.clear()
 
     def tensors(self) -> dict[str, Tensor]:
         out: dict[str, Tensor] = {}
-        for hook in (self.state, self.policy, self.wm, self.memory):
+        for hook in (self.state, self.policy, self.wm, self.world_state, self.memory):
             out.update(hook.tensors())
         return out
 
@@ -697,6 +833,7 @@ class ProbeRecorder:
             "state": self.state.summary(),
             "policy": self.policy.summary(),
             "wm": self.wm.summary(),
+            "world_state": self.world_state.summary(),
             "memory": self.memory.summary(),
             "chain": self.chain.check() if chain_check is None else dict(chain_check),
         }
@@ -1410,6 +1547,17 @@ DETACH_REGISTRY: tuple[dict[str, Any], ...] = (
         "stage": "R38-D1 probes 内部（step 后 Δθ 读数）",
         "blocks": "参数差 → 计算图",
         "reach": "static：update norm 读数",
+        "evidence": "static",
+    },
+    {
+        "id": "D-WS01",
+        "tensor": "value.detach()",
+        "file": "net/world_state.py",
+        "function": "_detach",
+        "line": 143,
+        "stage": "R39-B1 unified-world-state（想象态非可微边界；单一 detach 写点）",
+        "blocks": "已执行动作 ds/dθ、累积位姿 pose、WM 残差 ΔA 与 latent → 跨步想象链/策略头几何输入",
+        "reach": "static：`_detach` 只被 `WorldState` 构造与 `analytic_update` 调用（`world_state_api=off` 默认时整条路径不执行）；语义 = 想象世界状态是「已执行动作 + WM 残差」的确定性函数 —— 残差学习走 `net/world_state.residual_loss` one-step 真实下一状态监督（不穿越跨步链），策略头几何输入与 HEAD 的 `step_geometry` 同为外源确定性量",
         "evidence": "static",
     },
 )
