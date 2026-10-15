@@ -11,6 +11,7 @@
 | `architecture_contract.md` | 架构契约（生成器/辅助边界/调用图/训练部署同构） | `net/model.py`、`net/path_head.py` |
 | `round37_report.md` | 本轮全量报告（阶段 1：三层根因 + lane 索引 + 玩家讨论纪要） | 本索引 |
 | `repo_handbook.md` | **仓库手册**：网络架构 / 训练流程 / 当前问题（第 1/2 章代码核验 + 第 3 章台账依据；附录含文档-代码漂移表） | 本索引、台账 |
+| `r37_p0b_approval_packet.md` | **CG 审批包**：P0-B（IDM+PP 蒸馏）放行 + 7 项决策（D1–D7）+ 风险与放行条件（含 M8 取消披露） | 台账 §5.67 |
 | `round36_report.md`、`r36_implementation_evidence.md`、`r36_warp_layer_note.md` | 上一轮报告与证据/注记 | 台账、round36 工具 |
 | `LOCKS.md` | 锁版/冻结清单 | 清理记录 |
 
