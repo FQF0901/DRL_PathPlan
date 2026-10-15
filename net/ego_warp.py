@@ -1,8 +1,11 @@
-"""OD/LD 显式 anchor + ego-motion warp（R36 L-D 最小实现；**独立模块，暂不接入** ``net/model.py``）。
+"""OD/LD 显式 anchor + ego-motion warp（R36 L-D 最小实现；R37 M1 接入 ``net/model.py`` 主路径）。
 
 依据：GPT ``7dcf6bd`` §四.3/§五 阶段 1（坐标层先行）+ R33-B 已验证口径（``net/model.py``
-``set_ego_warp`` / ``DrivingModel._ego_warp_pose_k``）。本模块**只新增纯函数**：不改任何既有
-文件、不接管 rollout 主路径（集成 lane 待 L-A 落地后另派）。导入无副作用、无全局状态。
+``set_ego_warp`` / ``DrivingModel._ego_warp_pose_k``）。本模块**只含纯函数/无状态**：导入无
+副作用、无全局状态。R37 M1 集成（GPT ``66497a2`` §三.3/§三.4）后：``DrivingModel`` 的
+``set_ego_warp_mode("analytic")`` 经 :func:`assemble_pose_k`（``w2`` + :func:`od_velocity_t0`
+场景系速度）接管 rollout ``pose_k``；``off``（默认）经 :func:`assemble_pose_k`（``off``）逐位
+等于旧内联分支；5 项 hook / 分项读数由模型侧 ``set_warp_hooks`` / ``set_warp_readout`` 门控。
 
 语义（与 R33-B **逐位**一致；等价性单测见 ``.slim/deepwork/p1_v2/round36/d1_ego_warp_tests.py``）
 ----------------------------------------------------------------------------------------
@@ -73,6 +76,7 @@ __all__ = [
     "WARP_MODES",
     "advance_od_pose",
     "assemble_pose_k",
+    "masked_pose_error",
     "od_velocity_t0",
     "validate_anchor",
     "warp_ld_anchors",
@@ -167,6 +171,18 @@ def od_velocity_t0(od_rel_vel: Tensor, ego_vel_t0: Tensor) -> Tensor:
     返回 ``(B,S,2)``；掩码外槽位由调用方先清零。
     """
     return od_rel_vel + ego_vel_t0[:, None, :]
+
+
+def masked_pose_error(pred: Tensor, actual: Tensor, live: Tensor) -> Tensor:
+    """节点位姿误差的**位置 L2 掩码均值**（``(B,N,3)`` × ``live (B,N)`` → ``(B,)``，单位 m）。
+
+    R37 M1 分项读数用（解析先验误差 / 学习残差贡献 / 最终 anchor 误差）：仅统计 ``live=1``
+    槽位；全无效（分母 0）⇒ 0。只度量位置（航向误差由 hook 全张量留档离线算）。
+    """
+    diff = pred[..., :2] - actual[..., :2]
+    err = torch.sqrt(diff.pow(2).sum(dim=-1).clamp_min(0.0))
+    weight = live.to(err.dtype)
+    return (err * weight).sum(dim=-1) / weight.sum(dim=-1).clamp_min(1.0)
 
 
 def assemble_pose_k(

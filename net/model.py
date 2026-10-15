@@ -85,6 +85,30 @@ Round-36 L-A（架构硬化：旧头消歧 + oneshot 守卫）
   ``plan[:,0]==action_mu``）、⑤ structured 不使用 ``plan_override``；eval/deploy 违反 ⇒
   ``RuntimeError`` fail-fast，训练路径只落盘 ``contract_*`` 输出键。
 
+Round-37 M1（warp 主路径接入 + OD 速度语义修正 + 五项 hook + 分项读数；默认全关）
+------------------------------------------------------------------------------------
+- ``set_ego_warp_mode("off"|"analytic")``（默认 ``off``）：``analytic`` 时 rollout ``pose_k``
+  构造走 :func:`net.ego_warp.assemble_pose_k` ``w2``——t0 系当**静态场景**，OD 先验速度必须是
+  **t0 场景系对象速度** ``v_OD = v_rel + v_ego``（:func:`net.ego_warp.od_velocity_t0`；
+  ``v_ego = enc.ego_now[..., 0]``），LD 静止锚做 ego SE(2) 逆变换；整图重表达进 ego_k 帧
+  （ego 槽恒 ``(0,0,0)``）。**禁止**用相对速度推进后再扣自车运动（重复扣 ``|Δp|`` 的集成错误）。
+  ``off`` 经同一函数（``mode="off"``，相对速度=随体坐标语义）逐位复现旧内联分支；遗留实验
+  开关 ``set_ego_warp``（``w1``/``w2``）保留（与 ``analytic`` 互斥，见 setter）。
+- ``set_warp_hooks(WarpHooks)``（默认 ``None`` = 关）：每步经
+  :meth:`net.ego_warp.WarpHooks.capture` 记录 ① ``anchor_pre``（warp 前 t0 帧）/②
+  ``anchor_analytic``（ego_k 帧）/③ ``anchor_actual_next``（真实下一帧，由 ``obs`` 提供；缺省
+  n/a）/④ ``residual_learned``（缺省 None = 0，接口留给 WM residual 训练）/⑤ ``anchor_final``
+  （= ② + ④）。
+- ``set_warp_readout(True)``（默认关）：分项读数（诊断输出，训练/评测可关）——
+  ``warp_prior_err``（解析先验误差）/``warp_residual_contrib``（学习残差贡献）/``warp_final_err``
+  （最终 anchor 误差），``(B,T)`` 掩码均值 [m]；缺真实下一帧（部署侧）⇒ ``warp_readout_valid=0``
+  （n/a，不产出误差键）。
+- 数据接口（可选 obs 键，形状 ``(B,T,N,3)``，N = 1+OD+LD 节点数，T = rollout 步数）：
+  ``obs['warp_anchor_actual_next']``（ego_k 帧真实下一帧 anchor；离线/训练数据提供）、
+  ``obs['warp_anchor_residual_learned']``（逐 step learned residual）。缺省 ⇒ 诊断按 n/a/0。
+- 默认全关 ⇒ 前向逐位不变（``warp_mode="off"`` 的 ``assemble_pose_k`` 已由 R36 L-D
+  pre-hook 门逐位验证；Gate A：M0/cheap/structured/遗留 w1/w2 全输出 ``max|Δ|=0``）。
+
 v7 结构迭代 B：K-anchor 计划头（``num_anchors>0``；默认 0 = 关闭 = 旧行为逐位不变）
 ---------------------------------------------------------------------------------------
 - :class:`net.plan_head.PlanHead` 增加**选择头**（latent → K 锚 logits）、**连续速度头**
@@ -164,6 +188,7 @@ except ImportError:  # pragma: no cover - helper 未就绪时的回退
     _mem_world_state_from_obs = None
 
 from net.anchor import load_anchor_dictionary
+from net.ego_warp import WarpHooks, assemble_pose_k, masked_pose_error, od_velocity_t0
 from net.path_head import (
     LAT_HORIZON_M,
     PATH_HEAD_DEFAULT_MODE,
@@ -269,6 +294,26 @@ def _masked_mean(x: Tensor, mask: Tensor) -> Tensor:
     policy/value 的交叉注意力头直吃逐槽令牌，不再经过池化。
     """
     return (x * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+
+
+def _warp_diag_steps(
+    obs: Mapping[str, object], key: str, *, batch: int, steps: int, nodes: int, ref: Tensor
+) -> Tensor | None:
+    """R37 M1：``obs[key] (B,T,N,3)`` warp 诊断序列（缺省 None）→ 形状校验 + 投到 ``ref`` 设备。
+
+    仅服务 5 项 hook 与分项读数（默认关路径不触碰）；形状不符 ⇒ ``ValueError``（fail-fast，
+    不静默降级）。
+    """
+    raw = obs.get(key)
+    if raw is None:
+        return None
+    tensor = torch.as_tensor(raw)
+    if tuple(tensor.shape) != (batch, steps, nodes, 3):
+        raise ValueError(
+            f"obs[{key!r}] 形状应为 ({batch},{steps},{nodes},3)（B,T,N,3；缺省 = n/a），"
+            f"收到 {tuple(tensor.shape)}"
+        )
+    return tensor.to(dtype=ref.dtype, device=ref.device)
 
 
 # ------------------------------------------------------------- A4：nav 逐步重建
@@ -452,8 +497,15 @@ class DrivingModel(nn.Module):
         #: R21-3D：rollout 阶段 semantic 注入口径（``full`` = R21-3A 现状）
         self.rollout_semantic_mode: str = "full"
         #: R33-B：rollout 图位姿 ego-motion warp 口径（``off`` = 当前实现逐位不变；
-        #: ``w1``/``w2`` = 解析 ego SE(2) 补偿，见 :meth:`set_ego_warp`）。
+        #: ``w1``/``w2`` = 解析 ego SE(2) 补偿，见 :meth:`set_ego_warp`）。遗留实验开关。
         self.ego_warp: str = "off"
+        #: R37 M1：warp **主路径**口径（``off`` = 逐位不变；``analytic`` = 解析 warp +
+        #: OD t0 场景系速度先验，见 :meth:`set_ego_warp_mode`）。与遗留 ``ego_warp`` 互斥。
+        self.ego_warp_mode: str = "off"
+        #: R37 M1：5 项 warp hook 容器（默认 None ⇒ 零开销；见 :meth:`set_warp_hooks`）。
+        self.warp_hooks: WarpHooks | None = None
+        #: R37 M1：warp 分项读数开关（默认 False；诊断输出，训练/评测可关）。
+        self.warp_readout: bool = False
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
@@ -592,7 +644,63 @@ class DrivingModel(nn.Module):
         mode = str(mode).lower()
         if mode not in ("off", "w1", "w2"):
             raise ValueError(f"未知 ego_warp={mode!r}（off | w1 | w2）")
+        if mode in ("w1", "w2") and self.ego_warp_mode == "analytic":
+            raise ValueError(
+                "ego_warp='w1'|'w2' 与 ego_warp_mode='analytic' 互斥（w2 旧口径用通道相对速度"
+                "推进，analytic 用 t0 场景系速度）；请先 set_ego_warp_mode('off')。"
+            )
         self.ego_warp = mode
+        return self
+
+    def set_ego_warp_mode(self, mode: str = "off") -> "DrivingModel":
+        """R37 M1：warp **主路径**口径（纯推理行为开关，非参数；默认 ``off`` = 逐位不变）。
+
+        - ``off``（默认）：rollout 图位姿 = 现行 t0 帧口径（OD 先验用通道**相对速度** =
+          随体坐标语义）——经 :func:`net.ego_warp.assemble_pose_k` ``mode="off"`` 逐位复现旧
+          内联分支；
+        - ``analytic``：解析 ego-motion warp（``assemble_pose_k`` ``w2``）——t0 系当**静态
+          场景**，OD 先验速度 = **t0 场景系对象速度** ``v_OD = v_rel + v_ego``
+          （:func:`net.ego_warp.od_velocity_t0`；``v_ego = enc.ego_now[..., 0]`` 沿自车 x 轴），
+          LD 静止锚做 ego SE(2) 逆变换，整图重表达进 ego_k 帧（ego 槽恒 ``(0,0,0)``）。
+          **禁止**用相对速度推进后再扣自车运动（系统性重复扣 ``|Δp|``；R36 L-D 实测同速前车
+          P90 1.95 m → 0.43 m）。几何自洽不变量：任意两节点距离/相对航向不变。
+
+        与遗留实验开关 :meth:`set_ego_warp`（``w1``/``w2``；w2 的 OD 先验是相对速度旧口径）
+        互斥：同时设非默认值 ⇒ ``ValueError``（两种速度口径不可混用）。
+        """
+        mode = str(mode).lower()
+        if mode not in ("off", "analytic"):
+            raise ValueError(f"未知 ego_warp_mode={mode!r}（off | analytic）")
+        if mode == "analytic" and self.ego_warp != "off":
+            raise ValueError(
+                f"ego_warp_mode='analytic' 与遗留 ego_warp={self.ego_warp!r} 互斥"
+                "（w1/w2 旧口径用通道相对速度推进）；请先 set_ego_warp('off')。"
+            )
+        self.ego_warp_mode = mode
+        return self
+
+    def set_warp_hooks(self, hooks: WarpHooks | None = None) -> "DrivingModel":
+        """R37 M1：装载 5 项 warp hook 容器（默认 ``None`` = 关；只读诊断，不参与数值）。
+
+        ``hooks.enabled=True`` 时 rollout 每步经 :meth:`net.ego_warp.WarpHooks.capture` 记录
+        ① ``anchor_pre``（warp 前 t0 帧）/② ``anchor_analytic``（ego_k 帧）/③
+        ``anchor_actual_next``（真实下一帧；``obs['warp_anchor_actual_next']``，缺省 n/a）/④
+        ``residual_learned``（``obs['warp_anchor_residual_learned']``，缺省 None = 0，接口留给
+        WM residual 训练）/⑤ ``anchor_final``（= ② + ④）。``enabled=False`` ⇒ 零张量操作、
+        不消耗 RNG、前向逐位不变。
+        """
+        self.warp_hooks = hooks
+        return self
+
+    def set_warp_readout(self, enabled: bool = True) -> "DrivingModel":
+        """R37 M1：分项读数开关（诊断输出；默认关，训练/评测可关）。
+
+        开启后（且提供 ``obs['warp_anchor_actual_next']``）rollout 返回逐步位置误差
+        ``warp_prior_err``（解析先验 vs 真实）/``warp_residual_contrib``（学习残差贡献 = ⑤−②）/
+        ``warp_final_err``（最终 anchor vs 真实），``(B,T)`` 掩码均值 [m]；缺真实下一帧
+        （部署侧）⇒ ``warp_readout_valid=0``（n/a，不产出误差键）。
+        """
+        self.warp_readout = bool(enabled)
         return self
 
     @staticmethod
@@ -603,6 +711,9 @@ class DrivingModel(nn.Module):
         ``od_pose (B,S,3)`` / ``ld_pose (B,L,3)`` = warp 前的 OD/LD t0 帧位姿（w1: OD 无
         恒速先验；w2: OD 含先验——由调用方决定）。返回 ``(B,1+S+L,3)``；ego 节点为同一
         刚体变换作用后的 ``(0,0,0)``（与"对 ego/OD/LD 施加同一变换"自洽）。
+
+        R37 M1：rollout 已改经 :func:`net.ego_warp.assemble_pose_k`（同 op 序 ⇒ 逐位等价；
+        R36 L-D pre-hook 门 18/18 验证）；本静态方法保留为逐位等价参照（单测消费）。
         """
         slots = torch.cat([od_pose, ld_pose], dim=1)
         dtheta = ego_pose[:, 2:3]
@@ -1337,6 +1448,16 @@ class DrivingModel(nn.Module):
                 raise ValueError(
                     f"obs['route_world_mask'] 形状应为 (B,M)（或 (B,1,M)），收到 {tuple(route_world_mask.shape)}"
                 )
+        # R37 M1：warp 诊断可选数据（形状 (B,T,N,3)；缺省 None ⇒ hooks 标 n/a、读数 valid=0）
+        warp_nodes = int(encoded.frame.pose.shape[1])
+        warp_actual_next = _warp_diag_steps(
+            obs, "warp_anchor_actual_next",
+            batch=mem.batch, steps=self.rollout_steps, nodes=warp_nodes, ref=z_ego,
+        )
+        warp_residual_learned = _warp_diag_steps(
+            obs, "warp_anchor_residual_learned",
+            batch=mem.batch, steps=self.rollout_steps, nodes=warp_nodes, ref=z_ego,
+        )
         return {
             "mem": mem,
             "encoded": encoded,
@@ -1373,6 +1494,9 @@ class DrivingModel(nn.Module):
             "semantic_delta_t0": delta_t0,
             "semantic_inputs": semantic,
             "semantic_off": bool(semantic_off),
+            # R37 M1：warp 诊断（5 项 hook 的 ③/④ 数据源；默认 None = n/a / 0）
+            "warp_anchor_actual_next": warp_actual_next,
+            "warp_anchor_residual_learned": warp_residual_learned,
         }
 
     # ---------------------------------------------------------------- rollout
@@ -1397,6 +1521,10 @@ class DrivingModel(nn.Module):
         ``a_k=(ds_k, κ_near_k·ds_k)``（imagined 步静态几何 = t0 静态地图 + 想象位姿确定性重算，
         :func:`~net.path_head.step_geometry`）；``plan`` 由逐步动作组装（唯一动作生成器）。
         模式 ``oneshot`` = H1 一次性诊断臂（``plan_override`` 钉住，仅诊断上界）。
+
+        R37 M1：``ego_warp_mode`` 决定 ``pose_k`` 口径（``off`` = 逐位不变 / ``analytic`` =
+        解析 warp + OD t0 场景系速度）；``warp_hooks`` / ``warp_readout``（默认全关，零开销）
+        逐步产出 5 项 hook 与分项读数（见 :meth:`set_warp_hooks` / :meth:`set_warp_readout`）。
         """
         mem: MemBank = encoded["mem"]  # 只读（nav 回退锚点）；不再拷贝/滑动
         enc: EncodedMem = encoded["encoded"]
@@ -1462,6 +1590,28 @@ class DrivingModel(nn.Module):
         ld_pose_t0 = frame.pose[:, 1 + self.od_slots :]
         od_velocity = enc.od_now[..., 2:4] * od_live.unsqueeze(-1)  # (B,S,2) t0 相对速度
 
+        # R37 M1：warp 诊断（5 项 hook + 分项读数；默认全关 ⇒ 零张量操作、不消耗 RNG）
+        warp_hooks = self.warp_hooks
+        warp_hooks_on = bool(warp_hooks is not None and warp_hooks.enabled)
+        warp_readout_on = bool(self.warp_readout)
+        warp_diag = bool(warp_hooks_on or warp_readout_on)
+        warp_actual_steps: Tensor | None = None
+        warp_residual_steps: Tensor | None = None
+        prior_err_steps: list[Tensor] = []
+        residual_contrib_steps: list[Tensor] = []
+        final_err_steps: list[Tensor] = []
+        if warp_diag:
+            actual = encoded.get("warp_anchor_actual_next")
+            residual = encoded.get("warp_anchor_residual_learned")
+            warp_actual_steps = (
+                actual.to(dtype=latent.dtype, device=latent.device) if torch.is_tensor(actual) else None
+            )
+            warp_residual_steps = (
+                residual.to(dtype=latent.dtype, device=latent.device)
+                if torch.is_tensor(residual)
+                else None
+            )
+
         pose = torch.zeros((mem.batch, 3), dtype=latent.dtype, device=latent.device)
         xy: list[Tensor] = []
         theta: list[Tensor] = []
@@ -1492,20 +1642,52 @@ class DrivingModel(nn.Module):
                 mem, pose_world, world, nav_token, nav_mask, signal_token, signal_mask, k
             )
 
-            # (b) 图位姿：ego = 累积位姿（detach：WM 输出不回传动作/策略链）；
-            #     OD = t0 位姿 + k·dt·v_t0；LD 静止。
-            #     R33-B warp（默认 off，逐位不变）：w1/w2 把整张图重表达进 ego_k 帧
-            #     （同一刚体变换施加于 ego/OD/LD；ego 恒 (0,0,0)）——见 set_ego_warp。
-            offset = float(k) * self.dt
-            od_pose_k = torch.cat(
-                [od_pose_t0[..., :2] + od_velocity * offset, od_pose_t0[..., 2:]], dim=-1
-            )
-            if self.ego_warp == "off":
-                pose_k = torch.cat([pose.detach().unsqueeze(1), od_pose_k, ld_pose_t0], dim=1)
+            # (b) 图位姿：ego = 累积位姿（detach：WM 输出不回传动作/策略链）；LD 静止。
+            #     ego_warp_mode="off"（默认，逐位不变）= assemble_pose_k(off)：现行 t0 帧口径
+            #     （OD 先验 = 通道相对速度，随体语义）；"analytic"（R37 M1）= assemble_pose_k(w2)：
+            #     t0 系当静态场景，OD 先验用 **t0 场景系速度** od_velocity_t0（v_rel+v_ego），
+            #     整图再重表达进 ego_k 帧（同一刚体变换施加于 ego/OD/LD；ego 恒 (0,0,0)）。
+            #     遗留 R33-B ego_warp=w1/w2（相对速度旧口径）经同一函数复现（L-D pre-hook 门逐位）。
+            ego_pose_det = pose.detach()
+            if self.ego_warp_mode == "analytic":
+                ego_speed = enc.ego_now[..., 0:1]  # t0 自车速度（沿自身 x 轴）
+                ego_vel_t0 = torch.cat([ego_speed, torch.zeros_like(ego_speed)], dim=-1)
+                # v_OD = v_rel + v_ego（掩码外槽位清零；禁止用相对速度推进后再扣自车运动）
+                od_prior_vel = od_velocity_t0(od_velocity, ego_vel_t0) * od_live.unsqueeze(-1)
+                warp_mode = "w2"
             else:
-                # w1：OD 不带恒速先验（t0 静止位姿）；w2：OD 含先验（= off 的 OD 位姿）
-                od_pose_pre = od_pose_k if self.ego_warp == "w2" else od_pose_t0
-                pose_k = self._ego_warp_pose_k(pose.detach(), od_pose_pre, ld_pose_t0)
+                od_prior_vel = od_velocity
+                warp_mode = self.ego_warp
+            pose_k = assemble_pose_k(
+                ego_pose_det, od_pose_t0, od_prior_vel, ld_pose_t0,
+                mode=warp_mode, dt=self.dt, steps=k,
+            )
+
+            if warp_diag:
+                # R37 M1 五项 hook / 分项读数（默认关 ⇒ 零张量操作）：
+                # ① warp 前 anchor（t0 帧；与 pose_k 同一 OD 先验与 ego 累积位姿，仅缺 warp）。
+                if warp_mode == "w1":
+                    anchor_pre = torch.cat([ego_pose_det.unsqueeze(1), od_pose_t0, ld_pose_t0], dim=1)
+                else:
+                    anchor_pre = assemble_pose_k(
+                        ego_pose_det, od_pose_t0, od_prior_vel, ld_pose_t0,
+                        mode="off", dt=self.dt, steps=k,
+                    )
+                actual_k = None if warp_actual_steps is None else warp_actual_steps[:, k - 1]
+                residual_k = None if warp_residual_steps is None else warp_residual_steps[:, k - 1]
+                if warp_hooks_on:
+                    warp_hooks.capture(
+                        step=k,
+                        anchor_pre=anchor_pre,
+                        anchor_analytic=pose_k,
+                        anchor_actual_next=actual_k,
+                        residual_learned=residual_k,
+                    )
+                if warp_readout_on and actual_k is not None:
+                    anchor_final = pose_k if residual_k is None else pose_k + residual_k
+                    prior_err_steps.append(masked_pose_error(pose_k, actual_k, node_mask))
+                    residual_contrib_steps.append(masked_pose_error(anchor_final, pose_k, node_mask))
+                    final_err_steps.append(masked_pose_error(anchor_final, actual_k, node_mask))
 
             # (c) latent 自回归转移 + 物理解码（t0 帧预测，逐步堆叠）
             # R32 canary：action = 本步执行动作 a_{k-1}（与 pose 链同一动作；开关默认关 ⇒ 无变化）
@@ -1666,6 +1848,16 @@ class DrivingModel(nn.Module):
             result["structured_plan_override_used"] = torch.tensor(
                 float(plan_override is not None), dtype=latent.dtype, device=latent.device
             )
+        if warp_readout_on:
+            # R37 M1 分项读数（诊断输出）：部署侧无真实下一帧 ⇒ ``warp_readout_valid=0``
+            # （n/a；不产出误差键）。误差 = 逐 step 位置 L2 的 node_mask 掩码均值 [m]。
+            result["warp_readout_valid"] = torch.tensor(
+                float(warp_actual_steps is not None), dtype=latent.dtype, device=latent.device
+            )
+            if warp_actual_steps is not None:
+                result["warp_prior_err"] = torch.stack(prior_err_steps, dim=1)
+                result["warp_residual_contrib"] = torch.stack(residual_contrib_steps, dim=1)
+                result["warp_final_err"] = torch.stack(final_err_steps, dim=1)
         return result
 
     # ---------------------------------------------------------------- 前向
@@ -1793,6 +1985,15 @@ class DrivingModel(nn.Module):
         out["traj_xy"] = rolled["traj_xy"]
         out["traj_theta"] = rolled["traj_theta"]
         out["plan"] = rolled["plan"]
+        # R37 M1：warp 分项读数（默认关 ⇒ 不出现；见 set_warp_readout）
+        for warp_key in (
+            "warp_readout_valid",
+            "warp_prior_err",
+            "warp_residual_contrib",
+            "warp_final_err",
+        ):
+            if warp_key in rolled:
+                out[warp_key] = rolled[warp_key]
         if path_out is not None:
             # 逐步组装 plan（唯一动作生成器）+ 调用计数（契约门证据）；``plan_from_aux=0``。
             out["plan_from_aux"] = torch.zeros((), dtype=action_mu.dtype, device=action_mu.device)

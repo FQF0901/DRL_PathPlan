@@ -4,6 +4,14 @@
 导入本包无副作用（不建 env、不读配置、不启线程）。
 """
 
+from net.ego_warp import (
+    WARP_MODES,
+    AnchorBatch,
+    WarpHooks,
+    assemble_pose_k,
+    masked_pose_error,
+    od_velocity_t0,
+)
 from net.encoders import FrameEncoding, ObsEncoders
 from net.mem import EncodedMem, MemBank, MemEncoder
 from net.moe import MoEBlock, top_k_softmax
@@ -24,10 +32,16 @@ from net.temporal import TemporalAttention
 __all__ = [
     "ACTION_HIGH",
     "ACTION_LOW",
+    "AnchorBatch",
     "DrivingModel",
     "EncodedMem",
     "FrameEncoding",
     "LD_PRED_DIM",
+    "WARP_MODES",
+    "WarpHooks",
+    "assemble_pose_k",
+    "masked_pose_error",
+    "od_velocity_t0",
     "MemBank",
     "MemEncoder",
     "MoEBlock",
