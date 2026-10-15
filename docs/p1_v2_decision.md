@@ -1,12 +1,12 @@
 # P1-v2 决策记录（P1-v2: LOCKED）
 
 > 达成：2026-10-11（round-9/10/11 双方共识）。依据：`docs/deepseekv4p1_argue.md` §10/§11、
-> `docs/p1_2_diagnosis.md`、`docs/chatgpt5p6sol_review.md`（`1ac2e30`）。
+> `docs/archive/p1v2_reports/p1_2_diagnosis.md`、`docs/chatgpt5p6sol_review.md`（`1ac2e30`）。
 > 本文件 = P1-v2 的日常决策载体（argue 文档回归历史审计）。
 
 ## 被证伪的假设（本阶段）
 
-1. recovery_v1 混采（任意剂量/对齐/类别/冻结）可提升闭环 —— **证伪**（四轴穷举全败；详见 `docs/p1_2_diagnosis.md`）。
+1. recovery_v1 混采（任意剂量/对齐/类别/冻结）可提升闭环 —— **证伪**（四轴穷举全败；详见 `docs/archive/p1v2_reports/p1_2_diagnosis.md`）。
 2. "绝对目标监督 + 状态可辨识"默认成立 —— **证伪**（受控探针：恢复行为在低速带被条件化重写；正常/失败态在 obs 上不可分）。
 3. 剂量/清洗类搜索有边际信息 —— **证伪**（0.25/0.05/0.02 × 对齐 × 类别组合均崩）。
 4. V1（ds 拉伸）可作教师上限证据并开 4B 门 —— **修正**（同时改变曲率；改列 calibration oracle）。

@@ -112,7 +112,7 @@
 
 - 接受 Level-1 与主方向；批准**最小可逆 canary**（AC0/AC1/P-only/AC1-P；C-A→C-B；Gate 0–4；10 条锁定）；采纳 ΔR² 条件化增益 + 语义串扰防线（action 不无差别广播）；我方 3 条执行注记（数据域/接线点/§五 vs §七 按 §七 因子设计）。
 
-### 5.40 R32 canary 执行（压缩；全文 `docs/round32_canary_report.md`）
+### 5.40 R32 canary 执行（压缩；全文 `docs/archive/p1v2_reports/round32_canary_report.md`）
 
 - **基建**：生产 +103/−3（默认关/惰性）；**Gate 0 七项全 PASS**（默认=HEAD 键集 168、旧 ckpt strict 0/0/0、关闭/α=0 逐位、RNG 不变、梯度只流新参数、OD/LD 不广播、z-path 等价）+ 966 tests。**α 冷启动=1（训练口径）**——审计闭合：ckpt vs M0 **共享键逐位 0 差异**；step1 `new_grad=2/5`（末层）→step2 `5/5`；终值 α=1.1267/0.7743。
 - **P3b**：ΔR²_WM state 仅 +0.025/+0.042 ⇒ "保留"≈惯性；**ΔR²_action +0.002~0.028**（latent 演化几乎不依赖动作）；泄漏 od_pool +0.32 / ld_pool +0.90。
@@ -136,7 +136,7 @@
   4. **噪声结论强化**：录制确定性 ⇒ 所有配对结论（+16.5%/+20.9% 等）均为真实模型效应，非 run-to-run 噪声。
 - **问题（open）**：①规划层放大未拆到模块级（plan head 的 κ-compose/投影 vs LQR 参考消费）——B 已定位、未细拆（不扩审计，留待 33C 后）；②od_pool 泄漏未解（v2 Gate 2 保留"泄漏不增"门）；③收费站静止障碍感知通道盲区（岗亭仅 others 5 维走廊段；**others 数值未记录** ⇒ "策略是否收到该信号"未验证；v2 评测建议分层读数）；④ds-progress 单调率口径（off-manifold）待 per-arm 探针修正；⑤warp 仅证"零-shot 无效"，"重训后有效"未测；⑥33C 训练**待授权**。
 - **决策与下一步**：**decision=GO_EGO_ACTION_CONDITIONING_V2**（不自动进入训练）。**33C 建议（待 CG）**：**B0/B1 两臂**（B2=B1+warp 因 NO-GO 删）；B1 = 特征 `[ds,dθ,κ]` + 隐藏层正常初始化 + 输出层零初始化 + **固定增益 1** + ego 物理监督 `{delta_progress, delta_speed, delta_heading}`；硬门沿用 GPT 列表（top-1≥0.35 / top-3≥0.85 / 单调≥0.90 / 接口恶化≤3% / lane 不退化 / 泄漏不增 / succ≥0.58 / off≤0.14 / coll≤0.08 / tmo≤11 / rc≥0.862；恶化>5% 或碰撞再恶化即停）；~35 min/臂。
-- **产物**：`docs/round33_report.md`、`runs/round33/*`（a1_ckpt_audit / a2_collision / a5_overshoot_decomp / a6_noise / b_warp / b_warp_compat）、脚本 `.slim/deepwork/p1_v2/round33/*`。
+- **产物**：`docs/archive/p1v2_reports/round33_report.md`、`runs/round33/*`（a1_ckpt_audit / a2_collision / a5_overshoot_decomp / a6_noise / b_warp / b_warp_compat）、脚本 `.slim/deepwork/p1_v2/round33/*`。
 
 ### 5.43 round-33C 批准受理（GPT `49e04d7`，487 行）：目标改写 + 四任务 + 长期路线图；我方 4 条补充；33C 开工
 
@@ -148,7 +148,7 @@
   4. **warp 登记同意 + 边界注记**：R36 重训验证须报告"锚残差 vs latent consistency"分离项；"零-shot 不可判方向"结论保留。
 - **开工**：lane A（v2 生产 + 训练器：3 维特征/删 α 固定增益 1/delta_speed 目标 + Gate 0 逐位 + smoke）；lane B（只读：四增益链探针 + 分层评测工具；先出 B0/AC1 基线数）。B1 训练在 lane A 落地后由主控启动。
 
-### 5.44 round-33C 执行完成（AC v2 = B0/B1；四任务）：**接口修复（Gate 3 −10~−12%）但硬门 6/11 未过**；不晋级；分支 3 适用（报告 `docs/round33c_report.md`）
+### 5.44 round-33C 执行完成（AC v2 = B0/B1；四任务）：**接口修复（Gate 3 −10~−12%）但硬门 6/11 未过**；不晋级；分支 3 适用（报告 `docs/archive/p1v2_reports/round33c_report.md`）
 
 - **执行**：生产 v2（3 维特征 + 删 α 固定增益 1；Gate 0 6/6 PASS、966 tests）；训练器 v2（ego 物理目标 delta_speed）；评测链三工具适配（自证 BIT-EXACT）；B1 训练 22,532 步/4ep（latent 0.0406 / ego_phys 0.0080）。
 - **硬门**：✓ = top-3 0.914 / **接口全改善**（E_if −10.1%、E_action −11.9%、overshoot −12.3%、E_real −4.3%）/ lane 保留改善 / coll 0.06（toll 2→1）/ tmo 9；✗ = **top-1 0.192**（<0.35）/ **单调 0.60**（<0.90）/ **泄漏 od_pool +46.9%、agg speed +19.1%**（>10%）/ **succ 0.56**（3正/3负）/ **off 0.20**（+3 新：merge×2 + tollgate×1）/ rc 0.855（<0.862）。
@@ -156,7 +156,7 @@
 - **分层/收费站**：tollgate **0 succ（两跑皆然**；coll 2→1、off 3→4；min_ttc 1.43→2.28）；**merge off 2→4**；t_intersection succ 3→5（+0.4）。7784 末步纵向余量 **+8.84m 转正仍碰撞** ⇒ **非纯纵向（路径级嫌疑）**。
 - **分析**：v2=**稳定器而非推进器**（接口修复、coll/tmo 改善；succ 未动、off 回退、top-1/单调/泄漏未过门）；单调 0.60 与 FD 2.98 组合="敏感度已好、方向性未好"；泄漏（od_pool +46.9%）说明"action 只进 ego transition"不足以防消息传递串扰。
 - **决策建议（按三分支）**：分支 1/2 不适用；**分支 3 适用**（仍收费站碰撞 ⇒ 静态障碍显式表示/走廊占用/path-conditioned 纵向剖面；不启 RL）。我方补充：①先做收费站/merge **路径级只读归因**（plan κ/dθ 剖面 vs 几何）；②泄漏防线重估；③**B1 不晋级**（保留为诊断参考）。
-- **产物**：`docs/round33c_report.md`、`runs/round33/canary_v2/*`（ckpt/eval_b1/gate3_b1/gate4_b1）、`runs/round33/{c_gain_chain_b1,c_stratified_b1}.*`。
+- **产物**：`docs/archive/p1v2_reports/round33c_report.md`、`runs/round33/canary_v2/*`（ckpt/eval_b1/gate3_b1/gate4_b1）、`runs/round33/{c_gain_chain_b1,c_stratified_b1}.*`。
 
 ### 5.45 round-34A 批准受理（GPT `82e815b`，533 行）：B1 结案不晋级；启动 34A 只读审计 → 34B 新动作表示；我方 5 条补充；34A 开工
 
@@ -169,14 +169,14 @@
   5. **34B 预注册**：外部兼容 + 可回滚 + **与现 policy 同预算 A/B 对照**（同数据/同 epoch，避免表示迁移与训练预算混淆）。
 - **开工**：lane D1（路径级归因）、lane D2（静态障碍契约）、lane D3（泄漏因果性 + hooks 注记）。
 
-### 5.46 round-34A 执行完成（三 lane）：**失败=路径级（通道选择 6 + 越界 6 + 撞障碍 6；跟踪/表示缺失/未响应 0）；覆盖率 94.7%**；34B 建议范围待确认（报告 `docs/round34a_report.md`）
+### 5.46 round-34A 执行完成（三 lane）：**失败=路径级（通道选择 6 + 越界 6 + 撞障碍 6；跟踪/表示缺失/未响应 0）；覆盖率 94.7%**；34B 建议范围待确认（报告 `docs/archive/p1v2_reports/round34a_report.md`）
 
 - **D1（19 ep：b1 11 + base 8）**：覆盖率 **18/19 = 0.947**；分类 = **目标通道选择错误 6**（收费站：路径最近接近位姿落在岗亭车道、未完成必需变道、同 road 有空闲车道）+ **路径越界 6**（merge 为主：路径首无效比执行早 26–837 步、路径余量 ≤0.01m vs 执行 1.0–1.5m）+ **路径撞障碍 6**；**path_ok_track_out / static_missing_from_input / obstacle_in_input_no_response 全 0**；未归因 1（base/7579 超时）。**Q1 收费站路径级 10/10（跟踪级 0/10）；Q2 merge 路径级 6/7（跟踪级 0/7，跟踪残差仅 0.09–0.90m）**。自证：A 链 lane_lat 重算 **0.0m 误差**；B 链 3 ep **exact**（preview 1326/1326、obs 静态段 1326/1326 逐位一致）。**发现既有工具 bug**（`forensics_closed_loop._make_on_lane_fn` heading filter）已绕开并记录。
 - **D2（8 runs）**：岗亭**确实进 obs**（`others[16:21]` static 5 维）**且被消费**（置零 → enc_ctx relΔ 0.71–0.81、latent 0.13–0.19），**但 PolicyHead 衰减到 |Δds| 0.031–0.060m 且方向反转（presence→加速；corridor_in 反向加速）** ⇒ 判定 `present_static_5d / consumed_head_attenuated (7/8) / presence_increases_ds (8/8)` ⇒ **"表示缺失"归因不成立**（static 仅 5 维摘要、无形状/精确横向 ⇒ 形状级避让仍需新表示）；自证全过（默认关 bit-exact、复跑 812 步×6 数组 0 差异、干预可复现）。
 - **D3**：**泄漏伤害闭环 = 无证据**（预注册主口径；附秩口径 12/12 弱不利相关、中位 ρ=−0.335、主要来自 WM 侧——非因果，建议干预对照结案）；**hooks 38 项**：纯缺口=effective rank / slot permutation / ckpt hash / schema version；部分=normalized obs、LD slot identity、frame/units/valid_range、ego pose delta、anchor warp 前后、**部署侧 PolicyBackbone latent / plan 累计 pose / LQR reference 遥测**；M1–M7 最小实现清单已列。
 - **综合结论**：①失败是**路径级**（跟踪 0、表示缺失 0、未响应 0）；②最大类=**通道/车道选择（6/19）**；③静态障碍信号需**符号修正 + 幅度提升**（34B path-conditioned 纵向可解）；④泄漏非因果（R35 优先级不上调）；⑤34B 输入条件：**route/lane-target token + 走廊占用 + 路径上障碍距离**；**LQR 保持不动**。
 - **34B 建议范围（待确认）**：横向 κ 3 控制点（near/mid/far）→ κ(s) 积分路径；纵向 v_ref[6] 路径条件化；外部 `dθ_t=κ_t·ds_t` 兼容（LQR/环境/评测不变）；同数据/同 epoch **A/B vs 现 policy**；默认关/可回滚。
-- **产物**：`docs/round34a_report.md`、`runs/round34/{d1_path_attribution,d2_static_contract,d3_leakage_causality}.*`、`runs/round34/d3_hooks_note.md`。
+- **产物**：`docs/archive/p1v2_reports/round34a_report.md`、`runs/round34/{d1_path_attribution,d2_static_contract,d3_leakage_causality}.*`、`runs/round34/d3_hooks_note.md`。
 
 ### 5.47 round-34B0 批准受理（GPT `5fb3718`，503 行）：34B 修订采纳（弃"走廊摘要"核心化）；nav 排模答复；34B0 开工
 
@@ -185,13 +185,13 @@
 - **我方补充（3 条）**：①**slots 提取同属外部先验**——原则="**暴露几何、不暴露决策**"（slots 提供形状/位置/mask；不做"哪个障碍相关/是否安全"的压缩）；②**候选覆盖证明的构造**：候选集来源=专家轨迹（`dec__expert_action` 合成）+ 车道中心线左右偏移，先证 ≥95% 覆盖再训 selector；③**34B0 复用 D1 工具**（footprint/几何评估器同口径，避免分叉）。
 - **开工**：lane E1（静态摘要因果消融，闭环 5 变体）、lane E2（显式静态对象 slots 提取器 + 自证）、lane E3（候选路径几何评估器 + 覆盖证明）。
 
-### 5.48 round-34B0 执行完成（三 lane）：**覆盖门 ✅（收费站 10/10、merge 7/7、严格 17/17）**；摘要结果层依赖≈0；34B1 建议=车道锚定多候选（报告 `docs/round34b0_report.md`）
+### 5.48 round-34B0 执行完成（三 lane）：**覆盖门 ✅（收费站 10/10、merge 7/7、严格 17/17）**；摘要结果层依赖≈0；34B1 建议=车道锚定多候选（报告 `docs/archive/p1v2_reports/round34b0_report.md`）
 
 - **E1（摘要消融 5 变体 × 50 ep）**：表示/Encoder/动作层确实消费（ctx relΔ 0.58–0.78、latent 0.27–0.32、|Δds| 0.11–0.17m）**但结果层 ≈0**（zero 不减少收费站 coll 2→2/off 3→3；**0/50 结果翻转**；static 段仅 5/50 ep 非零）⇒ **摘要方向错误非充分/主导原因**；D2"presence→加速"仅在 **raw 头**复现（−8.9mm 5/5），**部署 ds（kappa-compose）符号混合**、闭环去摘要反而更快（near20 +0.57 m/s）⇒ **旧摘要可废弃但非杠杆**。
 - **E2（slots）**：`e2-static-slots-v1`（8×8：type/rel_x·y/heading/L·W/mask/dist；60m 全部静态对象、cap 8；**暴露几何不暴露决策**）；收费站几何=岗亭面↔路缘 3.5m、跨向岗亭对 7.0m、边界多边形可表达；自证：重放 **16/16 零误差**、自车系 4691/4691 逐位、领先摘要 10–20 步；**merge 8/8 无静态对象**（与 D1 一致）。
 - **E3（覆盖证明）**：评估器（复用 D1，**1857 步 × 9 字段 0 不一致**）；**收费站 10/10 有 ≥1 无碰撞候选、merge 7/7 有不越界候选、严格合取 17/17、逐步率 1.000** ⇒ **问题是选择/生成而非存在性**；最佳候选=**车道锚定**（`lane_full_p` 17.5–37.1m 静态余量 0.824m / `lane_center` 14.3–20.6m）；plan 失败证据=压白实线 8.56–8.93m / 岗亭重叠 static_clr=0.0。
 - **34B1 设计输入（我方建议，待确认）**：候选参数化**以车道中心线为锚**（δ∈{0,±0.5w,±1.0w}；κ 控制点用于平滑/连续性）；多候选（当前/左/右）+ route/target-lane 条件（nav 现为路线级、需新增车道级）+ score head；**纵向监督用部署 ds 口径**（semantic_off/kappa-compose，非 raw 头）；merge 靠横向路径（无静态对象）；外部 `dθ=κ·ds`、LQR 不动；同预算 A/B。
-- **产物**：`docs/round34b0_report.md`、`runs/round34/{e1_ablation,e2_static_slots,e3_candidate_geometry}.*`、`runs/round34/e2_static_slots/*.npz`。
+- **产物**：`docs/archive/p1v2_reports/round34b0_report.md`、`runs/round34/{e1_ablation,e2_static_slots,e3_candidate_geometry}.*`、`runs/round34/e2_static_slots/*.npz`。
 
 ### 5.49 round-35 批准受理（GPT `07f8c4b`，479 行）：核心转向=优先重构 Policy 规划能力；四工作包 + 全套门；我方 6 条补充；开工
 
@@ -205,14 +205,14 @@
   6. **现 policy 保留为 fallback**（A/B + 默认关）——大重构期间闭环不倒退。
 - **开工**：lane F1（导航职责审计）、lane F2（hooks 最小实现）、lane F3（场景普查 + 字段可用性 recon）。
 
-### 5.50 round-35 审计执行完成（F1 导航 + F2 hooks + F3 数据）：**外部 target-lane 规则 = toll 失败集 0/10 正确的缺陷源**；merge = 横向路径几何；WP3 建议待令（报告 `docs/round35_report.md`）
+### 5.50 round-35 审计执行完成（F1 导航 + F2 hooks + F3 数据）：**外部 target-lane 规则 = toll 失败集 0/10 正确的缺陷源**；merge = 横向路径几何；WP3 建议待令（报告 `docs/archive/p1v2_reports/round35_report.md`）
 
 - **F1（5 arms × 18 ep 闭环；bit-exact 18/18）**：①**失败三分拆 17/17 = 1.00**——`external_target_wrong` **10（全部 toll）**、`policy_path_wrong_target_ok` 7（全部 merge）、第三类 0（3 例被优先级吸收）；②**外部规则正确率：episode 级 0.412；tollgate 0/10 = 0.0**、merge 7/7；③三干预：`swap_target` → μ/plan max|Δ| 1.35/1.94m、**merge 3 例失败→成功**（b1:7559/b1:7608/base:7559）、toll 变道意图 0→1.0 但未完成；`route_rot` → 强消费（1 成功损失）；**`no_token` → 仍自行变道但 0 成功**（自主雏形、不可靠）；④字段清单：`target_lane`=**规则生成且不查障碍**（lane_semantic.py:355-405）；nav/route=道路级；ref_lanes 仅被规则消费。
 - **F2（hooks）**：默认关 P1–P6 全 PASS；覆盖 input 40 / network 351（含 **effective rank** 全仓首例）/ rollout 17（含 **LQR reference**）/ lqr 11；D3 M1–M5 ✅、M6 ◐；**候选分数接口就绪、无候选头**（`num_anchors=0`）。
 - **F3（数据）**：expert5k **455/441/906/907 ≥ 目标**；缺口=独立 v7 场景（54/55/109/110）+ policy 失败集（21/16/28/28）；字段矩阵 + 数据计划（**DP-1 离线提取 ~2002 ep + DP-4 static slots 先行**；覆盖门不因总量阻塞）。
 - **综合**：①toll 失败 = **外部错误 target + Policy 跟随**（原则获证据支持）；②merge = **横向路径几何**（target 正确）；③无 token 自主选择不可靠 ⇒ 网络内候选+选择（WP3）为正解；④数据/hooks 就绪。
 - **我方建议（待裁）**：**诊断臂 = 障碍感知 target-lane 规则**（默认关、仅诊断，量化"正确 target 下 Policy 天花板"；**不作生产路径**）；**WP3 设计输入** = 候选含**收费站空闲闸口车道**（从可见车道生成）+ 车道锚定横向 + merge 保本车道中心线续接；数据 DP-1+DP-4 先行；**WP3 最小原型待 CG 确认**。
-- **产物**：`docs/round35_report.md`、`docs/navigation_scope_audit.md`、`runs/round35/{f1_nav_audit,f2_hooks,f3_data_census}.*`。
+- **产物**：`docs/archive/p1v2_reports/round35_report.md`、`docs/archive/p1v2_reports/navigation_scope_audit.md`、`runs/round35/{f1_nav_audit,f2_hooks,f3_data_census}.*`。
 
 ### 5.51 round-WP3 批准受理（GPT `acd22c1`，468 行）：启动 Network-Internal Lane and Path Selection；我方 3 条补充；开工
 
@@ -385,8 +385,8 @@
 
 ## 6. 文档与产物索引
 
-- **决策/契约**：`docs/p1_v2_decision.md`、`docs/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、`docs/round30_audit.md`、`docs/stage_a_config_consumption.md`
-- **报告**：`docs/p1_0_report.md`、`docs/p1_2_diagnosis.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`、`docs/recovery_v1_dataset_card.md`、**`docs/round32_canary_report.md`（canary Gate 0–4 全测）**、**`docs/round33_report.md`（33A 三问 + 33B warp NO-GO）**
+- **决策/契约**：`docs/p1_v2_decision.md`、`docs/archive/p1v2_reports/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、`docs/round30_audit.md`、`docs/archive/p1v2_reports/stage_a_config_consumption.md`
+- **报告**：`docs/archive/p1v2_reports/p1_0_report.md`、`docs/archive/p1v2_reports/p1_2_diagnosis.md`、`docs/r21_lane_semantic_contract.md`、`docs/r21_target_lane_selection.md`、`docs/semantic_v1_dataset_card.md`、`docs/r21_3a_semantic_wiring.md`、`docs/recovery_v1_dataset_card.md`、**`docs/archive/p1v2_reports/round32_canary_report.md`（canary Gate 0–4 全测）**、**`docs/archive/p1v2_reports/round33_report.md`（33A 三问 + 33B warp NO-GO）**
 - **数据**：`datasets/recovery_v1|v2/`、`datasets/semantic_v1_{pilot,independent,3d3}/`（9,515 / 8,953 / 53,765）
 - **产物**：`runs/p1_v2/round12a|15a|…|30/`、`runs/p1_v2/`（probe 家族）、**`runs/round32/canary/`（gate0_compat/eval_*/gate3_*/gate4_*/record_*/monitor）**、**`runs/round33/`（a1_ckpt_audit / a2_collision / a5_overshoot_decomp / a6_noise / b_warp / b_warp_compat）**、`runs/p1_0|p1_2/`、`runs/eval/`、`runs/forensics/`
 - **流水/脚本**：`.slim/deepwork/p1_v2/`（round12a→33 脚本 + logs）；R30 队列=`round30/*.sh`；canary 队列=`round32/{canary_train,canary_eval,canary_compat_check,c4_gate3_analyze,p3b_conditional_gain}.py` + `run_r32_*.sh`；R33 队列=`round33/{a2_collision_attribution,a5_overshoot_decomp,a6_noise,b_warp_compat,b_warp_record,b_warp_analyze}.py`

@@ -582,7 +582,7 @@
 | 路径 | 大小 | 建议 | 理由 |
 |---|---|---|---|
 | `docs/v7_program_prereg.md` | 66K | 保留 | v7 现行预注册（含 §12-§14） |
-| `docs/v7_program_report.md` | 43K | 保留 | v7 现行主报告（本次已更新引用） |
+| `docs/v7_reports/v7_program_report.md` | 43K | 保留 | v7 现行主报告（本次已更新引用） |
 | `docs/v6_program_prereg.md` | 30K | 保留 | v6 现行预注册（§7.4 pin 表等） |
 | `docs/v6_program_report.md` | 23K | 保留 | v6 现行主报告（本次已更新引用） |
 | `docs/version_ledger.md` | 7K | 保留 | 版本台账（被 v6 报告引用） |

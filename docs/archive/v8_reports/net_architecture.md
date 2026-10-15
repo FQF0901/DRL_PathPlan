@@ -1,7 +1,7 @@
 # 网络架构（代码口径）——数据流 / 模块实现 / IO 维度与物理意义 / 监督
 
 > ⚠️ **本文内容停在 `fa2b985`（v7 结构迭代前），与当前代码/结论有多处不符**；当前状态请以
-> `docs/v8_net_review.md`（2026-10-09，含 obs v6 / latent WM / 参数排摸现状）为准。
+> `docs/archive/v8_reports/v8_net_review.md`（2026-10-09，含 obs v6 / latent WM / 参数排摸现状）为准。
 >
 > **依据 = 当前代码**（`net/`、`env/obs/`、`pipeline/`、`reward_model/`、`config/*.yaml`），不引用设计文档结论；行号对应当前 HEAD（`fa2b985`）。
 > 默认超参取 `config/model.yaml` + `config/train.yaml`；与代码内置默认不同处均注明。

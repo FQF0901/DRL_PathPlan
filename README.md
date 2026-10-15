@@ -3,7 +3,7 @@
 MetaDrive 城市/高速驾驶规划 RL：观测（当前帧 + 6 帧历史，含 OD/LD/nav）→ 网络输出动作 `(ds, dθ)`
 （下一 0.5 s 的弧长 + 航向变化）→ 网络内 latent rollout 产生 3 s / 6 点 plan → LQR 跟踪执行。
 训练链路：**A 世界模型教师强制 → B 规划器 BC（primary→specific，可接 DAgger 迭代）→ C PPO RL
-（实验口径，KL 锚定 B 快照）**（`pipeline/stages.py:1-27`；网络数据流与输出契约见 `docs/net_architecture.md`）。
+（实验口径，KL 锚定 B 快照）**（`pipeline/stages.py:1-27`；网络数据流与输出契约见 `docs/archive/v8_reports/net_architecture.md`）。
 
 ## 快速开始
 
@@ -125,9 +125,9 @@ Stage C 当前采用臂见 `config/arms/README.md`。
 | 文档 | 内容 |
 | --- | --- |
 | `docs/LOCKS.md` | 锁版记录（Stage A/B 锁版与 RL 基线 tag） |
-| `docs/net_architecture.md` | 网络架构（代码口径：数据流 / 模块 / IO 维度 / 监督） |
+| `docs/archive/v8_reports/net_architecture.md` | 网络架构（代码口径：数据流 / 模块 / IO 维度 / 监督） |
 | `docs/rl_reward_v5.md` | 奖励 v5 冻结规格（项集 / 聚合结构 / 终局值档） |
-| `docs/v7_program_prereg.md`、`docs/v7_program_report.md` | v7 程序预注册（冻结）与收尾报告 |
+| `docs/v7_program_prereg.md`、`docs/v7_reports/v7_program_report.md` | v7 程序预注册（冻结）与收尾报告 |
 | `docs/v6_reports/` | v6 报告/预注册/网络设计（目录索引 `docs/v6_reports/README.md`） |
 | `docs/v7_reports/` | v7 证据/报告档 + 冻结 specs/figures（目录索引 `docs/v7_reports/README.md`） |
 | `docs/reward_audit/` | 奖励审计与 E-β″ 复算（`MANIFEST.md` 为入口） |

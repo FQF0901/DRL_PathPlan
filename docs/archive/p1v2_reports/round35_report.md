@@ -1,11 +1,11 @@
 # Round-35 总报告（导航职责审计 + 动态 hooks + 数据/字段盘点）
 
 > 依据：`docs/deepseekv4p1_argue.md` §5.49（GPT `07f8c4b` WP1/WP2 + 我方 F3）。纪律：只读、零训练、零既有文件改动；默认关 bit-exact。
-> 产物：`docs/navigation_scope_audit.md`（F1 交付件）、`runs/round35/{f1_nav_audit,f2_hooks,f3_data_census}.*`；脚本 `.slim/deepwork/p1_v2/round35/f*.py`。
+> 产物：`docs/archive/p1v2_reports/navigation_scope_audit.md`（F1 交付件）、`runs/round35/{f1_nav_audit,f2_hooks,f3_data_census}.*`；脚本 `.slim/deepwork/p1_v2/round35/f*.py`。
 
 ## 1. F1 导航职责审计（5 arms × 18 ep 闭环 + 干预；bit-exact 18/18）
 
-**字段清单（要点）**：`nav`=道路级（env/obs/nav.py → net/model.py:814-829）；`route_world`=道路级（→ mem.py:465-560）；`current_ref_lanes/next_ref_lanes`=**仅被规则消费**（lane_semantic.py:355-405/486-493）；**`target_lane`=规则生成**（lane_semantic.py:355-405，**不查障碍**）；`target_lane_token`=网络强消费（semantic.py:95-102→156/190；model.py:687-691/919-922）；`ld_route_associated`、`lane semantic`、`route command` 逐项 file:line 见 `docs/navigation_scope_audit.md`。
+**字段清单（要点）**：`nav`=道路级（env/obs/nav.py → net/model.py:814-829）；`route_world`=道路级（→ mem.py:465-560）；`current_ref_lanes/next_ref_lanes`=**仅被规则消费**（lane_semantic.py:355-405/486-493）；**`target_lane`=规则生成**（lane_semantic.py:355-405，**不查障碍**）；`target_lane_token`=网络强消费（semantic.py:95-102→156/190；model.py:687-691/919-922）；`ld_route_associated`、`lane semantic`、`route command` 逐项 file:line 见 `docs/archive/p1v2_reports/navigation_scope_audit.md`。
 
 **三干预响应**（vs baseline；首差异决策中位=0，即刻生效）：
 

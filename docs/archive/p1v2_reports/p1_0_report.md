@@ -103,7 +103,7 @@ fail-fast 第三次拦截（臂配置）；GL wrapper 纪律（MetaDrive 必须 
 
 ### 5.2 契约文档
 
-`docs/p1_implementation_contract.md` v1（trajectory-action/PPO 记账/评测协议冻结 + P1-4 边界 + 锚点表）；`docs/p1_probe_spec.md` v1。
+`docs/archive/p1v2_reports/p1_implementation_contract.md` v1（trajectory-action/PPO 记账/评测协议冻结 + P1-4 边界 + 锚点表）；`docs/p1_probe_spec.md` v1。
 
 ### 5.3 引擎非确定性（关键流程发现）
 

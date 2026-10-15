@@ -12,7 +12,7 @@
 
 | # | 要求（终审原文要点） | 状态 | 证据 |
 |---|---|---|---|
-| C1 | 配置契约 → `stage_a_config_consumption.md`（键级 CONSUMED/IGNORED/LEGACY/DERIVED）；删键/fail-fast=审计后动作 | ✅ 文档；修复后置 | `docs/stage_a_config_consumption.md`（70 键：51/14/2/3） |
+| C1 | 配置契约 → `archive/p1v2_reports/stage_a_config_consumption.md`（键级 CONSUMED/IGNORED/LEGACY/DERIVED）；删键/fail-fast=审计后动作 | ✅ 文档；修复后置 | `docs/archive/p1v2_reports/stage_a_config_consumption.md`（70 键：51/14/2/3） |
 | C2 | h1/h3/h6 独立 backward 账本（不删 detach） | ✅ | §4（三布尔 + 模块表） |
 | C3 | 动作干预 probe 覆盖 future latent + physical decoder + next Policy action | ✅ | §3（9 变异 × k=1..6；三类目标全录） |
 | C4 | optimizer 契约（只记录；白名单建组后置） | ✅ 记录；修复后置 | §5.2 + `stages.py:1810-1819` |
@@ -264,7 +264,7 @@ MoE-on 对照（L_6）：experts 9.7e-3 非零（Stage A 零初始化保持）�
 
 ## 5. R30-5 执行契约文档
 
-- ✅ `docs/stage_a_config_consumption.md`（键级 70 行：CONSUMED 51 / IGNORED 14 / LEGACY 2 / DERIVED 3；
+- ✅ `docs/archive/p1v2_reports/stage_a_config_consumption.md`（键级 70 行：CONSUMED 51 / IGNORED 14 / LEGACY 2 / DERIVED 3；
   重点：`world_model.loss` 全仓零读取且 metrics 硬编码旧名；`trainable` 未消费（死参）；`stages.C.kl_anchor*` YAML 零消费；
   `epochs/batch/micro` 双真相；`--plan-noise` metrics 不回写开关）。
 - ✅ **执行契约（口径表 v1，R30 结论）**：
@@ -297,7 +297,7 @@ MoE-on 对照（L_6）：experts 9.7e-3 非零（Stage A 零初始化保持）�
      c. 监督侧：overshoot drift 直接指标化（尾段 ds/几何一致性项）后预注册。
   2. **Stage C 执行契约**：S3≪S2（结构级）⇒ 键级 fail-fast + 口径重选；Exact 主训练须过 §5.30 注记 2 前置。
   3. **工程尾巴**：R30-3 mirror 门重造（全场景镜像）；配置 fail-fast/删键批次（§5.1 清单）；exact 参考消费语义文档化。
-- 结论入口：本文 + `docs/stage_a_config_consumption.md`；产物索引见 `runs/p1_v2/round30/` 与 `.slim/deepwork/p1_v2/round30/journal.md`。
+- 结论入口：本文 + `docs/archive/p1v2_reports/stage_a_config_consumption.md`；产物索引见 `runs/p1_v2/round30/` 与 `.slim/deepwork/p1_v2/round30/journal.md`。
 
 ---
 

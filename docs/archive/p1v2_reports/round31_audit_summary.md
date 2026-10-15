@@ -1,7 +1,7 @@
 # Round-31 审计汇总（Q2 + WM fidelity + Stage C contract + M2；全只读、零训练）
 
 > 依据：`docs/deepseekv4p1_argue.md` §5.34（GPT `f4faec8` 裁决：批准 Q2 审计 / WM action fidelity / Stage C contract，暂停一切训练）。
-> 纪律：零训练、零生产代码改动。产物：`runs/round31/probes/*`、`runs/round31/moe_off/*`、`docs/round31_stagec_contract_audit.md`；脚本 `.slim/deepwork/p1_v2/round31/*`。
+> 纪律：零训练、零生产代码改动。产物：`runs/round31/probes/*`、`runs/round31/moe_off/*`、`docs/archive/p1v2_reports/round31_stagec_contract_audit.md`；脚本 `.slim/deepwork/p1_v2/round31/*`。
 
 ## 0. 结论速览（8 条）
 
@@ -44,7 +44,7 @@
 - mirror 一致率：a_next dθ 反号 restricted **0.842**（all 0.486，近零噪声主导）；near_mirror 0.33%；od.dy/ld.dy 反号 0.814/0.613（ld.curvature 0.981）。
 - **判定**：WM 由场景主导、动作/位姿条件化弱（正确构造下坐实）；mirror ≥95% 门未过（非等变模型 + t0 冻结简化口径 ⇒ 首轮诊断，不设门）。
 
-## 4. Lane D：Stage C 执行契约（`docs/round31_stagec_contract_audit.md`）
+## 4. Lane D：Stage C 执行契约（`docs/archive/p1v2_reports/round31_stagec_contract_audit.md`）
 
 - 四链路映射矩阵：collect↔update=**是**；collect↔eval=部分；**collect↔deploy=否（S3≠S2）**；update↔deploy/eval=部分；eval↔deploy=部分（默认口径）。
 - 不一致清单 I1–I7（S3≠S2 / exact 仅 plan[0] + 两栈默认相反 / kappa-compose 仅 eval / MoE on-off / `stages.C.tracker=mpc_lqr` 死键 / update 零消费 plan / eval 丢弃 reward）。

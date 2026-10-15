@@ -78,7 +78,7 @@
 - `config/arms/README.md`（保留的旧 README）仍以表格叙述 v6 arm0–8 文件名 → **叙述性、非可执行引用**，
   属已知遗留（§5.3）。
 - docs 叙述性引用（未改，仅列）：`docs/v7_reports/v7_night_watch.log`（21）、`docs/v7_program_prereg.md`（17）、
-  `docs/v7_reports/cleanup/CLEANUP_D_DEADCODE.md`（5）、`docs/v7_program_report.md`（5）、
+  `docs/v7_reports/cleanup/CLEANUP_D_DEADCODE.md`（5）、`docs/v7_reports/v7_program_report.md`（5）、
   `docs/v7_reports/v7_struct_retrain_v5.md`（4）、`docs/v7_reports/v7_struct_fail_diag.md`（4）、
   `docs/v7_reports/v7_p4extra_collision.md`（2）、`docs/v7_reports/{v7_s14_ttc,v7_p4extra_rewards}.md`（各 1）、
   `docs/v6_reports/{v6_seed11_attribution,v6_collision_arm_design,v6_program_report,v6_program_prereg}.md`（各 1）；
@@ -120,7 +120,7 @@
    | `docs/reward_audit/ebeta2/MANIFEST.md` | 4/39 | `v6_program_prereg.md` | 同上 |
    | `docs/reward_audit/ebeta2/config_draft_rc{1,3,10,30}.yaml` | 10 | `v6_program_prereg.md` | 注释 |
    | `docs/v7_program_prereg.md` | 6（链接）/12/20/95/103/106 | `experiments.md`、`v6_program_prereg.md` | 冻结正文（未改） |
-   | `docs/v7_program_report.md` | 3（链接）/153 | `experiments.md`、`v6_program_report.md` | 冻结正文（未改） |
+   | `docs/v7_reports/v7_program_report.md` | 3（链接）/153 | `experiments.md`、`v6_program_report.md` | 冻结正文（未改） |
    | `docs/v6_reports/README.md` | 4/5/22 | `v6_net_design.md`、`v6_program_prereg.md`、`v6_program_report.md` | 同目录索引，建议后续同步 |
    | `docs/v7_reports/v7_p0_gap_decomposition.md` | 23 | `experiments.md` | 证据档 |
    | `docs/v7_reports/MIGRATION_NOTE.md` | 4 | `v6_program_prereg.md` | 迁移说明 |

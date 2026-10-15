@@ -1,7 +1,7 @@
 # recovery_v2 采集契约（同状态）
 
 > P1-v2 Step 2 规范。原则：**每一行的 observation / baseline plan / expert label 必须来自同一时刻、同一状态**。
-> 禁止 Pass-1 observation 配 Pass-2 label（v1 教训：9,377/11,694 行为反事实错位；见 `docs/p1_2_diagnosis.md`）。
+> 禁止 Pass-1 observation 配 Pass-2 label（v1 教训：9,377/11,694 行为反事实错位；见 `docs/archive/p1v2_reports/p1_2_diagnosis.md`）。
 
 ## 1. 行字段（同状态）
 

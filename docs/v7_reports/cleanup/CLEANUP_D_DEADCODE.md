@@ -56,7 +56,7 @@
 
 - **位置**：
   - v6 P4（预算门截断未跑，`docs/v6_reports/v6_p4_report.md` §1）：`config/arms/arm6_lane_boundary.yaml`、`arm7_lane_center.yaml`、`arm8_collision_suppress_{gap,term,term46}.yaml`（arm8 设计后被 v7 P4-extra 碰撞抑制取代）；
-  - v7 §10（预注册后降级未跑，`docs/v7_program_report.md` §1）：`config/arms/v7_arm2_bundle_kl.yaml`、`v7_arm3_bundle_only.yaml`。
+  - v7 §10（预注册后降级未跑，`docs/v7_reports/v7_program_report.md` §1）：`config/arms/v7_arm2_bundle_kl.yaml`、`v7_arm3_bundle_only.yaml`。
 - **引用/调用检查**：仅预注册/报告（v6_prereg §7、v6_p4_report、v7_prereg §10、v7_report）+ dry-run 测试（`tests/test_p4_arm_configs.py` 14、`tests/test_v7_p2_arm_config.py` 6）；无对应 run 目录（`ls runs/ | grep p4_arm[678]` 为空）。
 - **风险**：删除需同步 dry-run 用例的臂清单参数化；配置体量 KB 级，保留成本低。
 - **建议**：**归档 / 删除待批**（v6 arm6/7 已明确"NOT RUN"；arm8 被 v7 P4-extra 取代；arm2/3 预注册降级）。删除前置：同步测试清单 + 预注册文档注记。

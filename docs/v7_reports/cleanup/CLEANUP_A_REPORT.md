@@ -24,7 +24,7 @@
 
 ## 2. 任务 2：repo 内引用更新
 
-- `docs/v7_program_report.md`：§4.4 / §8.7 证据档清单改为 in-repo 路径（未入仓项标注"已清理"）；§2 汇总表 4 行、§3 表示层行、§4.2 worktree、§6 配对目录、§8.3/§8.7 图与 JSON 引用同步更新。**数字与结论未改**。
+- `docs/v7_reports/v7_program_report.md`：§4.4 / §8.7 证据档清单改为 in-repo 路径（未入仓项标注"已清理"）；§2 汇总表 4 行、§3 表示层行、§4.2 worktree、§6 配对目录、§8.3/§8.7 图与 JSON 引用同步更新。**数字与结论未改**。
 - `docs/v6_program_report.md`：§5.4 证据档清单、§4 时间线（seed11 归因）、§5.2/§6 引用同步更新。
 - 其他 docs（`v7_program_prereg.md`、`rl_stage_c_*` 等）**未动**——冻结预注册/历史文档保完整性（见未决 3）。
 

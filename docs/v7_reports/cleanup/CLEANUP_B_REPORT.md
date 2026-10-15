@@ -30,7 +30,7 @@
 | `datasets/BTC20260929-1357_phase3_dagger_r1..r4` | 84.8M | `docs/phase3_rootcause_analysis.md:251` + `.slim/...:19`（`r{1..5}`，5 轮窗口数据族） |
 | `runs/BTC20260930-1434/1437/1441/1449_eval500_*` | 4.0M | `docs/v6_reports/v6_cleanup_report.md:43`（零点引用 run 清单，通配/缩写） |
 
-**v5 线（显式删除，引用情况记录在案）**：`expert5k_v5` / `expert500val_v5` / `phase3_dagger_v5` 共 3 项 / 323.1 MiB —— 已关闭路线、报告已归档；引用点（`docs/v7_program_report.md:150`、`docs/v7_program_prereg.md:342-343`）为历史叙述，非复现依赖。
+**v5 线（显式删除，引用情况记录在案）**：`expert5k_v5` / `expert500val_v5` / `phase3_dagger_v5` 共 3 项 / 323.1 MiB —— 已关闭路线、报告已归档；引用点（`docs/v7_reports/v7_program_report.md:150`、`docs/v7_program_prereg.md:342-343`）为历史叙述，非复现依赖。
 
 **其余删除项复核为无引用**；少量命中为假阳性（如 `BTC20260930-0418_eval500_p3a4*` 的时间戳命中实为保留父 run `stage_c_p3_a4`；`datasets/BTC20260926-2343_expert5k.log` 命中实为目录名），已逐项判读后删除。
 

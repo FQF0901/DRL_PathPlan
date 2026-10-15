@@ -351,7 +351,7 @@
 
 ## 12. P4-extra 预注册（2026-10-05；s11 + 碰撞抑制单变量；收尾后定向尝试）
 
-> 本 § 为 v7 收尾（`v7-close-20261006`；报告 `v7_program_report.md`）后的 **P4-extra 定向尝试**：
+> 本 § 为 v7 收尾（`v7-close-20261006`；报告 `v7_reports/v7_program_report.md`）后的 **P4-extra 定向尝试**：
 > 在程序最佳 RL 产物 arm1-s11 u150（clean500 0.668 / eval500 0.646）上以**单变量**碰撞抑制
 > 修复安全闸（§5：collision ≤ IDM）。范围 = `config/arms/v7_arm1_collision_suppress.yaml`（新）+
 > `docs/`；**不碰 net/env/reward 代码语义**（唯一改动 = 臂配置中一个终局值）。揭盲前冻结。
