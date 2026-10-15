@@ -464,6 +464,33 @@
 - **编排裁定（文档 §6 已结案）**：①static 保诊断；②nav 取派生；③**迁移节奏=先接口后掩码**（(a) 生产者补全 + 禁 0 + fail-fast〔零训练可验，附逐位 off〕→(b) 掩码进头 + static 下沉〔与下次重训同批〕）；④`c3_eval_probe.py` 纳入常规"头入口雷达"；⑤索引登记已更新。
 - **并入串行队列**：**Q4-A 实施 lane**（生产者补全 `path_*` 8 列 + 移除静默 0〔fail-fast/mask+中性〕+ 同公式真值、eval 与训练共享 builder；零训练、默认关/逐位）——`net/` 队列排在 **P1 之后**；B 段与下次训练同批。
 
+### 5.76 R38-Q4-A（`path_*` 生产者补全 + 禁静默 0）——**已落地 `9577078`**：builder 与 M7 真值**逐位等价**、闭环**复现 C1_true 50/50**
+
+- **语义等价**：同一 eval 帧，builder 产出 == M7 `--long-exog-fill true` 注入值 **334/334 逐位**（max|Δ|=0，三列 bit-exact 失配 0）；训练侧同公式 **float32 bit-exact**（256 行）。头入口雷达（`c3_eval_probe`）7/7 键在场率 **0.0→1.0**。
+- **闭环**：`geo_native`（C1 + 新 builder）**逐 id 复现 `C1_true` 50/50**（0.400/0.080/0.180/0.340）；`geo_native_fill_neutral` max|Δ|=0（真值已原生）。
+- **结构**：公式**单一出处** `env/obs/long_exog.py`（M7 注入器与 i1 抽取改调同一函数）+ `env/obs/path_field.py`（8 列 + 同源 `__present`）+ `net/path_head.py` dynamic 两列**缺键 fail-fast**；头 schema/CLI/数据集白名单不变。
+- 门：pytest 998→**1005**；K1 契约门 (a)–(d) PASS（(e) 因 P1 先删 `allow_oneshot` 记 skipped 并给因）。
+
+### 5.77 R38-P1/P1b（A 组减枝）——**已落地 `596747c`+`48cb5eb`**（+`.slim` 本地清扫）
+
+- A 组 prod 命中 **89→24**（残留=守卫/契约结构派生/文档串）；`compose_path_plan`/`--diagnostic-oneshot`/`allow_oneshot`/`one_shot_plan(` 在 net+tools（排除 legacy）**命中 = 0**；实现迁 `tools/legacy/oneshot_path.py`（快照 + 出处）。
+- 逐位：plain 25/structured 73 键 keys_equal=true **max|Δ|=0**；pytest 987→**998**；契约门**未弱化**（键名保留、语义=结构派生"路径不存在"，含可证伪测试）。
+- P1b：`.slim` **11/12 清扫**（复扫 74→23 行、**活调用点 0**）；唯一例外 `a3/eval_a3.py`（C6 冻结期跳过，解冻方案已备）。
+
+### 5.78 R38-P2a（K-anchor 减枝，B 组）——**已落地 `a226285`+`dd0a8c2`**
+
+- **12/12 符号 prod 命中 = 0**（删前 115 行/9 文件）；实现迁 `tools/legacy/k_anchor/`（9 文件 + README/出处）；移除面=模型构造/4 张训练冻结表/config/eval·collect 透传/损失链路（`trainer.py` −258/+12 等）。
+- `tools/legacy/legacy_key_mapper.py`（20 键 ignore 集，v7 K-anchor ckpt 实测 **20 键全登记、reject=0**）+ `checkpoint_migration.py`（最小装载入口，**未接线 loader**＝D 组挂载点）。
+- 逐位 plain/structured max|Δ|=0；**state_dict 键集 sha256 双侧一致**（168/186）；pytest 1005→**1022**；config 零活键（仅 README "已退役"说明）。
+- 落差记录：manifest B 组实为 12 子项（非 10）；`.slim` 唯一预期 fail-fast = `round35/g3_wp3a_proof.py`。
+
+### 5.79 R38-P2b（C 组旧 warp 退役 + D 组双实体收编）——**已落地（本笔）**
+
+- **C 组**：先冻结 `tests/fixtures/r38_p2b_warp/`（w1/w2 逐位 oracle：pure_cases 16 + model_poses + m1_arms + b_compat + manifest sha256 + 生成器）→ 相关 Gate/单测改读 fixture → 才删 `set_ego_warp`/`_ego_warp_pose_k`/`self.ego_warp`（迁 `tools/legacy/legacy_ego_warp.py`）；`WARP_MODES` 收为 `("off","analytic")`。**M1 Gate A PASS**（五臂逐位；w1/w2 = fixture↔HEAD live）、**R33-B Gate 0 PASS**。
+- **D 组六步**：①mapper 扩展（`path_head.*↔policy.structured_action.*` 前缀改名 + `log_std→logstd` + meta 键 + 条件族计数）②结构化头收编为 **`model.policy.structured_action`**（默认兼容；`path_head` 只读 alias；`output_groups()` 三子结构，logstd 请求 fail-fast=均值方差不得两源）③`enable_path_head`/`path_head_ablation` 删除（消融降 legacy 诊断入口）④旧 PolicyHead 快照 + legacy 装载层 ⑤**forward 单动作出口** ⑥诊断离线化 `tools/diagnostics/legacy_policy_diag.py`。**L-A 契约断言零弱化**（contract_* 全 1.0）。
+- 证据：逐位 plain 25/structured 73 max|Δ|=0；**state_dict 默认 168 键逐字节一致；structured raw 差 = 恰好 18 键、经 mapper 归一后一致**（`keys_diff_is_mapper_explainable=true`）；pytest 1022→**1043**；旧 ckpt×mapper（8 代表）：t1_keep structured rename 18/0 reject/0 missing。
+- 遗留：`a3/eval_a3.py` 的 oneshot 残留（C6 冻结期跳过，解冻方案见 p2b_report §⑤）；`pipeline/`、`docs/` 的 C/D 组同步属下一批（P2b 写域外）。
+
 ## 6. 文档与产物索引
 
 - **决策/契约**：`docs/p1_v2_decision.md`、`docs/archive/p1v2_reports/p1_implementation_contract.md`（v1）、`docs/p1_probe_spec.md`（v1.1）、`docs/p0_eval_compat_design.md`、`docs/recovery_v2_contract.md`、`docs/round30_audit.md`、`docs/archive/p1v2_reports/stage_a_config_consumption.md`
