@@ -435,8 +435,8 @@ def test_policy_distinguishes_left_right_cutin_tokens() -> None:
         obs["od"][:, 0, :2] = torch.tensor([8.0, side])
         return obs
 
-    left = model(_with_target(3.5), rollout=False, world_model=False)["action_mu"]
-    right = model(_with_target(-3.5), rollout=False, world_model=False)["action_mu"]
+    left = model(_with_target(3.5), forward_mode="policy_single_step")["action_mu"]
+    right = model(_with_target(-3.5), forward_mode="policy_single_step")["action_mu"]
     assert float((left - right).abs().max()) > 1e-4, "左/右 cut-in 目标不可区分（去池化失效？）"
 
 

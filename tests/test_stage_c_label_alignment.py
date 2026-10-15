@@ -25,7 +25,7 @@ class _AlignModel(torch.nn.Module):
         self.head_value = torch.nn.Linear(8, 1)
 
     def forward(  # noqa: D102 - stub 契约
-        self, obs: dict, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False
+        self, obs: dict, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False
     ) -> dict:
         x = obs["ego"].flatten(start_dim=1)
         mu = torch.sigmoid(self.head_mu(x))

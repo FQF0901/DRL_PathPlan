@@ -35,7 +35,7 @@ def test_plan_valid_delta_kappa_pairwise() -> None:
     _activate_residual(model, context=0.2, token=0.2)
     obs = _semantic_obs(batch=2, seed=51)
     with torch.no_grad():
-        out = model(obs, rollout=True, world_model=False)
+        out = model(obs, forward_mode="policy_wm_rollout")
     ds = out["plan"][..., 0]
     expected = (ds.abs() >= 0.5)[..., :-1] & (ds.abs() >= 0.5)[..., 1:]
     assert out["plan_valid_delta_kappa"].dtype == torch.bool

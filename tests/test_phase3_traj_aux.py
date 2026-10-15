@@ -45,7 +45,7 @@ class _StubPhase3Model(torch.nn.Module):
         )
         self.register_buffer("action_mu", torch.randn(batch, 2, generator=generator, dtype=torch.float32))
 
-    def forward(self, obs, *, rollout=True, world_model=False, **kwargs):  # noqa: D102 - stub
+    def forward(self, obs, *, forward_mode: str = "policy_wm_rollout", **kwargs):  # noqa: D102 - stub
         return {"traj_xy": self.traj_xy, "plan": self.plan, "action_mu": self.action_mu}
 
 

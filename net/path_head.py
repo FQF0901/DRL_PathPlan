@@ -823,14 +823,26 @@ def step_geometry(
 
 # ---------------------------------------------------------------------- obs → 输入
 def anchor_from_obs(obs: Mapping[str, Tensor]) -> tuple[Tensor, Tensor | None]:
-    """``obs`` → ``(lane_anchor_xy (B,P,2), lane_anchor_mask (B,P)|None)``；缺键 fail-fast。"""
+    """``obs`` → ``(lane_anchor_xy (B,P,2), lane_anchor_mask (B,P)|None)``；缺键 fail-fast。
+
+    R39-A1：``lane_anchor_xy`` 是**评测/部署侧注入**键（``env/obs`` builder 不生产；训练数据由
+    教师注入）⇒ 缺键 fail-fast 文案同步指路注入方式（选项 a：不静默回退、不改 env/obs）：
+    ① ``.slim/deepwork/p1_v2/a3/eval_a3.py --lane-anchor inject``（R36 C lane 注入器，
+    ``select_target_lane`` + E3 车道链采样口径）；② 自定义 controller 子类在决策步
+    ``builder.build`` 之后写入 ``lane_anchor_xy (1,P,2)`` + ``lane_anchor_mask (1,P)``（同口径）。
+    """
     if not isinstance(obs, Mapping):
         raise TypeError(f"obs 必须是映射，收到 {type(obs).__name__}")
     value = obs.get("lane_anchor_xy")
     if not torch.is_tensor(value):
         raise ValueError(
             "path head 启用时 obs 必须提供 'lane_anchor_xy'（目标车道中心线折线，(B,P,2)，"
-            "ego t0 系；首点 ≈ 自车在车道上的投影点）"
+            "ego t0 系；首点 ≈ 自车在车道上的投影点）。"
+            "该键属评测/部署侧注入（R39-A1 选项 a：缺键明确报错 + 文档化注入）："
+            "① 可执行 .slim/deepwork/p1_v2/a3/eval_a3.py --lane-anchor inject"
+            "（R36 C lane 注入器：env.obs.lane_semantic.select_target_lane + E3 车道链采样）；"
+            "② 或在自定义 controller 决策步（builder.build 之后、模型前向之前）写入 "
+            "obs['lane_anchor_xy']/obs['lane_anchor_mask']（口径同 a3）。"
         )
     xy = squeeze_batch_singletons(value.float(), 3, "lane_anchor_xy")
     if int(xy.shape[-1]) != 2:

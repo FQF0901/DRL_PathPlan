@@ -108,8 +108,8 @@ class _MoeSmokeModel(_SmokeModel):
             moe=SimpleNamespace(experts=nn.ModuleList([nn.Linear(self.trunk[0].in_features, 64) for _ in range(num_experts)]))
         )
 
-    def forward(self, obs, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False):  # noqa: ANN001
-        out = super().forward(obs, rollout=rollout, world_model=world_model, wm_detach=wm_detach)
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False):  # noqa: ANN001
+        out = super().forward(obs, forward_mode=forward_mode, wm_detach=wm_detach)
         hidden = out["latent"]
         for expert in self.plan_head.moe.experts:  # 输出被丢弃；hook 只读采集范数
             expert(hidden)

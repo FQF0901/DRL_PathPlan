@@ -6,7 +6,10 @@
 1. **禁生产目录重新引用 legacy 模块/符号**：``net/``、``env/``、``pipeline/``、``tools/*.py``
    （官方 CLI）对 ``tools.legacy``/``tools.diagnostics`` 零 import；生产目录不得重新定义
    已退役符号（``set_ego_warp``/``one_shot_plan``/``_group_of_tag``/``_remap_legacy_others``/
-   ``_write_legacy_grouped_tensorboard``）。
+   ``_write_legacy_grouped_tensorboard``）。**R39-A1 登记例外**：loader 桥接模块
+   ``tools.legacy.legacy_key_mapper`` / ``tools.legacy.checkpoint_migration`` 允许被
+   ``pipeline/eval_runner.py`` 装载路径 import（GPT §二-A 任务 2 明确要求接入；例外窄化到
+   这两个模块自身，其余 ``tools.legacy.*`` 仍零 import）。
 2. **禁 default config 出现 deprecated 键**：``config/**/*.yaml``（含 ``default.yaml::includes``
    链）不得出现 ``plan_anchor``/``num_anchors``/``oneshot``/``allow_oneshot``/...
    （A/B/D 组配置键）；``plan_anchors_k6.json`` 不再存在。
@@ -43,6 +46,14 @@ BATCH = 2
 #: ``tools/legacy`` 自身与 ``tools/diagnostics`` 离线工具除外）。
 _PROD_DIRS = ("net", "env", "pipeline")
 _LEGACY_MODULE_PREFIXES = ("tools.legacy", "tools.diagnostics", "experiments.archive")
+#: R39-A1 登记例外（GPT §二-A 任务 2：正式加载路径**接入** ckpt migration）：
+#: ``tools.legacy.legacy_key_mapper``（纯函数键面映射）+ ``tools.legacy.checkpoint_migration``
+#: （装载原语）是 loader 的**被登记桥接模块**——它们不携带旧行为实现，只做旧键面的
+#: 分类/改名/丢弃计数；除此之外 ``tools.legacy``/``tools.diagnostics`` 仍零 import。
+_ALLOWED_LEGACY_IMPORTS = (
+    "tools.legacy.legacy_key_mapper",
+    "tools.legacy.checkpoint_migration",
+)
 
 #: 生产目录不得重新定义/落地的退役符号（定义面；名字精确匹配，避免误伤引用/文档）
 _FORBIDDEN_DEF_NAMES = frozenset(
@@ -72,6 +83,15 @@ def _module_targets(node: ast.AST) -> list[str]:
     return []
 
 
+def _is_allowed_legacy(module: str) -> bool:
+    """R39-A1 登记例外：loader 桥接模块（``tools.legacy.legacy_key_mapper`` /
+    ``tools.legacy.checkpoint_migration``）及其子导入面。"""
+    return any(
+        module == allowed or module.startswith(allowed + ".")
+        for allowed in _ALLOWED_LEGACY_IMPORTS
+    )
+
+
 def test_guard1_no_legacy_import_in_production_dirs() -> None:
     scanned = list(_iter_prod_py())
     # 非空控制：扫描面必须真实覆盖生产目录（防 glob 失效导致空判定）
@@ -83,9 +103,18 @@ def test_guard1_no_legacy_import_in_production_dirs() -> None:
     for path in scanned:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            for module in _module_targets(node):
-                if module.startswith(_LEGACY_MODULE_PREFIXES):
-                    hits.append(f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', '?')} → {module}")
+            if isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                resolved = [f"{base}.{alias.name}" if base else alias.name for alias in node.names]
+                if resolved and all(_is_allowed_legacy(name) for name in resolved):
+                    continue  # 全为 R39-A1 登记桥接模块（``from tools.legacy import legacy_key_mapper`` 形）
+                for module in _module_targets(node):
+                    if module.startswith(_LEGACY_MODULE_PREFIXES):
+                        hits.append(f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', '?')} → {module}")
+            else:
+                for module in _module_targets(node):
+                    if module.startswith(_LEGACY_MODULE_PREFIXES) and not _is_allowed_legacy(module):
+                        hits.append(f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', '?')} → {module}")
             # importlib / __import__ 字符串装配（反射面）
             if isinstance(node, ast.Call):
                 func = node.func
@@ -93,7 +122,8 @@ def test_guard1_no_legacy_import_in_production_dirs() -> None:
                 if name in {"import_module", "__import__"} and node.args:
                     arg = node.args[0]
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                        if arg.value.startswith(_LEGACY_MODULE_PREFIXES):
+                        if (arg.value.startswith(_LEGACY_MODULE_PREFIXES)
+                                and not _is_allowed_legacy(arg.value)):
                             hits.append(f"{path.relative_to(ROOT)}:{node.lineno} → {arg.value}")
     assert hits == [], f"生产目录出现 legacy 模块引用：{hits}"
 

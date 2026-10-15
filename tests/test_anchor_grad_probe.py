@@ -67,7 +67,7 @@ class _ProbeModel(torch.nn.Module):
             {"moe": torch.nn.ModuleDict({"experts": torch.nn.ModuleDict({"0": torch.nn.Linear(16, 16)})})}
         )
 
-    def forward(self, obs, *, rollout=True, world_model=True, wm_detach=False):  # noqa: ANN001
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", wm_detach=False):  # noqa: ANN001
         hidden = torch.tanh(self.encoders["ego"](torch.flatten(obs["ego"], start_dim=1)))
         hidden = hidden + 0.01 * self.plan_head["moe"]["experts"]["0"](hidden)
         span = self.policy.action_high - self.policy.action_low
@@ -241,7 +241,7 @@ class _ConstantPolicyModel(torch.nn.Module):
         self.register_buffer("action_low", torch.tensor([0.0, -0.6]))
         self.register_buffer("action_high", torch.tensor([10.0, 0.6]))
 
-    def forward(self, obs, *, rollout=True, world_model=True, wm_detach=False):  # noqa: ANN001
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", wm_detach=False):  # noqa: ANN001
         batch = int(torch.flatten(obs["ego"], start_dim=1).shape[0])
         span = self.action_high - self.action_low
         mu = self.action_low + span * torch.sigmoid(self.raw_mu)

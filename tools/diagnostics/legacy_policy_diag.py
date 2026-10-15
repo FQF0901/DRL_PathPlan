@@ -64,7 +64,7 @@ def diag_policy_head(model: Any, obs: Mapping[str, Tensor]) -> dict[str, Tensor]
     key_mask = encoded["key_mask"]
     policy_action_mu, action_logstd = model.policy(tokens, key_mask)
     with torch.no_grad():
-        forward_out = model(obs, rollout=True, world_model=True)
+        forward_out = model(obs, forward_mode="world_model_teacher_forcing")
     return {
         "policy_action_mu": policy_action_mu.detach(),
         "action_logstd": action_logstd.detach(),

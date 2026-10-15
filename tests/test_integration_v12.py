@@ -52,7 +52,7 @@ def _tiny_model() -> DrivingModel:
 def _backward(model: DrivingModel) -> None:
     """backward 一个覆盖策略/轨迹/router/WM 输出的损失（用于梯度可见性检查）。"""
     obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=True)
+    out = model(obs, forward_mode="world_model_teacher_forcing")
     loss = (
         out["action_mu"].pow(2).mean()
         + out["traj_xy"].pow(2).mean()

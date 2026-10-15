@@ -37,6 +37,30 @@
    仅 ``--allow-partial-load``（显式）放行，放行时强制在日志与 ``metrics.json::meta.ckpt_load``
    记录三计数与 missing 列表；``metrics.json::meta`` 另落版本戳（evaluator / git commit /
    argv / ckpt sha256；config 快照由入口层 manifest 落盘）。干净加载行为逐位不变。
+7. **R39-A1 工程闭合**（GPT §二-A 任务 1/2/4，零训练）：
+   - ``--path-head {off,structured}``（默认 off = 既有装配逐位不变）：``structured`` 在装载前
+     惰性构造 ``policy.structured_action`` 结构化头（``set_path_head(True)`` +
+     ``set_path_head_ablation("structured")``，对齐 ``.slim/deepwork/p1_v2/a3/eval_a3.py``）；
+   - **正式加载路径接入 ckpt migration**（``tools.legacy.legacy_key_mapper`` +
+     ``checkpoint_migration.migrate_state_dict``）：已登记族（K-anchor 丢弃族 /
+     ``path_head.*→policy.structured_action.*`` 改名族）逐族计数，未登记 unexpected 仍拒绝；
+     **严格加载语义**：已登记迁移后 missing/unexpected/shape_mismatch 全零 ⇒ ``strict=True``
+     语义装载；任一非零 ⇒ 默认 fail-fast（``--allow-partial-load`` 显式放行时才 ``strict=False``）；
+   - **LoadReport**（missing/unexpected/filled/rejected/renamed/dropped 计数 + 全量键列表 +
+     逐族计数 + ckpt 路径/sha256 + mapper 版本 + strict 判定）随加载摘要落
+     ``metrics.json::meta`` 与 ``run_meta.json``；
+   - **四 hash 原生**：``run_meta.json``（+ 既有 ``manifest.txt`` 追加 ``r39a1_hashes:`` 行）
+     记录 ``evaluation_protocol_hash``（口径复用 ``.slim/deepwork/p1_v2/round38/c6_protocol.py``；
+     正式入口轴映射：tracker/tail(=eval-reference)/moe/path_head 入 hash）、``model_tree_hash``
+     （``net/**/*.py`` 树指纹，m2 口径）、``schema_hash``（``env.obs.obs_fingerprint()``）、
+     ``checkpoint_hash``（ckpt 内容 sha256）；
+   - **``lane_anchor_xy`` 口径（选项 a：缺键明确报错 + 文档化注入）**：结构化头前向要求
+     ``obs['lane_anchor_xy']``（目标车道中心线折线，ego t0 系），本入口的 obs builder 不生产
+     该键 ⇒ 缺键在 forward 由 ``net/path_head.py::anchor_from_obs`` **fail-fast**（不静默回退）。
+     注入方式（评测侧，二选一，均不改本文件）：① ``.slim/deepwork/p1_v2/a3/eval_a3.py
+     --lane-anchor inject``（R36 C lane 注入器：``select_target_lane`` + E3 采样器口径）；
+     ② 自定义 controller 子类在决策步 builder.build 后写入 ``lane_anchor_xy (1,P,2)`` +
+     ``lane_anchor_mask (1,P)``（同 a3 口径）。**缺键报错文案已同步指路此注入方式**。
 
 关键实现事实（先核对源码再写码）
 ------------------------------
@@ -679,8 +703,24 @@ def _build_ckpt_model(model_cls: Any, config: Mapping[str, Any]) -> Any:
 
 
 _CKPT_MODEL_CACHE: Dict[Tuple[str, str], Any] = {}
-#: P0-A 版本戳/审计：每个 ``(ckpt, device)`` 最近一次成功加载的摘要（含三计数与明细列表）。
+#: P0-A 版本戳/审计：每个 ``(ckpt, device[, path_head])`` 最近一次成功加载的摘要
+#: （含三计数、明细列表与 R39-A1 migration LoadReport）。
 _CKPT_LOAD_SUMMARY: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+#: R39-A1（GPT §二-A 任务 1）：正式入口结构化装配开关（``--path-head``）。
+#: ``off``（默认）= 既有装配逐位不变；``structured`` = 惰性构造
+#: ``policy.structured_action`` 结构化头并启用结构化动作出口（口径对齐
+#: ``.slim/deepwork/p1_v2/a3/eval_a3.py`` 的结构化装载顺序）。
+LOAD_PATH_HEAD_CHOICES: tuple[str, ...] = ("off", "structured")
+
+
+def _path_head_cache_key(ckpt: str, device: str, path_head: str) -> Tuple[str, str]:
+    """缓存/加载摘要键：``off`` 保持旧键 ``(ckpt, device)``（历史调用点逐位不变）；
+    ``structured`` 加第三段避免与默认装配互撞（a3 预填缓存仍按旧键命中）。"""
+    if str(path_head or "off") == "off":
+        return (str(ckpt), str(device))
+    return (str(ckpt), str(device), f"path_head={path_head}")  # type: ignore[return-value]
 
 
 def _sha256_file(path: str) -> str:
@@ -707,9 +747,165 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def _ckpt_load_summary(ckpt: str, device: str = "cpu") -> Optional[Dict[str, Any]]:
+# --------------------------------------------------------------------------- #
+# R39-A1：四 hash 原生记录（evaluation_protocol_hash / model tree / schema / ckpt）
+# --------------------------------------------------------------------------- #
+#: 口径来源（只读复用；路径以仓内实际为准）：
+#: - ``evaluation_protocol_hash`` → ``.slim/deepwork/p1_v2/round38/c6_protocol.py``
+#:   （R38 C6 统一闭环基准；canonical JSON + sha256 hex16；正式入口按本文件映射调用）；
+#: - ``model tree hash`` → ``.slim/deepwork/p1_v2/round37/m2_net_sha.py``（``net/**/*.py`` 树指纹）；
+#: - ``schema hash`` → ``env.obs.obs_fingerprint()``（obs 实现 + schema 版本短指纹）；
+#: - ``checkpoint hash`` → 本文件 ``_sha256_file``（ckpt 内容 sha256）。
+R39_PROTOCOL_HASH_SCRIPT = ".slim/deepwork/p1_v2/round38/c6_protocol.py"
+R39_NET_SHA_SCRIPT = ".slim/deepwork/p1_v2/round37/m2_net_sha.py"
+
+
+def _load_readonly_script(name: str, rel_path: str) -> Any:
+    """只读装载仓内工具脚本（importlib；口径单一出处，避免重复实现）。"""
+    import importlib.util as importlib_util
+
+    path = Path(_PROJECT_ROOT) / rel_path
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"[eval_runner] R39-A1 缺 hash 口径工具 {rel_path}（四 hash 原生记录依赖；不静默跳过）"
+        )
+    spec = importlib_util.spec_from_file_location(name, str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"[eval_runner] 无法装载 {rel_path}")
+    module = importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _net_tree_digest() -> Dict[str, Any]:
+    """``net/**/*.py`` 树指纹（m2 口径：逐文件 sha16 → 排序连接哨兵 sha256 前 16 hex）。"""
+    module = _load_readonly_script("r39a1_m2_net_sha", R39_NET_SHA_SCRIPT)
+    return dict(module.net_tree_digest())
+
+
+def _formal_entry_protocol(
+    *,
+    spec_path: Any,
+    policy: str,
+    tracker: str,
+    eval_reference: str,
+    moe_off: bool,
+    path_head: str,
+    workers: int,
+    max_steps: int,
+    device: Optional[str],
+    net_tree_sha16: str,
+) -> Dict[str, Any]:
+    """正式入口 evaluation protocol（口径复用 c6：``build_protocol`` + canonical JSON sha256 hex16）。
+
+    轴映射（正式入口 → c6 协议字段；记录在 ``notes``）：
+    ``control.tracker ← --tracker``；``control.tail ← --eval-reference``（正式入口参考口径）；
+    ``model.ld_mode/rollout_semantic`` = 正式入口固定装配（``baseline``/``full``，本入口不提供
+    开关）；``model.moe ← --moe-off``；R39-A1 追加 ``model.path_head``（结构化装配开关，**入 hash**）。
+    """
+    module = _load_readonly_script("r39a1_c6_protocol", R39_PROTOCOL_HASH_SCRIPT)
+    protocol = module.build_protocol(
+        spec_path=Path(str(spec_path)),
+        set_name=Path(str(spec_path)).stem,
+        policy_kind=str(policy),
+        entry="pipeline/eval_runner.py",
+        tracker=str(tracker),
+        tail=str(eval_reference),
+        ld_mode="baseline",
+        rollout_semantic="full",
+        moe=("off" if moe_off else "on"),
+        workers=int(workers),
+        max_steps=int(max_steps),
+        device=str(device or ""),
+        net_tree_sha16=str(net_tree_sha16),
+        notes=(
+            "R39-A1 正式入口协议（tools/test.py / pipeline.eval_runner.py）："
+            "model.ld_mode=baseline / model.rollout_semantic=full 为正式入口固定装配；"
+            "model.path_head = --path-head 结构化装配开关（R39-A1 入 hash）"
+        ),
+    )
+    protocol["model"]["path_head"] = str(path_head)
+    protocol["hashes"] = {
+        "protocol_hash": module.hash_protocol(protocol),
+        "protocol_hash_full": module.hash_protocol(protocol, full=True),
+        "protocol_common_hash": module.common_hash(protocol),
+    }
+    return protocol
+
+
+def _evaluation_hashes(
+    *,
+    spec_path: Any,
+    policy: str,
+    ckpt: Optional[str],
+    tracker: str,
+    eval_reference: str,
+    moe_off: bool,
+    path_head: str,
+    workers: int,
+    max_steps: int,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """R39-A1 四 hash（+ 完整 protocol dict；供 run_meta/manifest 与 metrics 记录）。"""
+    net_tree = _net_tree_digest()
+    from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint  # 轻量（stdlib only）
+
+    protocol = _formal_entry_protocol(
+        spec_path=spec_path, policy=policy, tracker=tracker, eval_reference=eval_reference,
+        moe_off=moe_off, path_head=path_head, workers=workers, max_steps=max_steps,
+        device=device, net_tree_sha16=str(net_tree["tree_sha16"]),
+    )
+    ckpt_sha = _sha256_file(str(ckpt)) if ckpt is not None else None
+    return {
+        # 四 hash 主口径（字符串）
+        "evaluation_protocol_hash": protocol["hashes"]["protocol_hash"],
+        "model_tree_hash": str(net_tree["tree_sha16"]),
+        "schema_hash": str(obs_fingerprint()),
+        "checkpoint_hash": ckpt_sha,
+        # 辅助记录（不改主口径）
+        "evaluation_protocol_hash_full": protocol["hashes"]["protocol_hash_full"],
+        "evaluation_protocol_common_hash": protocol["hashes"]["protocol_common_hash"],
+        "checkpoint_hash16": (ckpt_sha[:16] if isinstance(ckpt_sha, str) and len(ckpt_sha) == 64 else None),
+        "checkpoint_path": str(ckpt) if ckpt is not None else None,
+        "model_tree": {"root": "net", "n_files": int(net_tree["n_files"]),
+                       "tree_sha16": str(net_tree["tree_sha16"]),
+                       "tool": R39_NET_SHA_SCRIPT},
+        "schema": {"tool": "env.obs.obs_fingerprint", "obs_schema_version": int(OBS_SCHEMA_VERSION)},
+        "protocol": protocol,
+    }
+
+
+def _record_run_meta(out_dir: Path, payload: Dict[str, Any]) -> Path:
+    """写 ``<out>/run_meta.json``（R39-A1 四 hash + LoadReport + protocol）并登记 manifest。
+
+    manifest（入口层 ``run_paths.write_manifest`` 产物，若存在）追加单行
+    ``r39a1_hashes: {…}``（幂等：已有标记则不重复追加）；无 manifest 时只写 run_meta.json。
+    """
+    meta_path = out_dir / "run_meta.json"
+    meta_path.write_text(
+        json.dumps(_sanitize(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    manifest = out_dir / "manifest.txt"
+    marker = "r39a1_hashes:"
+    if manifest.is_file():
+        text = manifest.read_text(encoding="utf-8")
+        if marker not in text:
+            line = json.dumps(
+                {
+                    "evaluation_protocol_hash": payload["hashes"]["evaluation_protocol_hash"],
+                    "model_tree_hash": payload["hashes"]["model_tree_hash"],
+                    "schema_hash": payload["hashes"]["schema_hash"],
+                    "checkpoint_hash": payload["hashes"]["checkpoint_hash"],
+                },
+                ensure_ascii=False, sort_keys=True,
+            )
+            manifest.write_text(text.rstrip("\n") + "\n" + marker + " " + line + "\n", encoding="utf-8")
+    return meta_path
+
+
+def _ckpt_load_summary(ckpt: str, device: str = "cpu", path_head: str = "off") -> Optional[Dict[str, Any]]:
     """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
-    return _CKPT_LOAD_SUMMARY.get((str(ckpt), str(device)))
+    return _CKPT_LOAD_SUMMARY.get(_path_head_cache_key(ckpt, device, path_head))
 
 
 def _filter_checkpoint_state(model: Any, state: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str], List[str], List[str]]:
@@ -750,23 +946,46 @@ def _load_ckpt_model(
     device: str = "cpu",
     *,
     allow_partial: bool = False,
+    path_head: str = "off",
 ) -> Any:
-    """worker 内按 ``(ckpt, device)`` 缓存模型（回收前后各加载一次，不会每 spec 重载）。
+    """worker 内按 ``(ckpt, device[, path_head])`` 缓存模型（回收前后各加载一次，不会每 spec 重载）。
 
-    架构变更（如 H 96→128）后用 :func:`_filter_checkpoint_state` 只加载形状一致的键，
-    其余键打印上报（不修改 ckpt 文件）。
+    R39-A1（GPT §二-A 任务 1/2）：正式加载路径接入 ckpt migration
+    （``tools.legacy.legacy_key_mapper`` + ``checkpoint_migration.migrate_state_dict``）：
 
-    P0-A 评测安全前置：``missing/unexpected/shape_mismatch`` 任一非零 → **默认 fail-fast**
-    （打印三计数与明细后 ``raise SystemExit(2)``），拒绝用部分加载的模型产出数字；
-    仅 ``allow_partial=True``（CLI ``--allow-partial-load``，显式）可放行，放行时在日志与
-    ``metrics.json::meta.ckpt_load`` 强制记录三计数与 missing 列表。干净加载行为逐位不变。
+    - **已登记族**（K-anchor 丢弃族 / ``path_head.*→policy.structured_action.*`` 改名族）从
+      unexpected 里移走并逐族计数（LoadReport）；未登记 unexpected 键仍 = 拒绝（reject）；
+    - ``--path-head structured``：装载前先 ``set_path_head(True)`` + ``set_path_head_ablation
+      ("structured")``（对齐 ``.slim/deepwork/p1_v2/a3/eval_a3.py`` 的 canary 装载顺序；
+      默认 ``off`` = 既有装配逐位不变）；``lane_anchor_xy`` 由**评测侧注入**（本入口不生产该键；
+      缺键 ⇒ ``net/path_head.py::anchor_from_obs`` fail-fast，注入方式见模块 docstring）；
+    - **严格加载语义（明确）**：应用已登记迁移后，``missing/unexpected/shape_mismatch`` 任一
+      非零 ⇒ **默认 fail-fast**（``raise SystemExit(2)``，打印三计数与明细）；三者全零时以
+      ``strict=True`` 装载（= 与严格装载逐位同结果）；仅 ``--allow-partial-load``（显式）
+      放行并以 ``strict=False`` 装载，同时强制在日志与 ``metrics.json::meta.ckpt_load``
+      记录三计数、missing 列表与 LoadReport。干净加载行为逐位不变；
+    - **LoadReport**（``summary["load_report"]``；R39-A1）：missing/unexpected/filled/
+      rejected/renamed/dropped 计数 + 全量键列表 + 逐族计数 + ckpt 路径/sha256 +
+      mapper 版本 + strict 判定，供 run_meta/manifest 落盘审计。
     """
-    cached = _CKPT_MODEL_CACHE.get((ckpt, str(device)))
+    path_head = str(path_head or "off")
+    if path_head not in LOAD_PATH_HEAD_CHOICES:
+        raise ValueError(
+            f"未知 path_head={path_head!r}（可选 {'/'.join(LOAD_PATH_HEAD_CHOICES)}）"
+        )
+    cache_key = _path_head_cache_key(ckpt, device, path_head)
+    cached = _CKPT_MODEL_CACHE.get(cache_key)  # type: ignore[arg-type]
     if cached is not None:
         return cached
     import torch
 
+    from tools.legacy import legacy_key_mapper as _key_mapper
+    from tools.legacy.checkpoint_migration import migrate_state_dict
+
     model = _build_model_from_config(config)
+    if path_head == "structured":
+        model.set_path_head(True)  # 惰性构造（默认关 = 不新增参数/键）
+        model.set_path_head_ablation("structured")
     payload = torch.load(ckpt, map_location="cpu", weights_only=False)
     state = payload
     if isinstance(payload, Mapping):
@@ -776,17 +995,56 @@ def _load_ckpt_model(
                 break
     if not isinstance(state, Mapping):
         raise ValueError(f"ckpt {ckpt!r} 不含可识别的 state_dict（顶层键 {list(payload)[:5]}）")
-    filtered, missing, unexpected, shape_mismatch = _filter_checkpoint_state(model, state)
+    # R38-P2a/P2b → R39-A1：已登记丢弃族/改名族在分类层应用（逐族计数；未登记键仍 reject）。
+    migrated, migration = migrate_state_dict(state, model.state_dict().keys())
+    filtered, missing, unexpected, shape_mismatch = _filter_checkpoint_state(model, migrated)
     counts = {
         "missing": len(missing),
         "unexpected": len(unexpected),
         "shape_mismatch": len(shape_mismatch),
     }
+    blocked = any(counts.values())
+    ckpt_sha256 = _sha256_file(ckpt)
+    # R39-A1 LoadReport（口径：missing/unexpected/filled/rejected/renamed + ckpt hash + mapper 版本）。
+    load_report: Dict[str, Any] = {
+        "ckpt": {"path": str(ckpt), "sha256": ckpt_sha256, "ckpt_keys": len(state)},
+        "model_keys": len(model.state_dict()),
+        "counts": {
+            "missing": len(missing),
+            "unexpected": len(unexpected),
+            "filled": len(filtered),
+            "rejected": len(migration.reject_keys),
+            "renamed": int(migration.n_rename),
+            "dropped": int(migration.n_drop),
+        },
+        "missing_keys": list(missing),
+        "unexpected_keys": list(unexpected),
+        "filled_keys": sorted(str(key) for key in filtered),
+        "rejected_keys": list(migration.reject_keys),
+        "renamed_keys": dict(migration.rename_map),
+        "renamed_by_family": dict(migration.renamed_by_family),
+        "dropped_by_family": dict(migration.dropped_by_family),
+        "reasons": dict(migration.reasons),
+        "mapper": {
+            "module": "tools.legacy.legacy_key_mapper",
+            "version": str(getattr(_key_mapper, "MAPPER_VERSION", "unknown")),
+        },
+        "path_head": path_head,
+        "strict": bool(not blocked),
+        "loader": None,  # 实际装载原语（干净 ⇒ load_checkpoint_migrated(strict=True)；逃生门 ⇒ 本地子集）
+        "strict_semantics": (
+            "已登记迁移应用后 missing/unexpected/shape_mismatch 全零 ⇒ strict=True 语义装载；"
+            "任一非零 ⇒ 默认 fail-fast（--allow-partial-load 显式放行时 strict=False）"
+        ),
+        "allow_partial_load": bool(allow_partial),
+        "explicit_escape": bool(blocked and allow_partial),
+    }
     summary: Dict[str, Any] = {
         "ckpt": str(ckpt),
-        "sha256": _sha256_file(ckpt),
+        "sha256": ckpt_sha256,
         "device": str(device),
         "allow_partial_load": bool(allow_partial),
+        "path_head": path_head,
         "loaded_keys": len(filtered),
         "model_keys": len(model.state_dict()),
         "ckpt_keys": len(state),
@@ -794,19 +1052,26 @@ def _load_ckpt_model(
         "missing": list(missing),
         "unexpected": list(unexpected),
         "shape_mismatch": list(shape_mismatch),
+        # R39-A1：迁移 + LoadReport（run_meta/manifest 审计口径）
+        "load_report": load_report,
     }
     # lane U1：MoE 输出口径 = primary + Σ_{i∈top2} g_i·expert_i（推理与训练一致、全场景生效；
     # 无硬切/二值门），评测侧无需任何开关（模型默认 moe_enabled=True）。
     print(
         f"[eval_runner] ckpt 载入 {ckpt}: loaded={len(filtered)}/{len(model.state_dict())} "
         f"ckpt_keys={len(state)} missing={counts['missing']} shape_mismatch={counts['shape_mismatch']} "
-        f"unexpected={counts['unexpected']} device={device} torch_threads={torch.get_num_threads()}",
+        f"unexpected={counts['unexpected']} path_head={path_head} renamed={migration.n_rename} "
+        f"dropped={migration.n_drop} device={device} torch_threads={torch.get_num_threads()}",
         flush=True,
     )
     for label, keys in (("missing", missing), ("shape_mismatch", shape_mismatch), ("unexpected", unexpected)):
         if keys:
             print(f"[eval_runner]   {label}（{len(keys)}，示例 {list(keys)[:5]}）", flush=True)
-    if any(counts.values()):
+    if migration.dropped_by_family:
+        print(f"[eval_runner]   已登记丢弃族（逐族计数）：{dict(migration.dropped_by_family)}", flush=True)
+    if migration.renamed_by_family:
+        print(f"[eval_runner]   已登记改名族（逐族计数）：{dict(migration.renamed_by_family)}", flush=True)
+    if blocked:
         if allow_partial:
             print(
                 f"[eval_runner] 警告：--allow-partial-load 放行部分加载 missing={counts['missing']} "
@@ -823,10 +1088,25 @@ def _load_ckpt_model(
                 flush=True,
             )
             raise SystemExit(2)
-    model.load_state_dict(filtered, strict=False)
+        # 逃生门（显式）：按调用点形状过滤后的子集 strict=False（形状门由本 loader 承担；
+        # tools.legacy 原语不做形状过滤 —— 见其 docstring）
+        model.load_state_dict(filtered, strict=False)
+    else:
+        # R39-A1：**干净迁移 ⇒ 统一迁移装载原语**（tools.legacy.checkpoint_migration.
+        # load_checkpoint_migrated，strict=True）——正式装载路径的严格语义钉住口径。
+        from tools.legacy.checkpoint_migration import load_checkpoint_migrated
+
+        info = load_checkpoint_migrated(str(ckpt), model, strict=True, state=state)
+        if info["missing_keys"] or info["unexpected_keys"]:  # pragma: no cover - 防御（counts 已零）
+            raise SystemExit(
+                "[eval_runner] ckpt 加载 FAIL-FAST：迁移原语报告非零差异"
+                f" missing={info['missing_keys'][:5]} unexpected={info['unexpected_keys'][:5]}"
+            )
+        load_report["loader"] = "tools.legacy.checkpoint_migration.load_checkpoint_migrated(strict=True)"
+    load_report["loader"] = load_report.get("loader", "pipeline.eval_runner（形状过滤子集，strict=False）")
     model.to(device).eval()
-    _CKPT_LOAD_SUMMARY[(ckpt, str(device))] = summary
-    _CKPT_MODEL_CACHE[(ckpt, str(device))] = model
+    _CKPT_LOAD_SUMMARY[cache_key] = summary  # type: ignore[index]
+    _CKPT_MODEL_CACHE[cache_key] = model  # type: ignore[index]
     return model
 
 
@@ -855,7 +1135,8 @@ def _build_model_from_config(config: Mapping[str, Any]) -> Any:
 
 #: 评测跟踪器参考口径（``--eval-reference``）：
 #: ``plan``（默认，历史口径）= 6 步 plan 预览（``plan[0] = action_mu``，rollout 前向）；
-#: ``repeat_action`` = ``repeat(action_mu, 6)``（与训练 P0-1 A-hold 同构；走 cheap path，不需要 plan）。
+#: ``repeat_action`` = ``repeat(action_mu, 6)``（与训练 P0-1 A-hold 同构；走 cheap path
+#: （``policy_single_step``），不需要 plan）。
 EVAL_REFERENCES: tuple[str, ...] = ("plan", "repeat_action")
 
 
@@ -887,7 +1168,7 @@ def build_eval_references(
 
     - ``repeat_action``：``np.repeat(mu_action[None, :], 6, axis=0)``——与训练
       ``PPOTrainer.collect_rollout`` 的 A-hold 口径同构（训练用采样动作 ``a_t``，评测确定性
-      用 ``mu``）；不需要 plan 输出（可走 ``rollout=False`` cheap path）；
+      用 ``mu``）；不需要 plan 输出（可走 ``policy_single_step`` cheap path，R39-A1 枚举口径）；
     - ``plan``（默认，现状）：plan 预览 ``(6,2)``，首步强制 = ``mu_action``（旧行为逐位不变）。
     """
     mu = np.asarray(mu_action, dtype=np.float64).reshape(2)
@@ -896,7 +1177,7 @@ def build_eval_references(
     if reference != "plan":
         raise ValueError(f"未知 eval_reference={reference!r}（可选 {'/'.join(EVAL_REFERENCES)}）")
     if plan is None:
-        raise ValueError("eval_reference='plan' 需要模型 plan 输出（rollout=True）")
+        raise ValueError("eval_reference='plan' 需要模型 plan 输出（forward_mode='policy_wm_rollout'）")
     tail = np.asarray(plan, dtype=np.float64).reshape(-1, 2).copy()
     if tail.shape[0] != 6:
         raise ValueError(f"plan 参考期望 (6,2)，收到 {tail.shape}")
@@ -914,9 +1195,9 @@ class _CkptController:
     ``task["eval_reference"]``（``--eval-reference``，默认 ``plan``）：
 
     - ``plan``（历史口径，默认）：6 步 plan 预览（``plan[0] = action_mu``），模型前向走
-      ``rollout=True``；
-    - ``repeat_action``：参考 = ``repeat(action_mu, 6)``（训练 A-hold 同构）→ ``rollout=False``
-      cheap path（不消费 plan）。
+      ``policy_wm_rollout``（R39-A1 枚举口径）；
+    - ``repeat_action``：参考 = ``repeat(action_mu, 6)``（训练 A-hold 同构）→ ``policy_single_step``
+      cheap path（R39-A1 枚举口径，不消费 plan）。
     """
 
     kind = "ckpt"
@@ -934,6 +1215,7 @@ class _CkptController:
             task.get("model_config") or {},
             str(self.device),
             allow_partial=bool(task.get("allow_partial_load")),
+            path_head=str(task.get("path_head") or "off"),
         )
         if bool(task.get("moe_off")):
             # A/B：primary-only 臂 —— 专家分支不参与（评测侧关闭 MoE）
@@ -1035,10 +1317,14 @@ class _CkptController:
         if self._steps % self.decision_interval == 0:
             # 参考口径（--eval-reference，默认 plan=现状）：
             #   plan：需要 6 步规划预览（跟踪器参考：首步执行动作 + 后 5 步 WM/plan 预览）；
-            #   repeat_action：参考 = repeat(mu, 6)（训练 A-hold 同构）→ cheap path（rollout=False）。
+            #   repeat_action：参考 = repeat(mu, 6)（训练 A-hold 同构）→ cheap path
+            #   （forward_mode="policy_single_step"，不消费 plan）。
             need_plan = self.eval_reference == "plan"
             with torch.no_grad():
-                output = self.model(self._tensors(obs), rollout=need_plan, world_model=False)
+                output = self.model(
+                    self._tensors(obs),
+                    forward_mode=("policy_wm_rollout" if need_plan else "policy_single_step"),
+                )
             mu = np.asarray(output["action_mu"].detach().cpu(), dtype=np.float64).reshape(-1)
             plan = None
             if need_plan:
@@ -1716,6 +2002,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-reference", choices=EVAL_REFERENCES, default="plan",
                         help="ckpt 跟踪器参考口径（默认 plan = 现状：6 步规划预览，plan[0]=action_mu）；"
                              "repeat_action = repeat(action_mu,6)（训练 A-hold 同构，cheap path，不消费 plan）")
+    parser.add_argument("--path-head", choices=LOAD_PATH_HEAD_CHOICES, default="off",
+                        help="动作头装配（R39-A1）：off=默认旧 PolicyHead（逐位不变）；"
+                             "structured=惰性构造结构化头 policy.structured_action 并启用结构化动作"
+                             "出口（口径对齐 .slim/deepwork/p1_v2/a3/eval_a3.py 的结构化装载顺序）。"
+                             "结构化头前向需要 obs['lane_anchor_xy']（目标车道中心线折线，ego t0 系）："
+                             "本入口不生产该键 —— 缺键会在 forward fail-fast（net/path_head.py::"
+                             "anchor_from_obs），评测侧注入方式见模块 docstring）。"
+                             "装载失败面（missing/unexpected/shape_mismatch）仍由 P0-A fail-fast 把关")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
@@ -1808,14 +2102,59 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ckpt_load_summary: Optional[Dict[str, Any]] = None
     if args.policy == "ckpt":
         print(
-            f"[eval_runner] ckpt 加载预检（fail-fast={'off' if args.allow_partial_load else 'on'}）: "
-            f"{args.ckpt}",
+            f"[eval_runner] ckpt 加载预检（fail-fast={'off' if args.allow_partial_load else 'on'}, "
+            f"path_head={args.path_head}）: {args.ckpt}",
             flush=True,
         )
         _load_ckpt_model(
-            str(args.ckpt), model_config, "cpu", allow_partial=bool(args.allow_partial_load)
+            str(args.ckpt), model_config, "cpu",
+            allow_partial=bool(args.allow_partial_load), path_head=str(args.path_head),
         )
-        ckpt_load_summary = _ckpt_load_summary(str(args.ckpt), "cpu")
+        ckpt_load_summary = _ckpt_load_summary(str(args.ckpt), "cpu", str(args.path_head))
+
+    # ---- R39-A1：四 hash 原生记录（protocol / model tree / schema / checkpoint）→ run_meta ----
+    eval_hashes = _evaluation_hashes(
+        spec_path=spec_path, policy=str(args.policy),
+        ckpt=str(args.ckpt) if args.ckpt is not None else None,
+        tracker=str(args.tracker), eval_reference=str(args.eval_reference),
+        moe_off=bool(getattr(args, "moe_off", False)), path_head=str(args.path_head),
+        workers=int(workers), max_steps=int(args.max_steps), device=device,
+    )
+    run_meta: Dict[str, Any] = {
+        "schema": "r39a1-run-meta/v1",
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "evaluator": "pipeline.eval_runner",
+        "git_commit": _git_commit(),
+        "argv": list(sys.argv[1:] if argv is None else argv),
+        "policy": str(args.policy),
+        "ckpt": str(args.ckpt) if args.ckpt is not None else None,
+        "run_name": run_name,
+        "out_dir": str(out_dir),
+        "spec": str(spec_path),
+        "tracker": str(args.tracker) if args.policy == "ckpt" else None,
+        "eval_reference": str(args.eval_reference) if args.policy == "ckpt" else None,
+        "path_head": str(args.path_head),
+        "hashes": {
+            "evaluation_protocol_hash": eval_hashes["evaluation_protocol_hash"],
+            "evaluation_protocol_hash_full": eval_hashes["evaluation_protocol_hash_full"],
+            "evaluation_protocol_common_hash": eval_hashes["evaluation_protocol_common_hash"],
+            "model_tree_hash": eval_hashes["model_tree_hash"],
+            "schema_hash": eval_hashes["schema_hash"],
+            "checkpoint_hash": eval_hashes["checkpoint_hash"],
+            "checkpoint_hash16": eval_hashes["checkpoint_hash16"],
+        },
+        "protocol": eval_hashes["protocol"],
+        "model_tree": eval_hashes["model_tree"],
+        "schema": eval_hashes["schema"],
+        "ckpt_load": ckpt_load_summary,
+    }
+    run_meta_path = _record_run_meta(out_dir, run_meta)
+    print(
+        f"[eval_runner] R39-A1 hashes: protocol={eval_hashes['evaluation_protocol_hash']} "
+        f"model_tree={eval_hashes['model_tree_hash']} schema={eval_hashes['schema_hash']} "
+        f"ckpt={(eval_hashes['checkpoint_hash'] or 'n/a')[:16]} -> run_meta.json",
+        flush=True,
+    )
 
     tasks: List[Dict[str, Any]] = [
         {
@@ -1836,6 +2175,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "eval_reference": str(args.eval_reference),
             "moe_off": bool(getattr(args, "moe_off", False)),
             "allow_partial_load": bool(args.allow_partial_load),
+            "path_head": str(args.path_head),
         }
         for spec in specs
     ]
@@ -1881,6 +2221,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "ckpt_sha256": (ckpt_load_summary or {}).get("sha256"),
         # P0-A 加载审计：三计数 + missing 列表（--allow-partial-load 放行时强制记录；干净加载同样落盘）
         "ckpt_load": ckpt_load_summary,
+        # R39-A1：四 hash（protocol/model tree/schema/ckpt）+ 迁移 LoadReport 同步记录于
+        # run_meta.json（本处落指标文件，保证 metrics 与 run_meta 可互相审计）
+        "hashes": run_meta["hashes"],
+        "load_report": (ckpt_load_summary or {}).get("load_report"),
         "policy_class": ("env.expert.pure_pursuit_idm.PurePursuitIDMPolicy"
                          if args.policy == "baseline" else "net.model.DrivingModel"),
         "tracker": str(args.tracker) if args.policy == "ckpt" else None,
@@ -1924,6 +2268,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     print(f"[eval_runner] metrics -> {metrics_path}")
     print(f"[eval_runner] episodes -> {csv_path} (n={len(episodes)}, errors={meta['n_error']})")
+    # R39-A1：run_meta 终稿（补 wall_time / 判定；hashes/LoadReport 已在预检后写入）
+    run_meta.update({
+        "wall_time_s": wall_time,
+        "n_evaluated": len(episodes),
+        "n_error": meta["n_error"],
+        "verdict": {"all_passed": bool(verdict["all_passed"]),
+                    "n_checks_judged": int(verdict["n_checks_judged"])},
+        "metrics_path": str(metrics_path),
+    })
+    _record_run_meta(out_dir, run_meta)  # manifest 已含标记 ⇒ 幂等只更新 run_meta.json
+    print(f"[eval_runner] run_meta -> {run_meta_path}")
     return 0
 
 

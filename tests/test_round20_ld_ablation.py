@@ -112,7 +112,7 @@ def test_m2_set_attn_forward_and_permutation_invariance() -> None:
         "others_hist": torch.randn(1, 6, 1, 33),
         "others_hist_mask": torch.ones(1, 6, 1),
     }
-    out = model(obs, rollout=True, world_model=False)
+    out = model(obs, forward_mode="policy_wm_rollout")
     assert torch.isfinite(out["action_mu"]).all()
     perm = torch.randperm(NUM_LD)
     obs_perm = dict(obs)
@@ -120,7 +120,7 @@ def test_m2_set_attn_forward_and_permutation_invariance() -> None:
     obs_perm["ld_mask"] = obs["ld_mask"][:, perm]
     obs_perm["ld_hist"] = obs["ld_hist"][:, :, perm]
     obs_perm["ld_hist_mask"] = obs["ld_hist_mask"][:, :, perm]
-    out_perm = model(obs_perm, rollout=True, world_model=False)
+    out_perm = model(obs_perm, forward_mode="policy_wm_rollout")
     diff = float((out["action_mu"] - out_perm["action_mu"]).abs().max())
     assert diff < 1e-4, f"M2 应对 LD 槽序近似不变（实测 {diff}）"
 

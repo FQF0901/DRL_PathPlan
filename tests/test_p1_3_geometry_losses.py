@@ -250,7 +250,7 @@ class _StubModel(torch.nn.Module):
         self.plan = torch.nn.Parameter(torch.randn(batch, 6, 2, generator=gen))
         self.mu = torch.nn.Parameter(torch.randn(batch, 2, generator=gen))
 
-    def forward(self, obs, *, rollout=True, world_model=False, **kwargs):  # noqa: D102 - stub
+    def forward(self, obs, *, forward_mode: str = "policy_wm_rollout", **kwargs):  # noqa: D102 - stub
         return {"traj_xy": self.traj_xy, "plan": self.plan, "action_mu": self.mu}
 
 

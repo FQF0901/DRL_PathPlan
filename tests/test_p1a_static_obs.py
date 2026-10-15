@@ -317,7 +317,7 @@ def test_model_consumes_static_dims_and_backprop_reaches_them():
     obs = make_dummy_obs(batch=2)
     obs["others_hist"] = obs["others_hist"].clone().requires_grad_(True)
 
-    out = model(obs, rollout=True, world_model=True)
+    out = model(obs, forward_mode="world_model_teacher_forcing")
     for key in ("action_mu", "action_logstd", "value", "traj_xy", "plan", "od_pred"):
         assert torch.isfinite(out[key]).all(), f"{key} 出现 NaN/Inf"
 

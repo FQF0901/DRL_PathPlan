@@ -40,9 +40,9 @@ class _PlanStubModel(torch.nn.Module):
         self.rollout_flags: List[bool] = []
 
     def forward(  # noqa: D102 - stub 契约见类 docstring
-        self, obs: dict, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False
+        self, obs: dict, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False
     ) -> dict:
-        self.rollout_flags.append(bool(rollout))
+        self.rollout_flags.append(forward_mode != "policy_single_step")
         x = obs["ego"].flatten(start_dim=1)
         mu = torch.sigmoid(self.head_mu(x))
         logstd = self.head_logstd.clamp(-5.0, 0.0).unsqueeze(0).expand(x.shape[0], -1)

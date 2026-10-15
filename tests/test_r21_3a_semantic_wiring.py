@@ -79,7 +79,7 @@ def _semantic_model() -> DrivingModel:
 
 
 def _forward(model, obs, **kwargs):
-    return model(obs, rollout=True, world_model=False, **kwargs)
+    return model(obs, forward_mode="policy_wm_rollout", **kwargs)
 
 
 def _activate_residual(model, *, context: float = 1.0, token: float = 1.0) -> None:

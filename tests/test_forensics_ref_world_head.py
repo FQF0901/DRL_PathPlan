@@ -62,7 +62,7 @@ class _StubTracker:
 
 
 class _StubModel(torch.nn.Module):
-    def forward(self, obs, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False):
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False):
         mu = torch.tensor([[3.0, 0.2]], dtype=torch.float64)
         plan = mu.unsqueeze(1) + torch.arange(6, dtype=torch.float64).reshape(1, 6, 1) * 1.0
         return {"action_mu": mu, "action_logstd": torch.zeros(1, 2), "plan": plan}

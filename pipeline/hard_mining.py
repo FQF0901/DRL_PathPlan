@@ -70,7 +70,7 @@ def row_il_errors(
 ) -> Dict[str, np.ndarray]:
     """冻结模型逐行 IL 误差（``err_l1`` / ``weight`` / ``err_weighted``，行空间 = 数据集全量）。
 
-    ``model`` 只做 ``rollout=False, world_model=False`` 的 cheap path 前向（``no_grad``）；
+    ``model`` 只做 ``policy_single_step``（cheap path）前向（``no_grad``；R39-A1 枚举口径）；
     ``weight = row_action_weights(dataset, indices)``（train_weight×配平，与训练主口径同源）。
     ``obs_source``（可选）= :class:`pipeline.trainer.MaterializedBCDataset` 物化快路径
     （只切片，避免逐行重拼历史）。
@@ -96,7 +96,7 @@ def row_il_errors(
                 else dataset.build_obs_batch(indices)
             )
             obs = to_device_tensors(obs_np, torch_device, dtype=torch.float32)
-            out = model(obs, rollout=False, world_model=False)
+            out = model(obs, forward_mode="policy_single_step")
             mu = out["action_mu"]
             expert = torch.as_tensor(
                 dataset.arrays["action"][indices, 0], dtype=torch.float32, device=torch_device

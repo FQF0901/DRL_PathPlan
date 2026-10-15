@@ -850,7 +850,10 @@ class InstrumentedCkpt:
         if self._steps % self.decision_interval == 0:
             need_plan = self.eval_reference == "plan"
             with torch.no_grad():
-                output = self.model(self._tensors(obs), rollout=need_plan, world_model=False)
+                output = self.model(
+                    self._tensors(obs),
+                    forward_mode=("policy_wm_rollout" if need_plan else "policy_single_step"),
+                )
             mu = np.asarray(output["action_mu"].detach().cpu(), dtype=np.float64).reshape(-1)
             plan = None
             if need_plan:

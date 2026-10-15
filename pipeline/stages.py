@@ -2350,7 +2350,7 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         cv_ade, cv_fde = _ade_fde(offset, od_target, weight)
         # lane B B2：A/B 同定义的 ego KPI（val 子集；WM rollout 6 点 vs 专家 traj6 + 首步动作）
         ego = ego_kpi_arrays(
-            model(obs, rollout=True, world_model=True, wm_detach=True),
+            model(obs, forward_mode="world_model_teacher_forcing", wm_detach=True),
             {
                 "traj6": _tensor(traj6_all_local[eval_idx], dtype=torch.float32),
                 "action": _tensor(action_all_local[eval_idx], dtype=torch.float32),
@@ -2836,7 +2836,7 @@ def _action_mu_stats(
                 obs_source.obs_batch(indices) if obs_source is not None else dataset.build_obs_batch(indices)
             )
             obs = to_device_tensors(obs_batch, device, dtype=torch.float32, pin=obs_source is not None)
-            out = model(obs, rollout=False, world_model=False)
+            out = model(obs, forward_mode="policy_single_step")
             mu = out["action_mu"]
             expert = torch.as_tensor(
                 dataset.arrays["action"][indices, 0], dtype=torch.float32, device=device
@@ -5107,7 +5107,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     ``None`` = 不钳制（行为逐位不变）。
     G4（v3 预注册 §0 必需项）：``--probe-interval``（config ``stages.C.probe_interval``，默认 25；
     0=关）——每 N 个 update（含 u1 基准）在 ``train.probe_batch`` 固定探针批上做一次
-    ``rollout=True, world_model=False`` 前向，记录 ``plan[:,1:6]`` 尾部 5 步与 ``action_mu`` 相对
+    ``policy_wm_rollout`` 前向（R39-A1 枚举口径），记录 ``plan[:,1:6]`` 尾部 5 步与 ``action_mu`` 相对
     首次记录的 RMS 位移（``drift/*`` 指标 + ``metrics.json::drift`` 序列）。纯监控：no_grad，
     不参与 loss、不改动作、不写 buffer；探针批缺失时启动告警并跳过该探针。
 
@@ -5136,8 +5136,8 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         "[stageC] P0-1 修复（A-hold）：references = repeat(a_t, 6)，执行只依赖记账动作。\n"
         "[stageC] P0-2 修复：router 标签步前同帧取 + 终局 record/reset 分离。\n"
         "[stageC] W1：WM（st_gnn）全期冻结（无 WM loss 信号；解冻被守卫禁止）。\n"
-        "[stageC] V9（P2）：collect cheap path——plan_reference=repeat_action 时 rollout=False"
-        "（与 update 同款）；plan 对照臂保留 rollout。\n"
+        "[stageC] V9（P2）：collect cheap path——plan_reference=repeat_action 时 policy_single_step"
+        "（与 update 同款，R39-A1 枚举）；plan 对照臂保留 policy_wm_rollout。\n"
         f"[stageC] R2/P0-6 trainable_scope={scope_wording}\n"
         "[stageC] 干净 PPO 基线的冻结口径以本行 trainable_scope 实际值为准。\n"
         "[stageC] 仍为实验口径：W2（WM 自监督）未接入（P2 性能优化进行中）。\n"
@@ -5280,7 +5280,7 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         flush=True,
     )
     # W1（P1）：WM（ST-GNN）全期冻结。旧 ``--wm-freeze-updates`` 的"解冻"只是把参数重新
-    # 加入优化器：PPO 更新走 rollout=False cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
+    # 加入优化器：PPO 更新走 policy_single_step cheap path（不执行 st_gnn）+ 损失无 WM 项 ⇒ 梯度
     # 恒 None（P0 侦察 §B），故弃用旧解冻语义。
     if args.wm_freeze_updates is not None:
         print(

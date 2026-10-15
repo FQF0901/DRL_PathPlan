@@ -440,8 +440,8 @@ class _StubModel(torch.nn.Module):
         super().__init__()
         self.rollout_flags: List[bool] = []
 
-    def forward(self, obs, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False):
-        self.rollout_flags.append(bool(rollout))
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False):
+        self.rollout_flags.append(forward_mode != "policy_single_step")
         mu = torch.tensor([[3.0, 0.2]], dtype=torch.float64)
         plan = mu.unsqueeze(1) + torch.arange(6, dtype=torch.float64).reshape(1, 6, 1) * 10.0
         logstd = torch.tensor([[-1.0, -2.0]], dtype=torch.float64)

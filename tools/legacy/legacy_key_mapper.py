@@ -23,6 +23,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
+#: 映射器版本（R39-A1：写入正式 loader 的 LoadReport，供 run_meta/manifest 审计）。
+#: 语义随键面规则集变化（r38p2a = B 组丢弃族；r38p2b = D 组改名族；R39-A1 起冻结本值）。
+MAPPER_VERSION: str = "r38p2b"
+
 #: 已登记丢弃族（前缀匹配；顺序无关）。B 组：K-anchor 7 前缀 + v8 已删通道 2 前缀 = 20 键。
 IGNORE_PREFIXES: tuple[str, ...] = (
     # K-anchor（13 个 ckpt 带此族；plan_head.py@9577078:120-123,91-117）
@@ -229,6 +233,7 @@ __all__ = [
     "IGNORE_PREFIXES",
     "INIT_FROM_CALIBRATION",
     "LEGACY_META_KEYS",
+    "MAPPER_VERSION",
     "PREFIX_RENAME_MAP",
     "RENAME_MAP",
     "MigrationPlan",

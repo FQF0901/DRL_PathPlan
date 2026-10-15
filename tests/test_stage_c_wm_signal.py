@@ -33,7 +33,7 @@ class _StageCModel(torch.nn.Module):
         self.head_traj = torch.nn.Linear(8, 12)
 
     def forward(  # noqa: D102 - stub 契约
-        self, obs: dict, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False
+        self, obs: dict, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False
     ) -> dict:
         x = obs["ego"].flatten(start_dim=1)
         latent = self.st_gnn(x)

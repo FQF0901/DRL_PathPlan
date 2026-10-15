@@ -678,7 +678,7 @@ def test_cheap_path_matches_full_forward() -> None:
         lambda *_: counter.__setitem__("n", counter["n"] + 1)
     )
     counter["n"] = 0
-    cheap = model(obs, rollout=False, world_model=False)
+    cheap = model(obs, forward_mode="policy_single_step")
     cheap_calls = counter["n"]
     counter["n"] = 0
     full = model(obs)

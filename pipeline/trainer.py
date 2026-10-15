@@ -50,8 +50,8 @@ PPO 诊断（无行为改变，2026-09-25 崩塌复盘后加入）
   任一 speed<2 m/s 档 ds<1.5 m → ``probe/low_speed_alert=1`` + 打印告警（低速吸引子）；
 - ``drift/*``（Stage C v3 预注册 §0 G4 必需项，纯监控）：每 ``probe_interval``
   （默认 :data:`DEFAULT_PROBE_INTERVAL`=25，0=关）个 update——记录点 = u1（基准）+
-  interval 的倍数——在同一固定探针批上做一次 ``rollout=True, world_model=False``
-  前向，记录 ``plan[:,1:6]``（尾部 5 步执行参考预览）与 ``action_mu`` 相对**首次记录**
+  interval 的倍数——在同一固定探针批上做一次 ``policy_wm_rollout``
+  前向（R39-A1 枚举口径），记录 ``plan[:,1:6]``（尾部 5 步执行参考预览）与 ``action_mu`` 相对**首次记录**
   的 RMS 位移（``drift/plan_rms_vs_init`` / ``drift/mu_rms_vs_init``）与尾部 5 步
   平均绝对值（``drift/plan_tail_abs``）；``torch.no_grad`` + eval 前向，不参与 loss、
   不改动作、不写 buffer（探针批不可用时跳过并告警一次）。
@@ -769,7 +769,7 @@ class PPOConfig:
     device: str = "auto"  # auto = CUDA 可用则 cuda，否则 cpu（显式 "cpu" 行为不变）
     #: 收集侧跟踪器参考口径（P0-1 A-hold）：
     #: ``repeat_action``（默认）= 6 步参考全部 = 采样动作 ``a_t``（执行只依赖 PPO 记账的随机变量）；
-    #: 该臂 collect 走 cheap path（rollout=False，V9）；``plan`` = 旧行为（首步 ``a_t`` + 后 5 步
+    #: 该臂 collect 走 cheap path（``policy_single_step``，V9）；``plan`` = 旧行为（首步 ``a_t`` + 后 5 步
     #: WM/plan head 规划预览，需 rollout 前向），仅供对照，不得用于 RL 结论。
     plan_reference: str = "repeat_action"
     #: S2（v3 探索降噪）：策略分布 logstd 上界钳制（CLI ``--policy-logstd-max`` / config
@@ -4145,8 +4145,7 @@ def pretrain_bc(
                 # lane U1：MoE 输出 = primary + Σ_{i∈top2} g_i·expert_i（全场景；phase 1 已 set_moe 关闭）。
                 out = model(
                     obs,
-                    rollout=True,
-                    world_model=False,
+                    forward_mode="policy_wm_rollout",
                     wm_detach=config.wm_detach,
                 )
                 traj_pred = out.get("traj_xy")
@@ -4480,7 +4479,7 @@ def evaluate_bc(
                 device=device,
             )
         specific_weight = frame_weight * row_scale_t
-        out = model(obs, rollout=True, world_model=False, wm_detach=config.wm_detach)
+        out = model(obs, forward_mode="policy_wm_rollout", wm_detach=config.wm_detach)
         traj_pred = out.get("traj_xy")
         if traj_pred is None:
             raise KeyError("模型 forward 缺少 'traj_xy'（契约见 p2-contract §2）")
@@ -5208,10 +5207,10 @@ def _phase3_loss_terms(
     import torch
     import torch.nn.functional as F
 
-    out = model(obs, rollout=True, world_model=False)
+    out = model(obs, forward_mode="policy_wm_rollout")
     plan = out.get("plan")
     if plan is None:
-        raise KeyError("phase 3 需要模型 forward(rollout=True) 输出 'plan'")
+        raise KeyError("phase 3 需要模型 forward(forward_mode='policy_wm_rollout') 输出 'plan'")
     action_pred = out.get("action_mu")
     target_action = targets["action"][:, 0, :]
     device = frame_weight.device
@@ -7173,7 +7172,7 @@ class PPOTrainer:
         was_training = bool(self.model.training)
         self.model.eval()
         try:
-            out = self.model(self._probe_obs, rollout=False, world_model=False)
+            out = self.model(self._probe_obs, forward_mode="policy_single_step")
             mu = out["action_mu"].detach().double().cpu().numpy()
             logstd = out["action_logstd"].detach().double().cpu().numpy()
         finally:
@@ -7221,7 +7220,7 @@ class PPOTrainer:
 
     @torch.no_grad() if torch is not None else (lambda fn: fn)
     def _drift_metrics(self) -> Dict[str, Any]:
-        """G4 drift 探针：固定批 ``rollout=True, world_model=False`` 前向的 plan/mu 漂移。
+        """G4 drift 探针：固定批 ``policy_wm_rollout`` 前向（R39-A1 枚举口径）的 plan/mu 漂移。
 
         记录 ``plan[:,1:6]``（尾部 5 步）与 ``action_mu`` 相对**首次记录**的 RMS 位移，
         以及尾部 5 步平均绝对值（量级参考）。纯监控：eval + no_grad 前向，不参与 loss、
@@ -7236,7 +7235,7 @@ class PPOTrainer:
         was_training = bool(self.model.training)
         self.model.eval()
         try:
-            out = self.model(self._probe_obs, rollout=True, world_model=False)
+            out = self.model(self._probe_obs, forward_mode="policy_wm_rollout")
             plan = out["plan"].detach().double().cpu().numpy()
             mu = out["action_mu"].detach().double().cpu().numpy()
         finally:
@@ -7352,11 +7351,11 @@ class PPOTrainer:
             batch = _to_device_obs(
                 {key: np.asarray(value)[selection] for key, value in obs_all.items()}, self.device
             )
-            out = self.model(batch, rollout=False, world_model=False)
+            out = self.model(batch, forward_mode="policy_single_step")
             mu = out["action_mu"]
             raw_logstd = out["action_logstd"]
             with torch.no_grad():
-                ref_out = self.ref_model(batch, rollout=False, world_model=False)  # type: ignore[union-attr]
+                ref_out = self.ref_model(batch, forward_mode="policy_single_step")  # type: ignore[union-attr]
                 ref_raw_mu = raw_mu_from_action(
                     ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
                 )
@@ -7424,17 +7423,20 @@ class PPOTrainer:
         self.model.eval()
         t_policy = 0.0
         t_env = 0.0
-        # V9（P2 性能，2026-09-30）：collect 默认走与 update 同款的 cheap path（rollout=False，
+        # V9（P2 性能，2026-09-30）：collect 默认走与 update 同款的 cheap path（policy_single_step，
         # 不跑 B1 递归编排/WM 多步）。P0-1 后默认 plan_reference=repeat_action，plan 输出无人
-        # 消费（LQR 参考 = repeat(a_t)，见下）；cheap 路径的 action_mu/logstd/value 与 rollout
+        # 消费（LQR 参考 = repeat(a_t)，见下）；cheap 路径的 action_mu/logstd/value 与 wm rollout
         # 路径逐位一致（net/model.py:466-468；tests/test_net_shapes.py::test_cheap_path_matches_full_forward）。
-        # plan_reference="plan"（旧行为对照）需 plan 输出 → 保留 rollout=True。
+        # plan_reference="plan"（旧行为对照）需 plan 输出 → 保留 policy_wm_rollout。
         need_plan = self.config.plan_reference == "plan"
         for step in range(horizon):
             t0 = time.perf_counter()
             batch = self._to_tensor_obs(self._obs_list)
             with torch.no_grad():
-                out = self.model(batch, rollout=need_plan, world_model=False)
+                out = self.model(
+                    batch,
+                    forward_mode=("policy_wm_rollout" if need_plan else "policy_single_step"),
+                )
                 mu = out["action_mu"]
                 # S2：分布构建点统一钳制（None=原样）；sample_action 与 update 的 logprob 同口径
                 logstd = clamp_logstd(out["action_logstd"], self.config.policy_logstd_max)
@@ -7549,7 +7551,7 @@ class PPOTrainer:
         last_batch = self._to_tensor_obs(self._obs_list)
         with torch.no_grad():
             last_values = (
-                self.model(last_batch, rollout=False, world_model=False)["value"]
+                self.model(last_batch, forward_mode="policy_single_step")["value"]
                 .reshape(-1)
                 .detach()
                 .cpu()
@@ -7621,7 +7623,7 @@ class PPOTrainer:
             "env_step_s": float(t_env),
             "horizon": int(horizon),
             "num_envs": int(self._num_envs),
-            # V9：collect 前向路径口径（cheap = rollout=False，repeat_action 臂；rollout = plan 对照臂）
+            # V9：collect 前向路径口径（cheap = policy_single_step，repeat_action 臂；rollout = plan 对照臂）
             "path": "rollout" if need_plan else "cheap",
         }
         if not has_labels.any() and not self._pose_warned:
@@ -7751,7 +7753,7 @@ class PPOTrainer:
                     # PPO 只需要 heads/router/logstd/value：走 cheap path（不跑 B1 rollout 与 WM 多步）
                     if expert_norm_probe is not None:
                         expert_norm_probe.reset()
-                    out = self.model(obs_batch, rollout=False, world_model=False)
+                    out = self.model(obs_batch, forward_mode="policy_single_step")
                     if expert_norm_probe is not None:
                         expert_norms = expert_norm_probe.norms()
                         if expert_norms is not None:
@@ -7782,7 +7784,7 @@ class PPOTrainer:
                             # v4 ⑨：ref 侧保持 no_grad（冻结参考）；mu 反解必须在梯度内，
                             # 否则锚对 mu 路径零梯度（v4 ④ 探针实测 anchor_grad_norm/mu==0）。
                             with torch.no_grad():
-                                ref_out = self.ref_model(obs_batch, rollout=False, world_model=False)
+                                ref_out = self.ref_model(obs_batch, forward_mode="policy_single_step")
                                 ref_raw_mu = raw_mu_from_action(
                                     ref_out["action_mu"], self.low, self.high, mode=self.config.action_mode
                                 )
@@ -8220,11 +8222,10 @@ class _SmokeModel(nn.Module):
         self,
         obs: Dict[str, "torch.Tensor"],
         *,
-        rollout: bool = True,
-        world_model: bool = True,
+        forward_mode: str = "world_model_teacher_forcing",
         wm_detach: bool = False,
     ) -> Dict[str, "torch.Tensor"]:
-        """stub 无多步分支：``rollout/world_model/wm_detach`` 标志只为兼容真实模型签名。"""
+        """stub 无多步分支：``forward_mode/wm_detach`` 标志只为兼容真实模型签名（R39-A1 枚举）。"""
         hidden = self.trunk(torch.cat([self.encoders[key](torch.flatten(obs[key], start_dim=1)) for key in self.keys], dim=-1))
         span = (self.action_high - self.action_low)
         unit = torch.sigmoid(self.head_mu(hidden))

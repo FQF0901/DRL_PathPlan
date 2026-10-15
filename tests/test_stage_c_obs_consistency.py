@@ -114,7 +114,7 @@ class _HistoryDependentModel(torch.nn.Module):
         return history.reshape(history.shape[0], history.shape[1], -1).mean(dim=1)
 
     def forward(  # noqa: D102 - stub 契约
-        self, obs: dict, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False
+        self, obs: dict, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False
     ) -> dict:
         x = torch.cat([self._mem(obs, "ego"), self._mem(obs, "others")], dim=-1)
         mu = torch.sigmoid(self.head_mu(x))
@@ -149,7 +149,7 @@ def _trainer() -> PPOTrainer:
 
 def _forward(model: torch.nn.Module, batch: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
     with torch.no_grad():
-        out = model(_to_device_obs(batch, torch.device("cpu")), rollout=False, world_model=False)
+        out = model(_to_device_obs(batch, torch.device("cpu")), forward_mode="policy_single_step")
     return out["action_mu"].detach().cpu().numpy(), out["value"].detach().cpu().numpy()
 
 

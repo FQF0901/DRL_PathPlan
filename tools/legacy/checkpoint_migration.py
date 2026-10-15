@@ -153,30 +153,38 @@ def load_checkpoint_state(
 
 
 def load_checkpoint_migrated(
-    path: str, model: Any, *, strict: bool = False
+    path: str, model: Any, *, strict: bool = False, state: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
-    """实用装载入口（.slim 评估/训练链调用点）：旧键面经 migration 后装载（R38-P2b）。
+    """实用装载入口（.slim 评估/训练链调用点 + **R39-A1 起接入正式 loader**）：旧键面经
+    migration 后装载（R38-P2b）。
 
-    流程：``torch.load`` → ``migrate_state_dict``（已登记族 drop + 改名族 rename）→
+    流程：``torch.load``（``state`` 给出时跳过 —— 调用点已装载/已计 hash）→
+    ``migrate_state_dict``（已登记族 drop + 改名族 rename）→
     ``model.load_state_dict(filtered, strict=strict)`` → 返回
     ``{"meta", "missing_keys", "unexpected_keys", "migration"}``。
     ``migration`` = :meth:`LoadReport.to_dict`（逐族计数；供调用点落盘/审计）。
     **注意**：未登记 unexpected 键仍会出现在 ``unexpected_keys``（默认 fail-fast 语义不弱化，
-    由调用点决定拒绝或记录）。
+    由调用点决定拒绝或记录）；形状不符键在 ``load_state_dict(strict=False)`` 下同样抛
+    ``RuntimeError``（本原语不做形状过滤 —— 正式 loader 的形状门在调用点，见
+    ``pipeline/eval_runner._load_ckpt_model`` 的"干净 ⇒ strict=True 原语装载"路径）。
     """
     import torch
 
-    payload = torch.load(str(path), map_location="cpu", weights_only=False)
-    state = payload
-    if isinstance(payload, Mapping):
-        for key in ("model", "state_dict", "model_state_dict", "net"):
-            if key in payload and isinstance(payload[key], Mapping):
-                state = payload[key]
-                break
+    if state is None:
+        payload = torch.load(str(path), map_location="cpu", weights_only=False)
+        state = payload
+        if isinstance(payload, Mapping):
+            for key in ("model", "state_dict", "model_state_dict", "net"):
+                if key in payload and isinstance(payload[key], Mapping):
+                    state = payload[key]
+                    break
+        meta = dict(payload.get("meta") or {}) if isinstance(payload, Mapping) else {}
+    else:
+        meta = {}
     filtered, report = migrate_state_dict(state, model.state_dict().keys())
     missing, unexpected = model.load_state_dict(filtered, strict=bool(strict))
     return {
-        "meta": dict(payload.get("meta") or {}) if isinstance(payload, Mapping) else {},
+        "meta": meta,
         "missing_keys": list(missing),
         "unexpected_keys": list(unexpected),
         "migration": report.to_dict(),

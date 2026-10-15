@@ -84,7 +84,7 @@ class _DriftModel(torch.nn.Module):
             "tail_shift", torch.zeros((int(mu.shape[0]), max(0, self.plan_steps - 1), 2), dtype=torch.float32)
         )
 
-    def forward(self, obs, *, rollout: bool = True, world_model: bool = True, **kwargs):  # noqa: ANN001
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", **kwargs):  # noqa: ANN001
         mu = self.base_mu
         tail = mu[:, None, :] + self.tail_shift
         plan = torch.cat([mu[:, None, :], tail], dim=1)
@@ -203,7 +203,7 @@ def test_drift_metrics_inside_update_and_interval_trigger() -> None:
     # 漂移前向发生在 optimizer step 之后：用同一（post-update）模型的独立前向手算对照
     model.eval()
     with torch.no_grad():
-        direct = model(_torch_obs(), rollout=True, world_model=False)
+        direct = model(_torch_obs(), forward_mode="policy_wm_rollout")
         mu_after = direct["action_mu"].double().numpy()
     expected_mu_rms = float(np.sqrt(np.mean(np.square(mu_after - trainer._drift_ref_mu))))
     assert third["drift"]["mu_rms_vs_init"] == pytest.approx(expected_mu_rms, rel=1e-6)

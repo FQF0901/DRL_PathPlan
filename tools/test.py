@@ -9,6 +9,7 @@
 
 未识别参数原样透传（``--workers/--limit/--name/--max-steps/--baseline-ref/--seed``
 ``--allow-partial-load/--tracker/--eval-reference/--device/--moe-off`` 等），
+``--path-head {off,structured}``（R39-A1 结构化装配，声明于本入口后显式转发）同列；
 run 名由代码自适应规范化（``pipeline/run_paths.py::eval_run_name``；调用方不手拼）：
 
 - ``--name`` 缺省 → ``BTC<秒级北京戳>_eval500_<policy>``（kind 随 ``--spec`` 文件名自适应）；
@@ -53,6 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="评测输出根目录（实际写 <out>/<name>/，默认 runs/eval）")
     parser.add_argument("--policy", choices=("baseline", "ckpt"), default="ckpt",
                         help="baseline=规则基线参照；ckpt=策略权重（默认 ckpt）")
+    parser.add_argument("--path-head", choices=("off", "structured"), default="off",
+                        help="动作头装配（R39-A1；透传 pipeline.eval_runner）：off=默认旧 PolicyHead"
+                             "（逐位不变）；structured=结构化头 policy.structured_action（口径对齐 "
+                             ".slim/deepwork/p1_v2/a3/eval_a3.py）。结构化前向需要 obs['lane_anchor_xy']"
+                             "（ego t0 系目标车道折线）：本入口不生产该键，缺键在 forward fail-fast；"
+                             "注入方式见 pipeline/eval_runner.py 模块 docstring §7（a3 --lane-anchor "
+                             "inject 或自定义 controller 决策步注入）")
     return parser
 
 
@@ -106,7 +114,7 @@ def main(argv: "list[str] | None" = None) -> int:
     )
 
     forward = ["--config", str(args.config), "--policy", args.policy, "--out", str(args.out),
-               "--name", run_name]
+               "--name", run_name, "--path-head", str(args.path_head)]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
     if args.ckpt is not None:

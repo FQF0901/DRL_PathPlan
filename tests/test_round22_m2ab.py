@@ -73,8 +73,8 @@ def test_alpha_zero_bitwise_equals_baseline() -> None:
     assert attn.stgnn_flags() == (True, False)  # attn 模式保留 LD-LD 链与 LD 节点 MP
     obs = _obs()
     with torch.no_grad():
-        out_base = base(obs, rollout=True, world_model=False)
-        out_attn = attn(obs, rollout=True, world_model=False)
+        out_base = base(obs, forward_mode="policy_wm_rollout")
+        out_attn = attn(obs, forward_mode="policy_wm_rollout")
         enc_base = base.encode(obs)
         enc_attn = attn.encode(obs)
     for key in ("action_mu", "plan", "latent"):
@@ -98,10 +98,10 @@ def test_plan_head_consumes_aggregate_output() -> None:
         torch.nn.init.normal_(model.policy.mu.weight, std=0.1)
         torch.nn.init.normal_(model.policy.mu.bias, std=0.05)
         enc0 = model.encode(obs)
-        out0 = model(obs, rollout=True, world_model=False)
+        out0 = model(obs, forward_mode="policy_wm_rollout")
         model.ld_aggregator.alpha.fill_(1.0)
         enc1 = model.encode(obs)
-        out1 = model(obs, rollout=True, world_model=False)
+        out1 = model(obs, forward_mode="policy_wm_rollout")
     pool_delta = float((enc0["ld_pool"] - enc1["ld_pool"]).abs().max())
     latent_delta = float((enc0["latent"] - enc1["latent"]).abs().max())
     plan_delta = float((out0["plan"] - out1["plan"]).abs().max())
@@ -134,7 +134,7 @@ def test_attn_mode_has_no_hidden_mean_path(monkeypatch) -> None:
         monkeypatch.setattr(model_mod, "_masked_mean", spy)
         monkeypatch.setattr(model, "aggregate_ld", agg_spy)
         with torch.no_grad():
-            model(obs, rollout=True, world_model=False)
+            model(obs, forward_mode="policy_wm_rollout")
         monkeypatch.undo()
         return len(calls), len(agg_calls)
 
@@ -153,7 +153,7 @@ def test_attn_mode_has_no_hidden_mean_path(monkeypatch) -> None:
     # attn：聚合器模块本体被消费 7 次（逐调用诊断计数）
     attn.ld_aggregator.collect_stats = True
     with torch.no_grad():
-        attn(obs, rollout=True, world_model=False)
+        attn(obs, forward_mode="policy_wm_rollout")
     calls = len(attn.ld_aggregator._stats["alpha"])
     assert calls == 7, f"LdAggregate 前向次数 {calls} != 7（LD summary 未全部走聚合器）"
     stats = attn.ld_aggregator.pop_stats()
@@ -174,7 +174,7 @@ def test_all_masked_ld_finite_fwd_bwd_and_exact_zero() -> None:
     assert torch.equal(out, torch.zeros_like(out)), "全灭 mask 输出必须精确 0"
 
     obs = _obs(ld_valid=0)
-    out = model(obs, rollout=True, world_model=False)
+    out = model(obs, forward_mode="policy_wm_rollout")
     assert torch.isfinite(out["action_mu"]).all()
     assert torch.isfinite(out["plan"]).all()
     loss = out["action_mu"].pow(2).sum() + out["plan"].pow(2).sum()
@@ -215,7 +215,7 @@ def test_alpha_first_then_attention_updates() -> None:
     grad_attn_step0: float | None = None
     grad_alpha_step0: float | None = None
     for step in range(6):
-        out = model(obs, rollout=True, world_model=False)
+        out = model(obs, forward_mode="policy_wm_rollout")
         loss = out["action_mu"].pow(2).sum() + out["plan"].pow(2).sum() + out["latent"].pow(2).sum()
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

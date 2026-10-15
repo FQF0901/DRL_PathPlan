@@ -6,7 +6,7 @@
 1. 按 ``tools/test.py --tracker lqr`` 同协议闭环驾驶所选 spec（``_CkptController`` +
    LQR tracker，0.5 s 决策，6 点 plan）并**录制每个 env step 的观测**（ObservationBuilder
    原样输出）与自车位姿；
-2. 离线逐**决策帧**（0.5 s）重跑 ``model(obs, rollout=True, world_model=True)``；
+2. 离线逐**决策帧**（0.5 s）重跑 ``model(obs, forward_mode="world_model_teacher_forcing")``（R39-A1 枚举）；
 3. 每帧渲染一张 PNG（左右两子图，均统一到 **t0 自车系**、同尺度同朝向）：
    - 左 = GT 真实未来 3 s：ego 真实轨迹（t0→t+3 s）+ t+3 s 的 OD 框（真实观测）+
      t+3 s 的 LD 采样点（真实观测）；
@@ -754,7 +754,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         obs = records[start]
         tensors = controller._tensors(obs)  # 与评测 `_CkptController.action` 完全同口径
         with torch.no_grad():
-            output = model(tensors, rollout=True, world_model=True)
+            output = model(tensors, forward_mode="world_model_teacher_forcing")
 
         traj_xy = output["traj_xy"][0].detach().cpu().numpy()
         od_step = output["od_pred"][0, PLAN_HORIZON - 1].detach().cpu().numpy()

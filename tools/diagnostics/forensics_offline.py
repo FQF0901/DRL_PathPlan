@@ -109,7 +109,7 @@ def section_plan(arrays: dict, *, ckpt: str, device: str, rows: int, batch: int,
             idx = idx_focus[start:start + batch]
             obs = dataset.build_obs_batch(idx)
             tensor = {k: torch.as_tensor(np.asarray(v, dtype=np.float32), device=device) for k, v in obs.items()}
-            out = model(tensor, rollout=True, world_model=False)
+            out = model(tensor, forward_mode="policy_wm_rollout")
             traj = out["traj_xy"].detach().float().cpu().numpy().astype(np.float64)   # (B,6,2) xy
             plan = out["plan"].detach().float().cpu().numpy().astype(np.float64)     # (B,6,2) ds,dtheta
             mu = out["action_mu"].detach().float().cpu().numpy().astype(np.float64)  # (B,2)

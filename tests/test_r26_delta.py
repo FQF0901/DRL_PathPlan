@@ -17,7 +17,7 @@ OUT_KEYS = ("action_mu", "value", "plan", "traj_xy", "router_logits")
 
 
 def _forward(model, obs, **kwargs):
-    return model(obs, rollout=True, world_model=False, **kwargs)
+    return model(obs, forward_mode="policy_wm_rollout", **kwargs)
 
 
 def _max_diff(a, b) -> float:
@@ -53,13 +53,13 @@ def test_cheap_path_consistent_and_off_zero() -> None:
     obs = _semantic_obs(batch=2, seed=34)
     with torch.no_grad():
         full_on = _forward(model, obs)["action_mu"]
-        cheap_on = model(obs, rollout=False, world_model=False)["action_mu"]
-        cheap_off = model(obs, rollout=False, world_model=False, semantic_off=True)["action_mu"]
+        cheap_on = model(obs, forward_mode="policy_single_step")["action_mu"]
+        cheap_off = model(obs, forward_mode="policy_single_step", semantic_off=True)["action_mu"]
         assert float((full_on - cheap_on).abs().max()) == 0.0, "cheap 与 full 的 action_mu 应逐位一致"
         assert float((cheap_on - cheap_off).abs().max()) == 0.0, "β=0 ⇒ cheap on/off 严格 0"
         _activate_residual(model, context=0.3, token=0.3)
-        cheap_on2 = model(obs, rollout=False, world_model=False)["action_mu"]
-        cheap_off2 = model(obs, rollout=False, world_model=False, semantic_off=True)["action_mu"]
+        cheap_on2 = model(obs, forward_mode="policy_single_step")["action_mu"]
+        cheap_off2 = model(obs, forward_mode="policy_single_step", semantic_off=True)["action_mu"]
         full_on2 = _forward(model, obs)["action_mu"]
         assert float((cheap_on2 - cheap_off2).abs().max()) > 1e-6
         assert float((full_on2 - cheap_on2).abs().max()) == 0.0

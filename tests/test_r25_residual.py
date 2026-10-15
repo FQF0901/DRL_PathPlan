@@ -24,7 +24,7 @@ OUT_KEYS = ("action_mu", "value", "plan", "traj_xy", "router_logits")
 
 
 def _forward(model, obs):
-    return model(obs, rollout=True, world_model=False)
+    return model(obs, forward_mode="policy_wm_rollout")
 
 
 def _max_diff(a, b) -> float:

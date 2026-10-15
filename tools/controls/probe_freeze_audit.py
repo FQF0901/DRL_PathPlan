@@ -283,7 +283,7 @@ def make_loss_fn(model, *, batch_size: int = 4, seed: int = 0, device: str = "cp
 
     def loss_fn():
         obs = make_random_obs(model, batch_size=batch_size, seed=seed, device=device)
-        out = model(obs, rollout=True, world_model=False)
+        out = model(obs, forward_mode="policy_wm_rollout")
         loss = out["action_mu"].pow(2).mean() + out["value"].pow(2).mean()
         for key in ("plan", "ego_next"):
             if key in out:

@@ -524,7 +524,7 @@ class _RewardStub:
 class _MultiKeySmokeModel(_SmokeModel):
     """多键 obs 的 smoke stub：``_SmokeModel`` 的 trunk 只接受单键拼接，这里取各键编码均值。"""
 
-    def forward(self, obs, *, rollout: bool = True, world_model: bool = True, wm_detach: bool = False):  # noqa: ANN001
+    def forward(self, obs, *, forward_mode: str = "world_model_teacher_forcing", wm_detach: bool = False):  # noqa: ANN001
         encoded = [self.encoders[key](torch.flatten(obs[key], start_dim=1)) for key in self.keys]
         hidden = self.trunk(torch.stack(encoded, dim=0).mean(dim=0))
         span = self.action_high - self.action_low

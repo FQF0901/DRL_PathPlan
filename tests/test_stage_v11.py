@@ -163,7 +163,7 @@ def test_trajectory_loss_does_not_reach_st_gnn() -> None:
     """v2 detach：``traj_xy`` 只走 action/pose 链；状态链（ST-GNN）不得收到梯度。"""
     model = _model_with_unsaturated_policy()
     obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=False)
+    out = model(obs, forward_mode="policy_wm_rollout")
     out["traj_xy"].pow(2).mean().backward()
     wm_grads = [p.grad for name, p in model.named_parameters() if name.startswith("st_gnn.")]
     assert wm_grads, "模型应包含 st_gnn 参数"
@@ -177,7 +177,7 @@ def test_prediction_loss_trains_st_gnn_but_not_policy() -> None:
     """v8 口径：物理解码 loss 训练 ST-GNN / encoder（真实帧检测），不训练 policy。"""
     model = _model_with_unsaturated_policy()
     obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=True)
+    out = model(obs, forward_mode="world_model_teacher_forcing")
     (out["od_pred"].pow(2).mean() + out["ld_pred"].pow(2).mean()).backward()
     st_grads = [p.grad for name, p in model.named_parameters() if name.startswith("st_gnn.")]
     assert any(g is not None and float(g.abs().sum()) > 0.0 for g in st_grads), "ST-GNN 应有梯度"
@@ -198,7 +198,7 @@ def test_latent_consistency_trains_st_gnn_transitions_not_policy() -> None:
 
     model = _model_with_unsaturated_policy()
     obs = make_obs(batch=2)
-    out = model(obs, rollout=True, world_model=True)
+    out = model(obs, forward_mode="world_model_teacher_forcing")
     # 目标 = 预测 detach 后平移（smooth_l1 在 diff=0 处梯度为 0，必须给非零残差）
     loss = F.smooth_l1_loss(out["z_od_pred"], out["z_od_pred"].detach() + 1.0) + F.smooth_l1_loss(
         out["z_ld_pred"], out["z_ld_pred"].detach() - 1.0
@@ -228,8 +228,8 @@ def test_wm_detach_kwarg_is_accepted_noop() -> None:
     """v2 兼容：``wm_detach`` 形参保留但语义固定（合成帧恒 detach），true/false 输出一致。"""
     model = _model_with_unsaturated_policy().eval()
     obs = make_obs(batch=2)
-    out_true = model(obs, rollout=True, world_model=True, wm_detach=True)
-    out_false = model(obs, rollout=True, world_model=True, wm_detach=False)
+    out_true = model(obs, forward_mode="world_model_teacher_forcing", wm_detach=True)
+    out_false = model(obs, forward_mode="world_model_teacher_forcing", wm_detach=False)
     for key in ("traj_xy", "plan", "od_pred", "ld_pred"):
         assert torch.equal(out_true[key], out_false[key]), f"wm_detach 不应改变 {key}"
 

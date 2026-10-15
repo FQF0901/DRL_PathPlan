@@ -152,7 +152,7 @@ def test_model_forward_physics_diagnostics() -> None:
     obs = _semantic_obs(batch=3, seed=41)
     _activate_residual(model, context=0.2, token=0.2)
     with torch.no_grad():
-        out = model(obs, rollout=True, world_model=False)
+        out = model(obs, forward_mode="policy_wm_rollout")
         assert out["final_ds"].shape == (3,)
         assert torch.allclose(out["final_ds"], out["action_mu"][:, 0], atol=0)
         assert torch.allclose(out["final_kappa"], out["action_mu"][:, 1] / out["action_mu"][:, 0].clamp_min(1e-6), atol=1e-6)
