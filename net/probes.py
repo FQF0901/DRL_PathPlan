@@ -1560,6 +1560,17 @@ DETACH_REGISTRY: tuple[dict[str, Any], ...] = (
         "reach": "static：`_detach` 只被 `WorldState` 构造与 `analytic_update` 调用（`world_state_api=off` 默认时整条路径不执行）；语义 = 想象世界状态是「已执行动作 + WM 残差」的确定性函数 —— 残差学习走 `net/world_state.residual_loss` one-step 真实下一状态监督（不穿越跨步链），策略头几何输入与 HEAD 的 `step_geometry` 同为外源确定性量",
         "evidence": "static",
     },
+    {
+        "id": "D-B201",
+        "tensor": "value.detach()",
+        "file": "net/world_residual.py",
+        "function": "save_residual_head",
+        "line": 315,
+        "stage": "R39-B2 残差头 ckpt 序列化（one-step 训练产物落盘；**非**状态链/学习图边界）",
+        "blocks": "头参数 → 磁盘 state_dict",
+        "reach": "static：仅 `save_residual_head` 的序列化路径调用（训练 lane 落盘时一次；默认路径/前向不执行）；训练/评测的梯度边界仍为 `world_state.residual_loss` 语义（one-step 真实下一状态监督，D-WS01 不变）",
+        "evidence": "static",
+    },
 )
 
 #: 登记表键 = (file, function, tensor)；`line` 仅为登记时行号（漂移不判失败，记入报告）

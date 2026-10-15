@@ -554,7 +554,7 @@ def test_rollout_destroys_imagined_memory_and_keeps_real_mem_untouched() -> None
 
 
 def test_world_state_api_modes_contract() -> None:
-    assert WORLD_STATE_API_MODES == ("off", "analytic", "analytic_residual")
+    assert WORLD_STATE_API_MODES == ("off", "analytic", "analytic_residual", "analytic_learned")
     assert tuple(POLICY_STATE_FIELDS) == tuple(LONG_EXOG_FEATURE_NAMES)
     assert set(FIELD_PRODUCERS) == set(POLICY_STATE_FIELDS)
     assert HELD_ALLOWED == ("nav_progress",)

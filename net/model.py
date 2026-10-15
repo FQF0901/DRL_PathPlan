@@ -235,6 +235,7 @@ from net.world_state import (
     analytic_update,
     od_decode_prior,
     readout,
+    world_state_from_encode,
 )
 
 #: router 监督标签（固定顺序，必须与 config/model.yaml::moe.router.supervised_labels 一致）
@@ -607,6 +608,10 @@ class DrivingModel(nn.Module):
         self.world_state_speed_max: float = 20.0
         #: R39-B1：本 forward 的想象世界状态（``world_state_api != "off"`` 时构造；off = None）。
         self._world_state: WorldState | None = None
+        #: R39-B2：学习残差头（``analytic_learned`` 档的 ΔA_θ 生产者；默认 None ⇒ 不存在）。
+        self.world_residual: "torch.nn.Module | None" = None
+        #: R39-B2 诊断旋钮：残差缩放（默认 1.0 ⇒ 逐位等于未缩放；α×残差联合扫描用）。
+        self.world_residual_scale: float = 1.0
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
@@ -796,7 +801,11 @@ class DrivingModel(nn.Module):
           progress / distance-to-end；来源逐字段标注，见 ``net/world_state.py``）；
         - ``analytic_residual``：在 ``analytic`` 基础上加 ``st_gnn`` 解码残差
           ΔA_θ = ``od_pred/ld_pred`` − 其自身先验（**零新增参数**；当前解码头未按 A+ΔA
-          口径训练 ⇒ 属 B2 训练接口面）。
+          口径训练 ⇒ 属 B2 训练接口面）；
+        - ``analytic_learned``（R39-B2 门臂）：在 ``analytic`` 基础上加**学习残差头**
+          ΔA_θ（:mod:`net.world_residual`；readout 列级残差 speed/static/dynamic/ttc，
+          ``source: analytic → learned``）。需 ``set_world_residual_head(...)`` 先挂载，
+          否则 ``_rollout`` fail-fast。
 
         ``speed_alpha`` / ``speed_max``：speed 阻尼解析更新参数（见属性说明）。仅结构化头
         生效（``path_head_mode=structured``；否则 ``_rollout`` fail-fast）。
@@ -813,6 +822,36 @@ class DrivingModel(nn.Module):
         self.world_state_speed_alpha = float(speed_alpha)
         self.world_state_speed_max = float(speed_max)
         self._world_state = None
+        return self
+
+    def set_world_residual_head(self, head: "torch.nn.Module | None") -> "DrivingModel":
+        """R39-B2：挂载/卸载学习残差头（``analytic_learned`` 档的 ΔA_θ 生产者）。
+
+        - 默认 ``None``（**不构造、不进 state_dict、不占参数预算**）；挂载的对象必须是
+          ``torch.nn.Module``（结构契约见 ``net/world_residual.py``），随模型 ``.to()``；
+        - 挂载**本身**不改变任何前向（仅 ``world_state_api="analytic_learned"`` 时被调用）；
+          零初始化头 ⇒ 该档输出与 ``analytic`` 逐位一致（自证见面级证据）。
+        """
+        if head is not None and not isinstance(head, torch.nn.Module):
+            raise TypeError(
+                f"[world_state] residual head 必须是 nn.Module 或 None，收到 {type(head).__name__}"
+            )
+        self.world_residual = head
+        if head is not None:
+            reference = next(self.parameters(), None)
+            if reference is not None:
+                head.to(device=reference.device)
+        return self
+
+    def set_world_residual_scale(self, scale: float = 1.0) -> "DrivingModel":
+        """R39-B2 诊断旋钮：残差缩放（默认 1.0 = 未缩放；仅 ``analytic_learned`` 档生效）。
+
+        量纲 = 头输出整体乘子（B2 α×残差联合扫描用；1.0 ⇒ 逐位等于未缩放前向）。
+        """
+        value = float(scale)
+        if not 0.0 <= value <= 4.0:
+            raise ValueError(f"[world_state] world_residual_scale 必须 ∈ [0,4]，收到 {scale}")
+        self.world_residual_scale = value
         return self
 
     #: ``static_role_only`` 下 rollout 后段置零的**动态**语义特征索引
@@ -1765,26 +1804,17 @@ class DrivingModel(nn.Module):
 
         # R39-B1：t0 → WorldState（只由真实 t0 编码 + t0 静态地图构造；Imagined Memory
         # 在此复制 t0 帧，source=real）。默认 off ⇒ 不构造、不触碰 net/world_state 运行路径。
+        # R39-B2：t0 构造 = ``world_state_from_encode``（单一实现出处；训练侧
+        # ``b2_train.py`` 复用同一函数 ⇒ 口径逐行一致）。
         ws_od_t0: Tensor | None = None
         ws_ld_t0: Tensor | None = None
         ws_view: dict[str, object] | None = None
         if ws_on:
             ws_od_t0 = od_anchor
             ws_ld_t0 = ld_anchor
-            self._world_state = WorldState.t0(
-                ego_speed=enc.ego_now[..., 0],
-                od_anchor=od_anchor,
-                od_feat=enc.od_now,
-                od_latent=z_od,
-                od_valid=od_live,
-                ld_anchor=ld_anchor,
-                ld_latent=z_ld,
-                ld_valid=ld_live,
-                lane_anchor=path_ctx["anchor_xy"],
-                lane_mask=path_ctx["anchor_mask"],
-                lane_target_valid=path_ctx["target_lane_valid"],
-                t0_exog=path_ctx["long_exog"],
-                t0_present=path_ctx["long_present"],
+            self._world_state = world_state_from_encode(
+                self.st_gnn,
+                encoded,
                 dt=self.dt,
                 speed_alpha=self.world_state_speed_alpha,
                 speed_max=self.world_state_speed_max,
@@ -1951,11 +1981,19 @@ class DrivingModel(nn.Module):
             # (d2) R39-B1：统一 WorldState 推进（解析 + 可选 ΔA_θ）+ readout（默认 off ⇒ 短路）。
             #      时序：a_{k-1}（= 本步 action）→ AnalyticUpdate → 第 k 步 readout；
             #      残差 = st_gnn 本步解码 − 其自身先验（零新增参数；未按 A+ΔA 口径训练 ⇒ B2 面）。
+            #      R39-B2（``analytic_learned``）：ΔA_θ = 学习残差头（readout 列级；输入 =
+            #      readout(S_{k-1}) 列 + a_{k-1} + analytic 列），经 readout(learned=...) 应用。
             if ws_on:
                 od_residual = ld_residual = None
                 if ws_mode == "analytic_residual":
                     od_residual = od_pred - od_decode_prior(ws_od_t0, step=k, dt=self.dt)
                     ld_residual = ld_pred - ws_ld_t0
+                # prev_view（仅学习残差档需要）：k=1 ⇒ 读 t0 状态；k≥2 ⇒ 上一迭代的 readout。
+                prev_view = (
+                    (ws_view if ws_view is not None else readout(self._world_state))
+                    if ws_mode == "analytic_learned"
+                    else None
+                )
                 analytic_update(
                     self._world_state,
                     ds=ds,
@@ -1967,7 +2005,30 @@ class DrivingModel(nn.Module):
                     ld_residual=ld_residual,
                     step=k,
                 )
-                ws_view = readout(self._world_state)
+                if ws_mode == "analytic_learned":
+                    if self.world_residual is None:
+                        raise ValueError(
+                            "[world_state] world_state_api='analytic_learned' 需要先 "
+                            "set_world_residual_head(head)（net/world_residual.py）"
+                        )
+                    from net.world_residual import (  # lazy：默认路径零触碰
+                        apply_readout_residual,
+                        readout_residual_features,
+                    )
+
+                    base_view = readout(self._world_state)
+                    delta = self.world_residual(
+                        **readout_residual_features(
+                            prev_view=prev_view, action=action, base_view=base_view
+                        )
+                    )
+                    scale = float(self.world_residual_scale)
+                    if scale != 1.0:
+                        delta = delta * scale
+                    learned = apply_readout_residual(base_view=base_view, delta=delta)
+                    ws_view = readout(self._world_state, learned=learned)
+                else:
+                    ws_view = readout(self._world_state)
                 if ws_hook is not None:
                     ws_hook.capture(step=k, state=self._world_state, view=ws_view)
 

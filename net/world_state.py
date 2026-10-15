@@ -18,6 +18,10 @@
 - ``ΔA_θ`` = **可选**学习残差（``analytic_residual`` 档）；本 lane 复用 ``st_gnn`` 现有
   物理解码头（``od_pred``/``ld_pred``）的输出减去其自身先验 = 零新增参数；训练接口 =
   :func:`residual_loss`（one-step；监督目标 = **真实下一状态**；禁自产状态回灌）。
+- R39-B2（``analytic_learned`` 档）：``ΔA_θ`` = :mod:`net.world_residual`
+  :class:`~net.world_residual.ReadoutResidualHead` 的小头输出（readout 列级残差
+  ``speed/static_distance/dynamic_distance/dynamic_ttc``；≤20k 参数；默认不构造）。
+  经 :func:`readout` 的 ``learned`` 载荷逐列应用（命中行 ``source="learned"``）。
 
 禁止（硬约束；本模块结构性排除）
 --------------------------------
@@ -68,6 +72,7 @@ __all__ = [
     "FIELD_PRODUCERS",
     "HELD_ALLOWED",
     "IMAGINED_MEMORY_MAX_FRAMES",
+    "LEARNED_ALLOWED",
     "POLICY_STATE_FIELDS",
     "SOURCE_CODES",
     "SOURCES",
@@ -80,10 +85,18 @@ __all__ = [
     "readout",
     "residual_loss",
     "residual_targets",
+    "world_state_from_encode",
 ]
 
-#: 开关取值（``DrivingModel.set_world_state_api``；默认 ``off`` ⇒ 逐位不变）
-WORLD_STATE_API_MODES: tuple[str, ...] = ("off", "analytic", "analytic_residual")
+#: 开关取值（``DrivingModel.set_world_state_api``；默认 ``off`` ⇒ 逐位不变）：
+#: ``analytic_learned``（R39-B2 门臂）= analytic + **学习残差头** ΔA_θ（
+#: :mod:`net.world_residual`；readout 列级残差，需 ``set_world_residual_head(...)``）。
+WORLD_STATE_API_MODES: tuple[str, ...] = (
+    "off",
+    "analytic",
+    "analytic_residual",
+    "analytic_learned",
+)
 
 #: 逐字段来源标签（readout 输出；机器可读）
 SOURCES: tuple[str, ...] = ("analytic", "learned", "held", "missing")
@@ -107,6 +120,15 @@ POLICY_STATE_FIELDS: tuple[str, ...] = (
 #: route 长度不可从 t0 观测推断时（``distance_to_target_lane_end`` 缺 present 或
 #: ``route_completion == 1``）保持上一值并显式标注。其余字段出现 ``held`` ⇒ readout 断言失败。
 HELD_ALLOWED: tuple[str, ...] = ("nav_progress",)
+
+#: readout 中允许 ``source="learned"`` 的字段（= R39-B2 残差头目标列；
+#: :mod:`net.world_residual` 同源常量 ⊆ :data:`POLICY_STATE_FIELDS`）。
+LEARNED_ALLOWED: tuple[str, ...] = (
+    "speed",
+    "static_distance",
+    "dynamic_distance",
+    "dynamic_ttc",
+)
 
 #: 字段 → **唯一 producer**（readout 断言：每字段唯一写点；跨帧不得变化）。
 #: 断言语义 = 「同字段唯一 producer」：一个字段只由一个写点产出，来源差异只体现在 source。
@@ -363,6 +385,46 @@ class WorldState:
         )
         state.memory = memory
         return state
+
+
+def world_state_from_encode(
+    st_gnn: Any,
+    encoded: Mapping[str, Any],
+    *,
+    dt: float,
+    speed_alpha: float = 1.0,
+    speed_max: float = 20.0,
+) -> WorldState:
+    """由 ``encode()`` 输出构造 t0 :class:`WorldState`（**单一实现出处**）。
+
+    生产 ``net.model.DrivingModel._rollout``（``world_state_api != "off"``）与 R39-B2 训练
+    侧（``b2_train.py``）共用本函数 ⇒ t0 构造口径逐行一致（锚/外参/OD/LD 初值同源）。
+    只吃 t0 真实编码 + t0 静态地图（**无未来帧入参**）。
+    """
+    enc = encoded["encoded"]
+    path_ctx = encoded.get("path_ctx")
+    if not isinstance(path_ctx, Mapping):
+        raise ValueError("[world_state] world_state_from_encode 需要 path_ctx（structured encode）")
+    od_anchor = st_gnn.od_state_from_features(enc.od_now, enc.od_live)
+    ld_anchor = st_gnn.ld_state_from_features(enc.ld_now, enc.ld_live)
+    return WorldState.t0(
+        ego_speed=enc.ego_now[..., 0],
+        od_anchor=od_anchor,
+        od_feat=enc.od_now,
+        od_latent=encoded["z_od"],
+        od_valid=enc.od_live,
+        ld_anchor=ld_anchor,
+        ld_latent=encoded["z_ld"],
+        ld_valid=enc.ld_live,
+        lane_anchor=path_ctx["anchor_xy"],
+        lane_mask=path_ctx["anchor_mask"],
+        lane_target_valid=path_ctx["target_lane_valid"],
+        t0_exog=path_ctx["long_exog"],
+        t0_present=path_ctx["long_present"],
+        dt=float(dt),
+        speed_alpha=float(speed_alpha),
+        speed_max=float(speed_max),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -641,7 +703,9 @@ def _od_kinematics(state: WorldState) -> dict[str, Tensor]:
     }
 
 
-def readout(state: WorldState) -> dict[str, Any]:
+def readout(
+    state: WorldState, *, learned: Mapping[str, Tensor] | None = None
+) -> dict[str, Any]:
     """``PolicyStateView_k = readout(WorldState_k)``：**七量统一重算**（第 7 步）。
 
     返回（头输入契约 = 现结构化头 forward 形参）：
@@ -651,6 +715,11 @@ def readout(state: WorldState) -> dict[str, Any]:
 
     断言（每次调用）：① 字段集 = :data:`POLICY_STATE_FIELDS` 且 producer = 唯一写点；
     ② ``held`` 仅限 :data:`HELD_ALLOWED`；③ ``missing`` ⇒ 值 0 ∧ present=0。
+
+    ``learned``（R39-B2 可选；``None`` = 默认逐位不变）：``{"delta" (B,4), "mask" (B,4)}``
+    = 学习残差 ``ΔA_θ``（列序 = :data:`LEARNED_ALLOWED`，物理单位）。逐列仅作用于
+    ``mask=1 ∧ base present=1`` 的行（missing 行不加 ⇒ 不静默填值），命中行
+    ``source: analytic → learned``；``present`` 不变（学习残差**不制造存在性**）。
     """
     from net.path_head import LONG_EXOG_FEATURE_NAMES  # lazy
 
@@ -714,6 +783,41 @@ def readout(state: WorldState) -> dict[str, Any]:
     values["nav_progress"] = state.nav_progress
     present["nav_progress"] = _align(state.nav_progress_present, ref)
     sources["nav_progress"] = _row_codes(state.route_trackable > 0.5, absent="held")
+
+    # R39-B2：学习残差（ΔA_θ 列级）——仅作用于 LEARNED_ALLOWED 四列；source -> "learned"。
+    learned_applied: dict[str, int] = {}
+    if learned is not None:
+        if not isinstance(learned, Mapping):
+            raise TypeError(
+                f"[world_state] learned 必须是 Mapping（delta/mask），收到 {type(learned).__name__}"
+            )
+        delta = _align(learned["delta"], ref)
+        mask = _align(learned["mask"], ref)
+        width = len(LEARNED_ALLOWED)
+        if tuple(delta.shape) != (batch, width) or tuple(mask.shape) != (batch, width):
+            raise ValueError(
+                f"[world_state] learned delta/mask 形状应为 {(batch, width)}，"
+                f"收到 {tuple(delta.shape)}/{tuple(mask.shape)}"
+            )
+        if not bool(torch.isfinite(delta).all()):
+            raise ValueError("[world_state] learned delta 出现非有限值")
+        learned_code = torch.full_like(ref, SOURCE_CODES["learned"]).long()
+        for index, name in enumerate(LEARNED_ALLOWED):
+            applied = (mask[:, index] > 0.5) & (present[name] > 0.5)
+            values[name] = values[name] + torch.where(
+                applied, delta[:, index], torch.zeros_like(delta[:, index])
+            )
+            existing = sources[name]
+            if isinstance(existing, str):
+                codes = torch.where(
+                    applied,
+                    learned_code,
+                    torch.full_like(learned_code, SOURCE_CODES[existing]),
+                )
+            else:
+                codes = torch.where(applied, learned_code, existing)
+            sources[name] = codes
+            learned_applied[name] = int(applied.sum())
 
     # 列序归一（= POLICY_STATE_FIELDS；hook/readout dict 顺序稳定）。
     # 防御性断言：字段集必须恰好覆盖（producer 唯一性 = FIELD_PRODUCERS 逐字段查表）。
@@ -800,6 +904,8 @@ def readout(state: WorldState) -> dict[str, Any]:
             "ld_valid": state.ld_valid,
             "step": state.step,
             "producer_assert_ok": True,
+            "learned_applied": dict(learned_applied),
+            "learned_enabled": learned is not None,
         },
     }
 
