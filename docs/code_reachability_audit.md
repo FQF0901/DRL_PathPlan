@@ -334,7 +334,8 @@ tools/venv-python .slim/deepwork/p1_v2/round38/c5_reach_scan.py --ckpt-families 
 > 通用纪律（§5.68-④ + §六）：**迁移 → 删引用 → 删实现** 三笔独立提交（每笔可回退）；
 > 每笔必过 **pytest 全量**（2026-10-15 实测 collect **973 项**；README 记录 966，差额 = R38-A4 新增
 > `tests/test_step_geometry_modes.py` 及后续用例）+ **默认关逐位**（默认关路径键集/前向逐位不变）。
-> `removal_commit` 在 `deprecation_manifest.yaml` 中一律留空，实施时回填。
+> `removal_commit` 在 `deprecation_manifest.yaml` 中：A/B/C/D 组已于 2026-10-15 回填（见本文件 §8 与 manifest `landing` 块），
+> E/F/G/H 仍留空（归 P3）。
 
 ### A 组｜oneshot / plan_override / 别名 —— `ARCHITECTURE_FORBIDDEN`（8/9 项）
 
@@ -498,7 +499,7 @@ tools/venv-python .slim/deepwork/p1_v2/round38/c5_reach_scan.py --ckpt-families 
    - F 组来源标签的落点（obs schema 字段 vs 模型侧标签）；
    - 正式入口口径：是否把结构化头链从 `.slim` 收编进 `pipeline/eval_runner.py`（否则 Clean500/Eval500 统一 protocol hash
      重跑只能继续用 `.slim` 链，且 `tools/test.py` 无法评测当前候选 ckpt 的 structured 口径）；
-   - `removal_commit` 全部留空（实施时回填）。
+   - `removal_commit`：A/B/C/D 已回填（§8）；E/F/G/H 留空待 P3。
 
 ## 7. 交付自证
 
@@ -511,3 +512,56 @@ tools/venv-python .slim/deepwork/p1_v2/round38/c5_reach_scan.py --ckpt-families 
 | 未写代码 | 本任务仅新增 C5 文档/脚本；`net/`、`pipeline/`、`config/`、`tests/` 零改动（`git status` 自证） |
 | 快照时点 | **2026-10-15 18:33（工作树快照）**。扫描期间并发 lane（R38-A4 已入库 `b9d1721`；其后 `net/**` 仍有在飞改动：`probes.py`/`mem.py`/`model.py` 等被并发改写）⇒ **数字会随该 lane 落定而漂移**；减枝前请重跑 `c5_reach_scan.py` 刷新基线（判定逻辑与 bins 定义不变，预期只影响 G/D/H 的行命中数） |
 | 未写代码（自证） | 本任务只新增：4 份 C5 文档 + `.slim/deepwork/p1_v2/round38/c5_*`（1 脚本 + 4 产物/中间件）；`net/`、`pipeline/`、`config/`、`tests/` **零改动**（`git status` 中 net/** 的改动来自并发 lane，非本任务） |
+
+---
+
+## 8. 落地状态（2026-10-15 回填；A/B/C/D 已完成，E/F/G/H 归 P3）
+
+> 出处：`docs/deprecation_manifest.yaml::landing`（本批回填）+ 各波执行报告
+> （`.slim/deepwork/p1_v2/round38/{p1_report,p1b_report,p2a_report,p2b_report,q4a_report}.md`）。
+> "已完成" = 该组清单项的迁移 → 删引用 → 删实现已入库；"残留" = 有意保留的护栏/守卫与冻结期例外（非漏项）。
+
+### 8.1 A/B/C/D 波次（commit + 证据 + 残留）
+
+| 组 | 波次 | 实现 commit | 机器/测试证据 | 残留（有意保留） |
+|---|---|---|---|---|
+| **A**（8 项） | R38-P1 | `596747c`（S1 迁 `tools/legacy/oneshot_path.py`）+ `48cb5eb`（S2 删引用 + S3 删实现） | `p1_report.md` / `p1_reach_tables_post.md`（prod 89→24 行）；`tests/test_r38_p1_oneshot_path_removed.py`、`tests/test_legacy_oneshot_path.py` | 契约⑤键 `structured_plan_override_used`（语义=结构派生"路径不存在"）；`PATH_HEAD_MODES` 两档；`path_head_mode()` 读出保留（P2b 改派生）；`net/probes.py` 守卫 flag；`.slim` 侧守卫 `allow=` 兼容 tripwire + `a3/eval_a3.py` 冻结未清（`p1b_report.md` §4.1） |
+| **B**（12 项） | R38-P2a | `a226285`（S1）+ `dd0a8c2`（S2/S3） | `p2a_report.md` / `p2a_reach_tables_post.md`（12/12 符号 prod=0）；`p2a_ckpt_mapper_check.json`（8 代表 ckpt 三档分类） | `legacy_key_mapper.IGNORE_PREFIXES`（20 键，CHECKPOINT_ONLY 隔离）；13 带 K-anchor / 15 带 lane·ttc 的旧 ckpt 键面按规定忽略（`c5_ckpt_families.json`） |
+| **C**（3 项） | R38-P2b | `939d1a2`（C 组旧 warp 退役 + D 组双实体收编；docs 收口 = `2cfd8e8`） | `p2b_report.md`；w1/w2 oracle fixture `tests/fixtures/r38_p2b_warp/` + `p2b_m1_gate_a.md` / `p2b_b_warp_compat.md`；`tests/test_r38_p2b_warp_legacy_removed.py` | 快照 `tools/legacy/legacy_ego_warp.py`；`WARP_MODES=("off","analytic")`（KEEP 项，net/ego_warp.py:103） |
+| **D**（4 项） | R38-P2b | `939d1a2`（同上） | `p2b_report.md`（默认路径逐位：plain 25 键 / structured 73 键 `max│Δ│=0`；键集归一 sha 一致）；`p2b_keys_evidence.json` / `p2b_ckpt_mapper_check.json`；`tests/test_r38_p2b_policy_fold.py` | `set_path_head_ablation` 保留两档 legacy 诊断入口（oneshot fail-fast，net/model.py:909-931）；`set_policy_diag` fail-fast 桩（指离线工具）；`path_head` 只读 alias（:864-872）；`.slim` 调用点已接 `load_checkpoint_migrated`（`p2b_report.md` S2 表） |
+
+- 改前基线可重放：`p1_reach_tables_pre_refresh.md` / `p2a_reach_tables_pre_refresh.md` / `p2b_reach_tables_pre_refresh.md`
+  与对应 `*_scan_post.json` 配对（各波 `*_report.md` 内为该组"迁移 → 删引用 → 删实现"的逐笔可回退证据表）。
+- 类目归位注记：`compose_path_plan()` 审计判定为 **KEEP**，实际随 H1 一次性六步路径**实迁** legacy 并从 `net/` 删除
+  （`48cb5eb`；`landing.reclassifications`）。
+- 改名映射登记：`path_head.*`（18 键）→ `policy.structured_action.*`（`landing.rename_map`；
+  代码 = `tools/legacy/legacy_key_mapper.py::PREFIX_RENAME_MAP`，条件族"装配缺席 ⇒ drop + 计数"）。
+
+### 8.2 Q4-A（E 组前置，生产者侧已落地）
+
+- commit `9577078`：`env/obs/long_exog.py`（动态距离/TTC/静态距**公式单一出处**）+ `env/obs/path_field.py`
+  （t0 段 8 列 + 同源 `<key>__present`）+ `env/obs/builder.py` 挂载（`out.update(path_long_exog_fields(env, out))`）；
+  `net/path_head.py`：`LONG_EXOG_STRICT_COLUMNS=(4,5)` ⇒ dynamic_distance/dynamic_ttc **缺键 fail-fast**（禁静默 0）。
+- 证据：`q4a_report.md`（builder 产出 vs M7 `truth_fill` 逐位 334 帧 `max|Δ|=0`；闭环逐位复现 C1_true）、
+  `tests/test_round38_q4a_path_fields.py`。
+- 边界：E 组清单本体（net 侧 schema/掩码消费等 B 类）**仍未落地**，归 P3（与重训同批）。
+
+### 8.3 E/F/G/H → P3
+
+| 组 | 现状（HEAD=2cfd8e8） | P3 口径 |
+|---|---|---|
+| E（9 项） | 未落地；生产者侧已由 Q4-A 先行 | schema 冻结 + 掩码消费（B 类）+ static 下沉；与重训同批 |
+| F（1 项） | 未动（只加来源标签，不删） | 来源标签随 schema/裁决落地 |
+| G（6 项） | 未落地 | monitoring `_LEGACY_*` 族 + others-28 legacy 重排迁移/删除 |
+| H（3 项） | 未落地；`forward_mode` 全仓 0 命中（本审计 §2 H 组表复核） | 枚举化 + 旧布尔组合逐位对照表（含 `wm_detach` 删除） |
+
+### 8.4 复核命令（刷新引用面 / 对账各波归属与残留）
+
+```bash
+# 全仓引用面刷新（判定逻辑与 bins 不变；与各组 post 快照对账）
+tools/venv-python .slim/deepwork/p1_v2/round38/c5_reach_scan.py
+# 旧 ckpt × 键面映射复核（8 代表 ckpt；重放 D 组改名与 B 组 ignore 的逐族计数）
+tools/venv-python .slim/deepwork/p1_v2/round38/p2b_ckpt_mapper_check.py
+# 默认关逐位/键集证据（HEAD 快照 × 工作树；重放 P2b 键面 sha 对账）
+tools/venv-python .slim/deepwork/p1_v2/round38/p2b_keys_evidence.py
+```

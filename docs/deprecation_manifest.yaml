@@ -7,7 +7,8 @@
 #           slim/runs 面列在 notes（不计入可达性判定，但决定迁移同步面）。
 #
 # 纪律（写入每笔提交的验收）：
-#   1. 三笔独立提交：迁移 → 删引用 → 删实现（每笔可回退）；removal_commit 实施时回填（当前一律 null）。
+#   1. 三笔独立提交：迁移 → 删引用 → 删实现（每笔可回退）；removal_commit 已按波次回填
+#      （A/B/C/D 已落地，见 landing 块）；null = 未落地（E/F/G/H → P3）。
 #   2. 每笔必过 pytest 全量（2026-10-15 collect 973 项） + 默认关逐位（默认关路径键集/前向逐位不变）。
 #   3. oneshot / plan_override / 旧 set_ego_warp / K-anchor / path_* 的删除必须同步 .slim 评估链与
 #      L-A 契约断言（§5.69-③）；legacy set_ego_warp 删除前必须**先冻结逐位 oracle fixture**（§5.69-①）。
@@ -34,6 +35,46 @@ meta:
   migration_order:
     - "C 组（先冻结 warp oracle fixture）→ A 组（oneshot 迁移 + .slim 同步）→ B 组（K-anchor 归档）→ D 组（收编）→ E 组（Q4 裁决后 schema 冻结）→ G 组 → H 组（forward_mode 枚举）；F 组只加来源标签，不删"
 
+
+landing:
+  updated: "2026-10-15"
+  head: "2cfd8e8"
+  waves:
+    - id: R38-P1
+      group: A
+      commits: ["596747c（S1 迁移）", "48cb5eb（S2 删引用 + S3 删实现）"]
+      pass: "pytest 全量 998；prod 行命中 89→24（残留 = fail-fast 守卫 / 契约键 / 文档串）"
+      evidence: [".slim/deepwork/p1_v2/round38/p1_report.md", ".slim/deepwork/p1_v2/round38/p1b_report.md", ".slim/deepwork/p1_v2/round38/p1_reach_tables_post.md"]
+    - id: R38-P2a
+      group: B
+      commits: ["a226285（S1 迁移）", "dd0a8c2（S2 删引用 + S3 删实现）"]
+      pass: "pytest 全量 1022；12/12 符号 prod=0"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md", ".slim/deepwork/p1_v2/round38/p2a_reach_tables_post.md", ".slim/deepwork/p1_v2/round38/p2a_ckpt_mapper_check.json"]
+    - id: R38-P2b
+      group: C+D
+      commits: ["939d1a2（C 组旧 warp 退役 + D 组双实体收编）"]
+      pass: "pytest 全量 1043；默认路径逐位（plain 25 键 / structured 73 键 max|Δ|=0）；docs 收口提交 = 2cfd8e8"
+      evidence: [".slim/deepwork/p1_v2/round38/p2b_report.md", ".slim/deepwork/p1_v2/round38/p2b_m1_gate_a.md", ".slim/deepwork/p1_v2/round38/p2b_keys_evidence.json", ".slim/deepwork/p1_v2/round38/p2b_ckpt_mapper_check.json"]
+    - id: R38-Q4A
+      group: E 组前置（生产者侧）
+      commits: ["9577078"]
+      pass: "env 侧 t0 段 8 列真值（builder 逐位 334 帧 max|Δ|=0）+ dynamic 两列缺键 fail-fast；E 组 net 侧剩余项归 P3"
+      evidence: [".slim/deepwork/p1_v2/round38/q4a_report.md", "tests/test_round38_q4a_path_fields.py"]
+  reclassifications:
+    - symbol: "compose_path_plan()"
+      audit_judgment: "KEEP（docs/code_reachability_audit.md A 组表）"
+      actual: "随 H1 一次性六步路径实迁 tools/legacy/oneshot_path.py 并从 net/ 删除（48cb5eb）"
+      evidence: "tests/test_r38_p1_oneshot_path_removed.py（net / net.path_head 全域不存在）；tools/legacy/README.md 清单"
+  rename_map:
+    - source: "path_head.*（18 键）"
+      target: "policy.structured_action.*"
+      code: "tools/legacy/legacy_key_mapper.py PREFIX_RENAME_MAP（939d1a2）"
+      evidence: ".slim/deepwork/p1_v2/round38/p2b_ckpt_mapper_check.json（t1_keep：structured rename 18 / missing 0 / reject 0；默认装配 = 条件族 drop 18）"
+    - source: "policy.log_std"
+      target: "policy.logstd"
+      code: "tools/legacy/legacy_key_mapper.py RENAME_MAP（939d1a2；a226285 时为空表预留）"
+  pending: "E/F/G/H 组未落地（P3）：E = net 侧 schema/掩码消费（生产者已由 Q4-A 落地）；F = 只加来源标签不删；G = monitoring/others-28 legacy 族；H = forward_mode 枚举（当前全仓 0 命中）"
+
 items:
 
   # ============================== A 组：一次性六步路径代码 ==============================
@@ -47,7 +88,12 @@ items:
     test_references: "0 行/0 文件（**无 pytest 载体**；守卫验证在 .slim/round36/a_hardening_check.py）"
     checkpoint_keys: ["meta.path_head_ablation", "meta.path_head_mode"]
     replacement: "删除模式值；诊断需求迁 tools/legacy/oneshot_path.py（导出 one_shot_plan + plan_override 钉住）；正式 CLI 移除 --diagnostic-oneshot"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p1_report.md", "tests/test_r38_p1_oneshot_path_removed.py", "tests/test_legacy_oneshot_path.py"]
+      residual: "枚举两档 = (\"policy\",\"structured\")（net/path_head.py:290）；契约⑤键 structured_plan_override_used 保留（结构派生）"
     notes: "slim 面 17 行/9 文件（清单/报告）；runs 面 11 行。迁移必须同步 8 个 .slim 工具并保留 L-A 运行时断言（断言是删枝后的护栏，只删 oneshot 分支）"
 
   - group: A
@@ -60,7 +106,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "随 oneshot 一并删除；legacy 判据迁 tools/legacy/oneshot_path.py 的装载守卫"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p1b_report.md", "tests/test_r38_p1_oneshot_path_removed.py"]
+      residual: ".slim 侧守卫保留 allow= 兼容 tripwire（eval_a3 冻结期；解冻清扫后删，见 p1b_report §4.1）"
     notes: "slim 面 1 行。守卫语义（默认拒 oneshot）在迁移后仍由 legacy CLI 承担，不回落主链"
 
   - group: A
@@ -73,7 +124,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "正式 CLI 删除该 flag；`.slim` 链同步去除（迁移期由 legacy 工具承接）"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p1b_report.md"]
+      residual: "net 侧清零；.slim 8 工具中 7 已清（P1b），a3/eval_a3.py 当时冻结未清（p1b_report §4.1）"
     notes: "同步面 = 8 个 .slim 工具的 argparse 与守卫调用（§5.69-③ 指定）"
 
   - group: A
@@ -86,7 +142,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "删除；唯一动作源断言改由 action_generator_names() 承担（KEEP）"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p1_report.md", "tests/test_r38_p1_oneshot_path_removed.py"]
+      residual: "读出函数保留（P2b 改派生实现 net/model.py:979-987）；oneshot 语义随枚举删除"
     notes: "slim 面 6 行/5 文件（k1_manifest/报告/diff）"
 
   - group: A
@@ -99,7 +160,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "从 _rollout 签名与分支删除；**保留**契约断言⑤（structured 模式不得走 plan_override）作为删枝后护栏"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: ["tests/test_r38_p1_oneshot_path_removed.py"]
+      residual: "契约⑤键名保留（语义 = 结构派生“路径不存在”）"
     notes: "slim 面 1 行；docs 面 15 行（方案/手册论述需同步改口径）"
 
   - group: A
@@ -112,7 +178,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "迁 tools/legacy/oneshot_path.py（作为 legacy 头的一次性 6 步调用）"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: ["tests/test_r38_p1_oneshot_path_removed.py"]
     notes: "slim 面 1 行；正式 forward 只保留结构化逐步口径（每步单动作）"
 
   - group: A
@@ -125,7 +195,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "迁 tools/legacy/oneshot_path.py（与 one_shot 同笔）"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: ["tests/test_r38_p1_oneshot_path_removed.py"]
     notes: "docs 面 1 行"
 
   - group: A
@@ -138,7 +212,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "直接删除别名（统一用 StructuredPolicyHead）；.slim 侧 3 处引用同步改名"
-    removal_commit: null
+    removal_commit: "596747c (S1) + 48cb5eb (S2/S3)"
+    landed:
+      wave: R38-P1
+      date: "2026-10-15"
+      evidence: ["tests/test_r38_p1_oneshot_path_removed.py", "tests/test_legacy_oneshot_path.py"]
+      residual: "net/path_head.py:8 文档串历史说明；.slim h1 工具改指快照（p1b_report §1.3）"
     notes: "slim 面 8 行/4 文件（h1/h3 工具与清单）；runs 面 44 行（历史报告引用，不回改）"
 
   # ============================== B 组：K-anchor 旧计划头 ==============================
@@ -152,7 +231,12 @@ items:
     test_references: "5 行/3 文件（test_plan_anchor/test_recovery_recipe/test_phase3_safe_recipe 构造 num_anchors=6）"
     checkpoint_keys: ["plan_head.anchor_head", "plan_head.anchor_embed", "plan_head.anchor_ds", "plan_head.anchor_dth", "plan_head.anchors", "plan_head.residual_head", "plan_head.speed_head"]
     replacement: "整体迁 experiments/archive/k_anchor/（模型侧 num_anchors 参数删除；旧 ckpt 键经 key mapper 忽略）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md", "tests/test_r38_p2a_k_anchor_net_removed.py"]
+      residual: "config/** 对 num_anchors 零命中"
     notes: "slim 面 37 行/20 文件；runs 面 147 行/131 文件（历史 run 配置与产物，不回改）。前置：确认全仓 config 侧 num_anchors=0（当前 model.yaml enabled=false）"
 
   - group: B
@@ -165,7 +249,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "随 PlanHead 锚分支迁 experiments/archive/k_anchor/"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md"]
     notes: "设计上产生独立计划候选（偏离唯一 Policy）——归档而非保留"
 
   - group: B
@@ -178,7 +266,12 @@ items:
     test_references: "4 行/3 文件"
     checkpoint_keys: []
     replacement: "配置块随归档删除；正式配置只保留单一 structured 头开关"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md"]
+      residual: "config/model.yaml 整块删除（CI 守卫 #2 扫描面）"
     notes: "slim 面 24 行/18 文件；runs 面 84 行/60 文件。CI 守卫 #2（禁 default config 出现 deprecated 键）覆盖本键"
 
   - group: B
@@ -191,7 +284,11 @@ items:
     test_references: "1 行/1 文件"
     checkpoint_keys: []
     replacement: "字典文件与方法随 net/anchor.py 迁 experiments/archive/k_anchor/"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: ["tools/legacy/k_anchor/README.md", "tools/legacy/k_anchor/plan_anchors_k6.json"]
     notes: "slim 面 15 行/14 文件；runs 面 45 行/45 文件（历史拟合产物）"
 
   - group: B
@@ -204,7 +301,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: ["plan_head.anchors", "plan_head.anchor_ds", "plan_head.anchor_dth"]
     replacement: "随锚分支归档（buffer 语义改由 migration layer 只读忽略）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md"]
     notes: "3 个 buffer 仅在 num_anchors>0 注册 ⇒ 关闭时键集与旧模型逐位一致（net/plan_head.py:119）"
 
   - group: B
@@ -217,7 +318,12 @@ items:
     test_references: "5 行/2 文件（test_plan_anchor 形状/冻结）"
     checkpoint_keys: ["plan_head.anchor_head.0/2.{weight,bias}", "plan_head.anchor_embed", "plan_head.residual_head.0/2.{weight,bias}", "plan_head.speed_head.0/2.{weight,bias}"]
     replacement: "实现删除；旧 ckpt 键由 legacy_key_mapper 归入 ignore 集（13 个 ckpt 受影响，见 checkpoint_migration_contract §2）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_ckpt_mapper_check.json", "tests/test_legacy_key_mapper.py"]
+      residual: "13 ckpt 键面经 IGNORE_PREFIXES 忽略（逐族计数）"
     notes: "runs 面 96 行/36 文件（键面清单/审计产物）"
 
   - group: B
@@ -230,7 +336,11 @@ items:
     test_references: "26 行/1 文件（test_plan_anchor）"
     checkpoint_keys: []
     replacement: "forward 输出键随锚分支删除；训练/测试同步（契约 = plan 输出键集合）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md"]
     notes: "slim 面 4 行；runs 面 6 行"
 
   - group: B
@@ -243,7 +353,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "迁 experiments/archive/k_anchor/fit_plan_anchors.py（与 net/anchor.py 同笔）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: ["tools/legacy/k_anchor/fit_plan_anchors.py", "tools/legacy/k_anchor/README.md"]
     notes: "slim 面 5 行/5 文件；runs 面 12 行/12 文件（拟合产物目录）"
 
   - group: B
@@ -256,7 +370,11 @@ items:
     test_references: "6 行/4 文件"
     checkpoint_keys: []
     replacement: "配置键删除（WTA/CE 训练路径随锚归档）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_report.md"]
     notes: "slim 面 1 行；runs 面 120 行/30 文件（历史配方快照）。CI 守卫 #2 覆盖"
 
   - group: B
@@ -269,7 +387,12 @@ items:
     test_references: "2 行/1 文件"
     checkpoint_keys: ["plan_head.anchors", "plan_head.anchor_ds", "plan_head.anchor_dth", "plan_head.anchor_embed", "plan_head.anchor_head.*", "plan_head.residual_head.*", "plan_head.speed_head.*", "encoders.lane.*", "encoders.ttc.*"]
     replacement: "legacy_key_mapper 的 ignore 集（20 键）；不参与正式 forward"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2a_ckpt_mapper_check.json", ".slim/deepwork/p1_v2/round38/c5_ckpt_families.json"]
+      residual: "522 ckpt 普查：13 带 K-anchor / 15 带 lane、ttc；装载容差经 legacy_key_mapper.classify_keys"
     notes: "13 个 ckpt 带 K-anchor 键、15 个带 encoders.lane/ttc（c5_ckpt_families.json，522 ckpt 普查）"
 
   - group: B
@@ -282,7 +405,11 @@ items:
     test_references: "1 行/1 文件（test_plan_anchor 导入）"
     checkpoint_keys: []
     replacement: "整文件迁 experiments/archive/k_anchor/anchor.py（含 8 个纯函数）"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: ["tools/legacy/k_anchor/anchor.py", "tools/legacy/README.md"]
     notes: "主链删除后 net/ 无 K-anchor 残留；测试同步迁移（保留 1 个归档可加载性的迁移单测）"
 
   - group: B
@@ -295,7 +422,11 @@ items:
     test_references: "21 行/1 文件"
     checkpoint_keys: []
     replacement: "随 net/anchor.py 归档"
-    removal_commit: null
+    removal_commit: "a226285 (S1) + dd0a8c2 (S2/S3)"
+    landed:
+      wave: R38-P2a
+      date: "2026-10-15"
+      evidence: ["tools/legacy/k_anchor/selfcheck.py", "tests/test_legacy_k_anchor.py"]
     notes: "slim 面 1 行"
 
   # ============================== C 组：遗留 set_ego_warp（w1/w2） ==============================
@@ -309,7 +440,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "迁 legacy probe 模块（tools/legacy/ego_warp_probe.py）；正式接口只保留 set_ego_warp_mode(off|analytic)"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2b_report.md", "tests/test_r38_p2b_warp_legacy_removed.py", "tools/legacy/legacy_ego_warp.py"]
     notes: "**硬前置（§5.69-①）**：先把 w1/w2 逐位期望冻结为 fixture（m1_gate_a.py:137-141,588-590；b_warp_compat.py），否则 M1/L-D 等价性证据链断裂。slim 面 4 行/3 文件"
 
   - group: C
@@ -322,7 +457,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "WARP_MODES 仅保留 off|analytic；w1/w2 语义移入 legacy oracle fixture"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: ["tests/fixtures/r38_p2b_warp/", ".slim/deepwork/p1_v2/round38/p2b_m1_gate_a.md"]
+      residual: "WARP_MODES = (\"off\",\"analytic\")（net/ego_warp.py:103）；w1/w2 逐位 oracle = fixture"
     notes: "slim 面 39 行/10 文件；runs 面 24 行/3 文件（历史 warp 产物）"
 
   - group: C
@@ -335,7 +475,11 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "属性删除；与 set_ego_warp 同笔迁 legacy probe"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2b_report.md", "tools/legacy/legacy_ego_warp.py"]
     notes: "slim 面 6 行/3 文件；两条 warp 状态机互斥检查（:647-651,674-678）随之简化为单状态机"
 
   # ============================== D 组：Policy/path_head 双实体收编 ==============================
@@ -349,7 +493,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: ["meta.path_head_ablation"]
     replacement: "删除模式枚举；收编后 model.policy 单实体（structured_action/action_distribution/auxiliary_intent）"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: [".slim/deepwork/p1_v2/round38/p2b_report.md", "tests/test_r38_p2b_policy_fold.py", ".slim/deepwork/p1_v2/round38/p2b_keys_evidence.json"]
+      residual: "模式枚举删除；set_path_head_ablation 保留两档 legacy 诊断入口（net/model.py:909-931）"
     notes: "slim 面 3 行/3 文件。顺序约束（§七-D）：**先做 checkpoint key 迁移器**再收编"
 
   - group: D
@@ -362,7 +511,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "删除；装载/模式切换改由构造参数或 legacy 装载器承担"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: ["tests/test_r38_p2b_policy_fold.py", "tests/test_r38_p1_oneshot_path_removed.py"]
+      residual: "两档保留 + oneshot ValueError；path_head_mode() 由派生（net/model.py:979-987）"
     notes: "slim 面 7 行/5 文件；runs 面 66 行/66 文件（历史 run 记录）"
 
   - group: D
@@ -375,7 +529,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "收编为 model.policy 单实体后删除镜像属性（装配经构造参数；不再有第二实体开关）"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: ["tests/test_r38_p2b_policy_fold.py"]
+      residual: "单状态 _path_head_enabled（net/model.py:458）；path_head 改只读 alias（:864-872）"
     notes: "slim 面 2 行/1 文件。收编前先跑键迁移器（path_head.* 18 键）"
 
   - group: D
@@ -388,7 +547,12 @@ items:
     test_references: "0 行/0 文件"
     checkpoint_keys: []
     replacement: "旧头诊断改离线工具（tools/diagnostics/forensics_* 口径）；正式 forward 只保留一个动作出口"
-    removal_commit: null
+    removal_commit: "939d1a2"
+    landed:
+      wave: R38-P2b
+      date: "2026-10-15"
+      evidence: ["tools/diagnostics/legacy_policy_diag.py", "tests/test_r38_p2b_policy_fold.py"]
+      residual: "方法保留为 fail-fast 桩（net/model.py:945-957），指路离线工具"
     notes: "slim 面 1 行。policy_action_mu（KEEP）作为离线诊断键随工具迁移再定"
 
   # ============================== E 组：path_* 旁路字段（Q4 分类输入） ==============================
