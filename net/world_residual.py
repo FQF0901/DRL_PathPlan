@@ -52,11 +52,12 @@ from typing import Any, Mapping, Sequence
 import torch
 from torch import Tensor, nn
 
-from net.world_state import POLICY_STATE_FIELDS
+from net.world_state import POLICY_STATE_FIELDS, TTC_CAP_S
 
 __all__ = [
     "ACTION_SCALE",
     "BASE_EXOG_SCALE",
+    "COLUMN_LOSS_WEIGHTS",
     "DELTA_CAPS",
     "HEAD_PARAM_CAP",
     "PREV_EXOG_SCALE",
@@ -65,10 +66,12 @@ __all__ = [
     "TOTAL_PARAM_BASELINE",
     "TOTAL_PARAM_LIMIT",
     "TARGET_LOSS_SCALE",
+    "TTC_EVENT_TAU_S",
     "ReadoutResidualHead",
     "apply_readout_residual",
     "check_param_budget",
     "column_residual_loss",
+    "column_residual_loss_aligned",
     "load_residual_head",
     "readout_residual_features",
     "residual_head_param_count",
@@ -94,6 +97,11 @@ ACTION_SCALE: tuple[float, float] = (8.0, 1.2)
 DELTA_CAPS: tuple[float, ...] = (4.0, 30.0, 100.0, 60.0)
 #: 训练损失逐列归一化常数（列尺度差异 ⇒ 均衡梯度；≈ 1.5× one-step 基线 MAE 量级）
 TARGET_LOSS_SCALE: tuple[float, ...] = (0.5, 0.5, 0.5, 10.0)
+#: B2b 逐列损失权重（speed = 门主杠杆 ⇒ 加权；ttc 走事件式，见
+#: :func:`column_residual_loss_aligned`；预注册 ``.slim/.../round39/b2b_prereg.md`` §3）
+COLUMN_LOSS_WEIGHTS: tuple[float, ...] = (2.0, 0.5, 1.0, 1.0)
+#: B2b TTC 事件式监督的软判据尺度（``σ((cap − pred)/τ)``；秒）
+TTC_EVENT_TAU_S = 10.0
 #: 本头参数上限（GPT R39 §5.83 参数门：总量 ≤ 基线 ×1.02 ⇒ 余量 30,211；留出裕度定 20k）
 HEAD_PARAM_CAP = 20_000
 #: 总量基线/上限（= ``net/param_probe.TOTAL_BASELINES["structured"]`` × ``TOTAL_LIMIT``）
@@ -273,6 +281,136 @@ def column_residual_loss(
     active = weight > 0
     loss = per_column[active].mean() if bool(active.any()) else per.sum() * 0.0
     return {"loss": loss, "per_column": per_column, "mask": mask, "target": target * mask}
+
+
+def _masked_mean(values: Tensor, mask: Tensor) -> Tensor:
+    """``values*mask`` 的元素均值（全空 ⇒ 0；``mask`` ∈ {0,1} 浮点）。"""
+    weight = mask.sum()
+    return (values * mask).sum() / weight.clamp_min(1.0)
+
+
+def column_residual_loss_aligned(
+    delta: Tensor,
+    *,
+    base_exog: Tensor,
+    base_present: Tensor,
+    real_exog: Tensor,
+    real_present: Tensor,
+    speed_target: Tensor | None = None,
+    mode: str = "smooth_l1",
+    beta: float = 1.0,
+    scale: "Tensor | Sequence[float] | None" = None,
+    column_weights: "Sequence[float] | None" = None,
+    ttc_event_weight: float = 0.5,
+    ttc_regression_weight: float = 0.5,
+    ttc_tau_s: float = TTC_EVENT_TAU_S,
+) -> dict[str, Tensor]:
+    """R39-B2b 对齐损失（预注册 §3）：逐列加权 + speed 目标可替换 + **TTC 事件式**。
+
+    与 :func:`column_residual_loss` 的差异（单测覆盖；旧函数语义不动）：
+
+    - ``speed_target``（``(B,)``；``None`` = 用 ``real_exog[:,0]``）：speed 列目标可改为
+      **ds/dt 口径**（本步位移/dt）⇒ 残差对"步距语义"负责，而非复读 speed 列；
+    - 逐列权重 ``column_weights``（默认 :data:`COLUMN_LOSS_WEIGHTS`，speed 加权）；
+    - TTC 列（index 3）改为事件式：``event = [real_ttc < cap]``；
+      ``ℓ_ttc = w_e·BCE(σ((cap − pred)/τ), event) + w_r·(reg_event + reg_cap)/2``，
+      ``reg_event`` = 冲突行回归（``scale`` 归一），``reg_cap`` = 无冲突行"推至 cap"
+      （``min(pred, cap)`` 与 cap 的 smooth_l1）——有界、分档，规避重尾回归。
+    - 掩码/返回键与 :func:`column_residual_loss` 同义（``loss/per_column/mask/target``）+
+      ``ttc_event``/``n_ttc_event``/``n_ttc_noevent`` 诊断。
+    """
+    if mode not in ("smooth_l1", "mse", "l1"):
+        raise ValueError(f"[world_residual] 未知 loss mode={mode!r}")
+    for name, value in (
+        ("delta", delta), ("base_exog", base_exog), ("base_present", base_present),
+        ("real_exog", real_exog), ("real_present", real_present),
+    ):
+        if tuple(value.shape) != tuple(delta.shape):
+            raise ValueError(
+                f"[world_residual] {name} 形状应与 delta 一致：{tuple(value.shape)} vs "
+                f"{tuple(delta.shape)}"
+            )
+    width = int(delta.shape[-1])
+    if speed_target is not None and tuple(speed_target.shape) != (int(delta.shape[0]),):
+        raise ValueError(
+            f"[world_residual] speed_target 形状应为 {(int(delta.shape[0]),)}，"
+            f"收到 {tuple(speed_target.shape)}"
+        )
+    weights = torch.as_tensor(
+        COLUMN_LOSS_WEIGHTS if column_weights is None else column_weights,
+        dtype=delta.dtype, device=delta.device,
+    ).reshape(-1)
+    if int(weights.numel()) != width:
+        raise ValueError(f"[world_residual] column_weights 长度应为 {width}")
+    scale_t = None
+    if scale is not None:
+        scale_t = torch.as_tensor(scale, dtype=delta.dtype, device=delta.device).reshape(-1)
+        if int(scale_t.numel()) != width:
+            raise ValueError(f"[world_residual] scale 长度应为 {width}")
+
+    target = real_exog.clone()
+    if speed_target is not None:
+        target = torch.cat([speed_target.reshape(-1, 1), target[:, 1:]], dim=-1)
+    diff = base_exog + delta - target
+    if scale_t is not None:
+        diff = diff / scale_t.clamp_min(1e-6)
+    if mode == "mse":
+        per = diff * diff
+    elif mode == "l1":
+        per = diff.abs()
+    else:
+        per = torch.nn.functional.smooth_l1_loss(
+            diff, torch.zeros_like(diff), beta=float(beta), reduction="none"
+        )
+    mask = ((base_present > 0.5) & (real_present > 0.5)).to(per.dtype)
+    per_column = (per * mask).sum(dim=0) / mask.sum(dim=0).clamp_min(1.0)
+
+    # ---- TTC 列（index 3）：事件式（冲突存在性 BCE + 分档回归/cap 行为）----
+    ttc_index = len(READOUT_RESIDUAL_FIELDS) - 1
+    cap = float(TTC_CAP_S)
+    pred_ttc = base_exog[:, ttc_index] + delta[:, ttc_index]
+    real_ttc = real_exog[:, ttc_index]
+    active = mask[:, ttc_index] > 0.5
+    event = (real_ttc < cap - 1e-3) & active
+    logits = (cap - pred_ttc) / max(float(ttc_tau_s), 1e-6)
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, event.to(pred_ttc.dtype), reduction="none"
+    )
+    bce_mean = _masked_mean(bce, active.to(bce.dtype))
+    scale_ttc = (
+        scale_t[ttc_index] if scale_t is not None else torch.ones_like(pred_ttc)
+    ).clamp_min(1e-6)
+    reg_event = torch.nn.functional.smooth_l1_loss(
+        (pred_ttc - real_ttc) / scale_ttc, torch.zeros_like(pred_ttc),
+        beta=float(beta), reduction="none",
+    )
+    reg_cap = torch.nn.functional.smooth_l1_loss(
+        (pred_ttc.clamp(max=cap) - cap) / scale_ttc, torch.zeros_like(pred_ttc),
+        beta=float(beta), reduction="none",
+    )
+    reg_event_mean = _masked_mean(reg_event, event.to(reg_event.dtype))
+    reg_cap_mean = _masked_mean(reg_cap, ((~event) & active).to(reg_cap.dtype))
+    per_column = per_column.clone()
+    per_column[ttc_index] = float(ttc_event_weight) * bce_mean + float(
+        ttc_regression_weight
+    ) * 0.5 * (reg_event_mean + reg_cap_mean)
+
+    active_columns = mask.sum(dim=0) > 0
+    weight_sum = (weights * active_columns.to(weights.dtype)).sum()
+    loss = (
+        (per_column * weights * active_columns.to(weights.dtype)).sum() / weight_sum
+        if bool((weight_sum > 0).item())
+        else per.sum() * 0.0
+    )
+    return {
+        "loss": loss,
+        "per_column": per_column,
+        "mask": mask,
+        "target": target * mask,
+        "ttc_event": event.to(pred_ttc.dtype),
+        "n_ttc_event": int(event.sum().item()),
+        "n_ttc_noevent": int(((~event) & active).sum().item()),
+    }
 
 
 def residual_head_param_count(head: nn.Module) -> int:
