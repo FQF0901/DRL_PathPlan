@@ -177,7 +177,7 @@ class ImaginedMemory:
     - ``writeback`` 恒 0：本容器只持有 ``detach().clone()`` 副本，不持有 ``MemBank``/
       ``encoded`` 的任何引用 ⇒ 无写回路径（GPT §二.2「绝不写回 Real Memory」）；
     - ``destroy()``：rollout 结束销毁（``frames`` 清空、``destroyed=True``，计数保留）；
-    - ``frames/shift`` 计数与帧龄（``age``）供 hook 落盘。
+    - :meth:`summary`：帧数/上限/步号/来源/writeback/skipped（供 hook 落盘）。
     """
 
     batch: int
@@ -464,7 +464,8 @@ def analytic_update(
     )
     state.progress_s = state.progress_s + ds
 
-    # latent + 记忆（z_ego 是策略侧 latent，不属于 WorldState 物量；不摄入状态）    if z_od is not None:
+    # latent + 记忆（z_ego 是策略侧 latent，不属于 WorldState 物量；不摄入状态）
+    if z_od is not None:
         state.od_latent = _detach(z_od)
     if z_ld is not None:
         state.ld_latent = _detach(z_ld)
@@ -664,11 +665,7 @@ def readout(state: WorldState) -> dict[str, Any]:
 
     values: dict[str, Tensor] = {}
     present: dict[str, Tensor] = {}
-    codes: dict[str, Tensor] = {}
     sources: dict[str, str | Tensor] = {}
-
-    def _codes(kind: str, length: int) -> Tensor:
-        return torch.full((length, ), SOURCE_CODES[kind], dtype=torch.long, device=ref.device)
 
     def _row_codes(mask_analytic: Tensor, *, absent: str = "missing") -> Tensor:
         return torch.where(
@@ -677,7 +674,6 @@ def readout(state: WorldState) -> dict[str, Any]:
             torch.full_like(ref, SOURCE_CODES[absent]).long(),
         )
 
-    zeros = torch.zeros_like(ref)
     ones = torch.ones_like(ref)
 
     # speed ← analytic（阻尼状态）
