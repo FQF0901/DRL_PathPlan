@@ -2,7 +2,7 @@
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
 > **状态（2026-10-15 下午·十）**：**R37 阶段 1 四路诊断收口**：M2（C0 0.580 vs C1 0.340，C1 不晋级）、**M3**（头在训练分布内没坏〔bias +0.056/MAE 0.149〕但**命令语义=保速**；坍缩=闭环特有自锁；**装配错配主凶=`path_dynamic_ttc` 缺键→0**〔训练 30.6 s「无冲突」vs 评测 0「立即碰撞」，占消融效应 77%〕）、**M4**（C2 warp 机制生效、**collision 0.14→0.08**、Hard 不劣化；**F3 证伪外部配速**：v 8.9 但 coll 0.48）、**M5**（A1/A2/A3 先验探针意图层生效〔v_ref 8.49/6.31/5.37、残差不变式 50/50〕但达成层不升〔v 3.56/3.01/2.85〕，**Hard 全恶化〔off-road 0.12→0.44/0.28/0.24〕**；A1 steer 饱和 0.81+蛇形）。**横向侧谱（主控复核）**：加速后 |err_ψ| 0.017→0.241、plan |κ|p90 0.023→0.081、κ 抖动 ×4.7 ⇒ **横向能力（曲率质量）是共阻塞**。**零训练通道总账：F3 ✗ / A ✗ / C2 ~中性** ⇒ **P0 定为主训练 lane（B 第一候选：教师=IDM+PP 规则专家，`tools/dagger_collect.py` 就绪；训练须在 eval 装配/指纹统一下做）**；C3（WM/想象步动力学）其后；**接口修复探针 M6 ✅ 落地**（`--long-exog-fill neutral`：**c1_fill succ 0.34→0.42，翻正 4/翻负 0**、tmo −0.04、rc +0.058、v +0.31；a1_fill off 0.38 不晋级）⇒ 零训练 +8 pp、非完整解，剩余=保速教师+@speed 横向质量（训练层）。M1 已入库 `0d63bbc`（966 tests/契约门 6/6/off 逐位）。
-> **本版说明**：第五十六轮（489 → 498 行）——新增 §5.72（**R38-C1 Memory 消融**：GPT 判据未触发但机制归因=历史内容净贡献≈0〔逐位〕；全 mask=bias 隐患；OD 历史 ego-motion 对齐已具备；LD 时序重采样隐患）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **本版说明**：第五十七轮（498 → 506 行）——新增 §5.73（**R38-C5 四交付物**：零纯 UNREACHABLE/46 项 manifest〔19 禁/24 旧复现/3 ckpt-only〕；结构化链只在 `.slim`、正式入口缺装配开关；减枝 P1/P2/P3 波计划 + CI 守卫）；上版 498 行 = `git show 99fcd2f:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。——新增 §5.66 阶段 1 复盘（进展/发现/结果/分析/问题 + 起步/限速/监督/验证集四问核查结论）；§5.64 追加 M3–M7 结果；§0/§7 刷新；上版 418 行 = `git show d66cc0e:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -439,6 +439,13 @@
 - **专项检查**：①无效 token **严格清零** ✓（垃圾注入零变化对照）；②**全 mask 输出 = `out.bias` 逐位**（‖bias‖=0.60/0.59/0.52 vs 典型 ‖ctx‖ 3.41/2.30/6.28；真实数据 OD 空槽 57.5% 但 `od_live=0` ⇒ 当前不消费，**隐患已登记**）；③OD 槽身份=**槽位下标**（obs 无 `od_id_hist`，`mem.py` 回退；录入口径同 id 连续率 99.96%）；④OD 历史**需要** ego-motion 对齐且**录入口径已完成**（se2_align 复算 vs obs `od_hist` 逐位 0.0；不对齐将差 10.30 m）；⑤LD 当前帧-only 无泄漏，但"历史≈恒等"不成立（同槽位置差中位 7.80 m、槽对应仅 36.1%）⇒ 启用 LD 时序前须先解决重采样/槽匹配；⑥others 历史=nav 点/路线进度（52%/95% 有变化）。
 - **对后续 lane 的输入**：Q3 结案 ⇒ **D1 的 ④ Memory hook 需求缩为 mask/attention/全 mask 输出三项**（内容贡献已证 ≈0）；Q4 分类时 OD 记忆的接线问题并入。
 
+### 5.73 **R38-C5：减枝四交付物完成** + 减枝执行计划（用户令：全量执行；`net/` 串行）
+
+- **交付**（已核验：manifest 46 项/类别分布与审计逐项一致；513/643/121/183 行）：`docs/code_reachability_audit.md`（67 符号；**零纯 UNREACHABLE**〔65 REACHABLE + 2 TESTS_DOCS_ONLY〕⇒ 减枝只能走**契约/实验价值/ckpt** 三判据）、`docs/deprecation_manifest.yaml`（**46 项：ARCHITECTURE_FORBIDDEN 19 / LEGACY_REPRO 24 / CHECKPOINT_ONLY 3**；21 项 KEEP 不入册；`migration_order` 已排）、`docs/runtime_entrypoint_matrix.md`、`docs/checkpoint_migration_contract.md`（522 个 `.pt` 键面普查 + legacy 族清单 10+ 类）。
+- **关键发现**：①**结构化头链只在 `.slim`**——`tools/{train,test,baseline_eval,dagger_collect}.py` 与 `pipeline/eval_runner.py` 对 `path_head` **零引用**（168 vs 186 键）；`tools/test.py` 评结构化 ckpt 默认 **fail-fast（SystemExit(2)）** ⇒ 正式入口缺结构化装配开关（GPT §一"训练部署同构"下的既定缺口）；②组级引用面（prod/train/eval）：A 89/2/181、B 115/79/24、C 60/—/63、D 79/10/128、E 30/8/163、F 138/69/225、G 67/19/—、H 29/161/187；③K1 ckpt unexpected=18、v7 K-anchor ckpt missing 14+unexpected 20 ⇒ CHECKPOINT_ONLY 3 项经 migration layer。
+- **减枝执行计划（队列）**：**D1（hooks，在飞）→ P1 波**（A 组：oneshot/plan_override/`PathExecutionHead` 别名 → 迁 `tools/legacy/` + 删主链引用 + 同步 22 个 `.slim` 工具与 L-A 契约断言；三笔可回退提交）**→ P2 波**（B K-anchor + C 旧 `set_ego_warp`〔先冻结等价 oracle〕+ D 双实体收编〔含 `checkpoint_migration` key mapper〕）**→ P3 波**（E `path_*`〔待 C3 分类冻结〕+ F target-lane 来源标签 + G legacy monitoring〔+`net/mem.py` others-28〕+ H `forward_mode` 枚举）。每波开工前**重跑 `c5_reach_scan.py` 刷新**（C5 快照 18:4x，D1/A4 后已漂移）；每波过 **973 tests + 默认关逐位**。
+- **CI 守卫**（audit §CI 清单：禁 legacy 引用/禁 deprecated 键/禁 forward 含 oneshot/禁双动作源/禁缺失静默填 0）→ 随 P1 波落 `tests/`。
+
 ---
 
 ## 6. 文档与产物索引
@@ -455,7 +462,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第五十六轮（本版；489 → 498 行）**：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。
+- **第五十七轮（本版；498 → 506 行）**：新增 §5.73（C5 四交付物 + 减枝执行计划）；上版 498 行 = `git show 99fcd2f:docs/deepseekv4p1_argue.md`。
+- **第五十六轮（489 → 498 行）**：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。：新增 §5.72（C1 Memory 消融结案）；上版 489 行 = `git show f3c4179:docs/deepseekv4p1_argue.md`。
 - **第五十五轮（478 → 489 行）**：新增 §5.71（A3 FAIL 裁决 + C3 升 P0 + CG 包 D8）；上版 478 行 = `git show 1302dc5:docs/deepseekv4p1_argue.md`。
 - **第五十四轮（469 → 478 行）**：新增 §5.70（R38-A1 裁决 + 优先级重排）；上版 469 行 = `git show 0fae739:docs/deepseekv4p1_argue.md`。
 - **第五十三轮（450 → 469 行）**：新增 §5.69（清理候选可达性排摸 + 3 条修正）；上版 450 行 = `git show a925d07:docs/deepseekv4p1_argue.md`。

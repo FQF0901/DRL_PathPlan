@@ -19,6 +19,8 @@
 
 `p1_v2_decision.md`（P1-v2 决策）· `p1_probe_spec.md`（探针规格 v1.1）· `p0_eval_compat_design.md`（P0 评测兼容设计）· `recovery_v2_contract.md` / `recovery_v1_dataset_card.md`（恢复线契约与卡片）· `semantic_v1_dataset_card.md`（语义数据集卡）· `r21_lane_semantic_contract.md` / `r21_target_lane_selection.md` / `r21_3a_semantic_wiring.md`（R21 语义三件套）· `rl_reward_v5.md`（奖励口径）· `v7_program_prereg.md`（v7 预注册，仍被 `net/anchor.py` 引用）· `round30_audit.md`（R30 Reality Audit，现行问题框架依据）
 
+**清理/治理（R38 减枝四交付物，2026-10-15）**：`code_reachability_audit.md`（67 符号可达性审计 + 逐组判定/迁移顺序 + CI 守卫清单）· `deprecation_manifest.yaml`（46 项：ARCHITECTURE_FORBIDDEN 19 / LEGACY_REPRO 24 / CHECKPOINT_ONLY 3）· `runtime_entrypoint_matrix.md`（正式入口 × `.slim` 链 × legacy 触达）· `checkpoint_migration_contract.md`（ckpt 键面普查 + 迁移映射草案）
+
 ## 3. 归档桶（只读；正文不改）
 
 | 桶 | 内容 | 索引 |

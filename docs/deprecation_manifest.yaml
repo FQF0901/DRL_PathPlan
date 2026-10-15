@@ -1,0 +1,643 @@
+# R38-C5 弃用清单（deprecation manifest）
+# 出处：GPT R38 §八 schema（symbol/file/category/production·training·evaluation·test refs/checkpoint_keys/
+#       replacement/removal_commit）；判定依据 = docs/code_reachability_audit.md（四判据 × 8 组候选）。
+# 机器基线：.slim/deepwork/p1_v2/round38/{c5_reach_scan.json, c5_ckpt_keys.json, c5_ckpt_families.json}
+#
+# 引用格式：prod/train/eval/test 四列 = "行命中/去重文件数"（口径见审计 §1.1）；
+#           slim/runs 面列在 notes（不计入可达性判定，但决定迁移同步面）。
+#
+# 纪律（写入每笔提交的验收）：
+#   1. 三笔独立提交：迁移 → 删引用 → 删实现（每笔可回退）；removal_commit 实施时回填（当前一律 null）。
+#   2. 每笔必过 pytest 全量（2026-10-15 collect 973 项） + 默认关逐位（默认关路径键集/前向逐位不变）。
+#   3. oneshot / plan_override / 旧 set_ego_warp / K-anchor / path_* 的删除必须同步 .slim 评估链与
+#      L-A 契约断言（§5.69-③）；legacy set_ego_warp 删除前必须**先冻结逐位 oracle fixture**（§5.69-①）。
+#   4. KEEP 项（21 个）不入本清单；清单 = 46 项（ARCHITECTURE_FORBIDDEN 19 / LEGACY_REPRO 24 /
+#      CHECKPOINT_ONLY 3）。
+
+meta:
+  generated: "2026-10-15"
+  round: R38-C5
+  source_docs:
+    - docs/code_reachability_audit.md
+    - docs/runtime_entrypoint_matrix.md
+    - docs/checkpoint_migration_contract.md
+  scan_artifacts:
+    - .slim/deepwork/p1_v2/round38/c5_reach_scan.json
+    - .slim/deepwork/p1_v2/round38/c5_reach_tables.md
+    - .slim/deepwork/p1_v2/round38/c5_ckpt_keys.json
+    - .slim/deepwork/p1_v2/round38/c5_ckpt_families.json
+  category_legend:
+    UNREACHABLE: "生产/训练/评测入口全不可达（本清单 0 项——审计结论：候选全部可达，不得凭'看起来没用'删除）"
+    ARCHITECTURE_FORBIDDEN: "违反守则：第二动作生成器 / 一次输出六步 / 绕过 WM / 外部替网络选道 / 缺失静默填充 / 训练部署不同构"
+    LEGACY_REPRO: "仅历史消融/复现价值 ⇒ 迁 tools/legacy/ 或 experiments/archive/，不得留在 net//pipeline//config/default.yaml/正式 CLI"
+    CHECKPOINT_ONLY: "仅为旧 ckpt 加载保留 ⇒ 隔离进 checkpoint_migration.py / legacy_key_mapper.py，不参与正式 forward"
+  migration_order:
+    - "C 组（先冻结 warp oracle fixture）→ A 组（oneshot 迁移 + .slim 同步）→ B 组（K-anchor 归档）→ D 组（收编）→ E 组（Q4 裁决后 schema 冻结）→ G 组 → H 组（forward_mode 枚举）；F 组只加来源标签，不删"
+
+items:
+
+  # ============================== A 组：一次性六步路径代码 ==============================
+  - group: A
+    symbol: "oneshot（PATH_HEAD_MODES 第三值 / 模式串）"
+    file: ["net/path_head.py:261", "net/model.py:953-980"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "31 行/2 文件（net/model.py 守卫与分支；net/path_head.py 模式登记）"
+    training_references: "0 行/0 文件（官方训练链零引用）"
+    evaluation_references: "82 行/8 文件（.slim 评估链：c_old_canary_eval/c_old_eval_a3/c_old_p1_deploy_record/canary_eval/eval_a3/p1_deploy_record/a_hardening_check/c_selfproof）"
+    test_references: "0 行/0 文件（**无 pytest 载体**；守卫验证在 .slim/round36/a_hardening_check.py）"
+    checkpoint_keys: ["meta.path_head_ablation", "meta.path_head_mode"]
+    replacement: "删除模式值；诊断需求迁 tools/legacy/oneshot_path.py（导出 one_shot_plan + plan_override 钉住）；正式 CLI 移除 --diagnostic-oneshot"
+    removal_commit: null
+    notes: "slim 面 17 行/9 文件（清单/报告）；runs 面 11 行。迁移必须同步 8 个 .slim 工具并保留 L-A 运行时断言（断言是删枝后的护栏，只删 oneshot 分支）"
+
+  - group: A
+    symbol: "allow_oneshot（set_path_head_ablation 守卫形参）"
+    file: ["net/model.py:953", "net/model.py:968"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "6 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "9 行/4 文件（.slim 守卫调用）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "随 oneshot 一并删除；legacy 判据迁 tools/legacy/oneshot_path.py 的装载守卫"
+    removal_commit: null
+    notes: "slim 面 1 行。守卫语义（默认拒 oneshot）在迁移后仍由 legacy CLI 承担，不回落主链"
+
+  - group: A
+    symbol: "--diagnostic-oneshot（工具侧 CLI 守卫）"
+    file: ["net/model.py:80", "net/model.py:963", "net/model.py:972"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "3 行/1 文件（net/model.py 文档串 + 守卫报错文案）"
+    training_references: "0 行/0 文件"
+    evaluation_references: "65 行/7 文件（.slim：a_hardening_check/c_old_canary_eval/c_old_eval_a3/c_old_p1_deploy_record/selfproof/canary_eval/eval_a3/p1_deploy_record）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "正式 CLI 删除该 flag；`.slim` 链同步去除（迁移期由 legacy 工具承接）"
+    removal_commit: null
+    notes: "同步面 = 8 个 .slim 工具的 argparse 与守卫调用（§5.69-③ 指定）"
+
+  - group: A
+    symbol: "path_head_mode()"
+    file: ["net/model.py:1021-1023"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "8 行/1 文件"
+    training_references: "2 行/2 文件（.slim j1_train/j2_train_stripped_check 模式声明）"
+    evaluation_references: "18 行/9 文件（守卫读出）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "删除；唯一动作源断言改由 action_generator_names() 承担（KEEP）"
+    removal_commit: null
+    notes: "slim 面 6 行/5 文件（k1_manifest/报告/diff）"
+
+  - group: A
+    symbol: "plan_override（_rollout 形参 + 钉住分支）"
+    file: ["net/model.py:959", "net/model.py:1009", "net/model.py:1523", "net/model.py:1556"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "12 行/2 文件（net/model.py 分支 + 契约断言⑤）"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件（eval/deploy 已被断言禁止使用）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "从 _rollout 签名与分支删除；**保留**契约断言⑤（structured 模式不得走 plan_override）作为删枝后护栏"
+    removal_commit: null
+    notes: "slim 面 1 行；docs 面 15 行（方案/手册论述需同步改口径）"
+
+  - group: A
+    symbol: "one_shot（StructuredPolicyHead.forward 形参）"
+    file: ["net/model.py:1391", "net/path_head.py:1028-1053", "net/path_head.py:1289"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "6 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "迁 tools/legacy/oneshot_path.py（作为 legacy 头的一次性 6 步调用）"
+    removal_commit: null
+    notes: "slim 面 1 行；正式 forward 只保留结构化逐步口径（每步单动作）"
+
+  - group: A
+    symbol: "one_shot_plan()（ComposeLayer 方法）"
+    file: ["net/path_head.py:1053"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "3 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "迁 tools/legacy/oneshot_path.py（与 one_shot 同笔）"
+    removal_commit: null
+    notes: "docs 面 1 行"
+
+  - group: A
+    symbol: "PathExecutionHead（兼容别名 = StructuredPolicyHead）"
+    file: ["net/path_head.py:1312", "net/__init__.py:20", "net/__init__.py:50"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "5 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "3 行/2 文件（.slim h1_compat_check/h1_skeleton_smoke）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "直接删除别名（统一用 StructuredPolicyHead）；.slim 侧 3 处引用同步改名"
+    removal_commit: null
+    notes: "slim 面 8 行/4 文件（h1/h3 工具与清单）；runs 面 44 行（历史报告引用，不回改）"
+
+  # ============================== B 组：K-anchor 旧计划头 ==============================
+  - group: B
+    symbol: "num_anchors（DrivingModel/PlanHead 构造与属性）"
+    file: ["net/plan_head.py:54", "net/plan_head.py:83", "net/model.py:418", "net/model.py:432", "config/model.yaml:72"]
+    category: LEGACY_REPRO
+    production_references: "31 行/3 文件（net/plan_head.py、net/model.py、config/model.yaml）"
+    training_references: "10 行/3 文件（pipeline/stages.py::build_model 透传、tools/dagger_collect.py 透传）"
+    evaluation_references: "5 行/4 文件（pipeline/eval_runner.py 与 .slim 装载链 透传）"
+    test_references: "5 行/3 文件（test_plan_anchor/test_recovery_recipe/test_phase3_safe_recipe 构造 num_anchors=6）"
+    checkpoint_keys: ["plan_head.anchor_head", "plan_head.anchor_embed", "plan_head.anchor_ds", "plan_head.anchor_dth", "plan_head.anchors", "plan_head.residual_head", "plan_head.speed_head"]
+    replacement: "整体迁 experiments/archive/k_anchor/（模型侧 num_anchors 参数删除；旧 ckpt 键经 key mapper 忽略）"
+    removal_commit: null
+    notes: "slim 面 37 行/20 文件；runs 面 147 行/131 文件（历史 run 配置与产物，不回改）。前置：确认全仓 config 侧 num_anchors=0（当前 model.yaml enabled=false）"
+
+  - group: B
+    symbol: "plan_anchors()（PlanHead 选择头前向）"
+    file: ["net/plan_head.py:161-200"]
+    category: LEGACY_REPRO
+    production_references: "2 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "随 PlanHead 锚分支迁 experiments/archive/k_anchor/"
+    removal_commit: null
+    notes: "设计上产生独立计划候选（偏离唯一 Policy）——归档而非保留"
+
+  - group: B
+    symbol: "plan_anchor（config/model.yaml 配置块；enabled/num_anchors/path/temperature/hard）"
+    file: ["config/model.yaml:67-77"]
+    category: LEGACY_REPRO
+    production_references: "2 行/2 文件"
+    training_references: "7 行/2 文件（pipeline/stages.py 读取 + tools/dagger_collect.py 透传）"
+    evaluation_references: "7 行/2 文件（pipeline/eval_runner.py:878 + .slim）"
+    test_references: "4 行/3 文件"
+    checkpoint_keys: []
+    replacement: "配置块随归档删除；正式配置只保留单一 structured 头开关"
+    removal_commit: null
+    notes: "slim 面 24 行/18 文件；runs 面 84 行/60 文件。CI 守卫 #2（禁 default config 出现 deprecated 键）覆盖本键"
+
+  - group: B
+    symbol: "config/plan_anchors_k6.json（锚字典文件 + load_anchor_dictionary）"
+    file: ["config/plan_anchors_k6.json", "net/anchor.py:98-130"]
+    category: LEGACY_REPRO
+    production_references: "3 行/2 文件"
+    training_references: "3 行/1 文件（tools/fit_plan_anchors.py）"
+    evaluation_references: "0 行/0 文件"
+    test_references: "1 行/1 文件"
+    checkpoint_keys: []
+    replacement: "字典文件与方法随 net/anchor.py 迁 experiments/archive/k_anchor/"
+    removal_commit: null
+    notes: "slim 面 15 行/14 文件；runs 面 45 行/45 文件（历史拟合产物）"
+
+  - group: B
+    symbol: "set_anchors()"
+    file: ["net/plan_head.py:131-147", "net/model.py:447-451"]
+    category: LEGACY_REPRO
+    production_references: "5 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: ["plan_head.anchors", "plan_head.anchor_ds", "plan_head.anchor_dth"]
+    replacement: "随锚分支归档（buffer 语义改由 migration layer 只读忽略）"
+    removal_commit: null
+    notes: "3 个 buffer 仅在 num_anchors>0 注册 ⇒ 关闭时键集与旧模型逐位一致（net/plan_head.py:119）"
+
+  - group: B
+    symbol: "anchor_head/anchor_embed/residual_head/speed_head（K-anchor 参数子模块）"
+    file: ["net/plan_head.py:93-123"]
+    category: CHECKPOINT_ONLY
+    production_references: "14 行/1 文件（net/plan_head.py 构造）"
+    training_references: "2 行/1 文件"
+    evaluation_references: "6 行/1 文件"
+    test_references: "5 行/2 文件（test_plan_anchor 形状/冻结）"
+    checkpoint_keys: ["plan_head.anchor_head.0/2.{weight,bias}", "plan_head.anchor_embed", "plan_head.residual_head.0/2.{weight,bias}", "plan_head.speed_head.0/2.{weight,bias}"]
+    replacement: "实现删除；旧 ckpt 键由 legacy_key_mapper 归入 ignore 集（13 个 ckpt 受影响，见 checkpoint_migration_contract §2）"
+    removal_commit: null
+    notes: "runs 面 96 行/36 文件（键面清单/审计产物）"
+
+  - group: B
+    symbol: "anchor 输出键（anchor_logits/anchor_probs/anchor_plan/anchor_speed/anchor_residual/anchor_ctx）"
+    file: ["net/model.py:1961", "net/plan_head.py:161-200"]
+    category: LEGACY_REPRO
+    production_references: "21 行/1 文件"
+    training_references: "9 行/1 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "26 行/1 文件（test_plan_anchor）"
+    checkpoint_keys: []
+    replacement: "forward 输出键随锚分支删除；训练/测试同步（契约 = plan 输出键集合）"
+    removal_commit: null
+    notes: "slim 面 4 行；runs 面 6 行"
+
+  - group: B
+    symbol: "tools/fit_plan_anchors.py（锚拟合 CLI）"
+    file: ["tools/fit_plan_anchors.py"]
+    category: LEGACY_REPRO
+    production_references: "3 行/2 文件（net/anchor.py 文档串引用）"
+    training_references: "1 行/1 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "迁 experiments/archive/k_anchor/fit_plan_anchors.py（与 net/anchor.py 同笔）"
+    removal_commit: null
+    notes: "slim 面 5 行/5 文件；runs 面 12 行/12 文件（拟合产物目录）"
+
+  - group: B
+    symbol: "锚损失配置键（anchor_ce / anchor_wta / anchor_temperature / anchor_hard / plan_anchor.temperature）"
+    file: ["config/train.yaml:132-136", "config/train.yaml:189-195", "config/model.yaml:74-77"]
+    category: LEGACY_REPRO
+    production_references: "4 行/1 文件"
+    training_references: "41 行/2 文件（train.yaml 注释 + stages 读取）"
+    evaluation_references: "0 行/0 文件"
+    test_references: "6 行/4 文件"
+    checkpoint_keys: []
+    replacement: "配置键删除（WTA/CE 训练路径随锚归档）"
+    removal_commit: null
+    notes: "slim 面 1 行；runs 面 120 行/30 文件（历史配方快照）。CI 守卫 #2 覆盖"
+
+  - group: B
+    symbol: "plan_head.anchor* / encoders.lane|ttc ckpt 键面（旧 ckpt 专用）"
+    file: ["runs/BTC20261005-0856_v7struct_v5/stage_b/final.pt（代表性）"]
+    category: CHECKPOINT_ONLY
+    production_references: "0 行/0 文件"
+    training_references: "2 行/1 文件（键面清单落盘侧）"
+    evaluation_references: "6 行/1 文件（gate/键面审计）"
+    test_references: "2 行/1 文件"
+    checkpoint_keys: ["plan_head.anchors", "plan_head.anchor_ds", "plan_head.anchor_dth", "plan_head.anchor_embed", "plan_head.anchor_head.*", "plan_head.residual_head.*", "plan_head.speed_head.*", "encoders.lane.*", "encoders.ttc.*"]
+    replacement: "legacy_key_mapper 的 ignore 集（20 键）；不参与正式 forward"
+    removal_commit: null
+    notes: "13 个 ckpt 带 K-anchor 键、15 个带 encoders.lane/ttc（c5_ckpt_families.json，522 ckpt 普查）"
+
+  - group: B
+    symbol: "net/anchor.py（K-anchor 工具集，371 行）"
+    file: ["net/anchor.py"]
+    category: LEGACY_REPRO
+    production_references: "4 行/2 文件（net/plan_head.py:25、net/model.py:190 导入；仅 num_anchors>0 触达）"
+    training_references: "4 行/2 文件（fit/归档链引用）"
+    evaluation_references: "0 行/0 文件"
+    test_references: "1 行/1 文件（test_plan_anchor 导入）"
+    checkpoint_keys: []
+    replacement: "整文件迁 experiments/archive/k_anchor/anchor.py（含 8 个纯函数）"
+    removal_commit: null
+    notes: "主链删除后 net/ 无 K-anchor 残留；测试同步迁移（保留 1 个归档可加载性的迁移单测）"
+
+  - group: B
+    symbol: "anchor 纯函数（anchor_mixture/assign_anchors/lane_shape_features/anchor_lane_context/assigned_plan/to_lane_dtheta/from_lane_dtheta/lane_follow_dtheta）"
+    file: ["net/anchor.py:146-330"]
+    category: LEGACY_REPRO
+    production_references: "24 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "21 行/1 文件"
+    checkpoint_keys: []
+    replacement: "随 net/anchor.py 归档"
+    removal_commit: null
+    notes: "slim 面 1 行"
+
+  # ============================== C 组：遗留 set_ego_warp（w1/w2） ==============================
+  - group: C
+    symbol: "set_ego_warp()（遗留实验接口）"
+    file: ["net/model.py:618-653"]
+    category: LEGACY_REPRO
+    production_references: "2 行/1 文件（互斥状态机 + 报错文案）"
+    training_references: "0 行/0 文件"
+    evaluation_references: "10 行/2 文件（.slim m1_gate_a/b_warp_compat oracle 调用）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "迁 legacy probe 模块（tools/legacy/ego_warp_probe.py）；正式接口只保留 set_ego_warp_mode(off|analytic)"
+    removal_commit: null
+    notes: "**硬前置（§5.69-①）**：先把 w1/w2 逐位期望冻结为 fixture（m1_gate_a.py:137-141,588-590；b_warp_compat.py），否则 M1/L-D 等价性证据链断裂。slim 面 4 行/3 文件"
+
+  - group: C
+    symbol: "w1/w2 模式串（self.ego_warp 属性 + WARP_MODES 中的 legacy 值）"
+    file: ["net/model.py:500-501", "net/ego_warp.py:4-6"]
+    category: LEGACY_REPRO
+    production_references: "7 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "14 行/2 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "WARP_MODES 仅保留 off|analytic；w1/w2 语义移入 legacy oracle fixture"
+    removal_commit: null
+    notes: "slim 面 39 行/10 文件；runs 面 24 行/3 文件（历史 warp 产物）"
+
+  - group: C
+    symbol: "_ego_warp_pose_k / self.ego_warp（legacy 属性与方法）"
+    file: ["net/model.py:96", "net/model.py:500-504"]
+    category: LEGACY_REPRO
+    production_references: "10 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "3 行/1 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "属性删除；与 set_ego_warp 同笔迁 legacy probe"
+    removal_commit: null
+    notes: "slim 面 6 行/3 文件；两条 warp 状态机互斥检查（:647-651,674-678）随之简化为单状态机"
+
+  # ============================== D 组：Policy/path_head 双实体收编 ==============================
+  - group: D
+    symbol: "path_head_ablation（消融模式属性 policy|structured|oneshot）"
+    file: ["net/model.py:472", "net/model.py:952-980"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "6 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "29 行/7 文件（.slim 装载链模式读出）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: ["meta.path_head_ablation"]
+    replacement: "删除模式枚举；收编后 model.policy 单实体（structured_action/action_distribution/auxiliary_intent）"
+    removal_commit: null
+    notes: "slim 面 3 行/3 文件。顺序约束（§七-D）：**先做 checkpoint key 迁移器**再收编"
+
+  - group: D
+    symbol: "set_path_head_ablation()"
+    file: ["net/model.py:952-980"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "7 行/2 文件"
+    training_references: "4 行/2 文件（.slim j1/j2 训练装配）"
+    evaluation_references: "24 行/8 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "删除；装载/模式切换改由构造参数或 legacy 装载器承担"
+    removal_commit: null
+    notes: "slim 面 7 行/5 文件；runs 面 66 行/66 文件（历史 run 记录）"
+
+  - group: D
+    symbol: "enable_path_head（开关镜像属性）"
+    file: ["net/model.py:470", "net/model.py:942", "net/model.py:1021", "net/model.py:1377"]
+    category: LEGACY_REPRO
+    production_references: "4 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "1 行/1 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "收编为 model.policy 单实体后删除镜像属性（装配经构造参数；不再有第二实体开关）"
+    removal_commit: null
+    notes: "slim 面 2 行/1 文件。收编前先跑键迁移器（path_head.* 18 键）"
+
+  - group: D
+    symbol: "set_policy_diag() / policy_diag_enabled（旧头在主 forward 的诊断前向）"
+    file: ["net/model.py:478", "net/model.py:989-997", "net/model.py:1921-1922"]
+    category: LEGACY_REPRO
+    production_references: "10 行/2 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "6 行/3 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "旧头诊断改离线工具（tools/diagnostics/forensics_* 口径）；正式 forward 只保留一个动作出口"
+    removal_commit: null
+    notes: "slim 面 1 行。policy_action_mu（KEEP）作为离线诊断键随工具迁移再定"
+
+  # ============================== E 组：path_* 旁路字段（Q4 分类输入） ==============================
+  - group: E
+    symbol: "path_left_margin"
+    file: ["net/path_head.py:238（LONG_EXOG_OBS_KEYS[1]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件（仅 net/path_head.py 消费）"
+    training_references: "2 行/2 文件（.slim 注入口/数据集列）"
+    evaluation_references: "14 行/10 文件（.slim m6/m7/j1 注入）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：并入标准 obs（lane_semantic 列 4 已有天然出处）；删除 None→0 回退，改 valid mask + 显式 fail-fast"
+    removal_commit: null
+    notes: "**无 prod/eval 生产者**（env/pipeline/tools 零命中）；slim 面 4 行/4 文件；runs 面 31 行/5 文件。最终归属待 Q4 裁决"
+
+  - group: E
+    symbol: "path_right_margin"
+    file: ["net/path_head.py:239（LONG_EXOG_OBS_KEYS[2]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件"
+    training_references: "2 行/2 文件"
+    evaluation_references: "13 行/9 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：并入标准 obs（lane_semantic 列 5）；同 left_margin"
+    removal_commit: null
+    notes: "A4 已证 production 口径 margin 左右反号（与数据集口径互换）⇒ 归档/迁移时须以 fixed 口径为准"
+
+  - group: E
+    symbol: "path_static_distance"
+    file: ["net/path_head.py:240（LONG_EXOG_OBS_KEYS[3]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件"
+    training_references: "0 行/0 文件（训练值来自离线数据集 path_exec_v1）"
+    evaluation_references: "31 行/15 文件（.slim m6_calib/m7_fill 注入；eval env 不产）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：WM anchors 确定性派生（想象步几何接口，A1 主项）；禁止缺键填 0"
+    removal_commit: null
+    notes: "slim 面 29 行/9 文件；runs 面 68 行/17 文件"
+
+  - group: E
+    symbol: "path_dynamic_distance"
+    file: ["net/path_head.py:241（LONG_EXOG_OBS_KEYS[4]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "28 行/13 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：WM anchors 确定性派生（随 rollout 更新，不静默 hold）"
+    removal_commit: null
+    notes: "slim 面 29 行/9 文件；runs 面 68 行/17 文件"
+
+  - group: E
+    symbol: "path_dynamic_ttc"
+    file: ["net/path_head.py:242（LONG_EXOG_OBS_KEYS[5]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "31 行/15 文件（m6 中性填充/m7 真值回填）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：WM anchors 确定性派生（Gate C 要求 TTC 随 rollout 更新）；M3 证据：缺键→0 占装配错配效应 77%"
+    removal_commit: null
+    notes: "slim 面 31 行/9 文件；runs 面 68 行/17 文件；docs 面 15 行（M6/M7 报告）"
+
+  - group: E
+    symbol: "path_nav_progress"
+    file: ["net/path_head.py:243（LONG_EXOG_OBS_KEYS[6]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "10 行/8 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：并入标准 obs（obs['nav'] 末维 route_completion 已有兜底）"
+    removal_commit: null
+    notes: "slim 面 4 行/4 文件；runs 面 31 行/5 文件"
+
+  - group: E
+    symbol: "path_distance_to_target_lane_end"
+    file: ["net/path_head.py:244（LONG_EXOG_OBS_KEYS[7]）"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "2 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "5 行/3 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "草案：并入标准 obs（lane_semantic 列 11）或仅诊断（取决于 F 组来源标签裁决）"
+    removal_commit: null
+    notes: "slim 面 4 行/4 文件；runs 面 31 行/5 文件"
+
+  - group: E
+    symbol: "LONG_EXOG_OBS_KEYS / long_exog_from_obs()（消费口 + 缺键默认 0）"
+    file: ["net/path_head.py:236-244", "net/path_head.py:912-1000"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "9 行/1 文件"
+    training_references: "4 行/2 文件（.slim j1_train/j2_train_stripped_check 按列映射）"
+    evaluation_references: "8 行/3 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "schema 冻结后由统一 builder 供键；缺键必须带 valid mask 且消费端显式 fail-fast（禁 None→0）"
+    removal_commit: null
+    notes: "slim 面 13 行/4 文件；runs 面 2 行。与 plan_head.fusion.2（KEEP）同批 schema 冻结，勿混淆 K-anchor"
+
+  - group: E
+    symbol: "_vector_from_obs()（缺键静默 0 回退实现）"
+    file: ["net/path_head.py:929-943"]
+    category: ARCHITECTURE_FORBIDDEN
+    production_references: "7 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "1 行/1 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "删除 default=0.0 语义；改 required/optional 两档（required 缺键 raise，optional 带 mask）"
+    removal_commit: null
+    notes: "CI 守卫 #5（禁缺失静默填 0）的直接对象"
+
+  # ============================== F 组：外部 target-lane 强逻辑（只加标签，不删） ==============================
+  - group: F
+    symbol: "--lane-anchor inject（评测侧外部选道注入口 + c_lane_anchor 注入口径）"
+    file: [".slim/deepwork/p1_v2/round36/c_lane_anchor.py", ".slim/deepwork/p1_v2/a3/eval_a3.py:981-984（--lane-anchor 开关）"]
+    category: LEGACY_REPRO
+    production_references: "0 行/0 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "107 行/20 文件（.slim 评估链：inject 开关 + 守卫 + 报告）"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "schema 增来源标签（road_level_navigation / teacher_target_lane / deployment_available）；生产部署禁用外部注入（长期）"
+    removal_commit: null
+    notes: "lane_anchor_xy 本体 = KEEP（obs 必需输入）；本条只废弃'评测替网络选道'的注入用法。slim 面 78 行/16 文件；runs 面 64 行/35 文件"
+
+  # ============================== G 组：legacy monitoring + others-28 维 ==============================
+  - group: G
+    symbol: "legacy_tags（TrainingMonitor 旧落盘口径开关）"
+    file: ["pipeline/monitoring.py:618-622"]
+    category: LEGACY_REPRO
+    production_references: "10 行/1 文件"
+    training_references: "7 行/1 文件（pipeline/stages.py monitor 构造）"
+    evaluation_references: "0 行/0 文件"
+    test_references: "5 行/2 文件（test_monitoring_tb_grouped/test_monitoring_v2）"
+    checkpoint_keys: []
+    replacement: "迁 tools/legacy/monitoring_reader.py；正式训练只写新 schema（_slim_tag = KEEP）"
+    removal_commit: null
+    notes: "CLI --monitor-legacy-tags 同步退役；测试用例随实现迁移（保新路径用例）"
+
+  - group: G
+    symbol: "_LEGACY_* 常量/正则族（20 常量 + 7 条 regex）"
+    file: ["pipeline/monitoring.py:309-330", "pipeline/monitoring.py:342-380"]
+    category: LEGACY_REPRO
+    production_references: "29 行/4 文件（monitoring.py + run_paths.py）"
+    training_references: "12 行/4 文件（stages.py 旧 tag 喂入）"
+    evaluation_references: "0 行/0 文件"
+    test_references: "5 行/1 文件"
+    checkpoint_keys: []
+    replacement: "随 legacy reader 迁出；新 schema 不再兼容多代 tag"
+    removal_commit: null
+    notes: "slim 面 1 行"
+
+  - group: G
+    symbol: "_group_of_tag() / _write_legacy_grouped_tensorboard()"
+    file: ["pipeline/monitoring.py:333-380", "pipeline/monitoring.py:736"]
+    category: LEGACY_REPRO
+    production_references: "10 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "5 行/1 文件"
+    checkpoint_keys: []
+    replacement: "迁 legacy reader（旧 TB 多线族重放）"
+    removal_commit: null
+    notes: "—"
+
+  - group: G
+    symbol: "OTHERS_LEGACY_DIM / OTHERS_HEAD_LEGACY_DIM（旧 others-28 维布局常量）"
+    file: ["net/encoders.py:59-61"]
+    category: LEGACY_REPRO
+    production_references: "7 行/2 文件（net/encoders.py + net/mem.py）"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "删常量；旧数据由显式 schema 适配器（或采集侧重跑）承接，禁静默重排"
+    removal_commit: null
+    notes: "slim 面 1 行（handbook_facts）；§5.69-② 扩围项"
+
+  - group: G
+    symbol: "_remap_legacy_others()（旧 others 28→33 静默零填充重排）"
+    file: ["net/mem.py:110-138", "net/mem.py:393", "net/mem.py:407"]
+    category: LEGACY_REPRO
+    production_references: "3 行/1 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "迁为显式 legacy 适配器（带判定与告警等级）；或删除并强制重采"
+    removal_commit: null
+    notes: "违反'缺失静默填充'守则（static 段补 0）；现为一次性 RuntimeWarning，迁移时须升格为显式选择"
+
+  - group: G
+    symbol: "encoders.lane / encoders.ttc（v8 已删通道的旧 ckpt 键）"
+    file: ["runs/BTC20261005-0856_v7struct_v5/stage_b/final.pt（代表性）"]
+    category: CHECKPOINT_ONLY
+    production_references: "0 行/0 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: ["encoders.lane.weight", "encoders.lane.bias", "encoders.ttc.weight", "encoders.ttc.bias"]
+    replacement: "legacy_key_mapper 的 ignore 集（4 键）；15 个 ckpt 受影响"
+    removal_commit: null
+    notes: "文本零命中（TESTS_DOCS_ONLY）——唯一判定为'不可达'的键面项；证据 = c5_ckpt_families.json（522 ckpt 普查）"
+
+  # ============================== H 组：cheap-path 隐式布尔 ==============================
+  - group: H
+    symbol: "wm_detach（恒 no-op 形参）"
+    file: ["net/model.py:1870", "net/model.py:1883", "pipeline/trainer.py:860", "pipeline/trainer.py:4266"]
+    category: LEGACY_REPRO
+    production_references: "4 行/2 文件"
+    training_references: "13 行/3 文件（pipeline/stages.py 2366/3123/3307 + trainer 透传）"
+    evaluation_references: "0 行/0 文件"
+    test_references: "19 行/13 文件（stub forward 兼容旧签名）"
+    checkpoint_keys: []
+    replacement: "删除形参（迁移期由 **kwargs 吞掉）；detach 语义固定（v8 latent 状态链固定 detach）"
+    removal_commit: null
+    notes: "slim 面 1 行；runs 面 20 行（metrics 中的 wm_detach 字段）"
+
+  - group: H
+    symbol: "rollout= / world_model= 隐式布尔组合（cheap-path 语义）"
+    file: ["net/model.py:1864-1880"]
+    category: LEGACY_REPRO
+    production_references: "18 行/2 文件（rollout= 11 行/2 文件 + world_model= 7 行/2 文件；net/model.py 与 config/train.yaml）"
+    training_references: "135 行/12 文件（rollout= 70 行/12 文件 + world_model= 65 行/12 文件；pipeline/stages.py 2366/2864/5163 等 + trainer）"
+    evaluation_references: "166 行/各 34 文件（rollout= 90 行/34 文件 + world_model= 76 行/34 文件；eval_runner 与 .slim 装载链）"
+    test_references: "108 行（rollout= 58 行/22 文件 + world_model= 50 行/20 文件；stub forward 签名 + 语义用例）"
+    checkpoint_keys: []
+    replacement: "forward_mode 枚举 ∈ {policy_single_step, policy_wm_rollout, world_model_teacher_forcing, diagnostics}；旧布尔组合 → 枚举的映射表 + 每组合一次前向逐位对照"
+    removal_commit: null
+    notes: "slim 面 171 行；runs 面 1087 行。风险：Gate B'WM 是否真跑'依赖本组 ⇒ 枚举化必须附逐位对照与默认关回归"
+
+  - group: H
+    symbol: "forward_mode（显式枚举，方案提案——当前全仓 0 命中）"
+    file: ["（待实现；出处 GPT R38 §七-H）"]
+    category: LEGACY_REPRO
+    production_references: "0 行/0 文件"
+    training_references: "0 行/0 文件"
+    evaluation_references: "0 行/0 文件"
+    test_references: "0 行/0 文件"
+    checkpoint_keys: []
+    replacement: "实现枚举并替换 rollout×world_model 布尔组合（与上一条同笔）"
+    removal_commit: null
+    notes: "审计判定 TESTS_DOCS_ONLY（仅文档 3 行）——本条是'待实现'立项，不是既有代码的删除"
