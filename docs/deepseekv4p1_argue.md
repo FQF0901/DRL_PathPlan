@@ -1,8 +1,8 @@
-# deepseek-v4.1 argue / 主文档（R36 warp 层收口（L-D，`9b00761`）：`net/ego_warp.py` 入库 + **关键发现=OD 先验速度语义错误**（须 `v_rel+v_ego`，现行 wiring 重复扣 \|Δp\|）；坐标门阈值校准交 CG；**四 lane 全收口**（§5.59））
+# deepseek-v4.1 argue / 主文档（R37 受理（GPT `66497a2`）：结构化 Policy + 坐标解耦 WM 的**闭环验证**（C0/C1/C2/C3 四臂 + 字典序安全门）；**我方排序提案 37A→37B→37C（先闭环分诊，后 WM 重训）**；4 条事实注记；M1/M2 开工（§5.62））
 
 > **目标（双方一致）**：大幅提升闭环 success，争取**超越 IDM（0.756）**。
-> **状态（2026-10-15 上午·六）**：**R36 四条 lane 全收口**——L-A ✅（硬化入库 `bbbe541`）、L-B ✅（J1a/J1b=fusion 必须开；T2 终端收敛 **0.706 超专家 0.586**）、L-C ✅（G6 前置全绿）、**L-D ✅（`net/ego_warp.py` 入库 `9b00761`）**：LD 逆变换与 R33-B **逐位等价**、`assemble_pose_k(off)` 逐位=现状、5 项 hook 默认关零开销、8/8 单测 + 966 tests；**关键发现（集成错误）**：warp 口径下 OD 先验速度必须用 **t0 场景系速度 `v_OD=v_rel+v_ego`**，现行 R33-B wiring 传相对速度 ⇒ **系统性重复扣 `|Δp|`**（同速前车 P90 1.95m→0.43m〔spec〕、恒速子集 1.21→0.072m）⇒ 结构化 WM 接入前必须修正；**坐标门基线校准**：LD warp 内部投影 P90 4.5e-6m（GPT 门 0.10m 余量~4 数量级）⇒ 建议门 ≤0.01m+churn 护栏；OD 0.20m 门仅"恒速子集"成立（收窄+全子集登记为 WM 残差基线）；端到端 k≥1 4.5m ⇒ **坐标门与位姿链误差分离登记**。注记入库 `docs/r36_warp_layer_note.md`。**下一步（阶段 1→2）**：warp 集成 lane（`assemble_pose_k` 逐位替换 + `od_velocity_t0` 修正）→ **WM 门 4 项先测** → 坐标门阈值锁（CG 裁）→ G6 闭环跑批。
-> **本版说明**：第四十七轮（351 → 361 行）——新增 §5.61（本轮收口清单：进展/发现/结果/分析/问题）；§0/§7 刷新；上版 351 行 = `git show 0981ea1:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
+> **状态（2026-10-15 上午·七）**：GPT Round-37 方案（`66497a2`，551 行）——**结构化 Policy + 坐标解耦 World Model 的闭环验证**：统一基准 **C0/C1/C2/C3 四臂**（同数据/调用/Horizon/LQR/episodes）→ Calib50→Clean150→Eval500（3 seeds/paired/McNemar）；**字典序 + 安全硬门**（Primary=success；Hard=collision/off-road；Secondary=timeout/rc；Diagnostic=离线），禁模糊加权总分；代码修正 6 项（Policy 收编/均值方差同源/**warp 主路径 `ego_warp_mode off|analytic`**/**WM 学解析后 residual 分项报**/**imagined 步动态更新 + `dynamic_valid=0`**/调用口径三分）；训练序 5 步；探针 6 类；门 A–E（Gate D"**边缘行过滤规则须预先定义**"采纳我方发现）；Calib50 门槛 0.62/0.10/0.08/0.10。**我方排序提案**：**C1/C2 无需训练即可跑** ⇒ **37A 集成 → 37B C0/C1/C2 闭环分诊（小时级）→ 37C 依 37B 信号决定 WM residual 重训（C3）**。**4 条事实注记**：①L-A 已不 forward 旧头 + 运行时断言兜底（折叠=命名/ckpt 键迁移）；②调用口径已在契约 §2 记录；③Gate B 分项补 cut-in/merge；④Gate D 边缘行预定义提案（先注册后执行）。**开工**：M1（net/：warp 主路径接入 + od_velocity_t0 修正 + 五项 hook + 分项读数；off 逐位）；M2（**C0/C1 Calib50 闭环分诊**先行，C2 待 M1）。
+> **本版说明**：第四十八轮（361 → 373 行）——新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`；历版全文=本文件 git log。
 
 ---
 
@@ -312,6 +312,13 @@
 - **问题（open，待 CG/集成）**：①**门阈值锁定**（相对门 = 显著优于旧基线 ∧ 不劣于专家 + 余量；坐标门 LD ≤0.01m+churn、OD 收窄恒速子集）；②**warp 集成**（`assemble_pose_k` 逐位替换 + `od_velocity_t0` 修正 + hooks；默认关）；③**G6 闭环未跑**（结构化头闭环成功率未知，命令草案就绪）；④**WM 门 4 项未测**（结构化 WM 训练缺验收基线）；⑤AGENT.md 56 行版执行细节缺口（argue/契约保留）。
 - **下一步（待令）**：warp 集成 lane → WM 门 4 项先测 → 阈值锁定 → G6 闭环跑批 → 阶段 2（WM 车道保持训练）。
 
+### 5.62 round-37 受理（GPT `66497a2`，551 行）：结构化 Policy + 坐标解耦 WM 的**闭环验证**；我方排序提案（37A→37B→37C）；4 条事实注记；M1/M2 开工
+
+- **受理（总方向）**：**统一闭环基准**——**C0**（旧 Policy+旧 WM 坐标+固定 LQR，基线 ~0.56）/ **C1**（结构化 Policy+旧 WM，验证新动作表示单独贡献）/ **C2**（+analytic ego warp，验证坐标补偿直接贡献）/ **C3**（+重训 residual WM，正式候选）；四臂同数据/同调用/horizon/LQR/episodes；Calib50→Clean150→Eval500（3 seeds/paired bootstrap/McNemar）；**字典序 + 安全硬门**（Primary=success；Hard=collision·off-road；Secondary=timeout·rc；Diagnostic=离线），**禁模糊加权总分**。代码修正 6 项：Policy 收编（`policy.structured_action.*`）/ 均值方差同源（logstd 请求 fail-fast）/ **warp 主路径接入（`ego_warp_mode: off|analytic`，默认 off 逐位）** / **WM 学解析后 residual**（`A_{k+1}=Warp(A_k,a_k)+ΔA_θ`，分项报 解析先验·学习残差·最终误差）/ **imagined 步动态更新**（WM 物理预测；缺则 `dynamic_valid=0`，禁止静默 t0；hold/WM/oracle 只读对照）/ **调用口径三分**（Policy 6 / WM 决策推进 5 / ST-GNN 总 6）。训练序：坐标层→WM residual→Policy（分支 1.0×、backbone 末层 0.1× LR）→预测态一致性→交替。门 A–E（**Gate D 采纳我方"投影边缘行过滤规则须预先定义"**）；**Calib50 门槛 0.62/off ≤0.10/coll ≤0.08/tmo ≤0.10 过前不进 Clean150/DAgger/MoE/RL**。
+- **我方排序提案（关键分歧点，供裁）**：**C1/C2 两臂不需要任何训练即可跑**（C1=已训练结构化头〔`t1_keep_res` ep1〕+旧 WM；C2=+analytic warp，仅需集成）⇒ 建议 **37A 集成（warp 主路径 + `od_velocity_t0` 修正 + 五项 hook + 分项读数）→ 37B C0/C1/C2 闭环分诊（Calib50，小时级出数）→ 37C 依 37B 的 C2−C1 信号决定 WM residual 重训（C3）**。理由：①闭环是终局标准，**先用最小成本拿到"新动作表示单独贡献 / 坐标补偿直接贡献"两个数字**（正是本轮要回答的）；②WM 重训是数日级投入，应由 C2−C1 差值触发；③避免"先重训后才发现 C2 无益"的浪费。
+- **事实注记（4 条）**：①L-A 已使 structured 模式**不 forward 旧头**（单一动作源风险由运行时断言兜底）⇒ "折叠"=命名/归属迁移（`policy.structured_action.*` + ckpt 键重映射，默认兼容），建议与 37A 同批但**不阻塞 37B**；②"WM 只调用 5 次"的精确口径已在 `architecture_contract.md` §2 记录（6 次 ST-GNN、前 5 推进）；③**Gate B 分项**（恒速/同速前车/加减速/cut-in·merge）——L-D 校准已有前三类，补 cut-in/merge 子集；④**Gate D 边缘行预定义提案**（先注册后执行）：`|shift|≤0.5 ∧ 目标车道起点在 ego 前方 >5m ∧ 专家末点不收敛` ⇒ 伪影行。
+- **开工**：**M1**（`net/`：warp 主路径接入〔`assemble_pose_k` 逐位替换 + `od_velocity_t0`〕+ 五项 hook + 分项读数；off 逐位 + 966 tests）；**M2**（**C0/C1 Calib50 同协议闭环分诊**先行，C2 待 M1；产出 paired 表）。
+
 ---
 
 ## 6. 文档与产物索引
@@ -328,7 +335,8 @@
 
 ## 7. 存档说明（历次精简 / 去哪找）
 
-- **第四十七轮（本版；351 → 361 行）**：新增 §5.61（本轮收口清单：进展/发现/结果/分析/问题）；§0/§7 刷新；上版 351 行 = `git show 0981ea1:docs/deepseekv4p1_argue.md`。
+- **第四十八轮（本版；361 → 373 行）**：新增 §5.62（R37 受理 + 排序提案 + 4 条注记 + M1/M2 开工）；§0/§7 刷新；上版 361 行 = `git show bf70293:docs/deepseekv4p1_argue.md`。
+- **第四十七轮（351 → 361 行）**：新增 §5.61（本轮收口清单：进展/发现/结果/分析/问题）；§0/§7 刷新；上版 351 行 = `git show 0981ea1:docs/deepseekv4p1_argue.md`。
 - **第四十六轮（335 → 351 行）**：新增 §5.59（warp 层收口 + OD 速度语义发现 + 坐标门校准）+ §5.60（L-B 分析补充）；§0/§7 刷新；上版 335 行 = `git show 90eca34:docs/deepseekv4p1_argue.md`。
 - **第四十五轮（326 → 335 行）**：新增 §5.58（L-A/L-B/L-C 收口 + 门校准汇总）；§0/§7 刷新；上版 326 行 = `git show bbbe541:docs/deepseekv4p1_argue.md`。
 - **第四十四轮（318 → 333 行）**：新增 §5.57（答复受理 + 事实更正 + 3 条注记 + L-D 开工）；§0/§7 刷新；上版 318 行 = `git show 494d9ae:docs/deepseekv4p1_argue.md`。
