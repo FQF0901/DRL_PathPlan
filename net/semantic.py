@@ -22,6 +22,14 @@
 
 符号/编码：role 0..4（见 ``env.obs.lane_semantic.ROLE_*``），无效槽 role=-1 → embedding
 index 5；group relation 4 类（0=target 槽、1=同 group、2=异 group、3=未知/无 target）。
+
+R38-P3 来源标签（GPT §七-F；只标注，不改行为）
+------------------------------------------------
+``target_lane_token`` / ``lane_semantic`` 来源 = **客观 lane topology**
+（:data:`TARGET_LANE_SOURCE_TAGS` 中的 ``road_level_navigation`` + ``deployment_available``）；
+训练/评测教师注入的 target（``lane_anchor_xy`` 注入、train-side target-lane dropout）为
+``teacher_target_lane``（teacher-only；部署不可用）——长期移除生产部署对唯一 target lane
+的依赖，课程训练与诊断路径暂不删除。完整字段映射 = ``env.obs.lane_semantic.TARGET_LANE_FIELD_SOURCE_TAGS``。
 """
 
 from __future__ import annotations
@@ -36,6 +44,8 @@ from env.obs.lane_semantic import (
     ROLE_RIGHT_ADJACENT,
     ROLE_TARGET,
     ROLE_TARGET_CONTINUATION,
+    TARGET_LANE_FIELD_SOURCE_TAGS,
+    TARGET_LANE_SOURCE_TAGS,
 )
 
 __all__ = [
@@ -49,7 +59,14 @@ __all__ = [
     "GROUP_REL_OTHER",
     "GROUP_REL_UNKNOWN",
     "SEMANTIC_AUX_TARGETS",
+    "TARGET_LANE_SOURCE_TAGS",
+    "TARGET_LANE_TOKEN_SOURCE_TAGS",
 ]
+
+#: R38-P3（GPT §七-F）来源标签：``target_lane_token`` = 客观 lane topology 的 net 侧编码
+#: （来自 ``lane_semantic``；部署期 env 自身可产出）。标签枚举/字段映射单一出处 =
+#: ``env.obs.lane_semantic.TARGET_LANE_*``；本模块只做转出（behavior-free）。
+TARGET_LANE_TOKEN_SOURCE_TAGS: tuple[str, ...] = TARGET_LANE_FIELD_SOURCE_TAGS["target_lane_token"]
 
 #: role 取值 0..4（5 类）+ 无效槽 index 5
 NUM_ROLES = 5

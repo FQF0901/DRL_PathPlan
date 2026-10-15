@@ -206,3 +206,79 @@ def test_static_column_missing_stays_zero_with_present_zero():
     exog, present = long_exog_from_obs(obs, batch=2, device=torch.device("cpu"))
     assert float(exog[0, 3]) == 0.0
     assert float(present[0, 3]) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# 4) R38-P3-E：回退 present 与生产者 ``__present`` 口径对齐（lane_semantic_mask ∧
+#    target_lane_valid / nav_mask；回退**值**逐位不变）
+# --------------------------------------------------------------------------- #
+def _fallback_obs(
+    batch: int = 2,
+    *,
+    target_lane_valid: bool = True,
+    semantic_mask: float = 1.0,
+    nav_mask: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    sem = torch.zeros((batch, 12), dtype=torch.float32)
+    if target_lane_valid:
+        sem[:, 4], sem[:, 5], sem[:, 6], sem[:, 11] = 5.25, 5.24, 1.0, 22.0
+    nav = torch.zeros((batch, 11), dtype=torch.float32)
+    nav[:, -1] = 0.12
+    return {
+        "ego": torch.zeros((batch, 8), dtype=torch.float32),
+        "lane_semantic": sem,
+        "lane_semantic_mask": torch.full((batch, ), float(semantic_mask)),
+        "nav": nav,
+        "nav_mask": torch.full((batch, ), float(nav_mask)),
+        # dynamic 两列恒给（缺键 = fail-fast 由专门用例覆盖）
+        "path_dynamic_distance": torch.zeros(batch),
+        "path_dynamic_ttc": torch.full((batch, ), 60.0),
+    }
+
+
+def test_fallback_present_follows_source_availability_gate():
+    """回退列 present = 回退源可用性（mask ∧ valid / nav_mask）——与 Q4-A `__present` 同规则。"""
+    device = torch.device("cpu")
+    # 全可用：回退值照旧（逐位），present=1
+    exog, present = long_exog_from_obs(_fallback_obs(), batch=2, device=device)
+    assert float(exog[0, 1]) == pytest.approx(5.25, abs=1e-6)
+    assert float(exog[0, 2]) == pytest.approx(5.24, abs=1e-6)
+    assert float(exog[0, 6]) == pytest.approx(0.12, abs=1e-6)
+    assert float(exog[0, 7]) == pytest.approx(22.0, abs=1e-6)
+    assert present[0, [1, 2, 6, 7]].tolist() == [1.0, 1.0, 1.0, 1.0]
+
+    # target_lane_valid=0（env 通道语义 = 特征全 0）⇒ present=0（不再"缺键回退 ⇒ present=1"）
+    exog, present = long_exog_from_obs(
+        _fallback_obs(target_lane_valid=False), batch=2, device=device
+    )
+    assert present[0, [1, 2, 7]].tolist() == [0.0, 0.0, 0.0]
+    assert float(exog[0, 1]) == 0.0 and float(exog[0, 7]) == 0.0
+
+    # lane_semantic_mask=0（通道无效；值仍取列，present 与生产者同口径 = 0）
+    _exog, present = long_exog_from_obs(_fallback_obs(semantic_mask=0.0), batch=2, device=device)
+    assert present[0, [1, 2, 7]].tolist() == [0.0, 0.0, 0.0]
+
+    # nav_mask=0 ⇒ nav_progress present=0（值 = 回退值，不静默改值）
+    exog, present = long_exog_from_obs(_fallback_obs(nav_mask=0.0), batch=2, device=device)
+    assert float(present[0, 6]) == 0.0
+    assert float(exog[0, 6]) == pytest.approx(0.12, abs=1e-6)
+
+
+def test_primary_key_present_keeps_explicit_present_mask():
+    """主键在场的列：present 仍取显式 ``<key>__present``（回退不触达，口径不变）。"""
+    obs = _fallback_obs()
+    obs["path_left_margin"] = torch.full((2, ), 3.0)
+    obs["path_left_margin__present"] = torch.tensor([1.0, 0.0])
+    obs["path_nav_progress"] = torch.full((2, ), 0.5)
+    obs["path_nav_progress__present"] = torch.tensor([0.0, 1.0])
+    exog, present = long_exog_from_obs(obs, batch=2, device=torch.device("cpu"))
+    assert present[:, 1].tolist() == [1.0, 0.0]
+    assert present[:, 6].tolist() == [0.0, 1.0]
+    assert float(exog[0, 1]) == 3.0 and float(exog[1, 1]) == 3.0
+
+    # 主键缺 + present 掩码在场（异常装配）⇒ 回退门主导，不回读陈旧掩码
+    obs = _fallback_obs()
+    obs["path_left_margin__present"] = torch.tensor([0.0, 0.0])
+    exog, present = long_exog_from_obs(obs, batch=2, device=torch.device("cpu"))
+    assert present[:, 1].tolist() == [1.0, 1.0]  # 回退 = 真值（C3 §4.1），门 = mask ∧ valid
+    assert float(exog[0, 1]) == pytest.approx(5.25, abs=1e-6)

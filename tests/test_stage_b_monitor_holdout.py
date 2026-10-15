@@ -179,22 +179,19 @@ def test_stage_b_monitor_epoch_steps_and_val_family(tmp_path: Path, capsys: pyte
     assert "val=" in captured, "epoch 行必须打印 val= 摘要"
 
 
-def test_stage_b_monitor_legacy_tags_flag_restores_old_csv(tmp_path: Path) -> None:
-    """``--monitor-legacy-tags``（回退）：旧 canonical tag 全量落 CSV。"""
+def test_stage_b_monitor_legacy_tags_flag_retired(tmp_path: Path) -> None:
+    """``--monitor-legacy-tags``（R38-P3-G 退役）：argparse 直接拒绝（fail-fast）。"""
     dataset_dir = write_v2_dataset(tmp_path / "bc_v2", episodes=4, steps_per_episode=6)
-    out_dir = tmp_path / "stage_b_legacy"
-    args = _parse_args([
-        "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(out_dir),
-        "--ckpt", str(tmp_path / "missing_stage_a.pt"),
-        "--model-config", str(_model_cfg(tmp_path)),
-        "--bc-epochs", "1", "--val-frac", "0.34",
-        "--batch-size", "8", "--device", "cpu", "--seed", "0",
-        "--monitor", "--monitor-legacy-tags",
-    ])
-    run_stage_b(args, {})
-    series = _csv_series(out_dir)
-    for tag in ("train/primary_bc_loss", "train/primary_bc_action_err_median",
-                "horizon/h1/traj_mae_m/mean", "val/horizon/h1/traj_mae_m/mean",
-                "slice/brake/action_err/mean"):
-        assert tag in series, f"legacy tag 缺失：{tag}"
-    assert "loss/planner/primary/total" not in series and "val/loss/planner/primary/total" not in series
+    with pytest.raises(SystemExit):
+        _parse_args([
+            "--stage", "B", "--bc-dir", str(dataset_dir), "--out", str(tmp_path / "stage_b_legacy"),
+            "--ckpt", str(tmp_path / "missing_stage_a.pt"),
+            "--model-config", str(_model_cfg(tmp_path)),
+            "--bc-epochs", "1", "--val-frac", "0.34",
+            "--batch-size", "8", "--device", "cpu", "--seed", "0",
+            "--monitor", "--monitor-legacy-tags",
+        ])
+    # 旧日志读取/重放口径 = tools/legacy/monitoring_reader（正式训练只写新 schema）
+    from tools.legacy.monitoring_reader import legacy_group_of_tag
+
+    assert legacy_group_of_tag("horizon/h1/traj_mae_m/mean") == ("horizon_traj_mae_m", "h1")

@@ -9,6 +9,8 @@ CI 守卫 #1 的扫描面，见 `docs/code_reachability_audit.md` §5）。
 ```bash
 # 模块自检（纯 torch，CPU，无 metadrive）
 tools/venv-python -m tools.legacy.oneshot_path
+tools/venv-python -m tools.legacy.others_layout        # R38-P3-G：旧 others-28→33 适配器
+tools/venv-python -m tools.legacy.monitoring_reader    # R38-P3-G：legacy tag 分组/重放
 
 # 单测
 tools/venv-python -m pytest tests/test_legacy_oneshot_path.py -q
@@ -16,6 +18,7 @@ tools/venv-python -m pytest tests/test_legacy_k_anchor.py -q      # R38-P2a K-an
 tools/venv-python -m pytest tests/test_legacy_key_mapper.py -q    # R38-P2a/P2b 旧 ckpt 键映射
 tools/venv-python -m pytest tests/test_r38_p2b_warp_legacy_removed.py -q   # R38-P2b warp 快照
 tools/venv-python -m pytest tests/test_r38_p2b_policy_fold.py -q           # R38-P2b 双实体收编
+tools/venv-python -m pytest tests/test_monitoring_tb_grouped.py -q         # R38-P3-G legacy reader
 
 # 历史复现需旧 net（模型内 oneshot 诊断臂）
 git worktree add /tmp/old_net 74f0bd4     # 或 git show 74f0bd4:net/path_head.py
@@ -32,6 +35,8 @@ git worktree add /tmp/legacy_net dd0a8c2  # R38-P2b：legacy set_ego_warp(w1/w2)
 | `checkpoint_migration.py` | 最小装载入口（`migrate_state_dict`/`load_checkpoint_state`；默认 fail-fast 不变；R38-P2b 起应用改名族） | 同上（契约 §5 硬约束 1-4） | pipeline loader 仍**未接线**（.slim 评估链可在调用点显式使用）；单测 `tests/test_legacy_key_mapper.py` |
 | `legacy_ego_warp.py` | `set_ego_warp`（w1/w2 模式 setter，`net/model.py:593-628`@dd0a8c2）、`_ego_warp_pose_k`（`:697-717`）、`assemble_pose_k` w1/w2 口径（`net/ego_warp.py:189-227`@dd0a8c2） | `LEGACY_REPRO`（C 组：w1/w2 = 历史 warp 实验口径；R37 M1 正式接口 = `set_ego_warp_mode(off\|analytic)`） | 纯函数自包含（仅 torch）；**逐位参照物 = `tests/fixtures/r38_p2b_warp/`**（m1_gate_a/b_warp_compat/d1_ego_warp_tests 改读 fixture）；模型内整臂复现需删除前 net（`dd0a8c2`） |
 | `legacy_policy.py` | 旧 `PolicyHead`/`ValueHead`/`CrossAttnHead` 整模块（`net/policy.py`@dd0a8c2；唯一改动 = `H` 本地化） | D 组"旧 PolicyHead 迁 legacy 模型加载器"落点（正式 net 仍保留 `net/policy.py` 供默认关路径前向） | 自包含（仅 torch）；消费 = 离线诊断 `tools/diagnostics/legacy_policy_diag.py`（`--legacy-ckpt` 独立复算）/ 旧 ckpt `policy.*` 键面审计 |
+| `monitoring_reader.py` | `pipeline/monitoring.py` 旧 `legacy_tags` 口径：`_LEGACY_*`（20 常量 + 5 regex）/`_group_of_tag`/旧 `_grouped_scalars` 分支/`_write_legacy_grouped_tensorboard`（`pipeline/monitoring.py:309-391,736-744`@2cfd8e8） | `LEGACY_REPRO`（G 组：正式训练只写新 schema `_slim_tag`；旧 tag 仅用于**读取/重放旧日志**） | 纯 stdlib（csv/math/re）；`legacy_group_of_tag`/`legacy_grouped_scalars`/`read_metrics_csv`/`write_legacy_grouped_tensorboard`；正式 `TrainingMonitor(legacy_tags=...)` 写入即 fail-fast |
+| `others_layout.py` | 旧 others 28→33 重排：`net/mem.py::_remap_legacy_others`（`net/mem.py:110-138`@2cfd8e8）+ `net/encoders.py::OTHERS_LEGACY_DIM/OTHERS_HEAD_LEGACY_DIM` | `LEGACY_REPRO`（G 组：静默零填充 static 段违反"缺失静默填充"守则；net 端已改 fail-fast） | 纯函数 `remap_legacy_others_28_to_33`（仅 torch）；旧数据集/旧缓存需**显式**转换后喂 `mem_from_obs` |
 
 ## 纪律
 

@@ -39,7 +39,7 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - `ego_hist (B,6,8)` + `ego_hist_mask`；末 2 维 = 上一策略步 `(ds,dθ)`（reserved）
 - `od_hist (B,6,16,9)` + `od_hist_mask` + `od_id_hist (B,6,16)` + `od_presence_hist (B,6,16)`
 - `ld_hist (B,6,16,7)` + `ld_hist_mask`（只作输入）
-- `others_hist (B,6,33)` + `others_hist_mask`：`nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12)`；旧 28 维布局自动重排 + 零填充 static 段 + 一次性告警（`net/mem.py:110-139`）
+- `others_hist (B,6,33)` + `others_hist_mask`：`nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12)`；**旧 28 维布局不再自动重排**（R38-P3-G fail-fast + 显式适配器 `tools/legacy/others_layout.py`，`net/mem.py:108-129`）
 - `hist_valid (B,6)`（warmup 补位帧为 0；**必需**）
 - 可选上下文：`nav (B,11)`、`signal (B,4)`、`ego_world (B,3)`、`route_world (B,M,2)`、`route_world_mask (B,M)`；当前帧 `ego/od/ld/others/od_id/od_presence` 作回退
 
@@ -48,7 +48,8 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 - 恒有：`action_mu/action_logstd (B,2)`、`value (B,1)`、`latent (B,H)`、`ego_next (B,6)`、`router_logits (B,8)`、`expert_weights (B,8)`（top-2 混合权重）；MoE 开启且 `α>0` 时 `load_balance_loss`
 - `rollout=True`：`traj_xy (B,6,2)`（t=0.5..3.0 s 端点，t0 自车系）、`traj_theta (B,6)`、`plan (B,6,2)`（实际执行的 6 个动作，`plan[:,0] == action_mu`）
 - `world_model=True`（必须同时 `rollout=True`）另返回：`od_pred (B,6,16,5)`、`ld_pred (B,6,16,4)`、`od_presence_pred/od_entry_pred (B,6,16)`（logits）、`z_ego_pred/z_od_pred/z_ld_pred`（latent 诊断）
-- `forward(rollout=False, world_model=False)` 是 **PPO cheap path**：不跑任何 st_gnn 消息传递，`action_mu/action_logstd/value/router_logits/expert_weights/latent` 与完整前向逐位一致（`net/model.py:1970-1985`）；`rollout=True, world_model=False` 仍跑 rollout 但不返回预测键。
+- `forward(rollout=False, world_model=False)` 是 **PPO cheap path**：不跑任何 st_gnn 消息传递，`action_mu/action_logstd/value/router_logits/expert_weights/latent` 与完整前向逐位一致（`net/model.py:1991-2012`）；`rollout=True, world_model=False` 仍跑 rollout 但不返回预测键。
+- **R38-P3-H 显式模式枚举**：`forward(forward_mode=...) ∈ {policy_single_step, policy_wm_rollout, world_model_teacher_forcing, diagnostics}`（映射表 `FORWARD_MODE_FLAGS`）；旧 `rollout=/world_model=` 布尔组合 = 兼容 shim（保留，迁移列遗留清单），二者禁止混用；每组合一次前向逐位对照 = `tests/test_r38_p3_forward_mode.py`。
 - R36 K1（结构化头启用时，非默认）：`plan_from_aux/structured_*` 逐步组装证据键 + `contract_*` 契约断言键；`structured` 下旧头**永不前向**（`policy_action_mu` 不再产出；R38-P2b 诊断离线化 = `tools/diagnostics/legacy_policy_diag.py`，`set_policy_diag` fail-fast）；默认关路径照常产出 `action_logstd`。
 - R37 M1（`set_warp_readout(True)` 时，非默认）：`warp_readout_valid/warp_prior_err/warp_residual_contrib/warp_final_err`（`net/model.py:1988-1996`）。
 
@@ -56,7 +57,7 @@ P2 驾驶策略网络：mem-bank 观测 → 时序聚合 → **latent 世界模�
 
 - v8 不再拷贝/滑动 raw mem，直接迭代 latent 状态；真 mem 仅作 nav 回退锚点（`net/model.py:1519-1523`）。
 - 来自真实 obs 的 t0 状态**不 detach**（检测任务）；rollout 合成的后续 latent 进入下一步前 detach（预测任务）；**action/pose 链保持可微**（`net/model.py:1627,1720-1721`）。
-- `wm_detach` 形参保留但**恒为 no-op**（`net/model.py:1883`）。
+- `wm_detach` 形参**已撤**（R38-P3-H）：detach 语义固定（合成帧恒 detach），从未提供消融开关；迁移期旧签名 `wm_detach=...` 由 `**legacy_signature` 吞掉（恒 no-op），其他未知关键字 ⇒ `TypeError`（`net/model.py:289-305`）。
 - 图位姿（t0 帧口径）：ego = 累积位姿（detach）、OD = t0 位姿 + `k·dt·v_t0`、LD 静止（`net/model.py:1646-1663`；R37 M1 `set_ego_warp_mode("analytic")` 时改由 `assemble_pose_k(analytic)` + `od_velocity_t0` 组装，默认 `off` 逐位不变；R38-P2b 单状态机）。
 - 物理解码先验：OD 匀速外推 / LD 静止，t0 帧口径（`net/st_gnn.py:276-311`）。
 

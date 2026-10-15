@@ -13,6 +13,10 @@
 3. :func:`classify_slot_roles` / :func:`slot_group_ids` —— LD 点补充（逐槽 role / 局部 group），
    由 :class:`env.obs.ld.LDChannel` 作为伴随数组输出（不进 net 输入）。
 4. :func:`lane_curvature` —— dθ/ds 数值中心差分（``env.obs.ld`` 复用同一实现，单一出处）。
+5. R38-P3（GPT §七-F）**来源标签**：:data:`TARGET_LANE_SOURCE_TAGS` /
+   :data:`TARGET_LANE_FIELD_SOURCE_TAGS` —— target-lane 相关字段按
+   ``road_level_navigation``（客观拓扑，保留）/ ``teacher_target_lane``（训练教师注入，
+   teacher_only）/ ``deployment_available``（部署可用）登记；**只加标签，不改行为**。
 
 符号约定（与仓库既有口径一致，勿混）：
 
@@ -65,7 +69,41 @@ __all__ = [
     "CURVATURE_NEAR_OFFSET_M",
     "CURVATURE_FAR_OFFSET_M",
     "LANE_CONNECT_TOL_M",
+    "TARGET_LANE_SOURCE_TAGS",
+    "TARGET_LANE_FIELD_SOURCE_TAGS",
 ]
+
+#: R38-P3（GPT §七-F）：target-lane 相关字段的**来源标签**枚举（schema 文档契约；行为逐位不变）。
+#: - ``road_level_navigation``：客观 lane topology（road network / route ``current_ref_lanes``
+#:   选择出的 target lane 及其派生量）⇒ **保留**；
+#: - ``teacher_target_lane``：训练/评测**教师注入**的 target（``teacher_only``；部署侧没有
+#:   这一路输入）⇒ 长期从生产部署依赖中移除，课程训练与诊断路径暂不删除；
+#: - ``deployment_available``：部署期（env 自身，无外部注入）即可产出。
+TARGET_LANE_SOURCE_TAGS: tuple[str, ...] = (
+    "road_level_navigation",
+    "teacher_target_lane",
+    "deployment_available",
+)
+
+#: 字段/通道 → 来源标签（字段名 = obs 键或 net 侧符号；R38-P3 只加标签，不改行为）。
+#: 生产部署对**唯一 target lane** 的依赖（``teacher_target_lane`` 项）为长期移除目标：
+#: 训练教师目标（``lane_anchor_xy`` 注入、train drop）不得成为部署必需输入。
+TARGET_LANE_FIELD_SOURCE_TAGS: dict[str, tuple[str, ...]] = {
+    # 客观 lane topology（env 从 road network / route 自身选出；部署可用）
+    "lane_semantic": ("road_level_navigation", "deployment_available"),
+    "select_target_lane": ("road_level_navigation", "deployment_available"),
+    "TargetLaneSelection": ("road_level_navigation", "deployment_available"),
+    "target_lane_valid": ("road_level_navigation", "deployment_available"),
+    "target_lane_token": ("road_level_navigation", "deployment_available"),
+    "path_left_margin": ("road_level_navigation", "deployment_available"),
+    "path_right_margin": ("road_level_navigation", "deployment_available"),
+    "path_distance_to_target_lane_end": ("road_level_navigation", "deployment_available"),
+    # 训练/评测教师注入（teacher_only；部署不可用 —— 长期移除部署依赖）
+    "lane_anchor_xy": ("teacher_target_lane", ),
+    "lane_anchor_mask": ("teacher_target_lane", ),
+    "set_target_lane_dropout": ("teacher_target_lane", ),
+    "lane_anchor_inject_cli": ("teacher_target_lane", ),
+}
 
 # --------------------------------------------------------------------------- #
 # 常量 / 编码

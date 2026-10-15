@@ -54,12 +54,9 @@ LD_MEM_DIM = LD_DIM
 #: 语义由 ``env/obs/others.py`` / ``env/obs/static.py`` 定义；net 只做投影，
 #: 构造 ``DrivingModel(others_dim=...)`` 可覆盖。
 DEFAULT_OTHERS_DIM = 33
-#: 旧 others 布局（env schema v2/v3）：``nav(11)+speed_limit(1)+signal(4)+road_class(12)`` = 28；
-#: ``net.mem.mem_from_obs`` 对旧数据做"零填充 static 段"的重排（一次性告警）。
-OTHERS_LEGACY_DIM = 28
-#: 旧布局中 static 段之前的公共前缀维数（nav + speed_limit + signal）
-OTHERS_HEAD_LEGACY_DIM = 16
-#: v4 新增 static 段维数（present + gap_norm + 相对车道 one-hot(3)）
+#: 旧 others 布局常量（``OTHERS_LEGACY_DIM`` / ``OTHERS_HEAD_LEGACY_DIM``，schema v2/v3 28 维）
+#: 已迁 ``tools/legacy/others_layout.py``（R38-P3-G：net 不再静默重排旧布局）。
+#: v4 新增 static 段维数（present + gap_norm + 相对车道 one-hot(3)）。
 OTHERS_STATIC_DIM = 5
 #: OD 轨道 id 的桶数（``id % ID_BUCKETS`` 查嵌入；避免未知 id 词表爆炸）。
 ID_BUCKETS = 64

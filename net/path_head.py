@@ -70,15 +70,42 @@ H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 r
 输入契约（启用时；``obs`` 键）
 ------------------------------
 - ``lane_anchor_xy (B,P,2)``（必需；容忍 ``(B,1,P,2)``）——目标车道中心线折线（ego t0 系）；
-- ``lane_anchor_mask (B,P)``（可选；默认全 1）；
-- ``target_lane_valid (B,)``（可选；缺省 = 锚有效；``lane_semantic`` 列 6 兜底）；
+  **来源标签 = ``teacher_target_lane``**（R38-P3 / GPT §七-F：训练/评测教师注入；
+  teacher-only，部署侧不应依赖外部唯一 target 注入——long-term 由 env 客观 lane topology 供给）；
+- ``lane_anchor_mask (B,P)``（可选；默认全 1）——**来源标签 = ``teacher_target_lane``**（同上游）；
+- ``target_lane_valid (B,)``（可选；缺省 = 锚有效；``lane_semantic`` 列 6 兜底）——
+  **来源标签 = ``road_level_navigation``**（客观拓扑的有效性位）；
 - ``path_left_margin/path_right_margin/path_static_distance/path_dynamic_distance/
   path_dynamic_ttc/path_nav_progress/path_distance_to_target_lane_end (B,)``（R38-Q4A：t0 段
   由 env 侧生产者 ``env/obs/path_field.py`` 给出；``path_dynamic_distance`` / ``path_dynamic_ttc``
   **缺键 = fail-fast**（禁静默 0）；static 缺键 → 0 + present=0；margin/nav/d2end 缺键回退
   ``lane_semantic`` 列 4/5/11 与 ``nav[:,-1]``）；每列可附 ``<key>__present (B,)`` 显式掩码
   （在场时 ``long_present`` 用它，否则退回"键在场 ⇒ 1"）；
+  margin/d2end 的来源标签 = ``road_level_navigation``（``lane_semantic`` 派生；部署可用）；
   当前速度取 ``obs['ego']`` 第 0 维（v, m/s）。
+
+字段级"禁静默 0"最终语义（R38-Q4A 落地 + R38-P3 E 残留文档化；**不变量 = 缺失必须可判**）
+-------------------------------------------------------------------------------------
+============================  ==========================  ==========================================
+列                             缺失语义（R38-Q4A 最终）     present / 回退
+============================  ==========================  ==========================================
+``path_left_margin`` /          no key ⇒ 回退             ``lane_semantic[:,4]/[:,5]`` 回退成功且
+``path_right_margin``           （显式派生，非静默 0）       ``lane_semantic_mask ∧ target_lane_valid``
+                                （t0 生产者契约给值）       ⇒ present=1；回退源不可用 ⇒ present=0
+``path_static_distance``        缺键 ⇒ **0 + present=0**  诊断列（不进 Policy 语义决策；
+                                （显式主态，不报错）        B 类掩码进头未接线）
+``path_dynamic_distance``       缺键 ⇒ **报错**（fail-fast）0 值 = 分布外"立即碰撞"混淆 ⇒ 禁止缺键；
+``path_dynamic_ttc``            （== ``LONG_EXOG_STRICT_COLUMNS``）  "本帧无观测" = 0 + ``__present=0``
+``path_nav_progress``           缺键 ⇒ 回退 ``nav[:,-1]`` ``nav_mask``（在场）>0.5 ⇒ present=1；
+                                （确定性；禁写 0）           否则 present=0（R38-P3 与 Q4-A 掩码对齐）
+``path_distance_to_target_lane_end`` 缺键 ⇒ 回退           同 margin（``lane_semantic[:,11]``；
+                                ``lane_semantic[:,11]``     gate = mask ∧ valid）
+============================  ==========================  ==========================================
+
+对齐口径（R38-P3）：回退列的值 = 既有回退值（逐位不变）；present 位 = **回退源可用性**
+（与生产者 ``env/obs/path_field.py`` 的 ``<key>__present`` 同规则：``lane_semantic_mask ∧
+target_lane_valid`` / ``nav_mask``）；主键在场的列，present 仍取显式 ``<key>__present``
+（或"键在场 ⇒ 1"）。掩码进头（消费 present）= B 类，未接线（见 ``docs/r38_path_field_classification.md`` §6）。
 
 Caveats（K1 口径）
 ------------------
@@ -105,6 +132,7 @@ from typing import Mapping
 import torch
 from torch import Tensor, nn
 
+from env.obs.lane_semantic import TARGET_LANE_FIELD_SOURCE_TAGS
 from net.encoders import H
 from net.mem import squeeze_batch_singletons
 from net.policy import ACTION_HIGH, ACTION_LOW
@@ -140,6 +168,7 @@ __all__ = [
     "NUM_STEPS",
     "PATH_HEAD_DEFAULT_MODE",
     "PATH_HEAD_MODES",
+    "PATH_HEAD_SOURCE_TAGS",
     "STEP_GEOMETRY_DEFAULT_MODE",
     "STEP_GEOMETRY_MODES",
     "TRAIN_ALLOWLIST_PREFIXES",
@@ -270,10 +299,28 @@ LONG_EXOG_PRESENT_SUFFIX = "__present"
 #: 「本帧无观测」的正确表达 = 值 0 + ``__present=0``，不是缺键。
 LONG_EXOG_STRICT_COLUMNS: tuple[int, ...] = (4, 5)
 
+#: ``lane_semantic`` 的 ``target_lane_valid`` 列号（回退可用性门；同 ``env/obs/path_field.py``）。
+LANE_SEMANTIC_VALID_COLUMN = 6
+
 #: 纵向头完整输入 = 当前步曲率 ``κ_near``(1) + 外源几何(8)。
 #: **只吃 κ_near**：``κ_mid/κ_far`` 是辅助输出，不进动作（架构契约门之一）。
 LONG_HEAD_FEATURE_NAMES: tuple[str, ...] = ("kappa_near",) + LONG_EXOG_FEATURE_NAMES
 LONG_HEAD_NORMALIZATION: tuple[float, ...] = (0.1,) + LONG_EXOG_NORMALIZATION
+
+#: R38-P3（GPT §七-F）来源标签（机器可读；单一出处 = ``env.obs.lane_semantic.TARGET_LANE_*``）。
+#: ``lane_anchor_xy``/``lane_anchor_mask`` = ``teacher_target_lane``（训练/评测教师注入；
+#: teacher-only，部署侧不应依赖外部唯一 target 注入）；margin/d2end 派生列 =
+#: ``road_level_navigation``（客观 lane topology，部署可用）。**只加标签、不改行为**。
+PATH_HEAD_SOURCE_TAGS: dict[str, tuple[str, ...]] = {
+    key: TARGET_LANE_FIELD_SOURCE_TAGS[key]
+    for key in (
+        "lane_anchor_xy",
+        "lane_anchor_mask",
+        "path_left_margin",
+        "path_right_margin",
+        "path_distance_to_target_lane_end",
+    )
+}
 
 #: K1 训练 allowlist（与 ``pipeline.trainer.apply_trainable_allowlist`` 同口径；
 #: R38-P2b 双实体收编后前缀 = ``policy.structured_action.``）：
@@ -861,6 +908,30 @@ def _present_from_obs(
     return mask.to(device=device)
 
 
+def _fallback_mask_column(
+    obs: Mapping[str, Tensor], name: str, batch: int, device: torch.device
+) -> Tensor:
+    """通道 mask（``lane_semantic_mask`` / ``nav_mask``）→ ``(B,)`` float；缺键 ⇒ 全 1。
+
+    与生产者 ``env/obs/path_field.py::_mask_ok`` 同规则（mask 缺键视为在场）；回退 present
+    位 = ``mask ∧ target_lane_valid``（semantic）/ ``mask``（nav）——R38-P3 与 Q4-A
+    ``<key>__present`` 口径对齐（不改变回退值本身）。
+    """
+    raw = obs.get(name)
+    if not torch.is_tensor(raw):
+        return torch.ones((batch, ), dtype=torch.float32, device=device)
+    flat = raw.float()
+    if flat.ndim == 0:
+        flat = flat.reshape(1, 1)
+    elif flat.ndim == 1:
+        flat = flat.reshape(int(flat.shape[0]), 1)
+    else:
+        flat = flat.reshape(int(flat.shape[0]), -1)
+    if int(flat.shape[0]) != batch or int(flat.shape[1]) != 1:
+        raise ValueError(f"obs[{name!r}] 应为 (B,) 或 (B,1)，收到 {tuple(raw.shape)}")
+    return (flat[:, 0] > 0.5).to(dtype=torch.float32, device=device)
+
+
 def long_exog_from_obs(
     obs: Mapping[str, Tensor], *, batch: int, device: torch.device
 ) -> tuple[Tensor, Tensor]:
@@ -874,8 +945,11 @@ def long_exog_from_obs(
     ``.slim/deepwork/p1_v2/round37/m7_fill.py::truth_fill`` 回填；"本帧无观测"应写
     0 + ``<key>__present=0``）。``static_distance`` 缺键 → 0 + present=0（诊断列）。
 
-    ``present`` 列：显式 ``<key>__present`` 掩码在场 ⇒ 用它（与生产者值同源）；否则退回
-    "键在场 ⇒ 1"（旧口径，逐位不变）。
+    ``present`` 列（R38-P3 最终口径）：
+    - 主键在场：显式 ``<key>__present`` 掩码在场 ⇒ 用它（与生产者值同源）；否则"键在场 ⇒ 1"；
+    - 回退列（margin/nav/d2end）：**回退源可用性门** —— ``lane_semantic_mask ∧
+      target_lane_valid``（列 6；margin/d2end）/ ``nav_mask``（nav_progress），与生产者
+      ``env/obs/path_field.py`` 同规则；回退源不可用 ⇒ present=0（值仍为回退值 0，非"静默 1"）。
     """
     names = LONG_EXOG_FEATURE_NAMES
     values: list[Tensor] = []
@@ -884,15 +958,32 @@ def long_exog_from_obs(
     semantic = obs.get("lane_semantic")
     semantic_ok = torch.is_tensor(semantic)
     semantic_batch_ok = False
+    semantic_gate: Tensor | None = None
     if semantic_ok:
         sem = squeeze_batch_singletons(semantic.float(), 2, "lane_semantic")
         semantic_batch_ok = sem.ndim == 2 and int(sem.shape[0]) == batch and int(sem.shape[1]) >= 12
         semantic = sem if semantic_batch_ok else None
+        if semantic_batch_ok:
+            semantic_gate = _fallback_mask_column(obs, "lane_semantic_mask", batch, device) * (
+                semantic[:, LANE_SEMANTIC_VALID_COLUMN] > 0.5
+            ).to(dtype=torch.float32)
 
-    def _push(index: int, vector: Tensor, has: float, key: str | None = None) -> None:
+    def _push(
+        index: int,
+        vector: Tensor,
+        has: float | Tensor,
+        key: str | None = None,
+        *,
+        primary_used: bool = True,
+    ) -> None:
         values.append(vector)
         mask = None if key is None else _present_from_obs(obs, key, batch=batch, device=device)
-        present[:, index] = float(has) if mask is None else mask
+        if mask is not None and primary_used:
+            present[:, index] = mask
+        elif torch.is_tensor(has):
+            present[:, index] = has.to(device=device, dtype=torch.float32).reshape(batch)
+        else:
+            present[:, index] = float(has)
 
     # 0) speed：obs['ego'] 第 0 维（当前帧；容忍 (B,8)/(B,1,8)/(B,T,8)）
     ego = obs.get("ego")
@@ -910,15 +1001,17 @@ def long_exog_from_obs(
         value, has = _vector_from_obs(obs, "path_speed", batch=batch, device=device)
         _push(0, value, has, "path_speed")
 
-    # 1) left_margin / 2) right_margin
+    # 1) left_margin / 2) right_margin（缺键 ⇒ lane_semantic 回退；present = 回退源可用性门）
     left, left_has = _vector_from_obs(obs, str(LONG_EXOG_OBS_KEYS[1]), batch=batch, device=device)
-    if left_has == 0.0 and semantic_batch_ok:
-        left, left_has = semantic[:, 4].to(device=device), 1.0
-    _push(1, left, left_has, str(LONG_EXOG_OBS_KEYS[1]))
+    left_primary = left_has != 0.0
+    if not left_primary and semantic is not None and semantic_gate is not None:
+        left, left_has = semantic[:, 4].to(device=device), semantic_gate
+    _push(1, left, left_has, str(LONG_EXOG_OBS_KEYS[1]), primary_used=left_primary)
     right, right_has = _vector_from_obs(obs, str(LONG_EXOG_OBS_KEYS[2]), batch=batch, device=device)
-    if right_has == 0.0 and semantic_batch_ok:
-        right, right_has = semantic[:, 5].to(device=device), 1.0
-    _push(2, right, right_has, str(LONG_EXOG_OBS_KEYS[2]))
+    right_primary = right_has != 0.0
+    if not right_primary and semantic is not None and semantic_gate is not None:
+        right, right_has = semantic[:, 5].to(device=device), semantic_gate
+    _push(2, right, right_has, str(LONG_EXOG_OBS_KEYS[2]), primary_used=right_primary)
 
     # 3) static / 4) dynamic / 5) ttc（4/5 缺键 = fail-fast，见 docstring）
     for index in (3, 4, 5):
@@ -934,27 +1027,30 @@ def long_exog_from_obs(
             )
         _push(index, value, has, key)
 
-    # 6) nav_progress：显式键 → obs['nav'] 末维（route_completion）→ 0
+    # 6) nav_progress：显式键 → obs['nav'] 末维（route_completion）→ 0（present = nav_mask 门）
     progress, progress_has = _vector_from_obs(
         obs, str(LONG_EXOG_OBS_KEYS[6]), batch=batch, device=device
     )
-    if progress_has == 0.0:
+    progress_primary = progress_has != 0.0
+    if not progress_primary:
         nav = obs.get("nav")
         if torch.is_tensor(nav):
             nav_t = nav.float()
             while nav_t.ndim > 2 and int(nav_t.shape[1]) == 1:
                 nav_t = nav_t.squeeze(1)
             if nav_t.ndim == 2 and int(nav_t.shape[0]) == batch and int(nav_t.shape[1]) >= 11:
-                progress, progress_has = nav_t[:, -1].to(device=device), 1.0
-    _push(6, progress, progress_has, str(LONG_EXOG_OBS_KEYS[6]))
+                progress = nav_t[:, -1].to(device=device)
+                progress_has = _fallback_mask_column(obs, "nav_mask", batch, device)
+    _push(6, progress, progress_has, str(LONG_EXOG_OBS_KEYS[6]), primary_used=progress_primary)
 
-    # 7) distance_to_target_lane_end
+    # 7) distance_to_target_lane_end（缺键 ⇒ lane_semantic 列 11；present 同 margin 门）
     distance, distance_has = _vector_from_obs(
         obs, str(LONG_EXOG_OBS_KEYS[7]), batch=batch, device=device
     )
-    if distance_has == 0.0 and semantic_batch_ok:
-        distance, distance_has = semantic[:, 11].to(device=device), 1.0
-    _push(7, distance, distance_has, str(LONG_EXOG_OBS_KEYS[7]))
+    distance_primary = distance_has != 0.0
+    if not distance_primary and semantic is not None and semantic_gate is not None:
+        distance, distance_has = semantic[:, 11].to(device=device), semantic_gate
+    _push(7, distance, distance_has, str(LONG_EXOG_OBS_KEYS[7]), primary_used=distance_primary)
 
     return torch.stack(values, dim=-1).to(device=device, dtype=torch.float32), present
 

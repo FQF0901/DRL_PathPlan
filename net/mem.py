@@ -16,8 +16,9 @@ LD             ``ld_hist`` / ``ld_hist_mask``   ``(B,6,16,7)``（只作输入）
 others         ``others_hist`` / ``others_hist_mask`` ``(B,6,33)/(B,6)``；33 =
                                                nav(11)+speed_limit(1)+signal(4)+
                                                static(5)+road_class one-hot(12)
-                                               （schema v4；旧 28 维数据自动重排 +
-                                               零填充 static 段 + 一次性告警）
+                                               （schema v4；**旧 28 维数据不再自动
+                                               重排**——R38-P3-G fail-fast + 显式适配器
+                                               ``tools/legacy/others_layout.py``）
 帧级有效性      ``hist_valid``                    ``(B,6)``（warmup 补位帧为 0）
 ============== =============================== ==============================
 
@@ -28,8 +29,9 @@ others         ``others_hist`` / ``others_hist_mask`` ``(B,6,33)/(B,6)``；33 =
 -------------------------------------------------
 - ``ego_hist``/``others_hist`` 缺失时用当前帧 ``ego``/``others`` 复制 6 帧（mask 由
   ``hist_valid`` 门控）；
-- 旧 others 布局（28 维，schema v2/v3）→ 按新布局重排（static 段补 0、road_class 平移到
-  [21,33)）+ **一次性告警**（v4 新特征在旧数据上"未知"，等价于无静态障碍）；
+- 旧 others 布局（28 维，schema v2/v3）**不再静默重排**（R38-P3-G，`LEGACY_REPRO`）：
+  28 维输入 ⇒ fail-fast，指路显式适配器
+  ``tools/legacy/others_layout.remap_legacy_others_28_to_33``（迁移说明见该模块 docstring）；
 - ``od_id_hist`` 缺失时用当前 ``od_id`` 广播（再缺则槽位下标占位）；
 - ``od_presence_hist`` 缺失时用当前 ``od_presence`` 广播（再缺则 ``od_hist_mask × hist_valid``）；
 - 单槽历史通道 ``(B,6,1,F)``（env builder 的原始形状）自动挤压为 ``(B,6,F)``。
@@ -87,9 +89,6 @@ from net.encoders import (
     LD_MEM_DIM,
     NAV_DIM,
     OD_MEM_DIM,
-    OTHERS_HEAD_LEGACY_DIM,
-    OTHERS_LEGACY_DIM,
-    OTHERS_STATIC_DIM,
     FrameEncoding,
     ObsEncoders,
 )
@@ -107,35 +106,29 @@ def _warn_fallback(key: str, message: str) -> None:
         warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
-def _remap_legacy_others(tensor: Tensor, others_dim: int, name: str) -> Tensor:
-    """旧 others 布局（28 维）→ 新布局（v4，33 维）：static 段补 0、road_class 平移。
+def _check_others_layout(tensor: Tensor, others_dim: int, name: str) -> Tensor:
+    """others 布局检查（R38-P3-G：旧 28 维**不再静默重排** ⇒ fail-fast + 迁移说明）。
 
-    旧：``[nav(11), speed_limit(1), signal(4), road_class(12)]``；
-    新：``[nav(11), speed_limit(1), signal(4), static(5), road_class(12)]``。
-    维度已匹配时原样返回；其他维度不匹配立即报错（避免静默错位）。
-    旧数据的 static 段全 0 = "无静态障碍"（v4 新特征在旧数据上不可用，一次性告警）。
+    当前 env schema v4/v7 = 33 维（``nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12)``）；
+    旧 28 维（v2/v3）曾在此处"补 0 static 段 + road_class 平移 + 一次性告警"——违反
+    "缺失静默填充"守则（static 全 0 会被当作"无静态障碍"，可能静默错读）⇒ 迁
+    ``tools/legacy/others_layout.remap_legacy_others_28_to_33``（显式适配器）后由调用方负责。
     """
     dim = int(tensor.shape[-1])
     if dim == int(others_dim):
         return tensor
-    if dim == OTHERS_LEGACY_DIM and int(others_dim) == OTHERS_LEGACY_DIM + OTHERS_STATIC_DIM:
-        _warn_fallback(
-            "others_legacy_layout",
-            "obs 的 others 为旧布局（28 维，schema v2/v3）→ 重排到 v4 布局（33 维）："
-            "static 段补 0（无静态障碍信息）、road_class 平移；重新采集数据后自动生效",
+    if dim == 28 and int(others_dim) == 33:
+        raise ValueError(
+            f"obs[{name!r}] 为旧 others 布局（28 维，schema v2/v3）：R38-P3-G 起不再静默零填充"
+            "重排（LEGACY_REPRO，违反'缺失静默填充'守则）。请重新采集（schema v4/v7 = 33 维），"
+            "或显式转换旧数据：tools/legacy/others_layout.py::remap_legacy_others_28_to_33"
+            "（static 段补 0 的语义由调用方显式承担）后再喂入 mem_from_obs。"
         )
-        out = torch.zeros(
-            tuple(tensor.shape[:-1]) + (int(others_dim), ),
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
-        out[..., :OTHERS_HEAD_LEGACY_DIM] = tensor[..., :OTHERS_HEAD_LEGACY_DIM]
-        out[..., OTHERS_HEAD_LEGACY_DIM + OTHERS_STATIC_DIM:] = tensor[..., OTHERS_HEAD_LEGACY_DIM:]
-        return out
     raise ValueError(
         f"obs[{name!r}] 特征维 {dim} != others_dim {int(others_dim)}"
         f"（env schema v4 = nav(11)+speed_limit(1)+signal(4)+static(5)+road_class(12) = 33；"
-        f"旧布局 28 维会自动重排；如 env 改版请用 DrivingModel(others_dim=F_o) 构造）"
+        f"旧布局 28 维需显式走 tools/legacy/others_layout；如 env 改版请用 "
+        f"DrivingModel(others_dim=F_o) 构造）"
     )
 
 
@@ -390,7 +383,7 @@ def mem_from_obs(obs: Mapping[str, Tensor], *, others_dim: int, history_frames: 
         others = _require_float(obs[others_key], others_key)
         others = _squeeze_dim(others, others_key, 2)
         # v4：旧 28 维布局 → 33 维（static 段补 0 + road_class 平移 + 一次性告警）
-        others = _remap_legacy_others(others, int(others_dim), str(others_key))
+        others = _check_others_layout(others, int(others_dim), str(others_key))
         _check_shape(others, others_key, (frames, int(others_dim)), batch)
         others_mask_key = f"{others_key}_mask"
         if others_mask_key in obs:
@@ -404,7 +397,7 @@ def mem_from_obs(obs: Mapping[str, Tensor], *, others_dim: int, history_frames: 
         others_now = obs.get("others")
         if torch.is_tensor(others_now):
             others_now = squeeze_batch_singletons(others_now.float(), 2, "others")
-            others_now = _remap_legacy_others(others_now, int(others_dim), "others")
+            others_now = _check_others_layout(others_now, int(others_dim), "others")
             _check_shape(others_now, "others", (int(others_dim), ), batch)
             others = others_now.unsqueeze(1).expand(batch, frames, int(others_dim))
             others_mask = torch.ones((batch, frames), dtype=torch.float32, device=others.device)

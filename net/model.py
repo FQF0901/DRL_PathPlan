@@ -67,7 +67,7 @@ Round-36 K1（结构化动作生成器；默认关）＋ R38-P2b 双实体收编
   ③ 一次性六步臂 R38-P1 已删，写入即 fail-fast，历史复现看 ``tools/legacy/oneshot_path.py``）；
   ``action_generator_names()`` 给「生成器数 = 1」静态断言入口（structured ⇒
   ``("policy.structured_action",)``）。cheap path 无 WM ⇒ ``plan`` 仅为辅助预览（``plan_from_aux=1``），
-  生产 LQR 参考走 ``rollout=True``。
+  生产 LQR 参考走 ``policy_wm_rollout``（旧 ``rollout=True``；R38-P3-H 枚举）。
 - ``set_target_lane_dropout(p)``：训练期 target-lane token dropout（20%→50% 斜坡由训练侧调度；
   默认 0 = 关；``p=0`` 不消耗 RNG；仅 ``model.training`` 且存在 target token（semantic 模式）时生效）。
 
@@ -134,7 +134,16 @@ Round-37 M1（warp 主路径接入 + OD 速度语义修正 + 五项 hook + 分�
 ``ld_pred (B,6,16,4)``（物理解码，诊断 + 未来 LD 监督）、``od_presence_pred (B,6,16)``、
 ``od_entry_pred (B,6,16)``（logits）、``traj_theta (B,6)``、``z_*_pred``（latent 诊断）。
 
-``forward(..., rollout=False, world_model=False)`` 是 PPO cheap path：省略
+``forward(..., forward_mode=..., rollout=..., world_model=...)`` 是 R38-P3 显式模式枚举化：
+- ``forward_mode ∈ {policy_single_step, policy_wm_rollout, world_model_teacher_forcing,
+  diagnostics}``（映射表 = :data:`FORWARD_MODE_FLAGS`；旧布尔组合 → 枚举见
+  :func:`resolve_forward_mode`）；
+- **旧 ``rollout=/world_model=`` 布尔组合降为兼容 shim**（本波保留：生产调用点 20+ 处 +
+  d1 双跑脚本按旧签名调用；逐个调用点迁移列入遗留清单，与枚举公共行为等价——每组合一次
+  前向逐位对照 = ``tests/test_r38_p3_forward_mode.py``）；
+- ``forward_mode`` 与 ``rollout=/world_model=`` **禁止混用**（同时给 ⇒ ``ValueError``）。
+
+旧口径（兼容 shim 语义）：``rollout=False, world_model=False`` 是 PPO cheap path：省略
 traj/rollout 多步键（不跑 st_gnn 消息传递），``action_mu/action_logstd/value`` 与完整前向
 逐位一致。
 
@@ -143,17 +152,20 @@ traj/rollout 多步键（不跑 st_gnn 消息传递），``action_mu/action_logs
 - 输入契约（:func:`net.mem.mem_from_obs`）= env schema v2 规范键
   （``ego_hist/od_hist/od_id_hist/od_presence_hist/ld_hist/others_hist`` + masks +
   ``hist_valid``；others 维默认 33 = schema v4：nav(11)+speed_limit(1)+signal(4)+
-  static(5)+road_class(12)；旧 28 维数据自动重排 + 零填充 static 段 + 一次性告警）；
+  static(5)+road_class(12)；旧 28 维数据 ⇒ R38-P3-G fail-fast + 显式适配器
+  ``tools/legacy/others_layout.py``）；
   缺失 ``ego_hist/others_hist`` 或 ``od_id_hist/od_presence_hist`` 时按模块 docstring
   的回退规则处理（旧数据集可直接复用）；
 - ``nav/signal`` 键保留为可选上下文 token（v2 的规范上下文在 ``others`` 里）；
-- ``wm_detach`` 形参保留但**恒为 no-op**：v8 的 latent 状态链 detach 语义是固定的，
-  不提供消融开关。
+- ``wm_detach`` **形参已撤（R38-P3-H）**：v8 的 latent 状态链 detach 语义是固定的，从来
+  没有消融开关；迁移期旧签名 ``wm_detach=...`` 由 ``**legacy_signature`` 吞掉（恒 no-op，
+  逐位同结果；回归测试 ``tests/test_stage_v11.py::test_wm_detach_kwarg_is_accepted_noop``），
+  不再出现在 ``forward`` 签名中；其他未知关键字 ⇒ ``TypeError`` fail-fast。
 """
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 import torch
 from torch import Tensor, nn
@@ -217,6 +229,78 @@ SUPERVISED_LABELS: tuple[str, ...] = (
 )
 
 _ARC_EPS = 1e-6
+
+# ---------------------------------------------------------------------- 前向模式
+#: R38-P3-H（GPT §七-H）：``forward`` 显式模式枚举（替代 ``rollout × world_model`` 隐式布尔
+#: 组合）。映射表 = :data:`FORWARD_MODE_FLAGS`；``diagnostics`` 当前 = 全量前向旗标对
+#: （与 ``world_model_teacher_forcing`` 相同），独立枚举名用于**隔离诊断/可视化调用方**与
+#: 训练/评估口径（未来诊断面扩展——probes/readout 强制——挂靠此值，不动生产模式）。
+FORWARD_MODES: tuple[str, ...] = (
+    "policy_single_step",
+    "policy_wm_rollout",
+    "world_model_teacher_forcing",
+    "diagnostics",
+)
+
+#: ``forward_mode`` → ``(rollout, world_model)``（行为映射；每组合逐位对照见
+#: ``tests/test_r38_p3_forward_mode.py``）。
+#: - ``policy_single_step``：单步策略（cheap path；无 st_gnn 消息传递/rollout）；
+#: - ``policy_wm_rollout``：策略 + 6 步 **latent WM rollout**（轨迹/plan 逐步组装；不返回
+#:   WM 物理解码键 —— 修复"关 WM 仍 latent rollout"的旧命名歧义：本模式 WM 明确在跑）；
+#: - ``world_model_teacher_forcing``：全量前向（WM 预测键 ``od_pred/ld_pred/z_*_pred``
+#:   随 rollout 返回；WM 训练/评估口径。命名沿 GPT 术语：当前实现为 latent 自回归 rollout，
+#:   真正的教师强制输入链（真实未来帧/动作）是 Stage A ``_wm_predictions`` 路径，未接入本
+#:   入口）；
+#: - ``diagnostics``：当前 = 全量前向（同 WMTF），语义保留给诊断/可视化调用方。
+FORWARD_MODE_FLAGS: dict[str, tuple[bool, bool]] = {
+    "policy_single_step": (False, False),
+    "policy_wm_rollout": (True, False),
+    "world_model_teacher_forcing": (True, True),
+    "diagnostics": (True, True),
+}
+
+
+def resolve_forward_mode(
+    forward_mode: str | None,
+    rollout: bool | None,
+    world_model: bool | None,
+) -> tuple[bool, bool]:
+    """``forward_mode`` / 旧布尔入口 → ``(rollout, world_model)``。
+
+    - ``forward_mode`` 给值 ⇒ 查表（非法值 ⇒ ``ValueError``）；与 ``rollout=/world_model=``
+      **禁止混用**（同时给 ⇒ ``ValueError``，不给静默歧义留口）；
+    - 均未给 ⇒ ``(True, True)``（= 旧签名默认，逐位不变）；
+    - 旧布尔 shim（本波保留；迁移列出遗留清单）：单独给 ``rollout=``/``world_model=`` 时，
+      未给的一方按旧签名默认 ``True``；``world_model=True ∧ rollout=False`` 的非法组合仍由
+      :meth:`DrivingModel.forward` 报错（与旧行为逐位一致）。
+    """
+    if forward_mode is not None:
+        if rollout is not None or world_model is not None:
+            raise ValueError(
+                "forward_mode 与 rollout=/world_model= 二选一（禁止混用两套开关；"
+                f"收到 forward_mode={forward_mode!r}, rollout={rollout!r}, world_model={world_model!r}）"
+            )
+        mode = str(forward_mode)
+        if mode not in FORWARD_MODE_FLAGS:
+            raise ValueError(f"forward_mode={mode!r} 非法；允许值 = {FORWARD_MODES}")
+        return FORWARD_MODE_FLAGS[mode]
+    return (True if rollout is None else bool(rollout), True if world_model is None else bool(world_model))
+
+
+def _consume_legacy_forward_kwargs(kwargs: dict[str, Any]) -> None:
+    """旧 ``forward`` 签名兼容（R38-P3-H）：``wm_detach`` 恒 no-op —— 吞掉并忽略。
+
+    v8 的 latent 状态链 detach 语义固定（``_rollout`` 内固有），从未提供消融开关 ⇒
+    ``wm_detach`` 不再出现在 ``forward`` 签名中（迁移期旧调用点由 **kwargs 吞掉，逐位同
+    结果；回归 = ``tests/test_stage_v11.py::test_wm_detach_kwarg_is_accepted_noop``）。
+    其他未知关键字 ⇒ ``TypeError`` fail-fast（不给静默透传留口）。
+    """
+    kwargs.pop("wm_detach", None)
+    if kwargs:
+        raise TypeError(
+            f"forward() 收到未知参数 {sorted(kwargs)}；"
+            f"模式开关请用 forward_mode ∈ {FORWARD_MODES}（旧 rollout=/world_model= 仍兼容）"
+        )
 
 
 # ---------------------------------------------------------------------- 运动学
@@ -1914,22 +1998,32 @@ class DrivingModel(nn.Module):
         self,
         obs: Mapping[str, Tensor],
         *,
-        rollout: bool = True,
-        world_model: bool = True,
-        wm_detach: bool | None = None,
+        forward_mode: str | None = None,
+        rollout: bool | None = None,
+        world_model: bool | None = None,
         semantic_off: bool = False,
+        **legacy_signature: Any,
     ) -> dict[str, Tensor]:
         """完整前向：策略/价值/路由 + （可选）latent 自回归 rollout 与 t0 帧物理解码。
 
-        ``rollout=False, world_model=False`` 时走廉价路径：只做编码（**不再跑任何 st_gnn
-        消息传递**）+ plan head + 策略/价值头，不跑 rollout，返回的
-        ``action_mu/action_logstd/value/router_logits/expert_weights/latent`` 与完整前向
-        逐位一致（PPO 收集/BC update 用）。
+        **R38-P3-H 显式模式枚举**（GPT §七-H；映射表 = :data:`FORWARD_MODE_FLAGS`）：
+        ``forward_mode ∈ {policy_single_step, policy_wm_rollout, world_model_teacher_forcing,
+        diagnostics}``；旧 ``rollout=/world_model=`` 布尔组合 = **兼容 shim**（本波保留，
+        迁移列出遗留清单；不得与 ``forward_mode`` 混用 ⇒ ``ValueError``）。
 
-        ``world_model=False``（rollout=True）时仍执行 rollout（轨迹/动作需要），
-        但**不返回** ``od_pred/ld_pred/od_presence_pred/od_entry_pred`` 与 ``z_*_pred``。
+        - ``policy_single_step`` = 旧 ``(rollout=False, world_model=False)`` cheap path：只做
+          编码（**不再跑任何 st_gnn 消息传递**）+ plan head + 策略/价值头，不跑 rollout，
+          返回的 ``action_mu/action_logstd/value/router_logits/expert_weights/latent`` 与完整
+          前向逐位一致（PPO 收集/BC update 用）；
+        - ``policy_wm_rollout`` = 旧 ``(rollout=True, world_model=False)``：WM latent rollout
+          明确在跑（轨迹/动作需要），但**不返回** ``od_pred/ld_pred/od_presence_pred/
+          od_entry_pred`` 与 ``z_*_pred``；
+        - ``world_model_teacher_forcing`` = 旧 ``(rollout=True, world_model=True)``：全量前向
+          （WM 预测键返回；WM 训练/评估口径）；
+        - ``diagnostics``：当前 = 全量前向旗标（与 WMTF 相同），语义保留给诊断/可视化调用方。
 
-        ``wm_detach``：仅为兼容旧签名保留，**no-op**（v8 的 latent 状态链 detach 固定生效）。
+        ``wm_detach``：**形参已撤**（R38-P3-H；``**legacy_signature`` 兼容吞掉，恒 no-op ——
+        v8 的 latent 状态链 detach 固定生效，从未有消融开关）；未知关键字 ⇒ ``TypeError``。
 
         MoE 输出口径（lane U1）：``primary + Σ_{i∈top2} g_i·expert_i``，推理与训练一致、
         全场景生效（无硬切/二值门/硬掩码）；phase 1 训练由 ``set_moe(enabled=False)`` 关闭。
@@ -1949,6 +2043,8 @@ class DrivingModel(nn.Module):
           ``contract_deployment_does_not_use_plan_override``/``contract_runtime_ok``；
           eval/deploy 违反 ⇒ ``RuntimeError``（训练路径只落盘）。
         """
+        rollout, world_model = resolve_forward_mode(forward_mode, rollout, world_model)
+        _consume_legacy_forward_kwargs(legacy_signature)
         if self.path_head_trace is not None:
             # K1 门证据：每次 forward 先重置 trace（随后 encode 期的 t0 调用写入 step 0）。
             self.path_head_trace = []

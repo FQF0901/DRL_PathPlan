@@ -1,9 +1,9 @@
 """监控回归：GroupedMetricStatistics + Tier-1 瘦身落盘（2026-09-27）。
 
-- ``GroupedMetricStatistics`` 窗口统计本身不变（mean/n_updates/weighted_mean；legacy 模式使用）；
+- ``GroupedMetricStatistics`` 窗口统计本身不变（mean/n_updates/weighted_mean）；
 - 新口径 monitor 落盘前重命名：既有路径（KPI/episode/train/val/分组）经 ``_slim_tag``
   过滤，只保留 ``docs/metrics.md`` 的 Tier-1 tag；
-- ``legacy_tags=True`` 保留旧 tag 全量（回退）。
+- 旧 ``legacy_tags`` 全量口径已退役（R38-P3-G）：写入即 fail-fast。
 """
 
 from __future__ import annotations
@@ -119,14 +119,9 @@ def test_monitor_writes_slim_tier1_series(tmp_path: Path) -> None:
         assert tag not in tags, f"已移除 tag 仍写入：{tag}"
 
 
-def test_monitor_legacy_flag_keeps_old_tags(tmp_path: Path) -> None:
-    monitor = TrainingMonitor(str(tmp_path), tensorboard=False, csv=True, legacy_tags=True)
-    monitor.on_train_step({"wm_loss": 0.8, "grad_norm_router": 1.0}, step=1)
-    monitor.on_grouped_step(horizon={"h1": {"loss": 1.0, "traj_mse_m2": 2.0}}, step=1)
-    monitor.flush(step=1)
-    monitor.close()
-    tags = _read_tags(tmp_path / "metrics.csv")
-    for tag in ("train/wm_loss", "train/grad_norm_router", "horizon/h1/loss/mean",
-                "horizon/h1/traj_mse_m2/mean", "horizon/h1/loss/n_updates"):
-        assert tag in tags, f"legacy tag 缺失：{tag}"
-    assert "wm/loss" not in tags and "wm/od/loss/h1" not in tags
+def test_monitor_legacy_flag_retired_fail_fast(tmp_path: Path) -> None:
+    """R38-P3-G：``legacy_tags`` 口径退役 ⇒ fail-fast（旧读取/重放见 legacy reader）。"""
+    import pytest
+
+    with pytest.raises(ValueError, match="legacy_tags"):
+        TrainingMonitor(str(tmp_path), tensorboard=False, csv=True, legacy_tags=True)

@@ -13,7 +13,7 @@
 | `frames.py` | `FrameLookup`：按 `(episode_id, step)` **精确查表**的历史/未来窗口（stride 网格、缺帧 `hist_valid=0`、SE(2) 对齐到目标帧）（`frames.py:1-42`）。 |
 | `vector_env.py` | spawn 常驻 env 池（每进程一个 engine）、按 spec 复用键分组、按 spec 数回收、`MemAvailable` 下限检查、`env.prev_policy_action` 注入（`vector_env.py:1-45`）。 |
 | `eval_runner.py` | 独立进程、确定性冻结验证集评测；KPI/分组/Wilson CI/弱类 floor；内存纪律与 worker 回收（`eval_runner.py:1-45`）。 |
-| `monitoring.py` | tensorboard + CSV，hook 式；默认 Tier-1 瘦身（非白名单 tag 直接丢弃），`--monitor-legacy-tags` 回退全量（`monitoring.py:1-45`）。 |
+| `monitoring.py` | tensorboard + CSV，hook 式；唯一口径 = Tier-1 瘦身（非白名单 tag 直接丢弃）；旧 `legacy_tags` 口径已退役（R38-P3-G，迁 `tools/legacy/monitoring_reader.py`）（`monitoring.py:1-45`）。 |
 | `hard_mining.py` | worst-50% 行权重挖掘（冻结 primary 的加权 IL 误差 → 行权重 sidecar，可追溯 ckpt/数据集指纹）（`hard_mining.py:1-24`）。 |
 | `phase3_loop.py` | phase 3 全自动循环：采集 → 训练 → 评测 ×N + 基座/轮间护栏 + keep-best + 状态文件；OOM/显存守卫（`phase3_loop.py:1-45`）。 |
 | `run_paths.py` | 运行目录布局唯一来源（`runs/BTC<北京戳>_<name>`、stage 目录、日志/清单/配置快照命名）（`run_paths.py:1-17`）。 |
@@ -109,8 +109,8 @@
 ## 约定与坑
 
 - MetaDrive 每进程只能有一个 engine；任一时刻只跑一个 env-heavy 任务；评测前查 `MemAvailable`。
-- `wm_detach` 是 no-op（合成帧 detach 固定语义）；BC/phase3 前向 `rollout=True, world_model=False`，PPO collect/update 走 cheap path。
+- `wm_detach` 形参已撤（detach 语义固定；迁移期旧调用点由兼容层吞掉）；BC/phase3 前向 `rollout=True, world_model=False`（≡ `forward_mode="policy_wm_rollout"`），PPO collect/update 走 cheap path（≡ `policy_single_step`）。
 - `compute_gae(valid_mask=...)` 修复了 padding/bootstrap 行对 episode 尾部优势的污染（`test_adv_norm.py`）。
-- 监控默认只落 Tier-1 白名单 tag（OD/EGO 的 loss/KPI + router）；需要旧 tag 用 `--monitor-legacy-tags`。
+- 监控只落 Tier-1 白名单 tag（OD/EGO 的 loss/KPI + router）；旧全量 tag 口径（原 `--monitor-legacy-tags`）已退役，旧日志读取/重放用 `tools/legacy/monitoring_reader.py`。
 - phase3 `specific_only` 下上游 WM/ego_next/锚损失自动置 0；不要据此判断“损失未接线”。
 - 数据集 schema/标签顺序有硬校验（标签顺序必须等于 `config/model.yaml::moe.router.supervised_labels`）。

@@ -203,22 +203,17 @@ def _monitor_enabled(args: argparse.Namespace, config: Mapping[str, Any]) -> boo
     return any(bool(cfg.get(key)) for key in ("tensorboard", "csv", "scene_labels", "moe_routing"))
 
 
-def _make_monitor(log_dir: Path, enabled: bool, *, legacy_tags: bool = False) -> Optional[Any]:
-    """构造 :class:`pipeline.monitoring.TrainingMonitor`（``legacy_tags`` = 回退旧 tag 口径）。"""
+def _make_monitor(log_dir: Path, enabled: bool) -> Optional[Any]:
+    """构造 :class:`pipeline.monitoring.TrainingMonitor`（唯一口径 = Tier-1 瘦身 tag）。"""
     if not enabled:
         return None
     try:
         from pipeline.monitoring import TrainingMonitor
 
-        return TrainingMonitor(str(log_dir), legacy_tags=legacy_tags)
+        return TrainingMonitor(str(log_dir))
     except Exception as exc:  # noqa: BLE001
         print(f"[stages] monitoring 不可用（{type(exc).__name__}: {exc}）→ 跳过", flush=True)
         return None
-
-
-def _monitor_legacy_tags(args: argparse.Namespace) -> bool:
-    """``--monitor-legacy-tags``（默认关）：监控回退到旧 tag/旧写入行为。"""
-    return bool(getattr(args, "monitor_legacy_tags", False))
 
 
 def _wm_trainable(model: Any) -> bool:
@@ -2486,7 +2481,6 @@ def run_stage_a(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     monitor = _make_monitor(
         out_dir / "monitor",
         enabled=_monitor_enabled(args, config),
-        legacy_tags=_monitor_legacy_tags(args),
     )
     val_view = _build_val_view()
     rng = np.random.default_rng(int(args.seed))
@@ -3148,7 +3142,6 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     monitor = _make_monitor(
         out_dir / "monitor",
         enabled=_monitor_enabled(args, config),
-        legacy_tags=_monitor_legacy_tags(args),
     )
     if monitor is not None:
         monitor.on_train_step(
@@ -3187,7 +3180,8 @@ def run_stage_b(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
         - 留出侧：``val/<phase>_*`` 标量 + ``val/horizon|val/slice|val/label/*``；
         - 喂入 tag 均为旧命名，由 ``pipeline.monitoring`` 按 Tier-1 清单重命名/过滤
           （``stageB/<phase>/loss_terms`` / ``ego/*`` / ``router/*``；见 docs/metrics.md）；
-          ``--monitor-legacy-tags`` 时全量落盘；
+          旧 ``--monitor-legacy-tags`` 全量口径已退役（R38-P3-G；旧日志读取见
+          ``tools/legacy/monitoring_reader.py``）；
         - 阶段末只补记逐 epoch 未覆盖的标量（MoE 负载汇总/元数据），避免同 (step, tag) 重复；
         - resume：``start_epoch`` = 本相位已完成的本地 epoch 数（0 基）→ ``pretrain_bc`` 从该处续跑；
           ``optimizer_state``/``rng_state`` 只在 ckpt 与当前相位同源时传入（跨相位 → 全新优化器，
@@ -4769,7 +4763,6 @@ def run_stage_b_phase3(args: argparse.Namespace, config: Mapping[str, Any]) -> D
     monitor = _make_monitor(
         out_dir / "monitor",
         enabled=_monitor_enabled(args, config),
-        legacy_tags=_monitor_legacy_tags(args),
     )
     if monitor is not None:
         monitor.on_train_step(
@@ -5405,7 +5398,6 @@ def run_stage_c(args: argparse.Namespace, config: Mapping[str, Any]) -> Dict[str
     monitor = _make_monitor(
         out_dir / "monitor",
         enabled=_monitor_enabled(args, config),
-        legacy_tags=_monitor_legacy_tags(args),
     )
     try:
         reward_adapter, reward_source = build_reward_adapter(
@@ -5879,10 +5871,6 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--monitor", action=argparse.BooleanOptionalAction, default=None,
                         help="使用 pipeline.monitoring（tensorboard/CSV）；默认读 config/train.yaml::monitoring")
-    parser.add_argument("--monitor-legacy-tags", action="store_true",
-                        help="监控回退：按旧 tag 名/旧写入行为记录全部指标（默认关）。"
-                             "默认只记 Tier-1（OD/EGO loss+KPI、router loss+KPI），其余丢弃；"
-                             "清单见 docs/metrics.md")
     args = parser.parse_args(argv)
     if args.phase3 is None and args.stage is None:
         parser.error("必须给 --stage {A,B,C} 或 --phase3 <dagger_dir>（stage B phase 3 迭代恢复训练）")

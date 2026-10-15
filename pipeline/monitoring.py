@@ -11,8 +11,9 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
   ``slice/*``、``label/*``、``*/n_updates``、计数/权重和、``cv_ade``/``cv_fde`` 独立 tag、
   ``traj_mse_m2`` 曲线、``expert_util_*``/``expert_mix_util_*``、``grad_norm_*``、
   计时/显存、动作误差 median/p95、``kpi/*`` / ``moe/*`` / ``scene_label/*`` 等；
-- ``legacy_tags=True``（CLI ``--monitor-legacy-tags``，默认关）= **旧行为原样落盘**
-  （全部 tag + 旧多线分组），供需要时回退/对比；
+- **旧 ``legacy_tags`` 口径已退役**（R38-P3-G，`LEGACY_REPRO`）：原样落盘 + ``_group_of_tag``
+  旧多线族整体迁 ``tools/legacy/monitoring_reader.py``（旧日志读取/重放专用）；
+  ``TrainingMonitor(legacy_tags=...)`` 写入即 ``ValueError`` fail-fast（正式训练只写新 schema）；
 - tensorboard 写入只服务成图：多线族在主 run 内逐 sub 写 ``add_scalar("<main>/<sub>")``
   （``val/od/ade_m`` / ``val/od/fde_m`` 各 h1..h6+cv_h1..cv_h6、``ego/traj/mae_m`` 与
   ``val/ego/traj/mae_m`` h1..h6、``loss/planner/<phase>`` total/traj/action/router 及其
@@ -22,8 +23,8 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
 - CSV 长表 ``step,tag,value`` 保留**全部**瘦身后 tag（供 ``tools/il_report.py`` /
   ``tools/plot_curves.py`` 读取）。
 
-职责（legacy 模式下全部生效）
------------------------------
+职责（Tier-1 白名单 tag 全部生效；非白名单在落盘前丢弃）
+--------------------------------------------------------
 1. **KPI 序列**：``on_episode`` / ``on_train_step`` 把 episode KPI 与训练指标写成
    ``kpi/...`` / ``train/...`` 标量（tensorboard + ``metrics.csv``）；
 2. **场景 label 统计**：``on_scene_step`` 逐 step 接收 ``env.scenario.labels.compute_step_labels``
@@ -64,8 +65,7 @@ Tier-1 瘦身（2026-09-27，默认口径；完整清单见 ``docs/metrics.md``�
 
 用法
 ----
-    monitor = TrainingMonitor("runs/train/stageA/monitor")            # Tier-1 瘦身口径
-    monitor = TrainingMonitor("runs/train/stageA/monitor", legacy_tags=True)  # 回退旧口径
+    monitor = TrainingMonitor("runs/train/stageA/monitor")            # Tier-1 瘦身口径（唯一口径）
     ...
     monitor.on_scene_step(compute_step_labels(env, spec))     # 每步（可降频）
     # 口径：router_weights = router_logits 的 softmax 全专家分布（监督面；Σw∈[1,E]）。
@@ -150,11 +150,11 @@ def _flatten_scalars(values: Mapping[str, Any], prefix: str = "") -> Dict[str, A
 
 
 # --------------------------------------------------------------------------- #
-# Tier-1 瘦身：canonical tag 重命名 + tensorboard 多线族（2026-09-27）
+# Tier-1 瘦身：canonical tag 重命名 + tensorboard 多线族（2026-09-27；唯一口径）
 # --------------------------------------------------------------------------- #
-# 默认（``legacy_tags=False``）：训练侧照旧喂入 canonical tag，落盘前按 :func:`_slim_tag`
-# 重命名；**未列入**的 tag 直接丢弃（TB/CSV 都不写）。legacy 模式 = 旧行为（原样落盘 +
-# ``_group_of_tag`` 旧族多线图），仅由 ``TrainingMonitor(legacy_tags=True)`` 启用。
+# 训练侧照旧喂入 canonical tag，落盘前按 :func:`_slim_tag` 重命名；**未列入**的 tag 直接丢弃
+# （TB/CSV 都不写）。旧 legacy 模式（原样落盘 + ``_group_of_tag`` 旧族多线图）已迁
+# ``tools/legacy/monitoring_reader.py``（R38-P3-G）。
 #
 # 瘦身后的 canonical tag 形如 ``<main>/<sub>``（多线族）或独立标量名；tensorboard 只写
 # 两类：多线族逐 sub ``add_scalar("<main>/<sub>")``（同一事件文件、TB 自动并图）+ 标量
@@ -304,86 +304,30 @@ def _slim_group_of_tag(tag: str) -> Optional[Tuple[str, str]]:
 
 
 # --------------------------------------------------------------------------- #
-# legacy 模式：旧 canonical tag → 旧 (main_tag, sub_tag) 分组（2026-09-27 前的行为）
+# legacy 模式已退役（R38-P3-G，`LEGACY_REPRO`）
 # --------------------------------------------------------------------------- #
-_LEGACY_HORIZON_FAMILIES: Dict[str, str] = {
-    "loss": "horizon_loss",
-    "ade": "horizon_ade",
-    "cv_ade": "horizon_cv_ade",
-    "ego_next_loss": "horizon_ego_next",
-    "traj_mse_m2": "horizon_traj_mse_m2",
-    "traj_mae_m": "horizon_traj_mae_m",
-}
-_LEGACY_STAGE_A_WM_TERMS = ("wm_loss", "wm_loss_od", "wm_loss_ego_next", "presence_loss", "entry_loss")
-_LEGACY_STAGE_A_HEALTH = ("presence_auc", "entry_auc")
-_LEGACY_BC_TERM_SUBS = {"loss": "loss", "traj_loss": "traj", "action_loss": "action", "router_loss": "router"}
-
-_LEGACY_HORIZON_GROUP_RE = re.compile(r"^horizon/(?P<group>h\d+)/(?P<metric>[^/]+)/mean$")
-_LEGACY_SLICE_GROUP_RE = re.compile(r"^slice/(?P<group>[^/]+)/action_err/mean$")
-_LEGACY_LABEL_GROUP_RE = re.compile(r"^label/(?P<group>[^/]+)/action_err/mean$")
-_LEGACY_EXPERT_MIX_RE = re.compile(
-    r"^(?P<phase>[A-Za-z][A-Za-z0-9_]*)_bc_router_expert_mix_weight_(?P<index>\d+)$"
-)
-_LEGACY_BC_TERM_RE = re.compile(
-    r"^(?P<phase>[A-Za-z][A-Za-z0-9_]*)_bc_(?P<term>loss|traj_loss|action_loss|router_loss)$"
-)
-_LEGACY_GRAD_NORM_RE = re.compile(r"^grad_norm_(?P<name>.+)$")
-
-
-def _group_of_tag(tag: str) -> Optional[Tuple[str, str]]:
-    """legacy：单 tag → 旧 ``(main_tag, sub_tag)``；不属于任何分组族 → None。"""
-    prefix = ""
-    name = tag
-    if tag.startswith(f"{_VAL_PREFIX}/"):
-        prefix, name = f"{_VAL_PREFIX}_", tag[len(_VAL_PREFIX) + 1:]
-    elif tag.startswith(f"{_TRAIN_PREFIX}/"):
-        name = tag[len(_TRAIN_PREFIX) + 1:]
-
-    match = _LEGACY_HORIZON_GROUP_RE.match(name)
-    if match:
-        family = _LEGACY_HORIZON_FAMILIES.get(match.group("metric"))
-        return None if family is None else (f"{prefix}{family}", match.group("group"))
-    match = _LEGACY_SLICE_GROUP_RE.match(name)
-    if match:
-        return f"{prefix}slice_action_err", match.group("group")
-    match = _LEGACY_LABEL_GROUP_RE.match(name)
-    if match:
-        return f"{prefix}label_action_err", match.group("group")
-    match = _LEGACY_EXPERT_MIX_RE.match(name)
-    if match:
-        return f"{prefix}expert_mix_weight_{match.group('phase')}", f"e{match.group('index')}"
-    match = _LEGACY_BC_TERM_RE.match(name)
-    if match:
-        return f"{prefix}bc_terms_{match.group('phase')}", _LEGACY_BC_TERM_SUBS[match.group("term")]
-    if not prefix:  # Stage A 规则只在 train/ 前缀下生效（val/ 无同族）
-        if name in _LEGACY_STAGE_A_WM_TERMS:
-            return "wm_terms", name
-        if name in _LEGACY_STAGE_A_HEALTH:
-            return "health", name
-        match = _LEGACY_GRAD_NORM_RE.match(name)
-        if match:
-            return "grad_norm", match.group("name")
-    return None
+# 旧 `legacy_tags` 口径（原样落盘 + `_group_of_tag` 旧多线族）已迁
+# `tools/legacy/monitoring_reader.py`（旧日志读取/重放专用；正式训练只写新 schema）。
+# `TrainingMonitor(legacy_tags=...)` 写入即 fail-fast（见 __init__）。
 
 
 def _grouped_scalars(
     scalars: Mapping[str, Any],
     *,
-    group_fn: Any = _slim_group_of_tag,
     min_subs: int = 2,
 ) -> Dict[str, Dict[str, float]]:
     """扁平 ``tag → value`` → ``{main_tag: {sub: value}}``（仅保留 ≥``min_subs`` 个 sub 的族）。
 
     供 :meth:`TrainingMonitor.flush` 逐 sub 写 ``add_scalar("<main>/<sub>")``（同一事件文件，
-    TB 自动并成一张多线图）；瘦身模式默认按 :func:`_slim_group_of_tag` 归类（``val/`` 命名
-    空间同族各一图），legacy 模式传 :func:`_group_of_tag`。
+    TB 自动并成一张多线图）；按 :func:`_slim_group_of_tag` 归类（``val/`` 命名空间同族各一图）。
+    旧口径（``_group_of_tag`` legacy 分组）已迁 ``tools/legacy/monitoring_reader.py``。
     """
     groups: Dict[str, Dict[str, float]] = {}
     for raw_tag, raw_value in scalars.items():
         number = _finite(raw_value)
         if number is None:
             continue
-        identified = group_fn(str(raw_tag))
+        identified = _slim_group_of_tag(str(raw_tag))
         if identified is None:
             continue
         main_tag, sub_tag = identified
@@ -600,11 +544,12 @@ class GroupedMetricStatistics:
 class TrainingMonitor:
     """tensorboard + CSV 监控器（hook 式；见模块 docstring）。
 
-    命名（**瘦身默认**）：训练侧 ``on_train_step`` → ``train/<name>``、留出 ``on_val_step``
+    命名（**瘦身唯一口径**）：训练侧 ``on_train_step`` → ``train/<name>``、留出 ``on_val_step``
     → ``val/<name>``、分组 ``on_grouped_step`` → ``horizon|label|slice/...``（**喂入侧命名
     不变**），落盘前统一按 :func:`_slim_tag` 重命名为 Tier-1 tag（``wm/...`` / ``val/...`` /
-    ``ego/...`` / ``router/...`` / ``planner/...``）；未列入清单的 tag 丢弃。``legacy_tags=True``
-    = 回退旧口径（全部 tag 原样落盘 + 旧多线分组）。
+    ``ego/...`` / ``router/...`` / ``planner/...``）；未列入清单的 tag 丢弃。旧 ``legacy_tags``
+    回退口径已退役（R38-P3-G）——传入即 ``ValueError``，旧日志读取/重放见
+    ``tools/legacy/monitoring_reader.py``。
     """
 
     def __init__(
@@ -615,11 +560,17 @@ class TrainingMonitor:
         csv: bool = True,
         token_threshold: float = 0.5,
         scene_label_names: Optional[Sequence[str]] = None,
-        legacy_tags: bool = False,
+        legacy_tags: Optional[bool] = None,
     ):
+        if legacy_tags is not None:
+            raise ValueError(
+                "TrainingMonitor(legacy_tags=...) 已退役（R38-P3-G，LEGACY_REPRO）：正式训练只写"
+                "新 schema（Tier-1 白名单 tag）。旧 tag 原样落盘/旧多线族重放请用"
+                " tools/legacy/monitoring_reader.py（legacy_group_of_tag / read_metrics_csv /"
+                " write_legacy_grouped_tensorboard）；CLI --monitor-legacy-tags 同步退役。"
+            )
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.legacy_tags = bool(legacy_tags)
         self.scene_labels = SceneLabelStatistics(scene_label_names)
         self.moe = MoERoutingStatistics(token_threshold=token_threshold)
         # 分组窗口（per-horizon / per-label / 分切片）；瘦身模式下落盘前按 _slim_tag 过滤
@@ -664,23 +615,20 @@ class TrainingMonitor:
     def log_scalar(self, tag: str, value: Any, step: Optional[int] = None) -> None:
         """写单个标量并暂存到 flush 缓存（NaN/Inf/非数值静默跳过）。
 
-        瘦身模式（默认）：非 Tier-1 tag 直接丢弃；Tier-1 tag 重命名后进 CSV + flush 缓存
-        （TB 由 ``flush`` 统一写多线族/标量）。legacy 模式：原样落 CSV + 立即 ``add_scalar``。
+        非 Tier-1 tag 直接丢弃；Tier-1 tag 重命名后进 CSV + flush 缓存
+        （TB 由 ``flush`` 统一写多线族/标量）。
         """
         number = _finite(value)
         if number is None:
             return
-        key = str(tag)
-        if not self.legacy_tags:
-            key = _slim_tag(key)
-            if key is None:
-                return  # 非保留清单：TB/CSV 都不写（清单见 docs/metrics.md）
+        key = _slim_tag(str(tag))
+        if key is None:
+            return  # 非保留清单：TB/CSV 都不写（清单见 docs/metrics.md）
         self._pending_group_tags[key] = (number, step)
         if self._csv_writer is not None:
             self._csv_writer.writerow(["" if step is None else int(step), key, repr(number)])
             self._csv_handle.flush()
-        if self._writer is not None and self.legacy_tags:
-            self._writer.add_scalar(key, number, global_step=0 if step is None else int(step))
+        # TB 写入统一延迟到 flush（多线族逐 sub add_scalar；不再立即 add_scalar）
 
     def log_scalars(self, values: Mapping[str, Any], step: Optional[int] = None) -> None:
         """批量写标量（嵌套 Mapping 递归展平为 ``a/b/c`` 标签）。"""
@@ -690,9 +638,8 @@ class TrainingMonitor:
     def flush(self, step: Optional[int] = None) -> None:
         """把场景标签 / MoE / 分组（训练 + 留出）窗口统计写入后端，并重置窗口。
 
-        末尾按模式成图：瘦身模式对族内每个 sub 写 ``add_scalar("<main>/<sub>")``（同事件文件，
-        TB 自动并图）+ 标量 ``add_scalar``；legacy 模式写旧分组多线图。CSV 长表在
-        ``log_scalar`` 时已落盘。
+        末尾成图：对多线族逐 sub 写 ``add_scalar("<main>/<sub>")``（同一事件文件，TB 自动并图）
+        + 标量 ``add_scalar``。CSV 长表在 ``log_scalar`` 时已落盘。
         """
         self.log_scalars(self.scene_labels.flush(), step=step)
         self.log_scalars(self.moe.flush(), step=step)
@@ -702,17 +649,14 @@ class TrainingMonitor:
         self.log_scalars(self.val_horizon.flush(), step=step)
         self.log_scalars(self.val_labels.flush(), step=step)
         self.log_scalars(self.val_slices.flush(), step=step)
-        if self.legacy_tags:
-            self._write_legacy_grouped_tensorboard(step)
-        else:
-            self._write_slim_tensorboard(step)
+        self._write_slim_tensorboard(step)
         if self._writer is not None:
             self._writer.flush()
 
     def _write_slim_tensorboard(self, step: Optional[int]) -> None:
-        """瘦身模式：多线族逐 sub 写 ``add_scalar("<main>/<sub>")``（同一事件文件，TB 自动并成
-        一张多线图；不再产生 torch ``add_scalars`` 的 ``<main>_<sub>/`` sub-run 目录），
-        其余（标量）写单线 ``add_scalar``。
+        """多线族逐 sub 写 ``add_scalar("<main>/<sub>")``（同一事件文件，TB 自动并成一张多线图；
+        不再产生 torch ``add_scalars`` 的 ``<main>_<sub>/`` sub-run 目录），其余（标量）写单线
+        ``add_scalar``。
 
         多线族 tag 不写 canonical 单点（族内 <2 个 sub 时整族不写，避免单点噪声；
         数值仍在 CSV）；无 tensorboard writer（或缓存为空）时只清缓存。
@@ -732,16 +676,6 @@ class TrainingMonitor:
             self._writer.add_scalar(
                 tag, number, global_step=global_step if tag_step is None else int(tag_step)
             )
-
-    def _write_legacy_grouped_tensorboard(self, step: Optional[int]) -> None:
-        """legacy 模式：把自上次 flush 以来记录的标量按旧族写 ``add_scalars`` 多线图（仅 TB）。"""
-        pending, self._pending_group_tags = self._pending_group_tags, {}
-        if self._writer is None or not pending:
-            return
-        global_step = 0 if step is None else int(step)
-        values = {tag: number for tag, (number, _) in pending.items()}
-        for main_tag, subs in _grouped_scalars(values, group_fn=_group_of_tag).items():
-            self._writer.add_scalars(main_tag, subs, global_step=global_step)
 
     # ------------------------------------------------------------------ hooks
     def on_scene_step(self, labels: Mapping[str, Any]) -> None:

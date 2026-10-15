@@ -4,7 +4,8 @@
 1. ``env.obs.static`` 几何口径（走廊 / 净距 / 相对车道 one-hot / range / 身后 / 回退）；
 2. ``others`` 通道 static 段落位与 road_class 平移；
 3. schema 版本/hash/manifest 记录（当前 v6）；
-4. net 旧数据回退（28 维 others → 33 维重排 + 一次性告警）与新特征消费（梯度/形状/无 NaN）。
+4. net 旧数据退役（28 维 others → **fail-fast + 显式适配器**，R38-P3-G）与新特征消费
+   （梯度/形状/无 NaN）。
 
 纯 NumPy + 假 env；用 ``FakeBuilding`` 顶替 ``env.obs.static.BaseBuilding`` 的 isinstance 检查，
 不建 MetaDrive env（真实几何在 mini 冒烟里验证）。
@@ -237,48 +238,64 @@ def _legacy_others_from_v4(tensor: torch.Tensor) -> torch.Tensor:
     return torch.cat([tensor[..., :16], tensor[..., 21:]], dim=-1)
 
 
-def test_mem_from_obs_remaps_legacy_others_with_one_time_warning():
-    from net import mem as mem_module
-    from net.encoders import DEFAULT_OTHERS_DIM, OTHERS_STATIC_DIM
+def test_mem_from_obs_rejects_legacy_others_with_migration_hint():
+    """R38-P3-G：旧 28 维布局**不再静默重排** ⇒ fail-fast + 迁移说明（禁静默错读）。"""
+    from net.encoders import DEFAULT_OTHERS_DIM
     from net.mem import mem_from_obs
     from net.param_probe import make_dummy_obs
 
-    mem_module._FALLBACK_WARNED.discard("others_legacy_layout")
     obs = make_dummy_obs(batch=2)
     assert int(obs["others_hist"].shape[-1]) == DEFAULT_OTHERS_DIM == 33
     legacy_hist = _legacy_others_from_v4(obs["others_hist"])
     legacy_now = _legacy_others_from_v4(obs["others"])
     assert int(legacy_hist.shape[-1]) == 28
 
-    with pytest.warns(RuntimeWarning, match="旧布局"):
-        mem = mem_from_obs(
-            {**obs, "others_hist": legacy_hist, "others": legacy_now},
-            others_dim=DEFAULT_OTHERS_DIM,
-            history_frames=6,
-        )
-    assert int(mem.others.shape[-1]) == 33
-    # static 段补 0；其余两段逐位保留
-    assert torch.equal(mem.others[..., 16:16 + OTHERS_STATIC_DIM], torch.zeros(2, 6, OTHERS_STATIC_DIM))
-    assert torch.equal(mem.others[..., :16], obs["others_hist"].squeeze(2)[..., :16])
-    assert torch.equal(mem.others[..., 16 + OTHERS_STATIC_DIM:], obs["others_hist"].squeeze(2)[..., 21:])
-
-    # 第二次调用不再告警（一次性；key 已由首次调用写入）
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(ValueError, match="旧 others 布局"):
         mem_from_obs(
             {**obs, "others_hist": legacy_hist, "others": legacy_now},
             others_dim=DEFAULT_OTHERS_DIM,
             history_frames=6,
         )
-    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    # 迁移说明必须指路显式适配器
+    with pytest.raises(ValueError, match="tools/legacy/others_layout"):
+        mem_from_obs(
+            {**obs, "others_hist": legacy_hist, "others": legacy_now},
+            others_dim=DEFAULT_OTHERS_DIM,
+            history_frames=6,
+        )
+
+
+def test_legacy_others_adapter_is_bitwise_and_explicit():
+    """显式适配器（``tools/legacy/others_layout``）= 旧 ``_remap_legacy_others`` 逐位语义。"""
+    from net.encoders import DEFAULT_OTHERS_DIM
+    from net.mem import mem_from_obs
+    from net.param_probe import make_dummy_obs
+    from tools.legacy.others_layout import OTHERS_LEGACY_DIM, remap_legacy_others_28_to_33
+
+    obs = make_dummy_obs(batch=2)
+    legacy_hist = _legacy_others_from_v4(obs["others_hist"])
+    legacy_now = _legacy_others_from_v4(obs["others"])
+    assert int(legacy_hist.shape[-1]) == OTHERS_LEGACY_DIM == 28
+
+    converted = {**obs}
+    converted["others_hist"] = remap_legacy_others_28_to_33(legacy_hist)
+    converted["others"] = remap_legacy_others_28_to_33(legacy_now)
+    assert int(converted["others_hist"].shape[-1]) == DEFAULT_OTHERS_DIM
+    mem = mem_from_obs(converted, others_dim=DEFAULT_OTHERS_DIM, history_frames=6)
+    assert int(mem.others.shape[-1]) == 33
+    # static 段补 0（显式承担的语义）；其余两段逐位保留
+    assert torch.equal(mem.others[..., 16:21], torch.zeros(2, 6, 5))
+    assert torch.equal(mem.others[..., :16], obs["others_hist"].squeeze(2)[..., :16])
+    assert torch.equal(mem.others[..., 21:], obs["others_hist"].squeeze(2)[..., 21:])
+    # 已是 v4 布局 ⇒ 原样返回（恒等，无拷贝语义要求）
+    v4 = converted["others_hist"]
+    assert remap_legacy_others_28_to_33(v4) is v4
 
 
 def test_mem_from_obs_new_layout_has_no_warning_and_rejects_bad_dim():
-    from net import mem as mem_module
     from net.mem import mem_from_obs
     from net.param_probe import make_dummy_obs
 
-    mem_module._FALLBACK_WARNED.discard("others_legacy_layout")
     obs = make_dummy_obs(batch=2)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

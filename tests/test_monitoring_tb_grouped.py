@@ -7,7 +7,8 @@ lane B 口径（``docs/metrics.md``）：
 - router 只留**硬标签** CE/acc/acc_majority（软目标 KL/温度/专家混合权重全删）；
 - **不再用 torch ``add_scalars``**（会建 ``<main>_<sub>/`` sub-run 目录）：多线族在主 run 内
   逐 sub 写 ``add_scalar("<main>/<sub>")``；标量写单线；同族 <2 个 sub 不写；
-- ``legacy_tags=True`` 回退旧口径（原样落盘 + 旧多线分组）。
+- 旧 ``legacy_tags`` 回退口径已退役（R38-P3-G）：写入即 fail-fast；旧 tag 分组/重放见
+  ``tools/legacy/monitoring_reader.py``。
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ import pytest
 
 from pipeline.monitoring import (
     TrainingMonitor,
-    _group_of_tag,
     _grouped_scalars,
     _slim_group_of_tag,
     _slim_tag,
@@ -152,9 +152,10 @@ def test_slim_grouped_scalars_families_and_min_two_rule() -> None:
     groups = _grouped_scalars({"val/od/ade_m/h1": 1.0, "val/od/ade_m/h2": 2.0})
     assert groups == {"val/od/ade_m": {"h1": 1.0, "h2": 2.0}}
 
-    # legacy 规则仍可用（回退路径）
-    legacy = _grouped_scalars({"horizon/h1/loss/mean": 1.0, "horizon/h2/loss/mean": 2.0},
-                              group_fn=_group_of_tag)
+    # 旧口径（legacy 规则）已迁 tools/legacy/monitoring_reader（R38-P3-G）
+    from tools.legacy.monitoring_reader import legacy_grouped_scalars
+
+    legacy = legacy_grouped_scalars({"horizon/h1/loss/mean": 1.0, "horizon/h2/loss/mean": 2.0})
     assert legacy == {"horizon_loss": {"h1": 1.0, "h2": 2.0}}
 
 
@@ -288,26 +289,60 @@ def test_flush_writes_slim_csv_and_same_run_multiline(tmp_path: Path) -> None:
     monitor.close()
 
 
-def test_legacy_tags_flag_restores_old_surface(tmp_path: Path) -> None:
-    """``legacy_tags=True``：旧 tag 原样落 CSV + 旧族 add_scalars（回退路径）。"""
-    monitor = TrainingMonitor(str(tmp_path), tensorboard=False, csv=True, legacy_tags=True)
-    fake = _RecordingWriter()
-    monitor._writer = fake
-    monitor.on_train_step({"wm_loss": 0.8, "wm_loss_od": 0.5, "grad_norm_router": 2.0}, step=1)
-    monitor.on_grouped_step(
-        horizon={f"h{k}": {"loss": float(k)} for k in range(1, 7)},
-        slices={"brake": {"action_err": 0.2}, "turn": {"action_err": 0.3}},
-        step=1,
+def test_legacy_tags_kwarg_fails_fast_with_migration_pointer(tmp_path: Path) -> None:
+    """R38-P3-G：``legacy_tags`` 口径退役 ⇒ 写入即 fail-fast（指路 legacy reader）。"""
+    for value in (True, False):
+        with pytest.raises(ValueError, match="legacy_tags"):
+            TrainingMonitor(str(tmp_path), tensorboard=False, csv=True, legacy_tags=value)
+    with pytest.raises(ValueError, match="tools/legacy/monitoring_reader"):
+        TrainingMonitor(str(tmp_path), tensorboard=False, csv=True, legacy_tags=True)
+
+
+def test_legacy_reader_reproduces_old_surface(tmp_path: Path) -> None:
+    """旧口径替代实现（``tools/legacy/monitoring_reader``）：旧 tag 原样保留 + 旧族重放。"""
+    from tools.legacy.monitoring_reader import (
+        legacy_group_of_tag,
+        legacy_grouped_scalars,
+        read_metrics_csv,
+        write_legacy_grouped_tensorboard,
     )
-    monitor.flush(step=1)
-    grouped = {main: subs for main, subs, _ in fake.calls}
-    assert grouped["horizon_loss"] == {f"h{k}": float(k) for k in range(1, 7)}
+
+    scalars = {
+        "train/wm_loss": 0.8,
+        "train/wm_loss_od": 0.5,
+        "train/grad_norm_router": 2.0,
+        "horizon/h1/loss/mean": 1.0,
+        "horizon/h2/loss/mean": 2.0,
+        "slice/brake/action_err/mean": 0.2,
+        "slice/turn/action_err/mean": 0.3,
+    }
+    # 旧分组规则逐条还原
+    assert legacy_group_of_tag("train/wm_loss") == ("wm_terms", "wm_loss")
+    assert legacy_group_of_tag("train/grad_norm_router") == ("grad_norm", "router")
+    assert legacy_group_of_tag("horizon/h1/loss/mean") == ("horizon_loss", "h1")
+    assert legacy_group_of_tag("val/horizon/h1/loss/mean") == ("val_horizon_loss", "h1")
+    assert legacy_group_of_tag("train/unknown_x") is None
+    grouped = legacy_grouped_scalars(scalars)
+    assert grouped["wm_terms"] == {"wm_loss": 0.8, "wm_loss_od": 0.5}
+    assert grouped["horizon_loss"] == {"h1": 1.0, "h2": 2.0}
     assert grouped["slice_action_err"] == {"brake": 0.2, "turn": 0.3}
-    assert {tag for tag, _, _ in fake.scalars} >= {"train/wm_loss", "train/grad_norm_router"}
-    tags = _read_csv_tags(tmp_path / "metrics.csv")
-    assert "train/wm_loss" in tags and "horizon/h1/loss/mean" in tags
-    assert "horizon/h1/loss/n_updates" in tags  # legacy 全量口径
-    monitor.close()
+    assert "grad_norm" not in grouped  # 单 sub（<2）不成图
+
+    # 旧 TB 多线族重放（add_scalars）
+    fake = _RecordingWriter()
+    n = write_legacy_grouped_tensorboard(fake, scalars, step=3)
+    assert n == 3
+    assert ("horizon_loss", {"h1": 1.0, "h2": 2.0}, 3) in fake.calls
+
+    # 旧 CSV 长表读取（原样 tag，不重命名）
+    csv_path = tmp_path / "metrics.csv"
+    csv_path.write_text(
+        "step,tag,value\n1,train/wm_loss,0.8\n1,horizon/h1/loss/mean,1.0\n2,horizon/h1/loss/mean,nan\n",
+        encoding="utf-8",
+    )
+    series = read_metrics_csv(csv_path)
+    assert series["train/wm_loss"] == [(1, 0.8)]
+    assert series["horizon/h1/loss/mean"] == [(1, 1.0)]  # NaN 行跳过
 
 
 # ---------------------------------------------------------------- 事件读回（真实 writer）
