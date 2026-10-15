@@ -1,7 +1,7 @@
 # E-β″（v6 基座）奖励审计产物入库（tracked；P4 前置-C）
 
 > **用途**：P4 奖励口径（剖面 C + rc 各档终局值）的 E-β″ 定稿产物。**不覆盖** P2/E-β′ 产物
-> （`docs/reward_audit/` 根目录）；上游规格 `docs/v6_program_prereg.md` §7.1（六条）、
+> （`docs/reward_audit/` 根目录）；上游规格 `docs/v6_reports/v6_program_prereg.md` §7.1（六条）、
 > `docs/rl_reward_v5.md` §7。
 
 ## 产物清单（逐位一致：入库副本 = 原始 `runs/reward_audit_ebeta2/` 文件）
@@ -36,11 +36,12 @@
 - **Gate4 修正（替代上条）**：审计 `--max-steps 1000` 物理步 = 100 s = **200 策略步**；训练
   截断**对齐 200 策略步**（=100 s；旧 600 = 300 s = 3×，−46 被 dense（+0.168/步、不衰减）
   稀释 → 超时正收益 ≈ +54）。**终局值不变**；实现/复核（首臂后复核 + 非 max_step 两向
-  |Δ|≤5）见 `docs/v6_program_prereg.md` §7.1/§7.4。
+  |Δ|≤5）见 `docs/v6_reports/v6_program_prereg.md` §7.1/§7.4（2026-10-09 前为 `docs/v6_program_prereg.md`）。
 - 其余三类用 E-β″ 定稿值（rc=1 +29/−22/−14；rc=3 +27/−23/−15；rc=10 +20/−28/−18；
   rc=30 +0/−41/−26；两向非 max_step 类 |Δ|≤5）。
-- P4 臂配置组装见 `config/arms/`（8 臂；逐臂单变量/预期见其 README；dry-run 单测
-  `tests/test_p4_arm_configs.py`）。
+- P4 臂配置（8 臂）已于 2026-10-09 随 V8 清理归档至 `docs/archive/config_arms_legacy/`
+  （逐臂单变量/预期见该目录 README）；dry-run 单测快照 `test_p4_arm_configs.py.disabled`（同目录），
+  现行臂守卫见 `tests/test_arm_configs.py`。
 
 ## 溯源
 

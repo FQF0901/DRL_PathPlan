@@ -5,9 +5,9 @@
 
 ## 0. 实况概览（2026-10-09 磁盘核对）
 
-- 顶层报告/日志 **26** 个：§1（/tmp 入仓报告 24）+ §4（时间线日志 1）+ §7（KEEP 复核入仓 `v7_struct_retrain_v5.md` 1）；另本 `README.md` 与 `MIGRATION_NOTE.md`。
+- 顶层报告/日志 **27** 个：§1（/tmp 入仓报告 24）+ §4（时间线日志 1）+ §7（KEEP 复核入仓 `v7_struct_retrain_v5.md` 1）+ 主报告 `v7_program_report.md`（1；2026-10-15 自 `docs/` 根迁入，`sha256 = ecebfc84d90c2c6a9d5d99aedf62e059fe3e97860887c415489d07dcb1f77bcf`，迁入副本实测）；另本 `README.md` 与 `MIGRATION_NOTE.md`。
 - `figures/` **4** 张 PNG（§2）；`specs/` **8** 个 JSON（§3 顶层 3 + §7 `p0_variants/` 5）；`evidence/` **2** 个 JSON（§7）；`cleanup/` **13** 个文件（清单见文末）。
-- 全部 sha256 已于 2026-10-09 逐文件复验，与下文各表一致。
+- 全部 sha256 已于 2026-10-09 逐文件复验，与下文各表一致（`v7_program_report.md` 为 2026-10-15 迁入时实测）。
 - **状态：冻结**。本目录正文为 v7 程序冻结证据档，只读（不修改）；本 README 为索引。
 
 ## 1. 报告（24 项，均自 /tmp 入仓）
@@ -40,7 +40,7 @@
 | 24 | `/tmp/opencode/v7_p1b_chain.md` | `docs/v7_reports/v7_p1b_chain.md` | `b487f583c2efba6777a58e5508cd230b0e304a525f81bdfb37d6bfea36d4d8d3` | P1-B 链报告：obs v4 重采 → Stage A/B 重训 → tollgate 回归（aborted:B） |
 
 > `v7_seed11_attribution.md`：原清单标注"若在"，实际未产出（不存在），无入仓。
-> 原 `/tmp/opencode/` 的其余 v7 报告（如 `v7_p0_gap_tables.md`、`v7_p1b_report.md`、`v7_struct_retrain_v5.md` 等）未在保留清单内；其中被主报告引用者见文末"未决项"。
+> 原 `/tmp/opencode/` 的其余 v7 报告（如 `v7_p0_gap_tables.md`、`v7_p1b_report.md`、`v7_struct_retrain_v5.md` 等）未在保留清单内；其中被主报告引用者见文末"未决项"（`v7_struct_retrain_v5.md` 已后经 §6/§7 复核入仓）。
 
 ## 2. 图（`figures/`，4 张，来自 Q2 tollgate 双面板）
 

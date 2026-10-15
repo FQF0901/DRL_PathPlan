@@ -41,12 +41,12 @@
 ## 校验与报告（`validator.py`）
 - 每条 spec 经 `build_env` 实例化 + 轻量循迹控制器 rollout（`:129-169, 377-469`）；检查项：reset/ego 存在、导航 2 checkpoint + ref lanes、限速已写入、blocks/geometry 对账、事件被安装且触发、生成重叠（模块 docstring `:1-34`）。
 - 报告结构：`meta / summary / n_failed / failure_categories / warning_categories / coverage / resample_suggestions / warning_notes / results`（`:655-673`，`warning_notes` 见 `:671`）；`summary` 含 `n_specs/passed/failed/pass_rate`（`:608-616`），`n_failed` 在顶层供 CLI 读取（`:666`）。
-- 进程池按"每 worker 100 条 spec"分批回收（`:500-504`）；`workers<=1` 时在当前进程内联执行（`:515-517`）。
+- 进程池按"每 worker 100 条 spec"分批回收（`:493, 519-520`）；`workers<=1` 时在当前进程内联执行（`:515-517`）。
 
 ## 使用/运行
-- 生成：`bash tools/gene_env.sh [--slice [N]] [--n-train N] [--n-val N] [--workers W] [--no-validate]`（`tools/gene_env.sh` 转发到 `env.scenario.cli`；argparse 参数见 `cli.py:34-69`）。
-- 默认：train 10000 / val 1000，seed 区间 train 从 1000、val 从 5000000（`cli.py:26-31`）；生成后默认跑实例化校验并写 `validation_<name>.json`（`cli.py:97-119`）。
-- 配置：`config/env.yaml::scenario`（sequence/blocks/blocks_per_map/cache/set_speed_limit_after_build/behaviors/spec_dir，`:37-58`）为口径记录；生成器与封装**不直接读该段**，实际生效常量在 `taxonomy.SEQUENCE_MIN/MAX_BLOCKS` 与 `generator.BLOCKS_PER_MAP`。
+- 生成：`bash tools/gene_env.sh [--slice [N]] [--n-train N] [--n-val N] [--workers W] [--no-validate]`（`tools/gene_env.sh` 转发到 `env.scenario.cli`；argparse 参数见 `cli.py:32-69`）。
+- 默认：train 10000 / val 1000，seed 区间 train 从 1000、val 从 5000000（`cli.py:31-35`）；生成后默认跑实例化校验并写 `validation_<name>.json`（`cli.py:101-122`）。
+- 配置：`config/env.yaml::scenario`（sequence/blocks/blocks_per_map/cache/set_speed_limit_after_build/behaviors/spec_dir，`:37-57`）为口径记录；生成器与封装**不直接读该段**，实际生效常量在 `taxonomy.SEQUENCE_MIN/MAX_BLOCKS` 与 `generator.BLOCKS_PER_MAP`。
 
 ## 与其它模块的衔接
 - `env/metadrive_env.py::build_env` 消费 `spec.blocks/limits/traffic/ego`；`behaviors.install` 在每次 reset 后重放。

@@ -1,8 +1,8 @@
 # tools
 
-命令行入口与离线工具。统一用 `tools/venv-python` 运行（wrapper 把 venv 本地 glvnd 加进 `LD_LIBRARY_PATH` 后 exec `.venv/bin/python`，`tools/venv-python:6-12`）；裸 `python3` 可能解析到无 metadrive/GL 的解释器。`train.py` / `test.py` import 时只加载 stdlib，重依赖延迟到 `main()`，且**未识别参数原样透传**给下游（`tools/train.py:32,138`、`tools/test.py:23,113`）。`tools/` 同时是 Python 包（`__init__.py` 为空），`dagger_collect.py` 直接复用 `tools.collect_expert` 的实现。
+命令行入口与离线工具。统一用 `tools/venv-python` 运行（wrapper 把 venv 本地 glvnd 加进 `LD_LIBRARY_PATH` 后 exec `.venv/bin/python`，`tools/venv-python:6-12`）；裸 `python3` 可能解析到无 metadrive/GL 的解释器。`train.py` / `test.py` import 时只加载 stdlib，重依赖延迟到 `main()`，且**未识别参数原样透传**给下游（`tools/train.py:16,79,141`、`tools/test.py:10,78,113`）。`tools/` 同时是 Python 包（`__init__.py` 为空），`dagger_collect.py` 直接复用 `tools.collect_expert` 的实现。
 
-子目录：`diagnostics/`（一次性诊断）、`measure/`（环境实测），各自有 README。
+子目录：`diagnostics/`（一次性诊断）、`measure/`（环境实测），各自有 README；`controls/`（P1-0C 产物补齐与契约探针，无独立 README，见各脚本 docstring）。
 
 ## 入口与编排
 
@@ -20,7 +20,7 @@
 
 `train.py` 契约参数：`--config`（默认 `config/default.yaml`）、`--stage {A,B,C}`、`--spec`、`--ckpt`、`--out`（默认 `runs/train`）、`--phase3 <dir>`（固定阶段 B）、`--phase3-loop`、`--phase3-chain`；其余透传 `pipeline.stages`（`--wm-epochs/--bc-epochs/--ckpt-every/--batch-size/--micro-batch-size/--bc-dir/--resume/--device/--limit-dataset/--traj-aux-weight/--weight-sidecar/--critic-warmup-updates/--kl-anchor-coef/--pool/--trainable-scope` 等，完整清单见 `pipeline/stages.py` 的 parser）。
 
-`test.py` 契约参数：`--config`、`--spec`（缺省取 `config/eval.yaml::eval.spec`）、`--ckpt`（`--policy ckpt` 必填）、`--out`（输出根，默认 `runs/eval`）、`--policy {baseline,ckpt}`；透传 `--limit/--workers/--max-steps/--tracker {exact,lqr}/--eval-reference/--device/--seed/--baseline-ref`（eval_runner 默认 workers=2、max-steps=1000、tracker=exact、seed=0，`pipeline/eval_runner.py:1582-1599`）。run 名由 `pipeline.run_paths.py::eval_run_name` 规范化（缺省 `BTC<秒级戳>_<spec kind>_<policy>`；`EXP_foo` → `BTC<戳>_EXP_foo`；规范名原样）。
+`test.py` 契约参数：`--config`、`--spec`（缺省取 `config/eval.yaml::eval.spec`）、`--ckpt`（`--policy ckpt` 必填）、`--out`（输出根，默认 `runs/eval`）、`--policy {baseline,ckpt}`；透传 `--limit/--workers/--max-steps/--tracker {exact,lqr}/--eval-reference/--device/--seed/--baseline-ref`（eval_runner 默认 workers=2、max-steps=1000、tracker=exact、seed=0，`pipeline/eval_runner.py:1706-1722`）。run 名由 `pipeline.run_paths.py::eval_run_name` 规范化（缺省 `BTC<秒级戳>_<spec kind>_<policy>`；`EXP_foo` → `BTC<戳>_EXP_foo`；规范名原样）。
 
 `run_config.py` 输出键：train=`BC_DIR WORK_DIR STAGE STAGE_DIR LOG DETACH_PID WM_EPOCHS BC_EPOCHS CKPT_EVERY BATCH_SIZE MICRO_BATCH_SIZE TRAJ_AUX_WEIGHT CKPT RESUME`；eval=`NAME WORK_DIR OUT_ROOT LOG DETACH_PID CKPT`；tb=`TB_SPEC`。同名环境变量优先（空串也算显式覆盖，如 `RESUME=` 关闭续跑）。
 
@@ -39,7 +39,7 @@
 
 | 脚本 | 用途 | 典型调用与产物 |
 | --- | --- | --- |
-| `baseline_eval.py` | 规则基线（PurePursuitIDMPolicy）批量评测，输出逐类别 + 总体 KPI JSON | `tools/venv-python tools/baseline_eval.py --specs env/specs/scenarios_val.json --workers 8 --out runs/baseline_eval/val_reference.json`；`--limit/--split/--max-steps`(1000)/`--policy-params`(JSON)/`--speed-limit-units/--render/--debug/--debug-ids`；缺省 out=`runs/baseline_eval/<specs 文件名>.json`（冻结评测协议消费 `val_reference.json`；分组判定使用同目录 `val_reference_by_primary.json`，`pipeline/eval_runner.py:30,1605-1606`） |
+| `baseline_eval.py` | 规则基线（PurePursuitIDMPolicy）批量评测，输出逐类别 + 总体 KPI JSON | `tools/venv-python tools/baseline_eval.py --specs env/specs/scenarios_val.json --workers 8 --out runs/baseline_eval/val_reference.json`；`--limit/--split/--max-steps`(1000)/`--policy-params`(JSON)/`--speed-limit-units/--render/--debug/--debug-ids/--episodes-out`(逐 episode JSONL)；缺省 out=`runs/baseline_eval/<specs 文件名>.json`（冻结评测协议消费 `val_reference.json`；分组判定使用同目录 `val_reference_by_primary.json`，`pipeline/eval_runner.py:1727-1729,1803`） |
 | `paired_eval.py` | 同场景配对评测：2×2 翻牌、McNemar 精确 p、配对差 bootstrap CI、分层/分项、多 run 汇总（含方差闸） | `tools/venv-python tools/paired_eval.py --baseline runs/<base>/episodes.csv --agent runs/<a1>/episodes.csv runs/<a2>/episodes.csv --out-dir runs/paired_eval/v7_p0`；要求输入 `(id, seed)` 集合一致（默认 fail-closed，`--allow-mismatch` 取交集）；主判据要求 pin 单一 baseline（`--allow-multi-baseline` 仅标注非独立）；`--bootstrap`(10000)/`--seed`(20261002)/`--alpha`(0.05)/`--min-stratum`(30)。产物 `paired_eval.{md,json}` |
 | `reward_audit.py` | P2 奖励审计：快照 / 采集 / 离线重放+终局值反解 / 自检 | `tools/venv-python tools/reward_audit.py snapshot`；`... collect --code-mode {pre,current}`；`... analyze`；`... dry-run`。默认 ckpt=`runs/_refs_rlbase/e_beta_prime/final.pt`、池=`env/specs/scenarios_val.json`、排除=`scenarios_eval500.json`；产物 `runs/reward_audit/report/{reward_audit.md,reward_audit.json,config_draft_rc*.yaml}`（`--mirror-md` 另写） |
 | `reward_audit_collect.py` | 单 episode rollout 的逐策略步 ctx 采集器（通常由 `reward_audit.py collect` 调起） | `tools/venv-python tools/reward_audit_collect.py --code-mode current --specs env/specs/scenarios_train_5k.json --spec-id 0 --spec-seed 1000 --out /tmp/opencode/ep.json`；`--code-mode pre` 需 `--pre-root`；产物单 episode JSON |
@@ -57,8 +57,8 @@
 
 - **训练 run**：`runs/BTC<北京分钟戳>_<name>`（`run_paths.new_work_dir`）；同轮 A/B 共用一个 run 根（B 的 work_dir 取 `stage_a_ckpt` 所在 run），阶段目录 `<run>/stage_{a,b}`，另有 `logs/stage_<x>.log`、`manifest.txt`、`config.snapshot.yaml`、`model.snapshot.yaml`、`detach.pid`。
 - **评测 run**：`runs/BTC<秒级戳>_<spec kind>_<policy>`（`run_paths.eval_run_name`，调用方不手拼）；`test.sh` 走 run_config 先给 `BTC<分钟戳>_eval_<tracker><limit>` / `..._eval_baseline<limit>`，已是规范名则原样沿用。
-- **ckpt 命名**：阶段 A/B `<out>/final.pt` + 周期 `ckpt_epoch{NNN}.pt`；阶段 C `<out>/final.pt` + 周期 `ckpt_u{NNN}.pt`（`pipeline/stages.py:493-494,539-540`）。
-- **BC 数据集 auto**：最新 `datasets/BTC*_expert*`（须含 `expert_bc.npz`，名字含 `val` 的排除，`run_paths.latest_dataset`）；dagger 输出约定 `datasets/BTC<ts>_daggerN`（`tools/dagger_collect.py:1241`）。
+- **ckpt 命名**：阶段 A/B `<out>/final.pt` + 周期 `ckpt_epoch{NNN}.pt`；阶段 C `<out>/final.pt` + 周期 `ckpt_u{NNN}.pt`（`pipeline/stages.py:495-497,541-543`）。
+- **BC 数据集 auto**：最新 `datasets/BTC*_expert*`（须含 `expert_bc.npz`，名字含 `val` 的排除，`run_paths.latest_dataset`）；dagger 输出约定 `datasets/BTC<ts>_daggerN`（`tools/dagger_collect.py:1242`）。
 - **config 关系**：`config/default.yaml` 主配置（includes 自动合并）；`config/train.yaml::run` 驱动 `run_config.py`；`config/eval.yaml::eval.spec` 是评测缺省 spec；`config/model.yaml` 模型结构（`--model-config` 缺省值，写入 manifest）。
 - **gitignore**：`runs/`、`datasets/`、`env/specs/*.json` 均不入库（spec 是生成产物）。
 

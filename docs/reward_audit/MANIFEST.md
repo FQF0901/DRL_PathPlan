@@ -2,8 +2,8 @@
 
 > **用途**：`runs/` 在 `.gitignore` 下（Gate2 发现 ⑤）→ P2 审计产物（报告 + rc 档配置草案）
 > 在此落 tracked 路径，供 P4 臂消费与复核；原始 `runs/` 路径与 sha256 对照见下表。
-> **上游**：`docs/rl_reward_v5.md` §7（执行记录/池重叠声明）、`docs/v6_program_prereg.md` §7.1
-> （E-β″ 复算规格）。
+> **上游**：`docs/rl_reward_v5.md` §7（执行记录/池重叠声明）、`docs/v6_reports/v6_program_prereg.md` §7.1
+> （E-β″ 复算规格；2026-10-09 前为 `docs/v6_program_prereg.md`，路径已更新）。
 
 ## 产物清单（逐位一致：入库副本 = 原始文件）
 

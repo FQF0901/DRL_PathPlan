@@ -10,6 +10,7 @@
 | `chatgpt5p6sol_review.md` | GPT 审阅往来原文（每轮拉取后入库） | `net/path_head.py` 等（出处引用 12 处） |
 | `architecture_contract.md` | 架构契约（生成器/辅助边界/调用图/训练部署同构） | `net/model.py`、`net/path_head.py` |
 | `round37_report.md` | 本轮全量报告（阶段 1：三层根因 + lane 索引 + 玩家讨论纪要） | 本索引 |
+| `repo_handbook.md` | **仓库手册**：网络架构 / 训练流程 / 当前问题（第 1/2 章代码核验 + 第 3 章台账依据；附录含文档-代码漂移表） | 本索引、台账 |
 | `round36_report.md`、`r36_implementation_evidence.md`、`r36_warp_layer_note.md` | 上一轮报告与证据/注记 | 台账、round36 工具 |
 | `LOCKS.md` | 锁版/冻结清单 | 清理记录 |
 
@@ -31,7 +32,7 @@
 
 完整"原路径 → 现路径"见 **`archive/README.md` §D**。摘要：`p1_0_report / p1_2_diagnosis / p1_implementation_contract / stage_a_config_consumption / round31_{audit_summary,stagec_contract_audit} / round32_{canary_report,decision,audit_summary} / round33_report / round33c_report / round34a_report / round34b0_report / round35_report / navigation_scope_audit` → `archive/p1v2_reports/`；`net_architecture / v8_net_review` → `archive/v8_reports/`；`v7_program_report` → `v7_reports/`。
 
-**引用同步**：25 个文件已更新（`docs/*.md`、根 `README.md`、`docs/cleanup/*`、`docs/v7_reports/*`、`docs/archive/README.md`）+ 代码侧 `.slim/deepwork/p1_v2/round35/f1_nav_audit.py::DOCS_MD`；`runs/round36/agent_review/*`、`.slim/**/journal.md` 中的旧路径提及（历史留痕）未改，不在校验范围。
+**引用同步**：迁移时已更新全部 `docs/…` 引用——**tracked 侧 19 个文件**（随迁移入 commit `d18f148`，该 commit 共 33 项 = 18 重命名 + 14 修改 + 1 新增）＋ **`.slim` 本地 7 个**（`p1_0`/`round30`/`round31`/`round32`/`round33` journal、`round35/f1_nav_audit.py::DOCS_MD`、`round34/d3_leakage_causality.py`）；`runs/round36/agent_review/*` 中的旧路径提及（历史留痕）未改，不在校验范围。（2026-10-15 勘误：原记"25 个文件"系脚本口径〔tracked+本地混计〕，已按上述分列。）
 
 ## 5. 维护规则（新增文档时遵守）
 

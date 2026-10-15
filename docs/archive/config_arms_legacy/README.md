@@ -4,8 +4,8 @@
 > `config/arms/<同名文件>`（现路径 `docs/archive/config_arms_legacy/<同名文件>`）。
 > 原因：当前线只采用 `config/arms/v7_arm1_offroad.yaml`（保留原位、未动）；本批为 v6 P4 奖励臂与
 > v7 奖励/结构臂（K-anchor）的历史快照，不再是现行可执行 run config。文件内容原样，未做任何修改。
-> 逐项操作与引用检查见 `docs/cleanup/V8_CLEANUP_config_docs.md`；v6 P4 臂的历史清单另见
-> `config/arms/README.md`（该 README 待按新现状重写）。
+> 逐项操作与引用检查见 `docs/cleanup/V8_CLEANUP_config_docs.md`；`config/arms/README.md` 已按新现状
+> 更新（当前仅 `v7_arm1_offroad.yaml` + 指向本目录的归档指针）。
 
 ## 族与用途（每族一句话）
 

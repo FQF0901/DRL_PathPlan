@@ -9,7 +9,7 @@ MetaDrive 城市/高速驾驶规划 RL：观测（当前帧 + 6 帧历史，含 
 
 前置：Python 3.10 + 仓库内 `.venv`（`metadrive-simulator 0.4.3`、`numpy<2`、`opencv-python-headless`）。
 **所有 MetaDrive 运行统一用 `tools/venv-python`**（自动注入 venv 内 glvnd 的 `LD_LIBRARY_PATH`，
-`tools/venv-python:1-14`）。环境重建：
+`tools/venv-python:1-12`）。环境重建：
 
 ```bash
 python3 -m venv --without-pip --system-site-packages .venv
@@ -65,7 +65,7 @@ Stage C 当前采用臂见 `config/arms/README.md`。
 | --- | --- |
 | `config/` | 运行配置：`default/env/model/train/eval` 五份 YAML + `arms/`（RL 臂）+ `plan_anchors_k6.json`；加载关系与消费方见 `config/README.md` |
 | `env/` | MetaDrive 封装（`metadrive_env.py`、`tracking.py`）+ `obs/`（观测通道/历史/schema）+ `scenario/`（spec 生成/校验/标签/脚本事件）+ `expert/`（规则专家） |
-| `net/` | 编码器 / 时序注意力 / 空间消息传递 / MoE / latent 世界模型（ST-GNN）/ 策略与价值头 / K-anchor |
+| `net/` | 编码器 / 时序注意力 / 空间消息传递 / MoE / latent 世界模型（ST-GNN）/ 策略与价值头 / K-anchor / 结构化动作头 `path_head.py`（R36 K1，默认关）/ 语义接线 `semantic.py` / ego-warp 坐标层 `ego_warp.py` |
 | `pipeline/` | 阶段编排 `stages.py`、训练器 `trainer.py`、环境池 `vector_env.py`、评测 `eval_runner.py`、DAgger 循环 `phase3_loop.py`、run 布局 `run_paths.py`、监控 `monitoring.py` |
 | `reward_model/` | 奖励项 `terms.py`、聚合 `aggregation.py`、KPI `kpi.py` |
 | `tools/` | 入口脚本（`gene_env.sh` / `train.sh` / `test.sh` / `tb.sh`）+ 采集/评测/诊断工具 + `measure/`、`diagnostics/` |
@@ -88,12 +88,12 @@ Stage C 当前采用臂见 `config/arms/README.md`。
 
 ### ckpt 命名
 
-- A/B：周期 `ckpt_epoch{NNN}.pt`（`pipeline/stages.py:493-494`）、阶段末 `final.pt`
-  （`pipeline/stages.py:2709,3461`）、B 另存 `bc.pt`（`pipeline/stages.py:3456`）。
-- C：周期 `ckpt_u{NNN}.pt`（`pipeline/stages.py:539-540`）、阶段末 `final.pt`（`pipeline/stages.py:4888`）。
+- A/B：周期 `ckpt_epoch{NNN}.pt`（`pipeline/stages.py:495-498`）、阶段末 `final.pt`
+  （`pipeline/stages.py:2727,3514`）、B 另存 `bc.pt`（`pipeline/stages.py:3509`）。
+- C：周期 `ckpt_u{NNN}.pt`（`pipeline/stages.py:541-543`）、阶段末 `final.pt`（`pipeline/stages.py:5594`）。
 - `run.resume: auto` 从最新「有周期 ckpt、无 `final.pt`、进程未在跑」的 stage 原地续跑
   （`pipeline/run_paths.py:279-287`；`tools/run_config.py:82-99`）。
-- phase3 循环稳定导出 `<loop_dir>/best/final.pt` 供下游消费（`pipeline/phase3_loop.py:115,932`）。
+- phase3 循环稳定导出 `<loop_dir>/best/final.pt` 供下游消费（`pipeline/phase3_loop.py:115,922-926`）。
 
 ### spec 隔离硬校验（train-on-test 防复发）
 
@@ -106,17 +106,18 @@ Stage C 当前采用臂见 `config/arms/README.md`。
 
 ### obs 指纹：改动 `env/obs` 必须重采数据
 
-- `env/obs/__init__.py::obs_fingerprint` = `env/obs/*.py` 内容哈希 + schema 版本（当前 v6，
-  `env/obs/__init__.py:38-49`）。
-- 采集时写入数据集 meta（`tools/collect_expert.py:1632`）；训练加载时不一致 → 告警并要求重新采集
-  （`pipeline/trainer.py:2956-2968`）。
+- `env/obs/__init__.py::obs_fingerprint` = `env/obs/*.py` 内容哈希 + schema 版本（当前 v7，
+  `env/obs/__init__.py:43,48-58`；v7 = R21 语义重建，新增 `lane_semantic` 通道）。
+- 采集时写入数据集 meta（`tools/collect_expert.py:1636`）；训练加载时不一致 → 告警并要求重新采集
+  （`pipeline/trainer.py:3254-3268`；Stage A/B 启动契约守卫另会硬失败，`pipeline/stages.py:767-820`，
+  逃生门 `--allow-legacy-dataset`）。
 - 规则：scope/通道/历史语义一旦改动（如 OD/LD scope、历史帧结构），旧 BC 数据在新观测下语义不同，
-  必须用 `tools/collect_expert.py` 重采（`env/obs/__init__.py:3-5`）。
+  必须用 `tools/collect_expert.py` 重采（`env/obs/__init__.py:3-6`）。
 
 ### 配置加载（细节见 `config/README.md`）
 
-- 训练侧 `pipeline.stages.load_config` 只解析**一层 includes + 顶层平铺合并**（`pipeline/stages.py:138-149`）；
-- 评测侧 `pipeline.eval_runner.load_config` 为**递归深合并**（`pipeline/eval_runner.py:1424-1445`）。
+- 训练侧 `pipeline.stages.load_config` 只解析**一层 includes + 顶层平铺合并**（`pipeline/stages.py:141-152`）；
+- 评测侧 `pipeline.eval_runner.load_config` 为**递归深合并**（`pipeline/eval_runner.py:1543-1566`）。
 
 ## 文档索引
 

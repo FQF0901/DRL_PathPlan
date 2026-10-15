@@ -26,7 +26,7 @@
     tools/venv-python tools/make_dagger_pools.py --mode pool5k # 5k 覆盖整池
 
 ## 用途边界（代码可查）
-- train/val seed 区间重叠会被生成器拒绝（`env/scenario/generator.py:477-480`）。
-- 5k / dagger 池生成时断言与 `scenarios_eval500.json`、`scenarios_val.json` 无交集（`tools/make_dagger_pools.py:67-73, 119-125`；`:151-155` 为三轮互不重叠断言）。
-- `tools/gene_env.sh` 默认生成后做实例化校验，报告写 `validation_<name>.json`（`env/scenario/cli.py:97-119`）；校验失败或改过的 spec 不得用于训练。
+- train/val seed 区间重叠会被生成器拒绝（`env/scenario/generator.py:477-479`）。
+- 5k / dagger 池生成时断言与 `scenarios_eval500.json`、`scenarios_val.json` 无交集（`tools/make_dagger_pools.py:74-82, 123-131`；`:151-155` 为三轮互不重叠断言）。
+- `tools/gene_env.sh` 默认生成后做实例化校验，报告写 `validation_<name>.json`（`env/scenario/cli.py:101-122`）；校验失败或改过的 spec 不得用于训练。
 - 观测变更后 BC 数据需重采（`obs_fingerprint` 守卫，`env/obs/__init__.py:1-6`）。

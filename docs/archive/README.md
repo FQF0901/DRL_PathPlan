@@ -1,10 +1,10 @@
 # docs/archive/ —— 历史归档桶（只读）
 
 > 收录规则：已关闭实验线（v3/v4 代）的文档、已被现行口径取代的文档，以及锁版/清理时移入的历史快照。
-> 归档件正文一律原样保留、不修改；本 README 仅作索引。现行口径以 `docs/` 根（如 `docs/rl_reward_v5.md`、`docs/v7_program_prereg.md`、`docs/v7_reports/v7_program_report.md`）、`docs/v6_reports/`、`docs/v7_reports/` 为准。
+> 归档件正文一律原样保留、不修改（**例外**：迁入时同步正文内指向被移文档的 `docs/…` 路径引用；本批 4 件见 §D 注记）；本 README 仅作索引。现行口径以 `docs/` 根（如 `docs/rl_reward_v5.md`、`docs/v7_program_prereg.md`、`docs/v7_reports/v7_program_report.md`）、`docs/v6_reports/`、`docs/v7_reports/` 为准。
 > 相关记录：`docs/cleanup/`（2026-10-09 V8 清理）、`docs/v7_reports/cleanup/`（2026-10-06 锁版清理 A–D）、`docs/v7_reports/MIGRATION_NOTE.md`（/tmp → repo 迁移说明）。
 
-## 索引（2026-10-09 实况：18 个文件 + `config_arms_legacy/`）
+## 索引（2026-10-09 实况：18 个文件 + `config_arms_legacy/`；2026-10-15 追加：`p1v2_reports/`（15 件）+ `v8_reports/`（2 件），见 §D）
 
 ### A. 2026-10-09 V8 清理移入（2 文件 + 1 目录）
 
@@ -66,13 +66,15 @@
 | `docs/v8_net_review.md` | `docs/archive/v8_reports/v8_net_review.md` | v8 代网络 review（25KB） |
 | `docs/v7_program_report.md` | `docs/v7_reports/v7_program_report.md` | v7 代程序报告（归入既有 v7 桶） |
 
-> 归档依据：2026-10-15 全仓引用扫描（727 文件）——上述 18 件**零代码引用**（`round30_audit.md`/`navigation_scope_audit.md` 之外仅文档互引；后者的代码引用方 `f1_nav_audit.py` 路径常量已同步更新）。**保留在根**的文档 = 被 `net/`/`env/`/`tools/`/`tests/`/`.slim` 代码按路径引用者（清单见 `docs/README.md`）。
+> 归档依据：2026-10-15 全仓引用扫描（727 文件）——上述 18 件中 16 件零代码引用（仅文档互引）；`navigation_scope_audit.md` 的代码引用方 `.slim/deepwork/p1_v2/round35/f1_nav_audit.py::DOCS_MD` 与 `round33c_report.md` 的 `.slim/deepwork/p1_v2/round34/d3_leakage_causality.py` 文档字符串引用均已同步为新路径。**保留在根**的文档 = 被 `net/`/`env/`/`tools/`/`tests/`/`.slim` 代码按路径引用者（清单见 `docs/README.md`）。
+>
+> 正文改动注记：本批 4 件（`p1_0_report.md`、`round31_audit_summary.md`、`round35_report.md`、`net_architecture.md`）正文内指向被移文档的路径引用随迁移同步更新，其余内容逐位不变。
 
 ## 引用路径注记（按时间）
 
 1. 清理 B/C 期间：`README.md`（根）、`docs/v6_reports/v6_net_design.md`、`docs/rl_reward_v5.md`、`docs/v7_program_prereg.md`、`docs/v7_reports/README.md` 中指向本目录的路径已改为 `docs/archive/...`；`docs/v6_reports/v6_program_prereg.md` 顶部加 1 行路径注记（正文未改）。
 2. 2026-10-09 V8 清理：`experiments.md`、`version_ledger.md` 移入本目录；`v6_net_design.md`、`v6_program_prereg.md`、`v6_program_report.md` 移入 `docs/v6_reports/`。本次**未同步更新**相关引用；已知失效链接清单见 `docs/cleanup/V8_CLEANUP_config_docs.md` §5.3。
-3. 2026-10-15 P1-v2 代归档（本批）：**已同步更新**全部 `docs/…` 路径引用（25 个文件：`docs/*.md`、根 `README.md`、`docs/cleanup/`、`docs/v7_reports/*`、`docs/archive/README.md` 等）+ 代码引用（`.slim/deepwork/p1_v2/round35/f1_nav_audit.py::DOCS_MD`、`.slim/deepwork/p1_0/journal.md` 注记）；**未改**历史 run 产物（`runs/round36/agent_review/*`）与 `.slim/**/journal.md` 中的旧路径提及（日志留痕，不在校验范围）。
+3. 2026-10-15 P1-v2 代归档（本批）：**已同步更新**全部 `docs/…` 路径引用——tracked 侧 **19 个文件**（随迁移入 commit `d18f148`，共 33 项 = 18 重命名 + 14 修改 + 1 新增）＋ `.slim` 本地 **7 个**（`p1_0`/`round30`/`round31`/`round32`/`round33` journal、`round35/f1_nav_audit.py::DOCS_MD`、`round34/d3_leakage_causality.py`）；**未改**历史 run 产物（`runs/round36/agent_review/*`）。（2026-10-15 勘误：原记"25 个文件"系脚本口径〔tracked+本地混计〕，现按上分列。）
 
 ## 历史文档引用项的数据删除注记
 
