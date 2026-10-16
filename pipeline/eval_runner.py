@@ -733,6 +733,64 @@ LOAD_LANE_ANCHOR_MODES: tuple[str, ...] = ("off", "inject")
 #: R39-B2c：WorldState API 档位（net 侧 ``net.model.WORLD_STATE_API_MODES`` 的闭环子集；
 #: ``analytic_residual`` 属离线诊断面不开放）。``off`` = 生产口径（逐位不变）。
 LOAD_WORLD_STATE_API_MODES: tuple[str, ...] = ("off", "analytic", "analytic_learned")
+#: R41-A1：teacher-forced oracle 注入档（net 侧 ``net.model.TEACHER_FORCE_MODES`` 全集的闭环面）。
+#: ``off`` = 默认零触达（不装 hook、不新增键、前向逐位不变）。
+LOAD_TEACHER_FORCE_MODES: tuple[str, ...] = (
+    "off", "ego", "od", "ld", "ego_od_ld", "lateral", "all",
+)
+#: R41-A1：速度反事实档（``off`` = 零触达；``expert`` = 专家空问 ds 缩放，需 pure_pursuit labeler）。
+LOAD_SPEED_ORACLE_MODES: tuple[str, ...] = ("off", "expert")
+
+# --------------------------------------------------------------------------- #
+# R41-A1：oracle/teacher-force/speed 反事实轴（五要件：CLI ∧ 模型执行路径 ∧ protocol hash
+# ∧ 模型缓存键 ∧ metrics/manifest；默认关 ⇒ 逐位一致）
+# --------------------------------------------------------------------------- #
+#: truth npz 文件名后缀（两遍法：``<truth_dir>/<spec_id:04d>.npz``）。
+TRUTH_NPZ_SUFFIX = ".npz"
+#: 注入视野（想象步 k=1..6；= net rollout_steps = V4B 记载口径）。
+TEACHER_FORCE_HORIZON = 6
+#: 决策帧记录键（V4B 兼容集 + R41-A1 扩展：动作条件/漂移证据）。
+TRUTH_FRAME_KEYS: tuple[str, ...] = (
+    "frame_env_step", "ego_pose_world", "ego_speed",
+    "od", "od_mask", "od_presence",
+    "ld", "ld_mask",
+    "kappa_expert", "ds_expert", "expert_valid",
+    "action_exec", "plan_exec", "rng_digest",
+)
+#: 逐 env step 轨迹键（五类漂移中的"逐步状态误差"口径）。
+TRUTH_STEP_KEYS: tuple[str, ...] = ("step_index", "step_pose", "step_speed", "step_rng_digest")
+#: episode 级键（termination 一致性口径）。
+TRUTH_EPISODE_KEYS: tuple[str, ...] = ("termination_code", "n_steps", "meta_json")
+#: termination 名称 → 码（npz 只存整型；名称映射 = 本表 + ``_run_episode`` 的判定串）。
+TERMINATION_CODES: dict[str, int] = {
+    "arrive_dest": 0, "collision": 1, "out_of_road": 2, "max_step": 3, "other": 4, "error": 5,
+}
+#: 决策帧"同状态门"（预检硬门：超出 ⇒ 该帧所有注入自动拒绝——非法组合不得进入模型路径）。
+DEFAULT_FRAME_GATE: Dict[str, float] = {
+    "pose_pos_m": 0.5,        # 位置误差（m；帧级 max）
+    "heading_rad": 0.15,      # 航向误差（rad；帧级 max，wrap 后）
+    "od_mean_abs": 0.5,       # OD 特征均绝对差（掩码内）
+    "rng_required": 1.0,      # 1 = 要求 RNG 摘要一致（无数据时按"不可用"放行并计账）
+}
+#: 两遍重放五类漂移门（预注册默认；config ``eval.counterfactual.drift_thresholds`` 可覆盖）。
+#: 超标 episode ⇒ ``oracle_eligible=False``（剔除出 oracle 裁决视图）。
+DEFAULT_DRIFT_THRESHOLDS: Dict[str, float] = {
+    "pose_p95_m": 0.5,             # ① replay pose divergence：决策帧位置误差 p95（m）
+    "pose_max_m": 2.0,             # ① 决策帧位置误差 max（m）
+    "heading_p95_rad": 0.15,       # ① 航向误差 p95（rad，wrap 后）
+    "od_mean_abs": 0.25,           # ② OD state divergence：掩码内均绝对差
+    "od_max_abs": 2.0,             # ② 掩码内最大绝对差
+    "rng_match_frac_min": 0.98,    # ③ traffic RNG 一致性：决策帧 RNG 摘要一致率下限
+    "stepwise_pos_p95_m": 0.5,     # ⑤ 逐步状态误差：逐 env step 位置误差 p95（m）
+    "stepwise_speed_mean_abs": 0.5,  # ⑤ 逐 env step 速度误差均值（m/s）
+    "termination_step_tol": 2.0,   # ④ termination 一致性：步数容差（解）
+    "illegal_frac_max": 0.05,      # 动作条件非法注入步占比上限（超出 ⇒ 剔除）
+    "unproven_frac_max": 0.05,     # 动作条件不可判定步占比上限（超出 ⇒ 剔除）
+    "action_tol_ds_m": 5e-3,       # 命令动作条件容差（ds，m）
+    "action_tol_dtheta_rad": 5e-3,  # 命令动作条件容差（dθ，rad）
+    "realized_tol_ds_m": 5e-3,     # 实测（位姿派生）动作条件容差（ds，m）
+    "realized_tol_dtheta_rad": 5e-3,  # 实测动作条件容差（dθ，rad）
+}
 
 
 def _model_cache_key(
@@ -746,9 +804,19 @@ def _model_cache_key(
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
     world_residual_scale: Optional[float] = None,
+    teacher_force: str = "off",
+    record_truth: bool = False,
+    inject_truth_sha16: Optional[str] = None,
+    speed_scale: Optional[float] = None,
+    speed_oracle: str = "off",
 ) -> Tuple:
     """缓存/加载摘要键：**全默认装配 = 旧键 ``(ckpt, device)``**（历史调用点逐位不变；
-    a3 controller 的 canary 预填缓存按该旧键命中）；任何非默认轴追加一段避免互撞。"""
+    a3 controller 的 canary 预填缓存按该旧键命中）；任何非默认轴追加一段避免互撞。
+
+    R41-A1（五要件之"模型缓存键"）：teacher_force/record_truth/inject_truth_sha16/speed_scale/
+    speed_oracle 五轴**任一非默认**时整体追加 ``("counterfactual", …)`` 段（默认全关 ⇒ 逐位
+    不改旧键）。五轴同段记录：同进程内不同反事实语义绝不共享同一模型装配。
+    """
     key: Tuple = (str(ckpt), str(device))
     if str(path_head or "off") != "off":
         key += (("path_head", str(path_head)),)
@@ -765,6 +833,24 @@ def _model_cache_key(
         if world_residual_scale is not None and float(world_residual_scale) != 1.0:
             # R39-B2d：非默认残差缩放单独缓存（默认 None / 1.0 时不改旧键）
             key += (("world_residual_scale", float(world_residual_scale)),)
+    # R41-A1：反事实五轴（默认全关 ⇒ 不追加段，旧键逐位不变）
+    speed_scale_norm = None if (speed_scale is None or float(speed_scale) == 1.0) else float(speed_scale)
+    counterfactual_active = (
+        str(teacher_force or "off") != "off"
+        or bool(record_truth)
+        or bool(inject_truth_sha16)
+        or speed_scale_norm is not None
+        or str(speed_oracle or "off") != "off"
+    )
+    if counterfactual_active:
+        key += ((
+            "counterfactual",
+            str(teacher_force or "off"),
+            bool(record_truth),
+            (str(inject_truth_sha16) if inject_truth_sha16 else None),
+            speed_scale_norm,
+            str(speed_oracle or "off"),
+        ),)
     return key
 
 
@@ -1030,6 +1116,27 @@ def _record_run_meta(out_dir: Path, payload: Dict[str, Any]) -> Path:
                 ensure_ascii=False, sort_keys=True,
             )
             manifest.write_text(text.rstrip("\n") + "\n" + marker + " " + line + "\n", encoding="utf-8")
+        # R41-A1：反事实轴非默认时追加 manifest 行（默认关 ⇒ 不改 manifest，逐位一致）
+        cf_marker = "r41a1_counterfactual:"
+        counterfactual = payload.get("counterfactual")
+        if isinstance(counterfactual, Mapping) and counterfactual.get("active") and cf_marker not in text:
+            cf_line = json.dumps(
+                {
+                    "teacher_force": counterfactual.get("teacher_force"),
+                    "record_truth": counterfactual.get("record_truth"),
+                    "inject_truth": counterfactual.get("inject_truth"),
+                    "inject_truth_sha16": counterfactual.get("inject_truth_sha16"),
+                    "speed_scale": counterfactual.get("speed_scale"),
+                    "speed_oracle": counterfactual.get("speed_oracle"),
+                    "evaluation_protocol_hash": payload["hashes"]["evaluation_protocol_hash"],
+                    "cache_key_axes": "counterfactual(=五轴同段)",
+                },
+                ensure_ascii=False, sort_keys=True,
+            )
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").rstrip("\n") + "\n" + cf_marker + " " + cf_line + "\n",
+                encoding="utf-8",
+            )
     return meta_path
 
 
@@ -1044,6 +1151,11 @@ def _ckpt_load_summary(
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
     world_residual_scale: Optional[float] = None,
+    teacher_force: str = "off",
+    record_truth: bool = False,
+    inject_truth_sha16: Optional[str] = None,
+    speed_scale: Optional[float] = None,
+    speed_oracle: str = "off",
 ) -> Optional[Dict[str, Any]]:
     """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
     return _CKPT_LOAD_SUMMARY.get(_model_cache_key(
@@ -1051,6 +1163,9 @@ def _ckpt_load_summary(
         rollout_semantic=rollout_semantic, fill_from=fill_from,
         world_state_api=world_state_api, world_residual_head=world_residual_head,
         world_residual_scale=world_residual_scale,
+        teacher_force=teacher_force, record_truth=record_truth,
+        inject_truth_sha16=inject_truth_sha16, speed_scale=speed_scale,
+        speed_oracle=speed_oracle,
     ))
 
 
@@ -1099,6 +1214,11 @@ def _load_ckpt_model(
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
     world_residual_scale: Optional[float] = None,
+    teacher_force: str = "off",
+    record_truth: bool = False,
+    inject_truth_sha16: Optional[str] = None,
+    speed_scale: Optional[float] = None,
+    speed_oracle: str = "off",
 ) -> Any:
     """worker 内按装配键（``_model_cache_key``；全默认 = ``(ckpt, device)``）缓存模型。
 
@@ -1155,6 +1275,29 @@ def _load_ckpt_model(
         raise ValueError(
             "[eval_runner] --world-residual-head 只对 --world-state-api analytic_learned 有意义"
         )
+    # R41-A1：teacher-forced oracle / 速度反事实轴（默认 off/None ⇒ 零触达、零行为变化）
+    teacher_force = str(teacher_force or "off")
+    if teacher_force not in LOAD_TEACHER_FORCE_MODES:
+        raise ValueError(
+            f"[eval_runner] 未知 teacher_force={teacher_force!r}"
+            f"（可选 {'/'.join(LOAD_TEACHER_FORCE_MODES)}）"
+        )
+    if teacher_force != "off" and world_state_api == "off":
+        raise ValueError(
+            "[eval_runner] --teacher-force 非 off 需要 --world-state-api 非 off"
+            "（状态注入落点 = analytic_update 后 / readout 前；口径 = R40-V4B）"
+        )
+    speed_oracle = str(speed_oracle or "off")
+    if speed_oracle not in LOAD_SPEED_ORACLE_MODES:
+        raise ValueError(
+            f"[eval_runner] 未知 speed_oracle={speed_oracle!r}（可选 {'/'.join(LOAD_SPEED_ORACLE_MODES)}）"
+        )
+    if speed_scale is not None:
+        speed_scale = float(speed_scale)
+        if not (np.isfinite(speed_scale) and speed_scale > 0.0):
+            raise ValueError(f"[eval_runner] --speed-scale 必须 >0 有限，收到 {speed_scale}")
+        if speed_scale == 1.0:
+            speed_scale = None  # 显式 1.0 = 默认档（不触达、不入 hash/缓存键）
     # R39-B2d：残差缩放轴（默认 None ⇒ 零触达；仅 learned 档；∈[0,4] = net 契约）
     if world_residual_scale is not None:
         world_residual_scale = float(world_residual_scale)
@@ -1171,6 +1314,9 @@ def _load_ckpt_model(
         rollout_semantic=rollout_semantic, fill_from=fill_from,
         world_state_api=world_state_api, world_residual_head=world_residual_head,
         world_residual_scale=world_residual_scale,
+        teacher_force=teacher_force, record_truth=record_truth,
+        inject_truth_sha16=inject_truth_sha16, speed_scale=speed_scale,
+        speed_oracle=speed_oracle,
     )
     cached = _CKPT_MODEL_CACHE.get(cache_key)
     if cached is not None:
@@ -1408,6 +1554,19 @@ def _load_ckpt_model(
             + "：k≥1 想象步几何 = 统一 readout",
             flush=True,
         )
+    # R41-A1：teacher-forced oracle 档（模型内原生路径；默认 off ⇒ 不调用任何 net API）。
+    # 时序与 ws API 一致：状态装载/键面计数之后设置（非参数行为开关，不影响 LoadReport 键面）。
+    if teacher_force != "off":
+        model.set_teacher_force(teacher_force)
+    if teacher_force != "off" or record_truth or inject_truth_sha16 or speed_scale is not None \
+            or speed_oracle != "off":
+        summary["counterfactual"] = {
+            "teacher_force": teacher_force,
+            "record_truth": bool(record_truth),
+            "inject_truth_sha16": str(inject_truth_sha16) if inject_truth_sha16 else None,
+            "speed_scale": (None if speed_scale is None else float(speed_scale)),
+            "speed_oracle": speed_oracle,
+        }
     _CKPT_LOAD_SUMMARY[cache_key] = summary
     _CKPT_MODEL_CACHE[cache_key] = model
     return model
@@ -1489,6 +1648,653 @@ def build_eval_references(
 
 
 # --------------------------------------------------------------------------- #
+# R41-A1：两遍法 truth IO（记录 pass → npz；注入 pass 读取 + 载荷构造）
+# --------------------------------------------------------------------------- #
+def _truth_path(truth_dir: Any, spec_id: int) -> Path:
+    """``<truth_dir>/<spec_id:04d>.npz``（两遍法文件名口径，与 V4B 相同）。"""
+    return Path(str(truth_dir)) / f"{int(spec_id):04d}{TRUTH_NPZ_SUFFIX}"
+
+
+def _truth_dir_digest(truth_dir: Any) -> Dict[str, Any]:
+    """truth 目录内容指纹（逐文件 sha256 → 排序连接 → 聚合 sha256；protocol hash 轴用）。
+
+    口径 = R40-V4B ``a3/v4b_teacher_force.py::truth_dir_digest``（逐位一致：目录名排除在
+    聚合之外，只依赖文件内容与文件名）。
+    """
+    root = Path(str(truth_dir))
+    entries: List[Dict[str, str]] = []
+    aggregate = hashlib.sha256()
+    for path in sorted(root.glob(f"*{TRUTH_NPZ_SUFFIX}")):
+        digest = _sha256_file(str(path))
+        entries.append({"name": path.name, "sha256": digest})
+        aggregate.update(f"{path.name}:{digest}\n".encode("utf-8"))
+    return {
+        "dir": str(root),
+        "n_files": len(entries),
+        "sha256": aggregate.hexdigest(),
+        "sha16": aggregate.hexdigest()[:16],
+        "files": entries,
+    }
+
+
+def _env_rng_of(env: Any) -> Any:
+    """取 env.engine 的全局 RNG（MetaDrive ``Randomizable``；缺失 ⇒ None）。"""
+    engine = getattr(env, "engine", None)
+    return getattr(engine, "np_random", None)
+
+
+def _rng_digest(rng: Any) -> Optional[int]:
+    """``np.random.RandomState.get_state()`` 内容摘要（uint64；失败 ⇒ None）。
+
+    口径 = ``(str, uint32[624], pos, has_gauss, cached_gaussian)`` 的 str + 状态数组 + pos
+    的 sha256 前 8 字节（不依赖浮点 cached 值本身的表示）。
+    """
+    if rng is None:
+        return None
+    try:
+        state = rng.get_state()
+        array = np.ascontiguousarray(np.asarray(state[1]))
+        digest = hashlib.sha256()
+        digest.update(str(state[0]).encode("utf-8"))
+        digest.update(array.tobytes())
+        digest.update(f"pos={int(state[2])}".encode("utf-8"))
+        return int.from_bytes(digest.digest()[:8], "big")
+    except Exception:  # noqa: BLE001 - 取证字段不阻断评测
+        return None
+
+
+def _tensor_bundle_digest(bundle: Any) -> Optional[str]:
+    """张量/数组字典内容摘要（sha16；键排序 + dtype + 原始字节；空/None ⇒ None）。
+
+    Oracle Injection Hook 的"替换前后 state hash"与"替换前后 Policy 输出"统一口径
+    （float 字节按存储 dtype 原样），保证同输入同 hash。
+    """
+    if not isinstance(bundle, Mapping) or not bundle:
+        return None
+    try:
+        import torch
+
+        digest = hashlib.sha256()
+        for key in sorted(str(k) for k in bundle):
+            value = bundle[key]
+            if value is None:
+                continue
+            if torch.is_tensor(value):
+                array = value.detach().to("cpu").numpy()
+            else:
+                array = np.asarray(value)
+            digest.update(key.encode("utf-8"))
+            digest.update(str(array.dtype).encode("utf-8"))
+            digest.update(np.ascontiguousarray(array).tobytes())
+        return digest.hexdigest()[:16]
+    except Exception:  # noqa: BLE001 - 取证字段不阻断评测
+        return None
+
+
+def _termination_code(name: str) -> int:
+    return int(TERMINATION_CODES.get(str(name), TERMINATION_CODES["other"]))
+
+
+class _TruthRecorder:
+    """记录 pass：逐决策帧真值 + 逐 env step 轨迹 + episode 元数据（只观察、零执行副作用）。
+
+    帧记录（决策帧，0.5 s 间隔）：ego pose/speed、OD/LD 特征与掩码、专家空问（κ/ds/valid）、
+    实际下发动作（``action_exec`` = references[0]，``plan_exec`` = 6 步参考 —— 动作条件证据）、
+    env RNG 摘要（traffic RNG 一致性证据）。
+    逐 step 记录：step index / pose / speed / RNG 摘要（逐步状态误差证据）。
+    """
+
+    def __init__(self) -> None:
+        self.frames: List[Dict[str, Any]] = []
+        self.steps: List[Dict[str, Any]] = []
+        self.n_label_invalid = 0
+
+    # ---------------------------------------------------------------- 采集
+    def capture_step(self, *, env: Any, step_index: int, rng_digest: Optional[int]) -> None:
+        """逐 env step 轨迹（在 ``action()`` 每步调用；只读 pose/speed）。
+
+        ``step_rng_digest`` 以 **uint64** 存储（float64 无法精确表示 64 位摘要 ⇒ 低比特
+        失配假象；0 = 不可用）。
+        """
+        ego = env.agent
+        self.steps.append({
+            "step_index": float(int(step_index)),
+            "step_pose": np.asarray(
+                [float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta)],
+                dtype=np.float64,
+            ),
+            "step_speed": float(ego.speed),
+            "step_rng_digest": np.uint64(rng_digest if rng_digest is not None else 0),
+        })
+
+    def capture_frame(
+        self,
+        *,
+        env: Any,
+        obs: Mapping[str, Any],
+        label: Optional[Mapping[str, Any]],
+        action_exec: np.ndarray,
+        plan_exec: np.ndarray,
+        rng_digest: Optional[int],
+    ) -> None:
+        """逐决策帧真值（专家空问 ``label`` 由 ``tools.dagger_collect._make_labeler`` 产出）。"""
+        ego = env.agent
+        kappa = ds_e = np.nan
+        valid = 0.0
+        if label is not None:
+            action = np.asarray(label.get("action"), dtype=np.float64).reshape(-1)[:2]
+            ds_e = float(action[0])
+            dtheta_e = float(action[1])
+            if np.isfinite(ds_e) and np.isfinite(dtheta_e) and ds_e > 1e-3:
+                kappa = dtheta_e / ds_e
+                valid = 1.0
+        if valid <= 0.5:
+            self.n_label_invalid += 1
+        self.frames.append({
+            "frame_env_step": float(int(getattr(env, "episode_step", 0))),
+            "ego_pose_world": np.asarray(
+                [float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta)],
+                dtype=np.float64,
+            ),
+            "ego_speed": float(np.asarray(obs["ego"], dtype=np.float64).reshape(-1)[0]),
+            "od": np.asarray(obs["od"], dtype=np.float32).reshape(-1, 9),
+            "od_mask": np.asarray(obs["od_mask"], dtype=np.float32).reshape(-1),
+            "od_presence": np.asarray(obs["od_presence"], dtype=np.float32).reshape(-1),
+            "ld": np.asarray(obs["ld"], dtype=np.float32).reshape(-1, 7),
+            "ld_mask": np.asarray(obs["ld_mask"], dtype=np.float32).reshape(-1),
+            "kappa_expert": float(kappa),
+            "ds_expert": float(ds_e),
+            "expert_valid": float(valid),
+            "action_exec": np.asarray(action_exec, dtype=np.float64).reshape(2),
+            "plan_exec": np.asarray(plan_exec, dtype=np.float64).reshape(-1, 2),
+            # uint64（精确；float64 会丢低比特 ⇒ 假失配；0 = 不可用）
+            "rng_digest": np.uint64(rng_digest if rng_digest is not None else 0),
+        })
+
+    # ---------------------------------------------------------------- 落盘
+    def as_arrays(self, *, termination: str, meta: Mapping[str, Any]) -> Dict[str, np.ndarray]:
+        arrays: Dict[str, np.ndarray] = {}
+        if self.frames:
+            for key in TRUTH_FRAME_KEYS:
+                arrays[key] = np.stack(
+                    [np.asarray(frame[key]) for frame in self.frames], axis=0
+                )
+        else:
+            arrays.update({key: np.zeros((0,), dtype=np.float64) for key in TRUTH_FRAME_KEYS})
+        if self.steps:
+            for key in TRUTH_STEP_KEYS:
+                arrays[key] = np.stack([np.asarray(step[key]) for step in self.steps], axis=0)
+        else:
+            arrays.update({key: np.zeros((0,), dtype=np.float64) for key in TRUTH_STEP_KEYS})
+        arrays["termination_code"] = np.asarray([_termination_code(termination)], dtype=np.int64)
+        arrays["n_steps"] = np.asarray([len(self.steps)], dtype=np.int64)
+        arrays["meta_json"] = np.asarray(json.dumps(_sanitize(dict(meta)), ensure_ascii=False))
+        return arrays
+
+    def save(
+        self, truth_dir: Any, spec_id: int, *, termination: str, meta: Mapping[str, Any]
+    ) -> Path:
+        path = _truth_path(truth_dir, spec_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(str(path), **self.as_arrays(termination=termination, meta=meta))
+        return path
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "n_capture": int(len(self.frames)),
+            "n_steps": int(len(self.steps)),
+            "n_label_invalid": int(self.n_label_invalid),
+        }
+
+
+class _TruthRecord:
+    """注入 pass：读取记录 pass 的 npz（只读）；兼容 R40-V4B legacy 键面（缺扩展键 = 不可用）。
+
+    扩展键（``action_exec/plan_exec/rng_digest/step_*``）缺失时：动作条件按"实测（位姿派生）"
+    口径降级（legacy 文件也有 ``ego_pose_world`` 可与重放位姿对照），RNG/逐步误差报告显式
+    标注 n/a。
+    """
+
+    def __init__(self, path: Any):
+        self.path = Path(str(path))
+        with np.load(str(self.path)) as data:
+            self.data = {key: np.asarray(data[key]) for key in data.files}
+        for key in ("ego_pose_world", "ego_speed", "od", "od_mask", "od_presence", "ld", "ld_mask"):
+            if key not in self.data:
+                raise ValueError(f"[eval_runner] truth 文件缺必需键 {key!r}：{self.path}")
+        self.n_frames = int(self.data["ego_pose_world"].shape[0])
+        self.n_steps = int(np.asarray(self.data.get("n_steps", [0])).reshape(-1)[0])
+        self.termination_code = int(
+            np.asarray(self.data.get("termination_code", [_termination_code("other")])).reshape(-1)[0]
+        )
+        self.meta: Dict[str, Any] = {}
+        raw_meta = self.data.get("meta_json")
+        if raw_meta is not None:
+            try:
+                payload = json.loads(str(np.asarray(raw_meta).reshape(-1)[0]))
+                self.meta = dict(payload) if isinstance(payload, Mapping) else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                self.meta = {}
+
+    # ---------------------------------------------------------------- 只读访问
+    @property
+    def poses(self) -> np.ndarray:
+        return np.asarray(self.data["ego_pose_world"], dtype=np.float64).reshape(self.n_frames, 3)
+
+    @property
+    def speeds(self) -> np.ndarray:
+        return np.asarray(self.data["ego_speed"], dtype=np.float64).reshape(self.n_frames)
+
+    def has(self, key: str) -> bool:
+        return key in self.data
+
+    def array(self, key: str) -> Optional[np.ndarray]:
+        value = self.data.get(key)
+        return None if value is None else np.asarray(value)
+
+    def realized_action(self, frame: int) -> Optional[np.ndarray]:
+        """决策帧 ``frame → frame+1`` 的**实测动作** ``(ds, dθ)``（位姿派生；越界 ⇒ None）。"""
+        if int(frame) < 0 or int(frame) + 1 >= self.n_frames:
+            return None
+        return _pose_realized_action(self.poses[int(frame)], self.poses[int(frame) + 1])
+
+    def commanded_action(self, frame: int, step: int = 1) -> Optional[np.ndarray]:
+        """决策帧 ``frame`` 的第 ``step`` 个**命令动作**（``plan_exec``；legacy 缺键 ⇒ None）。"""
+        plan = self.array("plan_exec")
+        if plan is None or plan.ndim != 3 or int(frame) < 0 or int(frame) >= int(plan.shape[0]):
+            return None
+        k = int(step) - 1
+        if k < 0 or k >= int(plan.shape[1]):
+            return None
+        return np.asarray(plan[int(frame), k], dtype=np.float64).reshape(2)
+
+    def rng_digest(self, frame: int) -> Optional[int]:
+        """决策帧 RNG 摘要（精确 int；0/缺失 ⇒ None = 不可用；legacy 文件无该键）。"""
+        arr = self.array("rng_digest")
+        if arr is None or int(frame) < 0 or int(frame) >= arr.shape[0]:
+            return None
+        value = int(np.asarray(arr[int(frame)]).reshape(-1)[0])
+        return None if value == 0 else value
+
+    # ---------------------------------------------------------------- 载荷构造
+    @staticmethod
+    def _relative(pose_f: np.ndarray, pose_g: np.ndarray) -> np.ndarray:
+        """帧 f 系的相对位姿（t0 帧）：``[R(−θ_f)(p_g−p_f), wrap(θ_g−θ_f)]``（V4B §2.3 同式）。"""
+        theta_f = float(pose_f[2])
+        dx = float(pose_g[0]) - float(pose_f[0])
+        dy = float(pose_g[1]) - float(pose_f[1])
+        cos_t = math.cos(theta_f)
+        sin_t = math.sin(theta_f)
+        return np.asarray(
+            [cos_t * dx + sin_t * dy, -sin_t * dx + cos_t * dy,
+             _wrap_to_pi(float(pose_g[2]) - theta_f)],
+            dtype=np.float64,
+        )
+
+    def build_payload(self, frame: int, device: str = "cpu", max_step: int = 6) -> Dict[int, Dict[str, Any]]:
+        """重放帧 ``frame`` 的注入载荷 ``{k: entry}``（k=1..；``g = frame + k`` 越界 ⇒ 缺键）。
+
+        逐位对齐 R40-V4B ``TruthRecord.build_payload``（§2.3 重表达公式）；entry 张量 +
+        ``meta``（真实来源：truth 文件/记录帧/env step/来源 protocol hash）。
+        """
+        import torch
+
+        payload: Dict[int, Dict[str, Any]] = {}
+        if int(frame) < 0 or int(frame) >= self.n_frames:
+            return payload
+        poses = self.poses
+        speeds = self.speeds
+        od_all = np.asarray(self.data["od"], dtype=np.float64).reshape(self.n_frames, -1, 9)
+        od_mask = np.asarray(self.data["od_mask"], dtype=np.float64).reshape(self.n_frames, -1)
+        od_presence = np.asarray(self.data["od_presence"], dtype=np.float64).reshape(self.n_frames, -1)
+        ld_all = np.asarray(self.data["ld"], dtype=np.float64).reshape(self.n_frames, -1, 7)
+        ld_mask = np.asarray(self.data["ld_mask"], dtype=np.float64).reshape(self.n_frames, -1)
+        kappa_expert = np.asarray(self.data["kappa_expert"], dtype=np.float64).reshape(self.n_frames)
+        expert_valid = np.asarray(self.data["expert_valid"], dtype=np.float64).reshape(self.n_frames)
+        frame_env_step = self.array("frame_env_step")
+        pose_f = poses[int(frame)]
+        for k in range(1, int(max_step) + 1):
+            g = int(frame) + k
+            if g >= self.n_frames:
+                break  # 越界：该步无真值（显式跳过，计数见 runtime）
+            pose_rel = self._relative(pose_f, poses[g])
+            theta_rel = float(pose_rel[2])
+            cos_t = math.cos(theta_rel)
+            sin_t = math.sin(theta_rel)
+            speed_g = float(speeds[g])
+
+            od = od_all[g]                       # (S,9) 帧 g 的 ego 系特征
+            od_live = (od_mask[g] > 0.5) & (od_presence[g] > 0.5)
+            dx, dy = od[:, 0], od[:, 1]
+            vx_f, vy_f = od[:, 2], od[:, 3]
+            px = cos_t * dx - sin_t * dy + pose_rel[0]
+            py = sin_t * dx + cos_t * dy + pose_rel[1]
+            vx_world = vx_f + speed_g               # 沿 ego_g 纵轴（无侧向速度假设，同 V4A）
+            vwx = cos_t * vx_world - sin_t * vy_f
+            vwy = sin_t * vx_world + cos_t * vy_f
+            cos_f, sin_f = od[:, 4], od[:, 5]
+            cos_t0 = cos_f * cos_t - sin_f * sin_t
+            sin_t0 = sin_f * cos_t + cos_f * sin_t
+            heading_t0 = np.arctan2(sin_t0, cos_t0)
+            od_valid = od_live.astype(np.float64)
+
+            ld = ld_all[g]                          # (L,7) 帧 g 的 ego 系特征
+            ld_live = ld_mask[g] > 0.5
+            ldx, ldy = ld[:, 0], ld[:, 1]
+            lpx = cos_t * ldx - sin_t * ldy + pose_rel[0]
+            lpy = sin_t * ldx + cos_t * ldy + pose_rel[1]
+            ld_h = ld[:, 2] + theta_rel
+            ld_curv = ld[:, 3]
+            ld_valid = ld_live.astype(np.float64)
+
+            kappa_valid = bool(expert_valid[g] > 0.5 and np.isfinite(kappa_expert[g]))
+            meta = {
+                "truth_file": str(self.path),
+                "recorded_frame": int(g),
+                "replay_frame": int(frame),
+                "recorded_env_step": (
+                    int(frame_env_step[g]) if frame_env_step is not None and g < frame_env_step.shape[0]
+                    else None
+                ),
+                "source_protocol_hash": self.meta.get("protocol_hash"),
+                "source_teacher_force": self.meta.get("teacher_force"),
+            }
+            payload[k] = {
+                "pose": torch.as_tensor(pose_rel, dtype=torch.float32, device=device),
+                "speed": torch.as_tensor([speed_g], dtype=torch.float32, device=device),
+                "od_pos": torch.as_tensor(np.stack([px, py], axis=-1), dtype=torch.float32, device=device),
+                "od_vw": torch.as_tensor(np.stack([vwx, vwy], axis=-1), dtype=torch.float32, device=device),
+                "od_cs": torch.as_tensor(np.stack([cos_t0, sin_t0], axis=-1), dtype=torch.float32, device=device),
+                "od_h": torch.as_tensor(heading_t0, dtype=torch.float32, device=device),
+                "od_static": torch.as_tensor(od[:, 6:9], dtype=torch.float32, device=device),
+                "od_valid": torch.as_tensor(od_valid, dtype=torch.float32, device=device),
+                "ld_pos": torch.as_tensor(np.stack([lpx, lpy], axis=-1), dtype=torch.float32, device=device),
+                "ld_h": torch.as_tensor(ld_h, dtype=torch.float32, device=device),
+                "ld_curv": torch.as_tensor(ld_curv, dtype=torch.float32, device=device),
+                "ld_valid": torch.as_tensor(ld_valid, dtype=torch.float32, device=device),
+                "kappa": torch.as_tensor(
+                    [float(kappa_expert[g]) if kappa_valid else 0.0],
+                    dtype=torch.float32, device=device,
+                ),
+                "kappa_valid": torch.as_tensor([1.0 if kappa_valid else 0.0],
+                                               dtype=torch.float32, device=device),
+                "meta": meta,
+            }
+        return payload
+
+    def summary(self) -> Dict[str, Any]:
+        expert_valid = self.array("expert_valid")
+        return {
+            "path": str(self.path),
+            "n_frames": int(self.n_frames),
+            "n_steps": int(self.n_steps),
+            "termination_code": int(self.termination_code),
+            "extended_schema": bool(self.has("action_exec") and self.has("plan_exec")),
+            "has_rng": bool(self.has("rng_digest")),
+            "has_step_trace": bool(self.has("step_pose")),
+            "expert_valid_frac": (
+                float(np.mean(np.asarray(expert_valid, dtype=np.float64) > 0.5))
+                if expert_valid is not None and expert_valid.size else None
+            ),
+            "source_meta": dict(self.meta),
+        }
+
+
+def _pose_realized_action(pose_a: np.ndarray, pose_b: np.ndarray) -> np.ndarray:
+    """相邻决策帧位姿 → 实测动作 ``(ds, dθ)``（位移模 + wrap 航向差）。"""
+    a = np.asarray(pose_a, dtype=np.float64).reshape(3)
+    b = np.asarray(pose_b, dtype=np.float64).reshape(3)
+    ds = float(math.hypot(b[0] - a[0], b[1] - a[1]))
+    dtheta = float(_wrap_to_pi(b[2] - a[2]))
+    return np.asarray([ds, dtheta], dtype=np.float64)
+
+
+def _od_divergence(
+    replay_od: np.ndarray,
+    replay_mask: np.ndarray,
+    rec_od: np.ndarray,
+    rec_mask: np.ndarray,
+    rec_presence: np.ndarray,
+) -> Dict[str, Any]:
+    """② OD state divergence：掩码内（记录 live ∩ 重放 mask）逐槽特征绝对差。"""
+    replay = np.asarray(replay_od, dtype=np.float64).reshape(-1, 9)
+    rec = np.asarray(rec_od, dtype=np.float64).reshape(-1, 9)
+    if replay.shape != rec.shape:
+        return {"available": False, "reason": f"slot shape {replay.shape} vs {rec.shape}"}
+    live = (
+        (np.asarray(rec_mask, dtype=np.float64).reshape(-1) > 0.5)
+        & (np.asarray(rec_presence, dtype=np.float64).reshape(-1) > 0.5)
+        & (np.asarray(replay_mask, dtype=np.float64).reshape(-1) > 0.5)
+    )
+    if not bool(live.any()):
+        return {"available": False, "reason": "no live slot", "n_live": 0}
+    diff = np.abs(replay[live] - rec[live])
+    return {
+        "available": True,
+        "n_live": int(live.sum()),
+        "mean_abs": float(np.mean(diff)),
+        "max_abs": float(np.max(diff)),
+    }
+
+
+def _p95(values: Sequence[float]) -> Optional[float]:
+    array = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=np.float64)
+    return float(np.percentile(array, 95.0)) if array.size else None
+
+
+def _mean_abs(values: Sequence[float]) -> Optional[float]:
+    array = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=np.float64)
+    return float(np.mean(np.abs(array))) if array.size else None
+
+
+def _max_abs(values: Sequence[float]) -> Optional[float]:
+    array = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=np.float64)
+    return float(np.max(np.abs(array))) if array.size else None
+
+
+def _plan_scale_factor(speed_scale: float, speed_oracle: str, plan0_ds: float,
+                       expert_ds: Optional[float]) -> float:
+    """速度反事实缩放因子（``--speed-scale`` × ``--speed-oracle``；纯函数，口径 = V4B）。
+
+    ``expert``：``scale *= clip(ds_expert / plan0_ds, 0.05, 2.0)``（专家空问纵向速度替换）；
+    ``ds`` 极端比值计数并钳位，不静默逸出。
+    """
+    scale = float(speed_scale)
+    if str(speed_oracle or "off") == "expert":
+        if expert_ds is None or not np.isfinite(float(expert_ds)):
+            return scale
+        denom = max(float(plan0_ds), 1e-3)
+        scale *= float(np.clip(float(expert_ds) / denom, 0.05, 2.0))
+    return scale
+
+
+def _apply_plan_speed_scale(plan: np.ndarray, scale: float) -> np.ndarray:
+    """``plan (N,2) ← scale·plan``（ds/dθ 同缩 ⇒ κ = dθ/ds 不变；纯函数）。"""
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"[eval_runner] plan 缩放因子必须 >0 有限，收到 {scale}")
+    return np.asarray(plan, dtype=np.float64) * float(scale)
+
+
+def probe_env_snapshot_support(env: Any) -> Dict[str, Any]:
+    """R41-A1 §三.①：核实 MetaDrive engine 是否支持 snapshot/clone（一步合法 transition 路线）。
+
+    候选 API（engine 及当前 manager 对象上逐名探测可调用性）：``dump_state/load_state/
+    snapshot/clone/save_state/restore_state``。任一可用 ⇒ 路线 ①（clone_env 分支）；
+    全不可用 ⇒ 路线 ②（两遍重放 + 五类漂移报告 + 按阈剔除）。
+
+    事实（2026-10 环境，MetaDrive 2.3.0a0）：engine 无全状态 dump/load —— 仅有
+    ``dump_episode``（record_manager 元数据）与逐对象 ``get_state/set_state``（不含 RNG/
+    manager/physics 全局态）⇒ 本仓取路线 ②（见 a1 报告）。
+    """
+    candidates = ("dump_state", "load_state", "snapshot", "clone", "save_state", "restore_state")
+    engine = getattr(env, "engine", env)
+    present: List[str] = []
+    checked: List[Dict[str, Any]] = []
+    for scope_name, scope in (("engine", engine),):
+        for name in candidates:
+            callable_ = callable(getattr(scope, name, None))
+            checked.append({"scope": scope_name, "name": name, "callable": bool(callable_)})
+            if callable_:
+                present.append(f"{scope_name}.{name}")
+    managers = getattr(engine, "managers", None)
+    if isinstance(managers, Mapping):
+        for manager_name, manager in managers.items():
+            for name in candidates:
+                if callable(getattr(manager, name, None)):
+                    present.append(f"manager[{manager_name}].{name}")
+    supported = bool(present)
+    return {
+        "candidates": list(candidates),
+        "present": sorted(set(present)),
+        "supported": supported,
+        "route": ("clone_env_branch" if supported else "two_pass_replay"),
+        "checked": checked,
+        "evidence": (
+            "MetaDrive engine 无 dump_state/load_state/snapshot/clone（全状态分支不可用）⇒ "
+            "采用两遍重放 + 五类漂移报告 + 按阈剔除（报告显式声明阈值）"
+            if not supported else "engine 级 snapshot/clone 可用"
+        ),
+        "engine_class": type(engine).__name__,
+    }
+
+
+class _OracleInjectionHook:
+    """R41-A1 §七.1：Oracle Injection Hook —— 注入事件五要件记录 + 非法组合自动拒绝 + 审计落盘。
+
+    每注入事件记录：注入模块（surface 级）/注入步数/真实来源（truth 文件 + 记录帧 + 来源
+    protocol hash）/动作条件一致性（由 :meth:`note_action_condition` 后置判定）/替换前后
+    state hash/替换前后 Policy 输出（含 hash）。
+
+    自动拒绝语义（两级）：
+
+    - **预检硬拒**（不进入模型路径）：帧级"同状态门"失败/载荷结构性缺失 ⇒ runtime 直接不注入
+      （``n_rejected_frame_gate``/``n_missing`` 计账）；
+    - **后置裁定拒**（不得进入裁决）：注入后按动作条件判定 ``illegal``（学生动作条件下产生的
+      future state 与记录不一致）⇒ 该注入步不计入 ``legal_steps``，``adjudication_excluded``；
+      episode 级 ``illegal_frac`` 超阈 ⇒ 整条 episode 剔除出 oracle 裁决视图。
+    """
+
+    def __init__(self, *, spec_id: int, truth_summary: Mapping[str, Any], detail_cap: int = 500) -> None:
+        self.spec_id = int(spec_id)
+        self.truth_summary = dict(truth_summary)
+        self.detail_cap = int(detail_cap)
+        self.events: List[Dict[str, Any]] = []
+        self.pending: Dict[int, List[Dict[str, Any]]] = {}
+        self.verdicts: Dict[int, Dict[str, Any]] = {}
+        self.n_events = 0
+        self.n_detail_dropped = 0
+        self.counts: Dict[str, int] = {
+            "n_events": 0,
+            "n_state_events": 0,
+            "n_lateral_events": 0,
+            "n_legal": 0,
+            "n_illegal": 0,
+            "n_unproven": 0,
+        }
+        self.by_surface: Dict[str, int] = {}
+
+    # ---------------------------------------------------------------- 模型侧回调
+    def on_injection(self, event: Mapping[str, Any]) -> None:
+        """模型注入事件（替换前后 state 张量 / policy 输出 → hash + 明细；受 detail_cap 限制）。"""
+        record = {
+            "spec_id": int(self.spec_id),
+            "frame": int(event.get("frame", -1)),
+            "step": int(event.get("step", -1)),
+            "module": str(event.get("module", "?")),
+            "surface": str(event.get("surface", "?")),
+            "status": "injected",
+            "source": _sanitize(dict(event.get("meta") or {})),
+            "probe_mode": str(event.get("probe_mode", "")),
+            "state_hash_before": _tensor_bundle_digest(event.get("before_state")),
+            "state_hash_after": _tensor_bundle_digest(event.get("after_state")),
+            "policy_hash_before": _tensor_bundle_digest(event.get("before_policy")),
+            "policy_hash_after": _tensor_bundle_digest(event.get("after_policy")),
+            "policy_output_before": _sanitize(event.get("before_policy")),
+            "policy_output_after": _sanitize(event.get("after_policy")),
+        }
+        self.n_events += 1
+        self.counts["n_events"] += 1
+        surface = record["surface"]
+        self.by_surface[surface] = int(self.by_surface.get(surface, 0)) + 1
+        if surface == "lateral":
+            self.counts["n_lateral_events"] += 1
+        else:
+            self.counts["n_state_events"] += 1
+        self.pending.setdefault(record["frame"], []).append(record)
+        if len(self.events) < self.detail_cap:
+            self.events.append(record)
+        else:
+            self.n_detail_dropped += 1
+
+    # ---------------------------------------------------------------- 裁定
+    def _classify(self, record: Dict[str, Any], verdict: Optional[Mapping[str, Any]]) -> None:
+        """按裁定（``legal``/``unproven``/其余=不一致）落事件状态并计账。
+
+        - ``legal`` ⇒ ``n_legal``（**进入** oracle 裁决）；
+        - 不一致（``auto_rejected``）⇒ ``n_illegal``（**裁定剔除**：非法组合不得进入裁决）；
+        - 无证据（空裁定/``unproven``）⇒ ``n_unproven``（同样剔除，不默认合法）。
+        """
+        payload = dict(verdict) if isinstance(verdict, Mapping) else {}
+        record["action_condition"] = _sanitize(payload)
+        if not payload or bool(payload.get("unproven")):
+            record["status"] = "unproven"
+            self.counts["n_unproven"] += 1
+        elif bool(payload.get("legal")):
+            record["status"] = "legal"
+            self.counts["n_legal"] += 1
+        else:
+            record["status"] = "auto_rejected"
+            self.counts["n_illegal"] += 1
+
+    def note_action_condition(self, frame: int, verdict: Mapping[str, Any]) -> None:
+        """帧级动作条件裁定（逐 **步** 归因：事件按 ``(frame, step)`` 取 ``verdict["steps"][k]``）。"""
+        frame = int(frame)
+        verdict = dict(verdict)
+        self.verdicts[frame] = verdict
+        steps = dict(verdict.get("steps") or {})
+        for record in self.pending.pop(frame, []):
+            self._classify(record, steps.get(int(record.get("step", -1))))
+
+    def attribute(self, verdicts: Mapping[Tuple[int, int], Mapping[str, Any]]) -> Dict[str, Any]:
+        """收尾裁定：按 ``(frame, step)`` 键逐事件落状态（``verdicts`` 缺键 ⇒ unproven）；返回摘要。"""
+        for frame in sorted(list(self.pending)):
+            for record in self.pending.pop(frame):
+                key = (int(record["frame"]), int(record["step"]))
+                self._classify(record, verdicts.get(key))
+        return self.summary()
+
+    def finalize(self, extra_verdict: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """收尾兜底：未裁定事件按 ``extra_verdict``（缺省 unproven）落定；返回审计摘要。"""
+        fallback = dict(extra_verdict or {})
+        if not fallback:
+            fallback = {"legal": False, "unproven": True, "reason": "unattributed"}
+        for frame in sorted(self.pending):
+            for record in self.pending.pop(frame):
+                self._classify(record, fallback)
+        return self.summary()
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "spec_id": int(self.spec_id),
+            "truth": dict(self.truth_summary),
+            "counts": dict(self.counts),
+            "by_surface": dict(self.by_surface),
+            "n_frames_with_events": int(len(self.verdicts)),
+            "n_detail_recorded": int(len(self.events)),
+            "n_detail_dropped": int(self.n_detail_dropped),
+        }
+
+    def write_detail(self, path: Any) -> Path:
+        """逐事件明细 JSONL（含 hash/动作条件/policy 输出；受 detail_cap 截断，计数如实）。"""
+        path = Path(str(path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            for record in self.events:
+                handle.write(json.dumps(_sanitize(record), ensure_ascii=False, sort_keys=True) + "\n")
+        return path
+
+
+# --------------------------------------------------------------------------- #
 # R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；口径单一出处 = R36 C lane）
 # --------------------------------------------------------------------------- #
 #: R36 C lane 注入器（``select_target_lane`` + E3 车道链采样；与 a3 ``--lane-anchor inject`` 同源）。
@@ -1523,6 +2329,12 @@ class _CkptController:
     world_residual_scale}`` —— 透传 :func:`_load_ckpt_model` 与注入器；
     **缺省（无该键，如 a3 controller 自己的 canary 预填路径）= 全默认装配**，缓存键仍为
     ``(ckpt, device)``（旧行为逐位不变）。
+
+    ``task["counterfactual"]``（R41-A1；正式入口 ``main`` 装配）：``{teacher_force,
+    record_truth, inject_truth, speed_scale, speed_oracle, drift_thresholds, protocol_hash,
+    out_dir}`` —— teacher-forced oracle 注入（模型内原生路径）+ 两遍法 truth 记录/注入 +
+    速度反事实 + Oracle Injection Hook；**缺省 = 全关**（不装 hook、不读 npz、不新增 episode
+    键，逐位不变）。
     """
 
     kind = "ckpt"
@@ -1532,6 +2344,18 @@ class _CkptController:
     #: R39-A1b：注入器/模式的类级默认（``object.__new__`` 构造的测试实例亦有默认值）
     anchor_injector: Any = None
     lane_anchor_mode: str = "off"
+    #: R41-A1：反事实轴类级默认（``object.__new__`` 测试实例亦可用；全默认 = 全关）
+    teacher_force_mode: str = "off"
+    record_truth_dir: Optional[str] = None
+    inject_truth_dir: Optional[str] = None
+    speed_scale: Optional[float] = None
+    speed_oracle: str = "off"
+    cf_active: bool = False
+    #: R41-A1：两遍法运行时类级默认（None = 未挂载；仅 cf_active/对应开关非默认时被触达）
+    labeler: Any = None
+    record: Any = None
+    recorder: Any = None
+    hook: Any = None
 
     def __init__(self, env: Any, spec: Any, task: Mapping[str, Any]):
         import torch
@@ -1539,6 +2363,48 @@ class _CkptController:
         self.spec = spec
         self.device = torch.device(str(task.get("device") or "cpu"))
         assembly = dict(task.get("model_assembly") or {})
+        cf = dict(task.get("counterfactual") or {})
+        self.teacher_force_mode = str(cf.get("teacher_force") or "off")
+        if self.teacher_force_mode not in LOAD_TEACHER_FORCE_MODES:
+            raise ValueError(
+                f"未知 teacher_force={self.teacher_force_mode!r}"
+                f"（可选 {'/'.join(LOAD_TEACHER_FORCE_MODES)}）"
+            )
+        self.record_truth_dir = str(cf.get("record_truth") or "").strip() or None
+        self.inject_truth_dir = str(cf.get("inject_truth") or "").strip() or None
+        self.speed_scale = None if cf.get("speed_scale") is None else float(cf["speed_scale"])
+        if self.speed_scale is not None and self.speed_scale == 1.0:
+            self.speed_scale = None
+        if self.speed_scale is not None and not (np.isfinite(self.speed_scale) and self.speed_scale > 0.0):
+            raise ValueError(f"speed_scale 必须 >0 有限，收到 {self.speed_scale}")
+        self.speed_oracle = str(cf.get("speed_oracle") or "off")
+        if self.speed_oracle not in LOAD_SPEED_ORACLE_MODES:
+            raise ValueError(f"未知 speed_oracle={self.speed_oracle!r}")
+        if self.record_truth_dir and self.inject_truth_dir:
+            raise ValueError("[eval_runner] record_truth 与 inject_truth 互斥（两遍法 = 两次独立 run）")
+        if self.inject_truth_dir and self.teacher_force_mode == "off":
+            raise ValueError("[eval_runner] --inject-truth 只对 --teacher-force 非 off 有意义")
+        if self.teacher_force_mode != "off" and str(assembly.get("world_state_api") or "off") == "off":
+            raise ValueError(
+                "[eval_runner] --teacher-force 非 off 需要 --world-state-api 非 off"
+                "（状态注入落点 = analytic_update 后 / readout 前）"
+            )
+        self.cf_thresholds: Dict[str, float] = dict(DEFAULT_DRIFT_THRESHOLDS)
+        self.cf_thresholds.update(
+            {str(k): float(v) for k, v in dict(cf.get("drift_thresholds") or {}).items()
+             if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        )
+        self.cf_frame_gate: Dict[str, float] = dict(DEFAULT_FRAME_GATE)
+        self.cf_frame_gate.update(
+            {str(k): float(v) for k, v in dict(cf.get("frame_gate") or {}).items()
+             if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        )
+        self.cf_protocol_hash = str(cf.get("protocol_hash") or "")
+        self.cf_out_dir = str(cf.get("out_dir") or "").strip() or None
+        self.cf_active = bool(
+            self.teacher_force_mode != "off" or self.record_truth_dir or self.inject_truth_dir
+            or self.speed_scale is not None or self.speed_oracle != "off"
+        )
         self.model = _load_ckpt_model(
             str(task["ckpt"]),
             task.get("model_config") or {},
@@ -1553,6 +2419,11 @@ class _CkptController:
                                  if assembly.get("world_residual_head") else None),
             world_residual_scale=(float(assembly["world_residual_scale"])
                                   if assembly.get("world_residual_scale") is not None else None),
+            teacher_force=self.teacher_force_mode,
+            record_truth=bool(self.record_truth_dir),
+            inject_truth_sha16=(str(cf.get("inject_truth_sha16")) if cf.get("inject_truth_sha16") else None),
+            speed_scale=self.speed_scale,
+            speed_oracle=self.speed_oracle,
         )
         # R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；默认 off ⇒ None，不触达任何新代码路径）
         self.lane_anchor_mode = str(assembly.get("lane_anchor") or "off")
@@ -1586,6 +2457,36 @@ class _CkptController:
         self._plan_action = np.zeros(2, dtype=np.float64)
         #: 逐 env step 的自车实测位姿（用于重建"上一策略步实测动作"，见 _measured_prev_action）
         self._pose_history: List[Tuple[float, float, float]] = []
+        # ---- R41-A1：两遍法运行时（默认全 None/全空 ⇒ 零触达）----
+        self.labeler = None                    # 专家空问 labeler（record pass / speed_oracle）
+        self.record: Optional[_TruthRecord] = None   # 注入 pass：记录 pass 的 npz
+        self.recorder: Optional[_TruthRecorder] = None  # 记录 pass：本 episode 真值
+        self.hook: Optional[_OracleInjectionHook] = None
+        self._oracle_route: Optional[Dict[str, Any]] = None
+        self._cf_counts: Dict[str, int] = {}
+        self._drift_frames: List[Dict[str, Any]] = []
+        self._pending_verdicts: Dict[int, Dict[str, Any]] = {}
+        self._final_verdicts: Dict[int, Dict[str, Any]] = {}
+        self._replay_step_pose: List[Tuple[float, float, float]] = []
+        self._replay_step_speed: List[float] = []
+        self._replay_step_index: List[int] = []
+        self._replay_step_rng: List[Optional[int]] = []
+
+    def _cf_reset_episode(self) -> None:
+        """R41-A1：episode 级运行时重置（bind/finish 对称；默认关路径零触达）。"""
+        self._cf_counts = {
+            "n_frames": 0, "n_frames_rejected_gate": 0, "n_speed_scaled": 0,
+            "n_payload_steps": 0, "n_payload_steps_structural_skip": 0,
+        }
+        self._drift_frames = []
+        self._executed_first: Dict[int, np.ndarray] = {}  # frame -> 本帧下发首动作（动作条件链）
+        self._realized_intervals: Dict[int, Dict[str, Any]] = {}  # 区间起点 -> 实测证据（lag-1）
+        self._final_verdicts: Dict[Tuple[int, int], Dict[str, Any]] = {}  # (frame, step) -> 裁定
+        self._cf_frame_poses: List[Tuple[float, float, float]] = []
+        self._replay_step_pose = []
+        self._replay_step_speed = []
+        self._replay_step_index = []
+        self._replay_step_rng = []
 
     def bind(self, env: Any) -> None:
         from env.obs.builder import ObservationBuilder
@@ -1596,24 +2497,50 @@ class _CkptController:
         self._action = [0.0, 0.0]
         self._plan_action = np.zeros(2, dtype=np.float64)
         self._pose_history = []
+        self.recorder = None
+        self.record = None
+        self.hook = None
+        self.labeler = None
+        self._cf_reset_episode()
         # §8.4：episode 起点没有上一动作（与 collect_expert/training pools 同口径）
         env.prev_policy_action = np.zeros(2, dtype=np.float64)
         if self.tracker_kind == "exact":
             from env.tracking import ExactTracker  # 阶段 A/B 运动学执行器（step 后 apply）
 
             self.tracker = ExactTracker(dt=0.5, hz=10)
-            return
-        from env.tracking import LqrTracker  # N3 契约
+        else:
+            from env.tracking import LqrTracker  # N3 契约
 
-        # 与训练侧 ``LocalEnvPool(_setup_episode)`` 同款：engine 注册 + 每策略步 set_reference
-        self.tracker = env.engine.add_policy(
-            env.agent.id,
-            LqrTracker,
-            env.agent,
-            int(getattr(self.spec, "seed", 0)),
-        )
-        if hasattr(self.tracker, "reset"):
-            self.tracker.reset()
+            # 与训练侧 ``LocalEnvPool(_setup_episode)`` 同款：engine 注册 + 每策略步 set_reference
+            self.tracker = env.engine.add_policy(
+                env.agent.id,
+                LqrTracker,
+                env.agent,
+                int(getattr(self.spec, "seed", 0)),
+            )
+            if hasattr(self.tracker, "reset"):
+                self.tracker.reset()
+        # ---- R41-A1：两遍法运行时（默认关 ⇒ 以下全不触达；hook 逐 episode 挂/卸）----
+        if self.recorder is None and self.record_truth_dir is not None:
+            self.recorder = _TruthRecorder()
+        if self.inject_truth_dir is not None:
+            truth_path = _truth_path(self.inject_truth_dir, int(getattr(self.spec, "id", -1)))
+            if not truth_path.is_file():
+                raise SystemExit(
+                    f"[eval_runner] fail-fast：缺 truth 文件 {truth_path}"
+                    "（--inject-truth 需第一遍记录 pass 产物）"
+                )
+            self.record = _TruthRecord(truth_path)
+            self.hook = _OracleInjectionHook(
+                spec_id=int(getattr(self.spec, "id", -1)), truth_summary=self.record.summary()
+            )
+            self.model.set_teacher_force_hooks(self.hook)
+            self._oracle_route = probe_env_snapshot_support(env)
+        if self.record_truth_dir is not None or self.speed_oracle == "expert":
+            # 专家空问（无执行副作用；构造在 env.reset 之后 —— 规则专家依赖全局 engine）
+            from tools.dagger_collect import _make_labeler
+
+            self.labeler = _make_labeler(env, self.spec, "pure_pursuit")
 
     def _tensors(self, obs: Mapping[str, Any]) -> Dict[str, Any]:
         """与训练侧 ``PPOTrainer._to_tensor_obs`` 同口径：加 batch 维 + 单槽通道去槽位维。
@@ -1654,6 +2581,183 @@ class _CkptController:
         dtheta = float(wrap_to_pi(window[-1][2] - window[0][2]))
         return np.asarray([length, dtheta], dtype=np.float64)
 
+    # ------------------------------------------------------------------ R41-A1
+    def _cf_frame_gate(self, env: Any, obs: Mapping[str, Any], frame: int) -> Dict[str, Any]:
+        """决策帧"同状态门"（预检硬门；超标 ⇒ 该帧注入自动拒绝，不进入模型路径）。
+
+        条件（阈值见 ``DEFAULT_FRAME_GATE`` / config 覆盖）：位置误差 ≤ ``pose_pos_m``、
+        航向误差 ≤ ``heading_rad``、OD 掩码内均绝对差 ≤ ``od_mean_abs``、RNG 摘要一致
+        （``rng_required``=1；无数据 ⇒ n/a 放行并计账）。
+        """
+        record = self.record
+        gate: Dict[str, Any] = {"frame": int(frame), "available": True, "ok": True, "checks": {}}
+        if record is None:
+            return {"frame": int(frame), "available": False, "ok": False, "reason": "no_record"}
+        if int(frame) >= record.n_frames:
+            return {"frame": int(frame), "available": False, "ok": False,
+                    "reason": "beyond_record", "n_record_frames": int(record.n_frames)}
+        ego = env.agent
+        replay_pose = np.asarray(
+            [float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta)],
+            dtype=np.float64,
+        )
+        rec_pose = record.poses[int(frame)]
+        pose_err = float(math.hypot(replay_pose[0] - rec_pose[0], replay_pose[1] - rec_pose[1]))
+        head_err = float(abs(_wrap_to_pi(replay_pose[2] - rec_pose[2])))
+        od = _od_divergence(
+            obs["od"], obs["od_mask"],
+            record.array("od")[int(frame)], record.array("od_mask")[int(frame)],
+            record.array("od_presence")[int(frame)],
+        )
+        replay_rng = _rng_digest(_env_rng_of(env))
+        rec_rng = record.rng_digest(int(frame))
+        rng_match = None if (replay_rng is None or rec_rng is None) else bool(replay_rng == rec_rng)
+        checks = {
+            "pose_pos_m": {"value": pose_err, "limit": float(self.cf_frame_gate["pose_pos_m"])},
+            "heading_rad": {"value": head_err, "limit": float(self.cf_frame_gate["heading_rad"])},
+        }
+        if bool(od.get("available")):
+            checks["od_mean_abs"] = {
+                "value": float(od["mean_abs"]), "limit": float(self.cf_frame_gate["od_mean_abs"]),
+            }
+        ok = pose_err <= float(self.cf_frame_gate["pose_pos_m"]) \
+            and head_err <= float(self.cf_frame_gate["heading_rad"]) \
+            and (not bool(od.get("available")) or float(od["mean_abs"]) <= float(self.cf_frame_gate["od_mean_abs"]))
+        if float(self.cf_frame_gate.get("rng_required", 1.0)) >= 0.5 and rng_match is False:
+            ok = False
+        gate.update({
+            "ok": bool(ok), "checks": checks, "pose_pos_m": pose_err, "heading_rad": head_err,
+            "od": od, "rng_match": rng_match, "replay_rng": replay_rng, "record_rng": rec_rng,
+        })
+        return gate
+
+    def _cf_frame_drift(self, env: Any, obs: Mapping[str, Any], frame: int) -> Dict[str, Any]:
+        """五类漂移中的逐帧证据（① pose / ② OD / ③ RNG）。"""
+        record = self.record
+        if record is None or int(frame) >= record.n_frames:
+            return {"frame": int(frame), "available": False}
+        ego = env.agent
+        replay_pose = np.asarray(
+            [float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta)],
+            dtype=np.float64,
+        )
+        rec_pose = record.poses[int(frame)]
+        od = _od_divergence(
+            obs["od"], obs["od_mask"],
+            record.array("od")[int(frame)], record.array("od_mask")[int(frame)],
+            record.array("od_presence")[int(frame)],
+        )
+        replay_rng = _rng_digest(_env_rng_of(env))
+        rec_rng = record.rng_digest(int(frame))
+        return {
+            "frame": int(frame),
+            "available": True,
+            "pose_pos_m": float(math.hypot(replay_pose[0] - rec_pose[0], replay_pose[1] - rec_pose[1])),
+            "heading_rad": float(abs(_wrap_to_pi(replay_pose[2] - rec_pose[2]))),
+            "speed_abs": float(abs(float(ego.speed) - float(record.speeds[int(frame)]))),
+            "od_mean_abs": (float(od["mean_abs"]) if od.get("available") else None),
+            "od_max_abs": (float(od["max_abs"]) if od.get("available") else None),
+            "rng_match": (None if (replay_rng is None or rec_rng is None) else bool(replay_rng == rec_rng)),
+            "recorded_env_step": (
+                int(record.array("frame_env_step")[int(frame)])
+                if record.has("frame_env_step") else None
+            ),
+            "replay_env_step": int(self._steps),
+        }
+
+    def _cf_verdict(self, frame: int, step: int) -> Dict[str, Any]:
+        """(frame, step) 动作条件裁定（legality：可用判据全一致 ⇒ legal；无证据 ⇒ unproven）。
+
+        判据 = **执行命令链**（非循环口径）：注入状态 S_{f+k}（记录）由记录 run 的**实际下发动作**
+        ``plan_exec[g][0]``（g ∈ [f, f+k-1]）产生；重放侧同一区间的实际下发动作 =
+        ``_executed_first[g]``（首动作，含速度缩放；想象步注入不改它）。逐步比较，容差
+        ``action_tol_ds_m`` / ``action_tol_dtheta_rad``：
+
+        - k=1（一步合法 transition）：比较 f 帧；记录缺 ``plan_exec``（legacy）/重放帧缺失 ⇒
+          unproven（不默认合法）；
+        - k≥2（链步）：比较 f..f+k-1 逐帧；任一帧缺失 ⇒ unproven。
+
+        实测（位姿派生）区间一致性不进裁定（属**漂移证据**，见 ``drift.realized_*``）——
+        注入会经 LQR 前视改变同区间实测（反事实效应），把它当动作条件判据 = 自证循环。
+        """
+        if self.record is None:
+            return {"legal": False, "unproven": True, "criteria": {}}
+        th = self.cf_thresholds
+        per_frame: List[Dict[str, Any]] = []
+        for g in range(int(frame), int(frame) + int(step)):
+            rec_action = self.record.commanded_action(int(g), 1)
+            replay_action = self._executed_first.get(int(g))
+            if rec_action is None or replay_action is None:
+                return {"legal": False, "unproven": True, "criteria": {}}
+            diff = np.abs(np.asarray(replay_action, dtype=np.float64).reshape(2) - rec_action)
+            per_frame.append({
+                "frame": int(g),
+                "recorded": [float(rec_action[0]), float(rec_action[1])],
+                "replay": [float(replay_action[0]), float(replay_action[1])],
+                "abs_diff_ds_m": float(diff[0]), "abs_diff_dtheta_rad": float(diff[1]),
+                "consistent": bool(
+                    float(diff[0]) <= float(th["action_tol_ds_m"])
+                    and float(diff[1]) <= float(th["action_tol_dtheta_rad"])
+                ),
+            })
+        chain = {
+            "per_frame": per_frame,
+            "consistent": bool(all(bool(row["consistent"]) for row in per_frame)),
+            "max_abs_diff_ds_m": max(float(row["abs_diff_ds_m"]) for row in per_frame),
+            "max_abs_diff_dtheta_rad": max(float(row["abs_diff_dtheta_rad"]) for row in per_frame),
+        }
+        return {
+            "legal": bool(chain["consistent"]),
+            "unproven": False,
+            "criteria": _sanitize({"executed_chain": chain}),
+        }
+
+    def _cf_finalize_injection_verdicts(self) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        """收尾：为全部 (frame, step) 生成裁定并交 hook 归因（非法组合 ⇒ 裁决剔除）。"""
+        frames = sorted(set(self._executed_first) | set(self._realized_intervals))
+        verdicts: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for frame in frames:
+            for step in range(1, int(TEACHER_FORCE_HORIZON) + 1):
+                verdicts[(int(frame), int(step))] = self._cf_verdict(int(frame), int(step))
+        return verdicts
+
+    def _cf_realized_interval(self, frame: int) -> Dict[str, Any]:
+        """区间 [frame-1, frame] 实测动作一致性（lag-1；**漂移证据**，不进裁定）。
+
+        口径：位姿派生 ``(ds, dθ)`` 的 记录 vs 重放 差；注入经 LQR 前视会改变同区间实测
+        （反事实效应），故它只作五类漂移的补充读数（``drift.realized_*``），不作动作条件判据。
+        """
+        record = self.record
+        if record is None or int(frame) <= 0:
+            return {"available": False, "reason": "no_previous_interval"}
+        prev = int(frame) - 1
+        if prev + 1 >= len(self._cf_frame_poses):  # 重放决策帧位姿（本帧已在 action() 内捕获）
+            return {"available": False, "reason": "replay_pose_missing"}
+        rec_action = record.realized_action(prev)
+        if rec_action is None:
+            return {"available": False, "reason": "record_pose_missing"}
+        replay_action = _pose_realized_action(self._frame_pose(prev), self._frame_pose(int(frame)))
+        diff = np.abs(replay_action - rec_action)
+        th = self.cf_thresholds
+        consistent = bool(
+            float(diff[0]) <= float(th["realized_tol_ds_m"])
+            and float(diff[1]) <= float(th["realized_tol_dtheta_rad"])
+        )
+        return {
+            "available": True, "interval": [prev, int(frame)],
+            "recorded": [float(rec_action[0]), float(rec_action[1])],
+            "replay": [float(replay_action[0]), float(replay_action[1])],
+            "abs_diff_ds_m": float(diff[0]), "abs_diff_dtheta_rad": float(diff[1]),
+            "consistent": consistent,
+        }
+
+    def _frame_pose(self, frame: int) -> np.ndarray:
+        """重放决策帧位姿（``_cf_frame_poses``；缺失 ⇒ 零位姿（调用方以 available 拦下））。"""
+        poses = getattr(self, "_cf_frame_poses", None)
+        if poses is not None and 0 <= int(frame) < len(poses):
+            return np.asarray(poses[int(frame)], dtype=np.float64)
+        return np.zeros(3, dtype=np.float64)
+
     def action(self, env: Any) -> List[float]:
         import torch
 
@@ -1665,22 +2769,55 @@ class _CkptController:
             # R39-A1b：lane_anchor_xy 注入（默认 off ⇒ 不触达；只在决策步写 obs，与 a3 同点
             # 同口径 —— builder.build 之后、_tensors 之前；口径见 round36/c_lane_anchor.py）
             self.anchor_injector.apply(env, obs)
+        if self.cf_active:
+            # R41-A1：逐 env step 轨迹（两遍法漂移证据；默认关 ⇒ 零触达）
+            self._cf_capture_step(env)
         if self._steps % self.decision_interval == 0:
+            frame = self._steps // self.decision_interval
             # 参考口径（--eval-reference，默认 plan=现状）：
             #   plan：需要 6 步规划预览（跟踪器参考：首步执行动作 + 后 5 步 WM/plan 预览）；
             #   repeat_action：参考 = repeat(mu, 6)（训练 A-hold 同构）→ cheap path
             #   （forward_mode="policy_single_step"，不消费 plan）。
+            label = self.labeler.label(env.agent) if self.labeler is not None else None
+            # R41-A1：注入载荷（预检硬门 ⇒ 超标帧整帧自动拒绝：不进入模型路径）
+            tf_payload: Dict[int, Dict[str, Any]] = {}
+            tf_gate: Optional[Dict[str, Any]] = None
+            if self.teacher_force_mode != "off":
+                if self.record is not None:
+                    tf_gate = self._cf_frame_gate(env, obs, frame)
+                    self._cf_counts["n_frames"] += 1
+                    if tf_gate.get("ok"):
+                        tf_payload = self.record.build_payload(frame, device=str(self.device))
+                        self._cf_counts["n_payload_steps"] += int(len(tf_payload))
+                    else:
+                        self._cf_counts["n_frames_rejected_gate"] += 1
+                self.model.begin_teacher_force_frame(tf_payload or None, frame=frame)
             need_plan = self.eval_reference == "plan"
             with torch.no_grad():
                 output = self.model(
                     self._tensors(obs),
                     forward_mode=("policy_wm_rollout" if need_plan else "policy_single_step"),
                 )
+            tf_stats = None
+            if self.teacher_force_mode != "off":
+                tf_stats = self.model.end_teacher_force_frame()
             mu = np.asarray(output["action_mu"].detach().cpu(), dtype=np.float64).reshape(-1)
             plan = None
             if need_plan:
                 plan = np.asarray(output["plan"].detach().cpu(), dtype=np.float64).reshape(-1, 2)
             references = build_eval_references(mu[:2], plan, self.eval_reference)
+            # R41-A1：速度反事实（plan 后处理同缩：ds/dθ 同缩 ⇒ κ 不变；默认关 ⇒ 零触达）
+            if self.speed_scale is not None or self.speed_oracle != "off":
+                expert_ds = None
+                if self.speed_oracle == "expert" and label is not None:
+                    expert_ds = float(np.asarray(label["action"], dtype=np.float64).reshape(-1)[0])
+                ps_scale = _plan_scale_factor(
+                    (1.0 if self.speed_scale is None else float(self.speed_scale)),
+                    self.speed_oracle, float(references[0, 0]), expert_ds,
+                )
+                if ps_scale != 1.0:
+                    references = _apply_plan_speed_scale(references, ps_scale)
+                    self._cf_counts["n_speed_scaled"] += 1
             # 实际下发动作（供 action_ds/action_dtheta 指标；见 action_info）
             self._plan_action = np.array(references[0], dtype=np.float64, copy=True)
             if self.tracker_kind == "exact":
@@ -1689,9 +2826,40 @@ class _CkptController:
             else:
                 # 阶段 C：set_reference((N,2) 动作序列)，跟踪器内部插值成 30 点
                 self.tracker.set_reference(references)
+            # R41-A1：两遍法记录 pass（只观察；默认关 ⇒ 零触达）
+            if self.recorder is not None:
+                self.recorder.capture_frame(
+                    env=env, obs=obs, label=label, action_exec=references[0],
+                    plan_exec=references, rng_digest=_rng_digest(_env_rng_of(env)),
+                )
+            # R41-A1：注入 pass 漂移 + 动作条件证据（非法组合 ⇒ 收尾裁定剔除）
+            if self.record is not None:
+                ego = env.agent
+                self._cf_frame_poses.append(
+                    (float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta))
+                )
+                self._drift_frames.append(self._cf_frame_drift(env, obs, frame))
+                self._executed_first[int(frame)] = np.asarray(references[0], dtype=np.float64).reshape(2)
+                realized_prev = self._cf_realized_interval(frame)  # 区间 [frame-1, frame]（lag-1 证据）
+                if frame > 0 and bool(realized_prev.get("available")):
+                    self._realized_intervals[int(frame) - 1] = realized_prev
         self._steps += 1
         # engine 已注册策略，传回的占位动作会被忽略（engine/base_engine.py:98-104）
         return self._action
+
+    def _cf_capture_step(self, env: Any) -> None:
+        """逐 env step 轨迹采集（记录 pass 落 npz；注入 pass 留内存供逐步漂移对照）。"""
+        rng = _rng_digest(_env_rng_of(env))
+        if self.recorder is not None:
+            self.recorder.capture_step(env=env, step_index=self._steps, rng_digest=rng)
+        if self.record is not None:
+            ego = env.agent
+            self._replay_step_pose.append(
+                (float(ego.position[0]), float(ego.position[1]), float(ego.heading_theta))
+            )
+            self._replay_step_speed.append(float(ego.speed))
+            self._replay_step_index.append(int(self._steps))
+            self._replay_step_rng.append(rng)
 
     def post_step(self, env: Any) -> None:
         """env.step 之后调用（exact 执行器专用）：把 ego 置于插值参考位姿。"""
@@ -1721,6 +2889,223 @@ class _CkptController:
             info["steer"] = float("nan")
             info["throttle"] = float("nan")
         return info
+
+    # ------------------------------------------------------------------ R41-A1
+    def finish_episode(self, env: Any, *, steps: int, termination: str,
+                       success: bool, collision: bool, off_road: bool) -> Dict[str, Any]:
+        """episode 收尾（R41-A1；默认全关 ⇒ 返回 {}，episode 键集逐位不变）。
+
+        - 记录 pass：落 truth npz（含 episode 元数据/protocol hash）；
+        - 注入 pass：五类漂移聚合 + 按阈剔除（``oracle_eligible``）+ hook 收尾落盘 + 卸 hook。
+        """
+        if not self.cf_active:
+            return {}
+        if self.recorder is not None:
+            meta = {
+                "producer": "pipeline.eval_runner._TruthRecorder",
+                "schema": "r41a1-truth/v1",
+                "protocol_hash": self.cf_protocol_hash,
+                "spec_id": int(getattr(self.spec, "id", -1)),
+                "termination": str(termination),
+                "n_frames": int(len(self.recorder.frames)),
+                "n_steps": int(len(self.recorder.steps)),
+                "teacher_force": str(self.teacher_force_mode),
+                "speed_scale": (None if self.speed_scale is None else float(self.speed_scale)),
+                "speed_oracle": str(self.speed_oracle),
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            path = self.recorder.save(
+                self.record_truth_dir, int(getattr(self.spec, "id", -1)),
+                termination=str(termination), meta=meta,
+            )
+            summary = self.recorder.summary()
+            self.recorder = None
+            return {"oracle": {
+                "mode": "record",
+                "record": {**summary, "path": str(path)},
+                "hook": None,
+            }}
+        if self.record is None:
+            # 仅速度反事实（无 truth 读写）⇒ 轻量计数（无裁决面）
+            return {"oracle": {
+                "mode": "speed_only",
+                "injection": {"n_speed_scaled": int(self._cf_counts.get("n_speed_scaled", 0))},
+                "hook": None,
+            }}
+        return self._cf_finish_inject(env, steps=steps, termination=termination)
+
+    def _cf_finish_inject(self, env: Any, *, steps: int, termination: str) -> Dict[str, Any]:
+        """注入 pass 收尾：五类漂移聚合 + 阈剔除 + hook 摘要/明细落盘 + hook 卸载。"""
+        record = self.record
+        if record is None:
+            return {}
+        # 动作条件裁定（全 lag：k=1 = 首动作 ∧ 实测区间；k≥2 = 实测链）→ hook 归因
+        self._final_verdicts = self._cf_finalize_injection_verdicts()
+        hook_summary = None
+        if self.hook is not None:
+            hook_summary = self.hook.attribute(self._final_verdicts)
+            if self.cf_out_dir:
+                detail_path = Path(self.cf_out_dir) / "oracle_hook" / \
+                    f"spec_{int(getattr(self.spec, 'id', -1)):04d}.jsonl"
+                self.hook.write_detail(detail_path)
+            self.model.set_teacher_force_hooks(None)
+        # ---- ①/②/③ 逐帧漂移聚合 ----
+        frames = [f for f in self._drift_frames if f.get("available")]
+        pose_errs = [f["pose_pos_m"] for f in frames]
+        head_errs = [f["heading_rad"] for f in frames]
+        od_means = [f["od_mean_abs"] for f in frames if f.get("od_mean_abs") is not None]
+        od_maxs = [f["od_max_abs"] for f in frames if f.get("od_max_abs") is not None]
+        rng_flags = [f["rng_match"] for f in frames if f.get("rng_match") is not None]
+        realized_available = [
+            iv for iv in self._realized_intervals.values() if bool(iv.get("available"))
+        ]
+        drift: Dict[str, Any] = {
+            "n_frames_compared": int(len(frames)),
+            "pose_pos_p95_m": _p95(pose_errs), "pose_pos_max_m": _max_abs(pose_errs),
+            "heading_p95_rad": _p95(head_errs),
+            "speed_abs_mean": _mean_abs([f.get("speed_abs") for f in frames]),
+            "od_mean_abs": (float(np.mean(od_means)) if od_means else None),
+            "od_max_abs": (float(np.max(od_maxs)) if od_maxs else None),
+            "rng_match_frac": (float(np.mean([bool(x) for x in rng_flags])) if rng_flags else None),
+            "rng_available": bool(rng_flags),
+            # 实测（位姿派生）区间动作差（漂移证据；不进动作条件裁定 —— 见 _cf_verdict）
+            "n_realized_intervals": int(len(realized_available)),
+            "realized_first_ds_p95_m": _p95([iv["abs_diff_ds_m"] for iv in realized_available]),
+            "realized_first_dtheta_p95_rad": _p95(
+                [iv["abs_diff_dtheta_rad"] for iv in realized_available]
+            ),
+        }
+        # 逐帧漂移样本（前 5 + 后 2；裁决审计证据：帧 0 = 注入前反馈窗口，应 ~0）
+        frame_ids = [int(f["frame"]) for f in frames]
+        sample_ids = set(frame_ids[:5] + frame_ids[-2:])
+        drift["samples"] = [
+            {
+                "frame": int(f["frame"]),
+                "pose_pos_m": float(f["pose_pos_m"]),
+                "heading_rad": float(f["heading_rad"]),
+                "od_mean_abs": f.get("od_mean_abs"),
+                "od_max_abs": f.get("od_max_abs"),
+                "rng_match": f.get("rng_match"),
+                "replay_env_step": f.get("replay_env_step"),
+                "recorded_env_step": f.get("recorded_env_step"),
+            }
+            for f in frames if int(f["frame"]) in sample_ids
+        ]
+        # ---- ⑤ 逐步状态误差（replay 逐步 vs 记录逐步） ----
+        step_errs: List[float] = []
+        speed_errs: List[float] = []
+        step_rng_flags: List[bool] = []
+        rec_step_pose = record.array("step_pose")
+        rec_step_speed = record.array("step_speed")
+        rec_step_rng = record.array("step_rng_digest")
+        if rec_step_pose is not None:
+            n_common = min(int(rec_step_pose.shape[0]), len(self._replay_step_pose))
+            for index in range(n_common):
+                replay_pose = np.asarray(self._replay_step_pose[index], dtype=np.float64).reshape(3)
+                record_pose = np.asarray(rec_step_pose[index], dtype=np.float64).reshape(3)
+                step_errs.append(float(math.hypot(
+                    replay_pose[0] - record_pose[0], replay_pose[1] - record_pose[1]
+                )))
+                if rec_step_speed is not None and index < int(rec_step_speed.shape[0]) \
+                        and index < len(self._replay_step_speed):
+                    speed_errs.append(float(abs(
+                        self._replay_step_speed[index] - float(np.asarray(rec_step_speed[index]).reshape(-1)[0])
+                    )))
+                if rec_step_rng is not None and index < int(rec_step_rng.shape[0]) \
+                        and index < len(self._replay_step_rng):
+                    rec_value = int(np.asarray(rec_step_rng[index]).reshape(-1)[0])
+                    replay_value = self._replay_step_rng[index]
+                    if rec_value != 0 and replay_value is not None:
+                        step_rng_flags.append(bool(int(rec_value) == int(replay_value)))
+            drift.update({
+                "stepwise_n_common": int(n_common),
+                "stepwise_pos_p95_m": _p95(step_errs),
+                "stepwise_pos_max_m": _max_abs(step_errs),
+                "stepwise_speed_mean_abs": _mean_abs(speed_errs),
+                "stepwise_rng_match_frac": (
+                    float(np.mean([bool(x) for x in step_rng_flags])) if step_rng_flags else None
+                ),
+            })
+        else:
+            drift.update({
+                "stepwise_n_common": 0, "stepwise_pos_p95_m": None, "stepwise_pos_max_m": None,
+                "stepwise_speed_mean_abs": None, "stepwise_rng_match_frac": None,
+            })
+        # ---- ④ termination 一致性 ----
+        rec_steps = int(record.n_steps)
+        step_tol = float(self.cf_thresholds.get("termination_step_tol", 2.0))
+        termination_consistency: Dict[str, Any] = {
+            "replay_steps": int(steps), "recorded_steps": rec_steps,
+            "replay_termination": str(termination),
+            "recorded_termination_code": int(record.termination_code),
+            "step_delta": (None if rec_steps <= 0 else int(abs(int(steps) - rec_steps))),
+        }
+        if rec_steps > 0:
+            termination_consistency["kind_match"] = bool(
+                _termination_code(termination) == int(record.termination_code)
+            )
+            termination_consistency["consistent"] = bool(
+                termination_consistency["kind_match"]
+                and termination_consistency["step_delta"] <= step_tol
+            )
+        else:
+            termination_consistency["kind_match"] = None
+            termination_consistency["consistent"] = None
+        # ---- 阈剔除（oracle_eligible） ----
+        th = self.cf_thresholds
+        reasons: List[str] = []
+        if drift["pose_pos_p95_m"] is not None and drift["pose_pos_p95_m"] > float(th["pose_p95_m"]):
+            reasons.append(f"pose_p95>{th['pose_p95_m']}")
+        if drift["pose_pos_max_m"] is not None and drift["pose_pos_max_m"] > float(th["pose_max_m"]):
+            reasons.append(f"pose_max>{th['pose_max_m']}")
+        if drift["heading_p95_rad"] is not None and drift["heading_p95_rad"] > float(th["heading_p95_rad"]):
+            reasons.append(f"heading_p95>{th['heading_p95_rad']}")
+        if drift["od_mean_abs"] is not None and drift["od_mean_abs"] > float(th["od_mean_abs"]):
+            reasons.append(f"od_mean>{th['od_mean_abs']}")
+        if drift["od_max_abs"] is not None and drift["od_max_abs"] > float(th["od_max_abs"]):
+            reasons.append(f"od_max>{th['od_max_abs']}")
+        if drift["rng_match_frac"] is not None \
+                and drift["rng_match_frac"] < float(th["rng_match_frac_min"]):
+            reasons.append(f"rng_match<{th['rng_match_frac_min']}")
+        if drift["stepwise_pos_p95_m"] is not None \
+                and drift["stepwise_pos_p95_m"] > float(th["stepwise_pos_p95_m"]):
+            reasons.append(f"stepwise_pos_p95>{th['stepwise_pos_p95_m']}")
+        if drift["stepwise_speed_mean_abs"] is not None \
+                and drift["stepwise_speed_mean_abs"] > float(th["stepwise_speed_mean_abs"]):
+            reasons.append(f"stepwise_speed>{th['stepwise_speed_mean_abs']}")
+        if termination_consistency["consistent"] is False:
+            reasons.append("termination_mismatch")
+        injection_counts = dict((hook_summary or {}).get("counts") or {})
+        n_injected = int(injection_counts.get("n_events", 0))
+        n_illegal = int(injection_counts.get("n_illegal", 0))
+        n_unproven = int(injection_counts.get("n_unproven", 0))
+        illegal_frac = (float(n_illegal) / n_injected) if n_injected else 0.0
+        unproven_frac = (float(n_unproven) / n_injected) if n_injected else 0.0
+        if illegal_frac > float(th["illegal_frac_max"]):
+            reasons.append(f"illegal_frac>{th['illegal_frac_max']}")
+        if unproven_frac > float(th["unproven_frac_max"]):
+            reasons.append(f"unproven_frac>{th['unproven_frac_max']}")
+        eligible = bool(not reasons)
+        self.record = None
+        self.hook = None
+        return {"oracle": {
+            "mode": "inject",
+            "route": self._oracle_route,
+            "eligible": eligible,
+            "excluded_reasons": reasons,
+            "thresholds": {key: float(value) for key, value in self.cf_thresholds.items()},
+            "drift": drift,
+            "termination": termination_consistency,
+            "action_condition": {
+                "n_injected_steps": n_injected,
+                "n_legal_steps": int(injection_counts.get("n_legal", 0)),
+                "n_illegal_steps": n_illegal,
+                "n_unproven_steps": n_unproven,
+                "illegal_frac": illegal_frac,
+                "unproven_frac": unproven_frac,
+            },
+            "injection": {**dict(self._cf_counts), "hook": hook_summary},
+        }}
 
 
 def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dict[str, Any]:
@@ -1834,7 +3219,7 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
     jerk_array = np.asarray(jerk_samples, dtype=np.float64)
     speed_ratio_array = np.asarray(speed_ratio_samples, dtype=np.float64)
     speed_metrics = _speed_metrics(speed_samples, dt)
-    return {
+    result = {
         "id": int(getattr(spec, "id", -1)),
         "seed": int(getattr(spec, "seed", -1)),
         "split": str(getattr(spec, "split", "unknown")),
@@ -1882,6 +3267,17 @@ def _run_episode(env: Any, spec: Any, *, max_steps: int, controller: Any) -> Dic
         "_jerk": jerk_samples,
         "_speed_ratio": speed_ratio_samples,
     }
+    # R41-A1：两遍法收尾（记录落 npz / 注入裁决聚合；默认关 ⇒ finish_episode 返回 {}，
+    # episode 键集与数值逐位不变）
+    finish_episode = getattr(controller, "finish_episode", None)
+    if callable(finish_episode):
+        extra = finish_episode(
+            env, steps=int(steps), termination=str(termination),
+            success=bool(success), collision=bool(collision), off_road=bool(off_road),
+        )
+        if isinstance(extra, Mapping):
+            result.update(extra)
+    return result
 
 
 def _error_episode(spec: Any, task: Mapping[str, Any], exc: BaseException) -> Dict[str, Any]:
@@ -2002,9 +3398,19 @@ def _public_episode(episode: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _sanitize(obj: Any) -> Any:
-    """NaN/Inf → null，numpy 标量 → Python 标量，保证 JSON 合法。"""
+    """NaN/Inf → null，numpy 标量 → Python 标量，保证 JSON 合法。
+
+    R41-A1：追加 torch.Tensor 分支（Oracle Injection Hook 的替换前后 state/policy 输出；
+    评测导入期仍不 import torch —— 鸭子类型判定 module 前缀 + ``detach/tolist``）。
+    """
     if isinstance(obj, Mapping):
         return {key: _sanitize(value) for key, value in obj.items()}
+    module = type(obj).__module__
+    if module.startswith("torch") and hasattr(obj, "detach") and hasattr(obj, "tolist"):
+        try:
+            return _sanitize(obj.detach().to("cpu").numpy())
+        except Exception:  # noqa: BLE001 - 取证兜底（不阻断落盘）
+            return str(obj)
     if isinstance(obj, np.ndarray):
         return [_sanitize(value) for value in obj.tolist()]
     if isinstance(obj, (list, tuple)):
@@ -2017,6 +3423,60 @@ def _sanitize(obj: Any) -> Any:
         value = float(obj)
         return value if math.isfinite(value) else None
     return obj
+
+
+def _oracle_audit_report(episodes: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """R41-A1：oracle 审计汇总（五要件证据 + **裁决视图**；无 oracle 数据 ⇒ None）。
+
+    - ``route``：①/② 路线声明与 worker 内实测探针（``probe_env_snapshot_support``）；
+    - ``action_condition``：注入步 legal/illegal/unproven 聚合（**非法组合不得进入裁决**）；
+    - ``eligible_view``：只对 ``oracle_eligible=True`` 的 episode 求 KPI 汇总（剔除后的裁决口径）；
+      被剔除 episode 明细（id + 原因）如实列出。
+    """
+    oracle_rows = [(ep, ep.get("oracle")) for ep in episodes if isinstance(ep.get("oracle"), Mapping)]
+    if not oracle_rows:
+        return None
+    record_rows = [(ep, o) for ep, o in oracle_rows if str(o.get("mode")) == "record"]
+    inject_rows = [(ep, o) for ep, o in oracle_rows if str(o.get("mode")) == "inject"]
+    speed_rows = [(ep, o) for ep, o in oracle_rows if str(o.get("mode")) == "speed_only"]
+    audit: Dict[str, Any] = {
+        "n_record_episodes": len(record_rows),
+        "n_inject_episodes": len(inject_rows),
+        "n_speed_only_episodes": len(speed_rows),
+        "route": None,
+        "action_condition": {},
+        "thresholds": None,
+    }
+    if inject_rows:
+        first = inject_rows[0][1]
+        audit["route"] = first.get("route")
+        audit["thresholds"] = first.get("thresholds")
+        totals = {key: 0 for key in (
+            "n_injected_steps", "n_legal_steps", "n_illegal_steps", "n_unproven_steps",
+        )}
+        for _, oracle in inject_rows:
+            block = dict(oracle.get("action_condition") or {})
+            for key in totals:
+                totals[key] += int(block.get(key, 0))
+        totals["illegal_frac"] = (
+            float(totals["n_illegal_steps"]) / totals["n_injected_steps"]
+            if totals["n_injected_steps"] else 0.0
+        )
+        totals["unproven_frac"] = (
+            float(totals["n_unproven_steps"]) / totals["n_injected_steps"]
+            if totals["n_injected_steps"] else 0.0
+        )
+        audit["action_condition"] = totals
+        eligible = [ep for ep, oracle in inject_rows if bool(oracle.get("eligible"))]
+        excluded = [
+            {"id": int(ep.get("id", -1)), "reasons": list(oracle.get("excluded_reasons") or [])}
+            for ep, oracle in inject_rows if not bool(oracle.get("eligible"))
+        ]
+        audit["n_eligible"] = len(eligible)
+        audit["n_excluded"] = len(excluded)
+        audit["excluded"] = excluded
+        audit["eligible_view"] = summarize(eligible) if eligible else None
+    return audit
 
 
 def build_report(
@@ -2037,7 +3497,7 @@ def build_report(
 
     overall = summarize(episodes)
     verdict = evaluate_verdicts(overall, primary_views, baseline_doc, baseline_primary_doc)
-    return {
+    report: Dict[str, Any] = {
         "meta": dict(meta),
         "verdict": verdict,
         "overall": overall,
@@ -2048,6 +3508,11 @@ def build_report(
         "by_geometry": {name: summarize(group) for name, group in sorted(by_geometry.items())},
         "episodes": [_public_episode(episode) for episode in sorted(episodes, key=lambda ep: ep["id"])],
     }
+    # R41-A1：oracle 审计（含裁决视图）；默认全关 ⇒ 不追加键（metrics 逐字节不变）
+    oracle_audit = _oracle_audit_report(episodes)
+    if oracle_audit is not None:
+        report["oracle_audit"] = oracle_audit
+    return report
 
 
 CSV_FIELDS = (
@@ -2393,9 +3858,111 @@ def build_parser() -> argparse.ArgumentParser:
                              "零触达、与 B2c 口径逐字节同 hash）。仅 --world-state-api "
                              "analytic_learned 生效（其余组合 fail-fast）；∈[0,4]；非默认（≠1.0）"
                              "追加 protocol hash 轴 model.world_residual_scale")
+    parser.add_argument("--teacher-force", choices=LOAD_TEACHER_FORCE_MODES, default="off",
+                        help="R41-A1：teacher-forced oracle 注入（默认 off=零触达、前向逐位不变）。"
+                             "注入下沉为模型内原生路径（net/model.py::set_teacher_force；不再依赖 "
+                             ".slim 运行时补丁）；非 off 需要 --world-state-api 非 off 与 "
+                             "--inject-truth（状态注入落点 = analytic_update 后/readout 前）。"
+                             "非默认档进入 protocol hash（model.teacher_force/inject_truth_sha16）"
+                             "+ 模型缓存键 + metrics/manifest")
+    parser.add_argument("--record-truth", type=Path, default=None,
+                        help="R41-A1：两遍法第一遍（记录 pass）truth 输出目录（<dir>/<spec_id:04d>.npz；"
+                             "含逐决策帧真值/命令动作/RNG 摘要 + 逐 env step 轨迹）。只观察、零执行"
+                             "副作用；与 --inject-truth 互斥；非默认档入 protocol hash（model.record_truth）")
+    parser.add_argument("--inject-truth", type=Path, default=None,
+                        help="R41-A1：两遍法第二遍（注入 pass）truth 源目录（第一遍产物）。"
+                             "只对 --teacher-force 非 off 有意义；目录内容 sha16 入 protocol hash"
+                             "（model.inject_truth_sha16）；配合 Oracle Injection Hook 记录五要件并按"
+                             "动作条件/五类漂移剔除非法组合（oracle 裁决视图）")
+    parser.add_argument("--speed-scale", type=float, default=None,
+                        help="R41-A1：速度反事实（plan 后处理同缩：ds/dθ ×s ⇒ κ 不变；默认 None=关、"
+                             "1.0 视同关；须 >0 有限）。非默认档入 protocol hash + 缓存键")
+    parser.add_argument("--speed-oracle", choices=LOAD_SPEED_ORACLE_MODES, default="off",
+                        help="R41-A1：速度 oracle（默认 off）。expert=按专家空问 ds 缩放 plan"
+                             "（clip∈[0.05,2.0]，需 pure_pursuit labeler）；非默认档入 protocol hash")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
+
+
+def _counterfactual_from_args(args: Any, eval_cfg: Mapping[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """R41-A1：从 CLI 构造反事实轴装配（校验 + 阈值覆盖 + truth 目录指纹）；非法 ⇒ ``(payload, 错误串)``。
+
+    默认全关（``teacher_force=off``、无 record/inject、``speed_scale=None``、``speed_oracle=off``）
+    ⇒ ``active=False``：控制器零触达、协议 hash/缓存键不追加任何键（逐位一致）。
+    """
+    teacher_force = str(getattr(args, "teacher_force", "off") or "off")
+    record_dir = str(args.record_truth) if getattr(args, "record_truth", None) is not None else None
+    inject_dir = str(args.inject_truth) if getattr(args, "inject_truth", None) is not None else None
+    speed_scale = None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)
+    if speed_scale is not None and speed_scale == 1.0:
+        speed_scale = None  # 显式 1.0 = 默认档（不触达、不入 hash/缓存键）
+    speed_oracle = str(getattr(args, "speed_oracle", "off") or "off")
+    thresholds = dict(DEFAULT_DRIFT_THRESHOLDS)
+    frame_gate = dict(DEFAULT_FRAME_GATE)
+    cf_cfg = dict(eval_cfg.get("counterfactual") or {}) if isinstance(eval_cfg, Mapping) else {}
+    for key, value in dict(cf_cfg.get("drift_thresholds") or {}).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            thresholds[str(key)] = float(value)
+    for key, value in dict(cf_cfg.get("frame_gate") or {}).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            frame_gate[str(key)] = float(value)
+    active = bool(
+        teacher_force != "off" or record_dir or inject_dir or speed_scale is not None
+        or speed_oracle != "off"
+    )
+    payload: Dict[str, Any] = {
+        "active": active,
+        "teacher_force": teacher_force,
+        "record_truth": record_dir,
+        "inject_truth": inject_dir,
+        "inject_truth_sha16": None,
+        "inject_truth_digest": None,
+        "speed_scale": speed_scale,
+        "speed_oracle": speed_oracle,
+        "drift_thresholds": {key: float(value) for key, value in thresholds.items()},
+        "frame_gate": {key: float(value) for key, value in frame_gate.items()},
+        "route": {
+            "declared": "two_pass_replay",
+            "env_probe": "per-episode（worker 内 probe_env_snapshot_support：engine 无 snapshot/clone）",
+        },
+        "protocol_hash": None,
+        "out_dir": None,
+    }
+    if not active:
+        return payload, None
+    if teacher_force not in LOAD_TEACHER_FORCE_MODES:
+        return payload, f"未知 --teacher-force {teacher_force!r}"
+    if speed_oracle not in LOAD_SPEED_ORACLE_MODES:
+        return payload, f"未知 --speed-oracle {speed_oracle!r}"
+    if str(getattr(args, "policy", "")) != "ckpt":
+        return payload, "反事实轴（--teacher-force/--record-truth/--inject-truth/--speed-*）只在 --policy ckpt 生效"
+    if record_dir and inject_dir:
+        return payload, "--record-truth 与 --inject-truth 互斥（两遍法 = 两次独立 run）"
+    if inject_dir and teacher_force == "off":
+        return payload, "--inject-truth 只对 --teacher-force 非 off 有意义"
+    if teacher_force != "off":
+        if str(getattr(args, "world_state_api", "off")) == "off":
+            return payload, ("--teacher-force 非 off 需要 --world-state-api 非 off"
+                             "（状态注入落点 = analytic_update 后 / readout 前）")
+        if inject_dir is None:
+            return payload, "--teacher-force 非 off 需要 --inject-truth（第一遍记录产物）"
+    if speed_scale is not None and not (np.isfinite(speed_scale) and speed_scale > 0.0):
+        return payload, f"--speed-scale 必须 >0 有限，收到 {speed_scale}"
+    if inject_dir is not None:
+        truth_root = Path(inject_dir)
+        if not truth_root.is_dir():
+            return payload, f"--inject-truth 目录不存在：{inject_dir}"
+        digest = _truth_dir_digest(truth_root)
+        if int(digest["n_files"]) <= 0:
+            return payload, f"--inject-truth 目录无 npz 文件：{inject_dir}"
+        payload["inject_truth_sha16"] = str(digest["sha16"])
+        payload["inject_truth_digest"] = {
+            "dir": str(truth_root), "n_files": int(digest["n_files"]), "sha16": str(digest["sha16"]),
+        }
+    if record_dir is not None:
+        Path(record_dir).mkdir(parents=True, exist_ok=True)
+    return payload, None
 
 
 def _baseline_primary_path(baseline_ref: Path) -> Path:
@@ -2527,6 +4094,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"收到 {args.world_residual_scale}", file=sys.stderr)
             return 2
 
+    # ---- R41-A1：oracle/teacher-force/speed 反事实轴（默认全关 ⇒ 零触达、逐位不变）----
+    counterfactual, cf_error = _counterfactual_from_args(args, eval_cfg)
+    if cf_error is not None:
+        print(f"[eval_runner] counterfactual FAIL-FAST：{cf_error}", file=sys.stderr)
+        return 2
+    counterfactual["out_dir"] = str(out_dir)
+    if counterfactual["active"]:
+        print(
+            f"[eval_runner] counterfactual 激活：teacher_force={counterfactual['teacher_force']} "
+            f"record_truth={counterfactual['record_truth']} inject_truth={counterfactual['inject_truth']} "
+            f"speed_scale={counterfactual['speed_scale']} speed_oracle={counterfactual['speed_oracle']} "
+            f"(truth_sha16={counterfactual['inject_truth_sha16']})",
+            flush=True,
+        )
+
     # ---- P0-A 评测安全前置：ckpt 加载 fail-fast（默认开；父进程 CPU 预检，干净加载零行为变化）----
     ckpt_load_summary: Optional[Dict[str, Any]] = None
     if args.policy == "ckpt":
@@ -2545,6 +4127,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             world_state_api=model_assembly["world_state_api"],
             world_residual_head=model_assembly["world_residual_head"],
             world_residual_scale=model_assembly["world_residual_scale"],
+            teacher_force=counterfactual["teacher_force"],
+            record_truth=bool(counterfactual["record_truth"]),
+            inject_truth_sha16=counterfactual["inject_truth_sha16"],
+            speed_scale=counterfactual["speed_scale"],
+            speed_oracle=counterfactual["speed_oracle"],
         )
         ckpt_load_summary = _ckpt_load_summary(
             str(args.ckpt), "cpu",
@@ -2555,6 +4142,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             world_state_api=model_assembly["world_state_api"],
             world_residual_head=model_assembly["world_residual_head"],
             world_residual_scale=model_assembly["world_residual_scale"],
+            teacher_force=counterfactual["teacher_force"],
+            record_truth=bool(counterfactual["record_truth"]),
+            inject_truth_sha16=counterfactual["inject_truth_sha16"],
+            speed_scale=counterfactual["speed_scale"],
+            speed_oracle=counterfactual["speed_oracle"],
         )
 
     # ---- R39-A1：四 hash 原生记录（protocol / model tree / schema / checkpoint）→ run_meta ----
@@ -2569,7 +4161,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         world_state_api=model_assembly["world_state_api"],
         world_residual_head=model_assembly["world_residual_head"],
         world_residual_scale=model_assembly["world_residual_scale"],
+        teacher_force=counterfactual["teacher_force"],
+        record_truth=bool(counterfactual["record_truth"]),
+        inject_truth_sha16=counterfactual["inject_truth_sha16"],
+        speed_scale=counterfactual["speed_scale"],
+        speed_oracle=counterfactual["speed_oracle"],
     )
+    counterfactual["protocol_hash"] = str(eval_hashes["evaluation_protocol_hash"])
     run_meta: Dict[str, Any] = {
         "schema": "r39a1-run-meta/v1",
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2603,6 +4201,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "model_tree": eval_hashes["model_tree"],
         "schema": eval_hashes["schema"],
         "ckpt_load": ckpt_load_summary,
+        # R41-A1：反事实轴留痕（默认全关也记录声明值；非默认档书面化到 manifest）
+        "counterfactual": {
+            **{key: counterfactual[key] for key in (
+                "active", "teacher_force", "record_truth", "inject_truth", "inject_truth_sha16",
+                "speed_scale", "speed_oracle", "route",
+            )},
+            "inject_truth_digest": counterfactual["inject_truth_digest"],
+            "drift_thresholds": counterfactual["drift_thresholds"],
+            "frame_gate": counterfactual["frame_gate"],
+        } if args.policy == "ckpt" else None,
     }
     run_meta_path = _record_run_meta(out_dir, run_meta)
     print(
@@ -2633,6 +4241,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "allow_partial_load": bool(args.allow_partial_load),
             # R39-A1b：模型装配（controller 装载 + lane_anchor 注入的唯一透传口）
             "model_assembly": dict(model_assembly),
+            # R41-A1：反事实轴（controller 侧唯一透传口；默认全关 ⇒ 零触达）
+            "counterfactual": dict(counterfactual),
         }
         for spec in specs
     ]
@@ -2688,6 +4298,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "eval_reference": str(args.eval_reference) if args.policy == "ckpt" else None,
         # R39-A1b：模型装配开关（ld_mode/rollout_semantic/path_head/lane_anchor/fill_from）
         "model_assembly": dict(model_assembly) if args.policy == "ckpt" else None,
+        # R41-A1：反事实轴（teacher_force/record_truth/inject_truth(+sha16)/speed_* + 阈值 + 路线）
+        "counterfactual": {
+            **{key: counterfactual[key] for key in (
+                "active", "teacher_force", "record_truth", "inject_truth", "inject_truth_sha16",
+                "speed_scale", "speed_oracle", "route", "protocol_hash",
+            )},
+            "inject_truth_digest": counterfactual["inject_truth_digest"],
+            "drift_thresholds": counterfactual["drift_thresholds"],
+            "frame_gate": counterfactual["frame_gate"],
+        } if args.policy == "ckpt" else None,
         "fill_from": eval_hashes["fill_from"],
         "policy_params_effective": effective_params,
         "workers": workers,
@@ -2737,7 +4357,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "n_checks_judged": int(verdict["n_checks_judged"])},
         "metrics_path": str(metrics_path),
     })
+    oracle_audit = report.get("oracle_audit")
+    if oracle_audit is not None:
+        # R41-A1：反事实 run 的裁决视图随 run_meta 落盘（默认全关 ⇒ 不新增键）
+        run_meta["oracle_audit"] = oracle_audit
     _record_run_meta(out_dir, run_meta)  # manifest 已含标记 ⇒ 幂等只更新 run_meta.json
+    if oracle_audit is not None:
+        print(
+            f"[eval_runner] oracle_audit: inject_episodes={oracle_audit.get('n_inject_episodes')} "
+            f"eligible={oracle_audit.get('n_eligible')} excluded={oracle_audit.get('n_excluded')} "
+            f"steps={dict(oracle_audit.get('action_condition') or {}).get('n_injected_steps')} "
+            f"illegal={dict(oracle_audit.get('action_condition') or {}).get('n_illegal_steps')}",
+            flush=True,
+        )
     print(f"[eval_runner] run_meta -> {run_meta_path}")
     return 0
 

@@ -23,6 +23,37 @@ kpis:                                 # 评估 KPI（按 primary 标签分组；
   - per_category_success              # 分组口径 = spec.labels.geometry（primary）
   - overall_success                   # Gate 3 新增：总体成功率条款（原协议只有分项）
 
+counterfactual:                       # R41-A1：oracle/teacher-force/speed 反事实（CLI 开关同名；
+                                      # 默认全关 ⇒ 零触达、前向/协议 hash/缓存键逐位不变）。
+                                      # 非默认档：入 evaluation protocol hash + 模型缓存键（五轴同段）+
+                                      # metrics/manifest；truth/裁决见 oracle_audit + oracle_hook/*.jsonl
+  teacher_force: "off"                # off|ego|od|ld|ego_od_ld|lateral|all（需 --world-state-api 非 off）
+  record_truth: null                  # 目录：记录 pass 真值（与 inject 互斥；只观察）
+  inject_truth: null                  # 目录：注入 pass 真值源（目录内容 sha16 入 hash）
+  speed_scale: 1.0                    # plan 后处理同缩（>0；1.0=关）；speed_oracle: off|expert
+  speed_oracle: "off"
+  drift_thresholds:                   # 两遍重放五类漂移门（预注册默认；超标 episode 剔除出裁决）
+    pose_p95_m: 0.5                   # ① replay pose divergence：决策帧位置误差 p95（m）
+    pose_max_m: 2.0                   # ① 决策帧位置误差 max（m）
+    heading_p95_rad: 0.15             # ① 航向误差 p95（rad，wrap 后）
+    od_mean_abs: 0.25                 # ② OD state divergence：掩码内均绝对差
+    od_max_abs: 2.0                   # ② 掩码内最大绝对差
+    rng_match_frac_min: 0.98          # ③ traffic RNG 一致性：决策帧 RNG 摘要一致率下限
+    stepwise_pos_p95_m: 0.5           # ⑤ 逐步状态误差：逐 env step 位置误差 p95（m）
+    stepwise_speed_mean_abs: 0.5      # ⑤ 逐 env step 速度误差均值（m/s）
+    termination_step_tol: 2           # ④ termination 一致性：步数容差（解）
+    illegal_frac_max: 0.05            # 动作条件非法注入步占比上限（超出 ⇒ 剔除）
+    unproven_frac_max: 0.05           # 动作条件不可判定步占比上限（超出 ⇒ 剔除）
+    action_tol_ds_m: 5.0e-3           # 命令面动作条件容差（ds，m；V4B 计划序列口径）
+    action_tol_dtheta_rad: 5.0e-3     # 命令面动作条件容差（dθ，rad）
+    realized_tol_ds_m: 5.0e-3         # 实测（位姿派生）动作条件容差（ds，m）
+    realized_tol_dtheta_rad: 5.0e-3   # 实测动作条件容差（dθ，rad）
+  frame_gate:                         # 决策帧"同状态门"（预检硬门；超标帧注入整帧自动拒绝）
+    pose_pos_m: 0.5
+    heading_rad: 0.15
+    od_mean_abs: 0.5
+    rng_required: 1
+
 thresholds:                           # P0 冻结（Gate 2 + Gate 3 修订）：相对规则基线口径
   protocol: relative_to_rule_baseline
   baseline: pure_pursuit_idm

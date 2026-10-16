@@ -179,6 +179,7 @@ Round-39 B1（统一 imagined WorldState → PolicyStateView；默认关）
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Mapping
 
 import torch
@@ -324,6 +325,43 @@ def _consume_legacy_forward_kwargs(kwargs: dict[str, Any]) -> None:
             f"forward() 收到未知参数 {sorted(kwargs)}；"
             f"模式开关请用 forward_mode ∈ {FORWARD_MODES}"
         )
+
+
+# ---------------------------------------------------- R41-A1：teacher-forced oracle
+#: R41-A1：teacher-forced oracle 注入档（= 正式入口 ``--teacher-force``；``off`` 为默认零触达）。
+#: 口径下沉自 R40-V4B 的 ``.slim`` 运行时补丁（``a3/v4b_teacher_force.py``）——**模型内原生路径**，
+#: 不再依赖进程内 monkey-patch；默认 ``off`` ⇒ 不安装任何行为、不新增张量操作、前向逐位不变。
+TEACHER_FORCE_MODES: tuple[str, ...] = (
+    "off", "ego", "od", "ld", "ego_od_ld", "lateral", "all",
+)
+#: 档 → 注入面（ego/od/ld = WorldState 物理字段替换；lateral = 结构化头 κ_near 替换）。
+TEACHER_FORCE_SURFACES: dict[str, tuple[str, ...]] = {
+    "off": (),
+    "ego": ("ego",),
+    "od": ("od",),
+    "ld": ("ld",),
+    "ego_od_ld": ("ego", "od", "ld"),
+    "lateral": ("lateral",),
+    "all": ("ego", "od", "ld", "lateral"),
+}
+
+
+#: R41-A1：注入计数键（frame = 逐帧；stats = 累计；默认档恒 0）。
+_TEACHER_FORCE_STAT_KEYS: dict[str, int] = {
+    "n_frames": 0, "n_state_rows": 0, "n_ego_rows": 0, "n_od_rows": 0, "n_ld_rows": 0,
+    "n_lateral_rows": 0, "n_missing_entry": 0, "n_skip_kappa_invalid": 0,
+}
+
+
+def teacher_force_snapshot(tensors: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """R41-A1：teacher-force 审计快照（``detach().clone()`` 副本；**默认关路径不可达**）。
+
+    语义 = 只读诊断边界：替换前/后 state 与 Policy 输出以 detached 副本交 hook 做
+    hash/落盘，快照张量不进入 autograd 图（主前向梯度链不受影响；可达性实测见
+    ``net/probes.py::DETACH_REGISTRY`` D-TF01 的 ``reach`` 字段与
+    ``tests/test_r41_a1_counterfactual_wiring.py``）。
+    """
+    return {str(name): value.detach().clone() for name, value in tensors.items()}
 
 
 # ---------------------------------------------------------------------- 运动学
@@ -612,6 +650,19 @@ class DrivingModel(nn.Module):
         self.world_residual: "torch.nn.Module | None" = None
         #: R39-B2 诊断旋钮：残差缩放（默认 1.0 ⇒ 逐位等于未缩放；α×残差联合扫描用）。
         self.world_residual_scale: float = 1.0
+        #: R41-A1：teacher-forced oracle 注入档（**默认 ``off`` ⇒ 零触达、前向逐位不变**；
+        #: 模型内原生路径 = R40-V4B ``.slim`` 运行时补丁的下沉；见 :meth:`set_teacher_force`）。
+        self.teacher_force_mode: str = "off"
+        #: R41-A1：Oracle Injection Hook（默认 None ⇒ 不记录、零开销；pipeline 侧审计容器，
+        #: 只需实现 ``on_injection(event: dict)`` 可选回调；见 :meth:`set_teacher_force_hooks`）。
+        self.teacher_force_hooks: Any = None
+        #: R41-A1：本决策帧注入载荷（``begin_teacher_force_frame`` 设置；模型消费 k=1..rollout
+        #: 步；``end_teacher_force_frame`` 清空 —— 跨 episode 不残留）。
+        self._teacher_force_payload: dict[int, dict[str, Any]] | None = None
+        self._teacher_force_frame: int = -1
+        #: R41-A1：注入计数（`frame` = 本决策帧（begin 时清零，end 取回）；`stats` = 累计）。
+        self.teacher_force_frame_stats: dict[str, int] = dict(_TEACHER_FORCE_STAT_KEYS)
+        self.teacher_force_stats: dict[str, int] = dict(_TEACHER_FORCE_STAT_KEYS)
         self.ld_set_attn: "LdSetAttention | None" = None
         self.ld_aggregator: "LdAggregate | None" = None
         self.semantic_wiring: "SemanticWiring | None" = None
@@ -853,6 +904,331 @@ class DrivingModel(nn.Module):
             raise ValueError(f"[world_state] world_residual_scale 必须 ∈ [0,4]，收到 {scale}")
         self.world_residual_scale = value
         return self
+
+    # ------------------------------------------------------------------ R41-A1
+    def set_teacher_force(self, mode: str = "off") -> "DrivingModel":
+        """R41-A1：teacher-forced oracle 注入档（**默认 ``off`` ⇒ 不新增任何行为，逐位不变**）。
+
+        注入面（口径 = R40-V4B ``.slim`` 运行时，本方法把该补丁**下沉为模型内路径**）：
+
+        - ``ego``/``od``/``ld``/``ego_od_ld``/``all``：在 ``_rollout`` 内 ``analytic_update`` 之后、
+          readout 之前，按注入载荷替换 :class:`net.world_state.WorldState` 物理字段
+          （ego pose/speed；OD anchor/feat/valid；LD anchor/valid；载荷由调用方逐决策帧经
+          :meth:`begin_teacher_force_frame` 提供）；
+        - ``lateral``（及 ``all``）：在逐步结构化头输出后替换 ``κ_near``（纵向 ds 不变），
+          重组 ``dtheta/action/kappa_seg/plan_aux`` —— 口径 = ``compose_step_action``。
+        """
+        value = str(mode or "off")
+        if value not in TEACHER_FORCE_MODES:
+            raise ValueError(
+                f"[teacher_force] 未知档 {mode!r}（{' | '.join(TEACHER_FORCE_MODES)}）"
+            )
+        self.teacher_force_mode = value
+        if value == "off":
+            self._teacher_force_payload = None
+        return self
+
+    def set_teacher_force_hooks(self, hooks: Any = None) -> "DrivingModel":
+        """R41-A1：Oracle Injection Hook 容器（默认 ``None`` ⇒ 不记录；只需 ``on_injection``）。
+
+        模型侧只做**只读转发**（每注入事件一次 ``hooks.on_injection(event)``；事件含模块/步/
+        帧/来源 meta/动作条件 meta/替换前后 state 张量/替换前后 policy 输出张量）；哈希与落盘
+        由 pipeline 侧 hook 实现（职责分离：net 不做哈希/IO）。
+        """
+        self.teacher_force_hooks = hooks
+        return self
+
+    def begin_teacher_force_frame(
+        self, payload: Mapping[int, Mapping[str, Any]] | None = None, *, frame: int = -1
+    ) -> None:
+        """R41-A1：设置本决策帧注入载荷（``{k: entry}``，k=1..；缺省/None = 本帧无真值）。
+
+        在模型前向**之前**由控制器调用；``end_teacher_force_frame`` 清除（异常路径也必须清除，
+        防跨帧/跨 episode 残留）。``payload=None`` 时仅会计帧、不注入。
+        """
+        self._teacher_force_payload = (
+            {int(k): dict(v) for k, v in payload.items()} if isinstance(payload, Mapping) else None
+        )
+        self._teacher_force_frame = int(frame)
+        self.teacher_force_frame_stats = dict(_TEACHER_FORCE_STAT_KEYS)
+        self.teacher_force_frame_stats["n_frames"] = 1
+
+    def end_teacher_force_frame(self) -> dict[str, int]:
+        """R41-A1：清除本帧注入载荷，返回**本帧**注入计数（并累计进 ``teacher_force_stats``）。"""
+        stats = dict(self.teacher_force_frame_stats)
+        for key, value in stats.items():
+            self.teacher_force_stats[key] = int(self.teacher_force_stats.get(key, 0)) + int(value)
+        self._teacher_force_payload = None
+        self._teacher_force_frame = -1
+        return stats
+
+    def _teacher_force_entry(self, step: int) -> dict[str, Any] | None:
+        """取本帧第 ``step`` 步载荷条目（无载荷/越界 ⇒ None；调用方按缺失计账）。"""
+        payload = self._teacher_force_payload
+        if self.teacher_force_mode == "off" or not isinstance(payload, dict):
+            return None
+        entry = payload.get(int(step))
+        return entry if isinstance(entry, Mapping) else None
+
+    def _teacher_force_emit(self, *, module: str, step: int, event: Mapping[str, Any]) -> None:
+        """转发注入事件到 hook（默认 None ⇒ 零开销；异常不外抛——审计不阻断评测）。"""
+        hooks = self.teacher_force_hooks
+        if hooks is None:
+            return
+        emit = getattr(hooks, "on_injection", None)
+        if not callable(emit):  # pragma: no cover - 防御
+            return
+        payload = {"module": str(module), "step": int(step), "frame": int(self._teacher_force_frame)}
+        payload.update(dict(event))
+        try:
+            emit(payload)
+        except Exception:  # noqa: BLE001 - 审计失败不阻断评测（hook 内部自记）
+            pass
+
+    def _teacher_force_inject_state(self, *, step: int, state: WorldState) -> list[dict[str, Any]]:
+        """按载荷替换 WorldState 物理字段（``analytic_update`` 后 / readout 前）。
+
+        返回逐面审计记录（``surface/before/after`` 张量 + meta）；未命中载荷 ⇒ 空表。
+        口径逐行对齐 R40-V4B ``TeacherForceRuntime.inject_state``（batch=1 评测口径）。
+        """
+        surfaces = TEACHER_FORCE_SURFACES.get(self.teacher_force_mode, ())
+        if not surfaces or all(name == "lateral" for name in surfaces):
+            return []
+        entry = self._teacher_force_entry(step)
+        if entry is None:
+            self.teacher_force_frame_stats["n_missing_entry"] += 1
+            return []
+        if int(state.ego_pose.shape[0]) != 1:
+            raise ValueError("[teacher_force] 注入只支持 batch=1（评测口径）")
+        records: list[dict[str, Any]] = []
+
+        if "ego" in surfaces:
+            before = teacher_force_snapshot(
+                {"ego_pose": state.ego_pose, "ego_speed": state.ego_speed}
+            )
+            state.ego_pose = entry["pose"].reshape(1, 3).to(
+                dtype=state.ego_pose.dtype, device=state.ego_pose.device
+            )
+            state.ego_speed = torch.clamp(
+                entry["speed"].reshape(1).to(dtype=state.ego_speed.dtype, device=state.ego_speed.device),
+                min=0.0, max=float(state.speed_max),
+            )
+            after = teacher_force_snapshot(
+                {"ego_pose": state.ego_pose, "ego_speed": state.ego_speed}
+            )
+            self.teacher_force_frame_stats["n_ego_rows"] += 1
+            records.append({"surface": "ego", "before": before, "after": after})
+        if "od" in surfaces:
+            before = teacher_force_snapshot({
+                "od_anchor": state.od_anchor,
+                "od_feat": state.od_feat,
+                "od_valid": state.od_valid,
+            })
+            ref = state.ego_speed_ref.reshape(1)          # t0 速度（重放帧）
+            valid = entry["od_valid"]
+            vx = entry["od_vw"][:, 0] - ref
+            vy = entry["od_vw"][:, 1]
+            anchor = torch.stack(
+                [entry["od_pos"][:, 0], entry["od_pos"][:, 1], vx, vy, entry["od_h"]], dim=-1
+            ) * valid.unsqueeze(-1)
+            feat = torch.cat(
+                [entry["od_pos"], torch.stack([vx, vy], dim=-1), entry["od_cs"], entry["od_static"]],
+                dim=-1,
+            ) * valid.unsqueeze(-1)
+            state.od_anchor = anchor.reshape(1, *anchor.shape[-2:]).to(
+                dtype=state.od_anchor.dtype, device=state.od_anchor.device
+            )
+            state.od_feat = feat.reshape(1, *feat.shape[-2:]).to(
+                dtype=state.od_feat.dtype, device=state.od_feat.device
+            )
+            state.od_valid = valid.reshape(1, -1).to(
+                dtype=state.od_valid.dtype, device=state.od_valid.device
+            )
+            after = teacher_force_snapshot({
+                "od_anchor": state.od_anchor,
+                "od_feat": state.od_feat,
+                "od_valid": state.od_valid,
+            })
+            self.teacher_force_frame_stats["n_od_rows"] += 1
+            records.append({"surface": "od", "before": before, "after": after})
+        if "ld" in surfaces:
+            before = teacher_force_snapshot(
+                {"ld_anchor": state.ld_anchor, "ld_valid": state.ld_valid}
+            )
+            valid = entry["ld_valid"]
+            anchor = torch.stack(
+                [entry["ld_pos"][:, 0], entry["ld_pos"][:, 1], entry["ld_h"], entry["ld_curv"]],
+                dim=-1,
+            ) * valid.unsqueeze(-1)
+            state.ld_anchor = anchor.reshape(1, *anchor.shape[-2:]).to(
+                dtype=state.ld_anchor.dtype, device=state.ld_anchor.device
+            )
+            state.ld_valid = valid.reshape(1, -1).to(
+                dtype=state.ld_valid.dtype, device=state.ld_valid.device
+            )
+            after = teacher_force_snapshot(
+                {"ld_anchor": state.ld_anchor, "ld_valid": state.ld_valid}
+            )
+            self.teacher_force_frame_stats["n_ld_rows"] += 1
+            records.append({"surface": "ld", "before": before, "after": after})
+        if records:
+            self.teacher_force_frame_stats["n_state_rows"] += 1
+            meta = entry.get("meta") if isinstance(entry, Mapping) else None
+            for record in records:
+                record["meta"] = dict(meta) if isinstance(meta, Mapping) else {}
+        return records
+
+    def _teacher_force_patch_lateral(self, *, step: int, out: dict[str, Tensor]) -> dict[str, Any] | None:
+        """按载荷替换结构化头 ``κ_near``（= V4A O6/O7 口径；纵向 ds 输出不变）。"""
+        surfaces = TEACHER_FORCE_SURFACES.get(self.teacher_force_mode, ())
+        if "lateral" not in surfaces:
+            return None
+        entry = self._teacher_force_entry(step)
+        if entry is None:
+            self.teacher_force_frame_stats["n_missing_entry"] += 1
+            return None
+        if float(entry["kappa_valid"].reshape(-1)[0]) <= 0.5:
+            self.teacher_force_frame_stats["n_skip_kappa_invalid"] += 1
+            return None
+        from net.path_head import compose_step_action
+
+        kappa_true = entry["kappa"].to(device=out["kappa_near"].device, dtype=out["kappa_near"].dtype)
+        before = teacher_force_snapshot({
+            "ds_exec": out["ds_exec"],
+            "kappa_near": out["kappa_near"],
+            "dtheta": out["dtheta"],
+            "action": out["action"],
+        })
+        composed = compose_step_action(out["ds_exec"], kappa_true, dt=self.dt)
+        out["kappa_near"] = kappa_true
+        out["dtheta"] = composed["dtheta"]
+        out["action"] = composed["action"]
+        out["action_mu"] = composed["action"]
+        out["kappa_seg"] = composed["kappa_seg"]
+        out["kappa_seg_raw"] = composed["kappa_seg_raw"]
+        out["ds_clamped"] = composed["ds_clamped"]
+        out["dtheta_clamped"] = composed["dtheta_clamped"]
+        plan_aux = out.get("plan_aux")
+        if torch.is_tensor(plan_aux) and plan_aux.dim() == 3 and plan_aux.shape[1] >= 1:
+            plan_aux = plan_aux.clone()
+            plan_aux[:, 0, 1] = composed["dtheta"]
+            out["plan_aux"] = plan_aux
+        after = teacher_force_snapshot({
+            "ds_exec": out["ds_exec"],
+            "kappa_near": out["kappa_near"],
+            "dtheta": out["dtheta"],
+            "action": out["action"],
+        })
+        self.teacher_force_frame_stats["n_lateral_rows"] += 1
+        meta = entry.get("meta") if isinstance(entry, Mapping) else None
+        return {"surface": "lateral", "before": before, "after": after,
+                "meta": dict(meta) if isinstance(meta, Mapping) else {}}
+
+    def _teacher_force_probe_policy_out(
+        self, *, state: WorldState, before_fields: Mapping[str, Tensor], latent: Tensor, path_head: Any
+    ) -> dict[str, Tensor] | None:
+        """替换前 Policy 输出（诊断探针；只读重算，不进契约计数/不消耗 RNG）。
+
+        用替换前 WorldState 的浅拷贝重算 readout（``learned`` 缺口径：本探针固定 analytic 口径，
+        事件中以 ``probe_mode='analytic'`` 显式标注）→ 与真实调用同一 ``latent`` 与同一头实例。
+        """
+        if state is None:
+            return None
+        probe_state = copy.copy(state)
+        for name, value in before_fields.items():
+            setattr(probe_state, name, value)
+        view = readout(probe_state)
+        out = path_head(
+            latent,
+            anchor_xy=view["anchor_xy"],
+            anchor_mask=view["anchor_mask"],
+            long_exog=view["long_exog"],
+            target_lane_valid=view["target_lane_valid"],
+        )
+        return teacher_force_snapshot({
+            "ds_exec": out["ds_exec"],
+            "kappa_near": out["kappa_near"],
+            "action": out["action"],
+        })
+
+    def _teacher_force_emit_state_events(
+        self,
+        *,
+        step: int,
+        records: list[dict[str, Any]],
+        after_out: Mapping[str, Tensor] | None,
+        probe_out: Mapping[str, Tensor] | None,
+        probe_mode: str,
+    ) -> None:
+        """逐面转发状态替换事件（含替换前后 state 张量与 policy 输出；hook 缺省时调用方不触达）。"""
+        for record in records:
+            before_policy = None if probe_out is None else dict(probe_out)
+            after_policy = None if after_out is None else dict(after_out)
+            self._teacher_force_emit(
+                module=f"net.model._rollout.analytic_update.{record['surface']}",
+                step=step,
+                event={
+                    "surface": str(record["surface"]),
+                    "status": "injected",
+                    "before_state": record["before"],
+                    "after_state": record["after"],
+                    "before_policy": before_policy,
+                    "after_policy": after_policy,
+                    "probe_mode": str(probe_mode),
+                    "meta": dict(record.get("meta") or {}),
+                },
+            )
+
+    def _teacher_force_audit_head_call(
+        self,
+        *,
+        step: int,
+        latent: Tensor,
+        path_head: Any,
+        step_out: dict[str, Tensor],
+        state_records: list[dict[str, Any]],
+        state: WorldState | None,
+    ) -> None:
+        """头部输出审计：横向替换 + 替换前后 Policy 输出记录（仅非默认档触达）。"""
+        raw_after = teacher_force_snapshot({
+            "ds_exec": step_out["ds_exec"],
+            "kappa_near": step_out["kappa_near"],
+            "action": step_out["action"],
+        })
+        lateral_on = "lateral" in TEACHER_FORCE_SURFACES.get(self.teacher_force_mode, ())
+        if lateral_on:
+            patch = self._teacher_force_patch_lateral(step=step, out=step_out)
+            if patch is not None and self.teacher_force_hooks is not None:
+                self._teacher_force_emit(
+                    module="net.model._rollout.path_head.lateral",
+                    step=step,
+                    event={
+                        "surface": "lateral",
+                        "status": "injected",
+                        "before_state": None,
+                        "after_state": None,
+                        "before_policy": dict(patch["before"]),
+                        "after_policy": dict(patch["after"]),
+                        "probe_mode": "n/a（κ 直接替换）",
+                        "meta": dict(patch.get("meta") or {}),
+                    },
+                )
+        if not state_records or self.teacher_force_hooks is None:
+            return
+        probe_out = None
+        probe_mode = "n/a"
+        if state is not None:
+            before_fields: dict[str, Tensor] = {}
+            for record in state_records:
+                before_fields.update(record["before"])
+            probe_out = self._teacher_force_probe_policy_out(
+                state=state, before_fields=before_fields, latent=latent, path_head=path_head
+            )
+            probe_mode = "analytic"
+        self._teacher_force_emit_state_events(
+            step=step, records=state_records, after_out=raw_after, probe_out=probe_out,
+            probe_mode=probe_mode,
+        )
 
     #: ``static_role_only`` 下 rollout 后段置零的**动态**语义特征索引
     #: （lat/heading/margins/distance_to_lane_end/distance_to_target_lane_end）。
@@ -1856,7 +2232,20 @@ class DrivingModel(nn.Module):
         z_ego_steps: list[Tensor] = []
         z_od_steps: list[Tensor] = []
         z_ld_steps: list[Tensor] = []
+        # R41-A1：teacher-forced oracle（默认 off ⇒ 以下整段不触达；状态面仅存在于 ws_on 路径，
+        # lateral 面只依赖结构化头 ⇒ 二者按面独立判定）
+        tf_on = self.teacher_force_mode != "off"
+        tf_surfaces = TEACHER_FORCE_SURFACES.get(self.teacher_force_mode, ())
+        tf_state_surfaces = tuple(name for name in tf_surfaces if name in ("ego", "od", "ld"))
+        tf_lateral = "lateral" in tf_surfaces
+        if tf_state_surfaces and not ws_on:
+            raise ValueError(
+                "[teacher_force] 状态面注入（ego/od/ld）需要 world_state_api != 'off'"
+                "（注入落点 = analytic_update 后 / readout 前）"
+            )
+        tf_state_records: list[dict[str, Any]] = []
         for k in range(1, self.rollout_steps + 1):
+            tf_state_records = []
             # (a) 位姿链：action/pose 不 detach（6 点轨迹目标训练 plan head 的动作链）
             ds, dtheta = action[:, 0], action[:, 1]
             dx, dy = arc_step(ds, dtheta)
@@ -2005,6 +2394,12 @@ class DrivingModel(nn.Module):
                     ld_residual=ld_residual,
                     step=k,
                 )
+                # R41-A1：teacher-forced 状态替换（analytic_update 后 / readout 前；默认 off ⇒
+                # 本行不触达任何新代码；记录 = 替换前/后张量，供 hook 做 state hash 与审计）
+                if tf_on and tf_state_surfaces:
+                    tf_state_records = self._teacher_force_inject_state(
+                        step=k, state=self._world_state
+                    )
                 if ws_mode == "analytic_learned":
                     if self.world_residual is None:
                         raise ValueError(
@@ -2031,6 +2426,13 @@ class DrivingModel(nn.Module):
                     ws_view = readout(self._world_state)
                 if ws_hook is not None:
                     ws_hook.capture(step=k, state=self._world_state, view=ws_view)
+                if tf_on and tf_state_records and self.teacher_force_hooks is not None \
+                        and k >= self.rollout_steps:
+                    # 末步（无后续头调用）注入事件：policy 输出 n/a（显式 None，不伪填）
+                    self._teacher_force_emit_state_events(
+                        step=k, records=tf_state_records, after_out=None, probe_out=None,
+                        probe_mode="n/a（末步无头调用）",
+                    )
 
             # (e) 下一轮 plan head + 注意力头（最后一步之后不需要）
             if k < self.rollout_steps:
@@ -2094,6 +2496,13 @@ class DrivingModel(nn.Module):
                             "target_lane_valid": path_ctx["target_lane_valid"],
                         }
                     step_out = path_head(latent, **head_kwargs)
+                    # R41-A1：注入审计 + 横向替换（默认 off ⇒ 本行不触达任何新代码；
+                    # 探针头调用不进契约计数 `_path_head_call_ids`/`structured_head_calls`）
+                    if tf_on and (tf_state_records or tf_lateral):
+                        self._teacher_force_audit_head_call(
+                            step=k, latent=latent, path_head=path_head, step_out=step_out,
+                            state_records=tf_state_records, state=self._world_state,
+                        )
                     if self.contract_asserts_enabled:
                         self._path_head_call_ids.append(id(path_head))
                     wm_advance_calls += 1

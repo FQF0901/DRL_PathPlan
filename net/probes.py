@@ -1571,6 +1571,26 @@ DETACH_REGISTRY: tuple[dict[str, Any], ...] = (
         "reach": "static：仅 `save_residual_head` 的序列化路径调用（训练 lane 落盘时一次；默认路径/前向不执行）；训练/评测的梯度边界仍为 `world_state.residual_loss` 语义（one-step 真实下一状态监督，D-WS01 不变）",
         "evidence": "static",
     },
+    {
+        "id": "D-TF01",
+        "tensor": "value.detach()",
+        "file": "net/model.py",
+        "function": "teacher_force_snapshot",
+        "line": 357,
+        "stage": "R41-A1 teacher-forced oracle 审计快照（替换前/后 state 与 Policy 输出副本；"
+                 "唯一 detach 写点，默认关路径不可达）",
+        "blocks": "注入审计副本（before/after state、before/after policy 输出）→ autograd 图"
+                  "（hook 只做 hash/落盘；模型/损失链不消费快照）",
+        "reach": "实测（a1_reach:tf_snapshot；脚本 .slim/deepwork/p1_v2/round41/a1_detach_reach.py"
+                 " → a1_detach_reach.json）：① `teacher_force=off` 前向调用计数 = 0（结构性不可达——"
+                 "注入点只在非 off 档执行）；② `all` 无 hook = 51 次/前向、有 hook = 56 次/前向"
+                 "（+5 = 探针头调用前的替换前 Policy 输出）；③ 快照张量实测全部 grad_fn=None ∧ "
+                 "requires_grad=False（detach 边界成立）；④ 注入激活时主图不受污染：plan loss → "
+                 "结构化头参数梯度范数 > 0 而 → st_gnn = 0（与 D-WM01 同口径）；⑤ 注入后 WorldState "
+                 "物理字段无 grad_fn（detach 副本语义）；⑥ structured 契约 `contract_runtime_ok=1`"
+                 "（探针头调用不进契约计数）",
+        "evidence": "a1_reach:tf_snapshot",
+    },
 )
 
 #: 登记表键 = (file, function, tensor)；`line` 仅为登记时行号（漂移不判失败，记入报告）

@@ -65,6 +65,10 @@
   `recycle_every_specs`（`1762-1764`）、`thresholds`（顶层键优先，回退 `eval.thresholds`：`1866-1869`；
   判定公式见 `judge_group` / `evaluate_verdicts`，`pipeline/eval_runner.py:406-470`）；`deterministic`（`1899`）与
   `process`（`1905`）仅原样记入 `metrics.json`，无行为分支。
+- R41-A1：`counterfactual.drift_thresholds` / `counterfactual.frame_gate`
+  （`pipeline/eval_runner.py::_counterfactual_from_args`；覆盖内置**预注册默认**阈值，用于两遍重放
+  五类漂移门与决策帧"同状态门"）；同节其余键为正式 CLI 开关（`--teacher-force/--record-truth/
+  --inject-truth/--speed-scale/--speed-oracle`）的文档镜像，默认全关（CLI 缺省为准）。
 
 ## 未被代码消费的键（速查，以代码为准）
 

@@ -10,6 +10,9 @@
 未识别参数原样透传（``--workers/--limit/--name/--max-steps/--baseline-ref/--seed``
 ``--allow-partial-load/--tracker/--eval-reference/--device/--moe-off`` 等），
 ``--path-head {off,structured}``（R39-A1 结构化装配，声明于本入口后显式转发）同列；
+R39-B2c/B2d（``--world-state-api/--world-residual-head/--world-residual-scale``）与
+**R41-A1 反事实轴**（``--teacher-force/--record-truth/--inject-truth/--speed-scale/
+--speed-oracle``；默认 off/None ⇒ 不透传、逐位不变）亦在本入口显式声明并转发；
 run 名由代码自适应规范化（``pipeline/run_paths.py::eval_run_name``；调用方不手拼）：
 
 - ``--name`` 缺省 → ``BTC<秒级北京戳>_eval500_<policy>``（kind 随 ``--spec`` 文件名自适应）；
@@ -86,6 +89,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help="学习残差缩放（R39-B2d；透传 pipeline.eval_runner）：默认 None=零触达"
                              "（与 B2c 口径逐字节同 hash）；仅 --world-state-api analytic_learned "
                              "生效；∈[0,4]")
+    parser.add_argument("--teacher-force", default="off",
+                        choices=("off", "ego", "od", "ld", "ego_od_ld", "lateral", "all"),
+                        help="R41-A1：teacher-forced oracle 注入（透传 pipeline.eval_runner；默认 off="
+                             "零触达逐位不变）。注入 = 模型内原生路径（net/model.py::set_teacher_force）；"
+                             "非 off 需 --world-state-api 非 off + --inject-truth；非默认档入 protocol "
+                             "hash + 模型缓存键 + metrics/manifest")
+    parser.add_argument("--record-truth", type=Path, default=None,
+                        help="R41-A1：两遍法第一遍 truth 输出目录（<dir>/<spec_id:04d>.npz；只观察）；"
+                             "与 --inject-truth 互斥")
+    parser.add_argument("--inject-truth", type=Path, default=None,
+                        help="R41-A1：两遍法第二遍 truth 源目录（第一遍产物；目录 sha16 入 protocol "
+                             "hash）；只对 --teacher-force 非 off 有意义")
+    parser.add_argument("--speed-scale", type=float, default=None,
+                        help="R41-A1：速度反事实（plan 后处理同缩 ds/dθ×s ⇒ κ 不变；默认 None=关；>0）")
+    parser.add_argument("--speed-oracle", default="off", choices=("off", "expert"),
+                        help="R41-A1：速度 oracle（expert=按专家空问 ds 缩放，需 pure_pursuit labeler）")
     return parser
 
 
@@ -149,6 +168,17 @@ def main(argv: "list[str] | None" = None) -> int:
         forward += ["--world-residual-head", str(args.world_residual_head)]
     if args.world_residual_scale is not None:
         forward += ["--world-residual-scale", str(args.world_residual_scale)]
+    # R41-A1：oracle/teacher-force/speed 反事实轴（默认 off/None ⇒ 不透传，逐位不变）
+    if str(args.teacher_force) != "off":
+        forward += ["--teacher-force", str(args.teacher_force)]
+    if args.record_truth is not None:
+        forward += ["--record-truth", str(args.record_truth)]
+    if args.inject_truth is not None:
+        forward += ["--inject-truth", str(args.inject_truth)]
+    if args.speed_scale is not None:
+        forward += ["--speed-scale", str(args.speed_scale)]
+    if str(args.speed_oracle) != "off":
+        forward += ["--speed-oracle", str(args.speed_oracle)]
     if args.spec is not None:
         forward += ["--spec", str(args.spec)]
     if args.ckpt is not None:
