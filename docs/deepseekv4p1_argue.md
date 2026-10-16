@@ -38,7 +38,7 @@
 
 ## 4. 挂账与待裁
 
-1. **待 GPT/CG（更新）**：①**闭环 H 臂的 oracle 口径确认**（teacher-forced 定义：k≥1 用\"该步实际到达状态\"替换—由 V4A 预注册给出建议稿）；②**几何训练 A/B 是否列为本轮正式臂**（fixed vs legacy 重训残差/策略，检验冻结头 OOD 假说）；③c2 口径预注册草案（新证据：门语义绑定几何）；④**训练工装正式入库**（`b2_train.py`→`tools/`，含 config/split/命令；V1 遗留③）。
+1. **待 GPT/CG（更新：V7 门复核包已备）**：①**闭环 H 臂的 oracle 口径**（V4A §7.1 两遍法 teacher-forced，已按此实现于 V4B）｜②**几何训练 A/B**（fixed vs legacy 重训，检验冻结头 OOD 假说）｜③**门复核**（`.slim/deepwork/p1_v2/round40/gate_review_draft.md`：E1–E18 证据 + 候选 A1/A2/Bδ.5/联合门/C + 22 点重算；**我方倾向：立即采纳候选 C〔真值状态上界参照列，不设阈〕+ 几何口径声明要求〔任何门读数须标 step/readout 几何 + 四 hash〕；若裁可修订则联合门 = c1 正确性口径 + c2 加速需求加权，阈值=B0 在声明几何下的自然读数；桶归一为备选〔ε/tie 脆弱〕；锚几何须先定；不放宽数值、不按 22 点/门样本调参**）｜④训练工装（✅ V5 已入库 `db3ded8`）。
 2. **R40 执行状态**：V1 ✅ `42318b1`（特征同源 + 参数门 2.0M 五栏）｜V2 ✅（猜想 2 否证）｜V3 ✅ `6cdb93c`（几何控臂 + 默认关开关；装配由编排代跑其自带装配器，lane 停摆）｜**V4A 🕐**（离线 oracle 归因）｜V4B ⏳（闭环 H 臂，待口径确认）。
 3. **挂账**：R39-C（Memory M0/M1/M2）、R39-D（learner-state/DAgger）、B3/B4（BPTT 前置检查）、Eval500 3-seeds、`runs/` 归域、`net/world_residual.py` 内联上限统一 2.0M（V1 遗留①）、doc_stats 节拍。
 4. **工程事实**：pytest 当前 **1137**；各波默认关逐位 all_pass；四 hash 常态记录。
