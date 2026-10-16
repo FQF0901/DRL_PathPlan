@@ -20,6 +20,7 @@
    - **猜想 4 ✅ PASS**（train/eval 特征同源）：250,622 全量逐位、6 项 `max_abs_diff=0`（唯一跨 batch 0.048 系 TF32 GEMM tiling 效应，已固化\"同 batching\"口径）——`42318b1`。
    - **猜想 2 ❌ 否证**（双 ego-motion 链）：数值精度内一致（ego pose 位级相等；OD 位置 ≤4.8e-5 m=op 序 float32 舍入；动作局部增益≈0）⇒ 下沉单源化**仅整洁性**价值、非缺陷。
    - **猜想 3 ✅ 成立，但方向 = `fixed` 对冻结策略为负**（离线+闭环双证）：离线 fixed 使 B1 c1 **−0.471（拖累）**（统一 legacy 后 B1 c1=**12.7365** > fixed 口径 12.2654；B2p=14.0553/2.7169）；闭环 **`off+fixed` 臂 coll 0.08→0.16（翻倍）**、learned 臂 **legacy 0.12 vs fixed 0.18**；**学残差 succ 增益两口径一致（+0.18, p=0.004）⇒ 几何只改安全轴**。**遗留**：①A4\"fixed 闭环≈中性\"结论需复核（新证 G1 coll +8pp）；②legacy 保留已知缺陷（foot 伪影 `|lat|≈0.02`、margin 符号互换）⇒ **只作对照臂不作候选**；③**敞口问题：几何应否\"训练侧 A/B\"解决（冻结头 OOD 假说）**。
+   - **V6 取证（猜想 3 收口）✅**：闭环 footprint 对 fixed/legacy 轴**不可分辨（≈0）**（foot_pad≡0、exec_valid 1.0、plan_valid ~0.98、|lat| 两几何近似）；**G2L 的 coll 更低非 foot 伪影**（离线 65× 塌缩在闭环未重演——注入锚 mask 全 1 ⇒ 缺陷①休眠复证）；**唯一活跃几何差 = margin 符号轴**（符号一致率 0.00 vs 1.00 精确镜像），G2L↔B2F 剩余碰撞差（6 vs 9）归 margin 间接行为 + n=50 噪声（+5/−2, p=0.45）；口径事实（记录）：闭环 obs 行 margin=production 约定、dataset 行=dataset 约定（A4），两者相反。
    - **c2 阈值语义绑定几何**：统一 fixed 口径下 hold 基线 c2=**2.3829 > 2.31** ⇒ 门修订证据齐备（**须先预注册后跑**）。
 4. **R40 闭环归因（V4B）✅ 决定性否证 + 根因重定位**：13 臂 teacher-forced 闭环（Calib50 n=50；注入计数全部有效：C2 ego 44,388 / C3 OD 38,362 / **C4 LD 38,715 行已激活而指标与 C1 逐位同 ⇒ LD 真·零消费者** / C6 横向 23,134 / C7 全量）：
    - **H3/H4/H5 否证**：oracle 替换底层物理状态**不能**降低 collision/off-road（C3 OD 反而 coll 0.24；C5 全量 succ 跌回 0.38）；
