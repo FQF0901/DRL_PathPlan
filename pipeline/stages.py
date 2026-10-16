@@ -92,9 +92,9 @@ from pipeline.trainer import (  # noqa: E402
     dataset_weight_report,
     effective_traj_aux_mask,
     ego_kpi_arrays,
-    load_checkpoint,
+    load_checkpoint as _trainer_load_checkpoint,
     load_optimizer_state,
-    load_training_checkpoint,
+    load_training_checkpoint as _trainer_load_training_checkpoint,
     move_optimizer_state_to_device,
     presence_entry_loss,
     pretrain_bc,
@@ -103,7 +103,7 @@ from pipeline.trainer import (  # noqa: E402
     restore_rng_state,
     row_action_weights,
     sanitize_masked_od,
-    save_checkpoint,
+    save_checkpoint as _trainer_save_checkpoint,
     stack_history,
     squeeze_single_slot,
     to_device_tensor,
@@ -119,6 +119,108 @@ __all__ = ["main", "run_stage_a", "run_stage_b", "run_stage_b_phase3", "run_stag
            "build_model", "FrameWindows", "validate_bc_dataset"]
 
 _DEFAULT_MODEL_CFG = "config/model.yaml"
+
+
+# --------------------------------------------------------------------------- #
+# R41-D：checkpoint metadata 的几何口径链（保存注入 ∧ 读取判读；缺失 ⇒ 按默认）
+# --------------------------------------------------------------------------- #
+#: ckpt ``meta`` 的几何口径键（= 模型实例配置 ``DrivingModel.readout_lane_geometry``）。
+CKPT_GEOMETRY_META_KEY = "readout_lane_geometry"
+
+
+def geometry_meta_of(model: Any) -> str | None:
+    """模型实例的几何口径（无该属性/None ⇒ ``None``；非 DrivingModel 记录零触达）。"""
+    value = getattr(model, "readout_lane_geometry", None)
+    return None if value is None else str(value)
+
+
+def readout_geometry_meta_check(model: Any, meta: Mapping[str, Any] | None, *,
+                                source: str = "") -> dict[str, Any]:
+    """ckpt 几何元数据 vs 实例配置判读（R41-D「读取」链）。
+
+    - meta 缺失/哨兵未记录 ⇒ 按默认（不触达实例配置；记录 ``source="missing"``）；
+    - meta 显式且实例 **未配置**（哨兵）⇒ 采用 ckpt 口径（``set_readout_lane_geometry``）并打印；
+    - meta 显式且实例 **显式不一致** ⇒ 警告（不自动切换；实例/配置为训练声明口径）→ 调用方裁决；
+    - meta 取值非法 ⇒ 警告 + 按缺失处理（默认）。
+    返回机器可读记录（调用方/审计可落盘）。
+    """
+    from net.path_head import READOUT_LANE_GEOMETRY_DEFAULT, normalize_readout_lane_geometry
+
+    raw = meta.get(CKPT_GEOMETRY_META_KEY) if isinstance(meta, Mapping) else None
+    instance = geometry_meta_of(model)
+    record: dict[str, Any] = {
+        "ckpt_meta": (None if raw is None else str(raw)),
+        "instance": instance,
+        "source": "missing" if raw is None else "checkpoint_metadata",
+        "source_ref": str(source or ""),
+    }
+    if raw is None:
+        record["value"] = READOUT_LANE_GEOMETRY_DEFAULT
+        return record
+    try:
+        ckpt_value = normalize_readout_lane_geometry(raw)
+    except ValueError:
+        print(f"[ckpt] 警告：{source or 'ckpt'} 的 {CKPT_GEOMETRY_META_KEY}={raw!r} 非法"
+              " ⇒ 按缺失处理（默认）", flush=True)
+        record.update({"value": READOUT_LANE_GEOMETRY_DEFAULT, "invalid": True})
+        return record
+    record["value"] = ckpt_value
+    if ckpt_value == READOUT_LANE_GEOMETRY_DEFAULT:
+        return record  # 保存侧哨兵（新 ckpt 显式声明「默认」）
+    if instance is None or instance == READOUT_LANE_GEOMETRY_DEFAULT:
+        setter = getattr(model, "set_readout_lane_geometry", None)
+        if callable(setter):
+            setter(ckpt_value)
+            record["applied"] = True
+            print(f"[ckpt] 几何口径：{source or 'ckpt'} metadata={ckpt_value}"
+                  " ⇒ 实例采用（config 未显式配置）", flush=True)
+    elif instance != ckpt_value:
+        record["mismatch"] = True
+        print(f"[ckpt] 警告：几何口径不一致（实例/config = {instance}，{source or 'ckpt'} "
+              f"metadata = {ckpt_value}）——保持实例口径；训练/评测几何必须显式同口径",
+              flush=True)
+    return record
+
+
+def save_checkpoint(
+    path: str, model: Any, *, meta: Optional[Dict[str, Any]] = None,
+    optimizer: Any = None, epoch: Optional[int] = None,
+    val_metrics: Optional[Mapping[str, Any]] = None,
+    rng_state: Optional[Mapping[str, Any]] = None,
+    config_hash: Optional[str] = None,
+) -> str:
+    """``pipeline.trainer.save_checkpoint`` 包装（R41-D「保存」链）：注入几何口径元数据。
+
+    ``meta.setdefault("readout_lane_geometry", <实例几何口径 canonical/哨兵>)``；DrivingModel
+    恒有该属性（哨兵 = ``"default"``），无该属性的 module（测试 stub）零触达。其余行为
+    与 trainer 原语一致（payload 固定键集不变；meta 内新增单键）。
+    """
+    payload_meta: Dict[str, Any] = dict(meta or {})
+    geometry = geometry_meta_of(model)
+    if geometry is not None:
+        payload_meta.setdefault(CKPT_GEOMETRY_META_KEY, geometry)
+    return _trainer_save_checkpoint(
+        path, model, meta=payload_meta, optimizer=optimizer, epoch=epoch,
+        val_metrics=val_metrics, rng_state=rng_state, config_hash=config_hash,
+    )
+
+
+def load_checkpoint(path: str, model: Any, *, strict: bool = True) -> Dict[str, Any]:
+    """``pipeline.trainer.load_checkpoint`` 包装（R41-D「读取」链）：几何元数据判读。
+
+    行为 = trainer 原语 + :func:`readout_geometry_meta_check`（meta 缺失 ⇒ 按默认，零触达；
+    实例未配置而 ckpt 显式 ⇒ 采用；显式不一致 ⇒ 警告）。
+    """
+    meta = _trainer_load_checkpoint(path, model, strict=strict)
+    readout_geometry_meta_check(model, meta, source=f"ckpt:{path}")
+    return meta
+
+
+def load_training_checkpoint(path: str, model: Any, *, strict: bool = True) -> Dict[str, Any]:
+    """``pipeline.trainer.load_training_checkpoint`` 包装（R41-D；resume 场景同判读）。"""
+    info = _trainer_load_training_checkpoint(path, model, strict=strict)
+    readout_geometry_meta_check(model, info.get("meta") or {}, source=f"ckpt:{path}")
+    return info
 
 #: P4/Gate4 **horizon 对齐**（2026-10-01）：Stage C 训练截断（策略步）。200 策略步 × ``_POLICY_DT``
 #: （0.5 s）= 100 s = 审计（``--max-steps 1000`` 物理步 × 0.1 s）与评测（``max_steps=1000``）口径；
@@ -157,6 +259,9 @@ def build_model(config: Mapping[str, Any]) -> Any:
 
     ``load_config`` 的 includes 是**平铺合并**（model.yaml 的键在根层），因此这里也接受
     根层键（``hidden_dim``/``moe``/``world_model``）或显式的 ``config["model"]`` 子映射。
+
+    R41-D：``readout_lane_geometry``（几何口径实例配置；``corrected``/``legacy_aligned`` 或
+    哨兵 ``default``）也在根层读取并透传构造参数；键缺席 ⇒ 构造参数缺省（哨兵）⇒ 逐位不变。
     """
     from net.model import DrivingModel
 
@@ -186,6 +291,10 @@ def build_model(config: Mapping[str, Any]) -> Any:
         "attn_layers": int(policy_cfg.get("attn_layers", 1)),
         "wm_steps": int(world_model.get("rollout_steps", 6)),
     }
+    # R41-D：几何口径实例配置（键缺席/哨兵 ⇒ 不显式设置 ⇒ 默认行为逐位不变）
+    geometry = section.get("readout_lane_geometry")
+    if geometry is not None and str(geometry).strip().lower() != "default":
+        kwargs["readout_lane_geometry"] = str(geometry)
     return DrivingModel(**kwargs)
 
 

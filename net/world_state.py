@@ -159,12 +159,21 @@ IMAGINED_MEMORY_MAX_FRAMES = 8
 #: - ``production``：legacy-aligned readout（保留生产几何两条缺陷：foot 搜索不看
 #:   ``anchor_mask`` + margin 符号互换）⇒ G2 控臂"analytic + legacy 几何"。
 #: 默认 ``fixed`` ⇒ 不设置开关/环境变量时行为逐位不变（证据 = 本 lane ``v3_net_bitwise``）。
+#:
+#: **R41-D（正式入口迁移）**：几何口径正式入口 = 模型实例配置
+#: ``DrivingModel.readout_lane_geometry``（规范名 ``corrected`` = ``fixed`` / ``legacy_aligned``
+#: = ``production``）；:func:`readout` 的 ``lane_geometry`` 参数为显式装配口（实例配置经此
+#: 落地）。本进程级全局 + 环境变量**降级为内部默认 + 兼容判读**（历史 G2/G3 臂复现用），
+#: 不作为正式评测/训练入口。
 READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = ("fixed", "production")
 READOUT_LANE_GEOMETRY_DEFAULT_MODE = "fixed"
-#: 进程级口径的 spawn 传播入口（可选；**import 期读取一次**、取值白名单校验 fail-fast）。
+#: （R41-D 降级为兼容/内部）进程级口径的 spawn 传播入口（可选；**import 期读取一次**、
+#: 取值白名单校验 fail-fast，接受历史内部值 ``fixed``/``production``）。
 #: 缺省 ⇒ :data:`READOUT_LANE_GEOMETRY_DEFAULT_MODE`。机制 precedent =
 #: ``pipeline/trainer.py``/``pipeline/eval_runner.py`` 的 OMP env（spawn worker 重 import 继承）
-#: ——评估 lane 用它把 G2 档（legacy-aligned readout）传入 eval spawn 池；生产/训练不设。
+#: ——历史评估 lane 用它把 G2 档（legacy-aligned readout）传入 eval spawn 池。
+#: **正式入口 = 模型实例配置**（canonical ``corrected``/``legacy_aligned``，经
+#: ``readout(lane_geometry=...)`` 显式传入）；本 env 仅作兼容判读。
 READOUT_LANE_GEOMETRY_ENV = "RLP_READOUT_LANE_GEOMETRY"
 
 
@@ -191,6 +200,9 @@ def set_readout_lane_geometry_mode(mode: str = READOUT_LANE_GEOMETRY_DEFAULT_MOD
     默认 ``fixed`` ⇒ :func:`readout` 逐位 = R39 口径；``production`` = legacy-aligned
     readout（G2 控臂）。纯开关，无 RNG/参数副作用；只影响 readout 的想象步几何，
     不触碰 ``net.path_head`` 的进程级默认。
+
+    R41-D：**该进程级入口已降级为内部默认**（兼容保留；env 初始化同源）；正式入口 =
+    模型实例配置 ``DrivingModel.readout_lane_geometry``（经 ``readout(lane_geometry=...)``）。
     """
     global READOUT_LANE_GEOMETRY_MODE
     if mode not in READOUT_LANE_GEOMETRY_MODES:
@@ -669,12 +681,14 @@ def _field_rows(
     return code
 
 
-def _lane_geometry(state: WorldState) -> dict[str, Tensor]:
+def _lane_geometry(state: WorldState, *, geometry_mode: "str | None" = None) -> dict[str, Tensor]:
     """第 4 步（policy 视角）：目标车道锚 ego-motion 补偿 + margin/静态距/末端距重算。
 
-    委托 ``net.path_head.step_geometry``（口径 = :data:`READOUT_LANE_GEOMETRY_MODE`；
-    R38-A4 ``fixed`` 默认：foot 排除 ``mask=0`` 段 + margin 数据集符号 ``left = W/2 + lat_k``；
-    R40-V3 可切 ``production`` = legacy-aligned readout，见 setter）。动态列
+    委托 ``net.path_head.step_geometry``（口径 = ``geometry_mode``；``None`` ⇒ 进程级
+    :data:`READOUT_LANE_GEOMETRY_MODE`；R38-A4 ``fixed`` 默认：foot 排除 ``mask=0`` 段 +
+    margin 数据集符号 ``left = W/2 + lat_k``；R40-V3 可切 ``production`` = legacy-aligned
+    readout，见 setter）。R41-D：``geometry_mode`` 接受规范名 ``corrected``/``legacy_aligned``
+    （= 模型实例配置 ``readout_lane_geometry`` 的落地口）。动态列
     （speed/dyn/ttc/nav）被 :func:`readout` 覆盖为统一 readout 产物（不沿用 hold）。
     """
     from net.path_head import step_geometry  # lazy：避免 import 环
@@ -686,7 +700,7 @@ def _lane_geometry(state: WorldState) -> dict[str, Tensor]:
         state.t0_present,
         state.ego_pose,
         state.progress_s,
-        geometry_mode=READOUT_LANE_GEOMETRY_MODE,
+        geometry_mode=READOUT_LANE_GEOMETRY_MODE if geometry_mode is None else geometry_mode,
     )
 
 
@@ -761,7 +775,8 @@ def _od_kinematics(state: WorldState) -> dict[str, Tensor]:
 
 
 def readout(
-    state: WorldState, *, learned: Mapping[str, Tensor] | None = None
+    state: WorldState, *, learned: Mapping[str, Tensor] | None = None,
+    lane_geometry: "str | None" = None,
 ) -> dict[str, Any]:
     """``PolicyStateView_k = readout(WorldState_k)``：**七量统一重算**（第 7 步）。
 
@@ -777,6 +792,11 @@ def readout(
     = 学习残差 ``ΔA_θ``（列序 = :data:`LEARNED_ALLOWED`，物理单位）。逐列仅作用于
     ``mask=1 ∧ base present=1`` 的行（missing 行不加 ⇒ 不静默填值），命中行
     ``source: analytic → learned``；``present`` 不变（学习残差**不制造存在性**）。
+
+    ``lane_geometry``（R41-D 可选；``None`` = 默认逐位不变）：readout 车道几何口径的**显式
+    装配口**（模型实例配置 ``DrivingModel.readout_lane_geometry`` 经此落地）。接受规范名
+    ``corrected``/``legacy_aligned`` 与历史内部值 ``fixed``/``production``；``None`` ⇒
+    进程级 :data:`READOUT_LANE_GEOMETRY_MODE`（内部默认，兼容判读）。
     """
     from net.path_head import LONG_EXOG_FEATURE_NAMES  # lazy
 
@@ -785,7 +805,7 @@ def readout(
     ref = state.ego_speed
     batch = int(ref.shape[0])
 
-    geometry = _lane_geometry(state)
+    geometry = _lane_geometry(state, geometry_mode=lane_geometry)
     exog = geometry["long_exog"].clone()
     od = _od_kinematics(state)
 

@@ -217,9 +217,12 @@ from net.path_head import (
     LAT_HORIZON_M,
     PATH_HEAD_DEFAULT_MODE,
     PATH_HEAD_MODES,
+    READOUT_LANE_GEOMETRY_DEFAULT,
     StructuredPolicyHead,
     anchor_from_obs,
     long_exog_from_obs,
+    normalize_readout_lane_geometry,
+    readout_lane_geometry_internal,
     replay_plan,
     step_geometry,
     target_lane_valid_from_obs,
@@ -558,6 +561,7 @@ class DrivingModel(nn.Module):
         attn_layers: int = 1,
         trunk_hidden: int = 160,
         net_hidden: int = 256,
+        readout_lane_geometry: str | None = None,
     ):
         super().__init__()
         self.hidden = int(hidden)
@@ -567,6 +571,16 @@ class DrivingModel(nn.Module):
         self.others_dim = int(others_dim)
         self.rollout_steps = int(wm_steps)
         self.dt = float(wm_dt)
+        #: R41-D：几何口径**模型实例配置**（正式入口；非参数普通属性，不进 state_dict/键面）。
+        #: 规范名 ``corrected``（= 历史内部值 ``fixed``：R38-A4 两条几何缺陷修复）/
+        #: ``legacy_aligned``（= 历史内部值 ``production``：legacy 产线几何）/ 哨兵
+        #: :data:`net.path_head.READOUT_LANE_GEOMETRY_DEFAULT`（未配置）。
+        #: 语义：哨兵 ⇒ 各消费路径沿用历史默认（想象步 ``step_geometry`` = ``production``、
+        #: ws readout 车道几何 = ``fixed``）⇒ **默认 = 现行为（逐位不变）**；显式 canonical
+        #: 值 = 统一轴（ws readout 与 ws-off 想象步同时生效）。构造参数同名字；经
+        #: :meth:`set_readout_lane_geometry` 可运行时设置。落地链路（R41-D）= model config ∧
+        #: checkpoint metadata ∧ protocol hash ∧ 模型缓存键 ∧ metrics。
+        self.readout_lane_geometry: str = normalize_readout_lane_geometry(readout_lane_geometry)
 
         self.encoders = ObsEncoders(hidden, od_slots, ld_slots, others_dim=others_dim)
         self.mem_encoder = MemEncoder(hidden)
@@ -875,6 +889,29 @@ class DrivingModel(nn.Module):
         self._world_state = None
         return self
 
+    # ------------------------------------------------------------------ R41-D
+    def set_readout_lane_geometry(self, mode: str | None = None) -> "DrivingModel":
+        """R41-D：设置几何口径**实例配置**（正式入口；返回 ``self``）。
+
+        取值：规范名 ``corrected`` / ``legacy_aligned``，历史内部值 ``fixed`` / ``production``
+        （别名映射），或 ``None``/``"default"``（哨兵 = 恢复「未配置」⇒ 各消费路径历史默认）。
+        未知取值 ⇒ ``ValueError`` fail-fast。纯开关（普通属性，不进 state_dict/参数/RNG）。
+        """
+        self.readout_lane_geometry = normalize_readout_lane_geometry(mode)
+        return self
+
+    def _lane_geometry_override(self) -> str | None:
+        """实例配置 → 几何消费口的覆盖值（``fixed``/``production``）；哨兵 ⇒ ``None``。"""
+        return readout_lane_geometry_internal(self.readout_lane_geometry)
+
+    def _readout_view(self, state: WorldState, **kwargs: Any) -> dict[str, Any]:
+        """实例几何口径下的 :func:`net.world_state.readout`（R41-D；哨兵 ⇒ 逐位不变）。
+
+        显式配置（``corrected``/``legacy_aligned``）时经 ``lane_geometry`` 传入；未配置
+        （哨兵）⇒ ``None`` ⇒ 沿用进程级历史默认（``fixed``）——默认路径零触达。
+        """
+        return readout(state, lane_geometry=self._lane_geometry_override(), **kwargs)
+
     def set_world_residual_head(self, head: "torch.nn.Module | None") -> "DrivingModel":
         """R39-B2：挂载/卸载学习残差头（``analytic_learned`` 档的 ΔA_θ 生产者）。
 
@@ -1137,7 +1174,7 @@ class DrivingModel(nn.Module):
         probe_state = copy.copy(state)
         for name, value in before_fields.items():
             setattr(probe_state, name, value)
-        view = readout(probe_state)
+        view = self._readout_view(probe_state)
         out = path_head(
             latent,
             anchor_xy=view["anchor_xy"],
@@ -2197,7 +2234,8 @@ class DrivingModel(nn.Module):
             )
             if ws_hook is not None:
                 # t0 记录（identity 位姿口径；供 readout 自洽证据：t0 列重算对照）
-                ws_hook.capture(step=0, state=self._world_state, view=readout(self._world_state))
+                ws_hook.capture(step=0, state=self._world_state,
+                                view=self._readout_view(self._world_state))
 
         # R37 M1：warp 诊断（5 项 hook + 分项读数；默认全关 ⇒ 零张量操作、不消耗 RNG）
         warp_hooks = self.warp_hooks
@@ -2379,7 +2417,7 @@ class DrivingModel(nn.Module):
                     ld_residual = ld_pred - ws_ld_t0
                 # prev_view（仅学习残差档需要）：k=1 ⇒ 读 t0 状态；k≥2 ⇒ 上一迭代的 readout。
                 prev_view = (
-                    (ws_view if ws_view is not None else readout(self._world_state))
+                    (ws_view if ws_view is not None else self._readout_view(self._world_state))
                     if ws_mode == "analytic_learned"
                     else None
                 )
@@ -2411,7 +2449,7 @@ class DrivingModel(nn.Module):
                         readout_residual_features,
                     )
 
-                    base_view = readout(self._world_state)
+                    base_view = self._readout_view(self._world_state)
                     delta = self.world_residual(
                         **readout_residual_features(
                             prev_view=prev_view, action=action, base_view=base_view
@@ -2421,9 +2459,9 @@ class DrivingModel(nn.Module):
                     if scale != 1.0:
                         delta = delta * scale
                     learned = apply_readout_residual(base_view=base_view, delta=delta)
-                    ws_view = readout(self._world_state, learned=learned)
+                    ws_view = self._readout_view(self._world_state, learned=learned)
                 else:
-                    ws_view = readout(self._world_state)
+                    ws_view = self._readout_view(self._world_state)
                 if ws_hook is not None:
                     ws_hook.capture(step=k, state=self._world_state, view=ws_view)
                 if tf_on and tf_state_records and self.teacher_force_hooks is not None \
@@ -2488,6 +2526,9 @@ class DrivingModel(nn.Module):
                             path_ctx["long_present"],
                             pose.detach(),
                             progress_s,
+                            # R41-D：实例几何口径显式落地（哨兵 ⇒ None = 进程级历史默认，
+                            # 逐位不变；显式 corrected/legacy_aligned = 统一轴）
+                            geometry_mode=self._lane_geometry_override(),
                         )
                         head_kwargs = {
                             "anchor_xy": geometry["anchor_xy"],

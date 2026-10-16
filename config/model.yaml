@@ -2,6 +2,11 @@
 hidden_dim: 128                   # 主干隐藏维 H=128（2026-09-25 放大：GPU 化后余量充足）
 param_budget_estimate: 585000     # H=96 时期的历史估算；H=128 预算以 net/param_probe.py 与
                                   # root config 构建的实测参数量为准（≤1.5M）
+readout_lane_geometry: default    # R41-D：想象步几何口径（模型实例配置；
+                                  # corrected | legacy_aligned | default）。default = 未配置哨兵
+                                  # ⇒ 各消费路径历史默认（ws readout=corrected、ws-off 想象步
+                                  # = legacy_aligned），逐位不变；显式值 = 统一几何轴
+                                  # （训练：本键；评测：--readout-lane-geometry 或 ckpt metadata）
 
 temporal:
   type: gru                       # 时序编码器：GRU

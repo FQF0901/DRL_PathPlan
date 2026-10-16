@@ -33,14 +33,16 @@
 MoE 关闭时 ``plan_head.moe`` 整块记 dormant（router 仍为 TB 诊断产出 ``router_logits``，
 但不参与任何主输出）。
 
-断言（GPT 裁决；基线 = R39-A2 实测 HEAD）：
+断言（GPT 裁决；基线 = R39-A2 实测 HEAD；R41-D 处置）：
 
-- ``total ≤ 2,000,000``（GPT R40 §五.5 绝对上限；R39「基线 ×1.02」乘性规则废止。五栏口径
+- ``total ≤ 2,000,000``（GPT R40 §五.5 绝对上限；R39「基线 ×1.02」乘性规则废止（正式语义已在
+  R41-D 移除，历史常量见 ``tools/legacy/budget_constants.py``）。五栏口径
   不变：``total / reachable / trainable(=active) / frozen / dormant``——``trainable`` 即
   配方可训参数，``active`` 为同义别名）；
-- ``budget_active = 可达参数（= active + frozen，MoE 关）≤ 基线 × 1.05``
-  （default 871,478 / structured 994,717；与裁决 §一 "激活 ≈0.995M–1.103M" 同口径；
-  该激活门继承 R39，R40 §五.5 未改动）；
+- ``budget_active = 可达参数（= active + frozen，MoE 关）`` 对 ``基线 × 1.05``（default
+  871,478 / structured 994,717；与裁决 §一 "激活 ≈0.995M–1.103M" 同口径）：
+  **R41-D 起仅为警告**（``warnings.active_budget_over``，五栏照报），**不作断言硬门**
+  （若需恢复硬门须单独获批）；
 - ``optimizer ⊆ 声明 allowlist``（structured = ``net.path_head.TRAIN_ALLOWLIST_PREFIXES``；
   default = 旧头配方占位）且 allowlist 参数全覆盖、全部可达。
 
@@ -87,11 +89,16 @@ ACTIVE_BASELINES: dict[str, int] = {
     "default": 871_478,
     "structured": 994_717,
 }
-#: 激活上限系数（GPT R39 裁决；R40 §五.5 未改动）
-ACTIVE_LIMIT = 1.05
-#: （遗留）R39 总参数乘性上限系数：仅存供历史脚本（``round39/a2_run.py``）import 兼容；
-#: R40 起**不参与任何断言**（总参数门 = :data:`TOTAL_CAP` 绝对上限）。
-TOTAL_LIMIT = 1.02
+#: 激活预算**警告阈值**系数（值 = GPT R39 裁决 1.05；**R41-D 起降级为警告**）：
+#: `budget_active ≤ 基线 × 1.05` 仅作报告**警告**（``warnings.active_budget_over``），
+#: **不作任何断言硬门**——参数预算只保留 ``total ≤ 2,000,000`` 绝对上限（任务书 R41-D：
+#: “ACTIVE_LIMIT=1.05 降级为警告；若继续作硬门须单独获批”）。
+ACTIVE_LIMIT_WARN = 1.05
+#: （兼容别名）历史名 ``ACTIVE_LIMIT``；语义同 :data:`ACTIVE_LIMIT_WARN`（警告阈值，非硬门）。
+ACTIVE_LIMIT = ACTIVE_LIMIT_WARN
+#: （遗留说明）R39 总参数乘性上限系数 ``TOTAL_LIMIT=1.02`` 的正式语义**已于 R41-D 移除**
+#: （R40 §五.5 起即不参与断言）；历史数值快照迁 ``tools/legacy/budget_constants.py``
+#: （仅历史脚本 import 兼容；生产代码零引用）。
 
 #: 历史绝对预算常量（H=96 旧口径；H=128 双配置改走 基线+容差 断言，保留供文档/对照指针）
 PARAM_BUDGET = 1_500_000
@@ -654,8 +661,13 @@ def ledger_for_config(config: str, *, demo_update_norm: bool = True) -> dict[str
 
     assertion = {
         "total_limit": total <= TOTAL_CAP,
-        "active_limit": budget_closed["budget_active"] <= math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT),
         "optimizer_ok": bool(optimizer["ok"]),
+    }
+    active_warn_threshold = math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT_WARN)
+    warnings = {
+        "active_budget_over": bool(budget_closed["budget_active"] > active_warn_threshold),
+        "active_budget": int(budget_closed["budget_active"]),
+        "active_warn_threshold": int(active_warn_threshold),
     }
     return {
         "config": config,
@@ -682,9 +694,14 @@ def ledger_for_config(config: str, *, demo_update_norm: bool = True) -> dict[str
         "optimizer": optimizer,
         "update_norm_demo": demo,
         "assertion": assertion,
+        "warnings": warnings,
         "assertion_detail": {
-            "total_rule": f"total ≤ {TOTAL_CAP:,}（GPT R40 §五.5 绝对上限；R39 基线×{TOTAL_LIMIT} 废止）",
-            "active_rule": f"budget_active ≤ {ACTIVE_BASELINES[config]:,} × {ACTIVE_LIMIT} = {math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT):,}",
+            "total_rule": f"total ≤ {TOTAL_CAP:,}（GPT R40 §五.5 绝对上限；R39 乘性规则正式语义"
+                          "已移除，历史常量见 tools/legacy/budget_constants.py）",
+            "active_warn_rule": (
+                f"（警告，非硬门；R41-D 降级）budget_active {budget_closed['budget_active']:,} "
+                f"≤ 基线 {ACTIVE_BASELINES[config]:,} × {ACTIVE_LIMIT_WARN} = {active_warn_threshold:,}"
+            ),
         },
     }
 
@@ -738,9 +755,15 @@ def render_report(ledgers: Mapping[str, Mapping[str, Any]]) -> str:
                 f"by_module[{by_module}]  隔离={'OK' if demo['optimizer_isolated'] else 'FAIL'}"
             )
         assertion = ledger["assertion"]
+        warnings = ledger["warnings"]
         emit(
-            f"  断言: total(cap {TOTAL_CAP:,}) {assertion['total_limit']} · active {assertion['active_limit']} · "
+            f"  断言: total(cap {TOTAL_CAP:,}) {assertion['total_limit']} · "
             f"optimizer {assertion['optimizer_ok']}"
+        )
+        emit(
+            f"  警告（非硬门；R41-D）: active {warnings['active_budget']:,} "
+            f"{'超阈' if warnings['active_budget_over'] else '≤阈'} "
+            f"（阈值 {warnings['active_warn_threshold']:,} = 基线 × {ACTIVE_LIMIT_WARN}）"
         )
         emit()
     return "\n".join(lines)
@@ -809,17 +832,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             "budget_moe_closed": ledger["views"]["budget_moe_closed"],
             "budget_moe_open": ledger["views"]["budget_moe_open"],
             "assertion": ledger["assertion"],
+            "warnings": ledger["warnings"],
         }
         for config, ledger in ledgers.items()
     }
+    # R41-D：硬门只剩 total（≤2,000,000）；active×1.05 = 警告（非硬门）
     print(
-        "OK: R39-A2 参数账本通过（total 门 = GPT R40 §五.5 ≤ 2,000,000）—— "
+        "OK: 参数预算门通过（total 门 = GPT R40 §五.5 ≤ 2,000,000；active×1.05 = 警告非硬门）—— "
         + " ｜ ".join(
             f"{config} total {ledger['total']:,}（上限 {TOTAL_CAP:,}）/ "
             f"reachable {ledger['views']['budget_moe_closed']['reachable']:,} / "
             f"trainable {ledger['views']['recipe_moe_closed']['trainable']:,} / "
             f"frozen {ledger['views']['recipe_moe_closed']['frozen']:,} / "
             f"dormant {ledger['views']['recipe_moe_closed']['dormant']:,}"
+            + ("（active 警告：超阈！）" if ledger["warnings"]["active_budget_over"] else "")
             for config, ledger in ledgers.items()
         )
     )

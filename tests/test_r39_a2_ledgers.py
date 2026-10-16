@@ -9,7 +9,8 @@ trainable = active）+ `docs/deepseekv4p1_argue.md` A2。
 1. **五栏闭合**（total = trainable + frozen + dormant；reachable = trainable + frozen，
    trainable = active 同义），两配置；
 2. **2.0M 绝对上限**（GPT R40 §五.5）：total ≤ 2,000,000；另保留 R39-A2 实测基线作回归
-   对照；激活上限（可达 ≤ 基线 × 1.05，R39 裁决）继续适用；
+   对照；激活上限（可达 ≤ 基线 × 1.05）**R41-D 起降级为警告**（``warnings.active_budget_over``，
+   不作断言硬门）；
 3. **dormant 语义**：MoE 关闭 ⇒ ``plan_head.moe`` 整块 dormant；structured 模式 ⇒ 旧
    ``policy`` 块 dormant；结构化头"已构造但未启用"（legacy 诊断档）⇒ ``policy.structured_action``
    整块 dormant（= 分类器对 "default 模式下 structured 头" 的口径）；default 装配下结构化头
@@ -37,7 +38,7 @@ from net import probes as probes_module
 from net.model import DrivingModel
 from net.param_probe import (
     ACTIVE_BASELINES,
-    ACTIVE_LIMIT,
+    ACTIVE_LIMIT_WARN,
     ALLOWLISTS_BY_CONFIG,
     TOTAL_BASELINES,
     TOTAL_CAP,
@@ -110,16 +111,25 @@ def test_ledger_five_columns_and_caps(config: str, ledgers: dict[str, dict]) -> 
     assert budget["total"] == budget["active"] + budget["frozen"] + budget["dormant"]
     assert recipe["reachable"] == recipe["trainable"] + recipe["frozen"] == budget["reachable"]
     assert recipe["trainable"] == recipe["active"]  # GPT R40 §五.5 栏名：trainable = active
-    # GPT R40 §五.5：总参数绝对上限 2,000,000（R39 基线×1.02 乘性规则已废止）
+    # GPT R40 §五.5：总参数绝对上限 2,000,000（R39 基线×1.02 乘性规则已废止；R41-D 正式语义移除）
     assert TOTAL_CAP == 2_000_000
     assert ledger["assertion"]["total_limit"], ledger["assertion_detail"]["total_rule"]
     assert ledger["total"] <= TOTAL_CAP
     _total_rule = ledger["assertion_detail"]["total_rule"]
     assert "2,000,000" in _total_rule and "× 1.02" not in _total_rule  # 乘性上限不得回潮
-    # R39 激活门（可达 ≤ 基线 ×1.05）继续适用
-    assert ledger["assertion"]["active_limit"], ledger["assertion_detail"]["active_rule"]
+    # R41-D：active×1.05 **降级为警告**（非硬门）——断言结构里不得再有 active_limit 硬门；
+    # 警告状态照实记录（当前实测 ≤ 阈值 ⇒ over=False）；五栏照报
+    assert "active_limit" not in ledger["assertion"], ledger["assertion"]
+    assert set(ledger["assertion"]) == {"total_limit", "optimizer_ok"}
+    assert ledger["warnings"]["active_budget_over"] is False
+    assert ledger["warnings"]["active_warn_threshold"] == math.floor(
+        ACTIVE_BASELINES[config] * ACTIVE_LIMIT_WARN
+    )
+    assert ledger["warnings"]["active_budget"] == budget["budget_active"]
+    assert "警告" in ledger["assertion_detail"]["active_warn_rule"]
+    assert str(ACTIVE_LIMIT_WARN) in ledger["assertion_detail"]["active_warn_rule"]
     assert ledger["assertion"]["optimizer_ok"]
-    assert budget["budget_active"] <= math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT)
+    assert budget["budget_active"] <= math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT_WARN)
 
 
 def test_render_report_five_columns_and_2m_cap(ledgers: dict[str, dict]) -> None:

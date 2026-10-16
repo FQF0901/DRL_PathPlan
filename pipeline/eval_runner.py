@@ -740,6 +740,12 @@ LOAD_TEACHER_FORCE_MODES: tuple[str, ...] = (
 )
 #: R41-A1：速度反事实档（``off`` = 零触达；``expert`` = 专家空问 ds 缩放，需 pure_pursuit labeler）。
 LOAD_SPEED_ORACLE_MODES: tuple[str, ...] = ("off", "expert")
+#: R41-D：几何口径实例配置档（正式入口 ``--readout-lane-geometry``；``default`` = 未配置哨兵
+#: ⇒ 沿用 config/ckpt metadata/历史默认）。``fixed``/``production`` = 历史内部值别名
+#: （映射 ``fixed``→``corrected``、``production``→``legacy_aligned``）。
+LOAD_READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = (
+    "default", "corrected", "legacy_aligned", "fixed", "production",
+)
 
 # --------------------------------------------------------------------------- #
 # R41-A1：oracle/teacher-force/speed 反事实轴（五要件：CLI ∧ 模型执行路径 ∧ protocol hash
@@ -793,6 +799,80 @@ DEFAULT_DRIFT_THRESHOLDS: Dict[str, float] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# R41-D：几何口径实例配置轴（五要件：CLI ∧ 模型构造参数/config ∧ protocol hash ∧
+# 模型缓存键 ∧ metrics/manifest；默认哨兵 ⇒ 逐位一致）
+# --------------------------------------------------------------------------- #
+#: ckpt ``meta`` 的几何口径键（= ``net.model.DrivingModel.readout_lane_geometry``；
+#: 保存侧 = ``pipeline.stages.save_checkpoint`` 注入，字面量同源）。
+CKPT_GEOMETRY_META_KEY = "readout_lane_geometry"
+
+
+def _normalize_readout_lane_geometry(value: Any) -> Optional[str]:
+    """取值 → canonical（``corrected``/``legacy_aligned``）；哨兵/None ⇒ ``None``；未知 ⇒ ValueError。"""
+    if value is None or str(value).strip().lower() in ("", "default"):
+        return None
+    from net.path_head import normalize_readout_lane_geometry  # lazy（baseline 路径不 import torch 面）
+
+    return normalize_readout_lane_geometry(str(value))
+
+
+def _resolve_readout_lane_geometry(
+    *,
+    requested: Optional[str] = None,
+    requested_source: str = "cli",
+    ckpt_meta: Optional[str] = None,
+    config_value: Optional[str] = None,
+    ckpt_meta_raw: Optional[str] = None,
+) -> Dict[str, Any]:
+    """几何口径解析：**CLI/config（requested） > ckpt metadata > model config > 默认哨兵**。
+
+    - ``requested`` = CLI ``--readout-lane-geometry`` 或 config 键的 canonical 值（``None`` = 未声明）；
+    - ``requested_source`` = ``"cli"`` / ``"model_config"``（值来源标注）；
+    - ``ckpt_meta`` = ckpt ``meta["readout_lane_geometry"]`` 的 canonical 值（``None`` = 缺失/哨兵）；
+    - ``config_value``：单独记录 config 侧声明（= requested 当它来自 config 时同值）。
+
+    返回记录：``{value: canonical|"default", source, requested, ckpt_meta, config,
+    conflict(声明不一致)}``。纯函数（无 IO/torch）。
+    """
+    source = "default"
+    value = "default"
+    if requested is not None:
+        value, source = requested, str(requested_source or "cli")
+    elif ckpt_meta is not None:
+        value, source = ckpt_meta, "checkpoint_metadata"
+    elif config_value is not None:
+        value, source = config_value, "model_config"
+    conflict = bool(requested is not None and ckpt_meta is not None and requested != ckpt_meta)
+    return {
+        "value": value,
+        "source": source,
+        "requested": requested,
+        "ckpt_meta": (ckpt_meta if ckpt_meta is not None else ckpt_meta_raw),
+        "config": config_value,
+        "conflict": conflict,
+    }
+
+
+def _readout_geometry_config_value(config: Mapping[str, Any] | None) -> Optional[str]:
+    """``task_model_config``（或 config/model.yaml 根层）的几何键 → canonical；未声明 ⇒ ``None``。"""
+    if not isinstance(config, Mapping):
+        return None
+    return _normalize_readout_lane_geometry(config.get("readout_lane_geometry"))
+
+
+def _geometry_artifact_record(resolution: Mapping[str, Any]) -> Dict[str, Any]:
+    """解析记录 → 产物口径（run_meta/metrics/load_report 同键名 ``readout_lane_geometry``）。"""
+    return {
+        "readout_lane_geometry": resolution.get("value"),
+        "source": resolution.get("source"),
+        "requested": resolution.get("requested"),
+        "ckpt_meta": resolution.get("ckpt_meta"),
+        "config": resolution.get("config"),
+        "conflict": bool(resolution.get("conflict")),
+    }
+
+
 def _model_cache_key(
     ckpt: str,
     device: str,
@@ -809,6 +889,7 @@ def _model_cache_key(
     inject_truth_sha16: Optional[str] = None,
     speed_scale: Optional[float] = None,
     speed_oracle: str = "off",
+    readout_lane_geometry: Optional[str] = None,
 ) -> Tuple:
     """缓存/加载摘要键：**全默认装配 = 旧键 ``(ckpt, device)``**（历史调用点逐位不变；
     a3 controller 的 canary 预填缓存按该旧键命中）；任何非默认轴追加一段避免互撞。
@@ -816,6 +897,9 @@ def _model_cache_key(
     R41-A1（五要件之"模型缓存键"）：teacher_force/record_truth/inject_truth_sha16/speed_scale/
     speed_oracle 五轴**任一非默认**时整体追加 ``("counterfactual", …)`` 段（默认全关 ⇒ 逐位
     不改旧键）。五轴同段记录：同进程内不同反事实语义绝不共享同一模型装配。
+
+    R41-D（几何五要件之"模型缓存键"）：``readout_lane_geometry`` 非默认（canonical/别名）时
+    追加 ``("readout_lane_geometry", <canonical>)`` 段；哨兵/None ⇒ 不追加（旧键逐位不变）。
     """
     key: Tuple = (str(ckpt), str(device))
     if str(path_head or "off") != "off":
@@ -833,6 +917,10 @@ def _model_cache_key(
         if world_residual_scale is not None and float(world_residual_scale) != 1.0:
             # R39-B2d：非默认残差缩放单独缓存（默认 None / 1.0 时不改旧键）
             key += (("world_residual_scale", float(world_residual_scale)),)
+    # R41-D：几何实例配置轴（哨兵/None ⇒ 不追加段）
+    geometry_value = _normalize_readout_lane_geometry(readout_lane_geometry)
+    if geometry_value is not None:
+        key += (("readout_lane_geometry", geometry_value),)
     # R41-A1：反事实五轴（默认全关 ⇒ 不追加段，旧键逐位不变）
     speed_scale_norm = None if (speed_scale is None or float(speed_scale) == 1.0) else float(speed_scale)
     counterfactual_active = (
@@ -938,6 +1026,7 @@ def _formal_entry_protocol(
     inject_truth_sha16: Optional[str] = None,
     speed_scale: Optional[float] = None,
     speed_oracle: str = "off",
+    readout_lane_geometry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """正式入口 evaluation protocol（口径复用 c6：``build_protocol`` + canonical JSON sha256 hex16）。
 
@@ -950,6 +1039,8 @@ def _formal_entry_protocol(
     R39-B2c：``model.world_state_api`` / ``model.world_residual_head_sha16`` **条件入 hash**——
     默认口径（``off``/none）时 protocol dict 与上面口径**逐字节相同**（历史 hash 可比性保持），
     非默认档才追加两键（装配轴敏感，避免不同档共享同一 hash）。
+    R41-D：``model.readout_lane_geometry``（canonical ``corrected``/``legacy_aligned``；解析结果
+    含 ckpt metadata 采用值）**条件入 hash**——哨兵/未声明 ⇒ 不追加键（逐字节相同）。
     """
     module = _load_readonly_script("r39a1_c6_protocol", R39_PROTOCOL_HASH_SCRIPT)
     protocol = module.build_protocol(
@@ -997,6 +1088,10 @@ def _formal_entry_protocol(
         protocol["model"]["speed_scale"] = float(speed_scale)
     if str(speed_oracle or "off") != "off":
         protocol["model"]["speed_oracle"] = str(speed_oracle)
+    # R41-D：几何实例配置轴条件入 hash（哨兵/未声明 ⇒ 不追加键 ⇒ 历史 hash 逐字节可比）
+    geometry_value = _normalize_readout_lane_geometry(readout_lane_geometry)
+    if geometry_value is not None:
+        protocol["model"]["readout_lane_geometry"] = geometry_value
     protocol["hashes"] = {
         "protocol_hash": module.hash_protocol(protocol),
         "protocol_hash_full": module.hash_protocol(protocol, full=True),
@@ -1029,6 +1124,8 @@ def _evaluation_hashes(
     inject_truth_sha16: Optional[str] = None,
     speed_scale: Optional[float] = None,
     speed_oracle: str = "off",
+    readout_lane_geometry: Optional[str] = None,
+    readout_lane_geometry_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """R39-A1 四 hash（+ 完整 protocol dict；供 run_meta/manifest 与 metrics 记录）。
 
@@ -1038,6 +1135,7 @@ def _evaluation_hashes(
     R40-V4B：``teacher_force``/``record_truth``/``inject_truth_sha16``/``speed_scale``/
     ``speed_oracle``（默认 off/False/none/none/off ⇒ **不追加任何键**，保持逐字节可比；
     非默认档入 hash 轴 —— 闭环 teacher-forced oracle 臂与速度反事实的可辨识性）。
+    R41-D：``readout_lane_geometry``（解析结果；``None``/哨兵 ⇒ 不追加键）+ ``source`` 记录。
     """
     net_tree = _net_tree_digest()
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint  # 轻量（stdlib only）
@@ -1058,8 +1156,10 @@ def _evaluation_hashes(
         inject_truth_sha16=(str(inject_truth_sha16) if inject_truth_sha16 else None),
         speed_scale=(None if speed_scale is None else float(speed_scale)),
         speed_oracle=str(speed_oracle or "off"),
+        readout_lane_geometry=_normalize_readout_lane_geometry(readout_lane_geometry),
     )
     ckpt_sha = _sha256_file(str(ckpt)) if ckpt is not None else None
+    geometry_value = _normalize_readout_lane_geometry(readout_lane_geometry)
     return {
         # 四 hash 主口径（字符串）
         "evaluation_protocol_hash": protocol["hashes"]["protocol_hash"],
@@ -1087,6 +1187,11 @@ def _evaluation_hashes(
             **({"residual_scale": float(world_residual_scale)}
                if world_residual_scale is not None and float(world_residual_scale) != 1.0 else {}),
         },
+        # R41-D：几何口径解析留痕（非默认才追加键 ⇒ 默认 payload 逐字节不变）
+        **({"geometry": {
+            "readout_lane_geometry": geometry_value,
+            "source": (str(readout_lane_geometry_source) if readout_lane_geometry_source else "requested"),
+        }} if geometry_value is not None else {}),
         "protocol": protocol,
     }
 
@@ -1137,6 +1242,24 @@ def _record_run_meta(out_dir: Path, payload: Dict[str, Any]) -> Path:
                 manifest.read_text(encoding="utf-8").rstrip("\n") + "\n" + cf_marker + " " + cf_line + "\n",
                 encoding="utf-8",
             )
+        # R41-D：几何实例配置非默认时追加 manifest 行（哨兵 ⇒ 不改 manifest，逐位一致）
+        geometry_marker = "r41d_geometry:"
+        geometry = payload.get("geometry")
+        if isinstance(geometry, Mapping) and geometry_marker not in text:
+            geometry_line = json.dumps(
+                {
+                    "readout_lane_geometry": geometry.get("readout_lane_geometry"),
+                    "source": geometry.get("source"),
+                    "evaluation_protocol_hash": payload["hashes"]["evaluation_protocol_hash"],
+                    "cache_key_axes": "readout_lane_geometry",
+                },
+                ensure_ascii=False, sort_keys=True,
+            )
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").rstrip("\n") + "\n" + geometry_marker + " "
+                + geometry_line + "\n",
+                encoding="utf-8",
+            )
     return meta_path
 
 
@@ -1156,6 +1279,7 @@ def _ckpt_load_summary(
     inject_truth_sha16: Optional[str] = None,
     speed_scale: Optional[float] = None,
     speed_oracle: str = "off",
+    readout_lane_geometry: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """取 ``_load_ckpt_model`` 最近一次成功加载的摘要（未加载过 → None）。"""
     return _CKPT_LOAD_SUMMARY.get(_model_cache_key(
@@ -1165,7 +1289,7 @@ def _ckpt_load_summary(
         world_residual_scale=world_residual_scale,
         teacher_force=teacher_force, record_truth=record_truth,
         inject_truth_sha16=inject_truth_sha16, speed_scale=speed_scale,
-        speed_oracle=speed_oracle,
+        speed_oracle=speed_oracle, readout_lane_geometry=readout_lane_geometry,
     ))
 
 
@@ -1219,6 +1343,8 @@ def _load_ckpt_model(
     inject_truth_sha16: Optional[str] = None,
     speed_scale: Optional[float] = None,
     speed_oracle: str = "off",
+    readout_lane_geometry: Optional[str] = None,
+    readout_lane_geometry_source: Optional[str] = None,
 ) -> Any:
     """worker 内按装配键（``_model_cache_key``；全默认 = ``(ckpt, device)``）缓存模型。
 
@@ -1243,6 +1369,11 @@ def _load_ckpt_model(
     - **LoadReport**（``summary["load_report"]``）：missing/unexpected/filled/rejected/
       renamed/dropped 计数 + 全量键列表 + 逐族计数 + ckpt 路径/sha256 + mapper 版本 +
       装配轴/回填报告 + strict 判定，供 run_meta/manifest 落盘审计。
+    - **R41-D 几何口径**（``readout_lane_geometry``；默认 None/哨兵 ⇒ 零触达）：解析顺序 =
+      ``requested``（CLI/config 显式）> ckpt ``meta["readout_lane_geometry"]`` > config 键 >
+      默认哨兵；非默认 ⇒ ``model.set_readout_lane_geometry(...)``（实例配置落地），并把
+      解析记录写入 ``load_report/summary["readout_lane_geometry"]``（有轴/有 meta 才写 ⇒
+      纯 legacy 默认逐字节不变）。冲突（requested ≠ meta）⇒ 警告 + 按 requested 执行（记录）。
     """
     path_head = str(path_head or "off")
     ld_mode = str(ld_mode or "baseline")
@@ -1309,6 +1440,13 @@ def _load_ckpt_model(
             raise ValueError(
                 "[eval_runner] --world-residual-scale 只对 --world-state-api analytic_learned 有意义"
             )
+    # R41-D：几何实例配置轴（默认哨兵/None ⇒ 零触达、逐位不变；canonical/别名 ⇒ 显式装配）
+    geometry_requested = _normalize_readout_lane_geometry(readout_lane_geometry)
+    geometry_requested_source = str(
+        readout_lane_geometry_source
+        or ("cli" if readout_lane_geometry is not None else "model_config")
+    )
+    geometry_config_value = _readout_geometry_config_value(config)
     cache_key = _model_cache_key(
         ckpt, device, path_head=path_head, ld_mode=ld_mode,
         rollout_semantic=rollout_semantic, fill_from=fill_from,
@@ -1316,7 +1454,7 @@ def _load_ckpt_model(
         world_residual_scale=world_residual_scale,
         teacher_force=teacher_force, record_truth=record_truth,
         inject_truth_sha16=inject_truth_sha16, speed_scale=speed_scale,
-        speed_oracle=speed_oracle,
+        speed_oracle=speed_oracle, readout_lane_geometry=geometry_requested,
     )
     cached = _CKPT_MODEL_CACHE.get(cache_key)
     if cached is not None:
@@ -1335,6 +1473,41 @@ def _load_ckpt_model(
         model.set_path_head(True)  # 惰性构造（默认关 = 不新增参数/键）
         model.set_path_head_ablation("structured")
     payload = torch.load(ckpt, map_location="cpu", weights_only=False)
+    # R41-D：「读取」链——ckpt metadata 几何口径（缺失 ⇒ 按默认并记录；非法 ⇒ 警告 + 按缺失）
+    raw_meta = payload.get("meta") if isinstance(payload, Mapping) else None
+    geometry_meta_raw = raw_meta.get("readout_lane_geometry") if isinstance(raw_meta, Mapping) else None
+    geometry_meta_value: Optional[str] = None
+    if geometry_meta_raw is not None:
+        try:
+            geometry_meta_value = _normalize_readout_lane_geometry(geometry_meta_raw)
+        except ValueError:
+            print(
+                f"[eval_runner] 警告：ckpt {ckpt} 的 readout_lane_geometry={geometry_meta_raw!r} 非法"
+                " ⇒ 按缺失处理（默认）",
+                flush=True,
+            )
+            geometry_meta_value = None
+    geometry_resolution = _resolve_readout_lane_geometry(
+        requested=geometry_requested,
+        requested_source=geometry_requested_source,
+        ckpt_meta=geometry_meta_value,
+        config_value=geometry_config_value,
+        ckpt_meta_raw=(str(geometry_meta_raw) if geometry_meta_raw is not None else None),
+    )
+    if geometry_resolution["conflict"]:
+        print(
+            f"[eval_runner] 警告：几何口径声明不一致（requested={geometry_requested} vs "
+            f"ckpt metadata={geometry_meta_value}）⇒ 按 requested 执行（交叉/显式臂）；"
+            "已记录 run_meta/metrics.geometry",
+            flush=True,
+        )
+    if geometry_resolution["value"] != "default":
+        model.set_readout_lane_geometry(geometry_resolution["value"])
+        print(
+            f"[eval_runner] 几何实例配置 readout_lane_geometry={geometry_resolution['value']}"
+            f"（source={geometry_resolution['source']}；ws readout + ws-off 想象步统一轴）",
+            flush=True,
+        )
     state = payload
     if isinstance(payload, Mapping):
         for key in ("model", "state_dict", "model_state_dict", "net"):
@@ -1436,6 +1609,10 @@ def _load_ckpt_model(
         "allow_partial_load": bool(allow_partial),
         "explicit_escape": bool(blocked and allow_partial),
     }
+    # R41-D：几何口径解析记录（有轴/有 meta/有声明才写 ⇒ 纯 legacy 默认路径逐字节不变）
+    if geometry_resolution["value"] != "default" or geometry_meta_raw is not None \
+            or geometry_requested is not None:
+        load_report["geometry"] = _geometry_artifact_record(geometry_resolution)
     summary: Dict[str, Any] = {
         "ckpt": str(ckpt),
         "sha256": ckpt_sha256,
@@ -1455,6 +1632,8 @@ def _load_ckpt_model(
         # R39-A1：迁移 + LoadReport（run_meta/manifest 审计口径）
         "load_report": load_report,
     }
+    if "geometry" in load_report:
+        summary["geometry"] = dict(load_report["geometry"])
     # lane U1：MoE 输出口径 = primary + Σ_{i∈top2} g_i·expert_i（推理与训练一致、全场景生效；
     # 无硬切/二值门），评测侧无需任何开关（模型默认 moe_enabled=True）。
     print(
@@ -1620,6 +1799,9 @@ def task_model_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         "world_model": dict(config.get("world_model") or {}),
         # 2026-10-10：spatial 层数（stg3 排摸臂）必须透传——见上方事故记录。
         "spatial": dict(config.get("spatial") or {}),
+        # R41-D：几何口径实例配置（config/model.yaml 根键；缺席 ⇒ 不携带 ⇒ 默认哨兵）。
+        **({"readout_lane_geometry": config.get("readout_lane_geometry")}
+           if config.get("readout_lane_geometry") is not None else {}),
     }
 
 
@@ -2326,7 +2508,8 @@ class _CkptController:
 
     ``task["model_assembly"]``（R39-A1b；正式入口 ``main`` 装配）：``{path_head, ld_mode,
     rollout_semantic, fill_from, lane_anchor, world_state_api, world_residual_head,
-    world_residual_scale}`` —— 透传 :func:`_load_ckpt_model` 与注入器；
+    world_residual_scale, readout_lane_geometry}``（R41-D：几何实例配置；缺省/哨兵 ⇒
+    沿用 config/ckpt metadata/历史默认）—— 透传 :func:`_load_ckpt_model` 与注入器；
     **缺省（无该键，如 a3 controller 自己的 canary 预填路径）= 全默认装配**，缓存键仍为
     ``(ckpt, device)``（旧行为逐位不变）。
 
@@ -2424,6 +2607,10 @@ class _CkptController:
             inject_truth_sha16=(str(cf.get("inject_truth_sha16")) if cf.get("inject_truth_sha16") else None),
             speed_scale=self.speed_scale,
             speed_oracle=self.speed_oracle,
+            readout_lane_geometry=(str(assembly["readout_lane_geometry"])
+                                   if assembly.get("readout_lane_geometry") else None),
+            readout_lane_geometry_source=(str(assembly["readout_lane_geometry_source"])
+                                          if assembly.get("readout_lane_geometry_source") else None),
         )
         # R39-A1b：lane_anchor_xy 注入器（选项 a 的显式开关；默认 off ⇒ None，不触达任何新代码路径）
         self.lane_anchor_mode = str(assembly.get("lane_anchor") or "off")
@@ -3880,6 +4067,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speed-oracle", choices=LOAD_SPEED_ORACLE_MODES, default="off",
                         help="R41-A1：速度 oracle（默认 off）。expert=按专家空问 ds 缩放 plan"
                              "（clip∈[0.05,2.0]，需 pure_pursuit labeler）；非默认档入 protocol hash")
+    parser.add_argument("--readout-lane-geometry", choices=LOAD_READOUT_LANE_GEOMETRY_MODES,
+                        default="default",
+                        help="R41-D：几何口径**实例配置**（默认 default=哨兵：按 ckpt metadata ∧ "
+                             "config/model.yaml ∧ 历史默认解析）。corrected=R38-A4 两条几何缺陷修复"
+                             "（= 历史内部值 fixed）；legacy_aligned=legacy 产线几何"
+                             "（= 历史内部值 production）。非默认档 ⇒ 模型实例统一轴（ws readout + "
+                             "ws-off 想象步）+ protocol hash（model.readout_lane_geometry）+ 模型缓存键 "
+                             "+ metrics/run_meta/manifest 记录")
     parser.add_argument("--device", default=None,
                         help="ckpt 策略运行设备；默认取 config train.device（auto=cuda 可用则 cuda）")
     return parser
@@ -4062,6 +4257,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "world_residual_scale": (float(args.world_residual_scale)
                                  if args.world_residual_scale is not None else None),
     }
+    # R41-D：几何口径实例配置（CLI > config/model.yaml；哨兵 ⇒ 不写装配键 ⇒ 默认逐位不变）
+    geometry_cli = _normalize_readout_lane_geometry(getattr(args, "readout_lane_geometry", None))
+    geometry_config = _readout_geometry_config_value(model_config)
+    geometry_requested = geometry_cli if geometry_cli is not None else geometry_config
+    geometry_requested_source = "cli" if geometry_cli is not None else (
+        "model_config" if geometry_config is not None else "default"
+    )
+    if geometry_requested is not None:
+        model_assembly["readout_lane_geometry"] = geometry_requested
+        model_assembly["readout_lane_geometry_source"] = geometry_requested_source
+        if args.policy != "ckpt":
+            print("[eval_runner] 警告：--readout-lane-geometry 非默认只在 --policy ckpt 生效"
+                  "（基线臂忽略）", flush=True)
+        elif str(args.path_head) != "structured":
+            print("[eval_runner] 警告：--readout-lane-geometry 非默认在 --path-head off（旧头）下"
+                  "不消费想象步几何（无触达；hash/缓存键仍按显式轴区分）", flush=True)
     if str(args.world_state_api) != "off" and args.policy != "ckpt":
         print("[eval_runner] 警告：--world-state-api 非默认只在 --policy ckpt 生效（基线臂忽略）",
               flush=True)
@@ -4132,6 +4343,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             inject_truth_sha16=counterfactual["inject_truth_sha16"],
             speed_scale=counterfactual["speed_scale"],
             speed_oracle=counterfactual["speed_oracle"],
+            readout_lane_geometry=model_assembly.get("readout_lane_geometry"),
+            readout_lane_geometry_source=model_assembly.get("readout_lane_geometry_source"),
         )
         ckpt_load_summary = _ckpt_load_summary(
             str(args.ckpt), "cpu",
@@ -4147,7 +4360,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             inject_truth_sha16=counterfactual["inject_truth_sha16"],
             speed_scale=counterfactual["speed_scale"],
             speed_oracle=counterfactual["speed_oracle"],
+            readout_lane_geometry=model_assembly.get("readout_lane_geometry"),
         )
+
+    # R41-D：几何口径**解析结果**（含 ckpt metadata 采用值；hash/metrics 以实际生效值为准）。
+    # 非 ckpt 臂（baseline）不消费几何轴 ⇒ 解析记录 None。
+    geometry_resolved: Optional[Dict[str, Any]] = None
+    if args.policy == "ckpt":
+        geometry_resolved = dict((ckpt_load_summary or {}).get("geometry") or {})
+        if not geometry_resolved:
+            # 纯 legacy 默认加载（无 meta/无声明）⇒ 显式补一条（内部记录用；不落默认产物）
+            geometry_resolved = _geometry_artifact_record(_resolve_readout_lane_geometry(
+                requested=geometry_requested, requested_source=geometry_requested_source,
+                ckpt_meta=None, config_value=geometry_config,
+            ))
+        geometry_value = geometry_resolved.get("readout_lane_geometry")
+    else:
+        geometry_value = None
 
     # ---- R39-A1：四 hash 原生记录（protocol / model tree / schema / checkpoint）→ run_meta ----
     eval_hashes = _evaluation_hashes(
@@ -4166,6 +4395,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         inject_truth_sha16=counterfactual["inject_truth_sha16"],
         speed_scale=counterfactual["speed_scale"],
         speed_oracle=counterfactual["speed_oracle"],
+        readout_lane_geometry=geometry_value,
+        readout_lane_geometry_source=(
+            str(geometry_resolved.get("source")) if geometry_resolved else None
+        ),
     )
     counterfactual["protocol_hash"] = str(eval_hashes["evaluation_protocol_hash"])
     run_meta: Dict[str, Any] = {
@@ -4188,6 +4421,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "protocol_model": {
                             k: v for k, v in eval_hashes["protocol"]["model"].items()
                             if str(k).startswith("world_")}},
+        # R41-D：几何实例配置解析留痕（非默认才追加键 ⇒ 默认 run_meta 结构不变）
+        **({"geometry": {
+            **dict(geometry_resolved),
+            "protocol_model": eval_hashes["protocol"]["model"].get(CKPT_GEOMETRY_META_KEY),
+        }} if geometry_value not in (None, "default") else {}),
         "hashes": {
             "evaluation_protocol_hash": eval_hashes["evaluation_protocol_hash"],
             "evaluation_protocol_hash_full": eval_hashes["evaluation_protocol_hash_full"],
@@ -4298,6 +4536,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "eval_reference": str(args.eval_reference) if args.policy == "ckpt" else None,
         # R39-A1b：模型装配开关（ld_mode/rollout_semantic/path_head/lane_anchor/fill_from）
         "model_assembly": dict(model_assembly) if args.policy == "ckpt" else None,
+        # R41-D：几何实例配置解析（非默认才追加键 ⇒ 默认 metrics 结构不变）
+        **({"geometry": dict(geometry_resolved)}
+           if args.policy == "ckpt" and geometry_value not in (None, "default") else {}),
         # R41-A1：反事实轴（teacher_force/record_truth/inject_truth(+sha16)/speed_* + 阈值 + 路线）
         "counterfactual": {
             **{key: counterfactual[key] for key in (

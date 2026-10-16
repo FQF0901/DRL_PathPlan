@@ -66,6 +66,9 @@ H1 的原型头（``PathExecutionHead``）一次调用给出 6 步 plan 并在 r
 - R38-A4 想象步几何口径开关（:func:`set_step_geometry`；默认 ``production`` ⇒ 逐位不变）：
   ``fixed`` = 两条确定性几何缺陷修复（foot 排除 ``mask=0`` 段；margin 符号 = 数据集口径），
   仅影响 ``step_geometry``；证据与验收见 ``.slim/deepwork/p1_v2/round38/a4_report.md``。
+- **R41-D**：几何口径正式入口 = 模型实例配置 ``DrivingModel.readout_lane_geometry``
+  （规范名 ``corrected`` / ``legacy_aligned``；映射 ``fixed``→``corrected``、
+  ``production``→``legacy_aligned``）；上述进程级开关降级为内部默认（兼容保留）。
 
 输入契约（启用时；``obs`` 键）
 ------------------------------
@@ -169,6 +172,10 @@ __all__ = [
     "PATH_HEAD_DEFAULT_MODE",
     "PATH_HEAD_MODES",
     "PATH_HEAD_SOURCE_TAGS",
+    "READOUT_LANE_GEOMETRY_ALIASES",
+    "READOUT_LANE_GEOMETRY_DEFAULT",
+    "READOUT_LANE_GEOMETRY_INTERNAL",
+    "READOUT_LANE_GEOMETRY_MODES",
     "STEP_GEOMETRY_DEFAULT_MODE",
     "STEP_GEOMETRY_MODES",
     "TRAIN_ALLOWLIST_PREFIXES",
@@ -183,6 +190,8 @@ __all__ = [
     "kappa_at",
     "kappa_limit_by_speed",
     "load_head_calibration",
+    "normalize_readout_lane_geometry",
+    "readout_lane_geometry_internal",
     "long_exog_from_obs",
     "replay_plan",
     "set_step_geometry",
@@ -347,9 +356,69 @@ PATH_HEAD_DEFAULT_MODE = "structured"
 #: 证据（foot_pad 67.9%→0 / ``valid_agree`` 0.302→0.881 / κ_ref MAE 0.098→0.027 /
 #: c1,c2 对齐 MAE 3.617/3.690→2.928/3.028）见 ``.slim/deepwork/p1_v2/round38/a3_report.md``
 #: §2.3/§2.4 与 ``a4_report.md``。非参数开关，不进 state_dict/ckpt。
+#:
+#: R41-D：该进程级开关**降级为内部默认**（正式入口 = 模型实例配置
+#: ``DrivingModel.readout_lane_geometry``；见下方 :data:`READOUT_LANE_GEOMETRY_MODES`）。
+#: ``step_geometry`` 的 ``geometry_mode`` 可显式覆盖（不读本全局）。
 STEP_GEOMETRY_MODES: tuple[str, ...] = ("production", "fixed")
 STEP_GEOMETRY_DEFAULT_MODE = "production"
 _STEP_GEOMETRY_MODE = STEP_GEOMETRY_DEFAULT_MODE
+
+# --------------------------------------------------------------------------- #
+# R41-D：几何口径**模型实例配置**（canonical 值域 + 历史内部值映射）
+# --------------------------------------------------------------------------- #
+#: 几何口径**规范名**（模型实例配置 ``DrivingModel.readout_lane_geometry`` 的正式值域）：
+#: - ``corrected``：两条确定性几何缺陷修复（= 历史内部值 ``fixed``；foot 搜索排除
+#:   ``anchor_mask=0`` 段 + margin 数据集符号 ``left = W/2 + lat_k``）；
+#: - ``legacy_aligned``：legacy/产线几何（= 历史内部值 ``production``；保留上述两条缺陷，
+#:   与历史训练/评测口径对齐）。
+READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = ("corrected", "legacy_aligned")
+#: 历史内部值 → 规范名（映射；报告/诊断口径）。
+READOUT_LANE_GEOMETRY_ALIASES: dict[str, str] = {
+    "fixed": "corrected",
+    "production": "legacy_aligned",
+}
+#: 规范名 → 内部值（``step_geometry`` 分支口径；单一映射出处）。
+READOUT_LANE_GEOMETRY_INTERNAL: dict[str, str] = {
+    "corrected": "fixed",
+    "legacy_aligned": "production",
+}
+#: 未配置哨兵：模型实例**未显式配置**几何 ⇒ 各消费路径沿用其历史默认
+#: （想象步 ``step_geometry`` = ``production``/legacy_aligned；ws readout = ``fixed``/corrected）。
+#: 语义 = 「默认 = 现行为（逐位不变）」；显式 canonical 值才是统一轴。
+READOUT_LANE_GEOMETRY_DEFAULT = "default"
+
+
+def normalize_readout_lane_geometry(mode: "str | None") -> str:
+    """几何口径取值 → **规范名**（``corrected`` / ``legacy_aligned`` / 哨兵 ``default``）。
+
+    接受：规范名、历史内部值（``fixed``→``corrected``、``production``→``legacy_aligned``）、
+    ``None``/空串/``"default"``（→ 哨兵）。未知取值 ⇒ ``ValueError``（fail-fast）。
+    """
+    if mode is None:
+        return READOUT_LANE_GEOMETRY_DEFAULT
+    raw = str(mode).strip().lower()
+    if not raw or raw == READOUT_LANE_GEOMETRY_DEFAULT:
+        return READOUT_LANE_GEOMETRY_DEFAULT
+    if raw in READOUT_LANE_GEOMETRY_MODES:
+        return raw
+    if raw in READOUT_LANE_GEOMETRY_ALIASES:
+        return READOUT_LANE_GEOMETRY_ALIASES[raw]
+    raise ValueError(
+        f"未知几何口径 {mode!r}（可选 {' | '.join(READOUT_LANE_GEOMETRY_MODES)}"
+        f" | {' | '.join(READOUT_LANE_GEOMETRY_ALIASES)} | {READOUT_LANE_GEOMETRY_DEFAULT}）"
+    )
+
+
+def readout_lane_geometry_internal(mode: "str | None") -> "str | None":
+    """几何口径取值 → ``step_geometry`` 内部值（``fixed`` / ``production``）；哨兵 ⇒ ``None``。
+
+    ``None`` 返回 = 「未配置」⇒ 调用方沿用进程级历史默认（:func:`get_step_geometry`）。
+    """
+    canonical = normalize_readout_lane_geometry(mode)
+    if canonical == READOUT_LANE_GEOMETRY_DEFAULT:
+        return None
+    return READOUT_LANE_GEOMETRY_INTERNAL[canonical]
 
 
 def set_step_geometry(mode: str = STEP_GEOMETRY_DEFAULT_MODE) -> str:
@@ -358,6 +427,9 @@ def set_step_geometry(mode: str = STEP_GEOMETRY_DEFAULT_MODE) -> str:
     默认 ``production`` ⇒ :func:`step_geometry` 逐位 = 历史产线口径；``fixed`` = R38-A4
     两条确定性几何修复（foot 排除 ``mask=0`` 段 + 数据集 margin 符号）。纯开关，无 RNG/
     参数副作用；``step_geometry(..., geometry_mode=...)`` 可就地覆盖（不读本全局）。
+
+    R41-D：**该进程级入口已降级为内部默认**（兼容保留）；正式训练/评测一律走模型实例
+    配置 ``DrivingModel.readout_lane_geometry``（``corrected`` / ``legacy_aligned``）。
     """
     global _STEP_GEOMETRY_MODE
     if mode not in STEP_GEOMETRY_MODES:
@@ -709,7 +781,9 @@ def step_geometry(
       （允许分支；WM ``od_pred`` 变体未接入）。
 
     R38-A4 几何口径开关（``geometry_mode``；**默认 = 进程级** :func:`get_step_geometry`，
-    缺省 ``production`` ⇒ 逐位 = 历史产线口径）：
+    缺省 ``production`` ⇒ 逐位 = 历史产线口径）。R41-D 起可传**规范名**：``corrected``
+    （= ``fixed``）/``legacy_aligned``（= ``production``）；正式入口 = 模型实例配置
+    ``DrivingModel.readout_lane_geometry``（见 :data:`READOUT_LANE_GEOMETRY_MODES`）：
     ``fixed`` = 两条确定性几何缺陷修复（证据 = R38-A3 逐位隔离 / R38-A4 落地）：
 
     ① 重锚 foot 搜索排除 ``anchor_mask=0`` 段 —— obs 锚为零填充（padding = ``(0,0)``）时，
@@ -725,8 +799,9 @@ def step_geometry(
         pose: ``(B,3)`` 想象位姿（ego t0 系；调用方通常传 ``detach``：几何是外源确定性输入）。
         progress_s: ``(B,)`` 累计路径进度（= Σ 已执行 ds）。
         dynamic_mode: 目前仅支持 ``hold``（显式 fail-fast，防静默变体）。
-        geometry_mode: ``None``（默认）= 读进程级口径（:func:`set_step_geometry`）；显式
-            ``production``/``fixed`` 覆盖（未知取值 fail-fast）。
+        geometry_mode: ``None``（默认）= 读进程级口径（:func:`set_step_geometry`，R41-D 起
+            为内部默认）；显式取值接受规范名 ``corrected``/``legacy_aligned``、历史内部值
+            ``fixed``/``production`` 或哨兵 ``default``（= 进程级；未知取值 fail-fast）。
 
     Returns:
         dict：``anchor_xy/anchor_mask/long_exog/long_present``（想象步输入）+ 诊断
@@ -734,7 +809,8 @@ def step_geometry(
     """
     if dynamic_mode != "hold":
         raise ValueError(f"dynamic_mode 仅支持 'hold'（当前），收到 {dynamic_mode!r}")
-    mode = get_step_geometry() if geometry_mode is None else str(geometry_mode)
+    override = readout_lane_geometry_internal(geometry_mode)  # 规范名/别名 → 内部值；哨兵 → None
+    mode = get_step_geometry() if override is None else override
     if mode not in STEP_GEOMETRY_MODES:
         raise ValueError(
             f"未知 geometry_mode={mode!r}（{' | '.join(STEP_GEOMETRY_MODES)}；None = 进程级口径）"

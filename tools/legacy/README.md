@@ -37,6 +37,7 @@ git worktree add /tmp/legacy_net dd0a8c2  # R38-P2b：legacy set_ego_warp(w1/w2)
 | `legacy_policy.py` | 旧 `PolicyHead`/`ValueHead`/`CrossAttnHead` 整模块（`net/policy.py`@dd0a8c2；唯一改动 = `H` 本地化） | D 组"旧 PolicyHead 迁 legacy 模型加载器"落点（正式 net 仍保留 `net/policy.py` 供默认关路径前向） | 自包含（仅 torch）；消费 = 离线诊断 `tools/diagnostics/legacy_policy_diag.py`（`--legacy-ckpt` 独立复算）/ 旧 ckpt `policy.*` 键面审计 |
 | `monitoring_reader.py` | `pipeline/monitoring.py` 旧 `legacy_tags` 口径：`_LEGACY_*`（20 常量 + 5 regex）/`_group_of_tag`/旧 `_grouped_scalars` 分支/`_write_legacy_grouped_tensorboard`（`pipeline/monitoring.py:309-391,736-744`@2cfd8e8） | `LEGACY_REPRO`（G 组：正式训练只写新 schema `_slim_tag`；旧 tag 仅用于**读取/重放旧日志**） | 纯 stdlib（csv/math/re）；`legacy_group_of_tag`/`legacy_grouped_scalars`/`read_metrics_csv`/`write_legacy_grouped_tensorboard`；正式 `TrainingMonitor(legacy_tags=...)` 写入即 fail-fast |
 | `others_layout.py` | 旧 others 28→33 重排：`net/mem.py::_remap_legacy_others`（`net/mem.py:110-138`@2cfd8e8）+ `net/encoders.py::OTHERS_LEGACY_DIM/OTHERS_HEAD_LEGACY_DIM` | `LEGACY_REPRO`（G 组：静默零填充 static 段违反"缺失静默填充"守则；net 端已改 fail-fast） | 纯函数 `remap_legacy_others_28_to_33`（仅 torch）；旧数据集/旧缓存需**显式**转换后喂 `mem_from_obs` |
+| `budget_constants.py` | 参数预算乘性常量：`TOTAL_LIMIT = 1.02`（`net/param_probe.py` R39-A2 → R41-D 正式语义移除）+ `ACTIVE_LIMIT = 1.05`（R41-D 起 = 警告阈值 `net.param_probe.ACTIVE_LIMIT_WARN`，非硬门） | `CHECKPOINT_ONLY` 类（历史脚本 import 兼容；数值快照） | 纯常量（零依赖）；**禁止新代码 import**（现行口径 = `net/param_probe.py`） |
 
 ## 纪律
 
