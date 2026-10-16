@@ -51,7 +51,11 @@
 
 **R41 进度**：**第一批 ✅ 全闭**（① A1 `78db917`｜② B `38298d9`｜③④ D `9b99d6e`〔pytest 1208〕｜⑤ E `fbd0641`）＋**第一批半 ✅**（C `c1754f5`）｜**第二批准备 ✅**（F `b6158bc`：横向训练栈入库 + 预注册 P0–P4 + 两项结构性发现）｜**第二批执行 🕐**（G：训练循环接线 + P0/P1）。
 
-## 3. 挂账
+## 2b. ⚠️ **新绑定约束（R41-G，最高优先）**：训练装配 ≠ 评测装配
+
+**证据（可复算）**：P0/P1（两几何轴）Calib50 **50/50 out_of_road**（succ 0/off 1.0/rc 0.10；McNemar vs init b_only 20/a_only 0, p=1.9e-6）；机理=训练分布上头≈专家且链有界，但**评测装配下同帧 steer 0–3 步饱和、plan k1 |dθ| ×10–20 ⇒ LQR 预览参考污染 ⇒ 60 步出界**（init 783 步）；已排除锚噪声/损失口径/ckpt 装载。**根因**：训练装配 = M0 **非 semantic** + **v6 期 base obs**（加载器自带"须重新采集"警告）+ path_exec anchor；评测装配 = **v7 env obs** + `--ld-mode semantic` K1e2 wiring + `--lane-anchor inject`。init 头因"钝"（首帧 dθ₀ 0.003 vs 专家 0.02）掩盖错位；训练变锐后失稳。⇒ **须先接线"训练装配=评测装配"（或按 v7 重采数据）并重新预注册；在此之前 P0–P4 无判决力，第二批暂停。**
+
+
 
 1. 第一批 5 项（在飞）＋第一批半消费者图（在飞）；2. 第二批 P0–P4 + 几何 A/B；3. 第三批 WorldState；4. Memory/detach/DAgger 后置；5. Eval500 3-seeds；6. `runs/` 归域、doc_stats 节拍；7. `ACTIVE_LIMIT` 处置。
 
