@@ -31,8 +31,9 @@
 ### 1.3 排模事实（本轮新增，代码为准）
 
 - **① 环境快照/克隆**：`env/*.py` **无** `dump_state/load_state/snapshot/clone` 封装 ⇒ R41"最优方案（snapshot/clone 一步合法 transition）"需先核实 MetaDrive engine API 并实现；否则按"两遍重放 + 漂移报告门"（replay pose/OD state divergence、traffic RNG 一致性、termination 一致性、逐步状态误差；超阈 episode 不得纳入 oracle 裁决）。
-- **② lane_anchor 捷径（证实）**：`lane_anchor_xy` 是 **path head 的必需输入**（`path_head.py:72/317/826`），评测由 `--lane-anchor inject`（`select_target_lane` 教师口径）在 `builder.build` 后注入 ⇒ **横向输入大比例来自外部教师目标线，而非 WM 的 LD latent**。
-- **③ LD latent 无消费者**（grep 空）⇒ 与 1.2 的 LD 观察互证；横向训练前必须补 **State Consumer Graph**（R41 第一批半）。
+- **② lane_anchor 捷径（证实+量化，C 审计）**：`lane_anchor_xy` 是 **path head 的必需输入**（`path_head.py:72/317/826`），评测由 `--lane-anchor inject`（`select_target_lane` 教师口径）注入；**梯度/有限差分弹性为全部输入源最高（eval G=160.3 / F=241.5，约次高 ego_phys 6.25 的 2 个数量级）**——因 κ_ref 由锚**二阶差分解析提取含 1/Δs² 增益**；遮挡读数 Z=0.83 非最高；**κ=κ_ref+残差 且残差在抵消锚曲率（corr(κ_ref,res)=−0.65，残差 RMS=1.31×κ）** ⇒ 锚是最高增益通道+解析先验、非盲目跟踪内容源，但**横向训练前必须修正该输入结构**（平滑/低阶拟合/≥2m 重采样后再差分）。
+- **③ LD 消费者（修正我方此前论断）**：**"LD latent 无消费者"仅对 `net/world_state.py` 的 readout LD 列/旧 token 语境成立**；`obs['ld']` 物理与潜**经 plan_context/semantic 有真实消费者**（`net/model.py:1500/1507`、非 semantic `:1345`），且 LD 物理是**全部源中遮挡读数最高（Z=4.76）**。⇒ 这也重解释了 V4A/V4B 的 "LD oracle ≡ C1"：被替换的是 **WS readout 的 LD 列**，非 `obs['ld']` 路径。**target lane token 对 κ 结构性零消费者**（只进旧 PolicyHead）；**Memory 仅 `others_ctx` 有消费者**（ego/od/ld_ctx 全零）。
+- **④ 其他 C 事实（P1/P2 设计约束）**：评测帧 **99.1% 锚视界 <29.75 m ⇒ κ_far 恒 ~0**（κ_mid/far 监督必须带**锚视界有效性掩码**）；rollout 6 步 aux：锚在 k1 峰值后衰减、ego/LD 状态全步持续；建议锚注入加 2–5 cm 噪声增强；probe≡`model.encode` 逐位（fidelity 0.0）。
 
 ## 2. R41 六点修改（全部受理）+ 执行批次
 
@@ -45,6 +46,8 @@
 
 **批次**：**第一批**（①正式接线 ②residual 链入库 ③几何模型实例属性 ④几何入 hash/缓存键/ckpt ⑤h1–h6 parity）→ **第一批半**（消费者图）→ **第二批**（横向训练：**P0 现基线 / P1 +当前帧 κ 监督 / P2 +速度分桶横向监督 / P3 P2+跨帧重规划一致性〔`w(ΔS)·‖κ_t−Warp(κ_{t−1})‖` 门控版〕/ P4 P3+student−expert 重加权**；几何必须 legacy训练/legacy评测 + corrected训练/corrected评测 + 交叉测试）→ **第三批**（WorldState 一致性：统一 kinematics/geometry、ego latent 入 WorldState、底层 ego/OD residual、readout 全由 final state；**验收=状态一致/消费者真实存在/不污染安全**，不预设更大闭环收益）。
 **后置**：Memory（M0–M2）/detach（D0–D3）/learner-state DAgger / MoE/RL。
+
+**R41 进度**：**第一批半 ✅**（C：消费者图，见 §1.3②③④——已修正 LD 论断；输入结构修正项已列入第二批前置）｜**第一批**：② ✅（B `38298d9` 零 `.slim` 依赖）、① 🕐（A1 在飞：正式接线+注入 hook+一步合法 transition）、③④⑤ ⏳（Wave-2，A1 落地后开工）。
 
 ## 3. 挂账
 
