@@ -8,7 +8,7 @@
 
 - **总目标**：闭环 success **超越 IDM+Pure Pursuit**；最终门 = Eval500 3-seeds > IDM 且 coll/off 不劣。
 - **三级集（禁混比）**：**Calib50**（开发；历史锚 legacy 0.40 / Q1 0.50 / K1 0.52 / T2 0.58 / 统一基线 0.56 / **IDM 0.756**）｜ **Clean500**（晋级级；canonical `env/specs/scenarios_clean500.json`，sha `087db3f5…`；**@HEAD 重登记**：IDM+PP **0.742** ／ C0_HEAD **0.588** ／ C1_HEAD **0.390**；plan 协议 `c082b57d…`）｜ Eval500（正式：3 seeds+bootstrap+McNemar）。
-- **研究基线（R39-B 结案产出）**：`ws_learned`（WorldState API + 学习残差头）= calib50 **succ 0.56 / tmo 0.06 / coll 0.18 / off 0.20 / rc 0.811**（vs `ws_off`=C1_HEAD 0.40/0.34/0.08/0.18）——**纵向修复兑现、横向@speed 为绑定约束**；**生产默认仍 `world_state_api=off`**（安全门未过不得设默认）。
+- **研究基线（R39-B 结案产出）**：`ws_learned`（WorldState API + 学习残差头）= calib50 **succ 0.56 / tmo 0.06 / coll 0.18 / off 0.20 / rc 0.811**（vs `ws_off`=C1_HEAD 0.40/0.34/0.08/0.18）——**纵向修复兑现、横向@speed 为绑定约束**；**几何口径修正（R40-V3）**：`fixed` 对冻结策略为负（off+fixed 臂 coll 翻倍 0.08→0.16）；learned 臂统一 legacy 口径后 **coll 0.12**（off 仍 0.20、rc 0.815），但 legacy 保留缺陷仅作对照臂；**生产默认仍 `world_state_api=off`**（安全门未过不得设默认）。
 - **参数门（R40 更新）**：总参数 **≤ 2,000,000**（GPT 放宽；原 1.5M/+2% 冻结作废），但每次报告 **total/reachable/trainable/frozen/dormant** 五栏。
 - **协议/hash**：`evaluation_protocol_hash` + model/schema/ckpt 四 hash；正式重测必带（口径 `c6_protocol.py` v1）。
 
@@ -16,8 +16,12 @@
 
 1. **三层根因（R36–R38 裁决链）**：①**结构层**（纵向保速先验 + LQR 弦长=速度指令）→ ②**接口层**（`path_*` 静默 0/缺键；已由 Q4-A 修）→ ③**横向层**（@speed 曲率质量/抖动）。
 2. **R39-B 闭环定位**：WorldState API（analytic+学习残差）**修好纵向**（succ +16pp / tmo −28pp / 爬行 17.3→0.7 s）但 **coll +10pp**；剂量扫描**无安全区间**且碰撞对剂量不平坦（机制开即饱和）⇒ **绑定约束 = lateral@speed**。碰撞定靶 = **tollgate×3 + ramp_in/uturn/split/roundabout**（几何约束场景；含"降速仍撞"例）⇒ **横向精度**问题。
-3. **新发现的**方法学**问题（R40 猜想 3，代码已证实）**：`net/world_state.py:152 READOUT_LANE_GEOMETRY_MODE="fixed"` ⇒ analytic/analytic_learned **强制 A4 fixed 几何**，而 `off` 用生产几何 ⇒**离线 B0/B1/B2 对照非单变量**（B1 的部分 c1 增益可能来自 fixed 的 foot-padding 修复）；闭环侧 A4 曾测"fixed 单独≈中性"（注入锚 mask 全 1 ⇒ 休眠），**但仍需 G0–G3 控臂坐实**。
-4. **另一方法学问题（猜想 1/2）**：学习残差只修 4 个读出标量，**未同步 ego/OD/LD latent 与 anchors** ⇒ "纵向认为可加速、横向表示仍是旧世界"；且 **两条 ego-motion 推进（graph `assemble_pose_k` vs WorldState `analytic_update`）可能逐步漂移**（待对拍）。
+3. **R40 验证批判定（V1–V3；2026-10-16 已完成）**：
+   - **猜想 4 ✅ PASS**（train/eval 特征同源）：250,622 全量逐位、6 项 `max_abs_diff=0`（唯一跨 batch 0.048 系 TF32 GEMM tiling 效应，已固化\"同 batching\"口径）——`42318b1`。
+   - **猜想 2 ❌ 否证**（双 ego-motion 链）：数值精度内一致（ego pose 位级相等；OD 位置 ≤4.8e-5 m=op 序 float32 舍入；动作局部增益≈0）⇒ 下沉单源化**仅整洁性**价值、非缺陷。
+   - **猜想 3 ✅ 成立，但方向 = `fixed` 对冻结策略为负**（离线+闭环双证）：离线 fixed 使 B1 c1 **−0.471（拖累）**（统一 legacy 后 B1 c1=**12.7365** > fixed 口径 12.2654；B2p=14.0553/2.7169）；闭环 **`off+fixed` 臂 coll 0.08→0.16（翻倍）**、learned 臂 **legacy 0.12 vs fixed 0.18**；**学残差 succ 增益两口径一致（+0.18, p=0.004）⇒ 几何只改安全轴**。**遗留**：①A4\"fixed 闭环≈中性\"结论需复核（新证 G1 coll +8pp）；②legacy 保留已知缺陷（foot 伪影 `|lat|≈0.02`、margin 符号互换）⇒ **只作对照臂不作候选**；③**敞口问题：几何应否\"训练侧 A/B\"解决（冻结头 OOD 假说）**。
+   - **c2 阈值语义绑定几何**：统一 fixed 口径下 hold 基线 c2=**2.3829 > 2.31** ⇒ 门修订证据齐备（**须先预注册后跑**）。
+4. **猜想 1/5（碰撞归因）**：学习残差只修 4 个读出标量、未同步 ego/OD/LD anchors 与 latent ⇒ \"纵向可加速、横向仍旧世界\"假说：**离线表示层检验（V4A）🕐 在飞**（O0–O7 oracle 替换臂）；**闭环 H0–H6 + 速度反事实（V4B）** 待 V4A 结果与 oracle 口径确认后派。
 
 ## 2. R39 状态（已完成/结案）
 
@@ -34,9 +38,10 @@
 
 ## 4. 挂账与待裁
 
-1. **待 GPT/CG**：①V1–V3 三项先行的排序确认；②c2 口径预注册草案（若同意修订）；③H0–H6/H5 闭环臂的 oracle 替换口径与判据确认（预注册里）。
-2. **挂账**：R39-C（Memory M0/M1/M2）、R39-D（learner-state/DAgger）、B3/B4（BPTT：难点=显存/时间，前置检查未做）、Eval500 3-seeds、`runs/` 归域执行、doc_stats 节拍。
-3. **工程事实**：pytest 当前 **1136**；各波逐位 all_pass；`net/param_probe.py` 待更新；`b2_train.py` 待入库。
+1. **待 GPT/CG（更新）**：①**闭环 H 臂的 oracle 口径确认**（teacher-forced 定义：k≥1 用\"该步实际到达状态\"替换—由 V4A 预注册给出建议稿）；②**几何训练 A/B 是否列为本轮正式臂**（fixed vs legacy 重训残差/策略，检验冻结头 OOD 假说）；③c2 口径预注册草案（新证据：门语义绑定几何）；④**训练工装正式入库**（`b2_train.py`→`tools/`，含 config/split/命令；V1 遗留③）。
+2. **R40 执行状态**：V1 ✅ `42318b1`（特征同源 + 参数门 2.0M 五栏）｜V2 ✅（猜想 2 否证）｜V3 ✅ `6cdb93c`（几何控臂 + 默认关开关；装配由编排代跑其自带装配器，lane 停摆）｜**V4A 🕐**（离线 oracle 归因）｜V4B ⏳（闭环 H 臂，待口径确认）。
+3. **挂账**：R39-C（Memory M0/M1/M2）、R39-D（learner-state/DAgger）、B3/B4（BPTT 前置检查）、Eval500 3-seeds、`runs/` 归域、`net/world_residual.py` 内联上限统一 2.0M（V1 遗留①）、doc_stats 节拍。
+4. **工程事实**：pytest 当前 **1137**；各波默认关逐位 all_pass；四 hash 常态记录。
 
 ## 5. 纪律与索引
 
