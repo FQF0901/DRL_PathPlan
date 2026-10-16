@@ -1,0 +1,45 @@
+# 横向训练栈配置（tools/train_lateral.py；R41 第二批-F：装配 + 预注册拟值）
+#
+# 键名 = 该 runner 的 CLI dest（`--arm p1` ⇔ `arm: p1`）；CLI 显式给出时覆盖本文件。
+# 纪律：本 lane **不执行训练**（仅 --dry-run / --check-features / --assemble-smoke）；
+# 正式训练（P0–P4）待 .slim/deepwork/p1_v2/round41/f_prereg.md 批准后另立定稿预注册。
+# 实现出处（R41 入库，零研究工作区依赖）：pipeline/lateral_{dataset,labels,replan,lqr,
+# anchor,losses}.py；split/配对复用 pipeline/residual_dataset.build_pairs（episode 级）。
+
+# ---- 路径 ----
+data: datasets/path_exec_v1                     # DP-6 路径执行抽取数据集（分片 + manifest）
+base_dataset: datasets/BTC20261007-2202_expert5k_v8   # obs 主键面来源（BCDataset 联合装载）
+init: runs/p1_v2/round22/M0/ckpt_epoch002.pt    # 装配初始化（结构化头 + MoE 关）
+model_config: runs/p1_v2/round22/M0/model.snapshot.yaml
+ckpt: runs/round36/j2/t1_keep_res/ckpt_epoch001.pt    # 冻结基座（= 残差链同源 canary）
+out: runs/round41/f                             # smoke 证据目录（dry-run 默认不写盘）
+
+# ---- 运行 ----
+device: cuda
+seed: 0                                         # split 抽样 + 锚噪声增强 RNG
+shards: null                                    # null = 全量分片；列表 = 子集（dry-run 提速用）
+max_pairs: null                                 # null = 全量 pair 集；整数 = 种子抽样的上限
+val_frac: 0.1                                   # val episode 占比（episode 级，复用残差链口径）
+
+# ---- arm（P0–P4 增量堆叠；预置见 pipeline/lateral_losses.ARM_PRESETS 与 f_prereg.md） ----
+arm: p1                                         # p0 | p1 | p2 | p3 | p4（建议最小臂 = p1）
+kappa_coef: null                                # null = 用 arm 预置；数字 = 覆盖 κ 监督系数
+delta_kappa_coef: null                          # L_Δκ 系数（默认 0；机制备件）
+replan_coef: null                               # L_replan 系数（p3+ 预置 0.5）
+dk_thresh: 0.1                                  # L_Δκ hinge 阈值（= trainer.curv_dk_thresh）
+speed_weight_mode: null                         # null = 用 arm 预置；off | bucket（P2）
+horizon_margin_m: 0.0                           # 锚视界掩码安全边际（m）
+
+# ---- 几何轴（R41-D 模型实例配置；default = 现行为哨兵） ----
+readout_lane_geometry: default                  # default | corrected | legacy_aligned（训评成对）
+
+# ---- 锚输入结构（AC 轴；默认关 = 逐位） ----
+anchor_correction: "off"                        # "off" | resample | smooth_resample（C §6-1：≥2 m 重采样）
+anchor_min_ds: 2.0                              # 重采样最小点距（m）
+anchor_noise_sigma_m: 0.0                       # 锚噪声增强 σ（m；0=关；C §6-6 建议 0.02–0.05）
+
+# ---- P4：固定 LQR 执行差距重加权（非梯度） ----
+lqr_reweight: false                             # true = 权重含 (1 + α·w_lqr)（p4 预置）
+lqr_probe: 0                                    # 学生计划 probe 帧数（dry-run 0；smoke 默认 64）
+lqr_clip_max: 1.0                               # gap 权重 cap（归一化后）
+lqr_alpha: 1.0                                  # LQR 因子斜率
