@@ -1,7 +1,10 @@
-# 残差头训练配置（tools/train_residual.py；R40 §六.10 正式入库）
+# 残差头训练配置（tools/train_residual.py；R41 第一批-B：链入库自包含）
 #
 # 键名 = 该 runner 的 CLI dest（`--loss x` ⇔ `loss: x`）；CLI 同名键显式优先。
-# 数值口径 = round39/b2 生产 lane 默认值（`b2_train.py` 同参）；改动即新配方，须重新预注册。
+# 数值口径 = round39/b2 生产 lane 默认值（同参；研究工作区版本仅作逐位对拍参考，见
+# round41/b_bitwise.json）；改动即新配方，须重新预注册。
+# 实现出处（R41 入库，零研究工作区依赖）：pipeline/residual_dataset.py（数据/配对/split/obs）
+# + pipeline/residual_features.py（特征/目标/ΔA_θ 调用口径）。
 # split：按 (spec_id, episode_id) 整段切（episode 级，无泄漏；固定 seed 可复现），见 runner docstring。
 
 # ---- 路径 ----

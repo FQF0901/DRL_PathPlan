@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""正式训练 runner：**readout 列残差头 ΔA_θ 的 one-step 真值监督训练**（R40 §六.10 正式入库）。
+"""正式训练 runner：**readout 列残差头 ΔA_θ 的 one-step 真值监督训练**（R41 第一批-B：完全入库）。
 
 规格出处
 --------
 - GPT ``docs/chatgpt5p6sol_review.md`` §六.10：训练 runner、配置、数据 split 与 train/eval
-  feature parity **正式入库**（不能只留在 ``.slim/`` 或临时脚本）；
+  feature parity **正式入库**；
+- R41 复审（``docs/deepseekv4p1_argue.md`` §2.3 / §三 第一批②）：残差链**移除研究工作区
+  硬依赖**（数据/obs/特征模块入库为 ``pipeline/residual_dataset.py`` +
+  ``pipeline/residual_features.py``；核心 CI 不因 harness 缺失 skip）；
 - GPT R39 ```647f909``` §二：``A_{k+1} = AnalyticUpdate(A_k, a_k) + ΔA_θ(S_k, a_k)``；
   B2 = analytic + learned residual；
-- ``.slim/deepwork/p1_v2/round39/b1_report.md`` §5（B2 训练口径）与
-  ``round39/b2_report.md``（lane 结论）；本文件 = ``round39/b2_train.py`` 的**逐位迁移版**
-  （同参下 features/targets/masks/loss 与 ``.slim`` 版逐位一致，证据见
-  ``.slim/deepwork/p1_v2/round40/v5_bitwise.json``）。
+- 本文件 = R40 入库版 runner 的**装配换并入库链**版；同参下 features/targets/masks/loss/
+  前向 ΔA_θ 与 R39 研究版逐位一致（对拍证据见 round41/b_bitwise.json，max_abs_diff=0）。
 - 参数门：总量 ≤ :data:`net.world_residual.TOTAL_PARAM_CAP` = 2,000,000
   （= ``net/param_probe.TOTAL_CAP``，GPT R40 §五.5 绝对上限；R39「基线 ×1.02」乘性规则废止）。
   本 runner 在 ``net/world_residual.check_param_budget`` 之外再断言
   ``structured 基线 1,510,570 + head ≤ 2,000,000``。
 
-数据/监督口径（与 ``b1_matrix.py`` 同列序/单位；单一口径）
-----------------------------------------------------------
+数据/监督口径（单一口径；实现出处 = ``pipeline.residual_dataset``/``residual_features``）
+------------------------------------------------------------------------------------------
 - 样本 = ``datasets/path_exec_v1`` 同 episode **连续行**（row t → row t+5 = 0.5 s）；
   ``ok`` 集合 = ``train_weight>0 ∧ horizon_ok ∧ 锚长≥3 ∧ 速度列 present=1``（主行与下一行）；
 - ``prev`` = 行 t 真实 encode 的 ``WorldState.t0``（``world_state_from_encode``，**单一出处**）
@@ -28,7 +29,7 @@
 - 目标 ``Δ* = real_next − base``；loss = ``net.world_residual.column_residual_loss``
   （掩码 = ``base_present ∧ real_present``）；``--loss aligned`` 走 B2b 的
   ``column_residual_loss_aligned``（逐列权重 + TTC 事件式；B2b 的 2-step 预热 / ds-dt
-  speed 目标研究线仍留在 ``.slim/.../round39/b2b_train.py``，未入库）；
+  speed 目标研究线未入库）；
 - **禁自产状态回灌**：特征/目标只来自真实行 encode 与数据集真实列；不闭环、不迭代自产链。
 
 切分定义（split；无泄漏）
@@ -36,7 +37,7 @@
 - train/val 按 **(spec_id, episode_id) 整段切**（episode 级；禁行级泄漏）：固定种子
   ``--seed`` ⇒ ``rng = np.random.default_rng(seed)``，对 episode 键去重后
   ``rng.permutation`` 取前 ``round(--val-frac × n_episodes)`` 为 val；
-- 落样本后**断言** train ∩ val = ∅（见 :func:`build_pairs` 的 fail-fast）；
+- 落样本后**断言** train ∩ val = ∅（见 :func:`pipeline.residual_dataset.build_pairs` 的 fail-fast）；
 - split 口径（seed/val_frac）记录在 ``config/residual_train.yaml`` 与产物 ``train_log.json``。
 
 配置与可复现命令
@@ -58,24 +59,21 @@
     # 3) train/eval 特征同源守卫（pytest；小样本逐位）
     tools/venv-python -m pytest tests/test_r40_train_eval_feature_parity.py -q
 
-研究 harness（只读装载，不复制实现）
-------------------------------------
-数据/obs 装配沿用 A1/J1 harness（**机制单一出处**）：
-``.slim/deepwork/p1_v2/round38/a1_matrix.py``（``load_rows_filtered``/``build_step_map``）
-与 ``.slim/deepwork/p1_v2/round36/j1_train.py``（``build_obs``/``build_model_and_load``）。
-本 runner 记录两文件的 sha256（`harness` 字段）；缺失即 fail-fast 并给出路径。
-
 产物（``--out``；默认 ``runs/residual_train``）
 ---------------------------------------------
 ``residual_head.pt``（state_dict + meta）/ ``train_log.json``（loss 曲线 + 分列残差 MAE +
 训练账本 + split/特征指纹）。``--log-mirror`` 可选镜像摘要。
+
+模块指纹（复现性）
+------------------
+``harness`` 字段 = 训练链模块（``pipeline/residual_dataset.py``/``residual_features.py``）
+与本 runner 的 sha256（入库自包含；无任何研究工作区文件）。
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import sys
 import time
@@ -88,42 +86,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline import residual_dataset, residual_features
+from pipeline.residual_dataset import (
+    build_obs,
+    build_pairs,
+    load_base_dataset,
+    resolve_path,
+)
+from pipeline.residual_features import (
+    COLUMN_NAMES,
+    FEATURE_KEYS,
+    FEATURE_WIDTHS,
+    TARGET_COLUMNS,
+    head_delta,
+    residual_targets,
+    transition_features,
+)
+
 DEFAULT_CONFIG = ROOT / "config/residual_train.yaml"
-#: 研究 harness（只读装载；J1 由 A1 内部再装载）
-HARNESS_A1 = ROOT / ".slim/deepwork/p1_v2/round38/a1_matrix.py"
-HARNESS_J1 = ROOT / ".slim/deepwork/p1_v2/round36/j1_train.py"
-#: 目标列（readout 列序中的列号）与列名（顺序敏感：贯穿特征/损失/账本）
-TARGET_COLUMNS = (0, 3, 4, 5)
-COLUMN_NAMES = ("speed", "static_distance", "dynamic_distance", "dynamic_ttc")
-#: 特征键序/宽度（= ``net.world_residual.readout_residual_features`` 返回键；合计 26）
-FEATURE_KEYS = ("prev_exog", "prev_present", "action", "base_exog", "base_present")
-FEATURE_WIDTHS = (8, 8, 2, 4, 4)
-
-
-def _load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, str(path))
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"[residual] fail-fast：无法装载 {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def a1_module():
-    """A1 harness（数据/obs/装配机制单一出处；importlib 只读装载）。"""
-    global _A1
-    if _A1 is None:
-        if not HARNESS_A1.is_file():
-            raise SystemExit(
-                f"[residual] fail-fast：研究 harness 缺失 {HARNESS_A1}"
-                "（数据/obs 机制单一出处；如迁移工作区请同步 round38/a1_matrix.py）"
-            )
-        _A1 = _load_module("r40_v5_a1_matrix", HARNESS_A1)
-    return _A1
-
-
-_A1 = None
 
 
 def _sha256(path: Path) -> str:
@@ -131,11 +111,17 @@ def _sha256(path: Path) -> str:
 
 
 def harness_info() -> dict[str, Any]:
-    """harness 指纹（复现性证据：本 runner 依赖的只读研究模块）。"""
-    return {
-        "a1": {"path": str(HARNESS_A1), "sha256": _sha256(HARNESS_A1) if HARNESS_A1.is_file() else None},
-        "j1": {"path": str(HARNESS_J1), "sha256": _sha256(HARNESS_J1) if HARNESS_J1.is_file() else None},
-    }
+    """训练链模块指纹（R41 入库：数据/obs/特征模块均在仓库内，无研究工作区文件）。"""
+    info: dict[str, Any] = {}
+    for label, module in (
+        ("residual_dataset", residual_dataset),
+        ("residual_features", residual_features),
+    ):
+        path = Path(module.__file__).resolve()
+        info[label] = {"module": module.__name__, "path": str(path), "sha256": _sha256(path)}
+    runner = Path(__file__).resolve()
+    info["runner"] = {"path": str(runner), "sha256": _sha256(runner)}
+    return info
 
 
 # --------------------------------------------------------------------------- #
@@ -228,96 +214,41 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 # --------------------------------------------------------------------------- #
-# 数据：连续行配对 + episode 切分（无泄漏）
+# 数据：连续行配对 + episode 切分（无泄漏；实现出处 = pipeline.residual_dataset）
 # --------------------------------------------------------------------------- #
-def build_pairs(args) -> dict:
-    a1 = a1_module()
-    rows, train_weight, horizon_ok = a1.load_rows_filtered(args)
-    spec = np.asarray(rows["spec_id"], dtype=np.int64)
-    episode = np.asarray(rows["episode_id"], dtype=np.int64)
-    step = np.asarray(rows["step"], dtype=np.int64)
-    exog = np.asarray(rows["long_exog"], dtype=np.float64)
-    present = np.asarray(rows["long_present"], dtype=np.float64)
-    anchor_len = np.asarray([len(np.asarray(a)) for a in rows["anchor"]], dtype=np.int64)
-    step_map = a1.build_step_map(rows)
-
-    succ = np.full(rows["n"], -1, dtype=np.int64)
-    for i in range(rows["n"]):
-        found = step_map.get((int(spec[i]), int(episode[i]), int(step[i]) + 5))
-        succ[i] = -1 if found is None else int(found)
-    speed_ok = (present[:, 0] > 0.5) & np.isfinite(exog[:, 0]) & (exog[:, 0] > 0.0)
-    next_speed_ok = np.zeros(rows["n"], dtype=bool)
-    has = succ >= 0
-    next_speed_ok[has] = (present[succ[has], 0] > 0.5) & np.isfinite(exog[succ[has], 0])
-    ok = (
-        (train_weight > 0.5)
-        & (horizon_ok > 0)
-        & (anchor_len >= 3)
-        & speed_ok
-        & has
-        & next_speed_ok
-    )
-    main_ids = np.flatnonzero(ok).astype(np.int64)
-    if main_ids.size == 0:
-        raise SystemExit("[residual] fail-fast：无可用配对样本")
-    rng = np.random.default_rng(int(args.seed))
-    if args.max_pairs is not None and main_ids.size > int(args.max_pairs):
-        pick = np.sort(rng.choice(main_ids.size, size=int(args.max_pairs), replace=False))
-        main_ids = main_ids[pick]
-    succ_ids = succ[main_ids]
-
-    keys = np.asarray([f"{int(a)}|{int(b)}" for a, b in zip(spec[main_ids], episode[main_ids])])
-    unique_keys = np.unique(keys)
-    order = rng.permutation(unique_keys.size)
-    n_val = max(1, int(round(float(args.val_frac) * unique_keys.size)))
-    val_keys = set(unique_keys[order[:n_val]].tolist())
-    is_val = np.asarray([key in val_keys for key in keys.tolist()])
-    train_mask, val_mask = ~is_val, is_val
-    if int(train_mask.sum()) == 0 or int(val_mask.sum()) == 0:
-        raise SystemExit("[residual] fail-fast：train/val 切分为空（调 --val-frac）")
-    overlap = set(keys[train_mask].tolist()) & set(keys[val_mask].tolist())
-    if overlap:  # pragma: no cover - 结构性排除
-        raise SystemExit(f"[residual] fail-fast：episode 泄漏 {sorted(overlap)[:3]}")
-
-    return {
-        "rows": rows, "spec": spec, "episode": episode, "step": step,
-        "exog": exog, "present": present,
-        "main_ids": main_ids, "succ_ids": succ_ids,
-        "train_mask": train_mask, "val_mask": val_mask,
-        "n_episodes": int(unique_keys.size), "n_val_episodes": int(n_val),
-        "meta": {
-            "n_rows_total": int(rows["n"]),
-            "n_pairs": int(main_ids.size),
-            "n_pairs_train": int(train_mask.sum()),
-            "n_pairs_val": int(val_mask.sum()),
-            "n_episodes": int(unique_keys.size),
-            "n_episodes_val": int(n_val),
-            "seed": int(args.seed),
-            "val_frac": float(args.val_frac),
-            "max_pairs": None if args.max_pairs is None else int(args.max_pairs),
-            "pair_rule": "row t → step t+5（0.5 s）；ok = train_weight ∧ horizon_ok ∧ 锚长≥3 ∧ 速度 present（主/次行）",
-            "split_rule": "按 (spec_id, episode_id) 整段切（episode 级，禁行级泄漏；断言两集不相交）",
-        },
-    }
 
 
 def build_model(args, device):
-    """结构化模型装载（口径 = A1 harness：正式 loader + fail-fast）。"""
-    from tools.legacy.checkpoint_migration import load_checkpoint_state
+    """结构化模型装载（正式装配 = ``pipeline.stages.build_model`` + legacy 迁移装载 + fail-fast）。
+
+    装配顺序与历史 harness（J1 ``build_model_and_load`` + 训练基座 ckpt 装载）逐位一致：
+    build → ``set_moe(enabled=False)`` → ``set_path_head(True)`` → ``load_checkpoint_migrated``
+    （``--init``）→ ``load_checkpoint_state``（``--ckpt``，``on_partial="fail"``）→ eval。
+    """
+    import yaml
+
+    from tools.legacy.checkpoint_migration import (
+        load_checkpoint_migrated,
+        load_checkpoint_state,
+    )
 
     import torch
 
     from net.model import DrivingModel
     from net.path_head import PATH_HEAD_DEFAULT_MODE
+    from pipeline.stages import build_model as _stage_build_model
 
-    a1 = a1_module()
-    jt = a1.jt_module()
-    model, _ = jt.build_model_and_load(
-        a1._Args(args.init, args.model_config), path_head=True
-    )
+    config_path = resolve_path(Path(args.model_config))
+    if not config_path.is_file():
+        raise SystemExit(f"[residual] fail-fast：model config 不存在：{args.model_config}")
+    model = _stage_build_model(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+    model.set_moe(enabled=False)
+    model.set_path_head(True)
+    # R38-P2b：经 legacy 键迁移装载（旧 `path_head.*` → `policy.structured_action.*` 重命名）
+    load_checkpoint_migrated(str(resolve_path(Path(args.init))), model, strict=False)
     if not isinstance(model, DrivingModel):  # pragma: no cover - 装配契约
-        raise SystemExit("[residual] fail-fast：build_model_and_load 未返回 DrivingModel")
-    ckpt_path = jt._resolve(Path(args.ckpt))
+        raise SystemExit("[residual] fail-fast：build_model 未返回 DrivingModel")
+    ckpt_path = resolve_path(Path(args.ckpt))
     payload = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     state = payload
     if isinstance(payload, dict):
@@ -364,11 +295,6 @@ def _cache_fingerprint(args, load_info: Mapping[str, Any]) -> str:
 def build_supervision(args, device, data: dict) -> dict:
     import torch
 
-    from net.world_residual import READOUT_RESIDUAL_INDICES, readout_residual_features
-    from net.world_state import analytic_update, readout, world_state_from_encode
-
-    a1 = a1_module()
-    jt = a1.jt_module()
     rows = data["rows"]
     main_ids, succ_ids = data["main_ids"], data["succ_ids"]
     exog, present = data["exog"], data["present"]
@@ -398,7 +324,7 @@ def build_supervision(args, device, data: dict) -> dict:
             "model": model, "load_info": load_info, "cache_fingerprint": fingerprint,
             **loaded, "feature_time_s": 0.0, "cache_hit": True,
         }
-    base_dataset = jt.load_base_dataset(jt._resolve(Path(args.base_dataset)))
+    base_dataset = load_base_dataset(resolve_path(Path(args.base_dataset)))
 
     chunk = int(args.chunk)
     feature_parts: list[np.ndarray] = []
@@ -411,38 +337,24 @@ def build_supervision(args, device, data: dict) -> dict:
     with torch.no_grad():
         for start in range(0, n, chunk):
             stop = min(start + chunk, n)
-            obs = jt.build_obs(rows, main_ids[start:stop], device=device, base_dataset=base_dataset)
-            encoded = model.encode(obs)
-            state = world_state_from_encode(
-                model.st_gnn, encoded, dt=model.dt, speed_alpha=1.0, speed_max=20.0
-            )
-            prev_view = readout(state)
-            action = encoded["path"]["action"]
-            ds, dtheta = action[:, 0], action[:, 1]
-            analytic_update(state, ds=ds, dtheta=dtheta, pose=None,
-                            z_od=encoded["z_od"], z_ld=encoded["z_ld"], step=1)
-            base_view = readout(state)
-            features = readout_residual_features(
-                prev_view=prev_view, action=action, base_view=base_view
-            )
-            index = list(READOUT_RESIDUAL_INDICES)
-            base_cols = base_view["long_exog"][:, index]
-            base_present = base_view["long_present"][:, index]
+            obs = build_obs(rows, main_ids[start:stop], device=device, base_dataset=base_dataset)
+            # 特征链（encode → WorldState.t0 → readout → analytic_update → readout →
+            # readout_residual_features）实现出处 = pipeline.residual_features.transition_features
+            tfeat = transition_features(model, obs)
+            index = list(TARGET_COLUMNS)
+            base_cols = tfeat["base_cols"]
+            base_present = tfeat["base_present"]
             succ = succ_ids[start:stop]
             real_cols = torch.as_tensor(exog[succ][:, index], dtype=torch.float32, device=device)
             real_present = torch.as_tensor(
                 present[succ][:, index], dtype=torch.float32, device=device
             )
-            mask = ((base_present > 0.5) & (real_present > 0.5)).to(torch.float32)
-            target = (real_cols - base_cols) * mask
+            target, mask = residual_targets(
+                base_cols=base_cols, base_present=base_present,
+                real_cols=real_cols, real_present=real_present,
+            )
             feature_parts.append(
-                torch.cat(
-                    [
-                        features["prev_exog"], features["prev_present"], features["action"],
-                        features["base_exog"], features["base_present"],
-                    ],
-                    dim=-1,
-                ).detach().cpu().numpy().astype(np.float32)
+                tfeat["feature_tensor"].detach().cpu().numpy().astype(np.float32)
             )
             target_parts.append(target.detach().cpu().numpy().astype(np.float32))
             mask_parts.append(mask.detach().cpu().numpy().astype(np.float32))
@@ -532,7 +444,7 @@ def train_head(args, device, data: dict, supervision: dict) -> dict:
     def batch_loss(delta, index):
         # 字面 one-step：L = loss(base + ΔA_θ, 实际下一状态)（掩码 = base_present ∧ real_present）
         if aligned:
-            # B2b 对齐损失路径（逐列权重 + TTC 事件式；speed_target/2-step 预热留在 .slim 研究线）
+            # B2b 对齐损失路径（逐列权重 + TTC 事件式；speed_target/2-step 预热研究线未入库）
             return column_residual_loss_aligned(
                 delta,
                 base_exog=device_base[index],
@@ -584,13 +496,7 @@ def train_head(args, device, data: dict, supervision: dict) -> dict:
         for start in range(0, order.size, int(args.batch_size)):
             index = torch.as_tensor(order[start : start + int(args.batch_size)], dtype=torch.long)
             base = device_features[index]
-            prev_exog, prev_present = base[:, :8], base[:, 8:16]
-            action, base_exog = base[:, 16:18], base[:, 18:22]
-            base_present = base[:, 22:26]
-            delta = head(
-                prev_exog=prev_exog, prev_present=prev_present, action=action,
-                base_exog=base_exog, base_present=base_present,
-            )
+            delta = head_delta(head, base)
             out = batch_loss(delta, index)
             optimizer.zero_grad(set_to_none=True)
             out["loss"].backward()
@@ -604,12 +510,7 @@ def train_head(args, device, data: dict, supervision: dict) -> dict:
                 pred_parts, target_parts_ = [], []
                 for start in range(0, index.size, 4096):
                     idx = torch.as_tensor(index[start : start + 4096], dtype=torch.long)
-                    base = device_features[idx]
-                    delta = head(
-                        prev_exog=base[:, :8], prev_present=base[:, 8:16],
-                        action=base[:, 16:18], base_exog=base[:, 18:22],
-                        base_present=base[:, 22:26],
-                    )
+                    delta = head_delta(head, device_features[idx])
                     pred_parts.append(delta.cpu())
                     target_parts_.append(device_targets[idx].cpu())
                 pred = torch.cat(pred_parts)
@@ -669,14 +570,7 @@ def train_head(args, device, data: dict, supervision: dict) -> dict:
         with torch.no_grad():
             for start in range(0, val_index.size, 4096):
                 idx = torch.as_tensor(val_index[start : start + 4096], dtype=torch.long)
-                base = device_features[idx]
-                val_pred_parts.append(
-                    head(
-                        prev_exog=base[:, :8], prev_present=base[:, 8:16],
-                        action=base[:, 16:18], base_exog=base[:, 18:22],
-                        base_present=base[:, 22:26],
-                    ).cpu()
-                )
+                val_pred_parts.append(head_delta(head, device_features[idx]).cpu())
         val_pred = torch.cat(val_pred_parts)
         per_column = {}
         for index, name in enumerate(COLUMN_NAMES):
@@ -711,11 +605,7 @@ def self_proof(args, device, data, supervision, head) -> dict:
     zeros = ReadoutResidualHead(hidden=int(args.hidden)).to(device).eval()
     features = torch.as_tensor(supervision["features"][:64], dtype=torch.float32, device=device)
     with torch.no_grad():
-        delta_zero = zeros(
-            prev_exog=features[:, :8], prev_present=features[:, 8:16],
-            action=features[:, 16:18], base_exog=features[:, 18:22],
-            base_present=features[:, 22:26],
-        )
+        delta_zero = head_delta(zeros, features)
     proof = {
         "zero_init_delta_is_zero": bool(torch.equal(delta_zero, torch.zeros_like(delta_zero))),
         "zero_init_max_abs": float(delta_zero.abs().max().item()),
@@ -733,44 +623,33 @@ def feature_contract(args, device, data, supervision) -> dict:
     """特征契约逐位复算（键面/宽度/复算 features/掩码/目标公式；--check-features 用）。"""
     import torch
 
-    from net.world_residual import (
-        READOUT_RESIDUAL_FIELDS,
-        READOUT_RESIDUAL_INDICES,
-        readout_residual_features,
-    )
-    from net.world_state import analytic_update, readout, world_state_from_encode
+    from net.world_residual import READOUT_RESIDUAL_FIELDS, READOUT_RESIDUAL_INDICES
 
-    a1 = a1_module()
-    jt = a1.jt_module()
     rows, main_ids = data["rows"], np.asarray(data["main_ids"], dtype=np.int64)
     chunk = max(1, min(int(args.chunk), int(main_ids.size)))
     ids = main_ids[:chunk]
     model = supervision["model"]
-    base_dataset = jt.load_base_dataset(jt._resolve(Path(args.base_dataset)))
+    base_dataset = load_base_dataset(resolve_path(Path(args.base_dataset)))
     with torch.no_grad():
-        obs = jt.build_obs(rows, ids, device=device, base_dataset=base_dataset)
-        encoded = model.encode(obs)
-        state = world_state_from_encode(
-            model.st_gnn, encoded, dt=model.dt, speed_alpha=1.0, speed_max=20.0
-        )
-        prev_view = readout(state)
-        action = encoded["path"]["action"]
-        analytic_update(state, ds=action[:, 0], dtheta=action[:, 1], pose=None,
-                        z_od=encoded["z_od"], z_ld=encoded["z_ld"], step=1)
-        base_view = readout(state)
-        features = readout_residual_features(prev_view=prev_view, action=action, base_view=base_view)
-        recon = (
-            torch.cat([features[key] for key in FEATURE_KEYS], dim=-1)
-            .detach().cpu().numpy().astype(np.float32)
-        )
+        obs = build_obs(rows, ids, device=device, base_dataset=base_dataset)
+        tfeat = transition_features(model, obs)
+        features = tfeat["features"]
+        recon = tfeat["feature_tensor"].detach().cpu().numpy().astype(np.float32)
     stored = np.asarray(supervision["features"][:chunk], dtype=np.float32)
-    index = list(READOUT_RESIDUAL_INDICES)
+    index = list(TARGET_COLUMNS)
     present_next = np.asarray(data["present"], dtype=np.float32)[data["succ_ids"][:chunk]][:, index]
-    mask_re = ((recon[:, 22:26] > 0.5) & (present_next > 0.5)).astype(np.float32)
-    target_re = (
-        np.asarray(supervision["real_cols"][:chunk], dtype=np.float32)
-        - np.asarray(supervision["base_cols"][:chunk], dtype=np.float32)
-    ) * mask_re
+    with torch.no_grad():
+        # 复算掩码/目标公式（单一出处 = residual_features.residual_targets；输入取复算 features 的
+        # base_present 切片 ⇒ 同时校验 26 列列序契约）
+        base_present_re = torch.as_tensor(recon[:, 22:26], device=device)
+        target_t, mask_t = residual_targets(
+            base_cols=torch.as_tensor(np.asarray(supervision["base_cols"][:chunk], dtype=np.float32), device=device),
+            base_present=base_present_re,
+            real_cols=torch.as_tensor(np.asarray(supervision["real_cols"][:chunk], dtype=np.float32), device=device),
+            real_present=torch.as_tensor(present_next, device=device),
+        )
+        mask_re = mask_t.cpu().numpy()
+        target_re = target_t.cpu().numpy()
     report = {
         "chunk": int(chunk),
         "keys": sorted(features),
@@ -934,7 +813,7 @@ def main(argv=None) -> int:
     head_path = save_residual_head(out_dir / "residual_head.pt", head, meta=meta)
     payload = {
         "meta": {
-            "runner": "r40-v5 正式训练 runner（tools/train_residual.py；GPT §六.10 入库）",
+            "runner": "r41-b 正式训练 runner（tools/train_residual.py；链入库自包含，GPT §六.10）",
             "script": str(Path(__file__).resolve()),
             "script_sha256": _sha256(Path(__file__).resolve()),
             "harness": harness_info(),
@@ -979,7 +858,7 @@ def main(argv=None) -> int:
             "真实下一状态列 = 行 t+5 的数据集列（env 生产者口径，与 b1_matrix v_real 同源；"
             "speed present 在长 horizon 处有衰减 ⇒ 掩码）。",
             "--loss aligned = B2b 的 column_residual_loss_aligned（逐列权重 + TTC 事件式）；"
-            "B2b 的 2-step 预热 / ds-dt speed 目标研究线未入库（.slim/.../round39/b2b_train.py）。",
+            "B2b 的 2-step 预热 / ds-dt speed 目标研究线未入库（round39 研究工作区）。",
         ],
     }
     log_path = out_dir / "train_log.json"

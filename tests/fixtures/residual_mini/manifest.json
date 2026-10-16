@@ -1,0 +1,147 @@
+{
+ "dataset": "path_exec_v1::residual_mini",
+ "created_at": "fixture（R41 第一批-B；生成脚本 = round41/b_make_fixture.py）",
+ "source": {
+  "dataset": "datasets/path_exec_v1",
+  "shard": "shard_0000.npz",
+  "episodes": 8,
+  "rows": 465,
+  "anchor_points": 22126
+ },
+ "schema_version": 1,
+ "frame_units": {
+  "ego_t0": "anchor_xy：自车 t0 系 x 前 / y 左 [m]（世界系 SE(2) 逆变换）",
+  "world": "ego_world：(x,y,theta) 世界系 [m, rad]；theta CCW，+y 左",
+  "anchor_errors": "lat_err [m 左正] / head_err [rad] / s_anchor [m]：专家 30 点（traj30 口径）投影到锚折线（0.5 m 采样）；valid=最近锚点距离≤5 m",
+  "time": "step = env step（10 Hz）；决策步 stride 5（0.5 s）",
+  "SI": "米 / 秒 / 弧度"
+ },
+ "long_exog_columns": [
+  {
+   "index": 0,
+   "name": "speed",
+   "unit": "m/s",
+   "frame": "标量",
+   "src": "源 npz ego 通道第 0 维（当前帧车速 v；= obs['ego'] 同源）",
+   "mask": "ego_mask>0.5 ∧ 有限"
+  },
+  {
+   "index": 1,
+   "name": "left_margin",
+   "unit": "m（≥0）",
+   "frame": "target lane 截面（左 = lane_id 递减方向；横向 _lane_lateral_left 左正）",
+   "src": "target lane 半宽 + ego 左正横向偏移 + 左侧同 road 同向相邻车道宽度累加（= lane_semantic 列 4 同公式；非 legal corridor）",
+   "mask": "target lane 可得 ∧ ego 可投影（s_raw 有限 ∧ lat 有限）；s 取 clamp(s_raw,0,L)；远距+弯曲时 margin 可显著大于几何直觉（尾部 ~0.2-0.4% 行 >25 m，见 report caveats）"
+  },
+  {
+   "index": 2,
+   "name": "right_margin",
+   "unit": "m（≥0）",
+   "frame": "同上（右 = lane_id 递增方向）",
+   "src": "同 left_margin（右）",
+   "mask": "target lane 可得 ∧ ego 可投影（s_raw 有限 ∧ lat 有限）；s 取 clamp(s_raw,0,L)；远距+弯曲时 margin 可显著大于几何直觉（尾部 ~0.2-0.4% 行 >25 m，见 report caveats）"
+  },
+  {
+   "index": 3,
+   "name": "static_distance",
+   "unit": "m（≥0）",
+   "frame": "ego 当前车道走廊（横向 ±(w/2+1+1w)；纵向 s 沿当前车道）",
+   "src": "env.obs.static.scan_static_blocker 同函数：gap = s_obj − s_ego − 0.5·L_obj（近面），范围 50 m，clamp ≥0",
+   "mask": "走廊 50 m 内有 BaseBuilding（岗亭/建筑）"
+  },
+  {
+   "index": 4,
+   "name": "dynamic_distance",
+   "unit": "m（≥0）",
+   "frame": "ego t0 系（x 前 / y 左）",
+   "src": "OD presence=1 槽（dx/dy/cosθ/sinθ/L/W）中 ego 中心→对象矩形最近距离（矩形内 → 0）取 min（含后向物体；OD scope 前150/后50/左25/右25 m）",
+   "mask": "≥1 个 presence=1 ∧ 特征有限的槽"
+  },
+  {
+   "index": 5,
+   "name": "dynamic_ttc",
+   "unit": "s（>0，cap 60）",
+   "frame": "ego t0 系（纵向 x）",
+   "src": "OD presence=1 槽：dx>0 ∧ vx<−1e-3 时 ttc = dx/(−vx)（自车系相对速度，中心到中心纵向；= env.obs.od TTC 公式）取 min，cap 60 s（接近速度≈0 ⇒ 无冲突）",
+   "mask": "≥1 个接近中的 presence=1 槽"
+  },
+  {
+   "index": 6,
+   "name": "nav_progress",
+   "unit": "[0,1]",
+   "frame": "标量（route_completion）",
+   "src": "源 npz nav 通道第 10 维 route_completion",
+   "mask": "nav_mask>0.5 ∧ 有限"
+  },
+  {
+   "index": 7,
+   "name": "distance_to_target_lane_end",
+   "unit": "m（≥0）",
+   "frame": "target lane 弧长（ego 投影 s_eff = clamp(s_raw,0,L) 起）",
+   "src": "max(target_lane.length − s_eff, 0)（= lane_semantic 列 11 的 remaining 同口径；不做 200 m 无拓扑封顶）",
+   "mask": "target lane 可得 ∧ ego 可投影（s_raw 有限）"
+  }
+ ],
+ "rel_names": [
+  "keep",
+  "keep_objswitch",
+  "change_l",
+  "change_r",
+  "change2_l",
+  "change2_r",
+  "branch_l",
+  "branch_r",
+  "branch_s",
+  "gate_ahead",
+  "off_target",
+  "no_direction",
+  "no_cur_lane",
+  "no_end_lane",
+  "end_lane_missing",
+  "gate_lane_missing",
+  "no_horizon",
+  "filtered",
+  "filtered",
+  "no_horizon",
+  "unresolved_wide"
+ ],
+ "geometry_names": [
+  "curve",
+  "intersection",
+  "merge",
+  "ramp_in",
+  "ramp_out",
+  "roundabout",
+  "split",
+  "straight",
+  "t_intersection",
+  "tollgate",
+  "uturn"
+ ],
+ "target_src_names": [
+  "none",
+  "expert_end",
+  "gate"
+ ],
+ "difficulty_names": [
+  "easy",
+  "medium",
+  "hard"
+ ],
+ "rows": 465,
+ "episodes": 8,
+ "shards": [
+  {
+   "name": "shard_0000.npz",
+   "rows": 465,
+   "episodes": 8,
+   "bytes": 524633,
+   "sha256": "3ed7547a0c86eee4d68fda6cb106731d6604d08c1a61e6fd39a2c3a66e683c43",
+   "spec_id_range": [
+    0,
+    7
+   ],
+   "anchor_points": 22126
+  }
+ ]
+}

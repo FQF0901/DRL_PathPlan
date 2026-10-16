@@ -2,9 +2,10 @@
 
 对拍主体（**同一批 transition、同一模型实例、同一残差头实例**；零训练、全 ``no_grad``）：
 
-- train 侧 = ``tools/train_residual.py``（正式 runner；R40 §六.10 入库版）：
-  ``build_pairs``（A1 harness 口径：row t → step t+5）→ ``build_supervision``（cache 关、
-  现场重算）产出特征 26 列（8+8+2+4+4）；
+- train 侧 = ``tools/train_residual.py``（正式 runner；R41 第一批-B 链入库自包含：
+  数据/obs = ``pipeline.residual_dataset``，特征/目标 = ``pipeline.residual_features``）：
+  ``build_pairs``（row t → step t+5）→ ``build_supervision``（cache 关、现场重算）产出特征
+  26 列（8+8+2+4+4）；
 - eval 侧 = 同一模型实例的 net 内想象链（``set_world_state_api("analytic_learned",
   speed_alpha=1.0)`` + ``set_world_residual_scale(1.0)`` + ``model(obs, forward_mode=
   "world_model_teacher_forcing")``），head forward hook 捕获送入残差头的特征 / ΔA_θ /
@@ -12,9 +13,10 @@
 - 逐项门：5 特征键 + ΔA_θ + 归一化 + mask，**max_abs_diff = 0**（逐 chunk，与两侧 runner
   同 batching）。
 
-口径出处 = ``.slim/deepwork/p1_v2/round40/v1_feat_gate.py``（全量 250,622 transition 硬门；
-本测试 = 同口径小样本守卫，资源缺失时 skip）。几何维度：GPU 张量按 batch 形状分块计算
-（TF32 GEMM tiling），**跨 batch 拼接不是同源口径** ⇒ 两侧同 chunk。
+口径出处 = round40/v1_feat_gate.py（全量 250,622 transition 硬门；本测试 = 同口径小样本
+守卫，大资源缺失时 skip；无资源核心守卫在 ``tests/test_r41_residual_chain_selfcontained.py``）。
+几何维度：GPU 张量按 batch 形状分块计算（TF32 GEMM tiling），**跨 batch 拼接不是同源口径**
+⇒ 两侧同 chunk。
 """
 
 from __future__ import annotations
@@ -40,8 +42,6 @@ FEATURE_KEYS = runner.FEATURE_KEYS
 # --------------------------------------------------------------------------- #
 def _missing_resources() -> list[str]:
     paths = {
-        "harness_a1": runner.HARNESS_A1,
-        "harness_j1": runner.HARNESS_J1,
         "runner_config": runner.DEFAULT_CONFIG,
         "data": runner.ROOT / "datasets/path_exec_v1/manifest.json",
         "base_dataset": runner.ROOT / "datasets/BTC20261007-2202_expert5k_v8/expert_bc.npz",
@@ -126,15 +126,15 @@ def eval_capture(parity_setup):
     net_handle = head.net.register_forward_pre_hook(_norm_hook)
     wr.apply_readout_residual = _apply_hook
     try:
-        a1 = runner.a1_module()
-        jt = a1.jt_module()
+        from pipeline.residual_dataset import build_obs, load_base_dataset, resolve_path
+
         rows = data["rows"]
         main_ids = np.asarray(data["main_ids"], dtype=np.int64)
-        base_dataset = jt.load_base_dataset(jt._resolve(Path(args.base_dataset)))
+        base_dataset = load_base_dataset(resolve_path(Path(args.base_dataset)))
         with torch.no_grad():
             for start in range(0, int(main_ids.size), CHUNK):
                 stop = min(start + CHUNK, int(main_ids.size))
-                obs = jt.build_obs(rows, main_ids[start:stop], device=device, base_dataset=base_dataset)
+                obs = build_obs(rows, main_ids[start:stop], device=device, base_dataset=base_dataset)
                 before = (len(all_head_records), len(all_norm_records), len(all_apply_records))
                 model(obs, forward_mode="world_model_teacher_forcing")
                 assert len(all_head_records) > before[0], "eval 链未调用残差头（装配失配）"
