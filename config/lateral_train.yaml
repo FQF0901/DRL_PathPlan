@@ -43,3 +43,20 @@ lqr_reweight: false                             # true = 权重含 (1 + α·w_lq
 lqr_probe: 0                                    # 学生计划 probe 帧数（dry-run 0；smoke 默认 64）
 lqr_clip_max: 1.0                               # gap 权重 cap（归一化后）
 lqr_alpha: 1.0                                  # LQR 因子斜率
+
+# ---- 正式训练循环（R41 第二批执行-G；F 预注册 §1/§4 共同面；CLI 同名键优先） ----
+train_out: null                                 # null = runs/dev/round41/<arm>（域规则）
+epochs: 2                                       # ≤2 epoch（F 预注册 §4）
+batch_size: 64
+val_batch_size: 256                             # val 只用于选点（episode 级）
+lr: 0.0003                                      # 3e-4（F 预注册 §4）
+weight_decay: 0.0                               # Adam（= J1 canonical 头优化器口径）
+grad_clip: 5.0                                  # runner 级保险（0 = 关；两臂一致）
+max_steps: 8000                                 # optimizer step 总上限（先到者停）
+max_wall_s: 5400.0                              # wall 预算（触顶即停并记账；投影超预算 ⇒ 降 step + 报告）
+action_weight: 1.0                              # L_action 权重（= phase3 action_weight 默认）
+chain_weight: 0.2                               # L_plan 权重（= phase3 action_chain 默认）
+forward_mode: chain                             # chain = policy_wm_rollout 6 步想象链（= 既有 phase3 口径）；
+                                                # t0 = 仅 encode（诊断臂；t0-only 目标不管 k≥1 想象 latent ⇒ 链尾失控，见 g_report §3）
+calib_steps: 20                                 # 步时标定窗口（成本标定 → 投影/降 step 记账）
+log_every: 100                                  # loss 曲线落点间隔

@@ -19,9 +19,23 @@
 3. ``--assemble-smoke``：在真实帧上（canary ckpt 冻结前向）计算 **arm 的每项损失值**
    （κ 监督/L_Δκ/L_replan/LQR gap 权重）+ 梯度流装配断言（仅到预测输入，无 optimizer step），
    写 ``<out>/smoke_<arm>.json``；
-4. **不执行任何训练/oracle/闭环**；正式训练循环（P0–P4）待预注册批准后另立。
+4. **R41 第二批执行-G：正式训练循环**（``--train`` / ``--smoke-steps N``；F 预注册 §1 共同面）：
+   数据 = ``pipeline.lateral_dataset``（episode 级 split，复用残差链）；模型装配 =
+   ``tools.train_residual.build_model`` 口径（M0 snapshot + legacy 迁移 + ``--ckpt``
+   冻结基座）+ 几何轴实例配置；**冻结面 = 除 allowlist 外全部**（``net.path_head.
+   TRAIN_ALLOWLIST_PREFIXES`` = ``policy.structured_action.`` + ``plan_head.fusion.2.``）；
+   loss = ``L_action``（首步 (ds,dθ)；= ``pipeline.trainer._phase3_loss_terms`` 的 action 项口径）
+   + ``L_plan``（``trainer.weighted_action_chain_loss``；6 步 (ds,dθ) 链，k=1..5）+ 横向项
+   （``lateral_losses.ARM_PRESETS``；p0 = 零触达）；frame_weight = ``train_weight×balance_weight``
+   （= ``trainer.row_action_weights`` 口径；`g_probe` 已验证 path_exec≡base 同键行）；
+   val（episode 级）只用于**选点**；ckpt → ``runs/dev/round41/<arm>/``；
+   账本 = loss 曲线/分项/时长/参数五栏/四 hash/冻结面逐位守卫/首步梯度探针。
 
-产物与写域：``runs/round41/f/**``（smoke 证据）；``.slim/deepwork/p1_v2/round41/f*``（报告）。
+**禁**：P3/P4 训练期接线（跨帧双前向 / LQR 权重量产）不在本批（F 预注册 §8-3/§6 展开规则）
+⇒ ``replan_coef>0`` / ``lqr_reweight`` 在训练模式下 fail-fast。
+
+产物与写域：``runs/round41/f/**``（smoke 证据）、``runs/dev/round41/<arm>/**``（训练产物）；
+``.slim/deepwork/p1_v2/round41/{f,g}*``（报告）。
 """
 
 from __future__ import annotations
@@ -130,6 +144,28 @@ def build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentPa
     parser.add_argument("--assemble-smoke", action="store_true", help="真实帧损失装配 smoke（写 runs/round41/f/**）")
     parser.add_argument("--json-out", default=None, help="报告 JSON 输出路径（--dry-run 默认不写）")
     parser.add_argument("--all-terms", action="store_true", help="smoke：附加全项开启（含 L_Δκ）的诊断行")
+    # ---- R41 第二批执行-G：正式训练循环 ----
+    parser.add_argument("--train", action="store_true", help="正式训练循环（写 runs/dev/round41/<arm>/**）")
+    parser.add_argument("--smoke-steps", type=int, default=0, help="训练循环但最多 N 个 optimizer step（成本标定；不写 ckpt）")
+    parser.add_argument("--train-out", default=None, help="训练产物目录（默认 runs/dev/round41/<arm>）")
+    parser.add_argument("--epochs", type=int, default=2, help="≤2（F 预注册 §4）")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--val-batch-size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--grad-clip", type=float, default=5.0, help="0 = 关（非法值 fail-fast）")
+    parser.add_argument("--max-steps", type=int, default=8000, help="optimizer step 总上限（F 预注册 §4）")
+    parser.add_argument("--max-wall-s", type=float, default=5400.0, help="wall 预算（s；触顶即停并显式记账）")
+    parser.add_argument("--action-weight", type=float, default=1.0, help="L_action 权重（= phase3 action_weight 默认）")
+    parser.add_argument("--chain-weight", type=float, default=0.2, help="L_plan 权重（= phase3 action_chain 默认）")
+    parser.add_argument(
+        "--forward-mode", default="chain", choices=("chain", "t0"),
+        help="chain = policy_wm_rollout 6 步想象链（= 既有 phase3 口径；默认）；t0 = 仅 encode（诊断臂）",
+    )
+    parser.add_argument("--calib-steps", type=int, default=20, help="步时标定窗口：投影超预算 ⇒ 降 step 并记账")
+    parser.add_argument("--log-every", type=int, default=100, help="loss 曲线落点间隔（step）")
+    parser.add_argument("--no-grad-probe", action="store_false", dest="grad_probe", default=True,
+                        help="关首步分项梯度探针（默认开）")
     if config:
         parser.set_defaults(**dict(config))
     return parser
@@ -525,6 +561,606 @@ def assemble_loss_terms(args, data: dict, probe: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 正式训练循环（R41 第二批执行-G；F 预注册 §1 共同面）
+# --------------------------------------------------------------------------- #
+def _net_tree_digest() -> dict:
+    """``net/**/*.py`` 源树指纹（口径 = m2：逐文件 sha16 → 排序连接 sha256 首 16 hex；只读）。"""
+    import hashlib
+
+    root = ROOT / "net"
+    per_file = {}
+    for path in sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts):
+        per_file[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    tree = hashlib.sha256()
+    for rel in sorted(per_file):
+        tree.update(f"{rel}\0{per_file[rel]}\n".encode("utf-8"))
+    return {"n_files": len(per_file), "tree_sha16": tree.hexdigest()[:16]}
+
+
+def _combined_harness_sha(harness: Mapping[str, Any]) -> str:
+    import hashlib
+
+    payload = json.dumps(
+        {key: value["sha256"] for key, value in harness.items() if isinstance(value, Mapping) and "sha256" in value},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def training_mode(args) -> bool:
+    """是否走训练循环（``--train`` / ``--smoke-steps``）。"""
+    return bool(args.train) or int(args.smoke_steps) > 0
+
+
+def train_model_assembly(args):
+    """模型装配（= ``tools.train_residual.build_model`` 口径）+ 几何轴实例配置。"""
+    from tools.train_residual import build_model
+
+    model, load_info = build_model(args, _device_of(args))
+    model.set_readout_lane_geometry(str(args.readout_lane_geometry))
+    return model, load_info
+
+
+def _device_of(args):
+    import torch
+
+    return torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+
+
+def freeze_to_allowlist(model) -> tuple[list, list[str]]:
+    """除 allowlist（``net.path_head.TRAIN_ALLOWLIST_PREFIXES``）外全冻；返回可训参数与键名。"""
+    from net.path_head import TRAIN_ALLOWLIST_PREFIXES
+
+    prefixes = tuple(TRAIN_ALLOWLIST_PREFIXES)
+    trainable = []
+    for name, parameter in model.named_parameters():
+        allowed = name.startswith(prefixes)
+        parameter.requires_grad_(allowed)
+        if allowed:
+            trainable.append((name, parameter))
+    if not trainable:
+        raise SystemExit("[lateral] fail-fast：allowlist 未命中任何参数（结构化头未构造？）")
+    foreign = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and not name.startswith(prefixes)
+    ]
+    if foreign:  # pragma: no cover - 结构性排除
+        raise SystemExit(f"[lateral] fail-fast：存在 allowlist 外未冻结参数 {foreign[:3]}")
+    return trainable, sorted(name for name, _ in trainable)
+
+
+def training_data_arrays(args, data: dict) -> dict:
+    """训练张量视图：``action``（仅 main_ids）+ 掩码/目标/权重 + frame_weight（train×balance）。"""
+    import numpy as np
+
+    from pipeline.residual_dataset import load_base_dataset, resolve_path
+
+    index = np.asarray(data["main_ids"], dtype=np.int64)
+    base = load_base_dataset(resolve_path(Path(args.base_dataset)))
+    arrays = base["dataset"].arrays
+    rows = data["rows"]
+    base_rows = np.asarray(
+        [
+            base["lookup"][(int(rows["spec_id"][i]), int(rows["episode_id"][i]), int(rows["step"][i]))]
+            for i in index
+        ],
+        dtype=np.int64,
+    )
+    train_w = np.asarray(arrays["train_weight"], dtype=np.float32)[base_rows]
+    balance_w = np.asarray(arrays["balance_weight"], dtype=np.float32)[base_rows]
+    if not bool((train_w > 0.5).all()):  # pragma: no cover - 结构性排除（ok 掩码已含 train_weight>0.5）
+        raise SystemExit("[lateral] fail-fast：训练行出现 train_weight≤0.5")
+    return {
+        "index": index,
+        "action": np.asarray(data["action"], dtype=np.float32)[index],
+        "step_mask": np.asarray(data["step_mask"], dtype=np.float32),
+        "station_target": np.asarray(data["station_target"], dtype=np.float32),
+        "station_mask": np.asarray(data["station_mask"], dtype=np.float32),
+        "speed_weight": np.asarray(data["speed_weight"], dtype=np.float32),
+        "frame_weight": (train_w * balance_w).astype(np.float32),
+        "base": base,
+    }
+
+
+def batch_tensors(view: dict, index: "np.ndarray", device):
+    """行索引 → device 张量批（目标/掩码/权重；obs 由 ``build_obs`` 另组装）。"""
+    import torch
+
+    def take(array):
+        return torch.as_tensor(np.asarray(array)[index], dtype=torch.float32, device=device)
+
+    return {
+        "action": take(view["action"]),
+        "step_mask": take(view["step_mask"]),
+        "station_target": take(view["station_target"]),
+        "station_mask": take(view["station_mask"]),
+        "speed_weight": take(view["speed_weight"]),
+        "frame_weight": take(view["frame_weight"]),
+    }
+
+
+def batch_loss_terms(model, obs, batch: dict, config: lateral_losses.LateralLossConfig, args) -> dict:
+    """单批前向 + 损失（L_action + L_plan + 横向项；单一出处 = trainer / lateral_losses）。
+
+    ``--forward-mode chain``（默认；= 既有 ``trainer._phase3_loss_terms`` 口径）= 模型自身
+    ``policy_wm_rollout`` 6 步想象链：``plan`` = 链 plan（评测 ``--tail chain`` 的同一产物），
+    ``action_mu`` = t0 动作（≡ ``encode`` 的 ``action``，逐位）；``t0`` = 仅 ``encode``（诊断臂；
+    G-iter1 已证：t0-only 目标不管 k≥1 想象latent ⇒ 链尾失控 ⇒ 不作正式臂）。
+    """
+    import torch
+
+    from pipeline.trainer import weighted_action_chain_loss
+
+    forward_mode = str(getattr(args, "forward_mode", "chain") or "chain")
+    if forward_mode == "chain":
+        out = model(obs, forward_mode="policy_wm_rollout")
+        action_pred = out["action_mu"]
+        plan_pred = out["plan"]
+        kappa_pred = torch.stack(
+            [
+                out["structured_kappa_near"][:, 0],
+                out["structured_aux_kappa_mid"][:, 0],
+                out["structured_aux_kappa_far"][:, 0],
+            ],
+            dim=-1,
+        )
+    elif forward_mode == "t0":
+        out = model.encode(obs)["path"]
+        action_pred = out["action"]
+        plan_pred = out["plan_aux"]
+        kappa_pred = torch.stack([out["kappa_near"], out["kappa_mid"], out["kappa_far"]], dim=-1)
+    else:
+        raise SystemExit(f"[lateral] fail-fast：--forward-mode 只支持 chain | t0，收到 {forward_mode!r}")
+    frame_w = batch["frame_weight"]
+    diff = action_pred - batch["action"][:, 0]
+    per_sample = (diff ** 2).mean(dim=-1)
+    l_action = (per_sample * frame_w).sum() / frame_w.sum().clamp_min(1e-8)
+    l_plan, per_step = weighted_action_chain_loss(
+        plan_pred, batch["action"], batch["step_mask"], frame_weight=frame_w, loss_type="l2"
+    )
+    lateral = lateral_losses.lateral_loss_terms(
+        config,
+        kappa_pred=kappa_pred,
+        kappa_target=batch["station_target"],
+        kappa_mask=batch["station_mask"],
+        plan_pred=plan_pred,
+        plan_target_mask=batch["step_mask"],
+        base_sample_weights=batch["speed_weight"],
+    )
+    total = float(args.action_weight) * l_action + float(args.chain_weight) * l_plan + lateral["total"]
+    return {
+        "total": total,
+        "l_action": float(args.action_weight) * l_action,
+        "l_plan": float(args.chain_weight) * l_plan,
+        "lateral_terms": {key: value for key, value in lateral["terms"].items()},
+        "lateral_total": lateral["total"],
+        "lateral_active": tuple(lateral["active"]),
+        "parts": {
+            "action": float(args.action_weight) * l_action,
+            "chain": float(args.chain_weight) * l_plan,
+            "lateral": lateral["total"],
+        },
+        "plan_per_step": per_step,
+        "forward_mode": forward_mode,
+    }
+
+
+def _grad_probe(model, obs, batch, config, args, trainable, *, terms: dict | None = None) -> dict:
+    """首步分项梯度探针：三项各自对 allowlist 的梯度范数 + 两两 cosine（retain_graph）。"""
+    import torch
+
+    params = [parameter for _, parameter in trainable]
+    if terms is None:
+        terms = batch_loss_terms(model, obs, batch, config, args)
+    vectors = {}
+    for label in ("action", "chain", "lateral"):
+        part = terms["parts"][label]
+        if not torch.is_tensor(part) or not part.requires_grad:
+            vectors[label] = None  # 零图项（如 p0 的横向项）无梯度
+            continue
+        grads = torch.autograd.grad(part, params, retain_graph=True, allow_unused=True)
+        vectors[label] = torch.cat(
+            [
+                (grad.detach().reshape(-1) if grad is not None else torch.zeros_like(parameter).reshape(-1))
+                for grad, (_, parameter) in zip(grads, trainable)
+            ]
+        )
+
+    def _cos(a, b) -> float:
+        if a is None or b is None:
+            return float("nan")
+        denom = float(a.norm()) * float(b.norm())
+        return float(torch.dot(a, b) / denom) if denom > 1e-12 else float("nan")
+
+    return {
+        "grad_norm": {
+            label: (None if vector is None else float(vector.norm())) for label, vector in vectors.items()
+        },
+        "cos": {
+            "action_chain": _cos(vectors["action"], vectors["chain"]),
+            "action_lateral": _cos(vectors["action"], vectors["lateral"]),
+            "chain_lateral": _cos(vectors["chain"], vectors["lateral"]),
+        },
+        "loss_values": {key: float(value.detach()) for key, value in terms["parts"].items()},
+    }
+
+
+def train_loop(args, data: dict) -> int:
+    """正式训练循环（F 预注册共同面；写 ``--train-out``）。"""
+    import hashlib
+    import numpy as np
+    import torch
+
+    from pipeline.residual_dataset import build_obs
+
+    if float(args.replan_coef if args.replan_coef is not None else 0.0) > 0.0 or bool(args.lqr_reweight):
+        raise SystemExit(
+            "[lateral] fail-fast：P3/P4 训练期接线不在本批（F 预注册 §8-3；跨帧双前向 / LQR 权重量产"
+            " 待 P1 过门后另立）"
+        )
+    config = resolve_loss_config(args)
+    if config.replan_coef or config.lqr_reweight:  # pragma: no cover - 同上（arm 预置路径）
+        raise SystemExit("[lateral] fail-fast：P3/P4 训练期接线不在本批（F 预注册 §8-3）")
+    smoke = int(args.smoke_steps) > 0
+    if float(args.grad_clip) < 0.0:
+        raise SystemExit(f"[lateral] fail-fast：--grad-clip 非法（{args.grad_clip}）")
+
+    started = time.time()
+    torch.manual_seed(int(args.seed))
+    np_rng = np.random.default_rng(int(args.seed))
+
+    model, load_info = train_model_assembly(args)
+    trainable, allow_names = freeze_to_allowlist(model)
+    optimizer = torch.optim.Adam(
+        [parameter for _, parameter in trainable],
+        lr=float(args.lr),
+        weight_decay=float(args.weight_decay),
+    )
+    optimizer_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+    if optimizer_ids != {id(p) for _, p in trainable}:  # pragma: no cover - allowlist 断言
+        raise SystemExit("[lateral] fail-fast：optimizer 参数集 ≠ allowlist（冻结面违约）")
+    frozen_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if not name.startswith(tuple(__import__("net.path_head", fromlist=["x"]).TRAIN_ALLOWLIST_PREFIXES))
+    }
+
+    view = training_data_arrays(args, data)
+    main_ids = view["index"]
+    train_idx = np.flatnonzero(np.asarray(data["train_mask"], dtype=bool))
+    val_idx = np.flatnonzero(np.asarray(data["val_mask"], dtype=bool))
+    n_train = int(train_idx.size)
+
+    plan = {
+        "arm": args.arm,
+        "forward_mode": str(args.forward_mode),
+        "loss_config": {key: value for key, value in config.__dict__.items()},
+        "lr": float(args.lr),
+        "weight_decay": float(args.weight_decay),
+        "grad_clip": float(args.grad_clip),
+        "batch_size": int(args.batch_size),
+        "epochs": int(args.epochs),
+        "max_steps": int(args.max_steps),
+        "max_wall_s": float(args.max_wall_s),
+        "action_weight": float(args.action_weight),
+        "chain_weight": float(args.chain_weight),
+        "steps_per_epoch": int(np.ceil(n_train / max(1, int(args.batch_size)))),
+        "n_train_pairs": n_train,
+        "n_val_pairs": int(val_idx.size),
+        "seed": int(args.seed),
+    }
+    ledger: dict[str, Any] = {
+        "mode": "smoke-steps" if smoke else "train",
+        "runner": "R41 第二批执行-G（训练循环；F 预注册 §1 共同面）",
+        "plan": plan,
+        "data": data["meta"],
+        "geometry": {
+            "readout_lane_geometry": str(model.readout_lane_geometry),
+            "note": "训练前向（encode→path）对几何轴逐位不敏感（g_probe 实测：default≡legacy_aligned；"
+                    "corrected 只改 rollout 步几何，t0 头输出 maxΔ=0）",
+        },
+        "model": {
+            "ckpt": load_info["ckpt"],
+            "ckpt_sha256": load_info["ckpt_sha256"],
+            "init": str(args.init),
+            "init_sha256": _sha256(Path(resolve_path(Path(args.init)))),
+            "model_config": str(args.model_config),
+            "model_config_sha256": _sha256(Path(resolve_path(Path(args.model_config)))),
+            "missing_keys": load_info["missing_keys"],
+            "unexpected_keys": load_info["unexpected_keys"],
+            "total_params": int(sum(p.numel() for p in model.parameters())),
+            "allowlist_tensors": len(trainable),
+            "allowlist_params": int(sum(p.numel() for _, p in trainable)),
+            "frozen_params": int(
+                sum(
+                    p.numel()
+                    for name, p in model.named_parameters()
+                    if not name.startswith(tuple(__import__("net.path_head", fromlist=["x"]).TRAIN_ALLOWLIST_PREFIXES))
+                )
+            ),
+            "allowlist_names": allow_names,
+        },
+        "epochs": [],
+        "steps": [],
+        "grad_probe": None,
+        "stop": {"reason": "running", "steps_done": 0, "wall_s": None},
+    }
+
+    def evaluate(split: str) -> dict:
+        index_pool = val_idx if split == "val" else train_idx
+        totals = {"total": 0.0, "l_action": 0.0, "l_plan": 0.0, "lateral": 0.0}
+        lateral_terms: dict[str, float] = {}
+        batches = 0
+        with torch.no_grad():
+            for start in range(0, index_pool.size, int(args.val_batch_size)):
+                index = index_pool[start : start + int(args.val_batch_size)]
+                obs = build_obs(data["rows"], main_ids[index], device=_device_of(args), base_dataset=view["base"])
+                terms = batch_loss_terms(model, obs, batch_tensors(view, index, _device_of(args)), config, args)
+                totals["total"] += float(terms["total"])
+                totals["l_action"] += float(terms["l_action"])
+                totals["l_plan"] += float(terms["l_plan"])
+                totals["lateral"] += float(terms["lateral_total"])
+                for key, value in terms["lateral_terms"].items():
+                    lateral_terms[key] = lateral_terms.get(key, 0.0) + float(value)
+                batches += 1
+        scale = 1.0 / max(1, batches)
+        return {
+            "split": split,
+            "n_pairs": int(index_pool.size),
+            "batches": batches,
+            **{key: value * scale for key, value in totals.items()},
+            "lateral_terms": {key: value * scale for key, value in lateral_terms.items()},
+        }
+
+    def save_ckpt(tag: str, epoch_label: int, val: dict) -> str:
+        from pipeline.stages import save_checkpoint
+
+        out_dir = train_out_dir(args)
+        payload = {
+            "arm": args.arm,
+            "round": "round41",
+            "lane": "g",
+            "task": f"lateral_{args.arm}",
+            "epoch": int(epoch_label),
+            "loss_config": plan["loss_config"],
+            "weights": {"action": plan["action_weight"], "chain": plan["chain_weight"]},
+            "plan": plan,
+            "val": val,
+            "runner": str(Path(__file__).resolve()),
+            "runner_sha256": _sha256(Path(__file__).resolve()),
+            "data": data["meta"],
+            "allowlist": allow_names,
+            "load_info_ckpt_sha256": load_info["ckpt_sha256"],
+            "geometry": {"readout_lane_geometry": str(model.readout_lane_geometry)},
+            "harness": _json_sanitize(harness_info()),
+        }
+        path = str(out_dir / tag)
+        save_checkpoint(path, model, meta=payload, optimizer=optimizer, epoch=int(epoch_label), val_metrics=val)
+        return path
+
+    train_out_dir(args).mkdir(parents=True, exist_ok=True)
+    stop_reason = "completed"
+    steps_done = 0
+    step_times: list[float] = []
+    budget_steps = int(args.max_steps)
+    budget_reduced: dict | None = None
+    ckpt_points: list[dict] = []
+    selected: dict | None = None
+    epoch_index = 0
+    run_started = time.time()
+    if smoke:
+        budget_steps = min(budget_steps, int(args.smoke_steps))
+    while epoch_index < int(args.epochs) and stop_reason == "completed":
+        epoch_index += 1
+        order = train_idx[np_rng.permutation(n_train)]
+        sums = {"total": 0.0, "l_action": 0.0, "l_plan": 0.0, "lateral": 0.0}
+        epoch_batches = 0
+        for start in range(0, order.size, int(args.batch_size)):
+            index = order[start : start + int(args.batch_size)]
+            device = _device_of(args)
+            obs = build_obs(data["rows"], main_ids[index], device=device, base_dataset=view["base"])
+            batch = batch_tensors(view, index, device)
+            step_started = time.time()
+            terms = batch_loss_terms(model, obs, batch, config, args)
+            if ledger["grad_probe"] is None and bool(args.grad_probe):
+                # 首步分项梯度探针（同图 3 次 autograd.grad；不写参数、不吞图：retain_graph ⇒ 之后可正常 backward）
+                ledger["grad_probe"] = _grad_probe(
+                    model, obs, batch, config, args, trainable, terms=terms
+                )
+            optimizer.zero_grad(set_to_none=True)
+            terms["total"].backward()
+            if float(args.grad_clip) > 0.0:
+                torch.nn.utils.clip_grad_norm_([p for _, p in trainable], float(args.grad_clip))
+            optimizer.step()
+            steps_done += 1
+            epoch_batches += 1
+            for key in sums:
+                value = terms["lateral_total"] if key == "lateral" else terms[key]
+                sums[key] += float(value)
+            step_times.append(time.time() - step_started)
+            if steps_done % max(1, int(args.log_every)) == 0 or steps_done == 1:
+                recent = float(np.mean(step_times[-min(50, len(step_times)) :]))
+                ledger["steps"].append(
+                    {
+                        "step": steps_done,
+                        "epoch": epoch_index,
+                        "total": float(terms["total"]),
+                        "l_action": float(terms["l_action"]),
+                        "l_plan": float(terms["l_plan"]),
+                        "lateral": float(terms["lateral_total"]),
+                        "lateral_terms": {k: float(v) for k, v in terms["lateral_terms"].items()},
+                        "step_time_s": recent,
+                    }
+                )
+                print(
+                    f"[lateral] epoch {epoch_index} step {steps_done} total={float(terms['total']):.6f} "
+                    f"action={float(terms['l_action']):.6f} plan={float(terms['l_plan']):.6f} "
+                    f"lateral={float(terms['lateral_total']):.6f}（{recent:.3f} s/step）",
+                    flush=True,
+                )
+            if steps_done == int(args.calib_steps) and step_times:
+                mean_step = float(np.mean(step_times))
+                remaining_steps = int(min(plan["max_steps"], plan["epochs"] * plan["steps_per_epoch"])) - steps_done
+                projected = mean_step * remaining_steps
+                print(
+                    f"[lateral] 成本标定：步时 {mean_step:.4f} s（n={len(step_times)}）⇒ 预计剩余 "
+                    f"{projected/60:.1f} min；预算 {float(args.max_wall_s)/60:.1f} min",
+                    flush=True,
+                )
+                ledger["calibration"] = {
+                    "steps": steps_done,
+                    "mean_step_s": mean_step,
+                    "projected_remaining_s": projected,
+                    "budget_s": float(args.max_wall_s),
+                }
+                if projected > float(args.max_wall_s):
+                    fit = max(1, int(float(args.max_wall_s) / mean_step) - steps_done)
+                    budget_reduced = {
+                        "reason": "projected_over_budget",
+                        "max_steps_before": budget_steps,
+                        "max_steps_after": steps_done + fit,
+                        "projected_s": projected,
+                        "budget_s": float(args.max_wall_s),
+                    }
+                    budget_steps = steps_done + fit
+                    print(f"[lateral] WARN：投影超预算 ⇒ 降 step 至 {budget_steps}（记账不静默）", flush=True)
+            if steps_done >= budget_steps:
+                stop_reason = "max_steps"
+            if (time.time() - run_started) > float(args.max_wall_s):
+                stop_reason = "wall_budget"
+            if stop_reason != "completed":
+                print(
+                    f"[lateral] 训练停止：{stop_reason}（steps={steps_done}, wall={time.time()-run_started:.1f}s）",
+                    flush=True,
+                )
+                break
+        scale = 1.0 / max(1, epoch_batches)
+        train_eval = {key: value * scale for key, value in sums.items()}
+        val_eval = evaluate("val")
+        epoch_record = {
+            "epoch": epoch_index,
+            "steps_done": steps_done,
+            "train_loss_mean": train_eval,
+            "val": val_eval,
+            "elapsed_s": round(time.time() - run_started, 1),
+        }
+        ledger["epochs"].append(epoch_record)
+        print(
+            f"[lateral] epoch {epoch_index} 完：train total={train_eval['total']:.6f} / "
+            f"val total={val_eval['total']:.6f}"
+            f"（action={val_eval['l_action']:.6f} plan={val_eval['l_plan']:.6f} lateral={val_eval['lateral']:.6f}）",
+            flush=True,
+        )
+        if not smoke:
+            tag = f"ckpt_epoch{epoch_index:03d}.pt"
+            path = save_ckpt(tag, epoch_index, val_eval)
+            ckpt_points.append({"epoch": epoch_index, "path": path, "val_total": val_eval["total"]})
+            if selected is None or val_eval["total"] < selected["val_total"]:
+                selected = {"epoch": epoch_index, "path": path, "val_total": val_eval["total"]}
+        if stop_reason != "completed":
+            break
+    if stop_reason == "completed" and steps_done >= budget_steps:
+        stop_reason = "max_steps"
+
+    # ---- 冻结面逐位守卫（训练后） ----
+    frozen_after = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if name not in set(allow_names)
+    }
+    max_frozen_delta = 0.0
+    changed = []
+    for name, before in frozen_before.items():
+        after = frozen_after.get(name)
+        if after is None:
+            changed.append(name)
+            continue
+        delta = float((before - after).abs().max())
+        if delta > 0.0:
+            changed.append(name)
+        max_frozen_delta = max(max_frozen_delta, delta)
+    ledger["frozen_guard"] = {
+        "n_frozen_tensors": len(frozen_before),
+        "changed_tensors": changed[:10],
+        "max_abs_delta": max_frozen_delta,
+        "bitwise_unchanged": not changed,
+    }
+    ledger["stop"] = {
+        "reason": stop_reason,
+        "steps_done": steps_done,
+        "wall_s": round(sum(step_times), 1),
+        "budget": {"max_steps": budget_steps, "max_wall_s": float(args.max_wall_s), "reduction": budget_reduced},
+    }
+    ledger["selection"] = (
+        {"rule": "val 最优（episode 级；仅 val）", "points": ckpt_points, "best": selected}
+        if not smoke
+        else {"rule": "smoke-steps：无选点", "points": [], "best": None}
+    )
+    if not smoke and selected is not None:
+        from shutil import copyfile
+
+        best_path = train_out_dir(args) / "ckpt_selected.pt"
+        copyfile(selected["path"], best_path)
+        selected["selected_copy"] = str(best_path)
+    ledger["hashes"] = {
+        "net_tree": _net_tree_digest(),
+        "harness_sha256": _combined_harness_sha(harness_info()),
+        "harness": _json_sanitize(harness_info()),
+        "data_identity_sha256": hashlib.sha256(
+            (
+                json.dumps(data["meta"], sort_keys=True, default=str)
+                + "|"
+                + hashlib.sha256(np.asarray(main_ids, dtype=np.int64).tobytes()).hexdigest()
+            ).encode("utf-8")
+        ).hexdigest(),
+        "ckpt_sha256": {Path(point["path"]).name: _sha256(Path(point["path"])) for point in ckpt_points},
+        "runner_sha256": _sha256(Path(__file__).resolve()),
+    }
+    ledger["elapsed_s"] = round(sum(step_times), 1)
+    ledger["wall_s"] = round(time.time() - run_started, 1)
+    out_dir = train_out_dir(args)
+    log_name = "smoke_steps.json" if smoke else "train_log.json"
+    log_path = out_dir / log_name
+    log_path.write_text(json.dumps(_json_sanitize(ledger), ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"[lateral] → {log_path}", flush=True)
+    if smoke:
+        per_step = float(np.mean(step_times)) if step_times else None
+        print(
+            json.dumps(
+                {
+                    "mode": "smoke-steps",
+                    "arm": args.arm,
+                    "steps": steps_done,
+                    "mean_step_s": per_step,
+                    "s_per_1000_steps": None if per_step is None else per_step * 1000,
+                    "projected_2epoch_min": None
+                    if per_step is None
+                    else per_step * plan["steps_per_epoch"] * plan["epochs"] / 60.0,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return 0
+    if not ledger["frozen_guard"]["bitwise_unchanged"]:  # pragma: no cover - 结构性排除
+        raise SystemExit("[lateral] fail-fast：冻结面出现改动（见 train_log.frozen_guard）")
+    print(
+        f"[lateral] 训练完成：steps={steps_done} 选点 epoch={selected['epoch'] if selected else None} "
+        f"val={selected['val_total'] if selected else None}",
+        flush=True,
+    )
+    return 0
+
+
+def train_out_dir(args) -> Path:
+    """训练产物目录（默认 ``runs/dev/round41/<arm>``；F 预注册 §4 ckpt 命名域）。"""
+    raw = args.train_out or f"runs/dev/round41/{args.arm}"
+    path = Path(raw)
+    return path if path.is_absolute() else ROOT / path
+
+
+# --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
@@ -533,13 +1169,16 @@ def main(argv=None) -> int:
 
     started = time.time()
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    if not (args.dry_run or args.check_features or args.assemble_smoke):
+    if not (args.dry_run or args.check_features or args.assemble_smoke or training_mode(args)):
         raise SystemExit(
-            "[lateral] fail-fast：本 runner 不执行训练（R41-F 纪律）；"
-            "请用 --dry-run / --check-features / --assemble-smoke"
+            "[lateral] fail-fast：未知运行模式；"
+            "请用 --dry-run / --check-features / --assemble-smoke / --train / --smoke-steps N"
         )
     data = build_lateral_data(args)
     print(f"[lateral] pairs {data['meta']}", flush=True)
+    if training_mode(args):
+        # R41 第二批执行-G：正式训练循环（写 runs/dev/round41/<arm>/**）
+        return train_loop(args, data)
     report = assemble_report(data)
     report["meta"] = {
         "runner": "R41 第二批-F（横向训练栈装配；零训练）",
