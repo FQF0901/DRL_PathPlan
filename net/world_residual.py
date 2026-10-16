@@ -20,8 +20,9 @@
 2. 复用 ``st_gnn`` 还要求把其内部先验从 kin_a 改成 kin_b（或训练目标错基）——正是
    ``B1_residual`` 记录的错配来源，且触碰 WM 训练语义（``st_gnn`` 为共享模块）；
 3. 专用小头把训练面收敛为**唯一可训模块**：optimizer allowlist = 本头全部参数，其余全冻；
-   参数量 ≤ :data:`HEAD_PARAM_CAP`（20k），在 +2% 预算余量（30,211）内（``net/param_probe.py``
-   同源基线 1,510,570 → 上限 1,540,781）。
+   参数量 ≤ :data:`HEAD_PARAM_CAP`（20k），总量 ≤ :data:`TOTAL_PARAM_CAP` = 2,000,000
+   （= ``net/param_probe.TOTAL_CAP``，GPT R40 §五.5 绝对上限；R39「基线 ×1.02 = 1,540,781」
+   乘性规则废止）。
 
 设计（训练与评测**同一实现**）
 ------------------------------
@@ -64,7 +65,7 @@ __all__ = [
     "READOUT_RESIDUAL_FIELDS",
     "READOUT_RESIDUAL_INDICES",
     "TOTAL_PARAM_BASELINE",
-    "TOTAL_PARAM_LIMIT",
+    "TOTAL_PARAM_CAP",
     "TARGET_LOSS_SCALE",
     "TTC_EVENT_TAU_S",
     "ReadoutResidualHead",
@@ -102,11 +103,13 @@ TARGET_LOSS_SCALE: tuple[float, ...] = (0.5, 0.5, 0.5, 10.0)
 COLUMN_LOSS_WEIGHTS: tuple[float, ...] = (2.0, 0.5, 1.0, 1.0)
 #: B2b TTC 事件式监督的软判据尺度（``σ((cap − pred)/τ)``；秒）
 TTC_EVENT_TAU_S = 10.0
-#: 本头参数上限（GPT R39 §5.83 参数门：总量 ≤ 基线 ×1.02 ⇒ 余量 30,211；留出裕度定 20k）
+#: 本头参数上限（GPT R39 §5.83 参数门：头 ≤ 20k ⇒ 现装配下总量仍 ≤ 2,000,000 绝对上限）
 HEAD_PARAM_CAP = 20_000
-#: 总量基线/上限（= ``net/param_probe.TOTAL_BASELINES["structured"]`` × ``TOTAL_LIMIT``）
+#: 总量**绝对上限**（= ``net/param_probe.TOTAL_CAP``；GPT R40 §五.5「总参数 ≤2,000,000」；
+#: R39「基线 ×1.02」乘性规则废止）
+TOTAL_PARAM_CAP = 2_000_000
+#: 历史基线 = R39-A2 实测 structured 总量（**报告/回归对照**用；不参与上限断言）
 TOTAL_PARAM_BASELINE = 1_510_570
-TOTAL_PARAM_LIMIT = 1.02
 
 
 class ReadoutResidualHead(nn.Module):
@@ -422,23 +425,22 @@ def check_param_budget(
     head: nn.Module,
     *,
     model_total: int | None = None,
-    baseline: int = TOTAL_PARAM_BASELINE,
-    limit: float = TOTAL_PARAM_LIMIT,
+    cap: int = TOTAL_PARAM_CAP,
     head_cap: int = HEAD_PARAM_CAP,
 ) -> dict[str, int]:
-    """参数门断言（``net/param_probe.py`` 同源基线）：head ≤ cap ∧（可选）总量 ≤ 基线×1.02。"""
+    """参数门断言（``net/param_probe.TOTAL_CAP`` 同源**绝对**上限）：head ≤ cap ∧（可选）总量 ≤ cap。"""
     head_params = residual_head_param_count(head)
     if head_params > int(head_cap):
         raise AssertionError(f"[world_residual] 残差头参数 {head_params} > 上限 {head_cap}")
-    report = {"head_params": head_params, "head_cap": int(head_cap), "baseline": int(baseline)}
+    report = {"head_params": head_params, "head_cap": int(head_cap), "total_cap": int(cap)}
     if model_total is not None:
         total = int(model_total)
-        cap = int(baseline * float(limit))
-        if total > cap:
+        if total > int(cap):
             raise AssertionError(
-                f"[world_residual] 模型总量 {total} > 基线 {baseline} × {limit} = {cap}"
+                f"[world_residual] 模型总量 {total} > 绝对上限 {int(cap)}"
+                "（= net/param_probe.TOTAL_CAP；R40 §五.5）"
             )
-        report.update({"model_total": total, "model_total_cap": cap})
+        report.update({"model_total": total, "model_total_cap": int(cap)})
     return report
 
 

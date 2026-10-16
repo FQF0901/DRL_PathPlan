@@ -11,7 +11,8 @@
    ``LEARNED_ALLOWED`` 四列 ∧ ``present=1`` 行（missing 行不加、值保持 0）；source 变
    ``learned``；形状/非有限 fail-fast。
 3. **头契约**：末层零初始化 ⇒ Δ ≡ 0（严格）；输出有界（caps·tanh）；参数 ≤ ``HEAD_PARAM_CAP``；
-   预算断言（``check_param_budget``）；输入形状 fail-fast。
+   预算断言（``check_param_budget``；总量 ≤ ``TOTAL_PARAM_CAP`` = 2,000,000 绝对上限 =
+   ``net/param_probe.TOTAL_CAP``）；输入形状 fail-fast。
 4. **同一实现**：``readout_residual_features``/``apply_readout_residual`` 掩码 = base present；
    ``column_residual_loss`` = one-step 真值监督（掩码/scale/形状）。
 5. **B2 ≡ B1（零头）**：同一模型同输入，``analytic`` 与（挂零初始化头的）``analytic_learned``
@@ -30,6 +31,7 @@ from net.world_residual import (
     DELTA_CAPS,
     HEAD_PARAM_CAP,
     READOUT_RESIDUAL_FIELDS,
+    TOTAL_PARAM_CAP,
     ReadoutResidualHead,
     apply_readout_residual,
     check_param_budget,
@@ -275,8 +277,14 @@ def test_residual_head_zero_init_bounded_and_param_cap() -> None:
     assert params == head.param_count() and params <= HEAD_PARAM_CAP
     report = check_param_budget(head)
     assert report["head_params"] == params and report["head_cap"] == HEAD_PARAM_CAP
+    assert report["total_cap"] == TOTAL_PARAM_CAP == 2_000_000
     with pytest.raises(AssertionError):
         check_param_budget(head, head_cap=params - 1)
+    # R40 §五.5 绝对上限（= net/param_probe.TOTAL_CAP；R39「基线×1.02」乘性规则废止）：
+    # 阈值处通过、超一即拒
+    assert check_param_budget(head, model_total=TOTAL_PARAM_CAP)["model_total_cap"] == TOTAL_PARAM_CAP
+    with pytest.raises(AssertionError):
+        check_param_budget(head, model_total=TOTAL_PARAM_CAP + 1)
     with pytest.raises(AssertionError):
         check_param_budget(head, model_total=10_000_000)
     with pytest.raises(ValueError):

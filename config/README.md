@@ -23,6 +23,7 @@
 | `model.yaml` | 网络结构 | `pipeline.stages.build_model`（`pipeline/stages.py:152-194`）；`pipeline.vector_env.load_supervised_labels`（`pipeline/vector_env.py:104-131`）；评测/采集侧 model_config 透传（`pipeline/eval_runner.py:1808,1831`、`tools/dagger_collect.py:1284-1300`） |
 | `train.yaml` | 运行开关 / 分阶段训练 / 监控 | `pipeline.stages`（`_resolve_*` 与各 stage 段）、`tools/run_config.py:56-166`、`pipeline/phase3_loop.py`（`stages.B.phase3` 段，`Phase3LoopConfig.from_config` = `:473-548`） |
 | `eval.yaml` | 评测 spec / KPI / 阈值 / dataset_gate | `pipeline.eval_runner.py`（`1754`、`1762-1764`、`1866-1869`；阈值判定 `406-470`） |
+| `residual_train.yaml` | 残差头训练配置（R40 §六.10 入库 runner 专用；**不**参与 `default.yaml::includes`） | `tools/train_residual.py`（两段解析：先 `--config` 再以配置作 CLI 默认值；未知键 fail-fast） |
 | `arms/` | 可执行 RL 臂配置 | 见 `config/arms/README.md` |
 
 ### env.yaml

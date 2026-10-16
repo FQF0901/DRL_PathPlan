@@ -1,0 +1,46 @@
+# 残差头训练配置（tools/train_residual.py；R40 §六.10 正式入库）
+#
+# 键名 = 该 runner 的 CLI dest（`--loss x` ⇔ `loss: x`）；CLI 同名键显式优先。
+# 数值口径 = round39/b2 生产 lane 默认值（`b2_train.py` 同参）；改动即新配方，须重新预注册。
+# split：按 (spec_id, episode_id) 整段切（episode 级，无泄漏；固定 seed 可复现），见 runner docstring。
+
+# ---- 路径 ----
+data: datasets/path_exec_v1                     # DP-6 路径执行抽取数据集（分片 + manifest）
+base_dataset: datasets/BTC20261007-2202_expert5k_v8   # obs 主键面来源（BCDataset 联合装载）
+init: runs/p1_v2/round22/M0/ckpt_epoch002.pt    # 装配初始化（结构化头 + MoE 关）
+model_config: runs/p1_v2/round22/M0/model.snapshot.yaml
+ckpt: runs/round36/j2/t1_keep_res/ckpt_epoch001.pt    # 训练基座（装载后全冻，只训残差头）
+out: runs/residual_train                        # 产物：residual_head.pt + train_log.json
+log_mirror: null                                # 可选：摘要镜像路径（null = 不写）
+
+# ---- 运行 ----
+device: cuda
+seed: 0                                         # 全局/训练种子（split 抽样 + 头初始化 + batch 顺序）
+
+# ---- batching / 特征 pass ----
+chunk: 256                                      # encode 批（特征 pass 与 eval 同 batching 口径；逐位门依赖）
+batch_size: 2048                                # 训练 macro-batch
+cache: ""                                       # 特征缓存：空串 = 禁用（现场重算）；给路径时需 n ∧ 指纹相符
+max_pairs: null                                 # null = 全量 pair 集；整数 = 种子抽样上限（冒烟/对拍用）
+shards: null                                    # null = 全量分片；列表 = path_exec_v1 子集
+
+# ---- split（episode 级） ----
+val_frac: 0.1                                   # val episode 占比（round(--val-frac × n_episodes)）
+
+# ---- 优化 ----
+epochs: 300
+patience: 40                                    # val 加权 MAE 早停
+lr: 1.0e-3
+weight_decay: 1.0e-4
+grad_clip: 5.0
+hidden: 64                                      # 残差头隐藏宽度（H=64 ⇒ 6,148 参数 ≤ 20k）
+log_every: 10
+
+# ---- 损失 ----
+loss: smooth_l1                                 # smooth_l1 | mse | l1 | aligned（B2b 对齐损失路径）
+beta: 1.0                                       # smooth_l1 的 beta
+# 以下三项仅 loss=aligned 生效（列权重默认 = net.world_residual.COLUMN_LOSS_WEIGHTS：
+# speed 加权 2.0 = 门主杠杆；TTC 走事件式 BCE + 分档回归）
+column_weights: [2.0, 0.5, 1.0, 1.0]
+ttc_event_weight: 0.5
+ttc_regression_weight: 0.5
