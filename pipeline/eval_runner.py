@@ -1829,6 +1829,51 @@ def build_eval_references(
     return tail
 
 
+#: R41-J：``env.tracking`` 可覆盖的 ``LqrTracker`` 构造键（白名单；空配置 = 逐位不变）。
+LQR_TRACKER_KEYS: Tuple[str, ...] = (
+    "wheelbase",
+    "max_steer_angle_rad",
+    "lookahead_time",
+    "lookahead_base",
+    "lookahead_min",
+    "lookahead_max",
+    "q_lateral",
+    "q_heading",
+    "r_steer",
+    "steer_gain",
+    "design_speed_mps",
+    "reschedule_dv",
+    "riccati_iters",
+    "riccati_tol",
+    "speed_gain",
+    "accel_action_scale",
+    "brake_action_scale",
+    "reference_dt",
+    "reference_hz",
+    "ref_speed_scale",
+    "telemetry_coupling",
+    "curvature_feedforward",
+    "ff_gain",
+)
+
+
+def lqr_tracker_kwargs(config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """``env.tracking`` 配置 → ``LqrTracker`` 构造 kwargs（R41-J 预瞄口径轴）。
+
+    默认路径（``config`` 为空/None）返回 ``{}`` ⇒ ``engine.add_policy`` 调用**逐位不变**。
+    非空时按 :data:`LQR_TRACKER_KEYS` 白名单透传（键名 = ``LqrTracker`` 构造参数；
+    ``env/tracking.py::LqrTracker.params`` 为单一出处）；未知键 **fail-fast**（禁静默忽略）。
+    """
+    if not config:
+        return {}
+    unknown = sorted(set(str(key) for key in config) - set(LQR_TRACKER_KEYS))
+    if unknown:
+        raise ValueError(
+            f"env.tracking 含未知 LqrTracker 键 {unknown}（可选 {' | '.join(LQR_TRACKER_KEYS)}）"
+        )
+    return {str(key): value for key, value in config.items()}
+
+
 # --------------------------------------------------------------------------- #
 # R41-A1：两遍法 truth IO（记录 pass → npz；注入 pass 读取 + 载荷构造）
 # --------------------------------------------------------------------------- #
@@ -2698,12 +2743,17 @@ class _CkptController:
         else:
             from env.tracking import LqrTracker  # N3 契约
 
+            # R41-J：预瞄口径轴（``env.tracking``；默认空 = 逐位不变的不变调用）
+            tracker_kwargs = lqr_tracker_kwargs(self.tracker_config)
+            if tracker_kwargs:
+                print(f"[eval_runner] LqrTracker 覆盖参数（R41-J env.tracking）：{tracker_kwargs}", flush=True)
             # 与训练侧 ``LocalEnvPool(_setup_episode)`` 同款：engine 注册 + 每策略步 set_reference
             self.tracker = env.engine.add_policy(
                 env.agent.id,
                 LqrTracker,
                 env.agent,
                 int(getattr(self.spec, "seed", 0)),
+                **tracker_kwargs,
             )
             if hasattr(self.tracker, "reset"):
                 self.tracker.reset()

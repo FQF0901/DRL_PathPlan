@@ -187,6 +187,17 @@ def build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentPa
         "--fill-from", default="runs/p1_v2/round28/K1/ckpt_epoch002.pt",
         help="aligned：ckpt 缺失语义键回填源（= 评测 --fill-from 默认；K1e2 血统）",
     )
+    # ---- R41-J：联合区（低速 ∧ 中偏移）重加权 / 过采样（默认关 = 逐位不变；仅改权重/采样） ----
+    parser.add_argument(
+        "--joint-reweight", default="off", choices=("off", "weight", "oversample"),
+        help="R41-J：联合区（v < --joint-speed-max ∧ |lat| > --joint-lat-min）重加权/过采样。"
+             "off = 现权重逐位不变（默认）；weight = 区内训练行 frame_weight × --joint-factor；"
+             "oversample = 每 epoch 追加区内行 (round(factor)-1) 份（打乱后拼接）。"
+             "region 判定用 v7 store（--obs-source v7obs）的 lane_semantic 列 0（env 真口径）",
+    )
+    parser.add_argument("--joint-speed-max", type=float, default=5.0, help="联合区速度上界（m/s；R41-I 定义 = 5.0）")
+    parser.add_argument("--joint-lat-min", type=float, default=0.2, help="联合区 |lat| 下界（m；R41-I 定义 = 0.2）")
+    parser.add_argument("--joint-factor", type=float, default=4.0, help="权重倍数 / 过采样倍数（>1）")
     if config:
         parser.set_defaults(**dict(config))
     return parser
@@ -228,6 +239,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "[lateral] fail-fast：--long-exog-source v7obs 与 --obs-source v7obs 冗余"
             "（aligned 已整批取 store；该轴只用于 base obs 的 path_* 列）"
         )
+    # R41-J：联合区重加权/过采样（需 v7 store 的 lane_semantic 真口径；默认 off 不触达）
+    if str(getattr(args, "joint_reweight", "off")) != "off":
+        if str(args.obs_source) != "v7obs":
+            raise SystemExit(
+                "[lateral] fail-fast：--joint-reweight 需 --obs-source v7obs（region 判定用 store "
+                "lane_semantic 列 0 真口径；G 批 base obs 不对齐评测域）"
+            )
+        if not (float(getattr(args, "joint_factor", 4.0)) > 1.0):
+            raise SystemExit(
+                f"[lateral] fail-fast：--joint-factor 必须 >1（收到 {getattr(args, 'joint_factor', None)}）"
+            )
+        if not (float(getattr(args, "joint_speed_max", 5.0)) > 0.0) or not (
+            float(getattr(args, "joint_lat_min", 0.2)) >= 0.0
+        ):
+            raise SystemExit("[lateral] fail-fast：--joint-speed-max 需 >0 且 --joint-lat-min 需 ≥0")
     return args
 
 
@@ -777,6 +803,60 @@ def freeze_to_allowlist(model) -> tuple[list, list[str]]:
     return trainable, sorted(name for name, _ in trainable)
 
 
+def joint_region_mask(args, data: dict, view: dict) -> tuple[np.ndarray, dict]:
+    """R41-J：联合低速∧中偏移区掩码（main_ids 行序）+ 记账块（``--joint-reweight`` ≠ off）。
+
+    ``region = speed < --joint-speed-max ∧ |lat| > --joint-lat-min``；
+    - ``speed`` = ``data["speed"]``（``long_exog`` 列 0；main_ids 行，0.5 s 决策帧）；
+    - ``lat`` = v7 store ``lane_semantic`` 列 0（env 真口径，右正；R41-I §1 判定）——
+      缺行（store 无该帧）记 ``region=False``（这些行已被重放一致性门的 ``keep`` 排除）。
+
+    仅改**训练行**的权重/采样；Val 行保持原权重（选点可比性）。
+    """
+    store = view["v7_store"]
+    rows = np.asarray(view["v7_rows"], dtype=np.int64)
+    sem = np.asarray(store._arrays["lane_semantic"]).reshape(int(store.n), -1)
+    lat = np.full(rows.size, np.nan, dtype=np.float64)
+    ok = rows >= 0
+    lat[ok] = np.asarray(sem[rows[ok], 0], dtype=np.float64)
+    speed = np.asarray(data["speed"], dtype=np.float64)
+    region = (
+        np.isfinite(lat)
+        & np.isfinite(speed)
+        & (speed < float(args.joint_speed_max))
+        & (np.abs(lat) > float(args.joint_lat_min))
+    )
+    train_mask = np.asarray(data["train_mask"], dtype=bool)
+    v_train = speed[region & train_mask]
+    lat_train = lat[region & train_mask]
+    joint = {
+        "mode": str(args.joint_reweight),
+        "factor": float(args.joint_factor),
+        "speed_max": float(args.joint_speed_max),
+        "lat_min": float(args.joint_lat_min),
+        "n_region": int(region.sum()),
+        "region_frac": float(region.mean()),
+        "n_region_train": int((region & train_mask).sum()),
+        "region_train_frac": float((region & train_mask).sum() / max(1, train_mask.sum())),
+        "v_p50_region_train": float(np.median(v_train)) if v_train.size else None,
+        "abs_lat_p50_region_train": float(np.median(np.abs(lat_train))) if lat_train.size else None,
+    }
+    return region, joint
+
+
+def joint_oversample_indices(train_idx: np.ndarray, region: np.ndarray, factor: float) -> np.ndarray:
+    """R41-J：区内训练行追加 (round(factor)-1) 份的索引（``--joint-reweight oversample``）。
+
+    ``train_idx`` = 训练行位置（main_ids 行序）；``region`` = 同序 bool 掩码。
+    返回需追加的索引（未打乱；调用方按 RNG 打乱后拼接）。factor < 2 ⇒ 空数组。
+    """
+    repeats = max(1, int(round(float(factor)))) - 1
+    if repeats <= 0:
+        return np.zeros(0, dtype=np.int64)
+    hit = np.asarray(region, dtype=bool)[np.asarray(train_idx, dtype=np.int64)]
+    return np.tile(np.asarray(train_idx, dtype=np.int64)[hit], repeats)
+
+
 def training_data_arrays(args, data: dict) -> dict:
     """训练张量视图：``action``（仅 main_ids）+ 掩码/目标/权重 + frame_weight（train×balance）。
 
@@ -868,6 +948,26 @@ def training_data_arrays(args, data: dict) -> dict:
                 flush=True,
             )
         view.update({"v7_store": store, "v7_rows": store_rows, "keep": keep})
+        # R41-J：联合区重加权/过采样（默认 off ⇒ 零触达；仅训练行）
+        if str(getattr(args, "joint_reweight", "off")) != "off":
+            region, joint = joint_region_mask(args, data, view)
+            joint["apply_mask_train"] = int((region & np.asarray(data["train_mask"], dtype=bool)).sum())
+            if str(args.joint_reweight) == "weight":
+                train_mask = np.asarray(data["train_mask"], dtype=bool)
+                factor = float(args.joint_factor)
+                view["frame_weight"] = (
+                    np.asarray(view["frame_weight"], dtype=np.float32)
+                    * np.where(region & train_mask, factor, 1.0).astype(np.float32)
+                )
+                joint["weight_mean_train"] = float(
+                    np.asarray(view["frame_weight"], dtype=np.float64)[train_mask].mean()
+                )
+            elif str(args.joint_reweight) != "oversample":  # pragma: no cover - CLI choices 已限
+                raise SystemExit(f"[lateral] fail-fast：未知 --joint-reweight {args.joint_reweight!r}")
+            view["joint"] = {"region": region, **joint}
+            print(f"[lateral] 联合区（R41-J {joint['mode']} ×{joint['factor']}）："
+                  f"训练行 {joint['n_region_train']}/{int(np.asarray(data['train_mask']).sum())}"
+                  f"（{joint['region_train_frac']*100:.2f}%）", flush=True)
     elif view["long_exog_source"] == "v7obs":
         # R41-I：仅取 ``path_*`` 真口径列（margin/d2end）时的 store 装载（**不改行集/不改其他键**；
         # 缺行由 :func:`long_exog_override_from_store` fail-fast 记账）
@@ -1092,6 +1192,15 @@ def train_loop(args, data: dict) -> int:
     train_idx = np.flatnonzero(np.asarray(data["train_mask"], dtype=bool) & keep_mask)
     val_idx = np.flatnonzero(np.asarray(data["val_mask"], dtype=bool) & keep_mask)
     n_train = int(train_idx.size)
+    # R41-J：联合区过采样（每 epoch 追加区内训练行 (round(factor)-1) 份；权重档已在数组里生效）
+    joint = view.get("joint")
+    extra_train = 0
+    if joint is not None and str(joint["mode"]) == "oversample":
+        joint_region = np.asarray(joint["region"], dtype=bool)
+        extra_pool = joint_oversample_indices(train_idx, joint_region, float(joint["factor"]))
+        extra_train = int(extra_pool.size)
+        joint["repeats_per_epoch"] = max(1, int(round(float(joint["factor"])))) - 1
+        joint["n_oversample_extra_per_epoch"] = int(extra_train)
 
     plan = {
         "arm": args.arm,
@@ -1106,10 +1215,13 @@ def train_loop(args, data: dict) -> int:
         "max_wall_s": float(args.max_wall_s),
         "action_weight": float(args.action_weight),
         "chain_weight": float(args.chain_weight),
-        "steps_per_epoch": int(np.ceil(n_train / max(1, int(args.batch_size)))),
+        "steps_per_epoch": int(np.ceil((n_train + extra_train) / max(1, int(args.batch_size)))),
         "n_train_pairs": n_train,
         "n_val_pairs": int(val_idx.size),
         "seed": int(args.seed),
+        "joint_reweight": (
+            {key: value for key, value in joint.items() if key != "region"} if joint is not None else None
+        ),
     }
     ledger: dict[str, Any] = {
         "mode": "smoke-steps" if smoke else "train",
@@ -1237,6 +1349,11 @@ def train_loop(args, data: dict) -> int:
     while epoch_index < int(args.epochs) and stop_reason == "completed":
         epoch_index += 1
         order = train_idx[np_rng.permutation(n_train)]
+        if joint is not None and str(joint["mode"]) == "oversample" and extra_train > 0:
+            # R41-J：区内训练行追加 repeats 份（先打乱再拼接；每 epoch 重抽）
+            extra = joint_oversample_indices(train_idx, np.asarray(joint["region"], dtype=bool),
+                                             float(joint["factor"]))
+            order = np.concatenate([order, extra[np_rng.permutation(extra.size)]])
         sums = {"total": 0.0, "l_action": 0.0, "l_plan": 0.0, "lateral": 0.0}
         epoch_batches = 0
         for start in range(0, order.size, int(args.batch_size)):
