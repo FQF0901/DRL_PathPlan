@@ -49,7 +49,7 @@
 **批次**：**第一批**（①正式接线 ②residual 链入库 ③几何模型实例属性 ④几何入 hash/缓存键/ckpt ⑤h1–h6 parity）→ **第一批半**（消费者图）→ **第二批**（横向训练：**P0 现基线 / P1 +当前帧 κ 监督 / P2 +速度分桶横向监督 / P3 P2+跨帧重规划一致性〔`w(ΔS)·‖κ_t−Warp(κ_{t−1})‖` 门控版〕/ P4 P3+student−expert 重加权**；几何必须 legacy训练/legacy评测 + corrected训练/corrected评测 + 交叉测试）→ **第三批**（WorldState 一致性：统一 kinematics/geometry、ego latent 入 WorldState、底层 ego/OD residual、readout 全由 final state；**验收=状态一致/消费者真实存在/不污染安全**，不预设更大闭环收益）。
 **后置**：Memory（M0–M2）/detach（D0–D3）/learner-state DAgger / MoE/RL。
 
-**R41 进度**：**第一批半 ✅**（C：消费者图，见 §1.3②③④——已修正 LD 论断；输入结构修正项已列入第二批前置）｜**第一批**：① ✅（A1 `78db917`）、② ✅（B `38298d9`）、⑤ ✅（E：h1–h6 parity，见 §1.3⑤；守卫测试自包含 CPU 6 passed）、③④ 🕐（D 在飞：几何实例化+预算常量）。
+**R41 进度**：**第一批 ✅ 全闭**（① A1 `78db917`｜② B `38298d9`｜③④ D `9b99d6e`〔几何实例化五链路+预算常量清理；pytest 1208〕｜⑤ E `fbd0641`）＋**第一批半 ✅**（C；见 §1.3②③④）｜**第二批准备 🕐**（F：横向训练栈实现+预注册 P0–P4；**不训练**）。<br/>**D 遗留**：residual 特征链 readout 仍走进程默认（写域外，待收口）；`.slim/…/round39/a2_run.py` 的 TOTAL_LIMIT import 将失败（改 `tools.legacy`）。
 
 ## 3. 挂账
 
