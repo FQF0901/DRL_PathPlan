@@ -60,3 +60,9 @@ forward_mode: chain                             # chain = policy_wm_rollout 6 �
                                                 # t0 = 仅 encode（诊断臂；t0-only 目标不管 k≥1 想象 latent ⇒ 链尾失控，见 g_report §3）
 calib_steps: 20                                 # 步时标定窗口（成本标定 → 投影/降 step 记账）
 log_every: 100                                  # loss 曲线落点间隔
+
+# ---- R41 第二批执行-H：训练装配 = 评测装配（默认 legacy = G 批口径；旧路径逐位不动） ----
+assembly: legacy                                # legacy | aligned（aligned = v7 env obs + semantic K1e2 + inject 锚）
+obs_source: null                                # null = 按 assembly 解析（aligned ⇒ v7obs；legacy ⇒ base）
+v7_obs: runs/dev/round41/h_v7obs                # v7 重放存储目录（pipeline/lateral_v7obs；aligned 时必填）
+fill_from: runs/p1_v2/round28/K1/ckpt_epoch002.pt  # aligned：缺失语义键回填源（= 评测 --fill-from 默认）

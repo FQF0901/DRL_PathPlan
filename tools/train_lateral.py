@@ -166,6 +166,21 @@ def build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentPa
     parser.add_argument("--log-every", type=int, default=100, help="loss 曲线落点间隔（step）")
     parser.add_argument("--no-grad-probe", action="store_false", dest="grad_probe", default=True,
                         help="关首步分项梯度探针（默认开）")
+    # ---- R41 第二批执行-H：训练装配 = 评测装配（默认关；旧路径逐位不动） ----
+    parser.add_argument(
+        "--assembly", default="legacy", choices=("legacy", "aligned"),
+        help="legacy = G 批口径（M0 非 semantic + v6 base obs；默认）；"
+             "aligned = 评测同源（语义 K1e2 装配 + v7 env obs + 注入锚）",
+    )
+    parser.add_argument(
+        "--obs-source", default=None, choices=("base", "v7obs"),
+        help="obs 来源（默认：aligned ⇒ v7obs；legacy ⇒ base）；v7obs = pipeline.lateral_v7obs 重放存储",
+    )
+    parser.add_argument("--v7-obs", default="runs/dev/round41/h_v7obs", help="v7 obs 重放存储目录（--obs-source v7obs）")
+    parser.add_argument(
+        "--fill-from", default="runs/p1_v2/round28/K1/ckpt_epoch002.pt",
+        help="aligned：ckpt 缺失语义键回填源（= 评测 --fill-from 默认；K1e2 血统）",
+    )
     if config:
         parser.set_defaults(**dict(config))
     return parser
@@ -188,6 +203,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         raise SystemExit(
             f"[lateral] fail-fast：anchor_correction={args.anchor_correction!r} 非法"
             f"（{' | '.join(lateral_anchor.ANCHOR_CORRECTION_MODES)}；YAML 中请加引号：\"off\"）"
+        )
+    # R41-H：装配档解析（aligned 与 v7obs 绑定；禁非法组合）
+    if args.obs_source is None:
+        args.obs_source = "v7obs" if str(args.assembly) == "aligned" else "base"
+    if str(args.assembly) == "aligned" and str(args.obs_source) != "v7obs":
+        raise SystemExit(
+            "[lateral] fail-fast：--assembly aligned 必须搭配 --obs-source v7obs"
+            "（评测同源 obs；G §2b：训练装配 = 评测装配）"
+        )
+    if str(args.assembly) == "legacy" and str(args.obs_source) != "base":
+        raise SystemExit(
+            "[lateral] fail-fast：--obs-source v7obs 仅用于 --assembly aligned（legacy = G 批口径冻结）"
         )
     return args
 
@@ -593,11 +620,119 @@ def training_mode(args) -> bool:
 
 
 def train_model_assembly(args):
-    """模型装配（= ``tools.train_residual.build_model`` 口径）+ 几何轴实例配置。"""
+    """模型装配（``--assembly`` 档选）：
+
+    - ``legacy``（默认）= ``tools.train_residual.build_model`` 口径（M0 非 semantic + 结构化头；
+      G 批冻结口径，逐位不动）；
+    - ``aligned`` = **评测同源**（R41-H）：``stages.build_model`` → ``set_ld_mode("semantic")``
+      → ``set_rollout_semantic("static_role_only")`` → ``set_moe(False)`` → ``set_path_head(True)``
+      + ``set_path_head_ablation("structured")`` → legacy 迁移装载 ``--init`` → ``--ckpt``
+      （nonstrict）→ **缺失语义键由 ``--fill-from``（K1e2 血统）回填**（= 评测
+      ``_load_model_canary`` 同口径；仓库内实现，不 import .slim）。
+    """
+    if str(getattr(args, "assembly", "legacy")) == "aligned":
+        return build_aligned_model(args)
     from tools.train_residual import build_model
 
     model, load_info = build_model(args, _device_of(args))
     model.set_readout_lane_geometry(str(args.readout_lane_geometry))
+    return model, load_info
+
+
+def build_aligned_model(args):
+    """评测同源模型装配（R41-H；语义 K1e2 + 结构化头 + K1e2 回填）。"""
+    import yaml
+    import torch
+
+    from tools.legacy.checkpoint_migration import load_checkpoint_migrated, migrate_state_dict
+    from pipeline.stages import build_model as _stage_build_model
+
+    config_path = resolve_path(Path(args.model_config))
+    if not config_path.is_file():
+        raise SystemExit(f"[lateral] fail-fast：model config 不存在：{args.model_config}")
+    model = _stage_build_model(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+    model.set_ld_mode("semantic")
+    model.set_rollout_semantic("static_role_only")
+    model.set_moe(enabled=False)
+    model.set_path_head(True)
+    model.set_path_head_ablation("structured")
+    model.set_readout_lane_geometry(str(args.readout_lane_geometry))
+
+    def _extract_state(payload):
+        state = payload
+        if isinstance(payload, dict):
+            for key in ("model", "state_dict", "model_state_dict", "net"):
+                if key in payload and isinstance(payload[key], dict):
+                    state = payload[key]
+                    break
+        return state
+
+    # 基座（--init）先行（若 ckpt 未覆盖非语义键，则由 init 兜底；canary 实测全覆盖）
+    load_checkpoint_migrated(str(resolve_path(Path(args.init))), model, strict=False)
+    ckpt_path = resolve_path(Path(args.ckpt))
+    payload = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+    state, migration_report = migrate_state_dict(_extract_state(payload), model.state_dict().keys())
+    result = model.load_state_dict(state, strict=False)
+    missing, unexpected = list(result.missing_keys), list(result.unexpected_keys)
+    filled: list[str] = []
+    fill_from = None
+    fill_path = resolve_path(Path(args.fill_from)) if args.fill_from else None
+    if missing and fill_path is not None and fill_path.is_file():
+        payload2 = torch.load(str(fill_path), map_location="cpu", weights_only=False)
+        state2 = _extract_state(payload2)
+        fill_state = {key: value for key, value in state2.items() if key in set(missing)}
+        if fill_state:
+            model.load_state_dict(fill_state, strict=False)
+            filled = sorted(fill_state)
+            fill_from = str(fill_path)
+    remaining = [key for key in missing if key not in set(filled)]
+    if remaining:
+        raise SystemExit(
+            f"[lateral] fail-fast：aligned 装载缺键 {remaining[:5]}…（{len(remaining)} 个；"
+            f"fill_from={fill_from}）——评测装配下这些键由 K1e2 回填，禁静默随机初始化"
+        )
+    if unexpected:
+        raise SystemExit(f"[lateral] fail-fast：aligned 装载 unexpected 键 {unexpected[:5]}…（{len(unexpected)} 个）")
+    semantic_keys = ("semantic_wiring.", "target_proj.")
+    foreign = [
+        key for key in filled
+        if not (key.startswith(semantic_keys) or key in ("beta_context", "beta_token"))
+    ]
+    if foreign:
+        raise SystemExit(f"[lateral] fail-fast：fill_from 回填了非语义键 {foreign[:5]}（口径仅限 K1e2 语义集）")
+
+    model.to(_device_of(args)).eval()
+    model.set_target_lane_dropout(0.0)
+    from net.path_head import PATH_HEAD_DEFAULT_MODE
+
+    if model.path_head_mode() != PATH_HEAD_DEFAULT_MODE:
+        raise SystemExit(f"[lateral] fail-fast：path_head_mode={model.path_head_mode()!r} != structured")
+    if not model._is_semantic():
+        raise SystemExit("[lateral] fail-fast：aligned 装配要求 semantic 模式")
+    if model.rollout_semantic_mode != "static_role_only":
+        raise SystemExit(
+            f"[lateral] fail-fast：rollout_semantic={model.rollout_semantic_mode!r} != static_role_only"
+        )
+    if bool(getattr(model.plan_head.moe, "moe_enabled", False)):
+        raise SystemExit("[lateral] fail-fast：aligned 装配要求 MoE 关闭")
+    load_info = {
+        "ckpt": str(ckpt_path),
+        "ckpt_sha256": _sha256(ckpt_path),
+        "missing_keys": [],
+        "unexpected_keys": [],
+        "unexpected_before_fill": unexpected,
+        "missing_before_fill": missing,
+        "filled_from": fill_from,
+        "filled_keys": filled,
+        "n_filled": len(filled),
+        "migration": migration_report.to_dict() if hasattr(migration_report, "to_dict") else str(migration_report),
+        "assembly": "aligned",
+        "ld_mode": str(model.ld_mode),
+        "rollout_semantic": str(model.rollout_semantic_mode),
+        "moe_enabled": False,
+        "path_head_mode": str(model.path_head_mode()),
+        "n_state_keys": int(len(state)),
+    }
     return model, load_info
 
 
@@ -631,7 +766,11 @@ def freeze_to_allowlist(model) -> tuple[list, list[str]]:
 
 
 def training_data_arrays(args, data: dict) -> dict:
-    """训练张量视图：``action``（仅 main_ids）+ 掩码/目标/权重 + frame_weight（train×balance）。"""
+    """训练张量视图：``action``（仅 main_ids）+ 掩码/目标/权重 + frame_weight（train×balance）。
+
+    ``--obs-source v7obs``（aligned）时额外打开 v7 重放存储并把 ``main_ids`` 映射到 store 行
+    （缺行/无锚 fail-fast；覆盖率记账）。
+    """
     import numpy as np
 
     from pipeline.residual_dataset import load_base_dataset, resolve_path
@@ -651,8 +790,9 @@ def training_data_arrays(args, data: dict) -> dict:
     balance_w = np.asarray(arrays["balance_weight"], dtype=np.float32)[base_rows]
     if not bool((train_w > 0.5).all()):  # pragma: no cover - 结构性排除（ok 掩码已含 train_weight>0.5）
         raise SystemExit("[lateral] fail-fast：训练行出现 train_weight≤0.5")
-    return {
+    view = {
         "index": index,
+        "rows": rows,
         "action": np.asarray(data["action"], dtype=np.float32)[index],
         "step_mask": np.asarray(data["step_mask"], dtype=np.float32),
         "station_target": np.asarray(data["station_target"], dtype=np.float32),
@@ -660,7 +800,75 @@ def training_data_arrays(args, data: dict) -> dict:
         "speed_weight": np.asarray(data["speed_weight"], dtype=np.float32),
         "frame_weight": (train_w * balance_w).astype(np.float32),
         "base": base,
+        "obs_source": str(getattr(args, "obs_source", "base")),
     }
+    if view["obs_source"] == "v7obs":
+        from pipeline import lateral_v7obs
+
+        store = lateral_v7obs.load_store(resolve_path(Path(args.v7_obs)))
+        keys = [
+            (int(rows["episode_id"][i]), int(rows["step"][i])) for i in index
+        ]
+        store_rows, present = store.map_rows(keys)
+        if store.base_consistent is None:
+            raise SystemExit(
+                "[lateral] fail-fast：aligned 要求 store 带 base_consistent.npy（重放对拍门；"
+                "先跑 h_patch_merge.py 生成）"
+            )
+        consistent = np.zeros(index.size, dtype=np.uint8)
+        consistent[present] = np.asarray(
+            store.base_consistent[store_rows[present]], dtype=np.uint8
+        ).reshape(-1)
+        anchor_valid = np.zeros(index.size, dtype=np.float32)
+        anchor_valid[present] = np.asarray(
+            store._arrays["lane_anchor_valid"][store_rows[present]], dtype=np.float32
+        ).reshape(-1)
+        if not bool((anchor_valid[present] > 0.5).all()):
+            bad = int((anchor_valid[present] <= 0.5).sum())
+            raise SystemExit(
+                f"[lateral] fail-fast：{bad} 个在场训练/校验帧在 v7 store 中无有效注入锚——"
+                "评测装配（--lane-anchor inject）下这些帧不可训练（禁静默空锚）"
+            )
+        keep = present & (consistent > 0)
+        excluded = int((~keep).sum())
+        n_missing = int((~present).sum())
+        n_mismatch = int((present & (consistent == 0)).sum())
+        if excluded:
+            frac = excluded / max(1, index.size)
+            if frac > 0.01:
+                raise SystemExit(
+                    f"[lateral] fail-fast：重放不可复现行占比 {frac:.4f} > 1%（{excluded}/{index.size}）——"
+                    "超出门限，需先修复重放（见 h_report §重放门）"
+                )
+            bad_eps = sorted(set(int(rows["episode_id"][i]) for i in index[~keep]))
+            view["replay_excluded"] = {
+                "n_rows": excluded,
+                "frac": frac,
+                "n_missing_in_store": n_missing,
+                "n_replay_mismatch": n_mismatch,
+                "episodes": bad_eps[:50],
+                "episodes_total": len(bad_eps),
+            }
+            print(
+                f"[lateral] 重放一致性门：排除 {excluded} 行（{frac*100:.3f}%；缺行 {n_missing}，"
+                f"失配 {n_mismatch}；{len(bad_eps)} 个 episode；见 ledger.assembly.replay_excluded）",
+                flush=True,
+            )
+        view.update({"v7_store": store, "v7_rows": store_rows, "keep": keep})
+    return view
+
+
+def obs_for_batch(args, view: dict, index: "np.ndarray", device):
+    """批次行索引 → 模型 obs（``base`` = 旧口径 ``build_obs``；``v7obs`` = 重放存储）。"""
+    import torch
+
+    if view.get("obs_source") == "v7obs":
+        store = view["v7_store"]
+        batch = store.obs_batch(view["v7_rows"][index], require_anchor=True)
+        return {key: torch.as_tensor(value, device=device) for key, value in batch.items()}
+    from pipeline.residual_dataset import build_obs
+
+    return build_obs(view["rows"], view["index"][index], device=device, base_dataset=view["base"])
 
 
 def batch_tensors(view: dict, index: "np.ndarray", device):
@@ -792,8 +1000,6 @@ def train_loop(args, data: dict) -> int:
     import numpy as np
     import torch
 
-    from pipeline.residual_dataset import build_obs
-
     if float(args.replan_coef if args.replan_coef is not None else 0.0) > 0.0 or bool(args.lqr_reweight):
         raise SystemExit(
             "[lateral] fail-fast：P3/P4 训练期接线不在本批（F 预注册 §8-3；跨帧双前向 / LQR 权重量产"
@@ -828,8 +1034,9 @@ def train_loop(args, data: dict) -> int:
 
     view = training_data_arrays(args, data)
     main_ids = view["index"]
-    train_idx = np.flatnonzero(np.asarray(data["train_mask"], dtype=bool))
-    val_idx = np.flatnonzero(np.asarray(data["val_mask"], dtype=bool))
+    keep_mask = np.asarray(view.get("keep", np.ones(np.asarray(data["main_ids"]).size, dtype=bool)))
+    train_idx = np.flatnonzero(np.asarray(data["train_mask"], dtype=bool) & keep_mask)
+    val_idx = np.flatnonzero(np.asarray(data["val_mask"], dtype=bool) & keep_mask)
     n_train = int(train_idx.size)
 
     plan = {
@@ -852,8 +1059,30 @@ def train_loop(args, data: dict) -> int:
     }
     ledger: dict[str, Any] = {
         "mode": "smoke-steps" if smoke else "train",
-        "runner": "R41 第二批执行-G（训练循环；F 预注册 §1 共同面）",
+        "runner": "R41 第二批执行-G/H（训练循环；装配档 = --assembly）",
         "plan": plan,
+        "assembly": {
+            "mode": str(args.assembly),
+            "obs_source": str(args.obs_source),
+            "v7_obs": str(args.v7_obs) if str(args.obs_source) == "v7obs" else None,
+            "v7_store": (
+                {
+                    "n_rows": int(view["v7_store"].n),
+                    "n_episodes": int(view["v7_store"].meta.get("n_episodes", -1)),
+                    "manifest_sha256": view["v7_store"].digest(),
+                }
+                if view.get("obs_source") == "v7obs" else None
+            ),
+            "fill_from": load_info.get("filled_from"),
+            "n_filled": int(load_info.get("n_filled", 0)),
+            "ld_mode": load_info.get("ld_mode"),
+            "rollout_semantic": load_info.get("rollout_semantic"),
+            "replay_excluded": view.get("replay_excluded"),
+            "note": (
+                "aligned = 评测同源（v7 env obs + semantic K1e2 + inject 锚；R41-H §2）"
+                if str(args.assembly) == "aligned" else "legacy = G 批口径（冻结）"
+            ),
+        },
         "data": data["meta"],
         "geometry": {
             "readout_lane_geometry": str(model.readout_lane_geometry),
@@ -895,7 +1124,7 @@ def train_loop(args, data: dict) -> int:
         with torch.no_grad():
             for start in range(0, index_pool.size, int(args.val_batch_size)):
                 index = index_pool[start : start + int(args.val_batch_size)]
-                obs = build_obs(data["rows"], main_ids[index], device=_device_of(args), base_dataset=view["base"])
+                obs = obs_for_batch(args, view, index, _device_of(args))
                 terms = batch_loss_terms(model, obs, batch_tensors(view, index, _device_of(args)), config, args)
                 totals["total"] += float(terms["total"])
                 totals["l_action"] += float(terms["l_action"])
@@ -959,7 +1188,7 @@ def train_loop(args, data: dict) -> int:
         for start in range(0, order.size, int(args.batch_size)):
             index = order[start : start + int(args.batch_size)]
             device = _device_of(args)
-            obs = build_obs(data["rows"], main_ids[index], device=device, base_dataset=view["base"])
+            obs = obs_for_batch(args, view, index, device)
             batch = batch_tensors(view, index, device)
             step_started = time.time()
             terms = batch_loss_terms(model, obs, batch, config, args)
