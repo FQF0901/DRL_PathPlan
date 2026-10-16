@@ -847,6 +847,11 @@ def _formal_entry_protocol(
     world_state_api: str = "off",
     world_residual_head_sha16: Optional[str] = None,
     world_residual_scale: Optional[float] = None,
+    teacher_force: str = "off",
+    record_truth: bool = False,
+    inject_truth_sha16: Optional[str] = None,
+    speed_scale: Optional[float] = None,
+    speed_oracle: str = "off",
 ) -> Dict[str, Any]:
     """正式入口 evaluation protocol（口径复用 c6：``build_protocol`` + canonical JSON sha256 hex16）。
 
@@ -893,6 +898,19 @@ def _formal_entry_protocol(
         if world_residual_scale is not None and float(world_residual_scale) != 1.0:
             # R39-B2d：残差缩放入 hash（默认 None / 1.0 ⇒ 不追加键，保持逐字节可比）
             protocol["model"]["world_residual_scale"] = float(world_residual_scale)
+    # R40-V4B：teacher-forced oracle / 速度反事实轴**条件入 hash**（默认 off/None/1.0 ⇒
+    # protocol dict 与上面口径逐字节相同；非默认档才追加键 ⇒ 不同档不共享同一 hash）。
+    if str(teacher_force or "off") != "off":
+        protocol["model"]["teacher_force"] = str(teacher_force)
+        protocol["model"]["inject_truth_sha16"] = (
+            str(inject_truth_sha16) if inject_truth_sha16 else "none"
+        )
+    if record_truth:
+        protocol["model"]["record_truth"] = "on"
+    if speed_scale is not None and float(speed_scale) != 1.0:
+        protocol["model"]["speed_scale"] = float(speed_scale)
+    if str(speed_oracle or "off") != "off":
+        protocol["model"]["speed_oracle"] = str(speed_oracle)
     protocol["hashes"] = {
         "protocol_hash": module.hash_protocol(protocol),
         "protocol_hash_full": module.hash_protocol(protocol, full=True),
@@ -920,12 +938,20 @@ def _evaluation_hashes(
     world_state_api: str = "off",
     world_residual_head: Optional[str] = None,
     world_residual_scale: Optional[float] = None,
+    teacher_force: str = "off",
+    record_truth: bool = False,
+    inject_truth_sha16: Optional[str] = None,
+    speed_scale: Optional[float] = None,
+    speed_oracle: str = "off",
 ) -> Dict[str, Any]:
     """R39-A1 四 hash（+ 完整 protocol dict；供 run_meta/manifest 与 metrics 记录）。
 
     R39-B2c：``world_state_api`` / ``world_residual_head`` 可选装配轴（默认 off/none ⇒ 与
     A1b 口径逐字节相同；非默认档入 protocol hash，见 :func:`_formal_entry_protocol`）。
     R39-B2d：``world_residual_scale``（默认 none ⇒ 不触达；非默认 ≠1.0 入 hash 轴）。
+    R40-V4B：``teacher_force``/``record_truth``/``inject_truth_sha16``/``speed_scale``/
+    ``speed_oracle``（默认 off/False/none/none/off ⇒ **不追加任何键**，保持逐字节可比；
+    非默认档入 hash 轴 —— 闭环 teacher-forced oracle 臂与速度反事实的可辨识性）。
     """
     net_tree = _net_tree_digest()
     from env.obs import OBS_SCHEMA_VERSION, obs_fingerprint  # 轻量（stdlib only）
@@ -941,6 +967,11 @@ def _evaluation_hashes(
         world_state_api=str(world_state_api or "off"),
         world_residual_head_sha16=(head_sha[:16] if head_sha else None),
         world_residual_scale=world_residual_scale,
+        teacher_force=str(teacher_force or "off"),
+        record_truth=bool(record_truth),
+        inject_truth_sha16=(str(inject_truth_sha16) if inject_truth_sha16 else None),
+        speed_scale=(None if speed_scale is None else float(speed_scale)),
+        speed_oracle=str(speed_oracle or "off"),
     )
     ckpt_sha = _sha256_file(str(ckpt)) if ckpt is not None else None
     return {
