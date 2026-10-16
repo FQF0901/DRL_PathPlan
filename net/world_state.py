@@ -62,6 +62,7 @@ ego-motion 补偿（第 4/5 步）在执行口径上是 **readout 期的确定�
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -74,6 +75,7 @@ __all__ = [
     "IMAGINED_MEMORY_MAX_FRAMES",
     "LEARNED_ALLOWED",
     "POLICY_STATE_FIELDS",
+    "READOUT_LANE_GEOMETRY_MODES",
     "SOURCE_CODES",
     "SOURCES",
     "WORLD_STATE_API_MODES",
@@ -81,10 +83,12 @@ __all__ = [
     "ImaginedMemoryFrame",
     "WorldState",
     "analytic_update",
+    "get_readout_lane_geometry_mode",
     "od_decode_prior",
     "readout",
     "residual_loss",
     "residual_targets",
+    "set_readout_lane_geometry_mode",
     "world_state_from_encode",
 ]
 
@@ -147,9 +151,61 @@ FIELD_PRODUCERS: dict[str, str] = {
 IMAGINED_MEMORY_MAX_FRAMES = 8
 
 #: readout 车道几何口径（R38-A4 ``fixed``：foot 搜索排除 ``mask=0`` 段 + margin 数据集符号
-#: ``left = W/2 + lat_k``；出处 = A3 §3.2/§3.3 行级证据 + A4 落地。**只管想象力几何**，
-#: 不触碰 ``step_geometry`` 的进程级默认）。
-READOUT_LANE_GEOMETRY_MODE = "fixed"
+#: ``left = W/2 + lat_k``；出处 = A3 §3.2/§3.3 行级证据 + A4 落地）。**只管想象力几何**，
+#: 不触碰 ``step_geometry`` 的进程级默认。
+#:
+#: R40-V3（猜想 3，几何控臂）：口径可显式切换——
+#: - ``fixed``（默认）：与 R39 逐位一致（历史 B1/B2 口径）；
+#: - ``production``：legacy-aligned readout（保留生产几何两条缺陷：foot 搜索不看
+#:   ``anchor_mask`` + margin 符号互换）⇒ G2 控臂"analytic + legacy 几何"。
+#: 默认 ``fixed`` ⇒ 不设置开关/环境变量时行为逐位不变（证据 = 本 lane ``v3_net_bitwise``）。
+READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = ("fixed", "production")
+READOUT_LANE_GEOMETRY_DEFAULT_MODE = "fixed"
+#: 进程级口径的 spawn 传播入口（可选；**import 期读取一次**、取值白名单校验 fail-fast）。
+#: 缺省 ⇒ :data:`READOUT_LANE_GEOMETRY_DEFAULT_MODE`。机制 precedent =
+#: ``pipeline/trainer.py``/``pipeline/eval_runner.py`` 的 OMP env（spawn worker 重 import 继承）
+#: ——评估 lane 用它把 G2 档（legacy-aligned readout）传入 eval spawn 池；生产/训练不设。
+READOUT_LANE_GEOMETRY_ENV = "RLP_READOUT_LANE_GEOMETRY"
+
+
+def _readout_geometry_initial_mode() -> str:
+    """进程级初始口径 = 环境变量（若设且合法）否则默认值；未知取值 fail-fast。"""
+    raw = str(os.environ.get(READOUT_LANE_GEOMETRY_ENV, "")).strip().lower()
+    if not raw:
+        return READOUT_LANE_GEOMETRY_DEFAULT_MODE
+    if raw not in READOUT_LANE_GEOMETRY_MODES:
+        raise ValueError(
+            f"[world_state] 未知 {READOUT_LANE_GEOMETRY_ENV}={raw!r}"
+            f"（{' | '.join(READOUT_LANE_GEOMETRY_MODES)}）"
+        )
+    return raw
+
+
+#: 当前进程的 readout 车道几何口径（``_lane_geometry`` 调用期读取；setter 修改）。
+READOUT_LANE_GEOMETRY_MODE = _readout_geometry_initial_mode()
+
+
+def set_readout_lane_geometry_mode(mode: str = READOUT_LANE_GEOMETRY_DEFAULT_MODE) -> str:
+    """设置 readout 车道几何口径（进程级；返回旧值）；未知取值 ``ValueError``（fail-fast）。
+
+    默认 ``fixed`` ⇒ :func:`readout` 逐位 = R39 口径；``production`` = legacy-aligned
+    readout（G2 控臂）。纯开关，无 RNG/参数副作用；只影响 readout 的想象步几何，
+    不触碰 ``net.path_head`` 的进程级默认。
+    """
+    global READOUT_LANE_GEOMETRY_MODE
+    if mode not in READOUT_LANE_GEOMETRY_MODES:
+        raise ValueError(
+            f"[world_state] 未知 readout 几何口径 {mode!r}"
+            f"（{' | '.join(READOUT_LANE_GEOMETRY_MODES)}）"
+        )
+    previous = READOUT_LANE_GEOMETRY_MODE
+    READOUT_LANE_GEOMETRY_MODE = mode
+    return previous
+
+
+def get_readout_lane_geometry_mode() -> str:
+    """当前 readout 车道几何口径（``fixed`` / ``production``）。"""
+    return READOUT_LANE_GEOMETRY_MODE
 
 #: TTC 接近判据 / cap（= ``env.obs.long_exog`` 同源常量）
 TTC_EPS = 1e-3
@@ -616,9 +672,10 @@ def _field_rows(
 def _lane_geometry(state: WorldState) -> dict[str, Tensor]:
     """第 4 步（policy 视角）：目标车道锚 ego-motion 补偿 + margin/静态距/末端距重算。
 
-    委托 ``net.path_head.step_geometry``（``fixed`` 口径；A3/A4 证据：foot 排除 ``mask=0``
-    段 + margin 数据集符号 ``left = W/2 + lat_k``）；动态列（speed/dyn/ttc/nav）被
-    :func:`readout` 覆盖为统一 readout 产物（不沿用 hold）。
+    委托 ``net.path_head.step_geometry``（口径 = :data:`READOUT_LANE_GEOMETRY_MODE`；
+    R38-A4 ``fixed`` 默认：foot 排除 ``mask=0`` 段 + margin 数据集符号 ``left = W/2 + lat_k``；
+    R40-V3 可切 ``production`` = legacy-aligned readout，见 setter）。动态列
+    （speed/dyn/ttc/nav）被 :func:`readout` 覆盖为统一 readout 产物（不沿用 hold）。
     """
     from net.path_head import step_geometry  # lazy：避免 import 环
 
