@@ -118,9 +118,12 @@ def _first_path_state(model: DrivingModel, obs: dict) -> WorldState:
 # 1. 规范名与映射
 # =========================================================================== #
 def test_canonical_modes_and_alias_mapping() -> None:
-    assert READOUT_LANE_GEOMETRY_MODES == ("corrected", "legacy_aligned")
+    assert READOUT_LANE_GEOMETRY_MODES == ("corrected", "legacy_aligned", "corrected_t0margins")
     assert READOUT_LANE_GEOMETRY_ALIASES == {"fixed": "corrected", "production": "legacy_aligned"}
-    assert READOUT_LANE_GEOMETRY_INTERNAL == {"corrected": "fixed", "legacy_aligned": "production"}
+    assert READOUT_LANE_GEOMETRY_INTERNAL == {
+        "corrected": "fixed", "legacy_aligned": "production",
+        "corrected_t0margins": "fixed_t0margins",
+    }
     assert normalize_readout_lane_geometry("fixed") == "corrected"
     assert normalize_readout_lane_geometry("production") == "legacy_aligned"
     assert normalize_readout_lane_geometry("CORRECTED") == "corrected"

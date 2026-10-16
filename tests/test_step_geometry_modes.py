@@ -200,7 +200,7 @@ def test_fixed_equals_production_when_no_defect_input() -> None:
 
 
 def test_setter_state_machine_and_global_consumption() -> None:
-    assert STEP_GEOMETRY_MODES == ("production", "fixed")
+    assert STEP_GEOMETRY_MODES == ("production", "fixed", "fixed_t0margins")
     assert set_step_geometry("fixed") == "production"
     assert get_step_geometry() == "fixed"
     out_global, _ = _run(mode=None)          # 读进程级全局

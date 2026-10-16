@@ -744,7 +744,7 @@ LOAD_SPEED_ORACLE_MODES: tuple[str, ...] = ("off", "expert")
 #: ⇒ 沿用 config/ckpt metadata/历史默认）。``fixed``/``production`` = 历史内部值别名
 #: （映射 ``fixed``→``corrected``、``production``→``legacy_aligned``）。
 LOAD_READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = (
-    "default", "corrected", "legacy_aligned", "fixed", "production",
+    "default", "corrected", "legacy_aligned", "corrected_t0margins", "fixed", "production",
 )
 
 # --------------------------------------------------------------------------- #

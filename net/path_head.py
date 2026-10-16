@@ -357,10 +357,15 @@ PATH_HEAD_DEFAULT_MODE = "structured"
 #: c1,c2 对齐 MAE 3.617/3.690→2.928/3.028）见 ``.slim/deepwork/p1_v2/round38/a3_report.md``
 #: §2.3/§2.4 与 ``a4_report.md``。非参数开关，不进 state_dict/ckpt。
 #:
-#: R41-D：该进程级开关**降级为内部默认**（正式入口 = 模型实例配置
-#: ``DrivingModel.readout_lane_geometry``；见下方 :data:`READOUT_LANE_GEOMETRY_MODES`）。
-#: ``step_geometry`` 的 ``geometry_mode`` 可显式覆盖（不读本全局）。
-STEP_GEOMETRY_MODES: tuple[str, ...] = ("production", "fixed")
+#: **R41-I 更正（② 的参照系是错的）**：``left/right_margin`` 的**真口径 = row t0 口径**
+#: （``env/obs/lane_semantic.py`` 列 4/5；契约：MetaDrive lat 正 = 车道方向**右侧**；
+#: 仿真级判定 ``.slim/deepwork/p1_v2/round41/i_truth.py``：``lane.position(s,+W/2)`` 恒在
+#: 左法向负侧、env 生产者 = 几何真值 100%、I1 ``long_exog`` 列 1/2 **左右反号**）。
+#: ⇒ ``fixed`` 的 ② 把 k≥1 的 margin 换成**反号**口径（与自己的 t0 输入相差 ``2·lat_k``；
+#: 影响读数：评测帧 κ_k≥1 p50 Δ ≈ 0.0016–0.0032，见 i_report §3）。
+#: ``fixed_t0margins`` = **只保留 ① foot 修复 + margin 保持 t0 真口径**（= ``production`` 的
+#: 符号）= R41-I 提供的**正确轴档**；``fixed``（= R38-A4 历史档）**冻结不改**（历史 run 可比性）。
+STEP_GEOMETRY_MODES: tuple[str, ...] = ("production", "fixed", "fixed_t0margins")
 STEP_GEOMETRY_DEFAULT_MODE = "production"
 _STEP_GEOMETRY_MODE = STEP_GEOMETRY_DEFAULT_MODE
 
@@ -371,8 +376,10 @@ _STEP_GEOMETRY_MODE = STEP_GEOMETRY_DEFAULT_MODE
 #: - ``corrected``：两条确定性几何缺陷修复（= 历史内部值 ``fixed``；foot 搜索排除
 #:   ``anchor_mask=0`` 段 + margin 数据集符号 ``left = W/2 + lat_k``）；
 #: - ``legacy_aligned``：legacy/产线几何（= 历史内部值 ``production``；保留上述两条缺陷，
-#:   与历史训练/评测口径对齐）。
-READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = ("corrected", "legacy_aligned")
+#:   与历史训练/评测口径对齐）；
+#: - ``corrected_t0margins``：**R41-I 新增**（= 内部值 ``fixed_t0margins``）：foot 修复
+#:   （A4 ①）+ margin 保持 **t0 真口径**（不带 A4 ② 的反号；见 ``STEP_GEOMETRY_MODES`` 注释）。
+READOUT_LANE_GEOMETRY_MODES: tuple[str, ...] = ("corrected", "legacy_aligned", "corrected_t0margins")
 #: 历史内部值 → 规范名（映射；报告/诊断口径）。
 READOUT_LANE_GEOMETRY_ALIASES: dict[str, str] = {
     "fixed": "corrected",
@@ -382,6 +389,7 @@ READOUT_LANE_GEOMETRY_ALIASES: dict[str, str] = {
 READOUT_LANE_GEOMETRY_INTERNAL: dict[str, str] = {
     "corrected": "fixed",
     "legacy_aligned": "production",
+    "corrected_t0margins": "fixed_t0margins",
 }
 #: 未配置哨兵：模型实例**未显式配置**几何 ⇒ 各消费路径沿用其历史默认
 #: （想象步 ``step_geometry`` = ``production``/legacy_aligned；ws readout = ``fixed``/corrected）。
@@ -411,10 +419,16 @@ def normalize_readout_lane_geometry(mode: "str | None") -> str:
 
 
 def readout_lane_geometry_internal(mode: "str | None") -> "str | None":
-    """几何口径取值 → ``step_geometry`` 内部值（``fixed`` / ``production``）；哨兵 ⇒ ``None``。
+    """几何口径取值 → ``step_geometry`` 内部值（``fixed`` / ``production`` / ``fixed_t0margins``）；
+    哨兵 ⇒ ``None``。
 
     ``None`` 返回 = 「未配置」⇒ 调用方沿用进程级历史默认（:func:`get_step_geometry`）。
+    接受内部值**直传**（与进程级 :func:`set_step_geometry` / ``--step-geometry`` 同值域），
+    亦接受规范名与历史内部值别名。
     """
+    raw = "" if mode is None else str(mode).strip().lower()
+    if raw in READOUT_LANE_GEOMETRY_INTERNAL.values():  # 内部值直传（含 fixed_t0margins）
+        return raw
     canonical = normalize_readout_lane_geometry(mode)
     if canonical == READOUT_LANE_GEOMETRY_DEFAULT:
         return None
@@ -790,6 +804,9 @@ def step_geometry(
     padding 点与末有效点构成的"桥接段"穿过自车 ⇒ foot 被吸到 padding，锚几何整段零化；
     ② margin 符号 = **数据集口径** ``left = W/2 + lat_k``、``right = W/2 − lat_k``
     （``production`` 把 row 的 t0 left/right 互换；出处 = I1 ``_long_exog_row`` + A3 行级实测）。
+    **R41-I 更正**：② 的参照系反号（真口径 = row t0 = env ``lane_semantic`` 列 4/5；
+    仿真级判定见 ``.slim/deepwork/p1_v2/round41/i_truth.py``）⇒ ``fixed`` 冻结为历史档；
+    ``fixed_t0margins`` = ① foot 修复 + margin 保持 t0 真口径（推荐用于新训练批的 corrected 轴）。
 
     Args:
         anchor_xy: ``(B,P,2)`` t0 锚折线（ego t0 系）。
@@ -800,8 +817,9 @@ def step_geometry(
         progress_s: ``(B,)`` 累计路径进度（= Σ 已执行 ds）。
         dynamic_mode: 目前仅支持 ``hold``（显式 fail-fast，防静默变体）。
         geometry_mode: ``None``（默认）= 读进程级口径（:func:`set_step_geometry`，R41-D 起
-            为内部默认）；显式取值接受规范名 ``corrected``/``legacy_aligned``、历史内部值
-            ``fixed``/``production`` 或哨兵 ``default``（= 进程级；未知取值 fail-fast）。
+            为内部默认）；显式取值接受规范名 ``corrected``/``legacy_aligned``/
+            ``corrected_t0margins``（R41-I）、历史内部值 ``fixed``/``production``
+            （= ``fixed_t0margins`` 同理直传）或哨兵 ``default``（= 进程级；未知取值 fail-fast）。
 
     Returns:
         dict：``anchor_xy/anchor_mask/long_exog/long_present``（想象步输入）+ 诊断
@@ -852,7 +870,7 @@ def step_geometry(
     param = param.clamp(0.0, 1.0)
     foot = xy_k[:, :-1] + segment_vec * param.unsqueeze(-1)
     foot_d2 = (foot * foot).sum(dim=-1)
-    if mode == "fixed" and mask is not None:
+    if mode in ("fixed", "fixed_t0margins") and mask is not None:
         # R38-A4 ①：foot 搜索排除 anchor_mask=0 段（零填充锚的"原点簇 + 桥接段"伪影；
         # production 不看 mask ⇒ 67.9% 想象步 foot 落 padding、锚几何整段零化）
         segment_valid = (mask[:, 1:] > 0.5) & (mask[:, :-1] > 0.5)
@@ -872,12 +890,14 @@ def step_geometry(
 
     exog_k = exog.clone()
     if mode == "fixed":
-        # R38-A4 ②：数据集口径（I1 _long_exog_row + A3 行级实测）：left = W/2 + lat_k、
-        # right = W/2 − lat_k（production 反号 ⇒ 把 row 的 t0 left/right 互换）
+        # R38-A4 ②（**历史档冻结**）：数据集口径（I1 _long_exog_row + A3 行级实测）：
+        # left = W/2 + lat_k、right = W/2 − lat_k —— R41-I 更正：该参照系反号
+        # （I1 的 lat 左正代入同一公式 ⇒ 与 row t0/env 真值左右互换；见 STEP_GEOMETRY_MODES 注释）
         exog_k[:, 1] = torch.where(margins_present, (0.5 * lane_width + lat_k).clamp_min(0.0), zero)
         exog_k[:, 2] = torch.where(margins_present, (0.5 * lane_width - lat_k).clamp_min(0.0), zero)
     else:
-        # lat_right = −lat_k（MetaDrive 口径）；t0 恒等：left_0 = W/2 − lat_0（见 docstring）
+        # production / fixed_t0margins：t0 真口径（lat_right = −lat_k，MetaDrive 口径）；
+        # t0 恒等：left_0 = W/2 − lat_0（见 docstring；= env/obs/lane_semantic 列 4/5 同号）
         exog_k[:, 1] = torch.where(margins_present, (0.5 * lane_width - lat_k).clamp_min(0.0), zero)
         exog_k[:, 2] = torch.where(margins_present, (0.5 * lane_width + lat_k).clamp_min(0.0), zero)
     for column in (3, 7):  # static_distance / distance_to_target_lane_end：按进度收缩

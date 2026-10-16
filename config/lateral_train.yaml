@@ -65,4 +65,8 @@ log_every: 100                                  # loss 曲线落点间隔
 assembly: legacy                                # legacy | aligned（aligned = v7 env obs + semantic K1e2 + inject 锚）
 obs_source: null                                # null = 按 assembly 解析（aligned ⇒ v7obs；legacy ⇒ base）
 v7_obs: runs/dev/round41/h_v7obs                # v7 重放存储目录（pipeline/lateral_v7obs；aligned 时必填）
+long_exog_source: dataset                       # R41-I：path_left/right_margin + d2end 来源
+                                                #   dataset = path_exec_v1 I1 long_exog（默认；G 批口径冻结）
+                                                #   v7obs  = v7 store 的 env 真口径列（I1 margin 左右反号 /
+                                                #            d2end 未封顶；缺行 fail-fast）
 fill_from: runs/p1_v2/round28/K1/ckpt_epoch002.pt  # aligned：缺失语义键回填源（= 评测 --fill-from 默认）

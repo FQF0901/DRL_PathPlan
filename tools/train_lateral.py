@@ -178,6 +178,12 @@ def build_parser(config: Mapping[str, Any] | None = None) -> argparse.ArgumentPa
     )
     parser.add_argument("--v7-obs", default="runs/dev/round41/h_v7obs", help="v7 obs 重放存储目录（--obs-source v7obs）")
     parser.add_argument(
+        "--long-exog-source", default="dataset", choices=("dataset", "v7obs"),
+        help="path_left/right_margin + path_distance_to_target_lane_end 的来源："
+             "dataset = path_exec_v1 I1 long_exog（默认；G 批口径冻结、逐位不变）；"
+             "v7obs = v7 store 的 env 真口径列（R41-I：I1 margin 与真值左右反号、d2end 未封顶）",
+    )
+    parser.add_argument(
         "--fill-from", default="runs/p1_v2/round28/K1/ckpt_epoch002.pt",
         help="aligned：ckpt 缺失语义键回填源（= 评测 --fill-from 默认；K1e2 血统）",
     )
@@ -215,6 +221,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if str(args.assembly) == "legacy" and str(args.obs_source) != "base":
         raise SystemExit(
             "[lateral] fail-fast：--obs-source v7obs 仅用于 --assembly aligned（legacy = G 批口径冻结）"
+        )
+    # R41-I：path_* 真口径列（margin/d2end）来源轴（默认 dataset = 逐位不变）
+    if str(getattr(args, "long_exog_source", "dataset")) == "v7obs" and str(args.obs_source) == "v7obs":
+        raise SystemExit(
+            "[lateral] fail-fast：--long-exog-source v7obs 与 --obs-source v7obs 冗余"
+            "（aligned 已整批取 store；该轴只用于 base obs 的 path_* 列）"
         )
     return args
 
@@ -801,6 +813,7 @@ def training_data_arrays(args, data: dict) -> dict:
         "frame_weight": (train_w * balance_w).astype(np.float32),
         "base": base,
         "obs_source": str(getattr(args, "obs_source", "base")),
+        "long_exog_source": str(getattr(args, "long_exog_source", "dataset")),
     }
     if view["obs_source"] == "v7obs":
         from pipeline import lateral_v7obs
@@ -855,7 +868,42 @@ def training_data_arrays(args, data: dict) -> dict:
                 flush=True,
             )
         view.update({"v7_store": store, "v7_rows": store_rows, "keep": keep})
+    elif view["long_exog_source"] == "v7obs":
+        # R41-I：仅取 ``path_*`` 真口径列（margin/d2end）时的 store 装载（**不改行集/不改其他键**；
+        # 缺行由 :func:`long_exog_override_from_store` fail-fast 记账）
+        from pipeline import lateral_v7obs
+
+        view["v7_store"] = lateral_v7obs.load_store(resolve_path(Path(args.v7_obs)))
     return view
+
+
+def long_exog_override_from_store(store, rows: dict, index: "np.ndarray") -> dict:
+    """R41-I：从 v7 store（env 真口径）取 ``path_*`` 三列 + present（按 ``(episode_id, step)``）。
+
+    ``path_left_margin`` / ``path_right_margin``：**env/obs 生产者**（
+    ``env/obs/lane_semantic.py::_same_direction_road_surface_margins`` → ``env/obs/path_field.py``）
+    逐帧落盘的 ``lane_semantic`` 列 4/5 —— 与 ``datasets/path_exec_v1`` 的 I1 ``long_exog``
+    列 1/2 **左右反号**（I1 用左正 lat 代入 ``left = W/2 + lat``；真值 = 右正 lat；
+    仿真级判定见 ``.slim/deepwork/p1_v2/round41/i_truth.py``）。
+    ``path_distance_to_target_lane_end``：env 口径 = ``lane_semantic`` 列 11（拓扑封顶）；
+    I1 = 未封顶 remaining（列 10 同义）⇒ 口径不同。
+
+    ``store`` 只需满足：``.map_rows(keys) -> (rows, present)`` 与 ``._arrays[key]``（
+    :class:`pipeline.lateral_v7obs.V7ObsStore` 契约）。缺行 **fail-fast**（禁静默）。
+    """
+    keys = [(int(rows["episode_id"][i]), int(rows["step"][i])) for i in index]
+    store_rows, present = store.map_rows(keys)
+    if not bool(present.all()):
+        missing = [key for key, ok in zip(keys, present.tolist()) if not ok]
+        raise SystemExit(
+            f"[lateral] fail-fast：--long-exog-source v7obs 下 {len(missing)} 帧不在 store "
+            f"（前 3：{missing[:3]}）——真口径列不可得，禁静默回退 dataset 口径"
+        )
+    out: dict = {}
+    for key in ("path_left_margin", "path_right_margin", "path_distance_to_target_lane_end"):
+        out[key] = np.asarray(store._arrays[key])[store_rows].astype(np.float32)
+        out[f"{key}__present"] = np.asarray(store._arrays[f"{key}__present"])[store_rows].astype(np.float32)
+    return out
 
 
 def obs_for_batch(args, view: dict, index: "np.ndarray", device):
@@ -868,7 +916,13 @@ def obs_for_batch(args, view: dict, index: "np.ndarray", device):
         return {key: torch.as_tensor(value, device=device) for key, value in batch.items()}
     from pipeline.residual_dataset import build_obs
 
-    return build_obs(view["rows"], view["index"][index], device=device, base_dataset=view["base"])
+    override = None
+    if view.get("long_exog_source") == "v7obs":
+        override = long_exog_override_from_store(view["v7_store"], view["rows"], view["index"][index])
+    if override is None:  # 默认路径：调用签名与参数面逐位不变（默认关纪律）
+        return build_obs(view["rows"], view["index"][index], device=device, base_dataset=view["base"])
+    return build_obs(view["rows"], view["index"][index], device=device, base_dataset=view["base"],
+                     long_exog_override=override)
 
 
 def batch_tensors(view: dict, index: "np.ndarray", device):

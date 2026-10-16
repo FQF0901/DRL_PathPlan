@@ -451,8 +451,15 @@ def anchor_polyline_tensors(rows: dict, idx: np.ndarray, device):
     )
 
 
-def build_obs(rows: dict, idx: np.ndarray, *, device, base_dataset, lane_width_default: float = 3.5):
-    """行索引 → 模型 obs（base 联合装载优先；缺则合成最小 obs）。"""
+def build_obs(rows: dict, idx: np.ndarray, *, device, base_dataset, lane_width_default: float = 3.5,
+              long_exog_override: dict | None = None):
+    """行索引 → 模型 obs（base 联合装载优先；缺则合成最小 obs）。
+
+    ``long_exog_override``（R41-I，默认 ``None`` = **逐位不变**）：逐 key 的 ``(len(idx),)``
+    数组，在 dataset ``long_exog`` 填装**之后**覆盖同名 obs 键（含 ``<key>__present``）——
+    用于把 ``path_left/right_margin`` / ``path_distance_to_target_lane_end`` 换成 env 真口径
+    （``--long-exog-source v7obs``；见 ``tools/train_lateral.long_exog_override_from_store``）。
+    """
     import torch
 
     from net.path_head import LONG_EXOG_OBS_KEYS
@@ -523,6 +530,14 @@ def build_obs(rows: dict, idx: np.ndarray, *, device, base_dataset, lane_width_d
                 widths if widths is not None else np.full(rows["n"], lane_width_default), dtype=np.float32
             )[idx]
             obs[key] = torch.as_tensor(half, device=device)
+    if long_exog_override:
+        for key, values in long_exog_override.items():
+            array = np.asarray(values, dtype=np.float32).reshape(-1)
+            if array.size != batch:
+                raise SystemExit(
+                    f"[residual] fail-fast：long_exog_override[{key}] 长度 {array.size} != batch {batch}"
+                )
+            obs[key] = torch.as_tensor(array, device=device)
     return obs
 
 
