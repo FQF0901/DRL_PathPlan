@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""参数账本（R39-A2）：双配置四分类（total / active / frozen / dormant）+ 上限断言 + optimizer allowlist。
+"""参数账本（R39-A2 起）：双配置五栏（total / reachable / trainable / frozen / dormant）+ 上限断言 + optimizer allowlist。
 
 用法::
 
     tools/venv-python net/param_probe.py [--json-out PATH] [--skip-update-norm-demo] [--skip-smoke]
 
-口径（GPT R39 §二-A 7 + §5.83 裁决；**无重叠、无遗漏**）
---------------------------------------------------------
+口径（GPT R39 §二-A 7 + §5.83 裁决 + GPT R40 §五.5 参数门）
+----------------------------------------------------------
 两配置（均 ``hidden=128``、``expert_hidden=76`` = ``config/model.yaml``，全量前向
 ``world_model_teacher_forcing``）：
 
@@ -19,13 +19,14 @@
 （含装配参数 ``beta_context``/``beta_token``/``target_proj.*``）。未知前缀 ⇒ ``ValueError``
 （新模块不得绕过账本）。
 
-四分类（每个参数恰好归一类）：
+五栏（GPT R40 §五.5「不能只报总参数」；每个参数恰好归一类）：
 
 - ``dormant`` = **当前模式 forward 不可达**：关闭 MoE 专家（R39 运行口径：MoE 不训练/不启动）
   + 当前模式死路径（structured 模式不跑旧 PolicyHead；旧头模式不跑结构化头）；
-- ``active`` = 可达 ∧ 可训练（``requires_grad=True``，当前配方下）；
+- ``trainable``（= ``active``；同义别名）= 可达 ∧ 可训练（``requires_grad=True``，当前配方下）；
 - ``frozen`` = 可达 ∧ 配方冻结（``requires_grad=False``）；
-- ``total`` = ``active + frozen + dormant``（全参数）。
+- ``reachable`` = ``trainable + frozen``；
+- ``total`` = ``trainable + frozen + dormant``（全参数）。
 
 可达性判定 = **实测模块 forward hook**（哪个模块在规范前向里被调用）∧ 声明死路径规则；
 两者不一致 ⇒ ``RuntimeError`` fail-fast（账本与运行行为脱钩即失效）。声明死路径：
@@ -34,9 +35,12 @@ MoE 关闭时 ``plan_head.moe`` 整块记 dormant（router 仍为 TB 诊断产�
 
 断言（GPT 裁决；基线 = R39-A2 实测 HEAD）：
 
-- ``total ≤ 基线 × 1.02``（default 1,278,879 / structured 1,510,570）；
+- ``total ≤ 2,000,000``（GPT R40 §五.5 绝对上限；R39「基线 ×1.02」乘性规则废止。五栏口径
+  不变：``total / reachable / trainable(=active) / frozen / dormant``——``trainable`` 即
+  配方可训参数，``active`` 为同义别名）；
 - ``budget_active = 可达参数（= active + frozen，MoE 关）≤ 基线 × 1.05``
-  （default 871,478 / structured 994,717；与裁决 §一 "激活 ≈0.995M–1.103M" 同口径）；
+  （default 871,478 / structured 994,717；与裁决 §一 "激活 ≈0.995M–1.103M" 同口径；
+  该激活门继承 R39，R40 §五.5 未改动）；
 - ``optimizer ⊆ 声明 allowlist``（structured = ``net.path_head.TRAIN_ALLOWLIST_PREFIXES``；
   default = 旧头配方占位）且 allowlist 参数全覆盖、全部可达。
 
@@ -66,9 +70,12 @@ from net.model import DrivingModel
 from net.path_head import TRAIN_ALLOWLIST_PREFIXES
 
 # --------------------------------------------------------------------------- #
-# 基线（GPT R39 §5.83 裁决：总参数 ≤ +2%；激活 ≤ +5%；取消 1.25× 扩容臂）
+# 参数门（R40 §五.5：总参数 ≤ 2,000,000 绝对上限；R39 「基线 ×1.02」乘性规则废止）
 # --------------------------------------------------------------------------- #
-#: 总参数基线 = R39-A2 HEAD 实测（= 冻结基线，GPT §一「约 1.51M」）
+#: 总参数绝对上限（GPT R40 `docs/chatgpt5p6sol_review.md` §五.5：「总参数 <=2,000,000」；
+#: 五栏报告 total/reachable/trainable/frozen/dormant，``trainable`` 即配方可训参数）
+TOTAL_CAP = 2_000_000
+#: 总参数基线 = R39-A2 HEAD 实测（**回归对照/报告**用；R40 起不再参与乘性上限断言）
 TOTAL_BASELINES: dict[str, int] = {
     "default": 1_278_879,
     "structured": 1_510_570,
@@ -80,9 +87,11 @@ ACTIVE_BASELINES: dict[str, int] = {
     "default": 871_478,
     "structured": 994_717,
 }
-#: 上限系数（GPT 裁决）
-TOTAL_LIMIT = 1.02
+#: 激活上限系数（GPT R39 裁决；R40 §五.5 未改动）
 ACTIVE_LIMIT = 1.05
+#: （遗留）R39 总参数乘性上限系数：仅存供历史脚本（``round39/a2_run.py``）import 兼容；
+#: R40 起**不参与任何断言**（总参数门 = :data:`TOTAL_CAP` 绝对上限）。
+TOTAL_LIMIT = 1.02
 
 #: 历史绝对预算常量（H=96 旧口径；H=128 双配置改走 基线+容差 断言，保留供文档/对照指针）
 PARAM_BUDGET = 1_500_000
@@ -456,21 +465,25 @@ def apply_recipe(model: DrivingModel, allowlist: Sequence[str]) -> tuple[str, ..
 
 
 def view_totals(records: Sequence[Mapping[str, Any]], total: int) -> dict[str, Any]:
-    """四分类汇总 + 模块聚合（total/active/frozen/dormant + 可达）。"""
+    """五栏汇总 + 模块聚合（total/reachable/trainable/frozen/dormant + 可达）。
+
+    ``trainable`` = ``active``（GPT R40 §五.5 栏名；同义别名，二者恒等）。
+    """
     counts = {"active": 0, "frozen": 0, "dormant": 0}
     reachable = 0
     for record in records:
         counts[record["class"]] += int(record["numel"])
         if record["reachable"]:
             reachable += int(record["numel"])
-    assert counts["active"] + counts["frozen"] + counts["dormant"] == total, "四分类不闭合"
-    assert counts["active"] + counts["frozen"] == reachable, "active+frozen != 可达"
+    assert counts["active"] + counts["frozen"] + counts["dormant"] == total, "五栏不闭合"
+    assert counts["active"] + counts["frozen"] == reachable, "trainable+frozen != 可达"
     return {
         "total": int(total),
         "active": counts["active"],
+        "trainable": counts["active"],  # GPT R40 §五.5 栏名（= active 同义）
         "frozen": counts["frozen"],
         "dormant": counts["dormant"],
-        "reachable": reachable,  # = active + frozen
+        "reachable": reachable,  # = trainable + frozen
         "budget_active": reachable,  # GPT §5.83 「激活」= 可达参数（含配方冻结）
     }
 
@@ -640,7 +653,7 @@ def ledger_for_config(config: str, *, demo_update_norm: bool = True) -> dict[str
     demo = update_norm_demo(model, obs, allowlist) if demo_update_norm else None
 
     assertion = {
-        "total_limit": total <= math.floor(TOTAL_BASELINES[config] * TOTAL_LIMIT),
+        "total_limit": total <= TOTAL_CAP,
         "active_limit": budget_closed["budget_active"] <= math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT),
         "optimizer_ok": bool(optimizer["ok"]),
     }
@@ -650,7 +663,7 @@ def ledger_for_config(config: str, *, demo_update_norm: bool = True) -> dict[str
         "forward_mode": FORWARD_MODE,
         "total": total,
         "allowlist": list(allowlist),
-        "baselines": {"total": TOTAL_BASELINES[config], "active": ACTIVE_BASELINES[config]},
+        "baselines": {"total": TOTAL_BASELINES[config], "total_cap": TOTAL_CAP, "active": ACTIVE_BASELINES[config]},
         "views": {
             "budget_moe_closed": budget_closed,
             "budget_moe_open": budget_open,
@@ -670,32 +683,30 @@ def ledger_for_config(config: str, *, demo_update_norm: bool = True) -> dict[str
         "update_norm_demo": demo,
         "assertion": assertion,
         "assertion_detail": {
-            "total_rule": f"total ≤ {TOTAL_BASELINES[config]:,} × {TOTAL_LIMIT} = {math.floor(TOTAL_BASELINES[config] * TOTAL_LIMIT):,}",
+            "total_rule": f"total ≤ {TOTAL_CAP:,}（GPT R40 §五.5 绝对上限；R39 基线×{TOTAL_LIMIT} 废止）",
             "active_rule": f"budget_active ≤ {ACTIVE_BASELINES[config]:,} × {ACTIVE_LIMIT} = {math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT):,}",
         },
     }
 
 
 def render_report(ledgers: Mapping[str, Mapping[str, Any]]) -> str:
-    """人类可读摘要（四栏 + 断言 + per-module + optimizer + update norm）。"""
+    """人类可读摘要（五栏 + 断言 + per-module + optimizer + update norm）。"""
     lines: list[str] = []
 
     def emit(text: str = "") -> None:
         lines.append(text)
 
-    emit("== R39-A2 参数账本（双配置四分类；MoE 关闭 = R39 运行口径）==")
+    emit("== R39-A2 参数账本（双配置五栏；MoE 关闭 = 运行口径；total 门 = GPT R40 §五.5 ≤2,000,000）==")
     emit(
-        f"{'配置':<12}{'total':>11}{'active':>11}{'frozen':>11}{'dormant':>11}"
-        f"{'可达':>11}{'激活上限':>14}"
+        f"{'配置':<12}{'total':>11}{'reachable':>11}{'trainable':>11}{'frozen':>11}{'dormant':>11}"
     )
     for config, ledger in ledgers.items():
         view = ledger["views"]["recipe_moe_closed"]
-        budget = ledger["views"]["budget_moe_closed"]
-        limit = math.floor(ledger["baselines"]["active"] * ACTIVE_LIMIT)
         emit(
-            f"{config:<12}{view['total']:>11,}{view['active']:>11,}{view['frozen']:>11,}"
-            f"{view['dormant']:>11,}{budget['budget_active']:>11,}{limit:>14,}"
+            f"{config:<12}{view['total']:>11,}{view['reachable']:>11,}{view['trainable']:>11,}"
+            f"{view['frozen']:>11,}{view['dormant']:>11,}"
         )
+    emit("（trainable = active 同义；reachable = trainable + frozen）")
     emit()
     emit("-- 预算视图（无配方；as-assembled；MoE 关/开）--")
     for config, ledger in ledgers.items():
@@ -728,7 +739,7 @@ def render_report(ledgers: Mapping[str, Mapping[str, Any]]) -> str:
             )
         assertion = ledger["assertion"]
         emit(
-            f"  断言: total {assertion['total_limit']} · active {assertion['active_limit']} · "
+            f"  断言: total(cap {TOTAL_CAP:,}) {assertion['total_limit']} · active {assertion['active_limit']} · "
             f"optimizer {assertion['optimizer_ok']}"
         )
         emit()
@@ -793,6 +804,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary = {
         config: {
             "total": ledger["total"],
+            "total_cap": TOTAL_CAP,
             "recipe": ledger["views"]["recipe_moe_closed"],
             "budget_moe_closed": ledger["views"]["budget_moe_closed"],
             "budget_moe_open": ledger["views"]["budget_moe_open"],
@@ -801,11 +813,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         for config, ledger in ledgers.items()
     }
     print(
-        "OK: R39-A2 参数账本通过 —— "
+        "OK: R39-A2 参数账本通过（total 门 = GPT R40 §五.5 ≤ 2,000,000）—— "
         + " ｜ ".join(
-            f"{config} total {ledger['total']:,}（基线 {ledger['baselines']['total']:,}）/ "
-            f"可达 {ledger['views']['budget_moe_closed']['budget_active']:,}"
-            f"（基线 {ledger['baselines']['active']:,}）"
+            f"{config} total {ledger['total']:,}（上限 {TOTAL_CAP:,}）/ "
+            f"reachable {ledger['views']['budget_moe_closed']['reachable']:,} / "
+            f"trainable {ledger['views']['recipe_moe_closed']['trainable']:,} / "
+            f"frozen {ledger['views']['recipe_moe_closed']['frozen']:,} / "
+            f"dormant {ledger['views']['recipe_moe_closed']['dormant']:,}"
             for config, ledger in ledgers.items()
         )
     )

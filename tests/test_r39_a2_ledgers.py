@@ -1,16 +1,19 @@
-"""R39-A2 双账本守卫：参数账本（四分类/上限/optimizer/update norm）+ detach 登记表 CI。
+"""R39-A2 双账本守卫：参数账本（五栏/上限/optimizer/update norm）+ detach 登记表 CI。
 
-出处：GPT R39 §二-A 任务 7–8 + §5.83 裁决（total ≤ 基线+2% / active ≤ 基线+5% /
-optimizer 仅声明模块）+ `docs/deepseekv4p1_argue.md` A2。
+出处：GPT R39 §二-A 任务 7–8 + §5.83 裁决（optimizer 仅声明模块）+ GPT R40 §五.5
+（**总参数 ≤ 2,000,000 绝对上限**；五栏报告 total/reachable/trainable/frozen/dormant，
+trainable = active）+ `docs/deepseekv4p1_argue.md` A2。
 
 断言面：
 
-1. **四分类闭合**（total = active + frozen + dormant；可达 = active + frozen），两配置；
-2. **基线断言**（total/active 上限）在 H=128 实测通过；激活基线 = MoE 关 + 模式单头口径；
+1. **五栏闭合**（total = trainable + frozen + dormant；reachable = trainable + frozen，
+   trainable = active 同义），两配置；
+2. **2.0M 绝对上限**（GPT R40 §五.5）：total ≤ 2,000,000；另保留 R39-A2 实测基线作回归
+   对照；激活上限（可达 ≤ 基线 × 1.05，R39 裁决）继续适用；
 3. **dormant 语义**：MoE 关闭 ⇒ ``plan_head.moe`` 整块 dormant；structured 模式 ⇒ 旧
    ``policy`` 块 dormant；结构化头"已构造但未启用"（legacy 诊断档）⇒ ``policy.structured_action``
    整块 dormant（= 分类器对 "default 模式下 structured 头" 的口径）；default 装配下结构化头
-   惰性未构造 ⇒ 不产生参数（total 受 +2% 约束保护）；
+   惰性未构造 ⇒ 不产生参数；
 4. **可达性 = 实测 hook**：声明存活块签名模块必须真被调用，否则 ``RuntimeError``（脱钩即
    账本失效）；声明死块的签名模块必须**未**被调用；
 5. **optimizer allowlist**：仅声明模块入组、全覆盖、无 dormant 入组（正例 + 违规负例）；
@@ -37,7 +40,7 @@ from net.param_probe import (
     ACTIVE_LIMIT,
     ALLOWLISTS_BY_CONFIG,
     TOTAL_BASELINES,
-    TOTAL_LIMIT,
+    TOTAL_CAP,
     build_model,
     classify_parameters,
     forward_reachable,
@@ -47,6 +50,7 @@ from net.param_probe import (
     module_of,
     module_update_norms,
     optimizer_allowlist_report,
+    render_report,
     shape_smoke,
     update_norm_demo,
     view_totals,
@@ -96,19 +100,39 @@ def ledgers() -> dict[str, dict]:
 
 
 @pytest.mark.parametrize("config", ["default", "structured"])
-def test_ledger_four_class_partition_and_baselines(config: str, ledgers: dict[str, dict]) -> None:
+def test_ledger_five_columns_and_caps(config: str, ledgers: dict[str, dict]) -> None:
     ledger = ledgers[config]
-    assert ledger["total"] == TOTAL_BASELINES[config]
+    assert ledger["total"] == TOTAL_BASELINES[config]  # R39-A2 实测基线（回归对照）
     recipe = ledger["views"]["recipe_moe_closed"]
     budget = ledger["views"]["budget_moe_closed"]
-    assert recipe["total"] == recipe["active"] + recipe["frozen"] + recipe["dormant"]
+    # 五栏闭合：total = trainable + frozen + dormant；reachable = trainable + frozen
+    assert recipe["total"] == recipe["trainable"] + recipe["frozen"] + recipe["dormant"]
     assert budget["total"] == budget["active"] + budget["frozen"] + budget["dormant"]
-    assert recipe["reachable"] == recipe["active"] + recipe["frozen"] == budget["reachable"]
+    assert recipe["reachable"] == recipe["trainable"] + recipe["frozen"] == budget["reachable"]
+    assert recipe["trainable"] == recipe["active"]  # GPT R40 §五.5 栏名：trainable = active
+    # GPT R40 §五.5：总参数绝对上限 2,000,000（R39 基线×1.02 乘性规则已废止）
+    assert TOTAL_CAP == 2_000_000
     assert ledger["assertion"]["total_limit"], ledger["assertion_detail"]["total_rule"]
+    assert ledger["total"] <= TOTAL_CAP
+    _total_rule = ledger["assertion_detail"]["total_rule"]
+    assert "2,000,000" in _total_rule and "× 1.02" not in _total_rule  # 乘性上限不得回潮
+    # R39 激活门（可达 ≤ 基线 ×1.05）继续适用
     assert ledger["assertion"]["active_limit"], ledger["assertion_detail"]["active_rule"]
     assert ledger["assertion"]["optimizer_ok"]
-    assert ledger["total"] <= math.floor(TOTAL_BASELINES[config] * TOTAL_LIMIT)
     assert budget["budget_active"] <= math.floor(ACTIVE_BASELINES[config] * ACTIVE_LIMIT)
+
+
+def test_render_report_five_columns_and_2m_cap(ledgers: dict[str, dict]) -> None:
+    """GPT R40 §五.5：报告不得只报总参数 —— 五栏 total/reachable/trainable/frozen/dormant。"""
+    text = render_report(ledgers)
+    header = [line for line in text.splitlines() if line.startswith("配置")][0]
+    for column in ("total", "reachable", "trainable", "frozen", "dormant"):
+        assert column in header, (column, header)
+    assert "2,000,000" in text
+    for ledger in ledgers.values():
+        view = ledger["views"]["recipe_moe_closed"]
+        assert isinstance(view["trainable"], int) and view["trainable"] == view["active"]
+        assert view["reachable"] == view["trainable"] + view["frozen"]
 
 
 def test_ledger_structured_activates_head_and_old_policy_is_dormant(ledgers: dict[str, dict]) -> None:
