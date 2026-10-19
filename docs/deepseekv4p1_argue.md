@@ -91,12 +91,14 @@ P_{n+1}=P_n\oplus\left(R(\theta_n)\begin{bmatrix}dx_n\\dy_n\end{bmatrix},\ \thet
   - `a_long` 由相邻段速度差/0.5 派生；
   - `kappa` 由 10Hz 插值轨迹的 heading 变化/弧长派生；
   - LQR 使用完整 3s 参考（7 个 pose → 30 个 0.1s 点）。
+- **可选 auxiliary head**：每步额外输出 `(v_end, kappa)` 两个数；不参与主 action 定义，只用于 LQR feedforward `delta_ff=atan(L*kappa)`、曲率平滑/限幅、速度参考。主 action 仍是 `(dx,dy,dtheta)`。
 
 ### 2.2 为什么不是 `(dx,dy)` 两维
 
 - SparseDrive/VAD/LAW 只输出 `(dx,dy)`，因为它们的评测是 open-loop L2，不需要 heading；decode 时 cumsum 成 `(x,y)`。
 - 我们的系统需要 **closed-loop ego frame 推进**：WM 要把 OD/LD/Nav anchor 旋转/平移到下一帧，LQR 需要参考 heading。没有 `dtheta` 就只能从弦方向反推 heading，会引入累计误差，且低速/小位移时不稳定。
 - Plan-R1 和 HorizonDrive 都把 `dtheta` 作为动作的一部分；这是有先例的。
+- TCP（arXiv:2206.08129）control-only 32.45 / trajectory-only 28.29 / fused 57.01；waypoint branch 的弱点是 PID tracker，不是表示本身；我们的 LQR 比 PID 更适合。ADT（arXiv:2606.02105）direct control 在 H=1 最好、长 horizon 变差；3s 直接控制不在证据支持范围内。
 - 代价只是一个额外维度（3D vs 2D），对 1M 模型和 PPO 都可接受。
 
 ### 2.3 为什么不是 `(dx,dy,v_next)`
@@ -107,7 +109,8 @@ P_{n+1}=P_n\oplus\left(R(\theta_n)\begin{bmatrix}dx_n\\dy_n\end{bmatrix},\ \thet
 
 ### 2.4 为什么不是 `(ds,dtheta)`
 
-- 它是 `(dx,dy,dtheta)` 在常曲率圆弧假设下的特殊参数化：`kappa=dtheta/ds`，`v_avg=ds/0.5`。
+- 它和 `(dx,dy,dtheta)` 在信息上近似等价：`ds=||dx,dy||`，`kappa=dtheta/ds`；差别是数值条件/约束，不是表达能力。
+- 它是常曲率圆弧假设下的极坐标形式：`kappa=dtheta/ds`，`v_avg=ds/0.5`。
 - 它把横向路径和纵向速度耦合在一起：同一路径减速必须同时缩 `ds` 和 `dtheta`；低速时 `kappa=dtheta/ds` 病态，容易产生极大曲率。
 - 旧分支跑通过 `(ds,dtheta)`，但这只证明“可实现”，不证明“最优/行业通用”。这轮 9 个 repo 里没有 learned head 用它作为主输出。
 - 保留为 baseline/ablation，不作为主合同。
@@ -119,6 +122,7 @@ P_{n+1}=P_n\oplus\left(R(\theta_n)\begin{bmatrix}dx_n\\dy_n\end{bmatrix},\ \thet
 - 从专家 10Hz 轨迹反推 `kappa` 在低速时噪声大（`dtheta/ds`，`ds→0`）；`(kappa,a)` 不会自动解决这个标签问题，只是把问题从动作空间移到数据空间。
 - `v_end` 有非负约束且依赖 `v0`；`a_long` 更自然，但它仍然不是行业 head 的常见输出。
 - 固定 0.5s 时间窗内，空间位移与速度天然耦合；`(kappa,a)` 只是把耦合从动作空间移到积分器，并不会让同一 0.5s 段同时“更慢但走同样远”。pose increment 更直接。
+- 但必须承认：2026 lifting paper（arXiv:2602.06214）在 Δt=0.5s 的 reactive closed-loop 里发现 CCPP/curvature-based integrator 更好。这与主 action 选 `(dx,dy,dtheta)` 不矛盾：我们保留 pose increment 作为 action，固定 integrator 优先 curvature/CCPP，并用 auxiliary `(v_end,kappa)` head 提供曲率；如果后续 P0 证明 `(kappa,a)` 作为主 action 明显更好，再单独评估。
 - 保留为 ablation/经典规划对照；不作为主合同。
 
 ### 2.6 动作 bounds 与可行性
@@ -130,7 +134,7 @@ dx ∈ [0, 10] m            # 0.5s 前向位移；倒车另开 reverse 模式
 dy ∈ [-2.0, 2.0] m        # 0.5s 横向位移
 dtheta ∈ [-0.6, 0.6] rad  # 0.5s 航向变化
 v_avg = sqrt(dx^2+dy^2)/0.5
-kappa_est = 2*sin(dtheta/2)/max(sqrt(dx^2+dy^2), eps)   # 或从 Hermite 轨迹派生
+kappa_est = 2*sin(dtheta/2)/max(sqrt(dx^2+dy^2), eps)   # 或从 integrator 轨迹派生
 |kappa_est| <= kappa_max(v_avg)
 a_lat = v_avg^2 * |kappa_est| <= a_lat_max
 ```
@@ -143,9 +147,11 @@ a_lat = v_avg^2 * |kappa_est| <= a_lat_max
 ### 2.7 轨迹插值与 LQR
 
 - 6 个 SE(2) 增量 → 7 个 pose（含 t=0）。
-- 用带切线约束的 cubic Hermite 插值到 30 个 0.1s 点；不要用无约束 Catmull-Rom（会过冲）。heading 由端点切线给出，速度由弧长/时间派生，曲率由 heading 差分派生。
-- LQR 使用完整 3s 参考；不是只传第一段。
+- **固定、无参数 integrator**：优先 constant-curvature / CCPP 3–5 substeps（2026 lifting paper 在 Δt=0.5s 的 closed-loop 证据）；cubic Hermite 作为精确端点 fallback。不要学习 integrator，也不要把 integrator 和 action 混成两个自由变量。
+- 用 integrator 生成的 pose 序列做 **pose-space loss**，同时保留每步 delta loss；UniAD/VAD 监督 cumsum pose，SparseDrive 监督 delta，两者都做可以兼顾全局形状和每步动作。
+- LQR 使用完整 3s 参考（30 个 0.1s 点）；不是只传第一段。
 - 插值后做曲率/横向加速度/速度限幅；如果超限，标记并回退到平滑/减速，而不是静默裁剪。
+- **低速保护**：`v<0.2 m/s` 时 bypass curvature，使用 stop controller/零曲率；LQR 的曲率拟合加正则（NAVSIM 的 `initial_curvature_penalty` 就是处理这个奇异性）。
 - 这与 NavSim/WoTE/Epona/drivelaw 的“pose → trajectory → LQR”链路一致；区别只是我们在模型内自回归生成 pose。
 
 ### 2.8 Plan Head / PPO / WM 的接口
@@ -291,7 +297,7 @@ ChatGPT 的 P2.5 只写“Real-ENV PPO canary”，没定义 tracker。建议：
 | 参数 | deployable ≤1M；H=96；无 MoE；默认 1 层；EMA target training-only 单独报告 |
 | 输入 | OD-dynamic/OD-static、LD、道路级 Nav、Ego；禁止 lane-level oracle；每模态 Encoder |
 | 时间 | env/control 0.1s；policy/memory/WM 0.5s；6 帧含当前；6 步=3s；30 个 0.1s 参考点 |
-| 动作 | `(dx,dy,dtheta)` per 0.5s，当前 ego frame；速度/曲率派生；bounds + feasibility loss |
+| 动作 | `(dx,dy,dtheta)` per 0.5s，当前 ego frame；速度/曲率派生；可选 `(v_end,kappa)` auxiliary；bounds + feasibility loss |
 | Plan Head | 单实例 6 次；BC oracle-state 6 步；WM 后 imagined state；同一 action schema |
 | Bank | per-entity token；6 帧含当前；warmup 重复最早真实帧 + valid=0；runtime detach；encoder hash |
 | Fusion | temporal per-entity（current+compensated history+delta+geometry+age/mask）→ spatial；fused `c_t` 不落 Bank |
@@ -412,11 +418,17 @@ ChatGPT 的 P2.5 只写“Real-ENV PPO canary”，没定义 tracker。建议：
 ### 9.4 外部参考
 
 - SparseDrive: arXiv:2405.19620（end-to-end sparse; planning head outputs per-step `(dx,dy)` deltas）。
-- VAD: arXiv:2305.13213（vectorized scene; waypoint deltas）。
+- VAD: arXiv:2303.12077（vectorized scene; waypoint deltas）。
 - UniAD: arXiv:2306.16927（planning-oriented; waypoint trajectory）。
+- SparseDriveV2: arXiv:2603.29163（path×speed vocabulary；LQR 下游）。
+- DriveSuprim: arXiv:2506.06659（selection-based pose trajectory；LQR 下游）。
+- TCP: arXiv:2206.08129（control-only vs trajectory-only vs fused；trajectory + controller 更好）。
+- ADT: arXiv:2606.02105（direct control；action horizon H=1 最好，长 horizon 变差）。
+- Waypoint–action lifting / CCPP: arXiv:2602.06214（Δt=0.5s；curvature-based integrator 在 reactive closed-loop 更好；pose-space loss 比 action-space loss 更相关）。
+- Apollo EM planning: arXiv:1807.08048（path-speed decomposition；`PathPoint.kappa` / `TrajectoryPoint.v`）。
 - Epona: arXiv:2506.24113（video diffusion world model; trajectory head `(x,y,yaw)`）。
 - DriveLaW: arXiv:2512.23421（latent world model + diffusion planner; local pose actions）。
-- 其他本地 repo（SparseDriveV2、WoTE、DriveSuprim、Plan-R1）以其代码路径为准；未逐一核实 arXiv 编号，避免猜测。
+- Plan-R1 / WoTE 以本地 repo 代码路径为准；未核实到稳定的 arXiv 编号，避免猜测。
 
 ---
 
