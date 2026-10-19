@@ -43,11 +43,14 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 | replay c500 LQR canary (`runs/p1_replay_c500_lqr`, 10) | 0.60 | 0.20 | 0.10 | 0.81 |
 | safety-weighted replay (`runs/p1_weight`, 50 val) | 0.64 | 0.26 | 0.08 | 0.82 |
 | safety-weighted LQR (`runs/p1_weight_lqr20`, 20 val) | 0.55 | 0.20 | 0.05 | 0.79 |
+| stronger safety weights 8/4 (`runs/p1_weight_hi`, 50 val) | 0.70 | 0.16 | 0.10 | 0.86 |
+| stronger safety weights 8/4 LQR (`runs/p1_weight_hi_lqr`, 20 val) | 0.55 | 0.10 | 0.15 | 0.79 |
+| safety weights 12/6 (`runs/p1_weight_hi2`, 50 val) | 0.54 | 0.06 | 0.18 | 0.81 |
 | Expert PurePursuitIDM (`runs/expert_val20.json`, 20 val) | 0.80 | 0.05 | 0.05 | 0.95 |
 
 Stage1 exact by geometry: straight 0.69 success / 0.15 coll / 0.15 off; curve 0.29 success / 0.29 coll / 0.43 off. LQR canary is a controller-interface canary only, not a final performance claim.
 
-A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR. Safety weighting (braking and near-lead rows, 3x/2x) further improves to 64% exact / 55% LQR on 50/20 val scenes. The expert is 80% success / 5% collision on the same 20 val scenes, so collision avoidance remains the main P1 gap.
+A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR. Safety weighting (braking and near-lead rows) improves exact success from 64% (3x/2x) to 70% (8x/4x) on 50 val; LQR is 55% success / 10% collision / 15% off-road. Pushing to 12x/6x cuts collision to 6% but collapses success to 54% and raises off-road to 18%, and LQR success to 30%: over-braking is the failure mode. 8x/4x is the current P1 trade-off. The expert is 80% success / 5% collision on 20 val, so collision avoidance and the Exact→LQR gap remain the main gaps.
 
 ## Root causes found and fixed
 
@@ -61,7 +64,7 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 
 - `datasets/bc_2k`: 2,000 train scenes, 6 workers; log `runs/logs/collect_2k.log`.
 - `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`.
-- Current P1 baseline: `runs/p1_weight` (64% exact success / 26% collision / 8% off-road on 50 val; 55% LQR success / 20% collision on 20 val).
+- Current P1 baseline: `runs/p1_weight_hi` (70% exact success / 16% collision / 10% off-road on 50 val; 55% LQR success / 10% collision / 15% off-road on 20 val). Safety-first alternative `runs/p1_weight_hi2` (54% exact / 6% collision / 18% off-road; LQR 30% success) is not promoted.
 - PPO canary: `runs/ppo_canary_smoke` (1 update, 1 episode, 100 steps) and `runs/ppo_canary_2u` (2 updates, 2 episodes, 200 steps) prove sampling/log-prob/GAE/value/optimizer wiring; the reward is negative and value loss is noisy, so these are pipeline canaries only, not performance claims.
 - DAgger c1000 finished/soon; next train with c0+DAgger replay and safety weighting and compare against `runs/p1_weight`.
 - Expert baseline on 20 val: 80% success / 5% collision / 5% off-road / 0.95 rc.
