@@ -289,6 +289,7 @@ ChatGPT 的 P2.5 只写“Real-ENV PPO canary”，没定义 tracker。建议：
 | 维度 | 合同 |
 |---|---|
 | 参数 | deployable ≤1M；H=96；无 MoE；默认 1 层；EMA target training-only 单独报告 |
+| 输入 | OD-dynamic/OD-static、LD、道路级 Nav、Ego；禁止 lane-level oracle；每模态 Encoder |
 | 时间 | env/control 0.1s；policy/memory/WM 0.5s；6 帧含当前；6 步=3s；30 个 0.1s 参考点 |
 | 动作 | `(dx,dy,dtheta)` per 0.5s，当前 ego frame；速度/曲率派生；bounds + feasibility loss |
 | Plan Head | 单实例 6 次；BC oracle-state 6 步；WM 后 imagined state；同一 action schema |
@@ -297,6 +298,8 @@ ChatGPT 的 P2.5 只写“Real-ENV PPO canary”，没定义 tracker。建议：
 | WM | 动态 OD 学习；静态 OD/LD/Nav/Ego 重投影+同 Encoder 重编码；RoadState 独立；action-conditioned |
 | Plan loss | 6 步 action/pose/heading/curvature/smoothness/feasibility；不是单一 XY MSE |
 | WM loss | normalized MSE + cosine + OD/ego physical decoder + per-modality mask；static LD/Nav 用 geometry+reencode consistency；anti-collapse 分阶段 |
+| Value/Risk | 同一 Plan/Value 接口；IL/DAgger 用 MC return/route progress + 3s collision/off-road/unsafe proximity；RL 用 GAE；reward value 与 safety cost 分开 |
+| Reward | handcrafted safety/comfort/efficiency/completion；route arc-length progress；cost 分离并审计；v1 不做 learned reward |
 | Interface | KL/一致性，分 depth，权重 < BC，WM fidelity 达标后启用 |
 | Detach | future target stop-grad；runtime Bank detach；training sequence 保留图到 batch；episode 边界 detach；PPO old log-prob/value detach |
 | 训练 | P0 → P1 BC → P2 DAgger → P2.5 Exact PPO + LQR canary → P3 WM → P4 Joint+LQR → P5 正式 PPO+LQR → P6 Imagined RL |
