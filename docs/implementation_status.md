@@ -38,10 +38,12 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 | Stage1 LQR canary (`runs/p1_s1_lqr`, 10 scenes) | 0.60 | 0.00 | 0.20 | 0.84 |
 | mix c0+c500+DAgger (`runs/p1_mix1`) | 0.35 | 0.10 | 0.55 | 0.72 |
 | stage2 c500+c1000 (`runs/p1_s2`) | 0.30 | 0.20 | 0.50 | 0.53 |
+| replay c0+DAgger200+c500DAgger (`runs/p1_replay_c500`) | 0.55 | 0.35 | 0.05 | 0.77 |
+| replay c500 LQR canary (`runs/p1_replay_c500_lqr`, 10) | 0.60 | 0.20 | 0.10 | 0.81 |
 
 Stage1 exact by geometry: straight 0.69 success / 0.15 coll / 0.15 off; curve 0.29 success / 0.29 coll / 0.43 off. LQR canary is a controller-interface canary only, not a final performance claim.
 
-A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Treat this as a BC distribution-shift result, not a data-size win.
+A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR, with 5% exact off-road; collision is now the main failure (35% exact, 20% LQR).
 
 ## Root causes found and fixed
 
@@ -55,7 +57,8 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 
 - `datasets/bc_2k`: 2,000 train scenes, 6 workers; log `runs/logs/collect_2k.log`.
 - `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`.
-- Running: `datasets/dagger_s1_c500` (200 scenes from offset 500, shield TTC 1.5); after it finishes, train c0 + DAgger200 + DAgger_c500 (replay, no raw c500 BC) and compare against `runs/p1_s1`.
+- Current P1 baseline: `runs/p1_replay_c500` (55% exact success, 60% LQR canary; 35% exact collision, 20% LQR collision).
+- Running: DAgger on c1000 (offset 1000, 200 scenes) with the current baseline; next train with c0+DAgger replay and compare.
 - Next: DAgger on c1000/c1500 if replay training holds; then freeze P1 baseline and run the 50-scene Val slice. 10k/500/500 remains the final scale.
 
 ## Known gaps
