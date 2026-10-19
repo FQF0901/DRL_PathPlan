@@ -162,6 +162,7 @@ M_{n+1}=\operatorname{FIFO}(M_n,\hat z_{n+1})
 
 - stable object/track ID，仅用于对齐、监督和诊断；
 - object type：车辆、行人、锥桶、障碍物、收费站动态设施等；
+- taxonomy fields：`semantic_type / mobility_type(dynamic|static) / geometry_type / state_type`；
 - 相对 ego 的位置、航向、速度、加速度；
 - object size；
 - visibility/validity；
@@ -174,6 +175,7 @@ M_{n+1}=\operatorname{FIFO}(M_n,\hat z_{n+1})
 - ID 用于跨帧对齐和监督；
 - 所有环境语义字段先进入 OD Encoder；
 - 不允许以规则形式直接告诉 Planner “哪辆车需要避让”。
+- 静态设施不得进入动态 WM transition；动态闸机/交通灯状态进入 RoadState token。
 
 ## 3.2 Lane/Road Data，LD
 
@@ -466,7 +468,7 @@ a_n=(\Delta x_n,\Delta y_n,\Delta\psi_n,v_{n+1})
 - 可等价改用 `(Δx, Δy, Δψ, Δv)`，但必须在 P0 写入 decision log 后全流程统一；
 - `(ds,dtheta)` 仅保留为对照基线，不作为长期主动作。
 
-P0 必须用 Expert 数据和车辆动力学完成动作参数化否决门，至少报告 endpoint/heading/terminal-speed、acceleration、jerk、curvature/curvature-rate、full-stop、stop-to-go 重建误差，以及 LQR tracking error 和控制饱和率。初始 action bounds 仅用于 spike，最终范围由 Expert 分位数、动力学边界和 LQR 可跟踪性共同标定。
+P0 将 4D `(dx,dy,dpsi,v_next)` 作为固定基线，只校准标签、bounds、归一化、Hermite 插值和动力学可行性；不得根据 `v_next` 与平均速度的相关性自动退化为 3D。若 action round-trip、full-stop/stop-to-go 或 Expert-GT LQR 出现结构性失败，则暂停 P1，提交 decision log 人工复审，不允许脚本静默改动作维度。至少报告 endpoint/heading/terminal-speed、conditional terminal-speed residual、acceleration、jerk、curvature/curvature-rate、full-stop、stop-to-go、LQR tracking error 和控制饱和率。
 
 必须从相邻点和连续 0.5 s 决策段派生并约束：
 - heading / `Δψ`；
@@ -475,6 +477,7 @@ P0 必须用 Expert 数据和车辆动力学完成动作参数化否决门，至
 - jerk；
 - curvature rate；
 - 相邻真实决策段连接处的位姿、速度、航向和曲率连续性。
+- 第 `n+1` 段起始速度硬继承 Ego Dynamics 推进后的第 `n` 段终态 `v_{n+1}`；平顺性使用 soft loss + feasibility gate。
 
 Exact Tracking 只替代早期执行器，不豁免轨迹动力学约束。即使仿真器能够瞬时落到目标点，也不得把横移过大、航向突变、曲率不连续或速度跳变的轨迹判为可用。
 
@@ -570,8 +573,10 @@ a_{lon}=\frac{v_{n+1}-v_n}{0.5}
 \]
 
 这些量由 Plan Head 输出和当前 ego state 计算，不需要另开互相矛盾的动作头。
+每段至少 enforce：`v_next>=0`、`a_min <= (v_next-v_n)/0.5 <= a_max`、`|kappa|<=kappa_max`、`|v^2*kappa|<=a_lat_max`；低速 stop/hold 属于 Controller；记录 clip/reject/post-process 和控制饱和率。
 
 ## 7.3 World Model 输出拆分
+分类合同：仅 dynamic OD/RoadState 进入 learned transition；Static OD/infrastructure/LD 做 geometry reprojection + shared Encoder re-encode；Nav 按 route progress 更新。交通灯 schema 保留，首版可默认关闭。
 
 动态预测主体：
 
@@ -686,6 +691,7 @@ L_{wm}=\lambda_{od}L_{od}+\lambda_{roadstate}L_{roadstate}+\lambda_{ego}L_{ego}+
 \]
 
 Static LD 和 Nav 不作为普通无条件预测主项。
+Static LD 使用 geometry reprojection + stop-gradient re-encode consistency；Nav 使用 route-progress + geometry/topology consistency。
 
 不能只报告 aggregate latent MSE。至少按：
 
@@ -789,6 +795,7 @@ detach_encoder_from_wm_loss: false
 ## 10.3 EMA Target Encoder
 
 Target Encoder 不参与反向传播。采用：
+D1/D2 冻结 Encoder 时 target 固定，EMA 为 no-op；D2 增加 latent variance/effective-rank gate；Stage E 解冻 adapter 后才启用 EMA，并监控 target-online drift。
 
 \[
 \theta_{target}\leftarrow m\theta_{target}+(1-m)\theta_{online}
@@ -842,7 +849,7 @@ Target Encoder 不参与反向传播。采用：
 1.0 → 0.7 → 0.4 → 0.2 → 0.0
 ```
 
-但实际以闭环安全和数据覆盖决定。
+但实际以闭环安全和数据覆盖决定。下降由 Student success、collision/off-road、Expert intervention、recovery、LQR shadow 和 failure-buffer 覆盖率触发，不按固定轮次机械下降。
 
 重点采集：
 
@@ -939,6 +946,7 @@ stuck                       -0.1 per step after grace period
 - 验证集完全冻结；
 - 没有 train/validation map seed 或 episode 泄漏；
 - Expert 特权信息审计报告完成，并明确哪些样本属于 privileged/multi-solution 场景及其监督降权方式。
+- P0 动作数据按 lane keeping、curve、full stop、stop-to-go、slow following、obstacle braking、lane change、junction、fork/merge、toll-gate 分桶；低速、急减速、大曲率设最低配额，数值写 decision log。
 
 ## Stage A1：单帧 BC + Exact Tracking
 
@@ -1052,7 +1060,7 @@ single frame
 训练策略：
 
 - 冻结或基本冻结已验证好的 Planner/Encoder；
-- Target Encoder 使用 EMA；
+- Encoder 冻结时 Target Encoder 固定，记录 target drift=0；
 - 先训练 one-step latent prediction；
 - 对动态 OD、ego、road-state 分模态监督。
 
@@ -1084,7 +1092,7 @@ WM 必须明显超过简单基线，才能进入多步阶段。
 - state autoregression error；
 - policy-WM coupling error。
 
-必须按 rollout depth 画误差曲线。若第 4 至 6 步明显失真，不得直接用于 imagined RL。
+必须按 rollout depth 画误差曲线，并监控 latent norm/std/effective rank；失真或 rank gate 不通过不得进入 imagined RL。
 
 当 WM 已能生成 1/2/3/6 步 preview 时，同步进行递增时域 LQR shadow evaluation：先验证 0.5 s，再验证 1.0/1.5/3.0 s。该评测只诊断轨迹拼接、插值和 Controller 可实现性，不参与 WM latent loss。
 
@@ -1100,7 +1108,7 @@ WM 必须明显超过简单基线，才能进入多步阶段。
 
 后期可选：
 
-- 只解冻 Encoder 顶层 adapter；
+- 只解冻 Encoder 顶层 adapter；此时才启用 EMA 更新并监控 drift；
 - 降低 WM loss 权重；
 - 通过 A/B 决定是否开放 action-to-WM 梯度。
 
@@ -1152,12 +1160,11 @@ Stage F 不是第一次测试 LQR，而是 LQR 首次成为完整 3 s Plan+WM �
 ## 14. 评测协议
 
 ## 14.1 数据划分
-
-- 训练集：10,000 个场景；
-- 验证集：1,000 个场景，首次生成后永久冻结；
-- 建议额外保留独立 test set；若暂时没有，至少不得在 validation 上调场景或手工删除失败样本；
-- 按 scenario/map seed 划分，禁止按帧随机切分；
-- 同一路网变体和相邻帧不得跨 train/validation 泄漏。
+- Train：10,000；其中 `Calib50` 属于训练域，只作快速调试；
+- Validation：500，用于 checkpoint、阈值和消融，永久冻结；
+- Test：500，仅用于里程碑和最终结论，不调参、不删失败样本；
+- P0/P1 可先用 2,000 train / 200 evaluation-scale scenes 做工程 smoke，不替代最终规模；
+- 按 scenario/map seed 划分，禁止 train/val/test 泄漏。
 
 ## 14.2 核心闭环指标
 
@@ -1329,6 +1336,8 @@ WM 指标：
 - `EXPERT_PRIVILEGE_MISMATCH`
 - `PLANNER_LANE_SELECTION_ERROR`
 - `PLANNER_SPEED_ERROR`
+- `PLAN_INTERFACE_SHIFT`
+- `ACTION_V_NEXT_INCONSISTENT`
 - `PLANNER_OBSTACLE_RESPONSE_ERROR`
 - `TRAJECTORY_INFEASIBLE`
 - `INTERPOLATION_OVERSHOOT`
@@ -1336,6 +1345,9 @@ WM 指标：
 - `WM_ACTION_INSENSITIVE`
 - `WM_ROLLOUT_DRIFT`
 - `WM_LATENT_COLLAPSE`
+- `STATIC_REPROJECTION_ERROR`
+- `MEMORY_WARMUP_ERROR`
+- `TRAIN_EVAL_ASSEMBLY_MISMATCH`
 - `POLICY_EXPLOITS_WM`
 - `REWARD_HACKING`
 - `OOD_SCENARIO`
@@ -1413,6 +1425,8 @@ config/
   train_wm.yaml
   train_joint.yaml
   evaluate.yaml
+  eval_thresholds.yaml
+  runtime_local.yaml
 
 pipeline/
   collect_expert.py
@@ -1481,6 +1495,16 @@ test/
   test_rollout_consistency.py
   test_detach_contract.py
   test_checkpoint_reproducibility.py
+  test_action_kinematics.py
+  test_velocity_chain_consistency.py
+  test_plan_head_single_instance.py
+  test_param_budget.py
+  test_tensor_budget.py
+  test_lqr_gt_tracking.py
+  test_lqr_plan_tracking.py
+  test_train_eval_assembly_parity.py
+  test_bank_entity_schema.py
+  test_validation_isolation.py
 
 docs/
   architecture_contract.md
@@ -1508,6 +1532,7 @@ docs/
 - 保存 git commit、dirty status、依赖版本和设备信息；
 - 每个实验生成唯一 run ID；
 - validation set 配置和 seed 只读，不允许训练脚本改写。
+- validation/test 均只读；worker/recycle/memory floor 写 `runtime_local.yaml`，按机器标定，不是架构硬约束。
 
 ## 18.2 Shape 与 Schema 约定
 
@@ -1682,12 +1707,10 @@ parameter-count check
 - DAgger/failure buffer；
 - nav leak and reset audit。
 
-### P3：真实环境 RL
-
-- PPO；
-- reward/cost；
-- real-env closed-loop baseline；
-- exceed-IDM evaluation。
+### P3：短 Real-ENV PPO Canary
+- PPO/action-log-prob/GAE/buffer；
+- reward/cost 与 hacking audit；
+- 只验证训练管线与无灾难性退化，不承担 exceed-IDM 结论。
 
 ### P4：World Model
 
@@ -1698,13 +1721,13 @@ parameter-count check
 - Imagine Bank；
 - causality/rollout probes。
 
-### P5：LQR 与联合磨合
-
-- trajectory assembly/interpolation；
-- dynamic feasibility；
-- LQR；
+### P5：完整 3 s LQR 正式闭环、联合磨合与 Real-ENV PPO
+- Plan+WM 完整 3 s preview；
+- trajectory assembly/interpolation 与 dynamic feasibility；
+- LQR controller-realized closed loop；
 - joint training；
-- exact-vs-LQR diagnosis。
+- 正式 Real-ENV PPO + LQR；
+- exceed-IDM 与 exact-vs-LQR diagnosis。
 
 ### P6：可选 imagined RL
 
@@ -1734,9 +1757,9 @@ parameter-count check
 ## 22. 最终不可违反的硬约束
 
 1. World Model 必须显式 ego-action/ego-trajectory conditioned。
-2. Plan Head 每次输出下一 0.5 s ego motion，rollout 6 次形成完整 3 s 轨迹。
+2. Plan Head 每次输出下一 0.5 s `(dx,dy,dpsi,v_next)`，rollout 6 次形成 3 s；不得自动删除 `v_next` 或退化为 3D。
 3. 六步轨迹点必须转换到同一个 rollout-t0 ego frame 后才能拼接。
-4. LQR 使用完整 3 s 预瞄轨迹，不得只传第一段。
+4. Stage F 正式 LQR 使用完整 3 s；A1-C 的 0.5 s LQR 仅是 canary/shadow。
 5. BC、DAgger、RL 使用同一种轨迹动作语义。
 6. OD/LD 先 ego-motion compensation，再按稳定 ID 对齐并计算 latent delta。
 7. latent delta 必须与绝对 latent、时间和 mask 一起使用。
@@ -1748,7 +1771,7 @@ parameter-count check
 13. Exact tracking 只证明 Planner 闭环能力；最终成绩必须报告 LQR controller-realized closed loop。
 14. IDM + Pure Pursuit 可作为唯一 Expert，但必须审计特权信息，并以真实闭环指标而非 imitation distance 判断是否超越。
 15. 每新增模块必须有关闭该模块的同 seed ablation。
-16. 所有主结论以冻结验证集、多 seed、按场景拆分的闭环结果为准。
+16. 调参与 checkpoint 依据冻结 Val500；最终结论必须由只读 Test500、多 seed、分场景复核。
 
 ---
 
