@@ -357,11 +357,11 @@ def _to_line_type(value) -> str | None:
     if value is None:
         return None
     if isinstance(value, (int, float, np.integer, np.floating)):
-        from env.obs.ld import LINE_TYPE_IDS
+        from env.obs import LINE_TYPE_IDS
 
         return {v: k for k, v in LINE_TYPE_IDS.items()}.get(int(value))
     text = str(value)
-    from env.obs.ld import LINE_TYPE_IDS
+    from env.obs import LINE_TYPE_IDS
 
     if text in LINE_TYPE_IDS:
         return text
