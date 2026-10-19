@@ -59,6 +59,9 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--init", default=None)
+    p.add_argument("--value-coef", type=float, default=0.1)
+    p.add_argument("--risk-coef", type=float, default=0.1)
+    p.add_argument("--gamma", type=float, default=0.95)
     args = p.parse_args(argv)
 
     torch.manual_seed(args.seed)
@@ -89,8 +92,28 @@ def main(argv=None) -> int:
     val = _tensor_batch(z, val_mask)
     target = torch.from_numpy(action)
     target_norm = _norm_action(target)
-    train_ds = TensorDataset(*(train[k] for k in KEYS), target_norm[train_mask])
-    val_ds = TensorDataset(*(val[k] for k in KEYS), target_norm[val_mask])
+
+    # Crude episode-level value/risk targets from terminal outcomes.
+    n_rows = len(action)
+    value_t = np.zeros(n_rows, dtype=np.float32)
+    risk_t = np.zeros(n_rows, dtype=np.float32)
+    for e in np.unique(episode_id):
+        idx = np.where(episode_id == e)[0]
+        if len(idx) == 0:
+            continue
+        last = int(idx[-1])
+        succ = float(z["success"][last]) > 0.5
+        coll = float(z["collision"][last]) > 0.5
+        off = float(z["off_road"][last]) > 0.5
+        outcome = 1.0 if succ else (-1.0 if (coll or off) else 0.0)
+        risk = 1.0 if (coll or off) else 0.0
+        for i in idx:
+            value_t[i] = outcome * (args.gamma ** (last - int(i)))
+            risk_t[i] = risk
+    value_t = torch.from_numpy(value_t)
+    risk_t = torch.from_numpy(risk_t)
+    train_ds = TensorDataset(*(train[k] for k in KEYS), target_norm[train_mask], value_t[train_mask], risk_t[train_mask])
+    val_ds = TensorDataset(*(val[k] for k in KEYS), target_norm[val_mask], value_t[val_mask], risk_t[val_mask])
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=False)
 
@@ -111,11 +134,13 @@ def main(argv=None) -> int:
         model.train()
         total = 0.0
         n = 0
-        for *xs, y in train_loader:
+        for *xs, y, vt, rt in train_loader:
             batch = {k: v.to(args.device) for k, v in zip(KEYS, xs)}
-            y = y.to(args.device)
+            y = y.to(args.device); vt = vt.to(args.device); rt = rt.to(args.device)
             out = model(batch)
-            loss = loss_fn(out["action_mu"], y)
+            loss = (loss_fn(out["action_mu"], y)
+                    + args.value_coef * loss_fn(out["value"].squeeze(-1), vt)
+                    + args.risk_coef * torch.nn.functional.binary_cross_entropy_with_logits(out["risk"].squeeze(-1), rt))
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -129,9 +154,9 @@ def main(argv=None) -> int:
         n = 0
         mae = torch.zeros(4, dtype=torch.float64)
         with torch.no_grad():
-            for *xs, y in val_loader:
+            for *xs, y, vt, rt in val_loader:
                 batch = {k: v.to(args.device) for k, v in zip(KEYS, xs)}
-                y = y.to(args.device)
+                y = y.to(args.device); vt = vt.to(args.device); rt = rt.to(args.device)
                 out = model(batch)
                 total += float(loss_fn(out["action_mu"], y)) * len(y)
                 n += len(y)
