@@ -20,10 +20,10 @@ from pipeline.rollout import batch_from_obs, first_segment_points, plan_actions
 STEPS_PER_POLICY = 5
 
 
-def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int, device: str) -> Dict[str, Any]:
+def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int, device: str, ff: bool = False, lookahead: float = 0.8) -> Dict[str, Any]:
     env.reset()
     ego = env.agent
-    tracker = env.engine.add_policy(ego.id, LqrTracker, ego, int(getattr(spec, "seed", 0)))
+    tracker = env.engine.add_policy(ego.id, LqrTracker, ego, int(getattr(spec, "seed", 0)), curvature_feedforward=ff, lookahead_time=lookahead)
     frames: List[Dict[str, np.ndarray]] = []
     poses: List[np.ndarray] = []
     prev_action = np.zeros(4, dtype=np.float64)
@@ -82,6 +82,8 @@ def main(argv=None) -> int:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--max-steps", type=int, default=600)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--ff", action="store_true", help="enable curvature feedforward")
+    p.add_argument("--lookahead-time", type=float, default=0.8)
     args = p.parse_args(argv)
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     model = StructuredPlanner(hidden=int(ck.get("config", {}).get("hidden", 128)))
@@ -92,7 +94,7 @@ def main(argv=None) -> int:
     for i, spec in enumerate(specs):
         env = build_env(spec, use_render=False)
         try:
-            r = run_episode(env, model, spec, max_steps=int(args.max_steps), device=args.device)
+            r = run_episode(env, model, spec, max_steps=int(args.max_steps), device=args.device, ff=bool(args.ff), lookahead=float(args.lookahead_time))
         finally:
             env.close()
         rows.append(r)
