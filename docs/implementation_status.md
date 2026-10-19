@@ -24,6 +24,7 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 - `pipeline/rollout.py`: 4D action -> cubic Hermite segment; 6-step composition.
 - `pipeline/eval_exact.py`: exact kinematic closed loop.
 - `pipeline/eval_lqr.py`: P1 single-0.5 s-segment LQR canary.
+- `pipeline/train_ppo.py`: short PPO canary (sampled normalized 4D action, exact tracker, GAE, clipped PPO). Smoke: 1 update / 1 episode / 100 steps at `runs/ppo_canary_smoke`; not a performance claim.
 - `config/`, `test/` (7 tests pass), `net/param_probe.py`, `tools/monitor_8h.sh`.
 
 ## Current results (10 validation scenes, exact tracking, 300 env steps)
@@ -61,6 +62,7 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 - `datasets/bc_2k`: 2,000 train scenes, 6 workers; log `runs/logs/collect_2k.log`.
 - `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`.
 - Current P1 baseline: `runs/p1_weight` (64% exact success / 26% collision / 8% off-road on 50 val; 55% LQR success / 20% collision on 20 val).
+- PPO canary: `runs/ppo_canary_smoke` (1 update, 1 episode, 100 steps) proves sampling/log-prob/GAE/value/optimizer wiring; run 2–4 updates before treating it as a pipeline gate.
 - DAgger c1000 finished/soon; next train with c0+DAgger replay and safety weighting and compare against `runs/p1_weight`.
 - Expert baseline on 20 val: 80% success / 5% collision / 5% off-road / 0.95 rc.
 - Next: DAgger on c1000/c1500 if replay training holds; then freeze P1 baseline and run the 50-scene Val slice. 10k/500/500 remains the final scale.
