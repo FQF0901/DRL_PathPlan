@@ -62,6 +62,8 @@ def main(argv=None) -> int:
     p.add_argument("--value-coef", type=float, default=0.0)
     p.add_argument("--risk-coef", type=float, default=0.0)
     p.add_argument("--gamma", type=float, default=0.95)
+    p.add_argument("--brake-weight", type=float, default=3.0)
+    p.add_argument("--near-weight", type=float, default=2.0)
     args = p.parse_args(argv)
 
     torch.manual_seed(args.seed)
@@ -112,8 +114,22 @@ def main(argv=None) -> int:
             risk_t[i] = risk
     value_t = torch.from_numpy(value_t)
     risk_t = torch.from_numpy(risk_t)
-    train_ds = TensorDataset(*(train[k] for k in KEYS), target_norm[train_mask], value_t[train_mask], risk_t[train_mask])
-    val_ds = TensorDataset(*(val[k] for k in KEYS), target_norm[val_mask], value_t[val_mask], risk_t[val_mask])
+    # Class imbalance: braking / near-lead rows are rare but safety-critical.
+    v0 = z["ego"][:, -1, 0]
+    dv = action[:, 3] - v0
+    brake = (dv < -0.5).astype(np.float32)
+    od = z["od"][:, -1]
+    om = z["od_mask"][:, -1] > 0.5
+    dx = od[..., 0]; vx = od[..., 4]
+    ttc = np.where((dx > 0) & (vx < -0.1), dx / np.maximum(-vx, 0.1), 1e6)
+    ttc = np.where(om, ttc, 1e6)
+    min_ttc = ttc.min(axis=1)
+    near = (min_ttc < 2.0).astype(np.float32)
+    w = 1.0 + args.brake_weight * brake + args.near_weight * near
+    w = w / max(float(w.mean()), 1e-6)
+    w_t = torch.from_numpy(w.astype(np.float32))
+    train_ds = TensorDataset(*(train[k] for k in KEYS), target_norm[train_mask], value_t[train_mask], risk_t[train_mask], w_t[train_mask])
+    val_ds = TensorDataset(*(val[k] for k in KEYS), target_norm[val_mask], value_t[val_mask], risk_t[val_mask], w_t[val_mask])
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=False)
 
@@ -134,13 +150,17 @@ def main(argv=None) -> int:
         model.train()
         total = 0.0
         n = 0
-        for *xs, y, vt, rt in train_loader:
+        for *xs, y, vt, rt, w in train_loader:
             batch = {k: v.to(args.device) for k, v in zip(KEYS, xs)}
-            y = y.to(args.device); vt = vt.to(args.device); rt = rt.to(args.device)
+            y = y.to(args.device); vt = vt.to(args.device); rt = rt.to(args.device); w = w.to(args.device)
             out = model(batch)
-            loss = (loss_fn(out["action_mu"], y)
-                    + args.value_coef * loss_fn(out["value"].squeeze(-1), vt)
-                    + args.risk_coef * torch.nn.functional.binary_cross_entropy_with_logits(out["risk"].squeeze(-1), rt))
+            per = ((out["action_mu"] - y) ** 2).mean(dim=1)
+            loss = (per * w).mean()
+            if args.value_coef:
+                loss = loss + args.value_coef * ((out["value"].squeeze(-1) - vt) ** 2 * w).mean()
+            if args.risk_coef:
+                bce = torch.nn.functional.binary_cross_entropy_with_logits(out["risk"].squeeze(-1), rt, reduction="none")
+                loss = loss + args.risk_coef * (bce * w).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -154,7 +174,7 @@ def main(argv=None) -> int:
         n = 0
         mae = torch.zeros(4, dtype=torch.float64)
         with torch.no_grad():
-            for *xs, y, vt, rt in val_loader:
+            for *xs, y, vt, rt, w in val_loader:
                 batch = {k: v.to(args.device) for k, v in zip(KEYS, xs)}
                 y = y.to(args.device); vt = vt.to(args.device); rt = rt.to(args.device)
                 out = model(batch)
