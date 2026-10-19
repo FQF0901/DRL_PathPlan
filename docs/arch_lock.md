@@ -447,8 +447,6 @@ Common:
 
 ---
 
-## 6.---
-
 ## 6. Plan Head 与轨迹定义
 
 ## 6.1 每次 policy query / imagined step 的输出
@@ -774,8 +772,8 @@ detach_wm_input: false
 detach_wm_recurrent_path: false
 detach_wm_to_value: false
 detach_plan_action_to_wm: true
-detach_encoder_from_wm_loss: true
-use_ema_target_encoder: true
+detach_encoder_from_wm_loss: true # D1/D2 固定 target、Stage E 才启用 EMA
+use_ema_target_encoder: true  # D1/D2 固定 target、Stage E 才启用 EMA
 ```
 
 训练后期只有在 WM 通过六步 fidelity 门槛后，才允许对照实验：

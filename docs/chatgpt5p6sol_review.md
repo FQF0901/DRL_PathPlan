@@ -75,4 +75,4 @@ TRAIN_EVAL_ASSEMBLY_MISMATCH
 修正 P5 为完整 3 秒 LQR 正式闭环和正式 Real-ENV PPO；
 删除了原文中的异常标题 ### 6.---。
 
-现在可以将更新后的 arch_lock_updated.md 作为新的合同真源，并让 Coding Agent 开始 P0，不需要继续进行架构层面的攻防。
+现在可以将更新后的 docs/arch_lock.md 作为新的合同真源，并让 Coding Agent 开始 P0，不需要继续进行架构层面的攻防。
