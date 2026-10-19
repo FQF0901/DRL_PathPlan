@@ -67,6 +67,18 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 - Expert baseline on 20 val: 80% success / 5% collision / 5% off-road / 0.95 rc.
 - Next: DAgger on c1000/c1500 if replay training holds; then freeze P1 baseline and run the 50-scene Val slice. 10k/500/500 remains the final scale.
 
+## Reproduce (current machine)
+
+```bash
+# environment already created; use wrapper for glvnd
+tools/venv-python -m env.scenario.cli --n-train 10000 --n-val 1000 --slice 200 --workers 4 --no-validate
+tools/venv-python -m dataset.collect --specs env/specs/scenarios_train_slice200.json --limit 200 --workers 4 --max-steps 600 --out datasets/bc_200
+tools/venv-python -m pipeline.train_bc --data datasets/bc_200_v2 datasets/dagger_100 --out runs/bc_dagger_100 --epochs 20 --batch-size 256 --lr 5e-4 --device cuda
+tools/venv-python -m pipeline.eval_exact --specs env/specs/scenarios_val_slice50.json --ckpt runs/bc_dagger_100/best.pt --out runs/eval --limit 50 --max-steps 600 --device cuda
+tools/venv-python -m pipeline.eval_lqr --specs env/specs/scenarios_val_slice50.json --ckpt runs/bc_dagger_100/best.pt --out runs/eval_lqr --limit 20 --max-steps 600 --device cuda
+tools/venv-python -m pipeline.train_ppo --ckpt runs/p1_weight/best.pt --specs env/specs/scenarios_train_slice200.json --out runs/ppo_canary --updates 2 --episodes 2 --max-steps 200 --device cuda
+```
+
 ## Known gaps
 
 - Value/risk heads are not yet trained.
