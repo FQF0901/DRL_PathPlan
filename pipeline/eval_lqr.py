@@ -80,7 +80,7 @@ def main(argv=None) -> int:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--max-steps", type=int, default=300)
+    p.add_argument("--max-steps", type=int, default=600)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args(argv)
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)

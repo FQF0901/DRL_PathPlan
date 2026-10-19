@@ -49,7 +49,19 @@ def expert_label(ego: Any, expert: PurePursuitIDMPolicy) -> np.ndarray:
     return np.array([x, y, _wrap(th), v], dtype=np.float32)
 
 
-def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int, device: str) -> Dict[str, np.ndarray] | None:
+def _needs_shield(obs: Dict[str, np.ndarray], ttc_thresh: float) -> bool:
+    if ttc_thresh <= 0:
+        return False
+    od = obs["od"]; mask = obs["od_mask"] > 0.5
+    if not mask.any():
+        return False
+    dx, dy, vx = od[:, 0], od[:, 1], od[:, 4]
+    ttc = np.where((dx > 0) & (vx < -0.1), dx / np.maximum(-vx, 0.1), 1e6)
+    lateral = np.abs(dy) < 2.5
+    return bool(np.any(mask & lateral & (ttc < ttc_thresh)))
+
+
+def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int, device: str, shield_ttc: float = 0.0) -> Dict[str, np.ndarray] | None:
     env.reset()
     ego = env.agent
     expert = PurePursuitIDMPolicy(ego, int(getattr(spec, "seed", 0)))
@@ -72,6 +84,8 @@ def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int
         batch = batch_from_obs(hist, device=device)
         actions = plan_actions(model, batch, steps=6)
         student = actions[0]
+        intervened = _needs_shield(obs, shield_ttc)
+        execute = label if intervened else student
         rows.append({
             **{k: hist[k] for k in ("od", "od_mask", "ld", "ld_mask", "nav", "nav_mask", "ego", "ego_mask", "hist_valid")},
             "action": label,
@@ -80,8 +94,9 @@ def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int
             "success": np.float32(0.0),
             "collision": np.float32(0.0),
             "off_road": np.float32(0.0),
+            "intervened": np.float32(1.0 if intervened else 0.0),
         })
-        tracker.arm(env, points=first_segment_points(student))
+        tracker.arm(env, points=first_segment_points(execute))
         done = False
         for _ in range(STEPS_PER_POLICY):
             _, _, term, trunc, info = env.step([0.0, 0.0])
@@ -94,7 +109,7 @@ def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int
                     rows[-1]["collision"] = np.float32(bool(info.get("crash", False)))
                     rows[-1]["off_road"] = np.float32(bool(info.get("out_of_road", False)))
                 break
-        prev_action = student.astype(np.float64)
+        prev_action = execute.astype(np.float64)
         prev_speed = float(ego.speed)
         prev_heading = float(ego.heading_theta)
         if done:
@@ -117,6 +132,7 @@ def main(argv=None) -> int:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--max-steps", type=int, default=300)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--shield-ttc", type=float, default=0.0, help="expert override when closest in-path TTC < this (0=off)")
     args = p.parse_args(argv)
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     model = StructuredPlanner(hidden=int(ck.get("config", {}).get("hidden", 128)))
@@ -127,7 +143,7 @@ def main(argv=None) -> int:
     for i, spec in enumerate(specs):
         env = build_env(spec, use_render=False)
         try:
-            data = run_episode(env, model, spec, max_steps=int(args.max_steps), device=args.device)
+            data = run_episode(env, model, spec, max_steps=int(args.max_steps), device=args.device, shield_ttc=float(args.shield_ttc))
         finally:
             env.close()
         if data is not None:

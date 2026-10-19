@@ -59,8 +59,8 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--init", default=None)
-    p.add_argument("--value-coef", type=float, default=0.1)
-    p.add_argument("--risk-coef", type=float, default=0.1)
+    p.add_argument("--value-coef", type=float, default=0.0)
+    p.add_argument("--risk-coef", type=float, default=0.0)
     p.add_argument("--gamma", type=float, default=0.95)
     args = p.parse_args(argv)
 

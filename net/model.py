@@ -103,7 +103,7 @@ class StructuredPlanner(nn.Module):
         self.spatial = nn.TransformerEncoder(layer, num_layers=int(spatial_layers))
         self.norm = nn.LayerNorm(hidden)
         self.plan = nn.Sequential(
-            nn.Linear(7 * hidden + 3, hidden), nn.GELU(),
+            nn.Linear(7 * hidden + 5, hidden), nn.GELU(),
             nn.Linear(hidden, hidden), nn.GELU(),
         )
         self.mu = nn.Linear(hidden, ACTION_DIM)
@@ -220,7 +220,9 @@ class StructuredPlanner(nn.Module):
         ttc_idx = ttc.argmin(dim=1)
         od_urgent = od_t[torch.arange(B, device=od_t.device), ttc_idx]
         ttc_min = ttc[torch.arange(B, device=od_t.device), ttc_idx].clamp_max(10.0)[:, None] / 10.0
-        fused = self.plan(torch.cat([ctx, nav_t, od_pool, ld_pool, ld_role0, od_near, od_urgent, lat0, od_min, ttc_min], dim=-1))
+        heading0 = _masked_mean(batch["ld"][:, -1, :, 0, 2:3], role0)
+        kappa0 = _masked_mean(batch["ld"][:, -1, :, 0, 3:4], role0)
+        fused = self.plan(torch.cat([ctx, nav_t, od_pool, ld_pool, ld_role0, od_near, od_urgent, lat0, od_min, ttc_min, heading0, kappa0], dim=-1))
         mu = self.mu(fused)
         logstd = self.logstd(fused).clamp(-5.0, 0.0)
         return {

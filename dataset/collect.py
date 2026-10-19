@@ -175,11 +175,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--specs", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--offset", type=int, default=0)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--max-steps", type=int, default=300)
     args = p.parse_args(argv)
 
     specs = load_specs(args.specs)
+    offset = max(0, int(args.offset))
+    specs = specs[offset:]
     if args.limit is not None:
         specs = specs[: max(0, int(args.limit))]
     if not specs:
