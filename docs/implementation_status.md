@@ -45,12 +45,13 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 | safety-weighted LQR (`runs/p1_weight_lqr20`, 20 val) | 0.55 | 0.20 | 0.05 | 0.79 |
 | stronger safety weights 8/4 (`runs/p1_weight_hi`, 50 val) | 0.70 | 0.16 | 0.10 | 0.86 |
 | stronger safety weights 8/4 LQR (`runs/p1_weight_hi_lqr`, 20 val) | 0.55 | 0.10 | 0.15 | 0.79 |
+| stronger safety weights 8/4 LQR (`runs/p1_weight_hi_lqr50`, 50 val) | 0.56 | 0.12 | 0.18 | 0.79 |
 | safety weights 12/6 (`runs/p1_weight_hi2`, 50 val) | 0.54 | 0.06 | 0.18 | 0.81 |
 | Expert PurePursuitIDM (`runs/expert_val20.json`, 20 val) | 0.80 | 0.05 | 0.05 | 0.95 |
 
 Stage1 exact by geometry: straight 0.69 success / 0.15 coll / 0.15 off; curve 0.29 success / 0.29 coll / 0.43 off. LQR canary is a controller-interface canary only, not a final performance claim.
 
-A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR. Safety weighting (braking and near-lead rows) improves exact success from 64% (3x/2x) to 70% (8x/4x) on 50 val; LQR is 55% success / 10% collision / 15% off-road. Pushing to 12x/6x cuts collision to 6% but collapses success to 54% and raises off-road to 18%, and LQR success to 30%: over-braking is the failure mode. 8x/4x is the current P1 trade-off. The expert is 80% success / 5% collision on 20 val, so collision avoidance and the Exact→LQR gap remain the main gaps.
+A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR. Safety weighting (braking and near-lead rows) improves exact success from 64% (3x/2x) to 70% (8x/4x) on 50 val; LQR is 56% success / 12% collision / 18% off-road on 50 val (curves: 39% success / 33% off-road), so the Exact→LQR gap is primarily curve tracking/off-road. Pushing to 12x/6x cuts collision to 6% but collapses success to 54% and raises off-road to 18%, and LQR success to 30%: over-braking is the failure mode. 8x/4x is the current P1 trade-off. The expert is 80% success / 5% collision on 20 val, so collision avoidance and the Exact→LQR gap remain the main gaps.
 
 ## Root causes found and fixed
 
