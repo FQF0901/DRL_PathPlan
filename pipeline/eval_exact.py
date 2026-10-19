@@ -77,6 +77,7 @@ def run_episode(env: Any, model: StructuredPlanner, spec: Any, *, max_steps: int
         "off_road": bool(off_road),
         "route_completion": float(rc),
         "termination": fail_reason,
+        "geometry": (getattr(spec, "geometry", None) or ["unknown"])[0],
     }
 
 
@@ -107,12 +108,24 @@ def main(argv=None) -> int:
         print(f"[eval] {i+1}/{len(specs)} {r}")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    by_geo = {}
+    for r in rows:
+        g = r.get("geometry", "unknown")
+        by_geo.setdefault(g, []).append(r)
+    by_geo_summary = {g: {
+        "n": len(v),
+        "success_rate": float(np.mean([x["success"] for x in v])),
+        "collision_rate": float(np.mean([x["collision"] for x in v])),
+        "off_road_rate": float(np.mean([x["off_road"] for x in v])),
+        "route_completion_mean": float(np.mean([x["route_completion"] for x in v])),
+    } for g, v in by_geo.items()}
     summary = {
         "n": len(rows),
         "success_rate": float(np.mean([r["success"] for r in rows])) if rows else 0.0,
         "collision_rate": float(np.mean([r["collision"] for r in rows])) if rows else 0.0,
         "off_road_rate": float(np.mean([r["off_road"] for r in rows])) if rows else 0.0,
         "route_completion_mean": float(np.mean([r["route_completion"] for r in rows])) if rows else 0.0,
+        "by_geometry": by_geo_summary,
         "episodes": rows,
     }
     (out / "metrics.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
