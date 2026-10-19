@@ -34,8 +34,14 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 | BC + role0/nearest OD (`runs/bc_odnear`) | 0.40 | 0.40 | 0.10 | 0.69 |
 | BC + DAgger100 (`runs/bc_dagger_100`) | 0.50 | 0.40 | 0.10 | 0.70 |
 | BC + TTC readout (`runs/bc_ttc`) | 0.40 | 0.30 | 0.10 | 0.75 |
+| Stage1: c0 + DAgger200 (`runs/p1_s1`) | 0.55 | 0.20 | 0.25 | 0.79 |
+| Stage1 LQR canary (`runs/p1_s1_lqr`, 10 scenes) | 0.60 | 0.00 | 0.20 | 0.84 |
+| mix c0+c500+DAgger (`runs/p1_mix1`) | 0.35 | 0.10 | 0.55 | 0.72 |
+| stage2 c500+c1000 (`runs/p1_s2`) | 0.30 | 0.20 | 0.50 | 0.53 |
 
-LQR single-segment canary (`runs/eval_lqr_odnear_seg`): success 0.10, collision 0.10, off-road 0.00, route completion 0.62. It is a canary only, not a performance claim.
+Stage1 exact by geometry: straight 0.69 success / 0.15 coll / 0.15 off; curve 0.29 success / 0.29 coll / 0.43 off. LQR canary is a controller-interface canary only, not a final performance claim.
+
+A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Treat this as a BC distribution-shift result, not a data-size win.
 
 ## Root causes found and fixed
 
@@ -49,7 +55,8 @@ LQR single-segment canary (`runs/eval_lqr_odnear_seg`): success 0.10, collision 
 
 - `datasets/bc_2k`: 2,000 train scenes, 6 workers; log `runs/logs/collect_2k.log`.
 - `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`.
-- Next: train 2k BC, evaluate exact/LQR, DAgger 200-500 scenes, fine-tune, re-evaluate.
+- Running: `datasets/dagger_s1_c500` (200 scenes from offset 500, shield TTC 1.5); after it finishes, train c0 + DAgger200 + DAgger_c500 (replay, no raw c500 BC) and compare against `runs/p1_s1`.
+- Next: DAgger on c1000/c1500 if replay training holds; then freeze P1 baseline and run the 50-scene Val slice. 10k/500/500 remains the final scale.
 
 ## Known gaps
 
@@ -58,3 +65,5 @@ LQR single-segment canary (`runs/eval_lqr_odnear_seg`): success 0.10, collision 
 - Traffic-light/toll/cone scenarios exist in specs but the observation builder's static-object path needs a dedicated check.
 - The expert label in DAgger is a kinematic-bicycle lift, not a replayed expert 0.5 s rollout; audit it against a small replayed sample.
 - Test set is not yet separated from validation in the current run; use `scenarios_val_slice50.json` only for smoke until the Val/Test split is frozen.
+- No replay buffer in `train_bc`; fine-tuning on a new map chunk can forget the c0/DAgger domain. Use explicit replay or DAgger per domain.
+- Exact tracker currently uses the geometric segment; `v_next` is used as a label but not yet enforced as a separate speed profile in the tracker/LQR.

@@ -130,6 +130,7 @@ def main(argv=None) -> int:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--offset", type=int, default=0)
     p.add_argument("--max-steps", type=int, default=300)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--shield-ttc", type=float, default=0.0, help="expert override when closest in-path TTC < this (0=off)")
@@ -138,7 +139,9 @@ def main(argv=None) -> int:
     model = StructuredPlanner(hidden=int(ck.get("config", {}).get("hidden", 128)))
     model.load_state_dict(ck["model"])
     model.to(args.device).eval()
-    specs = load_specs(args.specs)[: int(args.limit)]
+    specs = load_specs(args.specs)
+    off = max(0, int(args.offset))
+    specs = specs[off: off + int(args.limit)]
     shards = []
     for i, spec in enumerate(specs):
         env = build_env(spec, use_render=False)
