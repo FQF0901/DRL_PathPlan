@@ -1,0 +1,5 @@
+# Machine-local runtime knobs, not architecture hard constraints.
+workers: 6
+recycle_every_specs: 150
+mem_available_floor_mb: 3000
+torch_threads_per_process: 4

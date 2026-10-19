@@ -1,0 +1,14 @@
+# Relative gates first; absolute values are filled after P0 distributions.
+lqr_shadow:
+  require_expert_gt_pass: true
+  plan_vs_previous: "no significant degradation"
+  exact_gain_but_lqr_degradation: "block promotion"
+  report: [tracking_error, trackable_rate, steer_saturation, brake_saturation, throttle_saturation]
+calib50:
+  purpose: quick_debug_only
+  no_performance_claim: true
+val500:
+  purpose: checkpoint_selection
+test500:
+  purpose: final_only
+  no_tuning: true

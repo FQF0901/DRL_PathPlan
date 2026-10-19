@@ -1,0 +1,60 @@
+# PNP implementation status (P0/P1)
+
+Last updated: 2026-10-20 (Asia/Shanghai)
+
+## Environment
+
+- Project-local `.venv` with `--system-site-packages`; system Python/conda untouched.
+- `metadrive-simulator==0.4.3`, `numpy==1.26.4`, `opencv-python-headless`.
+- glvnd libs unpacked into `.venv/gl` to satisfy `libGL.so.1`; use `tools/venv-python`.
+- Headless smoke: reset ~0.17 s, ~892 FPS, RSS ~634 MB.
+- GPU RTX 4070 12 GB; CPU 20; RAM 15 GiB (swap 63 GiB).
+
+## Implemented
+
+- `env/metadrive_env.py`, `env/tracking.py`, `env/expert/pure_pursuit_idm.py`, `env/scenario/` copied from the previous branch as environment/control references (not the old net/schema).
+- New `env/obs.py`: fixed-shape OD/LD/Nav/Ego, 6-frame history, ego-motion alignment.
+  - OD: 16 x 11 (dx,dy,cos,sin,vx_rel,vy_rel,L,W,type,static,presence)
+  - LD: 16 x 5 x 9 (dx,dy,heading_rel,curvature,speed_limit,left_type,right_type,lane_role,lat_offset)
+  - Nav 11, Ego 8, history 6.
+- `dataset/collect.py`: expert roll-in, 4D action labels `(dx,dy,dpsi,v_next)`.
+- `dataset/collect_dagger.py`: student roll-in, expert 4D label via kinematic bicycle; recovery states.
+- `net/model.py`: 921k deployable params, H=128, 4 heads, temporal attention + 2-layer spatial transformer, role0 lane readout, nearest-OD and TTC readouts, value/risk heads (heads exist; value/risk loss not yet trained).
+- `pipeline/train_bc.py`: BC/fine-tune, episode-level split, normalized action MSE.
+- `pipeline/rollout.py`: 4D action -> cubic Hermite segment; 6-step composition.
+- `pipeline/eval_exact.py`: exact kinematic closed loop.
+- `pipeline/eval_lqr.py`: P1 single-0.5 s-segment LQR canary.
+- `config/`, `test/` (7 tests pass), `net/param_probe.py`, `tools/monitor_8h.sh`.
+
+## Current results (10 validation scenes, exact tracking, 300 env steps)
+
+| model | success | collision | off-road | route completion |
+|---|---:|---:|---:|---:|
+| BC 200 scenes (`runs/bc_200_v2`) | 0.00 | 0.10 | 0.50 | 0.54 |
+| BC + role0/nearest OD (`runs/bc_odnear`) | 0.40 | 0.40 | 0.10 | 0.69 |
+| BC + DAgger100 (`runs/bc_dagger_100`) | 0.50 | 0.40 | 0.10 | 0.70 |
+| BC + TTC readout (`runs/bc_ttc`) | 0.40 | 0.30 | 0.10 | 0.75 |
+
+LQR single-segment canary (`runs/eval_lqr_odnear_seg`): success 0.10, collision 0.10, off-road 0.00, route completion 0.62. It is a canary only, not a performance claim.
+
+## Root causes found and fixed
+
+1. **LD had no lateral error signal**: current-lane points were sampled at ego projection, so `dy=0`; added explicit `lat_offset` feature.
+2. **4D action geometry dropped `dy`**: old `(ds,dpsi)` arc discarded lateral offset; replaced with cubic Hermite through `(dx,dy,dpsi)`.
+3. **Plan head averaged all LD tokens**: current-lane signal was diluted; added role0 readout + lat0.
+4. **Plan head averaged all OD tokens**: nearest vehicle diluted; added nearest-OD and min-TTC readouts.
+5. **LQR canary used the unvalidated 3 s preview**: Stage A1 should use only the current 0.5 s segment; fixed.
+
+## Running
+
+- `datasets/bc_2k`: 2,000 train scenes, 6 workers; log `runs/logs/collect_2k.log`.
+- `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`.
+- Next: train 2k BC, evaluate exact/LQR, DAgger 200-500 scenes, fine-tune, re-evaluate.
+
+## Known gaps
+
+- Value/risk heads are not yet trained.
+- WM, PPO, imagined RL are not implemented yet.
+- Traffic-light/toll/cone scenarios exist in specs but the observation builder's static-object path needs a dedicated check.
+- The expert label in DAgger is a kinematic-bicycle lift, not a replayed expert 0.5 s rollout; audit it against a small replayed sample.
+- Test set is not yet separated from validation in the current run; use `scenarios_val_slice50.json` only for smoke until the Val/Test split is frozen.
