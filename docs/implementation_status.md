@@ -62,15 +62,15 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 4. **Plan head averaged all OD tokens**: nearest vehicle diluted; added nearest-OD and min-TTC readouts.
 5. **LQR canary used the unvalidated 3 s preview**: Stage A1 should use only the current 0.5 s segment; fixed.
 
-## Running
+## Running / current state
 
-- `datasets/bc_2k`: 2,000 train scenes, 6 workers; log `runs/logs/collect_2k.log`.
-- `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`.
-- Current P1 baseline: `runs/p1_weight_hi` (70% exact success / 16% collision / 10% off-road on 50 val; 55% LQR success / 10% collision / 15% off-road on 20 val). Safety-first alternative `runs/p1_weight_hi2` (54% exact / 6% collision / 18% off-road; LQR 30% success) is not promoted.
-- PPO canary: `runs/ppo_canary_smoke` (1 update, 1 episode, 100 steps) and `runs/ppo_canary_2u` (2 updates, 2 episodes, 200 steps) prove sampling/log-prob/GAE/value/optimizer wiring; the reward is negative and value loss is noisy, so these are pipeline canaries only, not performance claims.
-- DAgger c1000 finished/soon; next train with c0+DAgger replay and safety weighting and compare against `runs/p1_weight`.
+- `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`; currently 5/24 cycles.
+- Data: `datasets/bc_2k_c0..c1500` (4 x 500 scenes) complete; `datasets/dagger_*` complete (DAgger200 + c500 + c1000 + c1500).
+- Current P1 baseline: `runs/p1_weight_hi` (70% exact success / 16% collision / 10% off-road on 50 val; LQR 55/10/15 on 20 val; LQR+FF 54/6/22 on 50 val).
+- Safety-first alternative `runs/p1_weight_hi2` (54% exact / 6% collision / 18% off-road; LQR 30% success) is not promoted.
 - Expert baseline on 20 val: 80% success / 5% collision / 5% off-road / 0.95 rc.
-- Next: DAgger on c1000/c1500 if replay training holds; then freeze P1 baseline and run the 50-scene Val slice. 10k/500/500 remains the final scale.
+- PPO canary: `runs/ppo_canary_smoke` and `runs/ppo_canary_2u` prove wiring only; reward negative and value loss noisy.
+- No active training/collection besides the monitor. Next: freeze P1 and decide whether to start P2 WM or continue P1 collision/curve work. 10k/500/500 remains final scale.
 
 ## Reproduce (current machine)
 
