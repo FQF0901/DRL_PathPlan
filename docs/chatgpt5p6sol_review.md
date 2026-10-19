@@ -954,7 +954,15 @@ stuck                       -0.1 per step after grace period
 
 - 验证 action/trajectory 定义；
 - 验证 road-level nav 能被网络正确使用；
-- 验证 basic closed-loop。
+- 验证 basic closed-loop；
+- 提前验证轨迹插值、坐标转换、车辆模型与 LQR 接口，避免到 Stage F 才首次暴露控制不可跟踪问题。
+
+本阶段以 Exact Tracking 为 Planner 主评测，同时并行运行两类 LQR canary：
+
+1. **Expert GT 3 s trajectory + LQR**：验证插值、坐标系、速度边界、车辆模型和控制接口，只评价 Controller，不评价 Planner；
+2. **Plan Head 0.5 s segment + LQR**：将当前单段插值为 5 个 0.1 s reference points，只做接口、可跟踪性和控制饱和率 canary，不作为正式闭环成绩。
+
+无 WM 时不得声称 Plan Head 能因果生成完整 3 s LQR preview。
 
 必须报告：
 
@@ -963,9 +971,11 @@ stuck                       -0.1 per step after grace period
 - collision/off-road/wrong-route/stuck；
 - heading、curvature、acceleration、jerk、curvature-rate 与动力学可行率；
 - 连续 0.5 s policy decision 段连接处的位姿/速度/航向/曲率跳变量；
+- Expert GT + LQR 的 tracking error、steering/brake/throttle saturation 与失败类型；
+- Plan Head 单段 + LQR 的 tracking error、可跟踪率、控制饱和率，以及 Exact 成功但 LQR canary 失败的比例；
 - 按场景类型拆分结果。
 
-若 Exact Tracking 闭环成功但轨迹可行率或连续帧平顺性不达标，不得据此进入 LQR 阶段，应先修正 Plan Head/Plan Loss，而不是等待 LQR 兜底。
+若 Exact Tracking 闭环成功但轨迹可行率、连续帧平顺性或 LQR canary 不达标，应先修正 Plan Head/Plan Loss、插值或 Controller，不得等到 Stage F 才处理。Stage F 是 LQR 首次进入完整 3 s 正式执行链路，不是第一次测试 LQR。
 
 ## Stage A2：真实历史 Memory Bank
 
@@ -985,7 +995,14 @@ single frame
 6 frames
 ```
 
-若历史模型没有稳定超过单帧，禁止进入 WM 阶段，优先查：
+每个候选 checkpoint 除 Exact Tracking 外，还必须运行固定 seeds 的 **Plan Head 0.5 s segment + LQR canary**，比较：
+
+- Memory-on/off tracking error 与可跟踪率；
+- steering/brake/throttle saturation；
+- 曲率、速度和航向在连续决策段连接处的跳变量；
+- Exact 指标提升但 LQR canary 退化的比例。
+
+若历史模型没有稳定超过单帧，或 Exact 提升但 LQR 可跟踪性显著退化，禁止进入 WM 阶段，优先查：
 
 - frame timestamp；
 - reset；
@@ -1001,25 +1018,30 @@ single frame
 - 逐轮降低 Expert 混合比例；
 - failure-prioritized aggregation；
 - 每轮固定验证集闭环评测；
-- 保持 Expert 原始数据与 DAgger recovery 数据的来源标签。
+- 保持 Expert 原始数据与 DAgger recovery 数据的来源标签；
+- DAgger 主数据采集仍使用 Exact Tracking，以隔离 Controller 误差；
+- 每轮 checkpoint 必须在固定 seeds 上运行 Plan Head 单段 LQR shadow evaluation，不参与采集但作为推进门槛。
 
 进入下一阶段的最低要求：
 
 - Student exact-tracking success 接近 Expert；
 - collision/off-road 明显下降并稳定；
 - 复杂场景不因普通道路提升而退化；
-- 冻结验证集连续多个 seed 改善，而非单次偶然值。
+- 冻结验证集连续多个 seed 改善，而非单次偶然值；
+- LQR shadow 的 tracking error、可跟踪率和控制饱和率不得相对 A2 最佳 checkpoint 显著退化；若 Exact 提升但 LQR 持续恶化，不得进入 Stage C。
 
 ## Stage C：短 Real-ENV PPO Canary，无 WM
 - 从最佳 DAgger checkpoint 初始化；
 - 保持同一 `(dx,dy,dpsi,v_next)` 概率动作；
 - 每 0.5 s 采样并执行一个 `a0`，段内运行 5 个 0.1 s 控制步；
 - PPO 的 value/GAE/return 均来自真实 MetaDrive transition；
+- PPO transition 基线继续使用 Exact Tracking，以减少 WM 与 Controller 变量干扰；
 - 只进行足以验证 PPO、GAE、reward/cost、buffer、checkpoint 和遗忘控制的短 canary；
 - 保留 BC/DAgger auxiliary loss 或 replay regularization；
+- 每个主要 checkpoint 必须在同一组固定 seeds 上运行 Plan Head 单段 LQR shadow evaluation；
 - 不以本阶段是否超过 Expert 作为推进 WM 的硬条件。
 
-通过条件：训练无 NaN、log-prob 与 executed action 合同正确、reward/cost 无明显 hacking、冻结验证集安全指标不灾难性退化。
+通过条件：训练无 NaN、log-prob 与 executed action 合同正确、reward/cost 无明显 hacking、冻结验证集安全指标不灾难性退化；同时 LQR shadow 的可跟踪率、控制饱和率和舒适性不得显著恶化。禁止依靠 Exact 的瞬时执行能力获得不可由 LQR 实现的虚假 reward。
 
 ## Stage D1：单步 World Model
 
@@ -1064,6 +1086,8 @@ WM 必须明显超过简单基线，才能进入多步阶段。
 
 必须按 rollout depth 画误差曲线。若第 4 至 6 步明显失真，不得直接用于 imagined RL。
 
+当 WM 已能生成 1/2/3/6 步 preview 时，同步进行递增时域 LQR shadow evaluation：先验证 0.5 s，再验证 1.0/1.5/3.0 s。该评测只诊断轨迹拼接、插值和 Controller 可实现性，不参与 WM latent loss。
+
 ## Stage E：Planner + WM 联合磨合
 
 初期：
@@ -1080,6 +1104,8 @@ WM 必须明显超过简单基线，才能进入多步阶段。
 - 降低 WM loss 权重；
 - 通过 A/B 决定是否开放 action-to-WM 梯度。
 
+本阶段必须把 Plan Head + WM 生成的完整 3 s preview 接入 LQR shadow evaluation，并与 Exact/kinematic rollout 同 seed 对照。只有 3 s 轨迹拼接、插值、tracking error、控制饱和率和安全指标达到门槛，才进入 Stage F 的正式 Controller-realized 执行。
+
 联合损失参考：
 
 \[
@@ -1088,7 +1114,9 @@ L=L_{plan}+\lambda_{wm}L_{wm}+\lambda_vL_{value}+\lambda_rL_{risk}+\lambda_{aux}
 
 \(\lambda_{wm}\) 初始可从 0.05 至 0.2 搜索，不得让 latent loss 主导 Planner 闭环目标。
 
-## Stage F：LQR Controller-realized Closed Loop + 正式 Real-ENV PPO
+## Stage F：完整 3 s Plan+WM+LQR 正式闭环 + Real-ENV PPO
+
+Stage F 不是第一次测试 LQR，而是 LQR 首次成为完整 3 s Plan+WM 轨迹的**正式执行器和最终成绩口径**。
 
 - 6 个 0.5 s 点插值至 0.1 s；
 - 使用完整 3 s 预瞄参考；
