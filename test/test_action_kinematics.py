@@ -4,13 +4,11 @@ import numpy as np
 import torch
 
 from env.tracking import ExactTracker
-from net.action_space import LEGACY_BOUNDS, NEW_BOUNDS
+from net.action_space import CLEAN_BOUNDS
 from pipeline.rollout import (
-    compose_plan_poses,
     denorm_action,
     denorm_action_with_bounds,
     first_segment_trajectory,
-    segment_points,
     segment_trajectory,
 )
 
@@ -50,23 +48,11 @@ class _FakeEnv:
     def __init__(self, vehicle):
         self.engine = _FakeEngine(vehicle)
 
-def test_segment_endpoint_and_shapes():
-    for a in (np.array([3.0, 0.0, 0.0, 6.0]), np.array([3.0, 1.0, 0.1, 6.0]), np.array([2.0, -1.0, -0.2, 5.0])):
-        p = segment_points(a, n=5)
-        assert p.shape == (5, 3)
-        assert np.isfinite(p).all()
-        assert np.allclose(p[-1, :3], a[:3], atol=1e-6)
-
-def test_compose_plan():
-    p = compose_plan_poses(np.array([[3.0, 0.0, 0.0, 6.0]] * 6), np.zeros(3))
-    assert p.shape == (30, 3)
-    assert np.isfinite(p).all()
-    assert np.allclose(p[-1, :2], [18.0, 0.0], atol=1e-5)
 
 
 def test_segment_trajectory_endpoint_and_speed():
     a = np.array([3.0, 0.0, 0.0, 6.0])
-    tr = segment_trajectory(a, 6.0, bounds=NEW_BOUNDS)
+    tr = segment_trajectory(a, 6.0, bounds=CLEAN_BOUNDS)
     assert tr.positions.shape == (5, 3)
     assert tr.speeds.shape == (5,)
     assert np.allclose(tr.positions[-1, :2], a[:2], atol=1e-12)
@@ -75,7 +61,7 @@ def test_segment_trajectory_endpoint_and_speed():
     assert tr.metrics["start_speed_mps"] == 6.0
     assert tr.feasible
 
-    same = first_segment_trajectory(a, 6.0, bounds=NEW_BOUNDS)
+    same = first_segment_trajectory(a, 6.0, bounds=CLEAN_BOUNDS)
     assert np.allclose(same.positions, tr.positions)
     assert np.allclose(same.speeds, tr.speeds)
     # dict-style interface for downstream consumers
@@ -83,28 +69,20 @@ def test_segment_trajectory_endpoint_and_speed():
     assert np.allclose(same.as_dict()["speeds"], tr.speeds)
 
 
-def test_segment_trajectory_keeps_legacy_segment_points_unchanged():
-    a = np.array([3.0, 1.0, 0.1, 6.0])
-    legacy = segment_points(a, n=5)
-    assert legacy.shape == (5, 3)
-    assert np.allclose(legacy[-1, :3], a[:3], atol=1e-6)
-
 
 def test_denorm_action_with_bounds():
     normalized = torch.tensor([0.4, 0.5, 0.5, 0.4])
-    legacy = denorm_action_with_bounds(normalized, LEGACY_BOUNDS)
-    assert torch.allclose(legacy, denorm_action(normalized))
-    new = denorm_action_with_bounds(normalized, NEW_BOUNDS)
-    assert torch.allclose(new, torch.tensor([3.0, 0.0, 0.0, 6.0]))
-    # numpy path uses the same static clamp
-    arr = denorm_action_with_bounds(np.array([0.4, 0.5, 0.5, 0.4]), NEW_BOUNDS)
+    canonical = denorm_action(normalized)
+    assert torch.allclose(canonical, denorm_action_with_bounds(normalized, CLEAN_BOUNDS))
+    assert torch.allclose(canonical, torch.tensor([3.0, 0.0, 0.0, 6.0]))
+    arr = denorm_action_with_bounds(np.array([0.4, 0.5, 0.5, 0.4]), CLEAN_BOUNDS)
     assert np.allclose(arr, [3.0, 0.0, 0.0, 6.0])
 
 
 def test_exact_tracker_uses_explicit_speed_profile_for_velocity():
     vehicle = _FakeVehicle()
     env = _FakeEnv(vehicle)
-    traj = segment_trajectory(np.array([3.0, 0.0, 0.0, 6.0]), 6.0, bounds=NEW_BOUNDS)
+    traj = segment_trajectory(np.array([3.0, 0.0, 0.0, 6.0]), 6.0, bounds=CLEAN_BOUNDS)
     tracker = ExactTracker(dt=0.5, hz=10)
     tracker.arm(env, trajectory=traj)
 
@@ -123,10 +101,10 @@ def test_exact_tracker_uses_explicit_speed_profile_for_velocity():
         assert abs(vehicle.angular_velocity - traj.kappa[i] * traj.speeds[i]) < 1e-12
 
 
-def test_exact_tracker_accepts_points_plus_speeds_and_legacy_points():
+def test_exact_tracker_accepts_points_and_speeds():
     vehicle = _FakeVehicle()
     env = _FakeEnv(vehicle)
-    traj = segment_trajectory(np.array([3.0, 0.0, 0.0, 6.0]), 6.0, bounds=NEW_BOUNDS)
+    traj = segment_trajectory(np.array([3.0, 0.0, 0.0, 6.0]), 6.0, bounds=CLEAN_BOUNDS)
 
     tracker = ExactTracker(dt=0.5, hz=10)
     tracker.arm(env, points=traj.positions, speeds=traj.speeds)
@@ -144,9 +122,9 @@ def test_exact_tracker_accepts_points_plus_speeds_and_legacy_points():
         dict_tracker.apply(env)
         assert abs(float(np.linalg.norm(vehicle.velocity)) - traj.speeds[i]) < 1e-9
 
-    # legacy points-only path keeps the old chord-difference behavior
-    legacy = ExactTracker(dt=0.5, hz=10)
-    legacy.arm(env, points=traj.positions)
-    assert legacy.speeds is None
-    legacy.apply(env)
+    # points-only path derives velocity from chord differences
+    points_only = ExactTracker(dt=0.5, hz=10)
+    points_only.arm(env, points=traj.positions)
+    assert points_only.speeds is None
+    points_only.apply(env)
     assert np.isfinite(vehicle.velocity).all()

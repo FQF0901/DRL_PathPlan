@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from env.metadrive_env import build_env
-from env.obs_v2 import (
+from env.obs import (
     EGO_DIM,
     HISTORY_FRAMES,
     LD_DIM,
@@ -25,13 +25,13 @@ from env.obs_v2 import (
     _empty_history,
 )
 from env.scenario.spec import load_specs
-from net.action_space import NEW_BOUNDS
-from net.clean_model import CleanPlanner
-from pipeline.eval_clean import (
-    CLEAN_HARD_LIMITS,
+from net.action_space import CLEAN_BOUNDS
+from net.model import StructuredPlanner
+from pipeline.eval import (
+    HARD_LIMITS,
     _batch_from_history,
     _trajectory,
-    load_clean_model,
+    load_model,
     run_episode,
     safe_brake_action,
 )
@@ -40,11 +40,11 @@ from pipeline.eval_metrics import summarize_rows
 SPEC_PATH = "env/specs/scenarios_train_slice200.json"
 
 
-def test_load_clean_model_random_warns(capsys):
-    model = load_clean_model(None, "cpu")
+def test_load_model_random_warns(capsys):
+    model = load_model(None, "cpu")
     captured = capsys.readouterr().out.lower()
 
-    assert isinstance(model, CleanPlanner)
+    assert isinstance(model, StructuredPlanner)
     assert not model.training
     assert "warning" in captured and "smoke" in captured
     assert model.eval_config["hidden"] == model.hidden
@@ -56,8 +56,8 @@ def _synthetic_history():
     return hist
 
 
-def test_load_clean_model_from_checkpoint(tmp_path):
-    state = CleanPlanner(hidden=64, heads=4, spatial_layers=1)
+def test_load_model_from_checkpoint(tmp_path):
+    state = StructuredPlanner(hidden=64, heads=4, spatial_layers=1)
     ckpt = tmp_path / "clean.pt"
     torch.save(
         {
@@ -67,8 +67,8 @@ def test_load_clean_model_from_checkpoint(tmp_path):
         ckpt,
     )
 
-    model = load_clean_model(str(ckpt), "cpu")
-    assert isinstance(model, CleanPlanner)
+    model = load_model(str(ckpt), "cpu")
+    assert isinstance(model, StructuredPlanner)
     assert not model.training
     assert model.hidden == 64
     assert model.heads == 4
@@ -90,7 +90,7 @@ def test_batch_from_history_shapes_and_forward():
     for value in batch.values():
         assert value.dtype == torch.float32
 
-    out = CleanPlanner()(batch)
+    out = StructuredPlanner()(batch)
     assert out["action_mu"].shape == (1, 4)
     assert torch.isfinite(out["action_mu"]).all()
     assert torch.all(out["action_mu"] >= 0.0)
@@ -104,8 +104,8 @@ def test_safe_brake_action_is_feasible():
         assert action[1] == 0.0 and action[2] == 0.0
         assert action[3] == pytest.approx(expected_v1)
         assert action[0] == pytest.approx((v0 + expected_v1) * 0.5 / 2.0)
-        assert np.all(action >= NEW_BOUNDS.low)
-        assert np.all(action <= NEW_BOUNDS.high)
+        assert np.all(action >= CLEAN_BOUNDS.low)
+        assert np.all(action <= CLEAN_BOUNDS.high)
 
         tr = _trajectory(action, v0)
         assert tr.feasible, tr.codes
@@ -114,9 +114,9 @@ def test_safe_brake_action_is_feasible():
 
 
 def test_clean_limits_are_provisional_values():
-    assert CLEAN_HARD_LIMITS.a_long_max == 3.5
-    assert CLEAN_HARD_LIMITS.kappa_max == 0.345
-    assert CLEAN_HARD_LIMITS.jerk_long_max == 20.0
+    assert HARD_LIMITS.a_long_max == 3.5
+    assert HARD_LIMITS.kappa_max == 0.345
+    assert HARD_LIMITS.jerk_long_max == 20.0
 
 
 def test_summarize_rows_accepts_clean_schema():
@@ -183,7 +183,7 @@ def test_summarize_rows_accepts_clean_schema():
 )
 def test_run_episode_one_scene_smoke():
     spec = load_specs(SPEC_PATH)[0]
-    model = load_clean_model(None, "cpu")
+    model = load_model(None, "cpu")
     env = build_env(spec, use_render=False, lru_size=0)
     try:
         row = run_episode(

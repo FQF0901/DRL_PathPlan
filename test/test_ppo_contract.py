@@ -14,16 +14,16 @@ import numpy as np
 import pytest
 import torch
 
-from env.obs_v2 import _empty_history
-from net.action_space import NEW_BOUNDS
-from net.clean_model import CleanPlanner
-from pipeline import train_ppo_v2 as ppo
+from env.obs import _empty_history
+from net.action_space import CLEAN_BOUNDS
+from net.model import StructuredPlanner
+from pipeline import train_ppo as ppo
 from pipeline.distributions import TruncatedNormal
 
 
-def _tiny_model() -> CleanPlanner:
+def _tiny_model() -> StructuredPlanner:
     torch.manual_seed(0)
-    return CleanPlanner(hidden=32, heads=4, spatial_layers=1)
+    return StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
 
 
 def _state() -> dict:
@@ -38,7 +38,7 @@ def _state() -> dict:
 
 
 def _make_transition(
-    model: CleanPlanner,
+    model: StructuredPlanner,
     *,
     state: dict | None = None,
     sampled_norm: torch.Tensor | None = None,
@@ -78,7 +78,7 @@ def _make_transition(
         if old_cost_value is None:
             old_cost_value = float(out["cost_value"][0, 0])
 
-    executed = NEW_BOUNDS.denormalize(sampled_norm[0].numpy(), clip=True)
+    executed = CLEAN_BOUNDS.denormalize(sampled_norm[0].numpy(), clip=True)
     if cost_vector is None:
         cost_vector = [float(cost), 0.0, 0.0, 0.0, 0.0, 0.0]
     return {

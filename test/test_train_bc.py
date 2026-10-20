@@ -1,7 +1,7 @@
 """Tests for the schema-v2 clean-planner BC trainer.
 
 No MetaDrive environment or collection is built here.  The fixture is a tiny
-synthetic ``expert_bc_v2.npz`` with the exact schema-v2 history shapes, two
+synthetic ``expert_bc.npz`` with the exact schema-v2 history shapes, two
 scenes observed by four episodes, one out-of-bounds label, one failed-episode
 row set and one unknown comfort label.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from env.obs_v2 import (
+from env.obs import (
     EGO_DIM,
     HISTORY_FRAMES,
     LD_DIM,
@@ -25,8 +25,8 @@ from env.obs_v2 import (
     OD_DIM,
     OD_SLOTS,
 )
-from net.clean_model import CleanPlanner
-from pipeline.train_bc_v2 import (
+from net.model import StructuredPlanner
+from pipeline.train_bc import (
     INPUT_KEYS,
     LossConfig,
     _batch_from_indices,
@@ -116,7 +116,7 @@ def _write_fixture(root: Path) -> Path:
             [2.5, 0.2, 0.03, 6.0],
             [4.0, -0.1, -0.02, 8.0],
             [1.0, 0.0, 0.0, 1.0],
-            [8.0, 0.0, 0.0, 9.0],  # dx outside NEW_BOUNDS high (7.5)
+            [8.0, 0.0, 0.0, 9.0],  # dx outside CLEAN_BOUNDS high (7.5)
             [2.0, 0.1, 0.01, 5.0],
             [0.5, 0.0, 0.0, 0.5],
         ],
@@ -147,7 +147,7 @@ def _write_fixture(root: Path) -> Path:
     arrays["comfortable"] = np.array([1, 1, 0, 1, 0, 1, -1, 1], dtype=np.int8)
     arrays["intervened"] = np.array([0, 1, 0, 0, 0, 0, 0, 0], dtype=np.float32)
 
-    np.savez_compressed(root / "expert_bc_v2.npz", **arrays)
+    np.savez_compressed(root / "expert_bc.npz", **arrays)
     return root
 
 
@@ -220,7 +220,7 @@ def test_losses_are_finite_and_differentiable(tmp_path):
     assert not ({"scene_seed", "episode_id", "expert_target_lane_id"} & set(batch))
     assert set(INPUT_KEYS) <= set(batch)
 
-    model = CleanPlanner()
+    model = StructuredPlanner()
     out = model(batch)
     assert out["risk"].shape == (8, 5)
     assert out["value"].shape == (8, 1)
@@ -252,7 +252,7 @@ def test_zero_plan_weight_batch_keeps_value_risk_gradient(tmp_path):
     # Only failed-expert rows: plan terms must be zero, value/risk still flow.
     idx = np.array([4, 5, 6, 7])
     batch = _batch_from_indices(data, targets, idx, "cpu")
-    model = CleanPlanner()
+    model = StructuredPlanner()
     out = model(batch)
     total, components = compute_losses(out, batch, cfg)
 

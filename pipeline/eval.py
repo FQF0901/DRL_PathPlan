@@ -1,13 +1,13 @@
-"""Closed-loop evaluation for the clean schema-v2 planner.
+"""Closed-loop evaluation for the canonical planner.
 
-This is the clean-schema counterpart of :mod:`pipeline.eval_exact` and
-:mod:`pipeline.eval_lqr`:
+The previous exact/LQR split is available only from git history/tag
+``pre-consolidation``:
 
-* observation history comes from :mod:`env.obs_v2` (``build_observation_v2`` +
-  ``stack_history_v2``);
-* the policy is :class:`net.clean_model.CleanPlanner` with normalized
+* observation history comes from :mod:`env.obs` (``build_observation`` +
+  ``stack_history``);
+* the policy is :class:`net.model.StructuredPlanner` with normalized
   ``action_mu`` in ``[0, 1]``;
-* actions are denormalized with :data:`net.action_space.NEW_BOUNDS` and turned
+* actions are denormalized with :data:`net.action_space.CLEAN_BOUNDS` and turned
   into one PSTL 0.5 s segment by ``action_to_trajectory``.
 
 Only the **first 0.5 s segment** of a plan is executed (5 x 0.1 s substeps).
@@ -32,23 +32,24 @@ import torch
 from metadrive.utils.math import wrap_to_pi
 
 from env.metadrive_env import build_env
-from env.obs_v2 import (
+from env.obs import (
     HISTORY_FRAMES,
     SCHEMA_NAME,
     SCHEMA_VERSION,
-    build_observation_v2,
-    stack_history_v2,
+    build_observation,
+    stack_history,
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker, LqrTracker
-from net import action_space as _action_space
 from net.action_space import (
-    NEW_BOUNDS,
+    CLEAN_BOUNDS,
+    COMFORT_LIMITS,
+    HARD_LIMITS,
     DynamicsLimits,
     action_to_trajectory,
     feasible_v1_interval,
 )
-from net.clean_model import H, HEADS, SPATIAL_LAYERS, CleanPlanner
+from net.model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
 from pipeline.eval_metrics import summarize_rows
 
 DECISION_DT = 0.5
@@ -65,42 +66,11 @@ STUCK_STEPS = 20
 WRONG_ROUTE_DROP = 0.05
 
 # ---------------------------------------------------------------------------
-# Provisional clean limits
+# Canonical PSTL limits
 # ---------------------------------------------------------------------------
-# Mirrors dataset/collect_v2.py: net.action_space.HARD_LIMITS is too strict for
-# continuous PSTL derivatives of the clean expert labels.  These are
-# provisional calibration values and are recorded in metrics.json.  If
-# net.action_space starts exposing CLEAN_LIMITS / CLEAN_COMFORT_LIMITS, those
-# take precedence exactly like in the collector.
-_LOCAL_CLEAN_HARD_LIMITS = DynamicsLimits(
-    a_long_min=-10.0,
-    a_long_max=3.5,
-    a_lat_max=8.0,
-    kappa_max=0.345,
-    kappa_rate_max=1.0,
-    jerk_long_max=20.0,
-    jerk_lat_max=20.0,
-)
-_LOCAL_CLEAN_COMFORT_LIMITS = DynamicsLimits(
-    a_long_min=-4.0,
-    a_long_max=2.0,
-    a_lat_max=3.0,
-    kappa_max=0.20,
-    kappa_rate_max=0.05,
-    jerk_long_max=5.0,
-    jerk_lat_max=5.0,
-)
-CLEAN_HARD_LIMITS = getattr(_action_space, "CLEAN_LIMITS", _LOCAL_CLEAN_HARD_LIMITS)
-CLEAN_COMFORT_LIMITS = getattr(
-    _action_space, "CLEAN_COMFORT_LIMITS", _LOCAL_CLEAN_COMFORT_LIMITS
-)
-LIMITS_SOURCE = (
-    "net.action_space.CLEAN_LIMITS"
-    if hasattr(_action_space, "CLEAN_LIMITS")
-    else "pipeline.eval_clean local provisional"
-)
+LIMITS_SOURCE = "net.action_space.HARD_LIMITS"
 
-#: Keys CleanPlanner.forward consumes (metadata IDs are not needed for acting).
+#: Keys StructuredPlanner.forward consumes (metadata IDs are not needed for acting).
 BATCH_KEYS = (
     "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask",
     "ego", "ego_mask", "hist_valid",
@@ -117,8 +87,8 @@ def _config_int(config: Any, key: str, default: int) -> int:
         return int(default)
 
 
-def load_clean_model(ckpt: Optional[str], device: str = "cpu") -> CleanPlanner:
-    """Load ``CleanPlanner`` from ``ckpt``; random init only for smoke tests.
+def load_model(ckpt: Optional[str], device: str = "cpu") -> StructuredPlanner:
+    """Load ``StructuredPlanner`` from ``ckpt``; random init only for smoke tests.
 
     Checkpoints are expected to be ``{"model": state_dict, "config": {...}}``
     with optional ``hidden`` / ``heads`` / ``spatial_layers`` keys.  A bare
@@ -126,11 +96,11 @@ def load_clean_model(ckpt: Optional[str], device: str = "cpu") -> CleanPlanner:
     """
     if ckpt is None:
         print(
-            "[eval_clean] WARNING: no --ckpt given; using a randomly initialized "
-            "CleanPlanner for smoke only",
+            "[eval] WARNING: no --ckpt given; using a randomly initialized "
+            "StructuredPlanner for smoke only",
             flush=True,
         )
-        model = CleanPlanner()
+        model = StructuredPlanner()
         config = {"hidden": H, "heads": HEADS, "spatial_layers": SPATIAL_LAYERS}
     else:
         payload = torch.load(ckpt, map_location="cpu", weights_only=False)
@@ -140,7 +110,7 @@ def load_clean_model(ckpt: Optional[str], device: str = "cpu") -> CleanPlanner:
         else:
             state = payload
             config = {}
-        model = CleanPlanner(
+        model = StructuredPlanner(
             hidden=_config_int(config, "hidden", H),
             heads=_config_int(config, "heads", HEADS),
             spatial_layers=_config_int(config, "spatial_layers", SPATIAL_LAYERS),
@@ -180,9 +150,9 @@ def _trajectory(action: Sequence[float], v0: float):
         v0,
         dt=DECISION_DT,
         hz=HZ,
-        bounds=NEW_BOUNDS,
-        limits=CLEAN_HARD_LIMITS,
-        comfort_limits=CLEAN_COMFORT_LIMITS,
+        bounds=CLEAN_BOUNDS,
+        limits=HARD_LIMITS,
+        comfort_limits=COMFORT_LIMITS,
     )
 
 
@@ -223,7 +193,7 @@ def _add_codes(counts: Dict[str, int], codes: Sequence[str]) -> None:
 # ---------------------------------------------------------------------------
 def run_episode(
     env: Any,
-    model: CleanPlanner,
+    model: StructuredPlanner,
     spec: Any,
     *,
     controller: str = "exact",
@@ -232,7 +202,7 @@ def run_episode(
 ) -> Dict[str, Any]:
     """Run one closed-loop episode with 0.5 s segment execution.
 
-    ``max_steps`` counts 0.1 s ``env.step`` calls, matching the legacy
+    ``max_steps`` counts 0.1 s ``env.step`` calls, matching the canonical
     evaluators.  Only the first segment of each planner query is executed;
     the 6-step / WM preview is not implemented.
     """
@@ -286,7 +256,7 @@ def run_episode(
     executed_action = np.zeros(ACTION_DIM, dtype=np.float64)
 
     while n < max_steps:
-        obs = build_observation_v2(
+        obs = build_observation(
             env,
             prev_action=prev_action,
             prev_speed=prev_speed,
@@ -298,7 +268,7 @@ def run_episode(
         if len(frames) > HISTORY_FRAMES:
             frames = frames[-HISTORY_FRAMES:]
             poses = poses[-HISTORY_FRAMES:]
-        hist = stack_history_v2(frames, poses)
+        hist = stack_history(frames, poses)
         batch = _batch_from_history(hist, device=device)
 
         with torch.no_grad():
@@ -306,7 +276,7 @@ def run_episode(
         a_norm = out["action_mu"][0].detach().cpu().numpy().astype(np.float64)
 
         v0 = float(ego.speed)
-        requested_action = NEW_BOUNDS.denormalize(a_norm, clip=True)
+        requested_action = CLEAN_BOUNDS.denormalize(a_norm, clip=True)
         if first_requested_action is None:
             first_requested_action = requested_action.copy()
         requested_codes: Sequence[str] = ()
@@ -334,8 +304,8 @@ def run_episode(
                     requested_action,
                     v0,
                     dt=DECISION_DT,
-                    bounds=NEW_BOUNDS,
-                    limits=CLEAN_HARD_LIMITS,
+                    bounds=CLEAN_BOUNDS,
+                    limits=HARD_LIMITS,
                 )
                 if interval.nonempty:
                     candidate = requested_action.copy()
@@ -545,7 +515,7 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    model = load_clean_model(args.ckpt, args.device)
+    model = load_model(args.ckpt, args.device)
     specs = load_specs(args.specs)[: int(args.limit)]
 
     rows: List[Dict[str, Any]] = []
@@ -563,13 +533,13 @@ def main(argv=None) -> int:
         finally:
             env.close()
         rows.append(row)
-        print(f"[eval_clean/{args.controller}] {i + 1}/{len(specs)} {row}", flush=True)
+        print(f"[eval/{args.controller}] {i + 1}/{len(specs)} {row}", flush=True)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     payload = {
         **summarize_rows(rows),
-        "schema": "drl_pathplan_eval_clean",
+        "schema": "drl_pathplan_eval",
         "schema_version": 1,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "controller": args.controller,
@@ -584,10 +554,10 @@ def main(argv=None) -> int:
             "sim_dt": SIM_DT,
             "steps_per_policy": STEPS_PER_POLICY,
             "history_frames": HISTORY_FRAMES,
-            "action_bounds": NEW_BOUNDS.as_dict(),
+            "action_bounds": CLEAN_BOUNDS.as_dict(),
             "limits": {
-                "hard": _limits_dict(CLEAN_HARD_LIMITS),
-                "comfort": _limits_dict(CLEAN_COMFORT_LIMITS),
+                "hard": _limits_dict(HARD_LIMITS),
+                "comfort": _limits_dict(COMFORT_LIMITS),
                 "source": LIMITS_SOURCE,
                 "provisional": True,
             },

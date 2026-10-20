@@ -10,12 +10,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dataset import collect_dagger_v2 as dagger
-from dataset import collect_v2
-from env.obs_v2 import HISTORY_FRAMES, NAV_DIM, _empty_history, stack_history_v2
-from net.action_space import NEW_BOUNDS
+from dataset import collect_dagger as dagger
+from dataset import collect
+from env.obs import HISTORY_FRAMES, NAV_DIM, _empty_history, stack_history
+from net.action_space import CLEAN_BOUNDS
 
-#: Fields added by this collector on top of the collect_v2 row schema.
+#: Fields added by this collector on top of the collect row schema.
 DAGGER_ROW_KEYS = {
     "action_replay",
     "student_action",
@@ -56,7 +56,7 @@ def _synthetic_hist():
         "timestamp": 0.0,
         "source": "REAL",
     }
-    return stack_history_v2([frame], [np.zeros(3, dtype=np.float64)])
+    return stack_history([frame], [np.zeros(3, dtype=np.float64)])
 
 
 def _synthetic_rows(hist, n=2):
@@ -77,11 +77,11 @@ def _synthetic_rows(hist, n=2):
     return rows
 
 
-def test_schema_extends_collect_v2_without_dropping_fields():
-    assert dagger.HISTORY_KEYS == collect_v2.HISTORY_KEYS
-    assert set(dagger.ROW_DTYPES) == set(collect_v2.ROW_DTYPES) | DAGGER_ROW_KEYS
+def test_schema_extends_collect_without_dropping_fields():
+    assert dagger.HISTORY_KEYS == collect.HISTORY_KEYS
+    assert set(dagger.ROW_DTYPES) == set(collect.ROW_DTYPES) | DAGGER_ROW_KEYS
     # Every historical v2 field keeps its dtype.
-    for key, dtype in collect_v2.ROW_DTYPES.items():
+    for key, dtype in collect.ROW_DTYPES.items():
         assert dagger.ROW_DTYPES[key] is dtype, key
 
 
@@ -283,7 +283,7 @@ def test_audit_fields_mark_privileged_flags_and_source():
 
 
 def test_fallback_projects_v1_or_brakes_but_never_executes_infeasible():
-    # Requested action is within NEW_BOUNDS but PSTL-infeasible (v_next outside
+    # Requested action is within CLEAN_BOUNDS but PSTL-infeasible (v_next outside
     # the hard-feasible interval); projection keeps the geometry.
     v0 = 5.0
     requested = np.array([2.0, 0.0, 0.0, 12.0])
@@ -355,6 +355,6 @@ def test_backfill_outcomes_keeps_label_validity_separate():
 
 
 def test_new_bounds_are_used_for_student_actions():
-    # The collector must denormalize with the clean/new box, not legacy bounds.
-    assert dagger.NEW_BOUNDS == NEW_BOUNDS
-    assert dagger.NEW_BOUNDS.name == "new"
+    # The collector must denormalize with the canonical action box.
+    assert dagger.CLEAN_BOUNDS == CLEAN_BOUNDS
+    assert dagger.CLEAN_BOUNDS.name == "clean"

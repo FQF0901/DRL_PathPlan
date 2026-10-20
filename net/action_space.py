@@ -2,9 +2,9 @@
 
 Scope
 -----
-This module is the *new* P0/P1 execution layer.  It never changes the legacy
-checkpoint path: ``net.model.ACTION_LOW/HIGH``, ``pipeline.rollout.segment_points``
-and ``pipeline.rollout.denorm_action`` keep their old widths/semantics.
+This is the canonical P0/P1 execution layer.  The previous 3D/legacy
+implementation is available only from git history (tag ``pre-consolidation``),
+not as a second live path.
 
 PROVISIONAL data-audit facts (do not treat as final; re-audit before training)
 -----------------------------------------------------------------------------
@@ -16,22 +16,15 @@ Expert BC 2k rows (provisional)::
     v_next max = 13.90
     stop rows = 0.975 %; stop-to-go rows = 45
 
-The old ``[0,10],[-2,2],[-0.6,0.6],[0,30]`` box is too wide for ``dx``/``v``
-and too tight for ``dpsi``.  Old checkpoints must keep it until retrained.
-The recommended clean-path box is ``[0,7.5],[-1.5,1.5],[-0.8,0.8],[0,15]``
-(:data:`NEW_BOUNDS`).  The new execution layer defaults to this clean box
-(:data:`DEFAULT_BOUNDS`).  Old checkpoints remain on the legacy path because
-``net.model.ACTION_LOW/HIGH``, ``pipeline.rollout.denorm_action`` and
-``pipeline.rollout.segment_points`` are untouched; evaluating an old
-checkpoint through the new projection helpers must pass
-``bounds=LEGACY_BOUNDS`` explicitly.
+The canonical action box is ``[0,7.5],[-1.5,1.5],[-0.8,0.8],[0,15]``
+(:data:`CLEAN_BOUNDS` / :data:`DEFAULT_BOUNDS`).
 
 Hard/comfort feasibility limits below are provisional audit recommendations::
 
-    hard:   a_long [-10, 3], |a_lat| <= 5, |kappa| <= 0.25,
-            |kappa_rate| <= 0.20, |jerk_long| <= 15, |jerk_lat| <= 5
-    comfort:a_long [-4, 2],  |a_lat| <= 3, |kappa| <= 0.10,
-            |kappa_rate| <= 0.05, |jerk_long| <= 5, |jerk_lat| <= 2
+    hard:   a_long [-10, 3.5], |a_lat| <= 8, |kappa| <= 0.345,
+            |kappa_rate| <= 1.0, |jerk_long| <= 20, |jerk_lat| <= 20
+    comfort:a_long [-4, 2],  |a_lat| <= 3, |kappa| <= 0.20,
+            |kappa_rate| <= 0.05, |jerk_long| <= 5, |jerk_lat| <= 5
 
 Curvature / lateral-acceleration checks are only applied when the path arc
 length is at least 0.25 m (short segments are dominated by numerical noise).
@@ -106,17 +99,10 @@ __all__ = [
     "ProjectionResult",
     "V1Interval",
     "GateResult",
-    "LEGACY_BOUNDS",
-    "DEFAULT_BOUNDS",
-    "NEW_BOUNDS",
     "CLEAN_BOUNDS",
-    "LEGACY",
-    "DEFAULT",
-    "NEW",
+    "DEFAULT_BOUNDS",
     "HARD_LIMITS",
     "COMFORT_LIMITS",
-    "CLEAN_LIMITS",
-    "CLEAN_COMFORT_LIMITS",
     "normalize",
     "denormalize",
     "clip_components",
@@ -145,9 +131,8 @@ _GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(16)
 class ActionBounds:
     """Static box for ``(dx, dy, dpsi, v_next)``.
 
-    Bounds are *static*: they never depend on ``v0``.  ``DEFAULT_BOUNDS`` is the
-    clean-path box (:data:`NEW_BOUNDS`); pass :data:`LEGACY_BOUNDS` explicitly
-    when evaluating old checkpoints.
+    Bounds are *static*: they never depend on ``v0``.  ``DEFAULT_BOUNDS`` is
+    the canonical box (:data:`CLEAN_BOUNDS`).
     """
 
     low: np.ndarray
@@ -223,62 +208,29 @@ class ActionBounds:
         return {"name": self.name, "low": self.low.tolist(), "high": self.high.tolist()}
 
 
-LEGACY_BOUNDS = ActionBounds(
-    low=np.array([0.0, -2.0, -0.6, 0.0]),
-    high=np.array([10.0, 2.0, 0.6, 30.0]),
-    name="legacy",
-)
-NEW_BOUNDS = ActionBounds(
+CLEAN_BOUNDS = ActionBounds(
     low=np.array([0.0, -1.5, -0.8, 0.0]),
     high=np.array([7.5, 1.5, 0.8, 15.0]),
-    name="new",
+    name="clean",
 )
-#: New execution layer defaults to the clean box; old checkpoints pass LEGACY.
-DEFAULT_BOUNDS = NEW_BOUNDS
-#: Alias used by the clean-data path.
-CLEAN_BOUNDS = NEW_BOUNDS
-LEGACY = LEGACY_BOUNDS
-DEFAULT = DEFAULT_BOUNDS
-NEW = NEW_BOUNDS
+DEFAULT_BOUNDS = CLEAN_BOUNDS
 
 
 @dataclass(frozen=True)
 class DynamicsLimits:
-    """Acceleration/curvature/jerk limits (provisional)."""
+    """Acceleration/curvature/jerk limits (provisional, canonical calibration)."""
 
     a_long_min: float = -10.0
-    a_long_max: float = 3.0
-    a_lat_max: float = 5.0
-    kappa_max: float = 0.25
-    kappa_rate_max: float = 0.20
-    jerk_long_max: float = 15.0
-    jerk_lat_max: float = 5.0
+    a_long_max: float = 3.5
+    a_lat_max: float = 8.0
+    kappa_max: float = 0.345
+    kappa_rate_max: float = 1.0
+    jerk_long_max: float = 20.0
+    jerk_lat_max: float = 20.0
 
 
 HARD_LIMITS = DynamicsLimits()
 COMFORT_LIMITS = DynamicsLimits(
-    a_long_min=-4.0,
-    a_long_max=2.0,
-    a_lat_max=3.0,
-    kappa_max=0.10,
-    kappa_rate_max=0.05,
-    jerk_long_max=5.0,
-    jerk_lat_max=2.0,
-)
-
-#: Calibrated provisional limits for the continuous PSTL path (expert BC 2k:
-#: ~97.2% hard pass; see docs/decision_log.md).  The stricter ``HARD_LIMITS``
-#: above are kept for legacy/checker compatibility, not for the clean data gate.
-CLEAN_LIMITS = DynamicsLimits(
-    a_long_min=-10.0,
-    a_long_max=3.5,
-    a_lat_max=8.0,
-    kappa_max=0.345,
-    kappa_rate_max=1.0,
-    jerk_long_max=20.0,
-    jerk_lat_max=20.0,
-)
-CLEAN_COMFORT_LIMITS = DynamicsLimits(
     a_long_min=-4.0,
     a_long_max=2.0,
     a_lat_max=3.0,
@@ -287,7 +239,6 @@ CLEAN_COMFORT_LIMITS = DynamicsLimits(
     jerk_long_max=5.0,
     jerk_lat_max=5.0,
 )
-
 
 # ======================================================================================
 # Small helpers
@@ -365,7 +316,7 @@ def denormalize(
 ) -> np.ndarray:
     """Affine ``low + normalized * (high - low)``.
 
-    ``clip=True`` (default) mirrors the legacy ``denorm_action`` clamp to
+    ``clip=True`` (default) clamps normalized values to
     ``[0, 1]``; it is a static box clamp, not a state-dependent rewrite.
     """
     arr = np.asarray(normalized, dtype=np.float64)

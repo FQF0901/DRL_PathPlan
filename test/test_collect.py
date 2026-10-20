@@ -2,19 +2,19 @@
 
 These tests do not build MetaDrive or run a collection.  They exercise the
 pure packing/schema helpers with synthetic v2 history tensors produced by
-``stack_history_v2`` (no env required) and check the provisional clean limits.
+``stack_history`` (no env required) and check the provisional clean limits.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from dataset import collect_v2
-from env.obs_v2 import (
+from dataset import collect
+from env.obs import (
     HISTORY_FRAMES,
     NAV_DIM,
     _empty_history,
-    stack_history_v2,
+    stack_history,
 )
 from net.action_space import HARD_LIMITS
 
@@ -165,14 +165,14 @@ def _synthetic_hist():
         "timestamp": 0.0,
         "source": "REAL",
     }
-    return stack_history_v2([frame], [np.zeros(3, dtype=np.float64)])
+    return stack_history([frame], [np.zeros(3, dtype=np.float64)])
 
 
 def _synthetic_rows(hist, n=2):
     rows = []
     for i in range(n):
-        row = {key: np.array(hist[key], copy=True) for key in collect_v2.HISTORY_KEYS}
-        for key, dtype in collect_v2.ROW_DTYPES.items():
+        row = {key: np.array(hist[key], copy=True) for key in collect.HISTORY_KEYS}
+        for key, dtype in collect.ROW_DTYPES.items():
             np_dtype = np.dtype(dtype)
             if np_dtype.kind == "U":
                 row[key] = "TEST"
@@ -190,13 +190,13 @@ def _synthetic_rows(hist, n=2):
 
 def test_packed_output_keys_shapes_and_dtypes():
     hist = _synthetic_hist()
-    assert set(hist) == set(collect_v2.HISTORY_KEYS) | {"meta"}
-    assert set(collect_v2.ROW_DTYPES) == EXPECTED_ROW_KEYS
+    assert set(hist) == set(collect.HISTORY_KEYS) | {"meta"}
+    assert set(collect.ROW_DTYPES) == EXPECTED_ROW_KEYS
 
-    packed = collect_v2._pack_rows(_synthetic_rows(hist, n=2))
-    assert set(packed) == set(collect_v2.HISTORY_KEYS) | EXPECTED_ROW_KEYS
+    packed = collect._pack_rows(_synthetic_rows(hist, n=2))
+    assert set(packed) == set(collect.HISTORY_KEYS) | EXPECTED_ROW_KEYS
 
-    for key in collect_v2.HISTORY_KEYS:
+    for key in collect.HISTORY_KEYS:
         assert packed[key].shape == (2,) + hist[key].shape, key
         assert packed[key].dtype == hist[key].dtype, key
 
@@ -227,14 +227,14 @@ def test_packed_output_keys_shapes_and_dtypes():
 def test_history_features_exclude_privileged_metadata():
     # Privileged expert audit / outcome fields are side arrays only.
     forbidden_prefixes = ("expert_", "privileged_")
-    for key in collect_v2.HISTORY_KEYS:
+    for key in collect.HISTORY_KEYS:
         assert not key.startswith(forbidden_prefixes), key
         assert "target_lane" not in key, key
         assert "lane_level" not in key, key
 
     # Road-level nav tensor has no ID slot; IDs live in separate metadata arrays.
-    assert "nav" in collect_v2.HISTORY_KEYS
-    assert "nav_road_ids" in collect_v2.HISTORY_KEYS
+    assert "nav" in collect.HISTORY_KEYS
+    assert "nav_road_ids" in collect.HISTORY_KEYS
     hist = _synthetic_hist()
     assert hist["nav"].shape == (HISTORY_FRAMES, NAV_DIM)
     assert hist["nav"].dtype == np.float32
@@ -248,7 +248,7 @@ def test_history_features_exclude_privileged_metadata():
 
 def test_backfill_outcomes_applies_to_all_rows():
     rows = [{}, {}, {}]
-    collect_v2._backfill_outcomes(
+    collect._backfill_outcomes(
         rows,
         termination="collision",
         done=True,
@@ -262,11 +262,11 @@ def test_backfill_outcomes_applies_to_all_rows():
         assert row["expert_plan_valid"] == 0
         assert row["expert_failed"] == 1
         assert row["timeout"] == 0
-        assert row["termination_id"] == collect_v2.TERMINATION_IDS["collision"]
+        assert row["termination_id"] == collect.TERMINATION_IDS["collision"]
     assert [int(row["done"]) for row in rows] == [0, 0, 1]
 
     rows = [{}, {}]
-    collect_v2._backfill_outcomes(
+    collect._backfill_outcomes(
         rows,
         termination="arrive",
         done=True,
@@ -278,11 +278,11 @@ def test_backfill_outcomes_applies_to_all_rows():
         assert row["success"] == 1
         assert row["expert_plan_valid"] == 1
         assert row["expert_failed"] == 0
-        assert row["termination_id"] == collect_v2.TERMINATION_IDS["arrive"]
+        assert row["termination_id"] == collect.TERMINATION_IDS["arrive"]
     assert [int(row["done"]) for row in rows] == [0, 1]
 
     rows = [{}]
-    collect_v2._backfill_outcomes(
+    collect._backfill_outcomes(
         rows,
         termination="max_step",
         done=False,
@@ -296,7 +296,7 @@ def test_backfill_outcomes_applies_to_all_rows():
 
 
 def test_clean_limits_are_provisional_calibration():
-    hard = collect_v2.CLEAN_HARD_LIMITS
+    hard = collect.HARD_LIMITS
     assert (
         hard.a_long_min,
         hard.a_long_max,
@@ -307,7 +307,7 @@ def test_clean_limits_are_provisional_calibration():
         hard.jerk_lat_max,
     ) == (-10.0, 3.5, 8.0, 0.345, 1.0, 20.0, 20.0)
 
-    comfort = collect_v2.CLEAN_COMFORT_LIMITS
+    comfort = collect.COMFORT_LIMITS
     assert (
         comfort.a_lat_max,
         comfort.kappa_max,
@@ -316,10 +316,6 @@ def test_clean_limits_are_provisional_calibration():
         comfort.jerk_lat_max,
     ) == (3.0, 0.20, 0.05, 5.0, 5.0)
 
-    # The clean hard set must be looser than the legacy PSTL defaults.
-    assert hard.kappa_rate_max > HARD_LIMITS.kappa_rate_max
-    assert hard.jerk_long_max > HARD_LIMITS.jerk_long_max
-    assert hard.jerk_lat_max > HARD_LIMITS.jerk_lat_max
 
 
 def _reference_lift(
@@ -360,6 +356,6 @@ def test_lift_action_matches_collect_dagger_logic():
         brake_action_scale=3.0,
     )
     for steer, throttle in ((0.0, 1.0), (0.25, -0.4), (-0.6, 0.2)):
-        lift = collect_v2._lift_action(steer, throttle, **kwargs)
+        lift = collect._lift_action(steer, throttle, **kwargs)
         ref = _reference_lift(steer, throttle, **kwargs)
         np.testing.assert_allclose(lift, ref, rtol=0.0, atol=1e-6)
