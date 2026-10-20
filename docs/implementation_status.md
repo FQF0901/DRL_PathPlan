@@ -25,7 +25,9 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 - `pipeline/eval_exact.py`: exact kinematic closed loop.
 - `pipeline/eval_lqr.py`: P1 single-0.5 s-segment LQR canary.
 - `pipeline/train_ppo.py`: short PPO canary (sampled normalized 4D action, exact tracker, GAE, clipped PPO). Smoke: 1 update / 1 episode / 100 steps at `runs/ppo_canary_smoke`; not a performance claim.
-- `config/`, `test/` (7 tests pass), `net/param_probe.py`, `tools/monitor_8h.sh`.
+- `config/`, `net/param_probe.py`, `tools/monitor_tasks.sh`.
+- New schema-v2 path (2026-10-20): `env/obs_v2.py` with road-level Nav, stable IDs/taxonomy, fixed 6-frame same-ID history; `net/action_space.py` PSTL 4D→speed-profile execution; `net/clean_model.py` 1,053,142-param clean planner with `q_lane`/`q_od`, aux heads and `encode_entities()`; `dataset/collect_v2.py` measured expert labels + audit; `pipeline/train_bc_v2.py`; `pipeline/eval_clean.py`; `pipeline/distributions.py`; `pipeline/eval_metrics.py`; `dataset/splits.py`.
+- Test suite: 67 passed, 1 skipped (`tools/venv-python -m pytest -q`). Legacy path remains intact.
 
 ## Current results (10 validation scenes, exact tracking, 300 env steps)
 
@@ -52,6 +54,15 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 
 Stage1 exact by geometry: straight 0.69 success / 0.15 coll / 0.15 off; curve 0.29 success / 0.29 coll / 0.43 off. LQR canary is a controller-interface canary only, not a final performance claim.
 
+### Data audit (2026-10-20)
+
+- Full 2k BC collection: 137,831 rows / 2,000 episodes / 2,000 unique seeds. Expert success **70.2%**, collision **15.6%**, off-road **5.8%**, timeout/no-flag **8.3%**. The older “80% / 5% on 20 val” number is a small-sample slice (95% half-width ~±18 pp), not an expert ceiling.
+- Current DAgger labels are open-loop kinematic-bicycle lifts. On 800 matched initial states, lift minus measured BC label is **+0.53 m dx** and **+1.12 m/s v_next** on average; `a_long` is censored at -3.0, and there are no full-stop/stop-to-go rows. DAgger must be re-collected with measured expert 0.5 s replay, residual, source and validity fields.
+- Current training mix has 800 duplicate scene seeds across BC and DAgger shards; the episode-level 10% internal val split can leak 28.5% of val rows by seed. The external 50-scene val seeds are disjoint, but the final split must be by `scene_seed` (Val500/Test500).
+- Current PPO sample-vs-executed clamp rate is **61.8% any-dim** (probe on `runs/p1_weight_hi`); log-prob is for the pre-clamp sample while reward/next state use the clamped action. This is a wiring probe, not a valid PPO result.
+- Calibrated action quantiles (BC 2k): dx p99.9 6.94, dy p0.1/p99.9 -0.79/+0.57, dpsi -0.28/+0.18, v_next max 13.90. Provisional new bounds: dx [0,7.5–8.0], dy [-1.5,1.5], dpsi [-0.8,0.8], v_next [0,15]. Hard feasibility candidate: a_long [-10,3.5], |a_lat|≤8, |κ|≤0.345, |κ_rate|≤0.20, |jerk|≤20/5. All remain provisional until P0/LQR calibration is logged; see `docs/decision_log.md`.
+- Current code path is still the legacy schema/3D execution; schema v2 and the 4D speed-profile path are being implemented. Do not claim P1/P2 pass from the numbers above.
+
 A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR. Safety weighting (braking and near-lead rows) improves exact success from 64% (3x/2x) to 70% (8x/4x) on 50 val; LQR is 56% success / 12% collision / 18% off-road on 50 val; curvature feedforward reduces collision to 6% but raises curve off-road to 39%, so the Exact→LQR gap is primarily curve tracking/off-road, not straight-line or speed control. Pushing to 12x/6x cuts collision to 6% but collapses success to 54% and raises off-road to 18%, and LQR success to 30%: over-braking is the failure mode. 8x/4x is the current P1 trade-off. The expert is 80% success / 5% collision on 20 val, so collision avoidance and the Exact→LQR gap remain the main gaps.
 
 ## Root causes found and fixed
@@ -64,13 +75,15 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 
 ## Running / current state
 
-- `tools/monitor_8h.sh`: 24 x 20 min resource/task log `runs/monitor/monitor_8h.log`; currently 5/24 cycles.
-- Data: `datasets/bc_2k_c0..c1500` (4 x 500 scenes) complete; `datasets/dagger_*` complete (DAgger200 + c500 + c1000 + c1500).
+- `tools/monitor_tasks.sh`: 20 min task/resource monitor, `runs/monitor/tasks_20m.log`; independent of session.
+- Data: `datasets/bc_2k_c0..c1500` (4 x 500 scenes) complete; `datasets/dagger_*` complete but are lift labels and have duplicate scene seeds with BC shards. They are legacy diagnostics, not final training data.
 - Current P1 baseline: `runs/p1_weight_hi` (70% exact success / 16% collision / 10% off-road on 50 val; LQR 55/10/15 on 20 val; LQR+FF 54/6/22 on 50 val).
 - Safety-first alternative `runs/p1_weight_hi2` (54% exact / 6% collision / 18% off-road; LQR 30% success) is not promoted.
-- Expert baseline on 20 val: 80% success / 5% collision / 5% off-road / 0.95 rc.
-- PPO canary: `runs/ppo_canary_smoke` and `runs/ppo_canary_2u` prove wiring only; reward negative and value loss noisy.
-- No active training/collection besides the monitor. Next: freeze P1 and decide whether to start P2 WM or continue P1 collision/curve work. 10k/500/500 remains final scale.
+- Expert baseline: 80% success / 5% collision / 5% off-road on 20 val; full 2k collection is 70.2% / 15.6% / 5.8% / 8.3% timeout.
+- PPO canary: `runs/ppo_canary_smoke` and `runs/ppo_canary_2u` prove wiring only; 61.8% any-dim sample/execute mismatch; not a PPO result.
+- Active work: 2k v2 expert collection is running in 4×500 shards (`datasets/bc_v2_2k_s0..s3`); clean 2k training/eval next. DAgger v2 replay collector is being implemented. 10k/500/500 + Test500 remains the final data scale; the unsharded 10k collector was stopped because it aggregated all episodes in one parent process and exhausted RAM/swap.
+- 200-scene clean smoke (`runs/bc_v2_200`, 30 epochs) completed: val physical MAE dx 0.067 m, dpsi 0.010 rad, dvy 0.18 m/s; closed-loop 10 val exact = 0/10 success, 90% off-road with the current fallback projection. This is a small-data smoke, not an A/B result and not promoted.
+- Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
 
 ## Reproduce (current machine)
 

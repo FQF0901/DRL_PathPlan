@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -234,6 +235,9 @@ class ExactTracker:
     标准用法是 **env.step 之后立即 :meth:`apply`**：先让物理/管理器走完一步，再把 ego
     瞬移到该子步的参考位姿（并写入参考速度/角速度），于是调用方随后构建的观测、标签、
     可视化看到的就是参考轨迹本身（round-trip 误差只来自浮点写入精度）。
+
+    传入 ``trajectory``/``speeds`` 时，速度向量按**世界系切线朝向 × 显式速度**写入
+    （不是位置差分）；旧的 ``points``/``actions`` 调用保持弦长差分行为。
     """
 
     def __init__(self, *, dt: float = 0.5, hz: int = 10):
@@ -248,33 +252,99 @@ class ExactTracker:
         self.base_pose: Optional[np.ndarray] = None
         self.reference: Optional[np.ndarray] = None  # (N,3) 自车系（动作起点）
         self.index = 0
+        self._speed: Optional[np.ndarray] = None  # 显式速度剖面（m/s），None=弦长差分
 
     # ------------------------------------------------------------------ 装配
     @property
     def n_points(self) -> int:
         return 0 if self.reference is None else int(self.reference.shape[0])
 
+    @property
+    def speeds(self) -> Optional[np.ndarray]:
+        """Explicit speed profile passed at ``arm`` time (copy), or ``None``."""
+        return None if self._speed is None else self._speed.copy()
+
+    @staticmethod
+    def _unpack_trajectory(trajectory: Any) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+        """Accept an ``ActionTrajectory``-like object, a dict, ``(N,4)`` array, or ``(points, speeds)``."""
+        kappa = None
+        if isinstance(trajectory, Mapping):
+            points = trajectory.get("positions", trajectory.get("points"))
+            speeds = trajectory.get("speeds")
+            kappa = trajectory.get("kappa")
+            if points is None:
+                raise ValueError("trajectory dict 需要 positions/points 键")
+            return np.asarray(points), speeds, kappa
+        if hasattr(trajectory, "positions"):
+            points = getattr(trajectory, "positions")
+            speeds = getattr(trajectory, "speeds", None)
+            kappa = getattr(trajectory, "kappa", None)
+            return np.asarray(points), speeds, kappa
+        if isinstance(trajectory, (tuple, list)) and len(trajectory) == 2:
+            first = np.asarray(trajectory[0])
+            second = np.asarray(trajectory[1])
+            # ``(points, speeds)`` has 2-D points; a list of two 3-D points is
+            # just an ``(N,3)`` point list and falls through below.
+            if first.ndim >= 2 and (second.ndim == 1 or second.ndim == 2 and second.shape[1] == 1):
+                return first, second, kappa
+        arr = np.asarray(trajectory, dtype=np.float64)
+        if arr.ndim == 2 and arr.shape[1] == 4:
+            return arr[:, :3], arr[:, 3], kappa
+        if arr.ndim == 2 and arr.shape[1] == 3:
+            return arr, None, kappa
+        raise ValueError(
+            "trajectory 需要 ActionTrajectory/dict、((N,3), speeds) 或 (N,4)="
+            f"(x,y,theta,speed)，收到 shape={arr.shape}"
+        )
+
     def arm(
         self,
         env: Any,
-        actions: Any = None,
-        *,
+        trajectory: Any = None,
         points: Any = None,
+        actions: Any = None,
+        speeds: Any = None,
+        *,
         base_pose: Optional[Sequence[float]] = None,
     ) -> np.ndarray:
-        """装配参考并捕获自车系原点。
+        """装配参考并捕获自车系原点（向后兼容 actions/points 旧接口）。
 
         Args:
             env: MetaDrive env（取 ego 位姿作 ``base_pose``）。
-            actions: ``(N,2)`` ``(ds, dtheta)`` 序列（与 ``points`` 二选一）。
-            points: ``(N,3)`` 自车系位姿序列（与 ``actions`` 二选一）。
+            trajectory: PSTL 结果对象/字典 ``positions``/``points`` + ``speeds``；
+                也接受 ``(N,4)=(x,y,theta,speed)`` 或 ``(points, speeds)``。
+            points: ``(N,3)`` 自车系位姿序列（与 ``actions``/``trajectory`` 三选一）。
+            actions: ``(N,2)`` ``(ds, dtheta)`` 序列（与 ``points``/``trajectory`` 三选一）。
+            speeds: 显式 ``(N,)`` 速度剖面；提供时每个子步速度向量 = 切线朝向 × 速度，
+                不再用位置差分。可覆盖 trajectory 自带速度。
             base_pose: 显式 ``(x, y, theta)``；``None`` 时取当前 ego 位姿。
 
         Returns:
             本次生效的自车系参考 ``(N,3)``。
         """
-        if (actions is None) == (points is None):
-            raise ValueError("ExactTracker.arm 需要且只需要 actions / points 之一")
+        # Legacy positional form: arm(env, actions_array) used to bind the
+        # second positional argument to ``actions``.  Keep that working while
+        # exposing ``trajectory`` as the first optional argument.
+        if trajectory is not None and actions is None and points is None:
+            is_traj = hasattr(trajectory, "positions") or isinstance(trajectory, Mapping)
+            if not is_traj:
+                try:
+                    arr = np.asarray(trajectory, dtype=np.float64)
+                except (TypeError, ValueError):
+                    arr = None
+                if arr is not None and arr.ndim == 2 and arr.shape[1] == 2:
+                    actions, trajectory = trajectory, None
+        sources = sum(x is not None for x in (actions, points, trajectory))
+        if sources != 1:
+            raise ValueError("ExactTracker.arm 需要且只需要 actions / points / trajectory 之一")
+        if speeds is not None and actions is not None:
+            raise ValueError("ExactTracker.arm: speeds 需要配合 points/trajectory，不能只给 actions")
+
+        kappa = None
+        if trajectory is not None:
+            points, traj_speeds, kappa = self._unpack_trajectory(trajectory)
+            if speeds is None:
+                speeds = traj_speeds
         reference = interpolate(actions, dt=self.dt, hz=self.hz) if actions is not None else (
             _as_point_array(points, 3, "points")
         )
@@ -289,18 +359,48 @@ class ExactTracker:
         self.base_pose = np.asarray(base_pose, dtype=np.float64).reshape(3)
         self.reference = reference  # 已 copy 且已 wrap，可直接持有
         self.index = 0
-        # 世界系参考 + 逐点参考速度/角速度（相邻子步差分）
+
+        speed_arr: Optional[np.ndarray] = None
+        if speeds is not None:
+            speed_arr = np.asarray(speeds, dtype=np.float64).reshape(-1)
+            if len(speed_arr) != len(reference):
+                raise ValueError(
+                    f"speeds 长度 {len(speed_arr)} 与参考点数 {len(reference)} 不一致"
+                )
+            if not np.all(np.isfinite(speed_arr)) or np.any(speed_arr < 0.0):
+                raise ValueError("speeds 必须是非负有限值")
+            speed_arr = speed_arr.copy()
+        self._speed = speed_arr
+
+        # 世界系参考 + 逐点参考速度/角速度
         dt_sub = 1.0 / float(self.hz)
         self._world = ego_to_world(self.reference, self.base_pose)
-        origin = self.base_pose[:2]
         self._velocity = np.zeros((len(self._world), 2), dtype=np.float64)
         self._yaw_rate = np.zeros(len(self._world), dtype=np.float64)
-        prev_xy = origin
-        prev_theta = float(self.base_pose[2])
-        for i, pose in enumerate(self._world):
-            self._velocity[i] = (pose[:2] - prev_xy) / dt_sub
-            self._yaw_rate[i] = float(wrap_to_pi(pose[2] - prev_theta)) / dt_sub
-            prev_xy, prev_theta = pose[:2], pose[2]
+        if speed_arr is not None:
+            # 显式速度剖面：速度向量由世界系切线朝向 × 速度给出（不是位置差分）
+            heading = self._world[:, 2]
+            self._velocity[:, 0] = speed_arr * np.cos(heading)
+            self._velocity[:, 1] = speed_arr * np.sin(heading)
+            if kappa is not None:
+                kappa_arr = np.asarray(kappa, dtype=np.float64).reshape(-1)
+                if len(kappa_arr) != len(self._world):
+                    raise ValueError(
+                        f"kappa 长度 {len(kappa_arr)} 与参考点数 {len(self._world)} 不一致"
+                    )
+                self._yaw_rate = kappa_arr * speed_arr
+            else:
+                prev_theta = float(self.base_pose[2])
+                for i, pose in enumerate(self._world):
+                    self._yaw_rate[i] = float(wrap_to_pi(pose[2] - prev_theta)) / dt_sub
+                    prev_theta = pose[2]
+        else:
+            prev_xy = self.base_pose[:2]
+            prev_theta = float(self.base_pose[2])
+            for i, pose in enumerate(self._world):
+                self._velocity[i] = (pose[:2] - prev_xy) / dt_sub
+                self._yaw_rate[i] = float(wrap_to_pi(pose[2] - prev_theta)) / dt_sub
+                prev_xy, prev_theta = pose[:2], pose[2]
         return self.reference
 
     # ------------------------------------------------------------------ 执行
@@ -370,7 +470,9 @@ class LqrTracker(BasePolicy):
     ``ref_speed_scale`` 只缩放参考速度 ``v_ref``（几何 plan/游标不动；默认 1.0 零行为变化），
     用于 P1-0B 的 V3 配速实验（§7.10-A3）。
 
-    ``set_reference`` 每次策略步（0.5 s）调用一次：``(N,2)`` 动作或 ``(N,3)`` 自车系位姿。
+    ``set_reference`` 每次策略步（0.5 s）调用一次：``(N,2)`` 动作、
+    ``(N,3)`` 自车系位姿，或 ``(N,4)=(x,y,theta,speed)``（显式速度列，
+    不再用弦长差分）。旧 2/3 列行为逐位不变。
 
     构造方式：``engine.add_policy(ego.id, LqrTracker, ego, seed)`` → 每个策略步
     ``set_reference``（训练器 canonical 路径）。
@@ -479,7 +581,9 @@ class LqrTracker(BasePolicy):
         """设置/刷新参考轨迹（自车系，起点为原点）。
 
         Args:
-            reference: ``(N,2)`` 动作（``ds, dtheta``）或 ``(N,3)`` 自车系位姿。
+            reference: ``(N,2)`` 动作（``ds, dtheta``）、``(N,3)`` 自车系位姿，
+                或 ``(N,4)=(x, y, theta, speed)``。4 列时速度列直接作为
+                ``_ref_speed``（不再用弦长差分），几何/弧长仍由位置列计算。
             base_pose: 参考所依附的世界位姿；``None`` 时取当前 ego 位姿。
 
         Returns:
@@ -488,12 +592,21 @@ class LqrTracker(BasePolicy):
         arr = np.asarray(reference, dtype=np.float64)
         if arr.size == 0:
             raise ValueError("reference 不能为空")
-        if arr.ndim != 2 or arr.shape[1] not in (2, 3):
-            raise ValueError(f"reference 需要 (N,2) 动作或 (N,3) 位姿，收到 shape={arr.shape}")
-        points = (
-            interpolate(arr, dt=self.reference_dt, hz=self.reference_hz)
-            if arr.shape[1] == 2 else _as_point_array(arr, 3, "reference")
-        )
+        if arr.ndim != 2 or arr.shape[1] not in (2, 3, 4):
+            raise ValueError(
+                "reference 需要 (N,2) 动作、(N,3) 位姿或 (N,4)=(x,y,theta,speed)，"
+                f"收到 shape={arr.shape}"
+            )
+        provided_speed: Optional[np.ndarray] = None
+        if arr.shape[1] == 4:
+            if not np.all(np.isfinite(arr[:, 3])) or np.any(arr[:, 3] < 0.0):
+                raise ValueError("reference 速度列必须是非负有限值")
+            provided_speed = arr[:, 3].copy()
+            points = _as_point_array(arr[:, :3], 3, "reference")
+        elif arr.shape[1] == 3:
+            points = _as_point_array(arr, 3, "reference")
+        else:
+            points = interpolate(arr, dt=self.reference_dt, hz=self.reference_hz)
         if base_pose is None:
             base_pose = _ego_pose(self.control_object)
         base = np.asarray(base_pose, dtype=np.float64).reshape(3)
@@ -501,7 +614,10 @@ class LqrTracker(BasePolicy):
         dt_sub = 1.0 / float(self.reference_hz)
         prev = np.vstack([base[:2], self._ref_world[:-1, :2]])
         chords = np.linalg.norm(self._ref_world[:, :2] - prev, axis=1)
-        self._ref_speed = chords / dt_sub * self.ref_speed_scale  # 默认 ×1.0 = 逐位不变
+        if provided_speed is None:
+            self._ref_speed = chords / dt_sub * self.ref_speed_scale  # 默认 ×1.0 = 逐位不变
+        else:
+            self._ref_speed = provided_speed * self.ref_speed_scale
         self._ref_arc = np.cumsum(chords)
         self._cursor = 0
         return self._ref_world

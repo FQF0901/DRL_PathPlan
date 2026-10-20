@@ -9,13 +9,60 @@ import numpy as np
 import torch
 
 from env.tracking import ego_to_world, interpolate
+from net.action_space import (
+    DEFAULT_BOUNDS,
+    ActionBounds,
+    ActionTrajectory,
+    action_to_trajectory,
+)
 from net.model import ACTION_HIGH, ACTION_LOW, StructuredPlanner
+
+#: Public alias for the PSTL result object (also supports dict-style access).
+Trajectory = ActionTrajectory
 
 
 def denorm_action(a: torch.Tensor) -> torch.Tensor:
     low = ACTION_LOW.to(a.device)
     high = ACTION_HIGH.to(a.device)
     return low + a.clamp(0.0, 1.0) * (high - low)
+
+
+def denorm_action_with_bounds(a: torch.Tensor, bounds: ActionBounds) -> torch.Tensor:
+    """Denormalize with an explicit static box (legacy tensors stay unchanged).
+
+    ``torch`` inputs follow :func:`denorm_action` exactly (clamp to ``[0,1]``);
+    numpy inputs use the same static clamp.  Callers evaluating old checkpoints
+    must pass :data:`net.action_space.LEGACY_BOUNDS`.
+    """
+    if not isinstance(a, torch.Tensor):
+        return bounds.denormalize(np.asarray(a, dtype=np.float64), clip=True)
+    low = torch.as_tensor(np.array(bounds.low, dtype=np.float32), device=a.device)
+    high = torch.as_tensor(np.array(bounds.high, dtype=np.float32), device=a.device)
+    return low + a.clamp(0.0, 1.0) * (high - low)
+
+
+def segment_trajectory(
+    action: np.ndarray,
+    v0: float,
+    *,
+    dt: float = 0.5,
+    hz: int = 10,
+    bounds: ActionBounds = DEFAULT_BOUNDS,
+) -> ActionTrajectory:
+    """PSTL trajectory for one 0.5 s action; ``v0`` is the current speed."""
+    return action_to_trajectory(action, v0, dt=dt, hz=hz, bounds=bounds)
+
+
+def first_segment_trajectory(
+    action: np.ndarray,
+    v0: float,
+    *,
+    dt: float = 0.5,
+    hz: int = 10,
+    bounds: ActionBounds = DEFAULT_BOUNDS,
+) -> ActionTrajectory:
+    """Alias for :func:`segment_trajectory` (one action == one first segment)."""
+    return segment_trajectory(action, v0, dt=dt, hz=hz, bounds=bounds)
 
 
 def batch_from_obs(hist: Dict[str, np.ndarray], device: str = "cpu") -> Dict[str, torch.Tensor]:
