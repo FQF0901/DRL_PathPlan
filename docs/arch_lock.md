@@ -4,6 +4,8 @@
 >
 > **核心目标**：基于 MetaDrive 构建约 100 万参数的结构化端到端自动驾驶系统，使用 OD、LD、道路级导航和自车动力学输入，依次完成 IL、DAgger、真实环境 RL，再引入 ego-conditioned latent world model、imagined rollout 与 LQR，实现车道保持、障碍物响应、自主选道、路口和收费站通行，并在冻结验证集闭环指标上争取超过 IDM + Pure Pursuit。
 
+> **核对说明（2026-10-20）**：以下批复针对提交 `437b076` 相对 `af73a99` 的整体实现（17 个提交，`c8c4ce2..437b076`）。状态仅取三种：**已实现无偏差 / 已实现有偏差 / 未实现**；“有偏差”包含部分实现、合同降级或证据不足。对“非目标/禁止”类条款，`已实现无偏差` 表示**禁止项未被违反**（功能本身可以不存在），`已实现有偏差` 表示存在部分违反，`未实现` 仅用于条款要求的机制/产物完全不存在（此时禁止项通常也无适用对象）。逐条批复见每条后的【】标记；代码块、公式、目录树等无法内联的位置，在块后以 `> 批复` 汇总。
+
 
 ## 1. 目标、范围与非目标
 
@@ -11,48 +13,48 @@
 
 系统需要在 MetaDrive 闭环环境中完成：
 
-- 官方案例和自定义场景中的稳定车道保持；
-- 根据车辆、锥桶、收费站等 OD 做减速、停车、绕行；
-- 在仅有道路级导航、没有车道级 oracle 的情况下自主选道；
-- 通过分岔、匝道、路口、收费站等拓扑复杂区域；
-- 保持安全性、平顺性、效率和路线达成率；
-- 最终在冻结验证集的 controller-realized closed-loop 指标上超过 IDM + Pure Pursuit 基线。
+- 官方案例和自定义场景中的稳定车道保持；　——【已实现有偏差：50 val 上 exact 70% success；未冻结验证集】
+- 根据车辆、锥桶、收费站等 OD 做减速、停车、绕行；　——【已实现有偏差：OD 有，锥桶/收费站路径未专项验证】
+- 在仅有道路级导航、没有车道级 oracle 的情况下自主选道；　——【已实现有偏差：Nav 由 lane 端点派生（见 §3.3）】
+- 通过分岔、匝道、路口、收费站等拓扑复杂区域；　——【未实现：无分场景闭环证据】
+- 保持安全性、平顺性、效率和路线达成率；　——【已实现有偏差：仅 success/collision/off-road/RC】
+- 最终在冻结验证集的 controller-realized closed-loop 指标上超过 IDM + Pure Pursuit 基线。　——【未实现：无 Test500、无多 seed】
 
 ### 1.2 第一阶段目标
 
 第一阶段暂不上 latent world model，以 exact tracking 为 Planner 主诊断，同时从早期并行运行 LQR canary，重点证明：
 
-- 输入 schema 正确；
-- 道路级导航真的足以支持自主选道；
-- Plan Head 能生成闭环可用轨迹；
-- BC、DAgger 以及短 Real-ENV PPO canary 的训练链路可运行；
-- 模型可以闭环恢复，而不只是 open-loop 拟合专家。
+- 输入 schema 正确；　——【已实现有偏差：固定 shape，缺 stable ID/taxonomy】
+- 道路级导航真的足以支持自主选道；　——【未实现：无选道专项评测，Nav 含 lane 信息】
+- Plan Head 能生成闭环可用轨迹；　——【已实现有偏差：exact 闭环可用；v_next 未执行】
+- BC、DAgger 以及短 Real-ENV PPO canary 的训练链路可运行；　——【已实现有偏差：三条链路跑通；PPO log-prob 合同不成立】
+- 模型可以闭环恢复，而不只是 open-loop 拟合专家。　——【未实现：无 recovery 指标】
 
 ### 1.3 第二阶段目标
 
 在第一阶段 Plan Head 闭环能力达标后：
 
-- 加入真实历史 Memory Bank；
-- 加入 ego-conditioned deterministic latent world model；
-- 建立 Imagine Memory Bank；
-- 自回归 rollout 6 次，每次 0.5 s，形成未来 3 s 轨迹；
-- 将 6 个轨迹点插值至 0.1 s，交给 LQR 预瞄跟踪；
-- 联合优化 World Model、Plan Head、Value/Risk Head；
-- 在 Plan+WM+LQR 闭环成立后进行正式 Real-ENV PPO，争取超过 Expert；
-- 最后再评估 imagined RL 或 real-env-to-WM distillation。
+- 加入真实历史 Memory Bank；　——【未实现】
+- 加入 ego-conditioned deterministic latent world model；　——【未实现】
+- 建立 Imagine Memory Bank；　——【未实现】
+- 自回归 rollout 6 次，每次 0.5 s，形成未来 3 s 轨迹；　——【未实现】
+- 将 6 个轨迹点插值至 0.1 s，交给 LQR 预瞄跟踪；　——【未实现】
+- 联合优化 World Model、Plan Head、Value/Risk Head；　——【未实现】
+- 在 Plan+WM+LQR 闭环成立后进行正式 Real-ENV PPO，争取超过 Expert；　——【未实现】
+- 最后再评估 imagined RL 或 real-env-to-WM distillation。　——【未实现】
 
 ### 1.4 明确非目标
 
 第一版不做：
 
-- 图像输入或视觉 Backbone；
-- 多候选轨迹 K-sampling；
-- 多模态生成式 World Model；
-- Diffusion World Model；
-- 车道级导航或外置推荐车道；
-- 由规则模块替网络完成收费站选道、路口选道或绕障；
-- 用 open-loop ADE/FDE 替代闭环性能判断；
-- 一次性将全部模块同时上线。
+- 图像输入或视觉 Backbone；　——【已实现无偏差：非目标，未引入视觉输入】
+- 多候选轨迹 K-sampling；　——【已实现无偏差：非目标，未引入 K-sampling】
+- 多模态生成式 World Model；　——【已实现无偏差：非目标，未引入生成式 WM】
+- Diffusion World Model；　——【已实现无偏差：非目标，未引入 Diffusion WM】
+- 车道级导航或外置推荐车道；　——【已实现有偏差：Nav checkpoint 为 lane 端点+中间车道偏置】
+- 由规则模块替网络完成收费站选道、路口选道或绕障；　——【已实现有偏差：nearest-OD/min-TTC 手工 readout】
+- 用 open-loop ADE/FDE 替代闭环性能判断；　——【已实现无偏差：非目标，以闭环为主】
+- 一次性将全部模块同时上线。　——【已实现有偏差：A2 时序+DAgger+PPO 已提前】
 
 ### 1.5 统一时间合同
 
@@ -65,7 +67,9 @@ rollout_steps = 6
 rollout_horizon = 3.0 s
 ```
 
-每个真实 policy decision 产生一个 0.5 s 轨迹段，由 Exact Tracker 或 LQR 在内部执行 5 个 0.1 s 控制步；执行完该段后再读取真实 observation 并重新决策。禁止训练阶段使用 0.1 s 重规划、部署阶段改成 0.5 s 重规划。六步 imagined rollout 仅用于 3 s preview，不代表真实环境开环执行 3 s。
+> **批复：已实现有偏差** —— control_dt=0.1、policy_dt=0.5、history=6 已落实；`memory_dt/wm_dt` 无实现；六步 preview 实际是同一 batch 重复查询（`pipeline/rollout.py:29-37`）。
+
+每个真实 policy decision 产生一个 0.5 s 轨迹段，由 Exact Tracker 或 LQR 在内部执行 5 个 0.1 s 控制步；执行完该段后再读取真实 observation 并重新决策。禁止训练阶段使用 0.1 s 重规划、部署阶段改成 0.5 s 重规划。六步 imagined rollout 仅用于 3 s preview，不代表真实环境开环执行 3 s。　——【已实现有偏差：段内 5 步已实现；六步 imagined 未实现，plan_actions 重复同 batch】
 
 ---
 
@@ -94,6 +98,8 @@ Exact Tracking in early phase
             ↓
 MetaDrive closed loop
 ```
+
+> **批复：已实现有偏差** —— Encoders/Spatial/Plan/Value-Risk 头均有；value/risk 默认不训练；时序融合已提前加入（A2 特性）。
 
 ### 2.2 阶段二：带 ego-conditioned latent World Model 的自回归规划
 
@@ -125,9 +131,11 @@ LQR preview tracking
 MetaDrive
 ```
 
+> **批复：未实现** —— 无 Real/Imagine Memory Bank、无 Latent WM、无自回归 rollout；`plan_actions` 用同一 context 重复 6 次。
+
 ### 2.3 因果约定
 
-每个 imagined step 的因果关系必须是：
+每个 imagined step 的因果关系必须是：　——【未实现：无 WM/Imagine Bank】
 
 \[
 a_n = \pi(M_n)
@@ -150,7 +158,9 @@ M_{n+1}=\operatorname{FIFO}(M_n,\hat z_{n+1})
 → 下一步 ego action/motion
 ```
 
-禁止实现成“先无条件预测下一环境，再决定同一步动作”。World Model 必须显式接受 ego motion condition。
+> **批复：未实现** —— 无 WM，因果链无法成立；当前 6 步查询不改变 context。
+
+禁止实现成“先无条件预测下一环境，再决定同一步动作”。World Model 必须显式接受 ego motion condition。　——【未实现：无 WM；当前 6 步为同一 batch 重复查询】
 
 ---
 
@@ -160,94 +170,94 @@ M_{n+1}=\operatorname{FIFO}(M_n,\hat z_{n+1})
 
 每个 OD token 至少包含编码前的结构化字段：
 
-- stable object/track ID，仅用于对齐、监督和诊断；
-- object type：车辆、行人、锥桶、障碍物、收费站动态设施等；
-- taxonomy fields：`semantic_type / mobility_type(dynamic|static) / geometry_type / state_type`；
-- 相对 ego 的位置、航向、速度、加速度；
-- object size；
-- visibility/validity；
-- observation age；
-- 可选的 turn signal、brake state 等 MetaDrive 可稳定提供的信息。
+- stable object/track ID，仅用于对齐、监督和诊断；　——【未实现：OD 无 ID 字段】
+- object type：车辆、行人、锥桶、障碍物、收费站动态设施等；　——【已实现有偏差：8 类 type id；行人/护栏类被过滤】
+- taxonomy fields：`semantic_type / mobility_type(dynamic|static) / geometry_type / state_type`；　——【未实现：无 semantic/mobility/geometry/state 四元组】
+- 相对 ego 的位置、航向、速度、加速度；　——【已实现有偏差：无加速度】
+- object size；　——【已实现无偏差：L/W 入特征】
+- visibility/validity；　——【已实现有偏差：presence flag；无 visibility/age】
+- observation age；　——【未实现】
+- 可选的 turn signal、brake state 等 MetaDrive 可稳定提供的信息。　——【未实现】
 
 原则：
 
-- Planner 不直接读取裸 ID 做策略逻辑；
-- ID 用于跨帧对齐和监督；
-- 所有环境语义字段先进入 OD Encoder；
-- 不允许以规则形式直接告诉 Planner “哪辆车需要避让”。
-- 静态设施不得进入动态 WM transition；动态闸机/交通灯状态进入 RoadState token。
+- Planner 不直接读取裸 ID 做策略逻辑；　——【已实现无偏差：禁止项满足（未提供 ID）】
+- ID 用于跨帧对齐和监督；　——【未实现：无 ID，按槽位对齐】
+- 所有环境语义字段先进入 OD Encoder；　——【已实现有偏差：nearest-OD/TTC/原始 lane 标量旁路】
+- 不允许以规则形式直接告诉 Planner “哪辆车需要避让”。　——【已实现有偏差：nearest-OD + min-TTC readout】
+- 静态设施不得进入动态 WM transition；动态闸机/交通灯状态进入 RoadState token。　——【未实现：RoadState token 未实现；禁止项当前无违反对象（无 WM）】
 
 ## 3.2 Lane/Road Data，LD
 
 LD 包括：
 
-- lane centerline polyline；
-- lane boundary polyline 和 boundary type；
-- predecessor、successor、left、right topology；
-- road segment ID；
-- lane ID、boundary ID 或稳定 polyline ID；
-- lane type、road type；
-- junction、ramp、fork、merge；
-- toll lane/toll booth static geometry；
-- speed limit；
-- traffic light 等动态道路状态应单列为 dynamic road-state token。
+- lane centerline polyline；　——【已实现无偏差：5 点 polyline】
+- lane boundary polyline 和 boundary type；　——【已实现有偏差：仅左右 line type id，无 boundary polyline】
+- predecessor、successor、left、right topology；　——【未实现】
+- road segment ID；　——【未实现】
+- lane ID、boundary ID 或稳定 polyline ID；　——【未实现】
+- lane type、road type；　——【未实现】
+- junction、ramp、fork、merge；　——【未实现】
+- toll lane/toll booth static geometry；　——【未实现：建筑作为 OD，未做 LD 几何】
+- speed limit；　——【已实现无偏差】
+- traffic light 等动态道路状态应单列为 dynamic road-state token。　——【未实现】
 
 LD 对齐不能只靠 lane ID。如果同一 lane 每帧被局部裁剪，必须增加：
 
-- world-coordinate anchor；或
-- 固定弧长 segment index；或
-- 可复现的 polyline chunk ID。
+- world-coordinate anchor；或　——【未实现】
+- 固定弧长 segment index；或　——【未实现】
+- 可复现的 polyline chunk ID。　——【未实现】
 
-否则同一 lane ID 的 latent delta 会混入裁剪窗口变化。
+否则同一 lane ID 的 latent delta 会混入裁剪窗口变化。　——【已实现有偏差：正是当前问题（s0 每帧重算）】
 
 ## 3.3 Road-level Navigation
 
 允许输入：
 
-- 当前 road segment；
-- 后续若干 road segments；
-- road graph topology；
-- destination relation；
-- route progress；
-- 下一道路在拓扑上的方向关系。
+- 当前 road segment；　——【未实现】
+- 后续若干 road segments；　——【未实现】
+- road graph topology；　——【未实现】
+- destination relation；　——【未实现】
+- route progress；　——【已实现无偏差】
+- 下一道路在拓扑上的方向关系。　——【已实现有偏差：用 lane heading 推左右转】
 
 严禁输入：
 
-- target lane ID；
-- recommended lane；
-- lane-change command；
-- 专家使用的 lane-level route；
-- 专家参考中心线；
-- 由规则模块提前算出的收费站入口选择。
+- target lane ID；　——【已实现无偏差：禁止项满足（未直接提供）】
+- recommended lane；　——【已实现有偏差：get_checkpoints 的 later_middle 等价中间车道目标】
+- lane-change command；　——【已实现无偏差：禁止项满足（未提供）】
+- 专家使用的 lane-level route；　——【已实现有偏差：checkpoint 来自 current_ref_lanes】
+- 专家参考中心线；　——【已实现有偏差：checkpoint 位于 lane centerline】
+- 由规则模块提前算出的收费站入口选择。　——【已实现无偏差：禁止项满足（未提供）】
 
-允许网络看到 lane-to-road topology，因为这是环境事实；不允许直接告诉网络应选择哪条 lane。
+允许网络看到 lane-to-road topology，因为这是环境事实；不允许直接告诉网络应选择哪条 lane。　——【已实现有偏差：无 lane-to-road topology；Nav 中间车道偏置已擦边违反后半句】
 
 ## 3.4 Ego Kinematics
 
 至少包括：
 
-- longitudinal/lateral velocity；
-- longitudinal/lateral acceleration；
-- yaw、yaw rate；
-- steering angle 或等价状态；
-- vehicle length、width、wheelbase；
-- previous executed action/control；
-- 当前 pose 只用于坐标变换，网络输入使用规范化相对表示。
+- longitudinal/lateral velocity；　——【已实现有偏差：只有 scalar speed】
+- longitudinal/lateral acceleration；　——【已实现有偏差：有限差分；a_lat=v·yaw_rate】
+- yaw、yaw rate；　——【已实现无偏差】
+- steering angle 或等价状态；　——【已实现无偏差】
+- vehicle length、width、wheelbase；　——【未实现】
+- previous executed action/control；　——【已实现有偏差：prev plan dx/dpsi，不是 steer/throttle】
+- 当前 pose 只用于坐标变换，网络输入使用规范化相对表示。　——【已实现无偏差】
 
 ## 3.5 控制元数据与语义信息边界
 
 以下信息不属于驾驶策略，不应强制编码后再使用：
 
-- scene reset signal；
-- valid/padding mask；
-- timestamp 和 delta_t；
-- REAL/IMAGINED source flag；
-- rollout depth；
-- batch/sample index。
+- scene reset signal；　——【已实现有偏差：env.reset 有；无显式 signal 入 obs】
+- valid/padding mask；　——【已实现有偏差：mask 存在，语义未文档化】
+- timestamp 和 delta_t；　——【未实现】
+- REAL/IMAGINED source flag；　——【未实现】
+- rollout depth；　——【未实现】
+- batch/sample index。　——【已实现无偏差：作为控制元数据，未入网】
 
-这些是张量管理、因果和安全正确性所需的控制元数据，可作为 mask、索引或控制信号直接使用。
+这些是张量管理、因果和安全正确性所需的控制元数据，可作为 mask、索引或控制信号直接使用。　——【已实现有偏差：mask 直接用；无 timestamp/source/depth】
 
-所有环境语义信息必须经过 Encoder 后进入下游；不得以显式规则旁路计划网络。
+所有环境语义信息必须经过 Encoder 后进入下游；不得以显式规则旁路计划网络。　——【已实现有偏差：规则 readout 旁路】
 
 ---
 
@@ -255,7 +265,7 @@ LD 对齐不能只靠 lane ID。如果同一 lane 每帧被局部裁剪，必须
 
 ## 4.1 Ego-motion compensation
 
-所有历史 OD/LD 在时序融合前必须对齐到当前时刻 ego frame，但**坐标补偿作用于 transform metadata / geometry anchor，不直接作用于普通 learned content latent**。普通 MLP、GNN 或 Attention 产生的 content latent 默认不具备可解释的 SE(2) 变换规则，禁止把 latent 向量当作二维坐标直接旋转或平移。
+所有历史 OD/LD 在时序融合前必须对齐到当前时刻 ego frame，但**坐标补偿作用于 transform metadata / geometry anchor，不直接作用于普通 learned content latent**。普通 MLP、GNN 或 Attention 产生的 content latent 默认不具备可解释的 SE(2) 变换规则，禁止把 latent 向量当作二维坐标直接旋转或平移。　——【已实现有偏差：补偿作用于原始几何；无 content latent/metadata】
 
 每个 OD/LD token 明确拆为：
 
@@ -265,12 +275,14 @@ content latent
 + stable ID / timestamp / valid mask
 ```
 
+> **批复：未实现** —— 无 content latent 拆分，也无 per-entity stable ID/timestamp；仅有原始几何特征。
+
 其中：
 
-- `content latent`：类别、尺寸、限速语义、拓扑语义、局部运动语义等 Encoder 表征；
-- `geometry anchor`：OD 的中心点/朝向/包围盒锚点，LD 的 polyline control points/切向/边界锚点；
-- `transform metadata`：写入 Bank 时的 ego pose、坐标系标识、时间戳，以及完成重投影所需的刚体变换信息；
-- Nav 不做普通动力学预测；道路级路由作为静态或拓扑条件保留，仅在路段切换、路由进度变化或仿真器真实更新时刷新。
+- `content latent`：类别、尺寸、限速语义、拓扑语义、局部运动语义等 Encoder 表征；　——【未实现：无显式 content latent 拆分】
+- `geometry anchor`：OD 的中心点/朝向/包围盒锚点，LD 的 polyline control points/切向/边界锚点；　——【已实现有偏差：OD x/y/cos/sin/L/W；LD 5 点；无显式 anchor】
+- `transform metadata`：写入 Bank 时的 ego pose、坐标系标识、时间戳，以及完成重投影所需的刚体变换信息；　——【未实现：pose 仅瞬时使用，未存储】
+- Nav 不做普通动力学预测；道路级路由作为静态或拓扑条件保留，仅在路段切换、路由进度变化或仿真器真实更新时刷新。　——【已实现无偏差】
 
 几何补偿原则公式：
 
@@ -292,21 +304,23 @@ compensated geometry feature
 same-ID temporal fusion
 ```
 
-这样将自车平移和旋转从环境变化中解耦，同时避免假设任意 latent 天然可变换。允许计算 content latent residual，但它只是学习特征差，不承担坐标补偿职责。
+> **批复：未实现** —— 无 stable-ID 对齐；`stack_history` 按距离排序槽位堆叠（`env/obs.py:364-400`）。
+
+这样将自车平移和旋转从环境变化中解耦，同时避免假设任意 latent 天然可变换。允许计算 content latent residual，但它只是学习特征差，不承担坐标补偿职责。　——【已实现有偏差：几何解耦成立；latent/ID 层未成立】
 
 必须写独立单元测试，覆盖：
 
-- 纯直行、纯旋转、同时平移旋转；
-- 静态锥桶、收费站或车道点经补偿后在当前 ego frame 的位置正确；
-- 动态车辆的补偿后位移与相对速度方向一致；
-- 同一实体改变全局原点或全局朝向后，Planner 输入的相对几何保持一致；
-- content latent 不进入手写 SE(2) 旋转/平移代码；
-- Nav 未被当作普通动态实体进行未来状态外推。
+- 纯直行、纯旋转、同时平移旋转；　——【已实现有偏差：仓库仅直线测试；旋转仅本次 review 数值验证】
+- 静态锥桶、收费站或车道点经补偿后在当前 ego frame 的位置正确；　——【未实现】
+- 动态车辆的补偿后位移与相对速度方向一致；　——【未实现】
+- 同一实体改变全局原点或全局朝向后，Planner 输入的相对几何保持一致；　——【未实现】
+- content latent 不进入手写 SE(2) 旋转/平移代码；　——【已实现无偏差：禁止项满足（无 content latent）】
+- Nav 未被当作普通动态实体进行未来状态外推。　——【已实现无偏差】
 
 
 ## 4.2 按稳定 ID 对齐后构造时序特征
 
-不使用“所有 OD/LD 压成单个全局 latent 后相减”的方案。采用实体级稳定 ID 对齐，并把内容变化与几何变化分开表示：
+不使用“所有 OD/LD 压成单个全局 latent 后相减”的方案。采用实体级稳定 ID 对齐，并把内容变化与几何变化分开表示：　——【已实现有偏差：未使用全局压平（禁止项满足），但 stable-ID 对齐未实现】
 
 ```text
 current content latent z_content(i,t)
@@ -320,33 +334,37 @@ current absolute state
 + delta_t / masks
 ```
 
+> **批复：未实现** —— 无 content latent residual、无显式 geometry delta 特征、无 Δt。
+
 建议实体时序输入：
 
 \[
 h_{i,t-k}=\left[z^c_{i,t},\ z^c_{i,t-k},\ z^c_{i,t}-z^c_{i,t-k},\ g_{i,t},\ g_{i,t-k\rightarrow t},\ g_{i,t}-g_{i,t-k\rightarrow t},\ \Delta t,\ m_{i,t-k}\right]
 \]
 
+> **批复：未实现**
+
 其中：
 
-- \(z^c\)：content latent，不接受手写坐标变换；
-- \(g\)：由 geometry anchor 和 transform metadata 构造的当前 ego frame 几何表征；
-- \(z^c_{i,t}-z^c_{i,t-k}\)：可选 content residual，用于表达语义或运动状态变化；
-- \(g_{i,t}-g_{i,t-k\rightarrow t}\)：显式几何变化，负责表达补偿后的实体相对运动；
-- \(m\)：valid/birth/death/source mask。
+- \(z^c\)：content latent，不接受手写坐标变换；　——【未实现】
+- \(g\)：由 geometry anchor 和 transform metadata 构造的当前 ego frame 几何表征；　——【未实现】
+- \(z^c_{i,t}-z^c_{i,t-k}\)：可选 content residual，用于表达语义或运动状态变化；　——【未实现】
+- \(g_{i,t}-g_{i,t-k\rightarrow t}\)：显式几何变化，负责表达补偿后的实体相对运动；　——【已实现有偏差：有补偿后几何，无显式 delta 特征】
+- \(m\)：valid/birth/death/source mask。　——【已实现有偏差：仅 valid；无 birth/death/source】
 
-基线可先关闭 content residual，仅使用“当前 content latent + 历史 content latent + 显式几何变化”，再通过 ablation 判断 latent residual 是否提供稳定闭环收益。不得只输入 delta，否则会丢失绝对距离、类别、尺寸、基准速度和道路位置。
+基线可先关闭 content residual，仅使用“当前 content latent + 历史 content latent + 显式几何变化”，再通过 ablation 判断 latent residual 是否提供稳定闭环收益。不得只输入 delta，否则会丢失绝对距离、类别、尺寸、基准速度和道路位置。　——【未实现】
 
 
 ## 4.3 实体 birth/death
 
 必须区分：
 
-- 当前存在、历史存在：正常 delta；
-- 当前存在、历史不存在：birth mask，不得用零 latent 假装历史实体；
-- 当前不存在、历史存在：作为 death/exit 状态供 WM 监督或诊断，是否保留给 Planner 由配置决定；
-- 当前和历史都不存在：padding mask。
+- 当前存在、历史存在：正常 delta；　——【未实现】
+- 当前存在、历史不存在：birth mask，不得用零 latent 假装历史实体；　——【未实现】
+- 当前不存在、历史存在：作为 death/exit 状态供 WM 监督或诊断，是否保留给 Planner 由配置决定；　——【未实现】
+- 当前和历史都不存在：padding mask。　——【已实现有偏差：槽位 presence mask 有；实体身份无】
 
-禁止把缺失实体直接填零后参与普通减法并当作真实运动。
+禁止把缺失实体直接填零后参与普通减法并当作真实运动。　——【已实现有偏差：零填充+mask；无 ID 时无法区分缺失与换人】
 
 ## 4.4 时空融合顺序
 
@@ -365,9 +383,11 @@ Nav/Ego-conditioned cross-attention
 Plan / Value / World Model
 ```
 
-即先做实体内时序，再做当前时刻实体间空间交互。
+> **批复：已实现有偏差** —— 先时序后空间成立，但时序按槽位而非 same-ID；空间层是单个联合 Transformer，而非规定的 OD/LD self + OD-LD cross 结构（`net/model.py:99-103,184-199`）。
 
-不采用所有 6 帧全部 OD/LD token 的全量时空 self-attention，以控制显存、参数和调试难度。
+即先做实体内时序，再做当前时刻实体间空间交互。　——【已实现有偏差：先时序后空间成立；时序不是 same-ID】
+
+不采用所有 6 帧全部 OD/LD token 的全量时空 self-attention，以控制显存、参数和调试难度。　——【已实现无偏差】
 
 ---
 
@@ -375,14 +395,14 @@ Plan / Value / World Model
 
 ## 5.1 Real Memory Bank
 
-- 容量：6 帧；
-- 帧间隔：0.5 s；
-- 覆盖历史：固定保存 \(t-2.5\) s 至 \(t\) 共 6 帧，**包含当前帧**；dataset、online rollout 和 test 必须使用完全相同的索引语义；
-- episode 初始不足 6 帧时可复制最早真实帧完成定形，但复制槽位必须 `valid=0`，不得伪装成真实历史；
-- 场景切换必须 hard reset；
-- Bank 只接收真实 MetaDrive ENV 观测经 Encoder 得到的 per-entity token record，不写入 imagined state，也不存储 StateFusion 之后的全局 fused context；
-- 写入 content latent 前默认 detach，避免计算图跨真实环境 step 无限增长；
-- 同一训练 batch 若需要 BPTT，使用显式 sequence tensor/unroll，不依赖长期在线 Bank 的历史计算图。
+- 容量：6 帧；　——【已实现有偏差：history 列表 6 帧；无 Bank 类】
+- 帧间隔：0.5 s；　——【已实现无偏差】
+- 覆盖历史：固定保存 \(t-2.5\) s 至 \(t\) 共 6 帧，**包含当前帧**；dataset、online rollout 和 test 必须使用完全相同的索引语义；　——【已实现有偏差：在线 episode 内成立；dataset/online/test 语义未统一】
+- episode 初始不足 6 帧时可复制最早真实帧完成定形，但复制槽位必须 `valid=0`，不得伪装成真实历史；　——【已实现有偏差：hist_valid=0；per-entity mask 仍为 1】
+- 场景切换必须 hard reset；　——【已实现有偏差：每 episode 新建 env；无 Bank reset 语义】
+- Bank 只接收真实 MetaDrive ENV 观测经 Encoder 得到的 per-entity token record，不写入 imagined state，也不存储 StateFusion 之后的全局 fused context；　——【已实现有偏差：保存原始 obs，不是 per-entity token record】
+- 写入 content latent 前默认 detach，避免计算图跨真实环境 step 无限增长；　——【未实现：无 Bank/无梯度写入】
+- 同一训练 batch 若需要 BPTT，使用显式 sequence tensor/unroll，不依赖长期在线 Bank 的历史计算图。　——【未实现】
 
 每帧必须存储：
 
@@ -412,38 +432,40 @@ Common:
   timestamp / scene_id / encoder_version / source=REAL
 ```
 
+> **批复：未实现** —— 无 Bank，也无 per-entity record；npz 只存原始 OD/LD/Nav/Ego 张量与 mask。
+
 约束：
 
-- `content_latent` 是主要学习表示；`geometry_anchor + transform_metadata` 是坐标补偿和 ID 对齐所需的最小结构化元数据，不属于外部规划规则或车道级导航特权；
-- OD anchor 建议保留中心点、朝向、长宽和速度锚点；LD anchor 建议保留固定数量 polyline control points、切向和拓扑 ID；
-- Road-level Nav 只给道路/路由级意图，不给目标车道 ID、推荐变道方向或专家未来轨迹；
-- Ego 显式动力学用于 causal conditioning、几何补偿和诊断，不要求 WM 从 latent 中反推 ego pose；
-- 必须为 Bank 定义固定 shape、padding 和 mask，避免 Python list 导致训练/部署语义不一致。
+- `content_latent` 是主要学习表示；`geometry_anchor + transform_metadata` 是坐标补偿和 ID 对齐所需的最小结构化元数据，不属于外部规划规则或车道级导航特权；　——【未实现：模型只有 fused ctx】
+- OD anchor 建议保留中心点、朝向、长宽和速度锚点；LD anchor 建议保留固定数量 polyline control points、切向和拓扑 ID；　——【已实现有偏差：部分（x/y/L/W/5 点）；无朝向/速度 anchor/topology ID】
+- Road-level Nav 只给道路/路由级意图，不给目标车道 ID、推荐变道方向或专家未来轨迹；　——【已实现有偏差：lane 端点+中间车道 offset】
+- Ego 显式动力学用于 causal conditioning、几何补偿和诊断，不要求 WM 从 latent 中反推 ego pose；　——【已实现有偏差：标量运动学；无 pose/尺寸】
+- 必须为 Bank 定义固定 shape、padding 和 mask，避免 Python list 导致训练/部署语义不一致。　——【已实现有偏差：张量固定 shape；无 Bank】
 
 
 ## 5.2 Imagine Memory Bank
 
-- rollout t0 从 Real Memory Bank 复制；
-- 复制后不与 Real Memory Bank 共享可变写入；
-- 每次 World Model 预测下一帧 `content latent + predicted/propagated geometry anchor + transform metadata` 后执行 FIFO append；
-- rollout 结束后立即 reset；
-- 每个元素带 `source=REAL/IMAGINED` 和 `rollout_depth=0..6`；
-- 静态 LD/Nav 优先由 t0 真实结构和 imagined ego pose 做解析重投影/传播，不要求 WM 从零生成静态地图；动态 OD 与必要 road-state 由 WM 预测；
-- forbidden：imagined content latent、geometry anchor 或 metadata 回写 Real Memory Bank。
+- rollout t0 从 Real Memory Bank 复制；　——【未实现】
+- 复制后不与 Real Memory Bank 共享可变写入；　——【未实现】
+- 每次 World Model 预测下一帧 `content latent + predicted/propagated geometry anchor + transform metadata` 后执行 FIFO append；　——【未实现】
+- rollout 结束后立即 reset；　——【未实现】
+- 每个元素带 `source=REAL/IMAGINED` 和 `rollout_depth=0..6`；　——【未实现】
+- 静态 LD/Nav 优先由 t0 真实结构和 imagined ego pose 做解析重投影/传播，不要求 WM 从零生成静态地图；动态 OD 与必要 road-state 由 WM 预测；　——【未实现】
+- forbidden：imagined content latent、geometry anchor 或 metadata 回写 Real Memory Bank。　——【未实现】
 
 ## 5.3 缓存与 Encoder 版本
 
-训练集、DAgger Buffer 和 PPO Replay/Rollout Buffer 优先保存**原始结构化 observation 与必要的 action/reward/mask**，训练取样时再用当前 Encoder 计算 latent，不把 latent 作为可跨多轮训练长期复用的唯一数据。原因是 Encoder 会随训练更新：同一帧 observation 经旧 Encoder 得到的 `z_old` 与经新 Encoder 得到的 `z_new` 可能处于不同表征基底；若把旧缓存 latent 与当前新算 latent 放入同一个 6 帧窗口，时序差分可能主要反映 Encoder 参数变化，而不是真实环境变化。
+训练集、DAgger Buffer 和 PPO Replay/Rollout Buffer 优先保存**原始结构化 observation 与必要的 action/reward/mask**，训练取样时再用当前 Encoder 计算 latent，不把 latent 作为可跨多轮训练长期复用的唯一数据。原因是 Encoder 会随训练更新：同一帧 observation 经旧 Encoder 得到的 `z_old` 与经新 Encoder 得到的 `z_new` 可能处于不同表征基底；若把旧缓存 latent 与当前新算 latent 放入同一个 6 帧窗口，时序差分可能主要反映 Encoder 参数变化，而不是真实环境变化。　——【已实现无偏差：npz 存原始 obs+action】
 
-这不影响 Real Memory Bank 的在线运行：单个 episode 内，Bank 保存最近 6 帧且写入时 detach；其生命周期短，允许使用当前参数快照的 Encoder 输出。训练参数更新发生在 batch/rollout 边界，不得在同一个 6 帧窗口构建过程中更新 Encoder。
+这不影响 Real Memory Bank 的在线运行：单个 episode 内，Bank 保存最近 6 帧且写入时 detach；其生命周期短，允许使用当前参数快照的 Encoder 输出。训练参数更新发生在 batch/rollout 边界，不得在同一个 6 帧窗口构建过程中更新 Encoder。　——【已实现有偏差：采集时 encoder 冻结；无 Bank】
 
 若为吞吐性能必须离线缓存 latent：
 
-- 每条缓存记录 `encoder_version/hash`，对应生成 latent 的 Encoder checkpoint 或权重哈希；
-- 训练加载时只允许使用与当前 Encoder 版本一致的缓存，否则重新编码原始 observation 或使缓存失效；
-- 禁止在同一时序窗口、同一 Real/Imagine Bank 中混用不同版本 latent；
-- 若 Encoder 在某阶段完全冻结，可为该冻结阶段一次性重建 latent cache；Encoder 再次解冻后，旧 cache 自动失效；
-- 部署推理时 Encoder 权重固定，因此不存在跨训练版本漂移，但场景 reset 和 Bank 隔离规则仍须保持。
+- 每条缓存记录 `encoder_version/hash`，对应生成 latent 的 Encoder checkpoint 或权重哈希；　——【未实现】
+- 训练加载时只允许使用与当前 Encoder 版本一致的缓存，否则重新编码原始 observation 或使缓存失效；　——【未实现】
+- 禁止在同一时序窗口、同一 Real/Imagine Bank 中混用不同版本 latent；　——【未实现】
+- 若 Encoder 在某阶段完全冻结，可为该冻结阶段一次性重建 latent cache；Encoder 再次解冻后，旧 cache 自动失效；　——【未实现】
+- 部署推理时 Encoder 权重固定，因此不存在跨训练版本漂移，但场景 reset 和 Bank 隔离规则仍须保持。　——【已实现有偏差：无 cache/Bank 可谈】
 
 ---
 
@@ -451,7 +473,7 @@ Common:
 
 ## 6.1 每次 policy query / imagined step 的输出
 
-每次 Plan Head query 只输出下一 0.5 s ego motion；同一个 Plan Head 参数实例贯穿 BC、DAgger、PPO 和 WM rollout。真实环境每 0.5 s 决策一次，Exact Tracker 或 LQR 在段内执行 5 个 0.1 s 控制步；下一决策时刻使用新 observation 重规划。
+每次 Plan Head query 只输出下一 0.5 s ego motion；同一个 Plan Head 参数实例贯穿 BC、DAgger、PPO 和 WM rollout。真实环境每 0.5 s 决策一次，Exact Tracker 或 LQR 在段内执行 5 个 0.1 s 控制步；下一决策时刻使用新 observation 重规划。　——【已实现有偏差：同一实例贯穿；但一次决策查 6 次并丢弃 5 次】
 
 第一版主动作定义为带终端速度边界的 SE(2) endpoint：
 
@@ -459,29 +481,31 @@ Common:
 a_n=(\Delta x_n,\Delta y_n,\Delta\psi_n,v_{n+1})
 \]
 
-其中：
-- `(Δx, Δy, Δψ)` 位于当前 real/imagined ego frame；
-- `v_{n+1}` 是 0.5 s 后目标速度，不得用 `distance/0.5` 的平均速度替代；
-- pose endpoint 决定空间边界，`v_{n+1}` 决定纵向时间边界，二者不是冗余量；
-- 可等价改用 `(Δx, Δy, Δψ, Δv)`，但必须在 P0 写入 decision log 后全流程统一；
-- `(ds,dtheta)` 仅保留为对照基线，不作为长期主动作。
+> **批复：已实现有偏差：输出 4D；执行链 3D**
 
-P0 将 4D `(dx,dy,dpsi,v_next)` 作为固定基线，只校准标签、bounds、归一化、Hermite 插值和动力学可行性；不得根据 `v_next` 与平均速度的相关性自动退化为 3D。若 action round-trip、full-stop/stop-to-go 或 Expert-GT LQR 出现结构性失败，则暂停 P1，提交 decision log 人工复审，不允许脚本静默改动作维度。至少报告 endpoint/heading/terminal-speed、conditional terminal-speed residual、acceleration、jerk、curvature/curvature-rate、full-stop、stop-to-go、LQR tracking error 和控制饱和率。
+其中：
+- `(Δx, Δy, Δψ)` 位于当前 real/imagined ego frame；　——【已实现无偏差】
+- `v_{n+1}` 是 0.5 s 后目标速度，不得用 `distance/0.5` 的平均速度替代；　——【已实现无偏差：标签取终端 ego.speed】
+- pose endpoint 决定空间边界，`v_{n+1}` 决定纵向时间边界，二者不是冗余量；　——【已实现有偏差：执行层把 v_next 当冗余】
+- 可等价改用 `(Δx, Δy, Δψ, Δv)`，但必须在 P0 写入 decision log 后全流程统一；　——【已实现无偏差：保持 4D，未触发该可选项】
+- `(ds,dtheta)` 仅保留为对照基线，不作为长期主动作。　——【已实现有偏差：pipeline 用 4D Hermite；tracking.py 仍以 2D 为单一真源】
+
+P0 将 4D `(dx,dy,dpsi,v_next)` 作为固定基线，只校准标签、bounds、归一化、Hermite 插值和动力学可行性；不得根据 `v_next` 与平均速度的相关性自动退化为 3D。若 action round-trip、full-stop/stop-to-go 或 Expert-GT LQR 出现结构性失败，则暂停 P1，提交 decision log 人工复审，不允许脚本静默改动作维度。至少报告 endpoint/heading/terminal-speed、conditional terminal-speed residual、acceleration、jerk、curvature/curvature-rate、full-stop、stop-to-go、LQR tracking error 和控制饱和率。　——【已实现有偏差：未自动退化为 3D，但 bounds/Hermite/feasibility 未标定，P0 否决门与必报指标未实现】
 
 必须从相邻点和连续 0.5 s 决策段派生并约束：
-- heading / `Δψ`；
-- curvature / `κ`；
-- longitudinal/lateral acceleration；
-- jerk；
-- curvature rate；
-- 相邻真实决策段连接处的位姿、速度、航向和曲率连续性。
-- 第 `n+1` 段起始速度硬继承 Ego Dynamics 推进后的第 `n` 段终态 `v_{n+1}`；平顺性使用 soft loss + feasibility gate。
+- heading / `Δψ`；　——【已实现有偏差：Hermite 导数给 heading；无 heading loss/指标】
+- curvature / `κ`；　——【已实现有偏差：LQR 内部算 ref curvature；无 κ 约束】
+- longitudinal/lateral acceleration；　——【已实现有偏差：数据 a_lon 有；无约束】
+- jerk；　——【未实现】
+- curvature rate；　——【未实现】
+- 相邻真实决策段连接处的位姿、速度、航向和曲率连续性。　——【未实现】
+- 第 `n+1` 段起始速度硬继承 Ego Dynamics 推进后的第 `n` 段终态 `v_{n+1}`；平顺性使用 soft loss + feasibility gate。　——【未实现】
 
-Exact Tracking 只替代早期执行器，不豁免轨迹动力学约束。即使仿真器能够瞬时落到目标点，也不得把横移过大、航向突变、曲率不连续或速度跳变的轨迹判为可用。
+Exact Tracking 只替代早期执行器，不豁免轨迹动力学约束。即使仿真器能够瞬时落到目标点，也不得把横移过大、航向突变、曲率不连续或速度跳变的轨迹判为可用。　——【已实现有偏差：无 feasibility gate；exact 接受任意几何】
 
 ## 6.2 坐标累计
 
-每个点来自不同 imagined ego frame，不能直接拼接。必须把每一步相对运动累计到 rollout-t0 ego frame：
+每个点来自不同 imagined ego frame，不能直接拼接。必须把每一步相对运动累计到 rollout-t0 ego frame：　——【已实现有偏差：compose 做 SE(2) 累积，但输出 world；未用于 eval】
 
 \[
 P_{n+1}=P_n\oplus\Delta P_n
@@ -493,43 +517,45 @@ P_{n+1}=P_n\oplus\Delta P_n
 \tau=\{(x_i^{ego@t0},y_i^{ego@t0},v_i)\}_{i=1}^{6}
 \]
 
+> **批复：未实现：无 6 点 t0 带速度轨迹**
+
 单元测试必须验证：
 
-- 六次直行累计后位置正确；
-- 连续转弯时坐标旋转正确；
-- 输出点都在同一个 t0 坐标系；
-- 轨迹转换到 world frame 后和 ego dynamics rollout 一致。
+- 六次直行累计后位置正确；　——【已实现有偏差：仅 base=0 直线测试】
+- 连续转弯时坐标旋转正确；　——【未实现】
+- 输出点都在同一个 t0 坐标系；　——【未实现：docstring 与实现不一致】
+- 轨迹转换到 world frame 后和 ego dynamics rollout 一致。　——【未实现】
 
 ## 6.3 插值与 LQR 输入
 
 6 个点对应未来 0.5、1.0、1.5、2.0、2.5、3.0 s。进入 LQR 前：
 
-- 插值为 0.1 s；
-- 推荐使用带切线约束的 cubic Hermite 或其他不会明显过冲的插值；切向方向由 heading 决定，切向大小由速度边界决定，禁止仅凭 `Δψ` 任意设定；
-- 速度使用 `v_n → v_{n+1}` 做单调/限幅插值；
-- 计算 heading、curvature、acceleration、jerk；
-- 对不连续曲率、逆行、速度负值、超动力学限制做 reject 或修正；
-- 保留完整 2 至 3 s 参考轨迹供 LQR 预瞄，不得只传第一个 0.5 s。
+- 插值为 0.1 s；　——【已实现有偏差：存在；仅用第一段 5 点】
+- 推荐使用带切线约束的 cubic Hermite 或其他不会明显过冲的插值；切向方向由 heading 决定，切向大小由速度边界决定，禁止仅凭 `Δψ` 任意设定；　——【已实现有偏差：Hermite 有；切向幅值 m=max(0.5,ds)，与速度无关】
+- 速度使用 `v_n → v_{n+1}` 做单调/限幅插值；　——【未实现】
+- 计算 heading、curvature、acceleration、jerk；　——【已实现有偏差：仅 heading】
+- 对不连续曲率、逆行、速度负值、超动力学限制做 reject 或修正；　——【未实现】
+- 保留完整 2 至 3 s 参考轨迹供 LQR 预瞄，不得只传第一个 0.5 s。　——【已实现有偏差：LQR canary 只传 0.5 s；3 s 未接】
 
 ## 6.4 Action semantics 一致性
 
-BC、DAgger、RL、World Model rollout 必须使用同一 Plan Head 输出语义。禁止出现：
+BC、DAgger、RL、World Model rollout 必须使用同一 Plan Head 输出语义。禁止出现：　——【已实现有偏差：BC/DAgger/PPO 4D；执行 3D；tracking 2D 声明】
 
-- BC 输出轨迹点，RL 改为 steering/throttle；
-- DAgger 用 \(x,y,v\)，WM 阶段改成 \(ds,d\theta\)；
-- train 和 inference 使用不同坐标系。
+- BC 输出轨迹点，RL 改为 steering/throttle；　——【已实现有偏差：RL 4D→几何；LQR 下游转 steering】
+- DAgger 用 \(x,y,v\)，WM 阶段改成 \(ds,d\theta\)；　——【已实现无偏差：禁止项未被违反（DAgger 用 4D；WM 不存在）】
+- train 和 inference 使用不同坐标系。　——【已实现有偏差：world/t0 文档不一致】
 
-MetaDrive 原生 steering/throttle 仅作为下游控制执行接口，不作为 Planner 的主要动作定义。
+MetaDrive 原生 steering/throttle 仅作为下游控制执行接口，不作为 Planner 的主要动作定义。　——【已实现无偏差】
 
 ### 6.5 PPO 概率动作合同
 
-PPO 要求可计算 `log_prob(action | state)`。因此 Plan Head 不是只输出确定性三元组，而是输出受约束轨迹动作分布：
-- 对归一化 `(dx, dy, dpsi, v_next)` 输出 `mu, log_std`，或使用 squashed Gaussian 后映射到动力学边界；
-- BC/DAgger 使用 expert action 的 NLL，并保留 point/velocity/feasibility auxiliary loss；
-- PPO buffer 保存 sampled pre-squash action、executed feasible action、old log-prob、old value 与修正/裁剪标记；
-- 若 feasibility layer 改写了动作，必须避免把“采样动作的 log-prob”错误地对应到“被大幅改写后的执行动作”。基线应让分布本身落在可行域，并统计 post-process rate；
-- Value Head 输入 state/context，不输入未来 GT；Risk/Cost Value 与 reward Value 分头训练。
-正式 PPO 中：当前 `a0` 从策略分布采样并记录 `log_prob`，执行完整 0.5 s 后形成一个 transition；`a1...a5` 使用各 imagined step 分布均值，仅作为非执行 preview，不计入当前 `old_log_prob`，下一真实决策时刻重新采样新的 `a0`。不得把 preview tail 对真实控制造成的影响算入一个未覆盖它的 log-prob。
+PPO 要求可计算 `log_prob(action | state)`。因此 Plan Head 不是只输出确定性三元组，而是输出受约束轨迹动作分布：　——【已实现有偏差：有 mu/log_std；分布未约束】
+- 对归一化 `(dx, dy, dpsi, v_next)` 输出 `mu, log_std`，或使用 squashed Gaussian 后映射到动力学边界；　——【已实现有偏差：未 squash，采样后直接 clamp】
+- BC/DAgger 使用 expert action 的 NLL，并保留 point/velocity/feasibility auxiliary loss；　——【未实现：BC 用 MSE；无 NLL/aux】
+- PPO buffer 保存 sampled pre-squash action、executed feasible action、old log-prob、old value 与修正/裁剪标记；　——【已实现有偏差：只存 sampled/logp/value；无 executed/clip mask】
+- 若 feasibility layer 改写了动作，必须避免把“采样动作的 log-prob”错误地对应到“被大幅改写后的执行动作”。基线应让分布本身落在可行域，并统计 post-process rate；　——【未实现】
+- Value Head 输入 state/context，不输入未来 GT；Risk/Cost Value 与 reward Value 分头训练。　——【已实现有偏差：value 只吃 state；risk 单标量且未训练】
+正式 PPO 中：当前 `a0` 从策略分布采样并记录 `log_prob`，执行完整 0.5 s 后形成一个 transition；`a1...a5` 使用各 imagined step 分布均值，仅作为非执行 preview，不计入当前 `old_log_prob`，下一真实决策时刻重新采样新的 `a0`。不得把 preview tail 对真实控制造成的影响算入一个未覆盖它的 log-prob。　——【已实现有偏差：a0 采样执行；clamp 改写、无 preview 语义】
 
 
 ---
@@ -540,25 +566,25 @@ PPO 要求可计算 `log_prob(action | state)`。因此 Plan Head 不是只输�
 
 Ego Dynamics：
 
-- 判断或推进“自车能否以及如何从当前状态走到该轨迹段”；
-- 计算 ego pose、heading、velocity、curvature 等下一状态；
-- 为坐标变换和 World Model 提供 ego motion condition。
+- 判断或推进“自车能否以及如何从当前状态走到该轨迹段”；　——【未实现：无 Ego Dynamics 模块】
+- 计算 ego pose、heading、velocity、curvature 等下一状态；　——【未实现】
+- 为坐标变换和 World Model 提供 ego motion condition。　——【未实现】
 
 Latent World Model：
 
-- 在给定当前 imagined context 和 ego motion 的情况下，预测周围环境下一帧 latent；
-- 不负责替代完整车辆动力学；
-- 不负责生成导航目标；
-- 不负责保证 Plan Head 轨迹可跟踪。
+- 在给定当前 imagined context 和 ego motion 的情况下，预测周围环境下一帧 latent；　——【未实现】
+- 不负责替代完整车辆动力学；　——【未实现】
+- 不负责生成导航目标；　——【未实现】
+- 不负责保证 Plan Head 轨迹可跟踪。　——【未实现】
 
 LQR：
 
-- 使用完整 3 s 插值轨迹进行预瞄跟踪；
-- 将参考轨迹转换为 MetaDrive 可执行控制。
+- 使用完整 3 s 插值轨迹进行预瞄跟踪；　——【已实现有偏差：LQR 只跟 0.5 s；3 s 未接】
+- 将参考轨迹转换为 MetaDrive 可执行控制。　——【已实现无偏差】
 
 ## 7.2 World Model 条件
 
-WM 不应只看到 0.5 s 终点。条件至少包括从轨迹段确定性派生的：
+WM 不应只看到 0.5 s 终点。条件至少包括从轨迹段确定性派生的：　——【未实现：无 WM；v_next 未入 condition】
 
 \[
 c_n=(\Delta x,\Delta y,v_n,v_{n+1},\Delta\psi,\kappa,a_{lon})
@@ -570,37 +596,39 @@ c_n=(\Delta x,\Delta y,v_n,v_{n+1},\Delta\psi,\kappa,a_{lon})
 a_{lon}=\frac{v_{n+1}-v_n}{0.5}
 \]
 
-这些量由 Plan Head 输出和当前 ego state 计算，不需要另开互相矛盾的动作头。
-每段至少 enforce：`v_next>=0`、`a_min <= (v_next-v_n)/0.5 <= a_max`、`|kappa|<=kappa_max`、`|v^2*kappa|<=a_lat_max`；低速 stop/hold 属于 Controller；记录 clip/reject/post-process 和控制饱和率。
+> **批复：已实现有偏差：标签/特征中计算，未用于 condition/enforce**
+
+这些量由 Plan Head 输出和当前 ego state 计算，不需要另开互相矛盾的动作头。　——【未实现】
+每段至少 enforce：`v_next>=0`、`a_min <= (v_next-v_n)/0.5 <= a_max`、`|kappa|<=kappa_max`、`|v^2*kappa|<=a_lat_max`；低速 stop/hold 属于 Controller；记录 clip/reject/post-process 和控制饱和率。　——【未实现：无 bounds enforce/clip 统计】
 
 ## 7.3 World Model 输出拆分
-分类合同：仅 dynamic OD/RoadState 进入 learned transition；Static OD/infrastructure/LD 做 geometry reprojection + shared Encoder re-encode；Nav 按 route progress 更新。交通灯 schema 保留，首版可默认关闭。
+分类合同：仅 dynamic OD/RoadState 进入 learned transition；Static OD/infrastructure/LD 做 geometry reprojection + shared Encoder re-encode；Nav 按 route progress 更新。交通灯 schema 保留，首版可默认关闭。　——【未实现】
 
 动态预测主体：
 
-- OD latent；
-- dynamic road-state latent，例如 traffic light；
-- 可选的 occupancy/risk latent；
-- uncertainty scalar/head。
+- OD latent；　——【未实现】
+- dynamic road-state latent，例如 traffic light；　——【未实现】
+- 可选的 occupancy/risk latent；　——【未实现】
+- uncertainty scalar/head。　——【未实现】
 
 显式推进或重新编码：
 
-- Ego latent：由 ego dynamics 推进后编码；
-- Static LD：依据 predicted ego pose 做坐标变换，可预测小 residual，但不应从零重建地图；
-- Road-level Nav：依据 route graph 和 predicted route progress 更新/重新编码，不做普通动力学幻想。
+- Ego latent：由 ego dynamics 推进后编码；　——【未实现】
+- Static LD：依据 predicted ego pose 做坐标变换，可预测小 residual，但不应从零重建地图；　——【未实现】
+- Road-level Nav：依据 route graph 和 predicted route progress 更新/重新编码，不做普通动力学幻想。　——【未实现】
 
 ## 7.4 确定性模型与不确定性
 
-第一版采用 deterministic World Model，不做多模态未来或 K 候选轨迹。
+第一版采用 deterministic World Model，不做多模态未来或 K 候选轨迹。　——【未实现】
 
 建议保留轻量 uncertainty head，用于：
 
-- 识别 out-of-distribution imagined state；
-- 统计 rollout depth 1 至 6 的误差增长；
-- 在 imagined RL 中衰减或截断高不确定性样本；
-- 防止 Policy 利用 WM 明显错误。
+- 识别 out-of-distribution imagined state；　——【未实现】
+- 统计 rollout depth 1 至 6 的误差增长；　——【未实现】
+- 在 imagined RL 中衰减或截断高不确定性样本；　——【未实现】
+- 防止 Policy 利用 WM 明显错误。　——【未实现】
 
-uncertainty head 不改变单轨迹主方案。
+uncertainty head 不改变单轨迹主方案。　——【未实现】
 
 ---
 
@@ -608,43 +636,43 @@ uncertainty head 不改变单轨迹主方案。
 
 ### 8.1 总参数约束
 
-部署推理主网络目标约 100 万参数，允许工程上约 0.8M 至 1.2M 的可解释浮动。EMA Target Encoder 属于 training-only teacher copy，必须单独统计，不计入 deployable parameter budget，但其显存和 optimizer/activation 开销仍需报告。必须在每次结构修改后记录：
+部署推理主网络目标约 100 万参数，允许工程上约 0.8M 至 1.2M 的可解释浮动。EMA Target Encoder 属于 training-only teacher copy，必须单独统计，不计入 deployable parameter budget，但其显存和 optimizer/activation 开销仍需报告。必须在每次结构修改后记录：　——【已实现有偏差：921,482 deployable；无 EMA target】
 
-- deployable total params 与 training-only target params；
-- trainable params；
-- peak allocated memory；
-- single-step latency；
-- six-step rollout latency。
+- deployable total params 与 training-only target params；　——【已实现有偏差：deployable total 有；target 无】
+- trainable params；　——【已实现有偏差：count_parameters 有】
+- peak allocated memory；　——【未实现】
+- single-step latency；　——【未实现】
+- six-step rollout latency。　——【未实现】
 
 ### 8.2 参考预算
 
-- OD Encoder：约 60k 至 100k；
-- LD/polyline Encoder：约 100k 至 150k；
-- Nav Encoder：约 20k 至 40k；
-- Ego Encoder：约 10k 至 30k；
-- Temporal Fusion：约 120k 至 200k；
-- Spatial/Cross Attention：约 150k 至 220k；
-- Plan Head：约 80k 至 120k；
-- Value/Risk Head：约 30k 至 70k；
-- Latent World Model：约 180k 至 260k。
+- OD Encoder：约 60k 至 100k；　——【已实现有偏差：34.5k < 60k】
+- LD/polyline Encoder：约 100k 至 150k；　——【已实现有偏差：17.5k < 100k】
+- Nav Encoder：约 20k 至 40k；　——【已实现无偏差：34.5k】
+- Ego Encoder：约 10k 至 30k；　——【已实现有偏差：34.2k > 30k】
+- Temporal Fusion：约 120k 至 200k；　——【已实现有偏差：268k > 200k】
+- Spatial/Cross Attention：约 150k 至 220k；　——【已实现有偏差：396k > 220k】
+- Plan Head：约 80k 至 120k；　——【已实现有偏差：132k > 120k】
+- Value/Risk Head：约 30k 至 70k；　——【已实现有偏差：258 << 30k】
+- Latent World Model：约 180k 至 260k。　——【未实现】
 
 推荐起点：
 
-- hidden dimension：96；必要时 128；
-- attention heads：4；
-- temporal layers：1 至 2；
-- spatial layers：1 至 2；
-- max OD tokens：16 至 32；
-- max LD/polyline tokens：24 至 48；
-- polyline 内先做 point MLP/PointNet pooling，再做实体间 attention。
+- hidden dimension：96；必要时 128；　——【已实现无偏差：128】
+- attention heads：4；　——【已实现无偏差】
+- temporal layers：1 至 2；　——【已实现无偏差：每模态 1 层】
+- spatial layers：1 至 2；　——【已实现无偏差：2】
+- max OD tokens：16 至 32；　——【已实现无偏差：16】
+- max LD/polyline tokens：24 至 48；　——【已实现有偏差：16 < 24】
+- polyline 内先做 point MLP/PointNet pooling，再做实体间 attention。　——【已实现无偏差：point MLP + mean pooling】
 
 ### 8.3 初始化
 
-- ReLU 类 MLP：Kaiming；
-- GELU/attention linear projection：Xavier；
-- LayerNorm：weight=1，bias=0；
-- 最终 trajectory residual/output head 可使用小方差初始化，但禁止整个分支双零初始化；
-- 每个模块必须提供初始化统计 probe，报告 weight mean/std 和输出分布。
+- ReLU 类 MLP：Kaiming；　——【已实现无偏差：全 GELU，无 ReLU 分支】
+- GELU/attention linear projection：Xavier；　——【已实现无偏差】
+- LayerNorm：weight=1，bias=0；　——【已实现无偏差】
+- 最终 trajectory residual/output head 可使用小方差初始化，但禁止整个分支双零初始化；　——【已实现无偏差：xavier gain 0.1；logstd bias -1】
+- 每个模块必须提供初始化统计 probe，报告 weight mean/std 和输出分布。　——【未实现：param_probe 只计数】
 
 ---
 
@@ -652,7 +680,7 @@ uncertainty head 不改变单轨迹主方案。
 
 ## 9.1 Plan Loss
 
-每个 rollout step 对 0.5 s motion 监督；六步后再对完整 3 s 轨迹做一致性监督。
+每个 rollout step 对 0.5 s motion 监督；六步后再对完整 3 s 轨迹做一致性监督。　——【已实现有偏差：0.5 s MSE；无 3 s 一致性】
 
 建议组成：
 
@@ -660,19 +688,21 @@ uncertainty head 不改变单轨迹主方案。
 L_{plan}=L_{point}+\lambda_vL_v+\lambda_hL_{heading}+\lambda_cL_{curvature}+\lambda_sL_{smooth}
 \]
 
+> **批复：未实现：无分项 loss**
+
 其中：
 
-- point loss：x/y 或 delta x/delta y；
-- velocity loss；
-- heading consistency；
-- curvature/radius feasibility；
-- acceleration、jerk、curvature-rate smoothness。
+- point loss：x/y 或 delta x/delta y；　——【已实现无偏差：dx/dy MSE】
+- velocity loss；　——【已实现有偏差：v_next 在 MSE 内；无独立指标】
+- heading consistency；　——【已实现有偏差：dpsi 在 MSE 内；无 consistency】
+- curvature/radius feasibility；　——【未实现】
+- acceleration、jerk、curvature-rate smoothness。　——【未实现】
 
-不允许只用单一 XY MSE 作为全部轨迹监督。
+不允许只用单一 XY MSE 作为全部轨迹监督。　——【已实现有偏差：4D 归一化 MSE，单一 loss】
 
 ## 9.2 World Model Loss
 
-真实下一帧 observation 经 Target Encoder 得到 latent GT：
+真实下一帧 observation 经 Target Encoder 得到 latent GT：　——【未实现】
 
 \[
 z_{t+1}^{GT}=E_{target}(o_{t+1})
@@ -691,14 +721,14 @@ L_{wm}=\lambda_{od}L_{od}+\lambda_{roadstate}L_{roadstate}+\lambda_{ego}L_{ego}+
 Static LD 和 Nav 不作为普通无条件预测主项。
 Static LD 使用 geometry reprojection + stop-gradient re-encode consistency；Nav 使用 route-progress + geometry/topology consistency。
 
-不能只报告 aggregate latent MSE。至少按：
+不能只报告 aggregate latent MSE。至少按：　——【未实现】
 
-- modality；
-- entity type；
-- rollout depth；
-- distance bin；
-- static/dynamic；
-- seen/unseen map；
+- modality；　——【未实现】
+- entity type；　——【未实现】
+- rollout depth；　——【未实现】
+- distance bin；　——【未实现】
+- static/dynamic；　——【未实现】
+- seen/unseen map；　——【未实现】
 
 拆分统计。
 
@@ -706,38 +736,38 @@ Static LD 使用 geometry reprojection + stop-gradient re-encode consistency；N
 
 Value Head 预测：
 
-- expected discounted return；
-- route completion probability；
-- time-to-goal 或 progress；
-- optional cost value。
+- expected discounted return；　——【已实现有偏差：粗 MC 目标存在；默认 coef=0】
+- route completion probability；　——【未实现】
+- time-to-goal 或 progress；　——【未实现】
+- optional cost value。　——【未实现】
 
 Risk Head 至少预测：
 
-- collision risk；
-- off-road risk；
-- wrong-way/wrong-road risk；
-- stuck risk；
-- comfort violation risk。
+- collision risk；　——【已实现有偏差：单标量 risk】
+- off-road risk；　——【已实现有偏差：与 collision 合并】
+- wrong-way/wrong-road risk；　——【未实现】
+- stuck risk；　——【未实现】
+- comfort violation risk。　——【未实现】
 
-建议 reward value 和 safety cost value 分开，避免成功奖励抵消安全成本。
+建议 reward value 和 safety cost value 分开，避免成功奖励抵消安全成本。　——【未实现】
 
 ## 9.4 Representation 防坍缩
 
 只做 latent regression 可能出现 Encoder 与 WM 共同缩小特征幅度。必须至少具备：
 
-- EMA Target Encoder；
-- stop-gradient target；
-- latent variance/statistics monitor；
-- 每模态 decoder 或 auxiliary task 中至少一种；
-- planner task loss 持续约束 latent 的任务相关性。
+- EMA Target Encoder；　——【未实现】
+- stop-gradient target；　——【未实现】
+- latent variance/statistics monitor；　——【未实现】
+- 每模态 decoder 或 auxiliary task 中至少一种；　——【未实现】
+- planner task loss 持续约束 latent 的任务相关性。　——【未实现】
 
 可选辅助任务：
 
-- OD type/relative state reconstruction；
-- LD topology classification；
-- route-progress prediction；
-- ego-motion prediction；
-- next-state contrastive discrimination。
+- OD type/relative state reconstruction；　——【未实现】
+- LD topology classification；　——【未实现】
+- route-progress prediction；　——【未实现】
+- ego-motion prediction；　——【未实现】
+- next-state contrastive discrimination。　——【未实现】
 
 ---
 
@@ -747,21 +777,21 @@ Risk Head 至少预测：
 
 应 detach：
 
-- Future GT latent；
-- EMA Target Encoder 输出；
-- Real Memory Bank 跨真实 env step 的写入；
-- Replay/DAgger/PPO Buffer 中保存的数据；
-- PPO old log-prob 和 old value；
-- 场景采集阶段的 observation/action；
-- 默认情况下，早期联合训练时 Plan action 进入 WM 前可 detach，防止 Plan Head 利用 WM 漏洞。
+- Future GT latent；　——【未实现】
+- EMA Target Encoder 输出；　——【未实现】
+- Real Memory Bank 跨真实 env step 的写入；　——【未实现】
+- Replay/DAgger/PPO Buffer 中保存的数据；　——【已实现有偏差：采集/PPO 张量 detach；无显式合同】
+- PPO old log-prob 和 old value；　——【已实现有偏差：已 detach；无合同测试】
+- 场景采集阶段的 observation/action；　——【已实现有偏差：np 数组天然无图；无验证】
+- 默认情况下，早期联合训练时 Plan action 进入 WM 前可 detach，防止 Plan Head 利用 WM 漏洞。　——【未实现】
 
 不应 detach：
 
-- 当前 batch 内 Encoder → Planner → Plan Loss；
-- 当前显式 WM unroll 内 WM recurrent path；
-- WM output → Value/Risk Head；
-- RL Policy Head → policy loss；
-- 允许联合调整时的 Encoder top layers/adapters。
+- 当前 batch 内 Encoder → Planner → Plan Loss；　——【已实现无偏差】
+- 当前显式 WM unroll 内 WM recurrent path；　——【未实现】
+- WM output → Value/Risk Head；　——【未实现】
+- RL Policy Head → policy loss；　——【已实现无偏差】
+- 允许联合调整时的 Encoder top layers/adapters。　——【未实现】
 
 ## 10.2 必须配置化的梯度开关
 
@@ -776,12 +806,16 @@ detach_encoder_from_wm_loss: true # D1/D2 固定 target、Stage E 才启用 EMA
 use_ema_target_encoder: true  # D1/D2 固定 target、Stage E 才启用 EMA
 ```
 
+> **批复：未实现** —— 无任何梯度开关配置；YAML 文件本身不被代码加载。
+
 训练后期只有在 WM 通过六步 fidelity 门槛后，才允许对照实验：
 
 ```yaml
 detach_plan_action_to_wm: false
 detach_encoder_from_wm_loss: false
 ```
+
+> **批复：未实现** —— 无 joint training/WM，开关无对应实现。
 
 开放后必须监控：
 
@@ -790,20 +824,24 @@ detach_encoder_from_wm_loss: false
 - action 分布是否越过训练数据范围；
 - latent norm 是否异常漂移。
 
+> **批复：未实现** —— 无相关监控。
+
 ## 10.3 EMA Target Encoder
 
-Target Encoder 不参与反向传播。采用：
+Target Encoder 不参与反向传播。采用：　——【未实现】
 D1/D2 冻结 Encoder 时 target 固定，EMA 为 no-op；D2 增加 latent variance/effective-rank gate；Stage E 解冻 adapter 后才启用 EMA，并监控 target-online drift。
 
 \[
 \theta_{target}\leftarrow m\theta_{target}+(1-m)\theta_{online}
 \]
 
+> **批复：未实现** —— 无 target encoder/EMA。
+
 建议起点：
 
-- 初期 \(m=0.99\)；
-- 稳定后可增加至 0.995 或 0.999；
-- 具体通过 target drift 与 WM 收敛速度决定，不能只看 loss 更低。
+- 初期 \(m=0.99\)；　——【未实现】
+- 稳定后可增加至 0.995 或 0.999；　——【未实现】
+- 具体通过 target drift 与 WM 收敛速度决定，不能只看 loss 更低。　——【未实现】
 
 ---
 
@@ -813,33 +851,33 @@ D1/D2 冻结 Encoder 时 target 固定，EMA 为 no-op；D2 增加 latent varian
 
 第一版唯一可用 Expert 为 IDM + Pure Pursuit 或可复现的等价组合。接受其不是所有场景的强专家，也不把“缺少更强专家”作为阻塞项：IL/DAgger 的目标是让 Student 接近并吸收可用示范，最终依靠真实环境 RL 和闭环筛选争取超过 Expert。但必须：
 
-- 记录 expert success、collision、off-road、wrong-route、stuck；
-- 失败 expert episode 不得无条件作为正样本；
-- 保存 expert 是否使用 lane-level 特权信息的审计结果；
-- 将 expert 轨迹统一转换为 Student 的轨迹表示。
+- 记录 expert success、collision、off-road、wrong-route、stuck；　——【已实现有偏差：仅末行；无 wrong-route/stuck】
+- 失败 expert episode 不得无条件作为正样本；　——【未实现：失败 episode 行仍为正样本（约 28-29%）】
+- 保存 expert 是否使用 lane-level 特权信息的审计结果；　——【未实现】
+- 将 expert 轨迹统一转换为 Student 的轨迹表示。　——【已实现有偏差：BC 真实执行；DAgger 为运动学 lift】
 
 ## 11.2 特权信息审计
 
 必须排查 MetaDrive Expert/IDM 路径：
 
-- 是否读取 target lane；
-- 是否读取 lane-level route；
-- 是否读取学生不可见的未来交通状态；
-- Pure Pursuit 参考点是否来自 lane-level centerline；
-- expert lane-change decision 的信息来源。
+- 是否读取 target lane；　——【未实现：未审计；代码事实=是】
+- 是否读取 lane-level route；　——【未实现：未审计；代码事实=是】
+- 是否读取学生不可见的未来交通状态；　——【未实现：未审计；代码事实=否】
+- Pure Pursuit 参考点是否来自 lane-level centerline；　——【未实现：未审计；代码事实=是】
+- expert lane-change decision 的信息来源。　——【未实现：未审计；事实=ref lanes/静态障碍】
 
 若 Expert 使用 lane-level oracle：
 
-- 允许其继续作为数据生成器，不要求先替换 Expert；
-- 禁止将该 oracle、target lane 或由其派生的推荐方向输入 Student；
-- 数据中标记 `privileged_expert_sample`，用于分桶评测和 loss weighting，不作为 Planner 语义输入；
-- 对分岔、路口、收费站和多条合法车道场景，禁止仅用单一轨迹 XY-MSE 强迫复制专家所选车道；应降低单轨迹 L2 权重，并辅以合法道路区域、路线进度、轨迹可行性和安全性监督；
-- 不要求 BC 在不可辨识的多解场景逐点复现 Expert，重点检查是否选择了合法、可达且安全的解；
-- 由 DAgger 补充 Student 访问状态下的恢复示范，由真实环境 RL 最终解除对专家车道选择和次优行为的绑定，并以冻结验证集闭环结果判断是否超越。
+- 允许其继续作为数据生成器，不要求先替换 Expert；　——【已实现无偏差】
+- 禁止将该 oracle、target lane 或由其派生的推荐方向输入 Student；　——【已实现有偏差：Nav 为 lane 端点派生】
+- 数据中标记 `privileged_expert_sample`，用于分桶评测和 loss weighting，不作为 Planner 语义输入；　——【未实现】
+- 对分岔、路口、收费站和多条合法车道场景，禁止仅用单一轨迹 XY-MSE 强迫复制专家所选车道；应降低单轨迹 L2 权重，并辅以合法道路区域、路线进度、轨迹可行性和安全性监督；　——【已实现有偏差：禁止项被违反，仍为单轨迹 MSE】
+- 不要求 BC 在不可辨识的多解场景逐点复现 Expert，重点检查是否选择了合法、可达且安全的解；　——【已实现有偏差：MSE 仍等价于要求逐点复现】
+- 由 DAgger 补充 Student 访问状态下的恢复示范，由真实环境 RL 最终解除对专家车道选择和次优行为的绑定，并以冻结验证集闭环结果判断是否超越。　——【已实现有偏差：DAgger/RL canary 有；无解绑证据】
 
 ## 11.3 DAgger
 
-每轮在 Student 访问到的状态上查询 Expert，并把恢复样本加入数据集。
+每轮在 Student 访问到的状态上查询 Expert，并把恢复样本加入数据集。　——【已实现有偏差：单轮采集，非迭代轮次】
 
 参考混合系数：
 
@@ -847,21 +885,23 @@ D1/D2 冻结 Encoder 时 target 固定，EMA 为 no-op；D2 增加 latent varian
 1.0 → 0.7 → 0.4 → 0.2 → 0.0
 ```
 
-但实际以闭环安全和数据覆盖决定。下降由 Student success、collision/off-road、Expert intervention、recovery、LQR shadow 和 failure-buffer 覆盖率触发，不按固定轮次机械下降。
+> **批复：未实现** —— 无逐轮混合系数；DAgger 为单轮采集（`dataset/collect_dagger.py`）。
+
+但实际以闭环安全和数据覆盖决定。下降由 Student success、collision/off-road、Expert intervention、recovery、LQR shadow 和 failure-buffer 覆盖率触发，不按固定轮次机械下降。　——【未实现：无混合系数/触发条件】
 
 重点采集：
 
-- 偏离车道后的恢复；
-- 错过换道窗口；
-- 锥桶邻近；
-- 慢车跟驰/绕行；
-- 路口犹豫；
-- 收费站入口选择；
-- 出路边缘状态；
-- 低速大曲率；
-- expert 与 student 决策分歧大但两者均未立即失败的状态。
+- 偏离车道后的恢复；　——【已实现有偏差：有 DAgger 数据；无 bucket 权重】
+- 错过换道窗口；　——【未实现】
+- 锥桶邻近；　——【未实现】
+- 慢车跟驰/绕行；　——【已实现有偏差：数据有；无 bucket】
+- 路口犹豫；　——【未实现】
+- 收费站入口选择；　——【未实现】
+- 出路边缘状态；　——【未实现】
+- 低速大曲率；　——【未实现：无最低配额】
+- expert 与 student 决策分歧大但两者均未立即失败的状态。　——【已实现有偏差：intervened 标记约 0.5-0.7%】
 
-必须使用 failure-prioritized buffer，不能只做均匀追加。
+必须使用 failure-prioritized buffer，不能只做均匀追加。　——【未实现：均匀拼接】
 
 ---
 
@@ -869,29 +909,29 @@ D1/D2 冻结 Encoder 时 target 固定，EMA 为 no-op；D2 增加 latent varian
 
 ## 12.1 训练顺序
 
-真实环境 RL 必须先于 imagined RL。MetaDrive 已提供真实 simulator，不应在 WM 尚未可靠时引入 model bias。
+真实环境 RL 必须先于 imagined RL。MetaDrive 已提供真实 simulator，不应在 WM 尚未可靠时引入 model bias。　——【已实现有偏差：无 imagined RL；但 PPO 早于 A2/B 门禁】
 
-第一版 RL 推荐 PPO，保持 Plan Head action semantics 不变。
+第一版 RL 推荐 PPO，保持 Plan Head action semantics 不变。　——【已实现有偏差：采样 4D；执行 3D】
 
 ## 12.2 Reward 与 Cost
 
 Reward 至少包含：
 
-- route progress；
-- success；
-- efficiency；
-- comfort；
-- lane/route compliance。
+- route progress；　——【已实现有偏差：10×Δroute_completion】
+- success；　——【已实现有偏差：+5】
+- efficiency；　——【未实现】
+- comfort；　——【已实现有偏差：仅速度变化惩罚】
+- lane/route compliance。　——【未实现】
 
 Cost 至少包含：
 
-- vehicle/object collision；
-- off-road；
-- wrong-way/wrong-road；
-- severe overspeed；
-- unsafe proximity；
-- stuck；
-- excessive lateral acceleration/jerk。
+- vehicle/object collision；　——【已实现有偏差：单一 crash -5】
+- off-road；　——【已实现有偏差：-5】
+- wrong-way/wrong-road；　——【未实现】
+- severe overspeed；　——【未实现】
+- unsafe proximity；　——【未实现】
+- stuck；　——【未实现】
+- excessive lateral acceleration/jerk。　——【未实现】
 
 参考初始量级仅作为调试起点：
 
@@ -909,20 +949,22 @@ steering/curvature rate     -0.02 * abs(delta)
 stuck                       -0.1 per step after grace period
 ```
 
-同时分开记录 reward 和 safety cost，不能依靠一个加权总分掩盖碰撞。
+> **批复：已实现有偏差** —— PPO reward 仅 progress/success/crash/off-road/速度变化，量级为 10/5/-5，无 cost 分项（`pipeline/train_ppo.py:55-56`）。
+
+同时分开记录 reward 和 safety cost，不能依靠一个加权总分掩盖碰撞。　——【未实现】
 
 ## 12.3 防 Reward Hacking
 
 必须排查：
 
-- 靠高速冲线抵消碰撞；
-- 原地左右摆动刷 progress；
-- 切角获得 route progress；
-- 停车规避风险但无法达成；
-- 借 off-road 缩短路线；
-- 沿错误道路获得局部前进奖励。
+- 靠高速冲线抵消碰撞；　——【未实现：无 hacking audit】
+- 原地左右摆动刷 progress；　——【未实现】
+- 切角获得 route progress；　——【未实现】
+- 停车规避风险但无法达成；　——【未实现】
+- 借 off-road 缩短路线；　——【未实现】
+- 沿错误道路获得局部前进奖励。　——【未实现】
 
-所有 progress 应基于合法 route arc-length，而不是 world displacement。
+所有 progress 应基于合法 route arc-length，而不是 world displacement。　——【已实现有偏差：用 route_completion 比例，未核 arc-length】
 
 ---
 
@@ -932,54 +974,54 @@ stuck                       -0.1 per step after grace period
 
 实施：
 
-- 固定结构化 observation schema；
-- 固定 train/validation/test 场景划分；
-- 建立 Expert 收集、回放和有效性过滤；
-- 完成坐标变换、reset、nav 泄漏、轨迹转换测试。
+- 固定结构化 observation schema；　——【已实现有偏差：固定 shape；缺 ID/taxonomy】
+- 固定 train/validation/test 场景划分；　——【未实现】
+- 建立 Expert 收集、回放和有效性过滤；　——【已实现有偏差：收集有；回放/过滤无】
+- 完成坐标变换、reset、nav 泄漏、轨迹转换测试。　——【已实现有偏差：坐标有；reset/nav leak 测试无】
 
 通过条件：
 
-- 所有 schema/unit tests 通过；
-- Expert 闭环指标可重复；
-- 验证集完全冻结；
-- 没有 train/validation map seed 或 episode 泄漏；
-- Expert 特权信息审计报告完成，并明确哪些样本属于 privileged/multi-solution 场景及其监督降权方式。
-- P0 动作数据按 lane keeping、curve、full stop、stop-to-go、slow following、obstacle braking、lane change、junction、fork/merge、toll-gate 分桶；低速、急减速、大曲率设最低配额，数值写 decision log。
+- 所有 schema/unit tests 通过；　——【已实现有偏差：7 个通过；2 个依赖 gitignore 的 specs】
+- Expert 闭环指标可重复；　——【已实现有偏差：20 scene 单次；确定性但未多 seed】
+- 验证集完全冻结；　——【未实现】
+- 没有 train/validation map seed 或 episode 泄漏；　——【未实现：episode 切分+seed 复用】
+- Expert 特权信息审计报告完成，并明确哪些样本属于 privileged/multi-solution 场景及其监督降权方式。　——【未实现】
+- P0 动作数据按 lane keeping、curve、full stop、stop-to-go、slow following、obstacle braking、lane change、junction、fork/merge、toll-gate 分桶；低速、急减速、大曲率设最低配额，数值写 decision log。　——【未实现：无分桶配额】
 
 ## Stage A1：单帧 BC + Exact Tracking
 
 网络：
 
-- Encoders；
-- Spatial Fusion；
-- Plan Head；
-- 可选 Value/Risk auxiliary heads；
-- 不使用 Memory Bank 和 WM。
+- Encoders；　——【已实现无偏差】
+- Spatial Fusion；　——【已实现无偏差】
+- Plan Head；　——【已实现无偏差】
+- 可选 Value/Risk auxiliary heads；　——【已实现无偏差：heads 存在】
+- 不使用 Memory Bank 和 WM。　——【已实现有偏差：无 Bank/WM；但已有 6 帧时序】
 
 目的：
 
-- 验证 action/trajectory 定义；
-- 验证 road-level nav 能被网络正确使用；
-- 验证 basic closed-loop；
-- 提前验证轨迹插值、坐标转换、车辆模型与 LQR 接口，避免到 Stage F 才首次暴露控制不可跟踪问题。
+- 验证 action/trajectory 定义；　——【已实现有偏差：v_next 未执行】
+- 验证 road-level nav 能被网络正确使用；　——【未实现：无选道评测；Nav 含 lane 信息】
+- 验证 basic closed-loop；　——【已实现有偏差：50 val 70%】
+- 提前验证轨迹插值、坐标转换、车辆模型与 LQR 接口，避免到 Stage F 才首次暴露控制不可跟踪问题。　——【已实现有偏差：0.5 s LQR canary；无 Expert-GT LQR】
 
 本阶段以 Exact Tracking 为 Planner 主评测，同时并行运行两类 LQR canary：
 
-1. **Expert GT 3 s trajectory + LQR**：验证插值、坐标系、速度边界、车辆模型和控制接口，只评价 Controller，不评价 Planner；
-2. **Plan Head 0.5 s segment + LQR**：将当前单段插值为 5 个 0.1 s reference points，只做接口、可跟踪性和控制饱和率 canary，不作为正式闭环成绩。
+1. **Expert GT 3 s trajectory + LQR**：验证插值、坐标系、速度边界、车辆模型和控制接口，只评价 Controller，不评价 Planner；　——【未实现】
+2. **Plan Head 0.5 s segment + LQR**：将当前单段插值为 5 个 0.1 s reference points，只做接口、可跟踪性和控制饱和率 canary，不作为正式闭环成绩。　——【已实现有偏差：有 canary；无 tracking/saturation 报告】
 
-无 WM 时不得声称 Plan Head 能因果生成完整 3 s LQR preview。
+无 WM 时不得声称 Plan Head 能因果生成完整 3 s LQR preview。　——【已实现无偏差：eval_lqr 只用 0.5 s；但 compose 6 步仍在】
 
 必须报告：
 
-- open-loop point/velocity errors；
-- exact-tracking closed-loop success；
-- collision/off-road/wrong-route/stuck；
-- heading、curvature、acceleration、jerk、curvature-rate 与动力学可行率；
-- 连续 0.5 s policy decision 段连接处的位姿/速度/航向/曲率跳变量；
-- Expert GT + LQR 的 tracking error、steering/brake/throttle saturation 与失败类型；
-- Plan Head 单段 + LQR 的 tracking error、可跟踪率、控制饱和率，以及 Exact 成功但 LQR canary 失败的比例；
-- 按场景类型拆分结果。
+- open-loop point/velocity errors；　——【未实现】
+- exact-tracking closed-loop success；　——【已实现无偏差】
+- collision/off-road/wrong-route/stuck；　——【已实现有偏差：无 wrong-route/stuck】
+- heading、curvature、acceleration、jerk、curvature-rate 与动力学可行率；　——【未实现】
+- 连续 0.5 s policy decision 段连接处的位姿/速度/航向/曲率跳变量；　——【未实现】
+- Expert GT + LQR 的 tracking error、steering/brake/throttle saturation 与失败类型；　——【未实现】
+- Plan Head 单段 + LQR 的 tracking error、可跟踪率、控制饱和率，以及 Exact 成功但 LQR canary 失败的比例；　——【已实现有偏差：仅 success；无 tracking/饱和/比例】
+- 按场景类型拆分结果。　——【已实现有偏差：仅 straight/curve 几何桶】
 
 若 Exact Tracking 闭环成功但轨迹可行率、连续帧平顺性或 LQR canary 不达标，应先修正 Plan Head/Plan Loss、插值或 Controller，不得等到 Stage F 才处理。Stage F 是 LQR 首次进入完整 3 s 正式执行链路，不是第一次测试 LQR。
 
@@ -987,10 +1029,10 @@ stuck                       -0.1 per step after grace period
 
 网络增加：
 
-- 6-frame Real Memory Bank；
-- ego-motion compensation；
-- stable-ID alignment；
-- entity temporal fusion。
+- 6-frame Real Memory Bank；　——【未实现】
+- ego-motion compensation；　——【已实现有偏差：几何补偿有；无 Bank】
+- stable-ID alignment；　——【未实现】
+- entity temporal fusion。　——【已实现有偏差：per-slot 时序，非 entity】
 
 必须做同 seed ablation：
 
@@ -1001,74 +1043,76 @@ single frame
 6 frames
 ```
 
-每个候选 checkpoint 除 Exact Tracking 外，还必须运行固定 seeds 的 **Plan Head 0.5 s segment + LQR canary**，比较：
+> **批复：未实现** —— 无 1/2/4/6 帧 ablation；当前 6 帧时序为固定配置。
 
-- Memory-on/off tracking error 与可跟踪率；
-- steering/brake/throttle saturation；
-- 曲率、速度和航向在连续决策段连接处的跳变量；
-- Exact 指标提升但 LQR canary 退化的比例。
+每个候选 checkpoint 除 Exact Tracking 外，还必须运行固定 seeds 的 **Plan Head 0.5 s segment + LQR canary**，比较：　——【已实现有偏差：部分 LQR canary；无固定 seeds/逐 ckpt】
 
-若历史模型没有稳定超过单帧，或 Exact 提升但 LQR 可跟踪性显著退化，禁止进入 WM 阶段，优先查：
+- Memory-on/off tracking error 与可跟踪率；　——【未实现】
+- steering/brake/throttle saturation；　——【未实现】
+- 曲率、速度和航向在连续决策段连接处的跳变量；　——【未实现】
+- Exact 指标提升但 LQR canary 退化的比例。　——【未实现】
 
-- frame timestamp；
-- reset；
-- ID churn；
-- coordinate transform；
-- birth/death mask；
-- LD segment alignment；
-- attention mask。
+若历史模型没有稳定超过单帧，或 Exact 提升但 LQR 可跟踪性显著退化，禁止进入 WM 阶段，优先查：　——【未实现：无门禁，PPO 已跑】
+
+- frame timestamp；　——【未实现】
+- reset；　——【未实现】
+- ID churn；　——【未实现】
+- coordinate transform；　——【未实现】
+- birth/death mask；　——【未实现】
+- LD segment alignment；　——【未实现】
+- attention mask。　——【未实现】
 
 ## Stage B：DAgger + Exact Tracking
 
-- 以 A2 最佳 checkpoint 初始化；
-- 逐轮降低 Expert 混合比例；
-- failure-prioritized aggregation；
-- 每轮固定验证集闭环评测；
-- 保持 Expert 原始数据与 DAgger recovery 数据的来源标签；
-- DAgger 主数据采集仍使用 Exact Tracking，以隔离 Controller 误差；
-- 每轮 checkpoint 必须在固定 seeds 上运行 Plan Head 单段 LQR shadow evaluation，不参与采集但作为推进门槛。
+- 以 A2 最佳 checkpoint 初始化；　——【未实现：A2 不存在】
+- 逐轮降低 Expert 混合比例；　——【未实现】
+- failure-prioritized aggregation；　——【未实现】
+- 每轮固定验证集闭环评测；　——【未实现】
+- 保持 Expert 原始数据与 DAgger recovery 数据的来源标签；　——【已实现有偏差：仅 intervened 标记】
+- DAgger 主数据采集仍使用 Exact Tracking，以隔离 Controller 误差；　——【已实现无偏差】
+- 每轮 checkpoint 必须在固定 seeds 上运行 Plan Head 单段 LQR shadow evaluation，不参与采集但作为推进门槛。　——【未实现】
 
 进入下一阶段的最低要求：
 
-- Student exact-tracking success 接近 Expert；
-- collision/off-road 明显下降并稳定；
-- 复杂场景不因普通道路提升而退化；
-- 冻结验证集连续多个 seed 改善，而非单次偶然值；
-- LQR shadow 的 tracking error、可跟踪率和控制饱和率不得相对 A2 最佳 checkpoint 显著退化；若 Exact 提升但 LQR 持续恶化，不得进入 Stage C。
+- Student exact-tracking success 接近 Expert；　——【未实现：70% vs 80%，样本量不足】
+- collision/off-road 明显下降并稳定；　——【未实现】
+- 复杂场景不因普通道路提升而退化；　——【未实现】
+- 冻结验证集连续多个 seed 改善，而非单次偶然值；　——【未实现】
+- LQR shadow 的 tracking error、可跟踪率和控制饱和率不得相对 A2 最佳 checkpoint 显著退化；若 Exact 提升但 LQR 持续恶化，不得进入 Stage C。　——【未实现】
 
 ## Stage C：短 Real-ENV PPO Canary，无 WM
-- 从最佳 DAgger checkpoint 初始化；
-- 保持同一 `(dx,dy,dpsi,v_next)` 概率动作；
-- 每 0.5 s 采样并执行一个 `a0`，段内运行 5 个 0.1 s 控制步；
-- PPO 的 value/GAE/return 均来自真实 MetaDrive transition；
-- PPO transition 基线继续使用 Exact Tracking，以减少 WM 与 Controller 变量干扰；
-- 只进行足以验证 PPO、GAE、reward/cost、buffer、checkpoint 和遗忘控制的短 canary；
-- 保留 BC/DAgger auxiliary loss 或 replay regularization；
-- 每个主要 checkpoint 必须在同一组固定 seeds 上运行 Plan Head 单段 LQR shadow evaluation；
-- 不以本阶段是否超过 Expert 作为推进 WM 的硬条件。
+- 从最佳 DAgger checkpoint 初始化；　——【已实现有偏差：p1_weight 混合 DAgger】
+- 保持同一 `(dx,dy,dpsi,v_next)` 概率动作；　——【已实现有偏差：采样 4D，执行 3D】
+- 每 0.5 s 采样并执行一个 `a0`，段内运行 5 个 0.1 s 控制步；　——【已实现无偏差】
+- PPO 的 value/GAE/return 均来自真实 MetaDrive transition；　——【已实现有偏差：GAE 跨 episode 边界错误】
+- PPO transition 基线继续使用 Exact Tracking，以减少 WM 与 Controller 变量干扰；　——【已实现无偏差】
+- 只进行足以验证 PPO、GAE、reward/cost、buffer、checkpoint 和遗忘控制的短 canary；　——【已实现无偏差：2 updates】
+- 保留 BC/DAgger auxiliary loss 或 replay regularization；　——【未实现】
+- 每个主要 checkpoint 必须在同一组固定 seeds 上运行 Plan Head 单段 LQR shadow evaluation；　——【未实现】
+- 不以本阶段是否超过 Expert 作为推进 WM 的硬条件。　——【已实现无偏差】
 
-通过条件：训练无 NaN、log-prob 与 executed action 合同正确、reward/cost 无明显 hacking、冻结验证集安全指标不灾难性退化；同时 LQR shadow 的可跟踪率、控制饱和率和舒适性不得显著恶化。禁止依靠 Exact 的瞬时执行能力获得不可由 LQR 实现的虚假 reward。
+通过条件：训练无 NaN、log-prob 与 executed action 合同正确、reward/cost 无明显 hacking、冻结验证集安全指标不灾难性退化；同时 LQR shadow 的可跟踪率、控制饱和率和舒适性不得显著恶化。禁止依靠 Exact 的瞬时执行能力获得不可由 LQR 实现的虚假 reward。　——【未实现：log-prob 合同错；无 LQR shadow】
 
 ## Stage D1：单步 World Model
 
-输入：真实历史 + Expert/Student/PPO canary 实际执行 ego motion。WM target 是真实下一帧 observation 经 EMA Target Encoder 得到的 per-entity latent token，不是融合后的 scene context，也不是 WM 自身输出。
+输入：真实历史 + Expert/Student/PPO canary 实际执行 ego motion。WM target 是真实下一帧 observation 经 EMA Target Encoder 得到的 per-entity latent token，不是融合后的 scene context，也不是 WM 自身输出。　——【未实现】
 
-数据覆盖：必须混合 Expert、DAgger Student、恢复扰动和真实 PPO policy 的已执行 motion；按 `(dx, dy, delta_yaw, acceleration, curvature)` 做覆盖率与 OOD 报告。只用 Expert action 达标不算 WM 可用于 Policy rollout。
+数据覆盖：必须混合 Expert、DAgger Student、恢复扰动和真实 PPO policy 的已执行 motion；按 `(dx, dy, delta_yaw, acceleration, curvature)` 做覆盖率与 OOD 报告。只用 Expert action 达标不算 WM 可用于 Policy rollout。　——【未实现】
 
 训练策略：
 
-- 冻结或基本冻结已验证好的 Planner/Encoder；
-- Encoder 冻结时 Target Encoder 固定，记录 target drift=0；
-- 先训练 one-step latent prediction；
-- 对动态 OD、ego、road-state 分模态监督。
+- 冻结或基本冻结已验证好的 Planner/Encoder；　——【未实现】
+- Encoder 冻结时 Target Encoder 固定，记录 target drift=0；　——【未实现】
+- 先训练 one-step latent prediction；　——【未实现】
+- 对动态 OD、ego、road-state 分模态监督。　——【未实现】
 
 必须建立基线：
 
-- persistence predictor；
-- constant-velocity predictor；
-- optional simple MLP transition。
+- persistence predictor；　——【未实现】
+- constant-velocity predictor；　——【未实现】
+- optional simple MLP transition。　——【未实现】
 
-WM 必须明显超过简单基线，才能进入多步阶段。
+WM 必须明显超过简单基线，才能进入多步阶段。　——【未实现】
 
 ## Stage D2：多步 World Model
 
@@ -1078,39 +1122,41 @@ WM 必须明显超过简单基线，才能进入多步阶段。
 1-step → 2-step → 3-step → 6-step
 ```
 
+> **批复：未实现** —— 无 WM 课程。
+
 区分三种实验：
 
-1. GT state + GT action teacher forcing；
-2. predicted state + GT action；
-3. predicted state + Plan Head action。
+1. GT state + GT action teacher forcing；　——【未实现】
+2. predicted state + GT action；　——【未实现】
+3. predicted state + Plan Head action。　——【未实现】
 
 这样可以分别定位：
 
-- WM transition error；
-- state autoregression error；
-- policy-WM coupling error。
+- WM transition error；　——【未实现】
+- state autoregression error；　——【未实现】
+- policy-WM coupling error。　——【未实现】
 
-必须按 rollout depth 画误差曲线，并监控 latent norm/std/effective rank；失真或 rank gate 不通过不得进入 imagined RL。
+必须按 rollout depth 画误差曲线，并监控 latent norm/std/effective rank；失真或 rank gate 不通过不得进入 imagined RL。　——【未实现】
 
-当 WM 已能生成 1/2/3/6 步 preview 时，同步进行递增时域 LQR shadow evaluation：先验证 0.5 s，再验证 1.0/1.5/3.0 s。该评测只诊断轨迹拼接、插值和 Controller 可实现性，不参与 WM latent loss。
+当 WM 已能生成 1/2/3/6 步 preview 时，同步进行递增时域 LQR shadow evaluation：先验证 0.5 s，再验证 1.0/1.5/3.0 s。该评测只诊断轨迹拼接、插值和 Controller 可实现性，不参与 WM latent loss。　——【未实现】
 
 ## Stage E：Planner + WM 联合磨合
 
 初期：
 
-- 冻结 Encoder 主体；
-- 训练 WM、Plan Head、Value/Risk Head；
-- Plan action 进入 WM 前 detach；
-- Target Encoder 始终 stop-gradient；
-- 此阶段允许 `WM output → Plan/Value` 的梯度更新下游 Head，但默认不允许 PPO/Plan loss 反向改写 WM；只有 real-env 闭环 A/B 证明收益后，才逐层开放 adapter。
+- 冻结 Encoder 主体；　——【未实现】
+- 训练 WM、Plan Head、Value/Risk Head；　——【未实现】
+- Plan action 进入 WM 前 detach；　——【未实现】
+- Target Encoder 始终 stop-gradient；　——【未实现】
+- 此阶段允许 `WM output → Plan/Value` 的梯度更新下游 Head，但默认不允许 PPO/Plan loss 反向改写 WM；只有 real-env 闭环 A/B 证明收益后，才逐层开放 adapter。　——【未实现】
 
 后期可选：
 
-- 只解冻 Encoder 顶层 adapter；此时才启用 EMA 更新并监控 drift；
-- 降低 WM loss 权重；
-- 通过 A/B 决定是否开放 action-to-WM 梯度。
+- 只解冻 Encoder 顶层 adapter；此时才启用 EMA 更新并监控 drift；　——【未实现】
+- 降低 WM loss 权重；　——【未实现】
+- 通过 A/B 决定是否开放 action-to-WM 梯度。　——【未实现】
 
-本阶段必须把 Plan Head + WM 生成的完整 3 s preview 接入 LQR shadow evaluation，并与 Exact/kinematic rollout 同 seed 对照。只有 3 s 轨迹拼接、插值、tracking error、控制饱和率和安全指标达到门槛，才进入 Stage F 的正式 Controller-realized 执行。
+本阶段必须把 Plan Head + WM 生成的完整 3 s preview 接入 LQR shadow evaluation，并与 Exact/kinematic rollout 同 seed 对照。只有 3 s 轨迹拼接、插值、tracking error、控制饱和率和安全指标达到门槛，才进入 Stage F 的正式 Controller-realized 执行。　——【未实现】
 
 联合损失参考：
 
@@ -1118,112 +1164,114 @@ WM 必须明显超过简单基线，才能进入多步阶段。
 L=L_{plan}+\lambda_{wm}L_{wm}+\lambda_vL_{value}+\lambda_rL_{risk}+\lambda_{aux}L_{aux}
 \]
 
-\(\lambda_{wm}\) 初始可从 0.05 至 0.2 搜索，不得让 latent loss 主导 Planner 闭环目标。
+> **批复：未实现** —— 无联合损失。
+
+\(\lambda_{wm}\) 初始可从 0.05 至 0.2 搜索，不得让 latent loss 主导 Planner 闭环目标。　——【未实现】
 
 ## Stage F：完整 3 s Plan+WM+LQR 正式闭环 + Real-ENV PPO
 
 Stage F 不是第一次测试 LQR，而是 LQR 首次成为完整 3 s Plan+WM 轨迹的**正式执行器和最终成绩口径**。
 
-- 6 个 0.5 s 点插值至 0.1 s；
-- 使用完整 3 s 预瞄参考；
-- 评估 tracking error、curvature、steering、acceleration、jerk；
-- 与 exact tracking 结果并列报告；
-- 在 Plan+WM+LQR 推理链稳定后，从最佳联合 checkpoint 进行正式 Real-ENV PPO + LQR；
-- 正式 PPO 才承担在安全门槛内超过 IDM + Pure Pursuit 的目标，value/GAE/return 仍全部来自真实 MetaDrive transition。
+- 6 个 0.5 s 点插值至 0.1 s；　——【未实现】
+- 使用完整 3 s 预瞄参考；　——【未实现】
+- 评估 tracking error、curvature、steering、acceleration、jerk；　——【未实现】
+- 与 exact tracking 结果并列报告；　——【未实现】
+- 在 Plan+WM+LQR 推理链稳定后，从最佳联合 checkpoint 进行正式 Real-ENV PPO + LQR；　——【未实现】
+- 正式 PPO 才承担在安全门槛内超过 IDM + Pure Pursuit 的目标，value/GAE/return 仍全部来自真实 MetaDrive transition。　——【未实现】
 
 必须区分：
-- planner-oracle closed loop；
-- controller-realized closed loop。
+- planner-oracle closed loop；　——【未实现】
+- controller-realized closed loop。　——【未实现】
 
-如果 exact tracking 好而 LQR 差，优先查轨迹可行性和控制器，不要把问题直接归因于 Planner。
+如果 exact tracking 好而 LQR 差，优先查轨迹可行性和控制器，不要把问题直接归因于 Planner。　——【已实现有偏差：本次 review 已按此诊断，代码无自动归因】
 
 ## Stage G：Imagined RL / WM Distillation，可选最后阶段
 
 只有满足以下条件才开放：
 
-- 6-step WM fidelity 达标；
-- imagined risk 与 real-env failure 有稳定相关性；
-- imagined action distribution 未明显 OOD；
-- real-env reward 没有因 joint training 下降。
+- 6-step WM fidelity 达标；　——【未实现】
+- imagined risk 与 real-env failure 有稳定相关性；　——【未实现】
+- imagined action distribution 未明显 OOD；　——【未实现】
+- real-env reward 没有因 joint training 下降。　——【未实现】
 
 策略：
 
-- imagined loss 按 rollout depth 衰减；
-- high uncertainty 时截断；
-- REAL 和 IMAGINED 数据严格标记；
-- 最终模型始终用 real-env closed-loop 决策，不以 imagined score 单独选 checkpoint。
+- imagined loss 按 rollout depth 衰减；　——【未实现】
+- high uncertainty 时截断；　——【未实现】
+- REAL 和 IMAGINED 数据严格标记；　——【未实现】
+- 最终模型始终用 real-env closed-loop 决策，不以 imagined score 单独选 checkpoint。　——【未实现】
 
 ---
 
 ## 14. 评测协议
 
 ## 14.1 数据划分
-- Train：10,000；其中 `Calib50` 属于训练域，只作快速调试；
-- Validation：500，用于 checkpoint、阈值和消融，永久冻结；
-- Test：500，仅用于里程碑和最终结论，不调参、不删失败样本；
-- P0/P1 可先用 2,000 train / 200 evaluation-scale scenes 做工程 smoke，不替代最终规模；
-- 按 scenario/map seed 划分，禁止 train/val/test 泄漏。
+- Train：10,000；其中 `Calib50` 属于训练域，只作快速调试；　——【未实现：当前 2k 切片】
+- Validation：500，用于 checkpoint、阈值和消融，永久冻结；　——【未实现：当前 10-50】
+- Test：500，仅用于里程碑和最终结论，不调参、不删失败样本；　——【未实现】
+- P0/P1 可先用 2,000 train / 200 evaluation-scale scenes 做工程 smoke，不替代最终规模；　——【已实现有偏差：2k train 有；eval 10-50】
+- 按 scenario/map seed 划分，禁止 train/val/test 泄漏。　——【未实现：按 episode 切分+seed 复用】
 
 ## 14.2 核心闭环指标
 
 主指标：
 
-- route success rate；
-- route completion；
-- collision rate；
-- off-road rate；
-- wrong-route/wrong-way rate；
-- stuck rate；
-- timeout；
-- comfort violations；
-- mean time/distance to failure。
+- route success rate；　——【已实现无偏差】
+- route completion；　——【已实现无偏差】
+- collision rate；　——【已实现无偏差】
+- off-road rate；　——【已实现无偏差】
+- wrong-route/wrong-way rate；　——【未实现】
+- stuck rate；　——【未实现】
+- timeout；　——【已实现有偏差：termination 字符串，无独立率】
+- comfort violations；　——【未实现】
+- mean time/distance to failure。　——【未实现】
 
 控制指标：
 
-- lateral tracking error；
-- heading error；
-- speed tracking error；
-- peak/mean curvature；
-- steering rate；
-- longitudinal/lateral acceleration；
-- jerk。
+- lateral tracking error；　——【未实现】
+- heading error；　——【未实现】
+- speed tracking error；　——【未实现】
+- peak/mean curvature；　——【未实现】
+- steering rate；　——【未实现】
+- longitudinal/lateral acceleration；　——【未实现】
+- jerk。　——【未实现】
 
 WM 指标：
 
-- one-step and 1..6-step latent error；
-- entity decode error；
-- rollout uncertainty calibration；
-- static LD invariance after ego compensation；
-- dynamic OD prediction by distance/type；
-- imagined-vs-real risk correlation。
+- one-step and 1..6-step latent error；　——【未实现】
+- entity decode error；　——【未实现】
+- rollout uncertainty calibration；　——【未实现】
+- static LD invariance after ego compensation；　——【未实现】
+- dynamic OD prediction by distance/type；　——【未实现】
+- imagined-vs-real risk correlation。　——【未实现】
 
 ## 14.3 场景分桶
 
 至少分为：
 
-- straight lane keeping；
-- following and braking；
-- obstacle/cone avoidance；
-- lane choice before fork；
-- merge；
-- ramp；
-- intersection；
-- toll station；
-- low-speed sharp turn；
-- dense traffic；
-- recovery from disturbed state。
+- straight lane keeping；　——【已实现有偏差：straight 桶有】
+- following and braking；　——【已实现有偏差：仅安全权重，无 bucket 指标】
+- obstacle/cone avoidance；　——【未实现】
+- lane choice before fork；　——【未实现】
+- merge；　——【未实现】
+- ramp；　——【未实现】
+- intersection；　——【未实现】
+- toll station；　——【未实现】
+- low-speed sharp turn；　——【未实现】
+- dense traffic；　——【未实现】
+- recovery from disturbed state。　——【未实现】
 
-总体指标不能掩盖关键场景退化。
+总体指标不能掩盖关键场景退化。　——【未实现：无分桶表】
 
 ## 14.4 Checkpoint 选择
 
-不能只按 training loss 或 open-loop ADE 选择。建议使用带安全门槛的闭环优先级：
+不能只按 training loss 或 open-loop ADE 选择。建议使用带安全门槛的闭环优先级：　——【未实现：BC 按 val MSE 选 ckpt】
 
-1. collision/off-road 不超过硬门槛；
-2. route success 最大；
-3. route completion 最大；
-4. comfort 和效率作为次级排序；
-5. open-loop loss 仅作为诊断。
+1. collision/off-road 不超过硬门槛；　——【未实现】
+2. route success 最大；　——【未实现】
+3. route completion 最大；　——【未实现】
+4. comfort 和效率作为次级排序；　——【未实现】
+5. open-loop loss 仅作为诊断。　——【未实现】
 
 ---
 
@@ -1233,92 +1281,92 @@ WM 指标：
 
 必须记录/可视化：
 
-- 每帧 ego pose；
-- compensation 前后 OD/LD；
-- 同 ID 轨迹；
-- lane/polyline anchor；
-- route graph 与 student-visible nav；
-- Expert-visible privileged info；
-- frame timestamp 和 scene reset。
+- 每帧 ego pose；　——【已实现有偏差：obs 内有 pose；未落盘/可视化】
+- compensation 前后 OD/LD；　——【未实现】
+- 同 ID 轨迹；　——【未实现】
+- lane/polyline anchor；　——【未实现】
+- route graph 与 student-visible nav；　——【未实现】
+- Expert-visible privileged info；　——【未实现】
+- frame timestamp 和 scene reset。　——【未实现】
 
 关键断言：
 
-- 场景切换后 bank 全空；
-- 静态 LD 经 compensation 后跨帧基本一致；
-- 同 ID 物体不会跳槽；
-- 不同 ID 不会误作同一实体；
-- 六个 rollout 点位于同一 t0 坐标系。
+- 场景切换后 bank 全空；　——【未实现：Bank 机制不存在，禁止项暂无适用对象】
+- 静态 LD 经 compensation 后跨帧基本一致；　——【未实现】
+- 同 ID 物体不会跳槽；　——【未实现】
+- 不同 ID 不会误作同一实体；　——【未实现】
+- 六个 rollout 点位于同一 t0 坐标系。　——【未实现】
 
 ## 15.2 Latent probes
 
 每模态记录：
 
-- mean/std/min/max/norm；
-- temporal cosine similarity；
-- same-ID delta 与 different-ID delta 分布；
-- padding token 激活；
-- static LD delta；
-- ego information leakage 到 OD/LD latent 的线性 probe；
-- gradient norm；
-- attention entropy；
-- top attended entities。
+- mean/std/min/max/norm；　——【未实现】
+- temporal cosine similarity；　——【未实现】
+- same-ID delta 与 different-ID delta 分布；　——【未实现】
+- padding token 激活；　——【未实现】
+- static LD delta；　——【未实现】
+- ego information leakage 到 OD/LD latent 的线性 probe；　——【未实现】
+- gradient norm；　——【未实现】
+- attention entropy；　——【未实现】
+- top attended entities。　——【未实现】
 
 重点判断：
 
-- latent collapse；
-- OD/LD latent 仅复制 ego motion；
-- Planner 忽视 Nav；
-- Planner 只看最近障碍物而不看长程路线；
-- World Model 无视 ego condition；
-- Token mask 泄漏。
+- latent collapse；　——【未实现】
+- OD/LD latent 仅复制 ego motion；　——【未实现】
+- Planner 忽视 Nav；　——【未实现】
+- Planner 只看最近障碍物而不看长程路线；　——【未实现】
+- World Model 无视 ego condition；　——【未实现】
+- Token mask 泄漏。　——【未实现】
 
 ## 15.3 Causality probes
 
 对同一个 Memory Bank：
 
-- 固定环境，替换不同 ego action，WM 输出应显著不同；
-- 固定 ego action，扰动关键 OD，Planner action 应合理变化；
-- shuffle ego condition 后，WM loss 应恶化；
-- 将 ego condition 置零，WM 不应仍得到近乎相同性能；
-- 替换 road-level Nav 后，选道应变化，但近距离碰撞响应不应失效。
+- 固定环境，替换不同 ego action，WM 输出应显著不同；　——【未实现】
+- 固定 ego action，扰动关键 OD，Planner action 应合理变化；　——【未实现】
+- shuffle ego condition 后，WM loss 应恶化；　——【未实现】
+- 将 ego condition 置零，WM 不应仍得到近乎相同性能；　——【未实现】
+- 替换 road-level Nav 后，选道应变化，但近距离碰撞响应不应失效。　——【未实现】
 
 ## 15.4 World Model probes
 
 必须实现：
 
-- one-step teacher-forced decode visualization；
-- six-step autoregressive visualization；
-- per-depth error；
-- GT action vs Plan action rollout 对照；
-- real-vs-imagined entity count、position、velocity 对照；
-- uncertainty-error reliability curve；
-- simple baseline comparison。
+- one-step teacher-forced decode visualization；　——【未实现】
+- six-step autoregressive visualization；　——【未实现】
+- per-depth error；　——【未实现】
+- GT action vs Plan action rollout 对照；　——【未实现】
+- real-vs-imagined entity count、position、velocity 对照；　——【未实现】
+- uncertainty-error reliability curve；　——【未实现】
+- simple baseline comparison。　——【未实现】
 
 ## 15.5 Planner probes
 
 必须实现：
 
-- 输出六步轨迹叠加到场景；
-- 每一步局部坐标和 t0 累计坐标同时显示；
-- route topology 和 chosen lane 可视化；
-- 轨迹 feasibility report；
-- exact tracking 和 LQR tracking 对照；
-- action distribution by scenario；
-- Expert/Student disagreement case replay。
+- 输出六步轨迹叠加到场景；　——【未实现】
+- 每一步局部坐标和 t0 累计坐标同时显示；　——【未实现】
+- route topology 和 chosen lane 可视化；　——【未实现】
+- 轨迹 feasibility report；　——【未实现】
+- exact tracking 和 LQR tracking 对照；　——【未实现】
+- action distribution by scenario；　——【未实现】
+- Expert/Student disagreement case replay。　——【未实现】
 
 ## 15.6 梯度 probes
 
 每个训练阶段报告：
 
-- 模块级 gradient norm；
-- 哪些模块 requires_grad；
-- 哪些 tensor detached；
-- EMA update 正常性；
-- recurrent rollout graph depth；
-- 是否出现跨 episode graph 泄漏；
-- plan loss、WM loss、value loss 对 Encoder 梯度贡献比例。
+- 模块级 gradient norm；　——【未实现】
+- 哪些模块 requires_grad；　——【未实现】
+- 哪些 tensor detached；　——【未实现】
+- EMA update 正常性；　——【未实现】
+- recurrent rollout graph depth；　——【未实现】
+- 是否出现跨 episode graph 泄漏；　——【未实现】
+- plan loss、WM loss、value loss 对 Encoder 梯度贡献比例。　——【未实现】
 
-提供自动化 `test_detach_contract.py`，不能只靠代码阅读。
+提供自动化 `test_detach_contract.py`，不能只靠代码阅读。　——【未实现】
 
 ---
 
@@ -1351,7 +1399,9 @@ WM 指标：
 - `OOD_SCENARIO`
 - `UNKNOWN`
 
-`UNKNOWN` 比例必须持续下降。每个关键失败要能用 scene seed 一键复现。
+> **批复：未实现** —— 无 failure taxonomy 代码/统计；本次 review 已实际命中 `DATA_SCHEMA_ERROR`、`ID_ALIGNMENT_ERROR`、`NAV_LEAK_OR_INSUFFICIENT_NAV`、`EXPERT_PRIVILEGE_MISMATCH`、`PLAN_INTERFACE_SHIFT`、`ACTION_V_NEXT_INCONSISTENT`、`TRAJECTORY_INFEASIBLE`、`LQR_TRACKING_ERROR` 等症状，但未被系统记录。
+
+`UNKNOWN` 比例必须持续下降。每个关键失败要能用 scene seed 一键复现。　——【未实现：无 taxonomy/统计】
 
 ---
 
@@ -1517,35 +1567,55 @@ docs/
   decision_log.md
 ```
 
+> **批复：已实现有偏差** —— 目录树逐项对照（实际仓库仅 47 个 tracked 文件）：
+>
+> | 合同目录 | 实际 | 判定 |
+> |---|---|---|
+> | `env/metadrive_env.py` | 存在（770 行） | 已实现有偏差 |
+> | `env/observation_adapter.py` | 无；功能在 `env/obs.py`（400 行） | 已实现有偏差 |
+> | `env/scenario_manager.py` | 无；改为 `env/scenario/`（7 文件） | 已实现有偏差 |
+> | `env/expert_policy.py` | 无；改为 `env/expert/pure_pursuit_idm.py`（884 行） | 已实现有偏差 |
+> | `env/exact_tracker.py` | 无；在 `env/tracking.py`（700 行） | 已实现有偏差 |
+> | `env/controller/lqr.py` | 无；LQR 同在 `env/tracking.py` | 已实现有偏差 |
+> | `dataset/schema.py`、`id_alignment.py`、`coordinate_transform.py`、`sequence_builder.py`、`scenario_split.py` | 无；功能散在 `env/obs.py` 与 collectors | 未实现 |
+> | `dataset/replay_buffer.py`、`dagger_buffer.py`、`failure_buffer.py` | 无 | 未实现 |
+> | `dataset/expert_collector.py` | 无；改为 `dataset/collect.py` | 已实现有偏差 |
+> | `net/encoders/*`、`fusion/*`、`planner/*`、`value/*`、`memory/*`、`world_model/*` | 无；全部在 `net/model.py` | 未实现（结构） |
+> | `config/*` | 仅 5/12；且无代码加载 | 已实现有偏差 |
+> | `pipeline/*` | 仅 5 个脚本；无 `stages/losses/metrics/checkpointing`、`rollout/`、`probes/`、`hooks/` | 已实现有偏差 |
+> | `tools/*` | 仅 `monitor_8h.sh`、`status.sh`、`venv-python`；12 个规定工具全无 | 未实现 |
+> | `test/*` | 7/29；无 memory/WM/detach/ID/velocity 等 | 已实现有偏差 |
+> | `docs/*` | 4 个；缺 7 个合同/日志文档（含 `decision_log.md`、`expert_audit.md`） | 未实现 |
+
 ---
 
 ## 18. 工程约定
 
 ## 18.1 配置与可复现性
 
-- 禁止在训练代码散落 magic numbers；
-- 超参数统一进入 YAML；
-- 每次 run 保存 resolved config；
-- 固定 Python、NumPy、PyTorch、MetaDrive 和 environment seed；
-- 保存 git commit、dirty status、依赖版本和设备信息；
-- 每个实验生成唯一 run ID；
-- validation set 配置和 seed 只读，不允许训练脚本改写。
-- validation/test 均只读；worker/recycle/memory floor 写 `runtime_local.yaml`，按机器标定，不是架构硬约束。
+- 禁止在训练代码散落 magic numbers；　——【已实现有偏差：大量硬编码】
+- 超参数统一进入 YAML；　——【未实现：仓库无 YAML 加载代码】
+- 每次 run 保存 resolved config；　——【未实现】
+- 固定 Python、NumPy、PyTorch、MetaDrive 和 environment seed；　——【已实现有偏差：torch/np/spec seed；Python hash 未固定】
+- 保存 git commit、dirty status、依赖版本和设备信息；　——【未实现】
+- 每个实验生成唯一 run ID；　——【已实现有偏差：输出目录名，无唯一 ID】
+- validation set 配置和 seed 只读，不允许训练脚本改写。　——【未实现】
+- validation/test 均只读；worker/recycle/memory floor 写 `runtime_local.yaml`，按机器标定，不是架构硬约束。　——【已实现有偏差：runtime_local 文件存在但不被读取】
 
 ## 18.2 Shape 与 Schema 约定
 
 每个模块 docstring 必须写：
 
-- 输入/输出 tensor shape；
-- 坐标系；
-- 单位；
-- mask 语义；
-- ID 对齐语义；
-- 是否 REAL/IMAGINED；
-- 是否 detach；
-- 时间索引。
+- 输入/输出 tensor shape；　——【已实现有偏差：部分模块有】
+- 坐标系；　——【已实现有偏差：部分】
+- 单位；　——【已实现有偏差：部分】
+- mask 语义；　——【未实现】
+- ID 对齐语义；　——【未实现】
+- 是否 REAL/IMAGINED；　——【未实现】
+- 是否 detach；　——【未实现】
+- 时间索引。　——【已实现有偏差：部分模块有帧索引】
 
-对关键 tensor 使用统一命名：
+对关键 tensor 使用统一命名：　——【已实现有偏差：B/T 有；R/No/Nl/P/D 未统一】
 
 ```text
 B: batch
@@ -1557,9 +1627,11 @@ P: polyline points
 D: latent dimension
 ```
 
+> **批复：已实现有偏差** —— `net/model.py` docstring 写 `ld [B,T,16,5,8]`，实际 `LD_DIM=9`；R/No/Nl/P/D 未统一使用。
+
 ## 18.3 单位
 
-全工程统一 SI：
+全工程统一 SI：　——【已实现无偏差】
 
 - position：m；
 - velocity：m/s；
@@ -1569,50 +1641,50 @@ D: latent dimension
 - time：s；
 - curvature：1/m。
 
-严禁角度和弧度混用。所有归一化必须可逆并有单元测试。
+严禁角度和弧度混用。所有归一化必须可逆并有单元测试。　——【已实现有偏差：动作归一化可逆但无测试；标签有越界】
 
 ## 18.4 Mask 约定
 
 必须明确 attention API 中：
 
-- `True` 表示 valid 还是 masked；
-- padding mask 与 causal mask 的 shape；
-- birth/death mask 的独立语义；
-- imagined depth mask。
+- `True` 表示 valid 还是 masked；　——【已实现有偏差：代码一致但未文档化】
+- padding mask 与 causal mask 的 shape；　——【已实现有偏差：padding 有；causal 无】
+- birth/death mask 的独立语义；　——【未实现】
+- imagined depth mask。　——【未实现】
 
-严禁依赖不同 PyTorch API 的默认 mask 语义。
+严禁依赖不同 PyTorch API 的默认 mask 语义。　——【已实现有偏差：显式 key_padding_mask，但无约定文档】
 
 ## 18.5 Logging
 
 每个 run 至少保存：
 
-- losses by component；
-- closed-loop metrics；
-- scenario bucket metrics；
-- model/optimizer LR；
-- gradient norms；
-- latent statistics；
-- rollout depth errors；
-- sample videos/plots；
-- failure seeds；
-- checkpoint selection reason。
+- losses by component；　——【已实现有偏差：仅 total】
+- closed-loop metrics；　——【已实现有偏差：4 项】
+- scenario bucket metrics；　——【已实现有偏差：仅 geometry】
+- model/optimizer LR；　——【未实现】
+- gradient norms；　——【未实现：仅 clip】
+- latent statistics；　——【未实现】
+- rollout depth errors；　——【未实现】
+- sample videos/plots；　——【未实现】
+- failure seeds；　——【已实现有偏差：eval 记录 scene_seed】
+- checkpoint selection reason。　——【未实现】
 
 ## 18.6 Checkpoint
 
 Checkpoint 必须包含：
 
-- online model；
-- EMA target encoder；
-- optimizer/scheduler；
-- scaler；
-- training stage；
-- global step/epoch；
-- RNG states；
-- resolved config；
-- dataset split hash；
-- encoder version。
+- online model；　——【已实现无偏差】
+- EMA target encoder；　——【未实现】
+- optimizer/scheduler；　——【未实现】
+- scaler；　——【未实现】
+- training stage；　——【未实现】
+- global step/epoch；　——【已实现有偏差：仅 epoch】
+- RNG states；　——【未实现】
+- resolved config；　——【未实现】
+- dataset split hash；　——【未实现】
+- encoder version。　——【未实现】
 
-禁止加载不兼容 checkpoint 后 `strict=False` 静默跳过关键参数。任何 missing/unexpected keys 必须显式记录并审计。
+禁止加载不兼容 checkpoint 后 `strict=False` 静默跳过关键参数。任何 missing/unexpected keys 必须显式记录并审计。　——【已实现无偏差：默认 strict load】
 
 ## 18.7 测试门槛
 
@@ -1627,25 +1699,27 @@ NaN/Inf check
 parameter-count check
 ```
 
-影响 Memory/WM/Trajectory 的改动还必须通过对应 causality 和 reset tests。
+> **批复：已实现有偏差** —— 逐项：unit tests 有（7 个）；small deterministic smoke train 无；one-episode closed-loop smoke 无（仅有手工 eval 脚本）；shape/mask 断言部分；NaN/Inf 仅数据层检查；parameter-count 有预算断言。影响 Memory/WM/Trajectory 的 causality/reset tests 全无。
+
+影响 Memory/WM/Trajectory 的改动还必须通过对应 causality 和 reset tests。　——【未实现】
 
 ## 18.8 性能和大张量约束
 
-- 不做 6 帧所有实体点的全连接全量 attention；
-- polyline 先局部聚合；
-- 记录每层 token 数；
-- 禁止隐式 broadcast 产生巨大中间 tensor；
-- profiler 中出现异常大张量必须解决后再推进；
-- rollout 6 步时严查计算图和显存线性/超线性增长。
+- 不做 6 帧所有实体点的全连接全量 attention；　——【已实现无偏差】
+- polyline 先局部聚合；　——【已实现无偏差】
+- 记录每层 token 数；　——【未实现】
+- 禁止隐式 broadcast 产生巨大中间 tensor；　——【已实现无偏差】
+- profiler 中出现异常大张量必须解决后再推进；　——【未实现】
+- rollout 6 步时严查计算图和显存线性/超线性增长。　——【未实现：无 WM/6 步图】
 
 ## 18.9 代码质量
 
-- 不以临时 if/else 规则修复具体场景；
-- 不把场景 seed 写进策略；
-- 不隐藏 fallback；
-- 所有 fallback 要可计数并记录；
-- 核心算法改动必须配设计说明和 ablation；
-- 文档结论必须能追溯到代码、配置、run 和 checkpoint。
+- 不以临时 if/else 规则修复具体场景；　——【已实现无偏差】
+- 不把场景 seed 写进策略；　——【已实现无偏差】
+- 不隐藏 fallback；　——【已实现有偏差：零向量/clamp 静默】
+- 所有 fallback 要可计数并记录；　——【未实现】
+- 核心算法改动必须配设计说明和 ablation；　——【未实现：readout/权重无 ablation】
+- 文档结论必须能追溯到代码、配置、run 和 checkpoint。　——【未实现：runs/specs 未入库】
 
 ---
 
@@ -1653,83 +1727,83 @@ parameter-count check
 
 至少完成以下对照：
 
-1. single frame vs 2/4/6-frame memory；
-2. no ego-motion compensation vs compensation；
-3. no latent delta vs absolute+delta；
-4. global scene temporal fusion vs same-ID entity temporal fusion，如实现过前者；
-5. no Nav vs road-level Nav；
-6. exact tracking vs LQR；
-7. Plan without WM vs Plan with WM；
-8. one-step WM vs six-step WM；
-9. teacher-forced action vs predicted Plan action；
-10. action condition enabled vs shuffled/zero action condition；
-11. frozen Encoder vs adapter joint tuning；
-12. plan-action-to-WM gradient detached vs open；
-13. BC vs DAgger vs real-env RL；
-14. deterministic WM with vs without uncertainty head。
+1. single frame vs 2/4/6-frame memory；　——【未实现】
+2. no ego-motion compensation vs compensation；　——【未实现】
+3. no latent delta vs absolute+delta；　——【未实现】
+4. global scene temporal fusion vs same-ID entity temporal fusion，如实现过前者；　——【未实现】
+5. no Nav vs road-level Nav；　——【未实现】
+6. exact tracking vs LQR；　——【已实现有偏差：10-50 scene canary，非正式 ablation】
+7. Plan without WM vs Plan with WM；　——【未实现】
+8. one-step WM vs six-step WM；　——【未实现】
+9. teacher-forced action vs predicted Plan action；　——【未实现】
+10. action condition enabled vs shuffled/zero action condition；　——【未实现】
+11. frozen Encoder vs adapter joint tuning；　——【未实现】
+12. plan-action-to-WM gradient detached vs open；　——【未实现】
+13. BC vs DAgger vs real-env RL；　——【已实现有偏差：三种 run 有；非同口径协议】
+14. deterministic WM with vs without uncertainty head。　——【未实现】
 
-每个 ablation 使用相同 split、seed 组、评测协议和 checkpoint 规则。
+每个 ablation 使用相同 split、seed 组、评测协议和 checkpoint 规则。　——【未实现】
 
 ---
 
 ## 20. Coding Agent 实施优先级
 
-按以下顺序开工，不得跨阶段一次性堆满：
+按以下顺序开工，不得跨阶段一次性堆满：　——【已实现有偏差：DAgger/PPO 提前】
 
 ### P0：合同与测试基础
 
-- schema；
-- coordinate transform；
-- scenario split；
-- Expert collector/audit；
-- trajectory representation；
-- exact tracking；
-- 动作参数化 P0 否决门；
-- LQR 跟踪 Expert GT 的 controller smoke；
-- MetaDrive headless smoke 和 worker 内存标定；
-- all critical unit tests。
+- schema；　——【已实现有偏差】
+- coordinate transform；　——【已实现有偏差】
+- scenario split；　——【未实现】
+- Expert collector/audit；　——【已实现有偏差：collector 有；audit 无】
+- trajectory representation；　——【已实现有偏差】
+- exact tracking；　——【已实现无偏差】
+- 动作参数化 P0 否决门；　——【未实现】
+- LQR 跟踪 Expert GT 的 controller smoke；　——【未实现】
+- MetaDrive headless smoke 和 worker 内存标定；　——【已实现无偏差】
+- all critical unit tests。　——【未实现】
 
 ### P1：单帧 BC
 
-- Encoders；
-- Spatial Fusion；
-- Plan Head；
-- open/closed-loop evaluation；
-- failure reproduction。
+- Encoders；　——【已实现无偏差】
+- Spatial Fusion；　——【已实现无偏差】
+- Plan Head；　——【已实现有偏差】
+- open/closed-loop evaluation；　——【已实现有偏差】
+- failure reproduction。　——【未实现】
 
 ### P2：真实历史 + DAgger
 
-- Memory Bank；
-- ID alignment；
-- temporal fusion；
-- DAgger/failure buffer；
-- nav leak and reset audit。
+- Memory Bank；　——【未实现】
+- ID alignment；　——【未实现】
+- temporal fusion；　——【已实现有偏差：per-slot】
+- DAgger/failure buffer；　——【已实现有偏差：DAgger 有；failure buffer 无】
+- nav leak and reset audit。　——【未实现】
 
 ### P3：短 Real-ENV PPO Canary
-- PPO/action-log-prob/GAE/buffer；
-- reward/cost 与 hacking audit；
-- 只验证训练管线与无灾难性退化，不承担 exceed-IDM 结论。
+- PPO/action-log-prob/GAE/buffer；　——【已实现有偏差】
+- reward/cost 与 hacking audit；　——【未实现】
+- 只验证训练管线与无灾难性退化，不承担 exceed-IDM 结论。　——【已实现有偏差：1-2 episode】
 
 ### P4：World Model
 
-- target encoder；
-- ego condition；
-- one-step WM；
-- multi-step WM；
-- Imagine Bank；
-- causality/rollout probes。
+- target encoder；　——【未实现】
+- ego condition；　——【未实现】
+- one-step WM；　——【未实现】
+- multi-step WM；　——【未实现】
+- Imagine Bank；　——【未实现】
+- causality/rollout probes。　——【未实现】
 
 ### P5：完整 3 s LQR 正式闭环、联合磨合与 Real-ENV PPO
-- Plan+WM 完整 3 s preview；
-- trajectory assembly/interpolation 与 dynamic feasibility；
-- LQR controller-realized closed loop；
-- joint training；
-- 正式 Real-ENV PPO + LQR；
-- exceed-IDM 与 exact-vs-LQR diagnosis。
+- Plan+WM 完整 3 s preview；　——【未实现】
+- trajectory assembly/interpolation 与 dynamic feasibility；　——【未实现】
+- LQR controller-realized closed loop；　——【未实现】
+- joint training；　——【未实现】
+- 正式 Real-ENV PPO + LQR；　——【未实现】
+- exceed-IDM 与 exact-vs-LQR diagnosis。　——【未实现】
 
 ### P6：可选 imagined RL
 
-仅在所有 WM 门槛通过后进行。
+仅在所有 WM 门槛通过后进行。　——【未实现】
 
 ---
 
@@ -1737,39 +1811,39 @@ parameter-count check
 
 每一轮必须提交：
 
-1. 修改文件清单；
-2. 设计意图与本文合同的对应条款；
-3. 关键代码 diff 说明；
-4. 新增/修改测试；
-5. 实际运行命令；
-6. 配置文件；
-7. 运行结果与原始日志路径；
-8. 与上一基线的同口径对比；
-9. 已知问题和未验证假设；
-10. 下一轮只解决的一个主要问题。
+1. 修改文件清单；　——【已实现无偏差：commit 含 44 文件】
+2. 设计意图与本文合同的对应条款；　——【已实现有偏差：status 未逐条映射】
+3. 关键代码 diff 说明；　——【未实现】
+4. 新增/修改测试；　——【已实现有偏差：7 个，覆盖不足】
+5. 实际运行命令；　——【已实现无偏差】
+6. 配置文件；　——【已实现有偏差：文件存在但不被读取】
+7. 运行结果与原始日志路径；　——【已实现有偏差：路径列出但未入库】
+8. 与上一基线的同口径对比；　——【已实现有偏差：n=20/50 混用】
+9. 已知问题和未验证假设；　——【已实现无偏差：status 诚实列出】
+10. 下一轮只解决的一个主要问题。　——【已实现有偏差：给出两个方向】
 
-禁止只提交总结文档而不提供代码、日志和测试证据。禁止用单次成功 episode 代表总体性能。
+禁止只提交总结文档而不提供代码、日志和测试证据。禁止用单次成功 episode 代表总体性能。　——【已实现有偏差：小样本结论强于证据】
 
 ---
 
 ## 22. 最终不可违反的硬约束
 
-1. World Model 必须显式 ego-action/ego-trajectory conditioned。
-2. Plan Head 每次输出下一 0.5 s `(dx,dy,dpsi,v_next)`，rollout 6 次形成 3 s；不得自动删除 `v_next` 或退化为 3D。
-3. 六步轨迹点必须转换到同一个 rollout-t0 ego frame 后才能拼接。
-4. Stage F 正式 LQR 使用完整 3 s；A1-C 的 0.5 s LQR 仅是 canary/shadow。
-5. BC、DAgger、RL 使用同一种轨迹动作语义。
-6. OD/LD 先 ego-motion compensation，再按稳定 ID 对齐并计算 latent delta。
-7. latent delta 必须与绝对 latent、时间和 mask 一起使用。
-8. Road-level Nav 严禁包含 lane-level oracle 或推荐车道。
-9. 环境语义全部经 Encoder；控制 mask/reset 可直接使用，不属于策略旁路。
-10. Real Memory Bank 与 Imagine Memory Bank 禁止混写。
-11. Future latent GT 必须来自真实下一帧 observation 的 per-entity EMA Target Encoder 输出并 stop-gradient；不得用 fused context 或 WM 自输出作 GT。
-12. WM 先单步、再多步，未通过六步 fidelity 不得进入 imagined RL。
-13. Exact tracking 只证明 Planner 闭环能力；最终成绩必须报告 LQR controller-realized closed loop。
-14. IDM + Pure Pursuit 可作为唯一 Expert，但必须审计特权信息，并以真实闭环指标而非 imitation distance 判断是否超越。
-15. 每新增模块必须有关闭该模块的同 seed ablation。
-16. 调参与 checkpoint 依据冻结 Val500；最终结论必须由只读 Test500、多 seed、分场景复核。
+1. World Model 必须显式 ego-action/ego-trajectory conditioned。　——【未实现：无 WM】
+2. Plan Head 每次输出下一 0.5 s `(dx,dy,dpsi,v_next)`，rollout 6 次形成 3 s；不得自动删除 `v_next` 或退化为 3D。　——【已实现有偏差：输出 4D；执行丢 v_next；无 6 步自回归】
+3. 六步轨迹点必须转换到同一个 rollout-t0 ego frame 后才能拼接。　——【未实现】
+4. Stage F 正式 LQR 使用完整 3 s；A1-C 的 0.5 s LQR 仅是 canary/shadow。　——【已实现有偏差：A1 canary 有；Stage F 无】
+5. BC、DAgger、RL 使用同一种轨迹动作语义。　——【已实现有偏差】
+6. OD/LD 先 ego-motion compensation，再按稳定 ID 对齐并计算 latent delta。　——【未实现：无 stable ID/latent delta】
+7. latent delta 必须与绝对 latent、时间和 mask 一起使用。　——【未实现】
+8. Road-level Nav 严禁包含 lane-level oracle 或推荐车道。　——【已实现有偏差：lane 端点+中间车道偏置】
+9. 环境语义全部经 Encoder；控制 mask/reset 可直接使用，不属于策略旁路。　——【已实现有偏差：规则 readout】
+10. Real Memory Bank 与 Imagine Memory Bank 禁止混写。　——【未实现：Bank 机制不存在，禁止项暂无适用对象】
+11. Future latent GT 必须来自真实下一帧 observation 的 per-entity EMA Target Encoder 输出并 stop-gradient；不得用 fused context 或 WM 自输出作 GT。　——【未实现】
+12. WM 先单步、再多步，未通过六步 fidelity 不得进入 imagined RL。　——【未实现】
+13. Exact tracking 只证明 Planner 闭环能力；最终成绩必须报告 LQR controller-realized closed loop。　——【已实现有偏差：只报 exact/canary，无正式 LQR 口径】
+14. IDM + Pure Pursuit 可作为唯一 Expert，但必须审计特权信息，并以真实闭环指标而非 imitation distance 判断是否超越。　——【已实现有偏差：未审计特权】
+15. 每新增模块必须有关闭该模块的同 seed ablation。　——【未实现】
+16. 调参与 checkpoint 依据冻结 Val500；最终结论必须由只读 Test500、多 seed、分场景复核。　——【未实现】
 
 ---
 
@@ -1777,21 +1851,21 @@ parameter-count check
 
 以下参数允许 Coding Agent 通过小规模实验选择，但必须记录对照，不得默认拍脑袋：
 
-- latent dimension 96 或 128；
-- temporal/spatial attention 层数；
-- OD/LD token 上限；
-- polyline anchor/chunk 方法；
-- exact tracking 的实现细节；
-- Plan Loss 各项权重；
-- EMA momentum；
-- WM loss 权重；
-- PPO 具体超参数；
-- LQR state、Q/R 和 preview 实现；
-- trajectory interpolation 方法；
-- uncertainty head 的监督定义；
-- `(dx,dy,dpsi,v_next)` 的最终 bounds 与归一化范围，须经 P0 Expert 分位数、动力学边界和 LQR 可跟踪性联合标定。
+- latent dimension 96 或 128；　——【已实现有偏差：选 128；无 decision log】
+- temporal/spatial attention 层数；　——【已实现有偏差：2 spatial/1 temporal；无 log】
+- OD/LD token 上限；　——【已实现有偏差：16/16；LD 低于建议；无 log】
+- polyline anchor/chunk 方法；　——【已实现有偏差：固定 5 点/5 m 间隔；无 log】
+- exact tracking 的实现细节；　——【已实现有偏差：已实现；无 log】
+- Plan Loss 各项权重；　——【已实现有偏差：3/2→8/4→12/6；无 log】
+- EMA momentum；　——【未实现】
+- WM loss 权重；　——【未实现】
+- PPO 具体超参数；　——【已实现有偏差：硬编码；无 log】
+- LQR state、Q/R 和 preview 实现；　——【已实现有偏差：已实现；无 log】
+- trajectory interpolation 方法；　——【已实现有偏差：Hermite；无 log】
+- uncertainty head 的监督定义；　——【未实现】
+- `(dx,dy,dpsi,v_next)` 的最终 bounds 与归一化范围，须经 P0 Expert 分位数、动力学边界和 LQR 可跟踪性联合标定。　——【未实现：未按分位数/动力学/LQR 标定】
 
-任何开放项一旦通过实验确定，应写入 `docs/decision_log.md`，包含：候选方案、实验运行、同口径结果、选择理由和回退条件。
+任何开放项一旦通过实验确定，应写入 `docs/decision_log.md`，包含：候选方案、实验运行、同口径结果、选择理由和回退条件。　——【未实现：无 docs/decision_log.md】
 
 ---
 
@@ -1821,8 +1895,23 @@ Action-conditioned WM 明显超过简单预测基线
 联合训练带来真实环境收益，而非仅 imagined score 提升
 ```
 
+> **批复：未实现** —— 证据链逐项：
+>
+> | 环节 | 状态 |
+> |---|---|
+> | Schema/坐标/Reset/ID tests 全通过 | 已实现有偏差（schema/坐标部分；reset/ID 无） |
+> | 单帧 BC exact-tracking 闭环可用 | 已实现有偏差（50 val 70%） |
+> | 历史 Memory 带来可重复闭环收益 | 未实现 |
+> | DAgger 改善恢复能力 | 已实现有偏差（DAgger 跑了；恢复未证） |
+> | 短 Real-ENV PPO canary 证明管线正确 | 已实现有偏差（wiring 有；log-prob 合同错） |
+> | Action-conditioned WM 超过基线 | 未实现 |
+> | 6-step imagined rollout 误差/风险可控 | 未实现 |
+> | 完整 3 s 插值 + LQR 闭环达标 | 未实现 |
+> | 正式 Real-ENV PPO + LQR 接近/超过 IDM | 未实现 |
+> | 联合训练带来真实环境收益 | 未实现 |
+
 最终模型的核心判据是：
 
-> 在冻结验证集、多 seed、controller-realized closed loop 下，route success 和 completion 提升，collision/off-road 不恶化或下降，并且提升能够在车道保持、障碍物响应、自主选道、路口与收费站等关键场景中解释和复现。
+> 在冻结验证集、多 seed、controller-realized closed loop 下，route success 和 completion 提升，collision/off-road 不恶化或下降，并且提升能够在车道保持、障碍物响应、自主选道、路口与收费站等关键场景中解释和复现。　——【未实现】
 
 
