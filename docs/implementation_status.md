@@ -27,7 +27,7 @@ Last updated: 2026-10-20 (Asia/Shanghai)
 - `pipeline/train_ppo.py`: short PPO canary (sampled normalized 4D action, exact tracker, GAE, clipped PPO). Smoke: 1 update / 1 episode / 100 steps at `runs/ppo_canary_smoke`; not a performance claim.
 - `config/`, `net/param_probe.py`, `tools/monitor_tasks.sh`.
 - New schema-v2 path (2026-10-20): `env/obs_v2.py` with road-level Nav, stable IDs/taxonomy, fixed 6-frame same-ID history; `net/action_space.py` PSTL 4D→speed-profile execution; `net/clean_model.py` 1,053,142-param clean planner with `q_lane`/`q_od`, aux heads and `encode_entities()`; `dataset/collect_v2.py` measured expert labels + audit; `pipeline/train_bc_v2.py`; `pipeline/eval_clean.py`; `pipeline/distributions.py`; `pipeline/eval_metrics.py`; `dataset/splits.py`.
-- Test suite: 67 passed, 1 skipped (`tools/venv-python -m pytest -q`). Legacy path remains intact.
+- Test suite: 89 passed, 1 skipped (`tools/venv-python -m pytest -q`). Legacy path remains intact.
 
 ## Current results (10 validation scenes, exact tracking, 300 env steps)
 
@@ -63,6 +63,25 @@ Stage1 exact by geometry: straight 0.69 success / 0.15 coll / 0.15 off; curve 0.
 - Calibrated action quantiles (BC 2k): dx p99.9 6.94, dy p0.1/p99.9 -0.79/+0.57, dpsi -0.28/+0.18, v_next max 13.90. Provisional new bounds: dx [0,7.5–8.0], dy [-1.5,1.5], dpsi [-0.8,0.8], v_next [0,15]. Hard feasibility candidate: a_long [-10,3.5], |a_lat|≤8, |κ|≤0.345, |κ_rate|≤0.20, |jerk|≤20/5. All remain provisional until P0/LQR calibration is logged; see `docs/decision_log.md`.
 - Current code path is still the legacy schema/3D execution; schema v2 and the 4D speed-profile path are being implemented. Do not claim P1/P2 pass from the numbers above.
 
+### Clean schema B/C progress (2026-10-20)
+
+- 2k v2 expert collection: 4 x 500 shards, 137,764 rows, 2,000 seeds; expert success 70.6%, collision/off-road/other per episode close to legacy; PSTL clean-gate pass 95.6–96.1%.
+- Clean 2k BC with learned `q_lane`/`q_od`: the first model had a real query bug — `q_lane` attention was near-uniform (current lane 0.011; a lat=-7 m lane got 0.60), so even straight driving drifted off-road. Added query-selection auxiliary supervision (current lane role0; urgent OD) and retrained. This is a change to auxiliary supervision only; current lane/TTC are still not plan inputs.
+- Same 50-val exact protocol: clean 2k BC after query supervision = **8% success / 14% collision / 80% off-road / 0.46 RC** (still far below legacy 70/16/10).
+- DAgger v2 round 1 (2k scenes, 50% measured expert replay): clean model = **50% success / 22% collision / 18% off-road / 0.755 RC**. BC+DAgger mix was worse (42/26/30), so DAgger-only is the current clean best.
+- DAgger v2 round 2 (2k scenes, 30% replay) trained from the round-1 model: same 50-val exact = **64% success / 12% collision / 12% off-road / 0.831 RC**. This is `runs/bc_v2_2k_q_dagger_r2`.
+- Val500 exact (same first 500 val seeds, paired by scene):
+  - legacy `runs/val500_legacy`: **64.0% success / 19.2% collision / 12.2% off-road / 0.853 RC**;
+  - clean round-2 `runs/val500_clean`: **58.8% / 16.8% / 18.2% / 0.819**;
+  - paired bootstrap diff (clean - legacy): success **-5.2 pp** (95% CI -9.2..-1.2), collision **-2.4 pp** (-5.8..+1.2), off-road **+6.0 pp** (+2.8..+9.4).
+- **A/B gate not passed**: clean has better collision but worse success and off-road. Do not promote clean over legacy. This is not a 50-scene noise artifact.
+- Hard/curve round 3 DAgger (500 hard train scenes, 30% replay) trained from round-2: 50-val exact = **64% / 8% collision / 18% off-road / 0.834 RC**; collision improved, off-road/success did not. Val500 exact: **59.6% success / 15.8% collision / 16.6% off-road / 0.827 RC**.
+- Val500 paired diff (clean round-3 - legacy): success **-4.4 pp** (95% CI -8.6..-0.2), collision **-3.4 pp** (-7.2..+0.2), off-road **+4.4 pp** (+1.2..+7.8). The A/B gate still fails on success/off-road; collision is not worse. Clean is **not promoted**.
+- LQR controller-realized canary on clean round-2 (50 val): **26% success / 4% collision / 18% off-road / 52% timeout**, versus legacy LQR ~55/10/15. The exact→LQR gap is unresolved; do not use exact numbers as final controller-realized claims. The likely cause is speed/profile tracking + timeout on curves, not a clean planner conclusion.
+- 50-scene numbers are smoke/regression evidence only; 500-scene paired numbers are the gate.
+- PPO v2 contract canary is implemented (`pipeline/train_ppo_v2.py`): bounded TruncatedNormal, sampled-vs-executed separation, per-episode GAE with truncation bootstrap, reward/cost separation; tests 89 passed / 1 skipped. A 1-update CPU canary (`runs/ppo_v2_canary`) produced boundary_rate 0.0, logprob recompute diff 0.0, ratio-at-old 1.0, mask/postprocess 25% (one infeasible transition); it is a contract canary, not a performance or P3 gate pass.
+- The 10k collection was stopped in its unsharded form because the parent process aggregated all episodes and exhausted RAM/swap. 2k is sharded and stable; final 10k needs shard-stream training or a disk-backed dataset. This is a hardware/data-path issue, not a schema result.
+
 A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% success) despite low val loss. Root cause: no replay of the c0/DAgger domain and no DAgger coverage on the new maps. Adding c500 DAgger with explicit c0/DAgger replay restores 55% exact / 60% LQR. Safety weighting (braking and near-lead rows) improves exact success from 64% (3x/2x) to 70% (8x/4x) on 50 val; LQR is 56% success / 12% collision / 18% off-road on 50 val; curvature feedforward reduces collision to 6% but raises curve off-road to 39%, so the Exact→LQR gap is primarily curve tracking/off-road, not straight-line or speed control. Pushing to 12x/6x cuts collision to 6% but collapses success to 54% and raises off-road to 18%, and LQR success to 30%: over-braking is the failure mode. 8x/4x is the current P1 trade-off. The expert is 80% success / 5% collision on 20 val, so collision avoidance and the Exact→LQR gap remain the main gaps.
 
 ## Root causes found and fixed
@@ -81,8 +100,10 @@ A naive fine-tune on c500+c1000+c1500 degraded closed-loop performance (30% succ
 - Safety-first alternative `runs/p1_weight_hi2` (54% exact / 6% collision / 18% off-road; LQR 30% success) is not promoted.
 - Expert baseline: 80% success / 5% collision / 5% off-road on 20 val; full 2k collection is 70.2% / 15.6% / 5.8% / 8.3% timeout.
 - PPO canary: `runs/ppo_canary_smoke` and `runs/ppo_canary_2u` prove wiring only; 61.8% any-dim sample/execute mismatch; not a PPO result.
-- Active work: 2k v2 expert collection is running in 4×500 shards (`datasets/bc_v2_2k_s0..s3`); clean 2k training/eval next. DAgger v2 replay collector is being implemented. 10k/500/500 + Test500 remains the final data scale; the unsharded 10k collector was stopped because it aggregated all episodes in one parent process and exhausted RAM/swap.
+- Current state: no training/collection process is active. Clean/legacy Val500 exact are complete; clean A/B is **not promoted**. 10k/500/500 + Test500 remains the final data scale; the unsharded 10k collector was stopped because it aggregated all episodes in one parent process and exhausted RAM/swap. Shard-stream training is required before 10k.
+- Next root fixes before more training: LQR speed/preview calibration and exact→LQR failure attribution; off-road failure buckets on Val500; failure-prioritized DAgger on actual train-scene failures (not only geometry buckets); 10k shard-stream loader; Test500 only after a P1/P2 gate passes.
 - 200-scene clean smoke (`runs/bc_v2_200`, 30 epochs) completed: val physical MAE dx 0.067 m, dpsi 0.010 rad, dvy 0.18 m/s; closed-loop 10 val exact = 0/10 success, 90% off-road with the current fallback projection. This is a small-data smoke, not an A/B result and not promoted.
+- 2k clean runs: `runs/bc_v2_2k_q2` (BC query-supervised), `runs/bc_v2_2k_q_dagger` (round-1 DAgger, current clean best), `runs/bc_v2_2k_q_mix` (worse mix), plus 50-val metrics in `runs/*_eval50`.
 - Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
 
 ## Reproduce (current machine)
