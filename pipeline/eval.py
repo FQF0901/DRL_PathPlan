@@ -523,6 +523,7 @@ def main(argv=None) -> int:
     parser.add_argument("--lqr-brake-scale", type=float, default=None)
     parser.add_argument("--lqr-lookahead-time", type=float, default=None)
     parser.add_argument("--lqr-lookahead-base", type=float, default=None)
+    parser.add_argument("--lqr-ref-speed-scale", type=float, default=None)
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -540,6 +541,8 @@ def main(argv=None) -> int:
         lqr_kwargs["lookahead_time"] = float(args.lqr_lookahead_time)
     if args.lqr_lookahead_base is not None:
         lqr_kwargs["lookahead_base"] = float(args.lqr_lookahead_base)
+    if args.lqr_ref_speed_scale is not None:
+        lqr_kwargs["ref_speed_scale"] = float(args.lqr_ref_speed_scale)
     specs = load_specs(args.specs)[: int(args.limit)]
 
     rows: List[Dict[str, Any]] = []

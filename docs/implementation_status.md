@@ -69,7 +69,7 @@ Paired bootstrap (clean r3 − legacy):
 | Legacy fixed LQR (`runs/lqr50_legacy_p0fixed`) | 44% | 8% | 26% | — | 0.776 |
 | Clean r3 LQR (`runs/lqr50_clean_r3_p0fixed`) | 34% | 2% | 12% | 52% | 0.740 |
 
-Clean LQR has lower collision/off-road but **10 pp lower success and 52% timeout**; tracking xy 0.016 m, heading 0.008 rad, speed 0.210 m/s. A one-scene diagnostic shows the model predicting a low `v_next` (~2.4 m/s) once LQR has slowed down; the controller follows that low reference. Raising speed gain made 20-val off-road worse (40%), so this is a closed-loop speed/distribution trap, not a simple gain error. The exact→LQR gap is still a blocker; do not present exact tracking as the final controller-realized result.
+Clean LQR has lower collision/off-road but **10 pp lower success and 52% timeout**; tracking xy 0.016 m, heading 0.008 rad, speed 0.210 m/s. A one-scene diagnostic shows the model predicting a low `v_next` (~2.4 m/s) once LQR has slowed down; the controller follows that low reference. Raising speed gain made 20-val off-road worse (40%); `ref_speed_scale=1.2` made 20-val 15% success / 60% collision / 30% off-road. This confirms a closed-loop speed/distribution trap, not a simple gain or reference-scale error. The exact→LQR gap is still a blocker; do not present exact tracking as the final controller-realized result.
 
 ### PPO contract canary
 
