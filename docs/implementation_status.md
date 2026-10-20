@@ -29,6 +29,8 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 
 ## Current evidence
 
+> **Gate warning (2026-10-21):** the clean/legacy Val500, 50-scene, LQR and PPO numbers below were produced before the confirmed P0 fixes: Nav history unit bug (100×), eval/PPO prev-state mismatch, exact steering=0, and PSTL feasibility labels not consumed by training. They are debugging evidence only; do not use them for a P1/P2/PPO gate until the P0 rerun is complete. See `docs/deepseekv4p1_argue.md`.
+
 ### 2k expert data
 
 - 4 x 500 scene shards, 137,764 rows, 2,000 seeds.

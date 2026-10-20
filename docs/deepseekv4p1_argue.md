@@ -151,3 +151,72 @@ PPO 在 log-prob/GAE/buffer 修好前只保留为 wiring probe，**不计入 P3 
 - 结论：P1 可用但未达 Expert；最大缺口是 collision（16% vs 5%）和 Exact→LQR 曲线 off-road（10% vs 22%）。
 
 ---
+
+## 2026-10-21 — code_review @ 6de65f4：排模结论、接受、反驳与解释
+
+**结论先行：我接受“P1/P2 gate 不予放行”。** 这次 review 的四个 P0 级问题我逐条复核后确认存在，且足以使当前 Val500/LQR/PPO 数字不能作为 gate 证据。下面区分“确认的缺陷”“影响范围的限定”“对合同细节的反驳/保留意见”，并给出修复顺序。
+
+本轮只做排模和分析，没有修改实现代码；不会在 P0 修复前继续用这些数字支撑 P1/P2 结论。
+
+### 1. 四个 P0：确认，且都进入训练/评测主链
+
+| 项 | 复核结果 | 证据/影响 |
+|---|---|---|
+| P0-1 Nav 历史 100× | **确认** | Nav 的 entry/mid/exit/dest 在 `env/obs.py` 中按 `/100` 存储，但 `_compensate_nav_road`/`_compensate_nav_global` 用米制 pose 平移。直接探针：归一化 `entry_dx=0.07425`，ego 前进 7.425 m 后补偿为 **-7.35075**，正确值应为 0。当前 clean 数据的 6 帧 Nav 历史被污染；legacy 数据不走这条路径，所以 clean/legacy 的 A/B 存在不对称污染。 |
+| P0-2 eval/PPO ego 历史语义错配 | **确认** | 采集侧 `prev_speed/prev_heading` 取段首值（`dataset/collect.py`、`collect_dagger.py`）；eval/PPO 在 5 个 0.1 s 子步后取段末值（`pipeline/eval.py`、`train_ppo.py`），因此下一帧 `a_long/yaw_rate/a_lat/curvature` 恒为 0。训练数据中 a_long 非零约 98.1%、yaw 非零约 86.7%，eval/PPO 中结构性为零。eval 还把 `prev_action` 设为 requested 而非 executed，fallback 时也不一致。 |
+| P0-3 exact `ego.steering` 恒为 0 | **确认** | `ExactTracker.set_pose` 不写 steering；训练数据中 `ego[:, -1, 4]` 非零约 **97.2%**，exact 模拟中 reset 后和 5 子步后均为 0。即使修 P0-2，exact 的 ego 输入仍有分布偏移。 |
+| P0-4 PSTL 失败标签未进入训练 | **确认** | 采集 npz 中有 `feasible/label_pass/action_in_bounds/label_source`，但 `pipeline/train_bc.py` 的 `KEEP_KEYS` 不加载这些列，`_plan_weights` 也不使用。DAgger r2 整体 feasible 约 83.4%，其中 measured replay 仅 **46.4%**；这些行仍以 plan_weight=1 进入 point/heading/velocity loss，NLL 只对 clipped target 计算。status 的“marked, not silently clipped”只在采集侧成立，训练侧确实没有消费。 |
+
+补充确认的数字：
+
+- clean checkpoint `runs/bc_v2_2k_q_dagger_r2` 的 `action_logstd` 均值约 **-4.64**，最小 -5.0；PPO 起点探索接近零。
+- `gate([0.24,0,0.8,0.5], v0=0.5)` 当前被判 accepted，但 κ≈**11.96**、路径长度约 **0.249 m**；`_MIN_CURVATURE_PATH=0.25` 使短路径绕过 κ/a_lat 检查。这是真实的 gate 漏洞。
+- `SPLITS` 仍只有 `("train","val")`；Test500 不存在。
+- 全仓库没有 `import yaml`，`config/*.yaml` 不进入执行路径。
+
+### 2. 我要限定/反驳的判断
+
+1. **“所有数字完全不可用”需要拆开说。**  
+   绝对闭环数字和训练分布对比确实不可用；但 clean 与 legacy 的 exact 评测都在各自旧 harness 下运行，错误方向并不完全相同（尤其 P0-1 的 Nav 历史污染只影响 clean）。因此正确结论不是“clean 架构被证明更差”，而是**当前 A/B 不可判决**。这与 review 的最终判决一致，但我不接受把 clean 的 -4.4pp 直接解释为架构失败；它至少混入了 P0-1/2/3 和 DAgger 数据质量差异。
+
+2. **P0-4 不是“数学上污染评测数字”的同类 bug。**  
+   它不会改变已跑 checkpoint 的 eval 轨迹，但会污染训练样本权重和 clean 模型质量。把它列为 P0 训练缺陷、阻止 gate 是合理的；把它说成“当前 eval 数字全错”的直接原因则不准确。两者应分开修复和归因。
+
+3. **`§4.4` 的“联合 Transformer 一定违规”是合同细节层面的判断，不是行为级定论。**  
+   当前 `net/model.py` 是 ego/nav/od/ld 单 joint TransformerEncoder，不是合同写的 OD/LD self + OD-LD cross + Nav/Ego cross。我接受“与合同文字不一致”这一事实，但不接受“joint masked attention 必然不能实现同样条件融合”的绝对说法。它可以作为待 ablation 的替代结构；在证明闭环等价前，不能声称满足 §4.4，也不能把它当成架构已解耦的证据。
+
+4. **god module / 配置 / checkpoint 校验是工程质量债，不必全部阻塞 P0 修复。**  
+   `env/obs.py`、`collect*.py`、`train_bc.py`、`train_ppo.py`、`tracking.py` 的体量和重复代码确实存在；但当前最优先的是 P0 数据/评测正确性。先修 P0，再做 schema/execution 唯一真源和模块拆分，避免在大重构中同时改变行为。
+
+5. **`expert_plan_valid=success` 是过度保守，不是“失败 expert 仍被当正样本”。**  
+   review 对 29.3% 行 plan_weight=0 的判断成立；但这也把 timeout episode 的早段有效专家行为整段清零。正确方向是按 label/segment 质量降权，而不是整条 episode 全零，尤其对 timeout 早段。
+
+6. **Val500 的固定 seed 使用是有的，但协议冻结没有完成。**  
+   我确实用同一批前 500 个 val seeds 跑了 clean/legacy；但没有 manifest/hash、spec 未入库，且 Test500 未建立。因此“使用过同一批 seed”不等于“Val500 已冻结”；review 的 gate 判断成立。
+
+7. **LQR gap 不能直接归因于 Planner。**  
+   LQR 只跑 0.5 s canary，preview 被 clamp 到参考末端；加上 P0-2/P0-3 的 ego 特征错配，当前 26% vs 64% 的 exact→LQR gap 不能作为架构结论。修复 P0 后必须重跑；这一点我同意 review 的“先修再判断”。
+
+### 3. 我接受的其他关键点
+
+- OD 只收 vehicle/cone/building，行人/barrier 缺失；`acc_x/acc_y` 用 0.5 s 差分而 `last_velocity` 按 0.1 s physics 更新，系统性缩小约 5×；age 只是窗口内停留时间。接受。
+- LD 无 boundary polyline、lane type、稳定拓扑 ID；`LD_CHUNK_METERS=20` 被写进 stable ID，速度 >8 m/s 时当前车道的 6 帧历史基本退化为当前帧。接受。
+- stable-ID 对齐和 SE(2) 补偿存在，但没有 content latent 拆分、显式 geometry delta、Δtimestamp、death/source mask。接受。
+- Plan loss 的 curvature/jerk/κ-rate 是有限差分代理，不是真实 PSTL 轨迹量；无 3 s 一致性、无 heading wrap/跨段连续性。接受。
+- Value/Risk 的 episode outcome 广播、value 只用 ±γ^remaining、无 route completion/time-to-go；接受。
+- `privileged_expert_sample` 全 1、`w_privileged=1`，且 `_weighted_mean` 按权重和归一化，统一乘常数会抵消；该旋钮当前结构性无效。接受。
+- DAgger r2 measured replay 仅 30.6%，69.4% 是 lift；`label_source` 未加载，lift 行 residual 为 NaN，`w_residual` 不生效；failure buffer、跨轮混合系数、逐轮 LQR shadow 未实现。接受。
+- PPO cost_adv 已计算但没有进入 policy loss；只有 cost critic 在学；cost 不进 policy。接受。BC logstd 接近 -5；PPO 探索不足。接受。
+- checkpoint 只按 open-loop val objective 选；Val500 未冻结；Test500 缺失；checkpoint 不校验 schema/bounds；config 不加载；2D `interpolate`/points-only API 仍活着；测试缺 eval/collect/PPO parity。接受。
+
+### 4. 修复顺序（在继续训练前）
+
+1. **P0-1 Nav 单位**：改 `_compensate_nav_road/global` 先乘 100 或直接存米；补 Nav pure-translation 测试；重算/重采当前 clean 2k/DAgger，旧 clean 数据不再用于 gate。
+2. **P0-2/P0-3 共享 decision state**：抽 `prev_speed/prev_heading/prev_action` 的唯一实现，统一取段首 \(v_0/h_0\)、使用 executed action；exact tracker 要么写 steering，要么从 ego 输入移除 steering/改用 PSTL 曲率合成；加 collect/eval/PPO parity 测试（a_long/yaw/a_lat/curvature/steer 分位一致）。
+3. **P0-4 数据质量消费**：train loader 加载 `feasible/label_pass/action_in_bounds/label_source`；PSTL 失败行丢弃/重降权；measured replay 与 lift 分开权重；`residual` 仅对 measured replay 生效；`w_privileged` 改为 per-sample/相对权重；补 multi_solution 标记。
+4. **LD stable ID**：road pair + lane_id 作为稳定 ID，chunk_s 只作 anchor 特征；补 1/2/4/6 帧 ablation，确认 history 真的超过单帧后再声称 P2。
+5. **Val/Test/checkpoint**：为 Val500 生成 manifest/hash 或入库；建立 Test500；best.pt 改为 collision/off-road 硬门槛→success→RC，不用 open-loop val objective。
+6. **PPO/LQR**：PPO 只有 wiring probe 地位；cost 用 Lagrangian/硬约束进入 policy，BC 加 logstd floor/entropy；LQR 在 P0 修复后重跑 0.5 s canary，再决定 3 s preview。
+7. **工程债**：YAML 真正加载并保存 resolved config；checkpoint 校验 schema/bounds/encoder version；抽 `dataset/schema.py`、`execution.py`、`checkpointing.py`；删除/标记 2D 旧路径。此步不应改变 P0 的语义。
+
+**在 1–3 完成并重跑之前，我不会用当前 Val500/50-scene/LQR/PPO 数字支撑 P1/P2；P4 继续不动。**
