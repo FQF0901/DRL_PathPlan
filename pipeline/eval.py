@@ -276,6 +276,7 @@ def run_episode(
         a_norm = out["action_mu"][0].detach().cpu().numpy().astype(np.float64)
 
         v0 = float(ego.speed)
+        h0 = float(ego.heading_theta)
         requested_action = CLEAN_BOUNDS.denormalize(a_norm, clip=True)
         if first_requested_action is None:
             first_requested_action = requested_action.copy()
@@ -435,9 +436,11 @@ def run_episode(
                 # metric matches.
                 track_speed.append(terminal_speed_error)
 
-        prev_action = np.asarray(requested_action, dtype=np.float64)
-        prev_speed = float(ego.speed)
-        prev_heading = float(ego.heading_theta)
+        # Match the collector: prev decision state is the segment START, and
+        # prev_action is what was actually executed (including fallback).
+        prev_action = np.asarray(executed_action, dtype=np.float64)
+        prev_speed = v0
+        prev_heading = h0
         if done:
             break
 

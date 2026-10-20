@@ -371,6 +371,9 @@ class ExactTracker:
                 raise ValueError("speeds 必须是非负有限值")
             speed_arr = speed_arr.copy()
         self._speed = speed_arr
+        self._kappa = None
+        if kappa is not None:
+            self._kappa = np.asarray(kappa, dtype=np.float64).reshape(-1).copy()
 
         # 世界系参考 + 逐点参考速度/角速度
         dt_sub = 1.0 / float(self.hz)
@@ -411,6 +414,7 @@ class ExactTracker:
         heading: float,
         velocity: Any = None,
         angular_velocity: float = 0.0,
+        steering: Optional[float] = None,
     ) -> None:
         """把车辆运动学状态直写到给定位姿（``WaypointPolicy`` 的 set_pose 写法）。
 
@@ -423,6 +427,10 @@ class ExactTracker:
             velocity = np.zeros(2, dtype=np.float64)
         vehicle.set_velocity(np.asarray(velocity, dtype=np.float64)[:2])
         vehicle.set_angular_velocity(float(angular_velocity))
+        if steering is not None:
+            # Exact tracking is a kinematic probe; keep the observation's
+            # normalized steering in parity with the measured training data.
+            vehicle.steering = float(np.clip(steering, -1.0, 1.0))
 
     def apply(self, env: Any, index: Optional[int] = None) -> np.ndarray:
         """把 ego 置于第 ``index`` 个子步参考位姿；``index=None`` 时消费当前 cursor。
@@ -439,7 +447,21 @@ class ExactTracker:
         if vehicle is None:
             raise RuntimeError("ExactTracker.apply: 无法获取 ego")
         pose = self._world[i]
-        self.set_pose(vehicle, pose[:2], float(pose[2]), self._velocity[i], float(self._yaw_rate[i]))
+        if self._kappa is not None and len(self._kappa) == len(self._world):
+            kappa = float(self._kappa[i])
+        else:
+            speed = float(np.linalg.norm(self._velocity[i]))
+            kappa = float(self._yaw_rate[i]) / max(speed, 0.1)
+        wheelbase = float(
+            getattr(vehicle, "FRONT_WHEELBASE", 1.05234) or 1.05234
+        ) + float(getattr(vehicle, "REAR_WHEELBASE", 1.4166) or 1.4166)
+        max_steer = float(np.deg2rad(getattr(vehicle, "max_steering", 40.0)))
+        steering = float(np.arctan(wheelbase * abs(kappa)) / max(max_steer, 1e-6))
+        steering = float(np.sign(kappa) * steering)
+        self.set_pose(
+            vehicle, pose[:2], float(pose[2]), self._velocity[i],
+            float(self._yaw_rate[i]), steering=steering,
+        )
         if index is None:
             self.index += 1
         realized_world = _ego_pose(vehicle)

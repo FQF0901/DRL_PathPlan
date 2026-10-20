@@ -229,6 +229,8 @@ DEFAULT_DT = 0.5
 LD_CHUNK_METERS = 20.0
 LD_POINT_OFFSETS = (0.0, 5.0, 10.0, 20.0, 30.0)
 OD_AGE_NORM_S = 3.0
+#: MetaDrive updates last_velocity at the physics step (0.1 s in this wrapper).
+OD_ACC_DT = 0.1
 EGO_LENGTH_NORM = 5.0
 EGO_WIDTH_NORM = 2.0
 
@@ -767,7 +769,7 @@ def _build_od(env: Any, ego: Any, scene_seed: int, dt: float) -> Dict[str, np.nd
         rel_h = _safe_float(getattr(obj, "heading_theta", theta) - theta)
         rel_h = _wrap_angle(rel_h)
         vx, vy = _rel_velocity(ego, obj) if isinstance(obj, BaseVehicle) else (0.0, 0.0)
-        acc_x, acc_y = _object_acceleration(ego, obj, dt)
+        acc_x, acc_y = _object_acceleration(ego, obj, OD_ACC_DT)
         type_id, static_flag = _type_id(obj)
         length = _safe_positive(getattr(obj, "LENGTH", getattr(obj, "length", 2.0)), 2.0)
         width = _safe_positive(getattr(obj, "WIDTH", getattr(obj, "width", 1.5)), 1.5)
@@ -863,7 +865,7 @@ def _build_ld(
                 except Exception:  # noqa: BLE001
                     pass
 
-            ld_ids[i] = _stable_hash(scene_seed, "ld", lane_index[0], lane_index[1], lane_id, chunk_s)
+            ld_ids[i] = _stable_hash(scene_seed, "ld", lane_index[0], lane_index[1], lane_id)
             ld_road_ids[i] = np.array([
                 _road_id(scene_seed, road_pair), lane_id,
             ], dtype=np.int64)
@@ -1173,12 +1175,22 @@ def _compensate_ld_point(row: np.ndarray, src_pose: np.ndarray, dst_pose: np.nda
     return out
 
 
+def _compensate_nav_xy(x: float, y: float, src_pose: np.ndarray, dst_pose: np.ndarray) -> Tuple[float, float]:
+    """Compensate a normalized Nav xy pair without mixing metres and /100 units.
+
+    Nav features are stored divided by 100 for scale; pose translation is in
+    metres.  Convert to metres for the SE(2) transform, then back.
+    """
+    mx, my = _transform_xy(float(x) * 100.0, float(y) * 100.0, src_pose, dst_pose)
+    return float(mx) / 100.0, float(my) / 100.0
+
+
 def _compensate_nav_road(block: np.ndarray, src_pose: np.ndarray, dst_pose: np.ndarray, dtheta: float) -> np.ndarray:
     out = np.array(block, dtype=np.float32, copy=True)
     for dx_i, dy_i in ((NAV_ROAD_INDEX["entry_dx"], NAV_ROAD_INDEX["entry_dy"]),
                        (NAV_ROAD_INDEX["mid_dx"], NAV_ROAD_INDEX["mid_dy"]),
                        (NAV_ROAD_INDEX["exit_dx"], NAV_ROAD_INDEX["exit_dy"])):
-        out[dx_i], out[dy_i] = _transform_xy(float(out[dx_i]), float(out[dy_i]), src_pose, dst_pose)
+        out[dx_i], out[dy_i] = _compensate_nav_xy(float(out[dx_i]), float(out[dy_i]), src_pose, dst_pose)
     out[NAV_ROAD_INDEX["entry_heading_rel"]] = float(
         _wrap_angle(float(out[NAV_ROAD_INDEX["entry_heading_rel"]]) + dtheta)
     )
@@ -1191,7 +1203,7 @@ def _compensate_nav_road(block: np.ndarray, src_pose: np.ndarray, dst_pose: np.n
 def _compensate_nav_global(nav_vec: np.ndarray, src_pose: np.ndarray, dst_pose: np.ndarray, dtheta: float) -> None:
     dx_i = NAV_GLOBAL_INDEX["dest_dx"]
     dy_i = NAV_GLOBAL_INDEX["dest_dy"]
-    nav_vec[dx_i], nav_vec[dy_i] = _transform_xy(float(nav_vec[dx_i]), float(nav_vec[dy_i]), src_pose, dst_pose)
+    nav_vec[dx_i], nav_vec[dy_i] = _compensate_nav_xy(float(nav_vec[dx_i]), float(nav_vec[dy_i]), src_pose, dst_pose)
     sin_i = NAV_GLOBAL_INDEX["dest_heading_sin"]
     cos_i = NAV_GLOBAL_INDEX["dest_heading_cos"]
     cos_new, sin_new = _rotate_xy(float(nav_vec[cos_i]), float(nav_vec[sin_i]), dtheta)

@@ -316,6 +316,23 @@ def test_history_compensates_geometry_into_current_ego_frame(env_and_obs):
         assert np.allclose(hist["ld"][t, j, :, 1], obs["ld"][j, :, 1])
         assert np.allclose(hist["ld_anchor"][t, j, 0], obs["ld_anchor"][j, 0] + 10.0)
 
+    # Nav pure translation: 10 m ahead must add 10/100 in normalized units,
+    # not 10 (the old 100x bug) or 1000.
+    for j in range(NAV_ROADS):
+        if obs["nav_road_mask"][j] <= 0.5:
+            continue
+        block = obs["nav"][j * NAV_ROAD_DIM:(j + 1) * NAV_ROAD_DIM]
+        got = hist["nav"][t, j * NAV_ROAD_DIM:(j + 1) * NAV_ROAD_DIM]
+        for dx_i, dy_i in ((NAV_ROAD_INDEX["entry_dx"], NAV_ROAD_INDEX["entry_dy"]),
+                           (NAV_ROAD_INDEX["mid_dx"], NAV_ROAD_INDEX["mid_dy"]),
+                           (NAV_ROAD_INDEX["exit_dx"], NAV_ROAD_INDEX["exit_dy"])):
+            assert np.allclose(got[dx_i], float(block[dx_i]) + 0.10)
+            assert np.allclose(got[dy_i], float(block[dy_i]))
+    assert np.allclose(hist["nav"][t, NAV_GLOBAL_INDEX["dest_dx"]],
+                       float(obs["nav"][NAV_GLOBAL_INDEX["dest_dx"]]) + 0.10)
+    assert np.allclose(hist["nav"][t, NAV_GLOBAL_INDEX["dest_dy"]],
+                       float(obs["nav"][NAV_GLOBAL_INDEX["dest_dy"]]))
+
     # Pure rotation by +90 degrees: (x, y) -> (-y, x).
     rot = stack_history([obs, obs], [np.array([0.0, 0.0, np.pi / 2.0]), np.zeros(3)])
     for j in range(OD_SLOTS):

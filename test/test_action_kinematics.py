@@ -128,3 +128,15 @@ def test_exact_tracker_accepts_points_and_speeds():
     assert points_only.speeds is None
     points_only.apply(env)
     assert np.isfinite(vehicle.velocity).all()
+
+
+def test_exact_tracker_sets_steering_from_path_curvature():
+    vehicle = _FakeVehicle()
+    env = _FakeEnv(vehicle)
+    traj = segment_trajectory(np.array([3.0, 0.5, 0.2, 6.0]), 6.0)
+    tracker = ExactTracker(dt=0.5, hz=10)
+    tracker.arm(env, trajectory=traj)
+    for _ in range(traj.n_points):
+        tracker.apply(env)
+    assert abs(float(vehicle.steering)) > 1e-6
+    assert -1.0 <= float(vehicle.steering) <= 1.0

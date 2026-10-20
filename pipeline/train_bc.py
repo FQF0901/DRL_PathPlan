@@ -107,6 +107,10 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "residual_dpsi",
     "comfortable",
     "intervened",
+    "feasible",
+    "label_pass",
+    "action_in_bounds",
+    "label_source",
 }
 
 REQUIRED_ROW_KEYS = (
@@ -124,7 +128,10 @@ RISK_NAMES = ("collision", "off_road", "wrong_route", "stuck", "comfort_violatio
 PLAN_KEYS = {"nll", "point", "heading", "velocity", "curvature", "accel"}
 
 #: Columns that must be available (hence required above) or can be defaulted.
-_DEFAULT_ONE_SCALARS = ("label_valid", "expert_plan_valid")
+_DEFAULT_ONE_SCALARS = (
+    "label_valid", "expert_plan_valid", "feasible", "label_pass",
+    "action_in_bounds", "label_source",
+)
 _DEFAULT_MINUS_ONE_SCALARS = ("comfortable",)
 _DEFAULT_PRIVILEGED = "privileged_expert_sample"
 _ALL_OPTIONAL_KEYS = (
@@ -139,6 +146,10 @@ _ALL_OPTIONAL_KEYS = (
     "residual_dpsi",
     "comfortable",
     "intervened",
+    "feasible",
+    "label_pass",
+    "action_in_bounds",
+    "label_source",
 )
 
 
@@ -177,8 +188,11 @@ class LossConfig:
     w_privileged: float = 1.0
     w_residual: float = 0.2
     w_intervened: float = 3.0
+    w_failed_expert: float = 0.2
     source_weight_expert: float = 1.0
     source_weight_other: float = 1.0
+    source_weight_replay: float = 1.0
+    source_weight_lift: float = 0.5
     residual_xy_thresh: float = 0.5
     residual_dpsi_thresh: float = 0.1
 
@@ -345,16 +359,32 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
 
     expert_plan_valid = np.asarray(data["expert_plan_valid"], dtype=np.float32)
     label_valid = np.asarray(data["label_valid"], dtype=np.float32)
-    w *= expert_plan_valid > 0.5
+    feasible = np.asarray(data["feasible"], dtype=np.float32)
+    label_pass = np.asarray(data["label_pass"], dtype=np.float32)
+    action_in_bounds = np.asarray(data["action_in_bounds"], dtype=np.float32)
+    # Do not train the plan on labels the canonical PSTL cannot execute.
+    w *= np.where(expert_plan_valid > 0.5, 1.0, float(cfg.w_failed_expert))
     w *= label_valid > 0.5
+    w *= feasible > 0.5
+    w *= label_pass > 0.5
+    w *= action_in_bounds > 0.5
 
     source = np.asarray(data["source"], dtype=np.float32)
     w *= np.where(
         source == 0.0, float(cfg.source_weight_expert), float(cfg.source_weight_other)
     )
+    label_source = np.asarray(data["label_source"], dtype=np.float32)
+    w *= np.where(
+        label_source >= 0.5,
+        float(cfg.source_weight_replay),
+        float(cfg.source_weight_lift),
+    )
 
     privileged = np.asarray(data["privileged_expert_sample"], dtype=np.float32) > 0.5
-    w *= np.where(privileged, float(cfg.w_privileged), 1.0)
+    # A constant multiplier over all rows cancels in `_weighted_mean`; the knob
+    # only has an effect when a mixed batch contains non-privileged rows.
+    if not bool(privileged.all()):
+        w *= np.where(privileged, float(cfg.w_privileged), 1.0)
 
     if "residual_xy_norm" in data:
         residual_xy = np.asarray(data["residual_xy_norm"], dtype=np.float32)
@@ -365,8 +395,10 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     residual_dpsi = np.abs(
         np.asarray(data["residual_dpsi"], dtype=np.float32)
     )
-    residual = (residual_xy > cfg.residual_xy_thresh) | (
-        residual_dpsi > cfg.residual_dpsi_thresh
+    measured = label_source >= 0.5
+    finite_residual = np.isfinite(residual_xy) & np.isfinite(residual_dpsi)
+    residual = measured & finite_residual & (
+        (residual_xy > cfg.residual_xy_thresh) | (residual_dpsi > cfg.residual_dpsi_thresh)
     )
     w *= np.where(residual, float(cfg.w_residual), 1.0)
 
@@ -873,8 +905,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--w-privileged", type=float, default=1.0)
     p.add_argument("--w-residual", type=float, default=0.2)
     p.add_argument("--w-intervened", type=float, default=3.0)
+    p.add_argument("--w-failed-expert", type=float, default=0.2)
     p.add_argument("--source-weight-expert", type=float, default=1.0)
     p.add_argument("--source-weight-other", type=float, default=1.0)
+    p.add_argument("--source-weight-replay", type=float, default=1.0)
+    p.add_argument("--source-weight-lift", type=float, default=0.5)
     p.add_argument("--residual-xy-thresh", type=float, default=0.5)
     p.add_argument("--residual-dpsi-thresh", type=float, default=0.1)
     return p
@@ -919,8 +954,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         w_privileged=args.w_privileged,
         w_residual=args.w_residual,
         w_intervened=args.w_intervened,
+        w_failed_expert=args.w_failed_expert,
         source_weight_expert=args.source_weight_expert,
         source_weight_other=args.source_weight_other,
+        source_weight_replay=args.source_weight_replay,
+        source_weight_lift=args.source_weight_lift,
         residual_xy_thresh=args.residual_xy_thresh,
         residual_dpsi_thresh=args.residual_dpsi_thresh,
     )

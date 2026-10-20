@@ -181,11 +181,12 @@ def test_targets_oob_value_risk_and_plan_weights(tmp_path):
     assert targets["risk"][6, 1] == 1.0 and targets["risk"][6, 4] == 0.0
     np.testing.assert_allclose(targets["cost"][[2, 4, 6]], [1.0, 2.0, 1.0])
 
-    # Plan weights: failed episodes and label_valid=0 are excluded, intervened
-    # is upweighted, residual audit disagreement is downweighted.
+    # Plan weights: invalid labels are excluded, failed expert episodes are
+    # downweighted, intervened rows are upweighted, and residual disagreement
+    # is downweighted.
     np.testing.assert_allclose(
         targets["plan_weight"],
-        np.array([1.0, 3.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        np.array([1.0, 3.0, 0.2, 0.0, 0.2, 0.2, 0.2, 0.2], dtype=np.float32),
         rtol=0.0,
         atol=1e-6,
     )
@@ -247,7 +248,7 @@ def test_losses_are_finite_and_differentiable(tmp_path):
 
 def test_zero_plan_weight_batch_keeps_value_risk_gradient(tmp_path):
     data = load_data([_fixture(tmp_path)])
-    cfg = LossConfig()
+    cfg = LossConfig(w_failed_expert=0.0)
     targets = build_targets(data, cfg)
     # Only failed-expert rows: plan terms must be zero, value/risk still flow.
     idx = np.array([4, 5, 6, 7])

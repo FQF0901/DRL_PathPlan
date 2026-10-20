@@ -831,6 +831,7 @@ def collect_episode(
 
         sampled_np = sampled[0].detach().cpu().numpy().astype(np.float64)
         v0 = float(ego.speed)
+        h0 = float(ego.heading_theta)
         resolved = resolve_action(sampled_np, v0)
         executed = np.asarray(resolved["executed_action"], dtype=np.float64)
         tr_exec = resolved["trajectory"]
@@ -949,9 +950,10 @@ def collect_episode(
         )
         policy_steps += 1
 
+        # Match the collector: segment-start ego state, executed action.
         prev_action = executed.astype(np.float64)
-        prev_speed = float(ego.speed)
-        prev_heading = float(ego.heading_theta)
+        prev_speed = v0
+        prev_heading = h0
 
         if terminated or truncated:
             termination = _termination_name(
