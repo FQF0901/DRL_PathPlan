@@ -20,6 +20,7 @@ FLOAT_KEYS = (
     "route_completion", "tracking_error_xy", "tracking_error_heading",
     "tracking_error_speed", "steer_saturation", "throttle_saturation",
     "max_curvature", "max_lateral_accel", "max_jerk",
+    "infeasible_count", "fallback_count", "postprocess_count",
 )
 
 

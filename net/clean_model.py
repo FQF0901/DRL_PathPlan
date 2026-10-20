@@ -309,7 +309,13 @@ class CleanPlanner(nn.Module):
     # ------------------------------------------------------------------
 
     def _query_attend(self, query: Tensor, tokens: Tensor, valid: Tensor,
-                      attn: nn.MultiheadAttention, norm: nn.LayerNorm) -> Tensor:
+                      attn: nn.MultiheadAttention, norm: nn.LayerNorm) -> Tuple[Tensor, Tensor]:
+        """Return (query context, per-entity attention weights).
+
+        The weights are exposed as *auxiliary* supervision only.  They are used
+        to teach the learned lane/OD query which environment entity it should
+        select; they are never fed back into the plan path.
+        """
         B, N, _ = tokens.shape
         q = query.view(1, 1, -1).expand(B, 1, -1)
         mask = ~(valid > 0.5)
@@ -317,9 +323,17 @@ class CleanPlanner(nn.Module):
         if bool(all_bad.any()):
             mask = mask.clone()
             mask[all_bad, -1] = False
-        out = attn(q, tokens, tokens, key_padding_mask=mask, need_weights=False)[0][:, 0]
-        out = norm(out + query)
-        return out * (~all_bad).to(out.dtype).unsqueeze(-1)
+        out, weights = attn(
+            q, tokens, tokens,
+            key_padding_mask=mask,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        out = norm(out[:, 0] + query)
+        out = out * (~all_bad).to(out.dtype).unsqueeze(-1)
+        # weights: [B, 1, N] -> [B, N]; zero invalid entities.
+        weights = weights[:, 0] * (valid > 0.5).to(weights.dtype)
+        return out, weights
 
     def forward(self, batch: Dict[str, Tensor] | None = None, **kwargs: Tensor) -> Dict[str, Tensor]:
         """Encode entities and plan; ``aux`` is supervision-only, never an input."""
@@ -350,10 +364,10 @@ class CleanPlanner(nn.Module):
         latent = self.spatial(tokens, src_key_padding_mask=~token_valid)
         ctx_ego = self.norm(latent[:, 0])
 
-        lane_ctx = self._query_attend(
+        lane_ctx, lane_query_weights = self._query_attend(
             self.q_lane, ld_t, ld_valid, self.lane_attn, self.lane_norm
         )
-        od_ctx = self._query_attend(
+        od_ctx, od_query_weights = self._query_attend(
             self.q_od, od_t, od_valid, self.od_attn, self.od_norm
         )
 
@@ -369,6 +383,9 @@ class CleanPlanner(nn.Module):
             "od_gap": self.od_gap_head(od_t).squeeze(-1),
             "od_ttc": self.od_ttc_head(od_t).squeeze(-1),
             "od_urgent": self.od_urgent_head(od_t).squeeze(-1),
+            # Query-selection supervision: current lane / urgent OD.  Aux only.
+            "lane_query_weights": lane_query_weights,
+            "od_query_weights": od_query_weights,
         }
 
         return {

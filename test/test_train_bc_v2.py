@@ -232,7 +232,7 @@ def test_losses_are_finite_and_differentiable(tmp_path):
     expected = {
         "total", "nll", "point", "heading", "velocity", "curvature", "accel",
         "value", "risk", "cost", "aux", "lane_role", "od_gap", "od_ttc",
-        "od_urgent",
+        "od_urgent", "lane_query", "od_query",
     }
     assert set(components) == expected
     for key, value in components.items():

@@ -164,6 +164,8 @@ class LossConfig:
     w_gap: float = 1.0
     w_ttc: float = 1.0
     w_urgent: float = 1.0
+    w_lane_query: float = 1.0
+    w_od_query: float = 0.5
 
     # targets / units
     gamma: float = 0.95
@@ -561,11 +563,35 @@ def compute_losses(
         ahead,
     )
 
+    # Query-selection supervision: teach q_lane to select the current lane
+    # (role 0) and q_od to select urgent/ahead objects.  These weights are not
+    # plan inputs; they are audit-only supervision of the learned queries.
+    lane_query_target = ((lane_role == 0) & lane_valid).float()
+    lane_query_loss = _masked_mean(
+        F.binary_cross_entropy(
+            aux["lane_query_weights"].clamp(1e-6, 1.0 - 1e-6),
+            lane_query_target,
+            reduction="none",
+        ),
+        lane_valid,
+    )
+    od_query_target = urgent_target
+    od_query_loss = _masked_mean(
+        F.binary_cross_entropy(
+            aux["od_query_weights"].clamp(1e-6, 1.0 - 1e-6),
+            od_query_target,
+            reduction="none",
+        ),
+        od_valid,
+    )
+
     aux_loss = (
         float(cfg.w_lane_role) * lane_role_loss
         + float(cfg.w_gap) * gap_loss
         + float(cfg.w_ttc) * ttc_loss
         + float(cfg.w_urgent) * urgent_loss
+        + float(cfg.w_lane_query) * lane_query_loss
+        + float(cfg.w_od_query) * od_query_loss
     )
 
     total = (
@@ -597,6 +623,8 @@ def compute_losses(
         "od_gap": gap_loss,
         "od_ttc": ttc_loss,
         "od_urgent": urgent_loss,
+        "lane_query": lane_query_loss,
+        "od_query": od_query_loss,
     }
     return total, components
 
@@ -836,6 +864,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--w-gap", type=float, default=1.0)
     p.add_argument("--w-ttc", type=float, default=1.0)
     p.add_argument("--w-urgent", type=float, default=1.0)
+    p.add_argument("--w-lane-query", type=float, default=1.0)
+    p.add_argument("--w-od-query", type=float, default=0.5)
     p.add_argument("--gamma", type=float, default=0.95)
     p.add_argument("--dt", type=float, default=0.5)
     p.add_argument("--ttc-cap", type=float, default=10.0)
@@ -880,6 +910,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         w_gap=args.w_gap,
         w_ttc=args.w_ttc,
         w_urgent=args.w_urgent,
+        w_lane_query=args.w_lane_query,
+        w_od_query=args.w_od_query,
         gamma=args.gamma,
         dt=args.dt,
         ttc_cap=args.ttc_cap,
