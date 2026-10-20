@@ -220,3 +220,46 @@ PPO 在 log-prob/GAE/buffer 修好前只保留为 wiring probe，**不计入 P3 
 7. **工程债**：YAML 真正加载并保存 resolved config；checkpoint 校验 schema/bounds/encoder version；抽 `dataset/schema.py`、`execution.py`、`checkpointing.py`；删除/标记 2D 旧路径。此步不应改变 P0 的语义。
 
 **在 1–3 完成并重跑之前，我不会用当前 Val500/50-scene/LQR/PPO 数字支撑 P1/P2；P4 继续不动。**
+
+## 2026-10-21 更新：P0 修复后的实测结果
+
+四个 P0 已落地并提交 `a6b2628`：
+
+- Nav 历史归一化坐标先乘 100 再补偿；补了 Nav pure-translation 测试（当前 `entry_dx=0.07425`、前进 7.425 m 后为 -2.3e-9）。
+- eval/PPO 统一使用段首 `v0/h0` 和 executed action；exact tracker 从 PSTL κ 合成 normalized steering。
+- 训练加载并消费 `feasible/label_pass/action_in_bounds/label_source`；infeasible 行降权而不是全删；lift/replay 分开权重；failed expert episode 用 0.2 权重。
+- 另修：LD stable ID 改为 road pair+lane_id（chunk_s 只作 anchor 特征）；OD acceleration 使用 physics 0.1 s；Val500/Test500 manifest 冻结（`docs/eval_split_manifest.json`）。
+
+### 有效 exact 结果
+
+2k canonical 数据重采：`datasets/bc_2k_s0..s3`，137,764 rows，expert success 70.6%，PSTL pass 95.6–96.1%。从零训练 BC/DAgger，50 val：
+
+| 模型 | success | collision | off-road | RC |
+|---|---:|---:|---:|---:|
+| BC 2k | 8% | 22% | 70% | 0.42 |
+| DAgger r1b | 44% | 24% | 32% | 0.733 |
+| DAgger r2 | 50% | 32% | 12% | 0.774 |
+| DAgger r3 + hard500 + safety weights | 58% | 12% | 16% | 0.844 |
+
+Val500 exact（冻结前 500 seeds，paired）：
+
+- legacy fixed：**65.0 / 18.2 / 12.0 / 0.854**
+- clean r3：**66.2 / 12.2 / 8.6 / 0.859**
+- paired diff：success **+1.2 pp**（CI −2.2..+4.6），collision **−6.0 pp**（−9.4..−2.6），off-road **−3.4 pp**（−6.0..−0.8）。
+
+**exact A/B 现在通过** success/no-worse 与安全指标；之前 clean 的 -4.4 pp 主要是 P0/数据污染，不是 clean 架构结论。
+
+### LQR 仍阻塞
+
+50 val LQR：
+
+- legacy fixed：**44% success / 8% collision / 26% off-road / RC 0.776**
+- clean r3：**34% / 2% / 12% / 52% timeout / RC 0.740**
+
+单场景诊断：LQR 下模型在低速状态持续预测低 `v_next`（约 2.4 m/s），控制器只是跟随；这是 **closed-loop speed/distribution trap**，不是简单 speed-gain 不够（提速试验 20 val 反而 offroad 40%）。在 LQR 闭环速度参考、LQR shadow DAgger 或可行的 speed floor 解决前，clean 不能作为完整 controller-realized P1 目标；exact 结果可以保留为 planner-only 证据。
+
+### 当前判断
+
+- P0-1/2/3/4 已修并重采/重训；exact A/B 有效且 clean 通过。
+- LQR controller-realized gate 仍未通过；Test500 未运行；PPO 仍是 contract canary；P4 未启动。
+- 因此不宣布完整 P1 通过，也不启动 P4。
