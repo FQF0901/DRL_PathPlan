@@ -119,7 +119,7 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 - No training/collection process is active; 20-minute monitor is running (`runs/monitor/tasks_20m.log`).
 - Data: `datasets/bc_v2_2k_s0..s3` (2k expert), `datasets/dagger_v2_2k_s0..s3` (round 1), `datasets/dagger_v2_r2_2k_s0..s3` (round 2), `datasets/dagger_v2_r3_hard500` (hard subset).
 - Best clean checkpoint: `runs/bc_v2_2k_q_dagger_r3` (Val500 59.6/15.8/16.6/0.827); round-2 `runs/bc_v2_2k_q_dagger_r2` is 58.8/16.8/18.2/0.819.
-- Legacy reference checkpoint for A/B: `runs/p1_weight_hi` (Val500 64.0/19.2/12.2/0.853).
+- Legacy reference checkpoint for A/B: `runs/p1_weight_hi` (Val500 64.0/19.2/12.2/0.853). It uses the old schema/model and is only reproducible with code at tag `pre-consolidation`; the canonical tree cannot load it.
 - 10k collection was stopped in its unsharded form: the parent process aggregated all episodes and exhausted RAM/swap. 2k is sharded and stable; final 10k needs shard-stream training or a disk-backed dataset.
 - Test500 has not been run; test data remains untouched until a P1/P2 gate passes.
 - Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
