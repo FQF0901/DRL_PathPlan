@@ -25,52 +25,51 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 - `pipeline/train_ppo.py`: PPO contract canary (bounded TruncatedNormal, stored sampled-vs-executed separation, per-episode GAE, truncation bootstrap, reward/cost separation).
 - `pipeline/eval.py`: clean exact/LQR closed-loop evaluator (`--controller exact|lqr`), fallback/v1 projection diagnostics.
 - `pipeline/distributions.py`, `pipeline/eval_metrics.py`, `pipeline/rollout.py`: bounded distribution, paired/bootstrap metrics, canonical plan helpers.
-- Tests: `81 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
+- Tests: `82 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
 
 ## Current evidence
 
-> **Gate warning (2026-10-21):** the clean/legacy Val500, 50-scene, LQR and PPO numbers below were produced before the confirmed P0 fixes: Nav history unit bug (100×), eval/PPO prev-state mismatch, exact steering=0, and PSTL feasibility labels not consumed by training. They are debugging evidence only; do not use them for a P1/P2/PPO gate until the P0 rerun is complete. See `docs/deepseekv4p1_argue.md`.
+**P0 rerun status:** Nav history units, eval/PPO decision-state parity, exact steering, LD stable-ID/OD acceleration units, and feasibility/label_source training weights were fixed and committed `a6b2628` (plus the `w_infeasible`/safety-weight refinement). The exact numbers below are from re-collected 2k data and the fixed evaluator. LQR remains controller-realized diagnostic only.
 
-### 2k expert data
+### 2k expert data (canonical re-collection)
 
-- 4 x 500 scene shards, 137,764 rows, 2,000 seeds.
-- Expert success 70.6%; collision/off-road/other close to the historical 2k set.
-- PSTL clean hard-gate pass 95.6–96.1%; the remaining rows are marked, not silently clipped.
+- `datasets/bc_2k_s0..s3`: 4 x 500 scenes, 137,764 rows, 2,000 seeds.
+- Expert success 70.6%; PSTL hard-gate pass 95.6–96.1%.
+- `expert_bc.npz` is the canonical filename; old `bc_v2_*` data is historical and not used.
 
-### Clean vs legacy exact (50 val smoke)
-
-| model | success | collision | off-road | RC |
-|---|---:|---:|---:|---:|
-| Clean 2k BC q2 | 8% | 14% | 80% | 0.46 |
-| Clean DAgger round-1 | 50% | 22% | 18% | 0.755 |
-| Clean DAgger round-2 | 64% | 12% | 12% | 0.831 |
-| Clean DAgger round-3 (hard500) | 64% | 8% | 18% | 0.834 |
-
-### Val500 exact (same first 500 val seeds, paired by scene)
+### 50-val exact after P0 fixes
 
 | model | success | collision | off-road | RC |
 |---|---:|---:|---:|---:|
-| Legacy (tag `pre-consolidation`) | 64.0% | 19.2% | 12.2% | 0.853 |
-| Clean round-2 | 58.8% | 16.8% | 18.2% | 0.819 |
-| Clean round-3 | 59.6% | 15.8% | 16.6% | 0.827 |
+| BC 2k (`runs/bc_2k`) | 8% | 22% | 70% | 0.42 |
+| DAgger r1 (`runs/bc_2k_dagger_r1b`) | 44% | 24% | 32% | 0.733 |
+| DAgger r2 (`runs/bc_2k_dagger_r2`) | 50% | 32% | 12% | 0.774 |
+| DAgger r3 hard500 + safety weights (`runs/bc_2k_dagger_r3`) | 58% | 12% | 16% | 0.844 |
 
-Paired bootstrap (clean round-3 − legacy):
+### Val500 exact (frozen first 500 val seeds; paired by scene)
 
-- success **−4.4 pp** (95% CI −8.6..−0.2)
-- collision **−3.4 pp** (CI −7.2..+0.2; not worse)
-- off-road **+4.4 pp** (CI +1.2..+7.8)
+| model | success | collision | off-road | RC |
+|---|---:|---:|---:|---:|
+| Legacy fixed evaluator (`runs/val500_legacy_p0fixed`) | 65.0% | 18.2% | 12.0% | 0.854 |
+| Clean r3 (`runs/val500_clean_r3_p0fixed`) | 66.2% | 12.2% | 8.6% | 0.859 |
 
-**A/B gate is not passed.** Clean has better collision but worse success and off-road. The clean path is **not promoted**; the legacy checkpoint remains the P1 reference until a later gate passes. The 50-scene numbers are smoke/regression evidence only.
+Paired bootstrap (clean r3 − legacy):
 
-### LQR controller-realized canary
+- success **+1.2 pp** (95% CI −2.2..+4.6)
+- collision **−6.0 pp** (CI −9.4..−2.6)
+- off-road **−3.4 pp** (CI −6.0..−0.8)
+- stuck +0.4 pp (CI 0.0..+1.0)
 
-Clean round-2, 50 val exact→LQR:
+**Exact A/B passes the success/no-worse and safety checks.** Clean is not yet promoted as the full P1 controller-realized target because the LQR canary still fails the gap gate.
 
-- 26% success / 4% collision / 18% off-road / 52% timeout;
-- tracking error xy 0.0276 m, heading 0.0146 rad, speed 0.296 m/s;
-- legacy LQR reference is roughly 55/10/15.
+### LQR controller-realized canary (50 val)
 
-The exact→LQR gap is unresolved. Do not present exact tracking as the final controller-realized result; likely causes are speed/profile tracking and curve/timeout behavior.
+| model | success | collision | off-road | timeout | RC |
+|---|---:|---:|---:|---:|---:|
+| Legacy fixed LQR (`runs/lqr50_legacy_p0fixed`) | 44% | 8% | 26% | — | 0.776 |
+| Clean r3 LQR (`runs/lqr50_clean_r3_p0fixed`) | 34% | 2% | 12% | 52% | 0.740 |
+
+Clean LQR has lower collision/off-road but **10 pp lower success and 52% timeout**; tracking xy 0.016 m, heading 0.008 rad, speed 0.210 m/s. The exact→LQR gap is still a blocker; do not present exact tracking as the final controller-realized result.
 
 ### PPO contract canary
 
@@ -119,11 +118,11 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 ## Current state
 
 - No training/collection process is active; 20-minute monitor is running (`runs/monitor/tasks_20m.log`).
-- Data: `datasets/bc_v2_2k_s0..s3` (2k expert), `datasets/dagger_v2_2k_s0..s3` (round 1), `datasets/dagger_v2_r2_2k_s0..s3` (round 2), `datasets/dagger_v2_r3_hard500` (hard subset).
-- Best clean checkpoint: `runs/bc_v2_2k_q_dagger_r3` (Val500 59.6/15.8/16.6/0.827); round-2 `runs/bc_v2_2k_q_dagger_r2` is 58.8/16.8/18.2/0.819.
-- Legacy reference checkpoint for A/B: `runs/p1_weight_hi` (Val500 64.0/19.2/12.2/0.853). It uses the old schema/model and is only reproducible with code at tag `pre-consolidation`; the canonical tree cannot load it.
+- Data: `datasets/bc_2k_s0..s3` (2k expert), `datasets/dagger_2k_r1_s0..s3`, `datasets/dagger_2k_r2_s0..s3`, `datasets/dagger_2k_r3_hard500`.
+- Best clean checkpoint: `runs/bc_2k_dagger_r3` (Val500 66.2/12.2/8.6/0.859).
+- Legacy reference checkpoint for exact A/B: `runs/p1_weight_hi` with fixed evaluator (`runs/val500_legacy_p0fixed`, 65.0/18.2/12.0/0.854). The checkpoint uses the old schema/model and requires code at tag `pre-consolidation`; the canonical tree cannot load it.
 - 10k collection was stopped in its unsharded form: the parent process aggregated all episodes and exhausted RAM/swap. 2k is sharded and stable; final 10k needs shard-stream training or a disk-backed dataset.
-- Test500 has not been run; test data remains untouched until a P1/P2 gate passes.
+- Val500/Test500 specs are frozen in `docs/eval_split_manifest.json` (`env/specs/scenarios_val500.json` / `scenarios_test500.json`). Test500 has not been run; it remains untouched until the LQR/P1 gate passes.
 - Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
 
 ## Reproduce (current machine)
@@ -134,31 +133,31 @@ tools/venv-python -m env.scenario.cli --n-train 10000 --n-val 1000 --slice 200 -
 
 # 2k expert data, sharded (avoid parent-process aggregation).
 tools/venv-python -m dataset.collect --specs env/specs/scenarios_train.json \
-  --out datasets/bc_v2_2k_s0 --offset 0 --limit 500 --workers 8 --max-steps 600
+  --out datasets/bc_2k_s0 --offset 0 --limit 500 --workers 8 --max-steps 600
 # repeat offsets 500/1000/1500, then concatenate via --data for training.
 
 # DAgger round 2 (student roll-in + measured expert replay).
 tools/venv-python -m dataset.collect_dagger \
-  --specs env/specs/scenarios_train.json --out datasets/dagger_v2_r2_2k_s0 \
-  --offset 0 --limit 500 --ckpt runs/bc_v2_2k_q_dagger/best.pt \
+  --specs env/specs/scenarios_train.json --out datasets/dagger_2k_r2_s0 \
+  --offset 0 --limit 500 --ckpt runs/bc_2k_dagger_r1b/best.pt \
   --workers 8 --max-steps 600 --expert-ratio 0.3 --shield-ttc 2.0 --round 2 --device cuda
 
 # Clean BC/DAgger training and closed-loop evaluation.
 tools/venv-python -m pipeline.train_bc \
-  --data datasets/dagger_v2_r2_2k_s0 datasets/dagger_v2_r2_2k_s1 \
-         datasets/dagger_v2_r2_2k_s2 datasets/dagger_v2_r2_2k_s3 \
-  --init runs/bc_v2_2k_q_dagger/best.pt --out runs/bc_v2_2k_q_dagger_r2 \
-  --epochs 15 --batch-size 256 --lr 1e-4 --device cuda
+  --data datasets/dagger_2k_r2_s0 datasets/dagger_2k_r2_s1 \
+         datasets/dagger_2k_r2_s2 datasets/dagger_2k_r2_s3 \
+  --init runs/bc_2k_dagger_r1b/best.pt --out runs/bc_2k_dagger_r2 \
+  --epochs 15 --batch-size 256 --lr 1e-4 --w-infeasible 0.2 --device cuda
 tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val.json \
-  --ckpt runs/bc_v2_2k_q_dagger_r2/best.pt --out runs/val500_clean \
+  --ckpt runs/bc_2k_dagger_r3/best.pt --out runs/val500_clean_r3_p0fixed \
   --limit 500 --max-steps 600 --controller exact --device cuda
 tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val_slice50.json \
-  --ckpt runs/bc_v2_2k_q_dagger_r2/best.pt --out runs/lqr50 \
+  --ckpt runs/bc_2k_dagger_r3/best.pt --out runs/lqr50_clean_r3_p0fixed \
   --limit 50 --max-steps 600 --controller lqr --device cuda
 
 # PPO contract canary.
 tools/venv-python -m pipeline.train_ppo \
-  --specs env/specs/scenarios_train_slice200.json --ckpt runs/bc_v2_2k_q_dagger_r2/best.pt \
+  --specs env/specs/scenarios_train_slice200.json --ckpt runs/bc_2k_dagger_r3/best.pt \
   --out runs/ppo_v2_canary --updates 1 --episodes 1 --max-steps 20 --device cpu
 ```
 

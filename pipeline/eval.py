@@ -199,6 +199,7 @@ def run_episode(
     controller: str = "exact",
     max_steps: int = 600,
     device: str = "cpu",
+    lqr_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one closed-loop episode with 0.5 s segment execution.
 
@@ -217,7 +218,11 @@ def run_episode(
         tracker: Any = ExactTracker(dt=DECISION_DT, hz=HZ)
     else:
         tracker = env.engine.add_policy(
-            ego.id, LqrTracker, ego, int(getattr(spec, "seed", 0))
+            ego.id,
+            LqrTracker,
+            ego,
+            int(getattr(spec, "seed", 0)),
+            **(lqr_kwargs or {}),
         )
 
     frames: List[Dict[str, Any]] = []
@@ -513,12 +518,28 @@ def main(argv=None) -> int:
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--controller", choices=("exact", "lqr"), default="exact")
+    parser.add_argument("--lqr-speed-gain", type=float, default=None)
+    parser.add_argument("--lqr-accel-scale", type=float, default=None)
+    parser.add_argument("--lqr-brake-scale", type=float, default=None)
+    parser.add_argument("--lqr-lookahead-time", type=float, default=None)
+    parser.add_argument("--lqr-lookahead-base", type=float, default=None)
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     args = parser.parse_args(argv)
 
     model = load_model(args.ckpt, args.device)
+    lqr_kwargs: Dict[str, Any] = {}
+    if args.lqr_speed_gain is not None:
+        lqr_kwargs["speed_gain"] = float(args.lqr_speed_gain)
+    if args.lqr_accel_scale is not None:
+        lqr_kwargs["accel_action_scale"] = float(args.lqr_accel_scale)
+    if args.lqr_brake_scale is not None:
+        lqr_kwargs["brake_action_scale"] = float(args.lqr_brake_scale)
+    if args.lqr_lookahead_time is not None:
+        lqr_kwargs["lookahead_time"] = float(args.lqr_lookahead_time)
+    if args.lqr_lookahead_base is not None:
+        lqr_kwargs["lookahead_base"] = float(args.lqr_lookahead_base)
     specs = load_specs(args.specs)[: int(args.limit)]
 
     rows: List[Dict[str, Any]] = []
@@ -532,6 +553,7 @@ def main(argv=None) -> int:
                 controller=args.controller,
                 max_steps=int(args.max_steps),
                 device=args.device,
+                lqr_kwargs=lqr_kwargs,
             )
         finally:
             env.close()
@@ -553,6 +575,7 @@ def main(argv=None) -> int:
             "max_steps": int(args.max_steps),
             "controller": args.controller,
             "device": str(args.device),
+            "lqr_kwargs": dict(lqr_kwargs),
             "decision_dt": DECISION_DT,
             "sim_dt": SIM_DT,
             "steps_per_policy": STEPS_PER_POLICY,

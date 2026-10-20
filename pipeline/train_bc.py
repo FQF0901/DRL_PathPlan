@@ -189,6 +189,9 @@ class LossConfig:
     w_residual: float = 0.2
     w_intervened: float = 3.0
     w_failed_expert: float = 0.2
+    w_infeasible: float = 0.2
+    brake_weight: float = 0.0
+    near_weight: float = 0.0
     source_weight_expert: float = 1.0
     source_weight_other: float = 1.0
     source_weight_replay: float = 1.0
@@ -365,8 +368,10 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     # Do not train the plan on labels the canonical PSTL cannot execute.
     w *= np.where(expert_plan_valid > 0.5, 1.0, float(cfg.w_failed_expert))
     w *= label_valid > 0.5
-    w *= feasible > 0.5
-    w *= label_pass > 0.5
+    # Keep a downweighted signal from PSTL-infeasible expert segments instead
+    # of deleting the hard/curve states entirely.  The evaluator still never
+    # executes an infeasible action; this is a training-data weight.
+    w *= np.where((feasible > 0.5) & (label_pass > 0.5), 1.0, float(cfg.w_infeasible))
     w *= action_in_bounds > 0.5
 
     source = np.asarray(data["source"], dtype=np.float32)
@@ -405,6 +410,23 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     if "intervened" in data:
         intervened = np.asarray(data["intervened"], dtype=np.float32) > 0.5
         w *= np.where(intervened, float(cfg.w_intervened), 1.0)
+
+    if cfg.brake_weight > 0.0 or cfg.near_weight > 0.0:
+        action = np.asarray(data["action"], dtype=np.float32)
+        ego = np.asarray(data["ego"], dtype=np.float32)
+        v0 = ego[:, -1, EGO_INDEX["speed"]]
+        brake = np.clip((v0 - action[:, 3]) / 1.0, 0.0, 2.0)
+        od = np.asarray(data["od"], dtype=np.float32)[:, -1]
+        od_valid = np.asarray(data["od_mask"], dtype=np.float32)[:, -1] > 0.5
+        dx = od[..., OD_INDEX["dx"]]
+        vx = od[..., OD_INDEX["vx_rel"]]
+        ttc = np.where(
+            od_valid & (dx > 0.0) & (vx < -0.1),
+            dx / np.maximum(-vx, 0.1),
+            1e6,
+        )
+        near = (ttc.min(axis=1) < 2.0).astype(np.float32)
+        w *= 1.0 + float(cfg.brake_weight) * brake + float(cfg.near_weight) * near
 
     return np.clip(w, 0.0, None).astype(np.float32)
 
@@ -906,6 +928,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--w-residual", type=float, default=0.2)
     p.add_argument("--w-intervened", type=float, default=3.0)
     p.add_argument("--w-failed-expert", type=float, default=0.2)
+    p.add_argument("--w-infeasible", type=float, default=0.2)
+    p.add_argument("--brake-weight", type=float, default=0.0)
+    p.add_argument("--near-weight", type=float, default=0.0)
     p.add_argument("--source-weight-expert", type=float, default=1.0)
     p.add_argument("--source-weight-other", type=float, default=1.0)
     p.add_argument("--source-weight-replay", type=float, default=1.0)
@@ -955,6 +980,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         w_residual=args.w_residual,
         w_intervened=args.w_intervened,
         w_failed_expert=args.w_failed_expert,
+        w_infeasible=args.w_infeasible,
+        brake_weight=args.brake_weight,
+        near_weight=args.near_weight,
         source_weight_expert=args.source_weight_expert,
         source_weight_other=args.source_weight_other,
         source_weight_replay=args.source_weight_replay,
