@@ -10,7 +10,7 @@ free -h | head -2
 echo "--- active tasks ---"
 ps -eo pid,etime,pcpu,pmem,cmd | grep -E 'dataset.collect|collect_dagger|pipeline.train_bc|pipeline.train_ppo|pipeline.eval|monitor_tasks' | grep -v grep || true
 echo "--- latest logs ---"
-for f in runs/logs/collect_v2_2k_shards.log runs/logs/collect_dagger_v2_2k.log runs/logs/train_bc_v2_2k_q_dagger_r2.log runs/monitor/tasks_20m.log; do
+for f in $(ls -t runs/logs/*.log runs/monitor/tasks_20m.log 2>/dev/null | head -3); do
   [ -f "$f" ] && { echo "## $f"; tail -5 "$f"; }
 done
 echo "--- latest metrics ---"
