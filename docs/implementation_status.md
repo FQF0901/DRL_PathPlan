@@ -50,7 +50,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 
 | model | success | collision | off-road | RC |
 |---|---:|---:|---:|---:|
-| Legacy ad-hoc fixed evaluator (`runs/val500_legacy_p0fixed`) | 65.0% | 18.2% | 12.0% | 0.854 |
+| Legacy ad-hoc evaluator (`runs/val500_legacy_p0fixed`) | 65.0% | 18.2% | 12.0% | 0.854 |
 | Clean r3 (`runs/val500_clean_r3_p0fixed`) | 66.2% | 12.2% | 8.6% | 0.859 |
 
 Paired bootstrap (clean r3 − legacy):

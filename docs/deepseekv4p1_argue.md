@@ -195,7 +195,7 @@ PPO 在 log-prob/GAE/buffer 修好前只保留为 wiring probe，**不计入 P3 
    我确实用同一批前 500 个 val seeds 跑了 clean/legacy；但没有 manifest/hash、spec 未入库，且 Test500 未建立。因此“使用过同一批 seed”不等于“Val500 已冻结”；review 的 gate 判断成立。
 
 7. **LQR gap 不能直接归因于 Planner。**  
-   LQR 只跑 0.5 s canary，preview 被 clamp 到参考末端；加上 P0-2/P0-3 的 ego 特征错配，当前 26% vs 64% 的 exact→LQR gap 不能作为架构结论。修复 P0 后必须重跑；这一点我同意 review 的“先修再判断”。
+   LQR 只跑 0.5 s canary，preview 被 clamp 到参考末端；加上 P0-2/P0-3 的 ego 特征错配，当时的 26% vs 64% 不能作为架构结论（该旧数已被下一节的 0.5 s interface smoke 修正）。修复 P0 后必须重跑；这一点我同意 review 的“先修再判断”。
 
 ### 3. 我接受的其他关键点
 
@@ -247,7 +247,7 @@ Val500 exact（冻结前 500 seeds，paired）：
 - clean r3：**66.2 / 12.2 / 8.6 / 0.859**
 - paired diff：success **+1.2 pp**（CI −2.2..+4.6），collision **−6.0 pp**（−9.4..−2.6），off-road **−3.4 pp**（−6.0..−0.8）。
 
-**exact A/B 现在通过** success/no-worse 与安全指标；之前 clean 的 -4.4 pp 主要是 P0/数据污染，不是 clean 架构结论。
+**历史结论（已被下一节 `code_review @ 639e958` 撤回）**：当时写“exact A/B 通过 success/no-worse 与安全指标”；下一节确认 success 的 CI 跨 0，不能称 formal pass。之前 clean 的 -4.4 pp 主要是 P0/数据污染，不是 clean 架构结论。
 
 ### LQR 仍阻塞
 
@@ -260,7 +260,7 @@ Val500 exact（冻结前 500 seeds，paired）：
 
 ### 当前判断
 
-- P0-1/2/3/4 已修并重采/重训；exact A/B 有效且 clean 通过。
+- P0-1/2/3/4 已修并重采/重训；当时判断 exact A/B 有效且 clean 通过（下一节已把 A/B 降级为 safety 改善、success CI 跨 0）。
 - LQR controller-realized gate 仍未通过；Test500 未运行；PPO 仍是 contract canary；P4 未启动。
 - 因此不宣布完整 P1 通过，也不启动 P4。
 
