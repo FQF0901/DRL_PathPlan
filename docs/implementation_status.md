@@ -25,60 +25,66 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 - `pipeline/train_ppo.py`: PPO contract canary (bounded TruncatedNormal, stored sampled-vs-executed separation, per-episode GAE, truncation bootstrap, reward/cost separation).
 - `pipeline/eval.py`: clean exact/LQR closed-loop evaluator (`--controller exact|lqr`), fallback/v1 projection diagnostics.
 - `pipeline/distributions.py`, `pipeline/eval_metrics.py`, `pipeline/rollout.py`: bounded distribution, paired/bootstrap metrics, canonical plan helpers.
-- Tests: `82 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
+- Tests: `95 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
 
 ## Current evidence
 
-**P0 rerun status (partial):** P0-1/P0-3 fixed; P0-2 only exact-requested/executed equivalence, LQR realized action + parity test still open; P0-4 columns loaded and infeasible downweighted, but segment-level/privileged/intervened semantics still open. P0-2/P0-4 are not closed. The exact numbers below are from re-collected 2k data and the fixed evaluator. The 0.5 s LQR canary is a current contract gate; the full 3 s / 6-point interface is not implemented, so the LQR numbers are not the final controller-realized score.
+**P0 status (partial):** P0-1/P0-3 are fixed and covered by tests; P0-2 now has shared `pipeline/execution.py` bookkeeping and measured `realized_action` in eval/PPO; unit parity tests pass, but the LQR canary/realized distribution is still open; P0-4 loads `done/shield/feasible/...`, weights failed expert only at the terminal segment and separates shield from replay, but multi-solution/privileged semantics remain open. The four P0s are not all "closed".
 
-### 2k expert data (canonical re-collection)
+### Canonical data layout
 
-- `datasets/bc_2k_s0..s3`: 4 x 500 scenes, 137,764 rows, 2,000 seeds.
-- Expert success 70.6%; PSTL hard-gate pass 95.6–96.1%.
-- `expert_bc.npz` is the canonical filename; old `bc_v2_*` data is historical and not used.
+`datasets/` now has exactly four logical datasets (the old versioned directories were moved to `/tmp/opencode/datasets_archive_20261022/`, not deleted):
 
-### 50-val exact after P0 fixes
+- `datasets/train_bc_2k/` — 137,787 rows, 2,000 scenes (4 shards)
+- `datasets/dagger_r1/` — 122,872 rows, 2,000 scenes
+- `datasets/dagger_r2/` — 133,559 rows, 2,000 scenes
+- `datasets/dagger_r3_hard500/` — 36,458 rows, 500 scenes
 
-| model | success | collision | off-road | RC |
-|---|---:|---:|---:|---:|
-| BC 2k (`runs/bc_2k`) | 8% | 22% | 70% | 0.42 |
-| DAgger r1 (`runs/bc_2k_dagger_r1b`) | 44% | 24% | 32% | 0.733 |
-| DAgger r2 (`runs/bc_2k_dagger_r2`) | 50% | 32% | 12% | 0.774 |
-| DAgger r3 hard500 + safety weights (`runs/bc_2k_dagger_r3`) | 58% | 12% | 16% | 0.844 |
+The canonical shards are hard-linked to the old payloads; the training loader accepts a directory of `*.npz` shards. Expert training success is **70.6%**; the expert itself is not a 100% oracle.
 
-### Val500 exact (same first 500 val seeds; paired by scene; manifest not yet enforced)
+### Expert ceiling on Val500
 
-| model | success | collision | off-road | RC |
-|---|---:|---:|---:|---:|
-| Legacy ad-hoc evaluator (`runs/val500_legacy_p0fixed`) | 65.0% | 18.2% | 12.0% | 0.854 |
-| Clean r3 (`runs/val500_clean_r3_p0fixed`) | 66.2% | 12.2% | 8.6% | 0.859 |
+I collected the expert on the 500 frozen validation seeds:
 
-Paired bootstrap (clean r3 − legacy):
+- expert success **73.2%**, collision **8.7%**, off-road **7.5%**, timeout **10.6%**, stuck 0%.
 
-- success **+1.2 pp** (95% CI −2.2..+4.6)
-- collision **−6.0 pp** (CI −9.4..−2.6)
-- off-road **−3.4 pp** (CI −6.0..−0.8)
-- stuck +0.4 pp (CI 0.0..+1.0)
+This is an upper bound for imitation under the current Expert. The clean model cannot be expected to reach 100% on this validation set without a stronger expert or RL that exceeds it. That is a root-cause finding, not a tuning excuse.
 
-**This is a descriptive, not a formal A/B pass.** Collision/off-road improvements are significant, but success +1.2 pp has a 95% CI of −2.2..+4.6, so success non-inferiority is not established. The legacy metrics artifact has `config: null` and no commit/patch provenance; the legacy harness is asymmetric and cannot prove the same evaluator code. Do not promote clean or call this an A/B gate on the strength of this table.
+### Val500 exact
 
-### LQR 0.5 s canary (50 val; contract gate; not final 3 s score)
+| model | success | collision | off-road | stuck | RC |
+|---|---:|---:|---:|---:|---:|
+| Legacy ad-hoc | 65.0% | 18.2% | 12.0% | 0.0% | 0.854 |
+| Clean r3 (`runs/val500_clean_r3_p0fixed`) | 66.2% | 12.2% | 8.6% | 0.4% | 0.859 |
+| Clean r3b (`runs/val500_clean_r3b_p0fixed`) | **67.6%** | 15.6% | **7.4%** | 4.6% | 0.857 |
+
+Paired r3b − legacy: success **+2.6 pp** (95% CI −1.2..+5.8), collision −2.6 pp (CI −6.0..+0.6), off-road **−4.6 pp** (CI −7.0..−2.2), stuck **+4.6 pp** (CI +2.8..+6.4). Success and collision are not formally significant; stuck is worse. **This is not a gate pass and r3b is not promoted.** r3 remains the safer checkpoint; r3b has higher success but worse collision/stuck.
+
+r4 (DAgger from r3) was **62% / 16% / 12% / 10% on 50 val**; r5 (DAgger from r3b) was **66% / 8% / 14% / 12% on 50 val**, but on Val500 only **64.8% / 13.8% / 11.8%** (stuck 5.0). Neither is promoted.
+
+### LQR canary (50 val; contract canary, not final 3 s)
 
 | model | success | collision | off-road | timeout | RC |
 |---|---:|---:|---:|---:|---:|
-| Legacy ad-hoc LQR (`runs/lqr50_legacy_p0fixed`) | 44% | 8% | 26% | — | 0.776 |
-| Clean r3 LQR (`runs/lqr50_clean_r3_p0fixed`) | 34% | 2% | 12% | 52% | 0.740 |
+| Legacy ad-hoc | 44% | 8% | 26% | — | 0.776 |
+| Clean r3 | 34% | 2% | 12% | 52% | 0.740 |
+| Clean r3b | 48% | 6% | 10% | 36% | 0.797 |
 
-These numbers are not comparable to the exact table; they are a **0.5 s canary gate**, not the final 3 s controller-realized score. `pipeline/eval.py` executes only the first 0.5 s segment (5 x 0.1 s); `docs/arch_lock.md` §6.3 requires a 6-point, 0.5–3.0 s trajectory and §6.4 says LQR must receive 2–3 s for preview. The current run therefore cannot support a full-closed-loop claim, but it still must report the contract canary metrics: tracking error, trackability, saturation, and Exact-success/LQR-failure ratio on fixed seeds. Current clean r3: success 34%, collision 2%, off-road 12%, timeout 52%, RC 0.740; tracking xy 0.016 m, heading 0.008 rad, speed 0.210 m/s, steer saturation 0.0007, throttle saturation 0.0. This is **not a pass** and must not be replaced by a NaN/crash-only smoke. A one-scene low-`v_next` observation is a hypothesis, not a root cause; speed-gain/ref-scale probes were multi-parameter and are not evidence of a single cause. The 3 s / 6-point interface becomes the focus after the ego-conditioned latent WM and imagined rollout.
+r3b tracking: xy 0.024 m, heading 0.009 rad, speed 0.247 m/s; steer saturation 0.0034, throttle saturation 0.0. On the same 50 seeds, exact r3b succeeds on 34 and LQR fails on 11 of those (**32.4% Exact-success→LQR-failure**); this is a contract canary metric, not a final 3 s score. The 0.5 s canary is still a gate and is **not closed**; the 3 s / 6-point interface is not implemented. The tiny-negative-speed LQR crash found during this run was a numerical bug, now clamped/fallback; it was not a planner failure.
 
 ### PPO contract canary
 
-`pipeline/train_ppo.py` 1-update CPU canary (`runs/ppo_v2_canary`):
+`runs/ppo_v2_canary/contract.json` is still 4 transitions, 25% mask, and a pre-P0 `bc_v2` checkpoint. It is wiring evidence only; not P3 and not a performance claim.
 
-- boundary_rate 0.0; logprob recompute diff 0.0; ratio-at-old 1.0;
-- mask/postprocess 25% (one infeasible transition);
-- config still points at pre-P0 `runs/bc_v2_2k_q_dagger_r3/best.pt` and only 4 transitions;
-- contract only, not a performance or P3 gate claim.
+### Test500
+
+`config/splits/val500.json` and `test500.json` now carry seeds/SHA; `scenarios_test500.json` has `split="test"`; `pipeline/eval.py --split-manifest ... --split test` verifies it. Test500 has **not** been run; no conclusions.
+
+### Cleanup
+
+- `datasets/`: four logical dirs, 2.1 GiB; old versioned dirs are archived outside the project.
+- `runs/`: 59 MiB of current lineage/evidence; old run dirs are archived outside the project. `runs/logs` and `runs/monitor` are retained.
+- Tests: **95 passed, 1 skipped**.
 
 ## Design decisions
 
@@ -114,16 +120,16 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 1. **`q_lane` was near-uniform**: current lane role0 received 0.011 attention while a lat=-7 m lane got 0.60; the car drifted off-road even on straight scenes. Added query-selection auxiliary supervision (current lane / urgent OD attention targets). This is auxiliary only; current lane/TTC are not plan inputs.
 2. **BC-to-closed-loop distribution shift**: on the current re-collected 2k data, BC 2k was 8% success / 70% off-road on 50 val; DAgger r1b/r2/r3 were 44%/50%/58% success. The historical “50% then 64%” came from the old data/evaluator and is not the current r3 number. This remains the dominant P2 issue.
 3. **DAgger lift bias**: old kinematic bicycle labels had +0.53 m dx / +1.12 m/s v_next bias and censored braking; the canonical collector stores measured expert replay plus lift/residual/source validity.
-4. **LQR canary gap**: clean LQR 34% / 52% timeout vs exact 66.2% on the current 50-val slice. The evaluator only executes the first 0.5 s (5 points), so this is a canary gate result, not the final 3 s controller-realized score. Report tracking/trackability/saturation and fixed-seed Exact-vs-LQR failures now; the full 3 s/6-point interface is the focus after the ego-conditioned latent WM/imagined rollout. Do not replace the canary with a NaN/crash-only check.
+4. **LQR canary gap**: clean r3 34% / 52% timeout and r3b 48% / 36% timeout on the 50-val canary vs exact 66.2/67.6%. The evaluator only executes the first 0.5 s (5 points), so this is a canary gate result, not the final 3 s controller-realized score. Report tracking/trackability/saturation and fixed-seed Exact-vs-LQR failures now; the full 3 s/6-point interface is the focus after the ego-conditioned latent WM/imagined rollout. Do not replace the canary with a NaN/crash-only check.
 
 ## Current state
 
 - No training/collection process is active; 20-minute monitor is running (`runs/monitor/tasks_20m.log`).
-- Data: `datasets/bc_2k_s0..s3` (2k expert), `datasets/dagger_2k_r1_s0..s3`, `datasets/dagger_2k_r2_s0..s3`, `datasets/dagger_2k_r3_hard500`.
-- Best clean checkpoint: `runs/bc_2k_dagger_r3` (Val500 66.2/12.2/8.6/0.859); `best.pt` is still selected by open-loop validation loss (r3 epoch 2/15), not by a closed-loop gate.
+- Data: four canonical dirs only: `datasets/train_bc_2k`, `datasets/dagger_r1`, `datasets/dagger_r2`, `datasets/dagger_r3_hard500`.
+- Best clean checkpoints: `runs/bc_2k_dagger_r3b` (exact 67.6/15.6/7.4, stuck 4.6; 0.5 s LQR 48/6/10/36) and `runs/bc_2k_dagger_r3` (exact 66.2/12.2/8.6, stuck 0.4; LQR 34/2/12/52). Neither is promoted: `best.pt` is still selected by open-loop validation loss (r3b epoch 4/15), not by a closed-loop gate. Safety-prefer r3; success-prefer r3b, but the paired differences are not gate-significant.
 - Legacy reference checkpoint (ad-hoc, not a formal A/B): `runs/p1_weight_hi` with (`runs/val500_legacy_p0fixed`, 65.0/18.2/12.0/0.854). The checkpoint uses the old schema/model and requires code at tag `pre-consolidation`; the canonical tree cannot load it, and the metrics artifact has no config/commit provenance.
 - 10k collection was stopped in its unsharded form: the parent process aggregated all episodes and exhausted RAM/swap. 2k is sharded and stable; final 10k needs shard-stream training or a disk-backed dataset.
-- `env/specs/scenarios_val500.json` exists, but the current manifest lives at `docs/eval_split_manifest.json` and is not enforced; `scenarios_test500.json` still has `split="val"` and is not a valid test split. Test500 has not been run. The manifest/generator will move to `config/splits/` + `dataset/` and be checked by the evaluator before any test conclusion.
+- Val/Test split is now machine-readable: `config/splits/val500.json` and `config/splits/test500.json`; `scenarios_test500.json` has `split="test"`; `dataset/freeze_splits.py` regenerates them; `pipeline/eval.py --split-manifest ... --split test` verifies seeds/SHA. Test500 has **not** been run.
 - Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
 
 ## Reproduce (current machine)
@@ -132,28 +138,27 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 # Environment already created; use the glvnd wrapper.
 tools/venv-python -m env.scenario.cli --n-train 10000 --n-val 1000 --slice 200 --workers 4 --no-validate
 
-# 2k expert data, sharded (avoid parent-process aggregation).
+# Expert/DAgger shards are collected with --out <canonical>/shard_XXXX.npz;
+# the loader accepts a directory of *.npz shards.
 tools/venv-python -m dataset.collect --specs env/specs/scenarios_train.json \
-  --out datasets/bc_2k_s0 --offset 0 --limit 500 --workers 8 --max-steps 600
-# repeat offsets 500/1000/1500, then concatenate via --data for training.
-
-# DAgger round 2 (student roll-in + measured expert replay).
+  --out datasets/train_bc_2k --offset 0 --limit 500 --workers 8 --max-steps 600
 tools/venv-python -m dataset.collect_dagger \
-  --specs env/specs/scenarios_train.json --out datasets/dagger_2k_r2_s0 \
+  --specs env/specs/scenarios_train.json --out datasets/dagger_r2 \
   --offset 0 --limit 500 --ckpt runs/bc_2k_dagger_r1b/best.pt \
   --workers 8 --max-steps 600 --expert-ratio 0.3 --shield-ttc 2.0 --round 2 --device cuda
 
-# Clean BC/DAgger training and closed-loop evaluation.
+# Train/evaluate only through the frozen manifest.
 tools/venv-python -m pipeline.train_bc \
-  --data datasets/dagger_2k_r2_s0 datasets/dagger_2k_r2_s1 \
-         datasets/dagger_2k_r2_s2 datasets/dagger_2k_r2_s3 \
-  --init runs/bc_2k_dagger_r1b/best.pt --out runs/bc_2k_dagger_r2 \
-  --epochs 15 --batch-size 256 --lr 1e-4 --w-infeasible 0.2 --device cuda
-tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val.json \
-  --ckpt runs/bc_2k_dagger_r3/best.pt --out runs/val500_clean_r3_p0fixed \
+  --data datasets/dagger_r2 --init runs/bc_2k_dagger_r1b/best.pt \
+  --out runs/bc_2k_dagger_r2 --epochs 15 --batch-size 256 --lr 1e-4 \
+  --w-infeasible 0.2 --w-shield 3 --device cuda
+tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val500.json \
+  --split-manifest config/splits/val500.json --split val --strict-checkpoint \
+  --ckpt runs/bc_2k_dagger_r3b/best.pt --out runs/val500_clean_r3b_p0fixed \
   --limit 500 --max-steps 600 --controller exact --device cuda
 tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val500.json \
-  --ckpt runs/bc_2k_dagger_r3/best.pt --out runs/lqr50_clean_r3_p0fixed \
+  --split-manifest config/splits/val500.json --split val --strict-checkpoint \
+  --ckpt runs/bc_2k_dagger_r3b/best.pt --out runs/lqr50_clean_r3b_canary \
   --limit 50 --max-steps 600 --controller lqr --device cuda
 
 # PPO contract canary.
@@ -164,12 +169,12 @@ tools/venv-python -m pipeline.train_ppo \
 
 ## Known gaps
 
-- Exact success is 66.2%; the +1.2 pp vs the ad-hoc legacy artifact is not a formal non-inferiority result (CI crosses 0) and the legacy provenance is asymmetric. Do not promote on this table alone.
-- 0.5 s LQR canary is a current contract gate and is **not passing/closed** (clean 34% success, 52% timeout); it is not the final 3 s controller-realized score. Report tracking/trackability/saturation and Exact→LQR failure ratio now; the full 3 s/6-point interface follows after WM/imagined rollout. Do not tune only for 0.5 s success and do not replace the canary with a NaN/crash-only check.
+- Val500 exact is **not a formal pass**: r3b success +2.6 pp vs legacy (95% CI −1.2..+5.8), collision −2.6 (CI −6.0..+0.6), off-road −4.6 (CI −7.0..−2.2), stuck **+4.6** (CI +2.8..+6.4). r3 is safer, r3b has higher success; do not promote either on this table.
+- **Expert ceiling is 73.2% success on Val500** (8.7 collision, 7.5 off-road, 10.6 timeout). The clean r3b is 67.6%; 100% is not attainable on this validation set with the current expert/imitation pipeline. Need a stronger expert or RL/curriculum that exceeds it, not just more epochs.
+- 0.5 s LQR canary is a current contract gate and is **not passing/closed**: r3b 48% success / 36% timeout; r3 34% / 52%. It is not the final 3 s controller-realized score. Report tracking/trackability/saturation and Exact→LQR failure ratio; the full 3 s/6-point interface follows after WM/imagined rollout.
 - 10k/500/500 + Test500 final scale and shard-stream loader are not implemented; no Test500 conclusions.
-- `datasets/` has 40 top-level versioned directories (~4.6 GiB); canonical migration to four logical datasets (`train_bc_2k`, `dagger_r1`, `dagger_r2`, `dagger_r3_hard500`) is pending. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
-- Evidence gaps: exact steering test only checks nonzero/bounded; `_plan_weights` residual diagnostic uses the old mask; `test_train_bc` fixture lacks feasible/label_pass/action_in_bounds/label_source; `OD_ACC_DT=0.1` is hardcoded; LD stable ID has no cross-chunk test or 1/2/4/6-frame ablation.
-- Failure-prioritized DAgger on actual train-scene failures is still needed; round 3 used a hard-geometry bucket.
+- Dataset cleanup is done: four canonical dirs, 2.1 GiB; old dirs archived outside the project. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
+- P0-4 multi-solution/privileged semantics are still open; DAgger failure-prioritized collection beyond the current r4/r5 experiments is needed. `train_bc._plan_weights` diagnostics and the 1/2/4/6-frame LD ablation still need dedicated regression coverage.
 - P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.
 - Comfort violation rate is 100% in current evals under the strict comfort bounds; it is a diagnostic, not yet a training gate.

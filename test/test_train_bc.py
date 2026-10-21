@@ -319,3 +319,13 @@ def test_one_epoch_smoke(tmp_path):
     assert metrics["history"][0]["val_loss"] is not None
     assert len(metrics["history"][0]["eval_mae_physical"]) == 4
     assert metrics["best"]["split"] == "val"
+
+
+def test_canonical_shard_directory_loader(tmp_path):
+    source = _fixture(tmp_path)
+    canonical = tmp_path / "train_bc_2k"
+    canonical.mkdir()
+    (canonical / "shard_0000.npz").write_bytes((source / "expert_bc.npz").read_bytes())
+    data = load_data([canonical])
+    assert len(data["action"]) == 8
+    assert len(set(data["scene_seed"].tolist())) == 3

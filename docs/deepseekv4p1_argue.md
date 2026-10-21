@@ -440,3 +440,57 @@ datasets/dagger_r3_hard500/shard_0000.npz
 - **本轮不做代码语义修改**；先把 contract/状态/证据口径修齐，再按 execution.py → checkpointing.py/gate.py → LQR canary 指标 → DAgger 的顺序推进。
 
 **结论：** 接受 review 的“P1/P2 未过、Test500/checkpoint/PPO/short-path/data semantics 仍需修”；撤回“exact A/B passes”；接受“0.5 s LQR canary 仍是合同 gate”，只把 3 s/6 点完整口径放到 WM/rollout 后。当前最重要的是把验证集和数据目录冻结成唯一口径，补齐 canary 指标和 P0-2/P0-4 证据，再把 66.2% 的失败场景变成下一轮 DAgger 的目标。
+
+---
+
+## 2026-10-22 — bugfix 落地、专家上限与实测结果
+
+本轮按“先修正确性，再按合同 gate 推进”执行，代码提交 `a639959`。没有修改 `arch_lock.md`。
+
+### 已落地
+
+- `pipeline/execution.py`：统一 segment-start `prev_speed/prev_heading`、measured/realized 4D action、`segment_dt`；eval/PPO 使用 realized action，PPO truncation 使用实际执行时间。
+- `pipeline/checkpointing.py`：checkpoint schema/action bounds/decision 校验；eval `--strict-checkpoint` 会拒绝不匹配的 checkpoint。
+- PSTL short-path：`<0.25 m` 且运动/转向时仍检查 κ/a_lat，旧的 `[0.24,0,0.8,0.5]` 现在 reject。
+- OD acceleration：从 `physics_world_step_size × decision_repeat` 推导，保留 0.1 s fallback，并加测试。
+- train_bc：failed expert 只降权 terminal segment；`shield` 与 replay 分开；residual 诊断使用 measured/finite mask；fixture 覆盖 feasible/label_pass/action_in_bounds/label_source；canonical shard loader。
+- Val/Test：迁移到 `config/splits/val500.json` / `test500.json`；Test spec 写 `split="test"`；evaluator 校验 seed/SHA；删除 docs 下的 manifest 和 tools 生成器。
+- 数据/运行清理：`datasets/` 只保留 `train_bc_2k/`、`dagger_r1/`、`dagger_r2/`、`dagger_r3_hard500/`；其他目录移到 `/tmp/opencode/datasets_archive_20261022/`（未删除）。`runs/` 只保留当前 lineage/evidence（59 MiB），旧目录移到 `/tmp/opencode/runs_archive_20261022/`。
+- Tests：95 passed, 1 skipped。
+
+### 实测：先看专家上限
+
+在 500 个冻结 val seed 上采集当前 Expert：
+
+- success **73.2%**, collision **8.7%**, off-road **7.5%**, timeout **10.6%**, stuck 0%。
+
+因此“用当前 Expert 示范把 Val500 做到 100%”在数据上是不可能的；clean 的当前上限接近 Expert，而不是 100%。这是必须报告的结构性 finding，不能用更多 epoch 或调参掩盖。
+
+### exact Val500
+
+| model | success | collision | off-road | stuck | RC |
+|---|---:|---:|---:|---:|---:|
+| legacy ad-hoc | 65.0% | 18.2% | 12.0% | 0% | 0.854 |
+| clean r3 | 66.2% | 12.2% | 8.6% | 0.4% | 0.859 |
+| clean r3b | **67.6%** | 15.6% | **7.4%** | 4.6% | 0.857 |
+
+r3b − legacy：success +2.6 pp（95% CI −1.2..+5.8），collision −2.6（−6.0..+0.6），off-road −4.6（−7.0..−2.2），stuck **+4.6**（+2.8..+6.4）。success/collision 不显著，stuck 显著更差；**不是 gate pass**。r3 更安全，r3b 更高 success，两者都不 promotion。
+
+r4 / r5 也未超过：
+- r4: 50 val 62/16/12/10；
+- r5: 50 val 66/8/14/12，但 Val500 只有 64.8/13.8/11.8，stuck 5.0。
+
+### LQR 0.5 s canary
+
+- r3b: 48% success / 6% collision / 10% off-road / 36% timeout / RC 0.797；tracking xy 0.024 m、heading 0.009 rad、speed 0.247 m/s。
+- r3: 34% / 2% / 12% / 52%。
+- 同一 50 seeds：exact r3b 成功 34 个，其中 **11 个 LQR 失败（32.4%）**。
+- 0.5 s canary 仍未闭合；它不是最终 3 s controller-realized 成绩，但按合同必须报告，不能以 NaN/crash-only 替代。
+- 本轮还发现并修复一个 LQR 数值 bug：时间律速度出现 −1.2e-9 量级负值导致 `set_reference` 抛错；现在对微小负值 clamp，大负值 fallback，而不是让评测崩掉。
+
+### 结论
+
+- P0-1/P0-3 已修；P0-2/P0-4 仍是 partial，但共享执行/权重语义已明显收敛。
+- P1/P2 仍未通过：exact success 不显著、stuck 退化；LQR canary 未闭合；Test500 未运行。
+- Expert 上限 73.2%，100% 目标在当前数据/专家下不可实现；下一步应优先 **强 expert / RL / 课程与 failure bucket**，而不是继续在 67% 附近堆 epoch。
+- P4 WM 未启动；继续遵守 arch_lock §13/§20。
