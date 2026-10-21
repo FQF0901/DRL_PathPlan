@@ -50,6 +50,9 @@ from net.action_space import (
     feasible_v1_interval,
 )
 from net.model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
+from dataset.splits import verify_split_manifest
+from pipeline.checkpointing import load_model_from_checkpoint
+from pipeline.execution import relative_action
 from pipeline.eval_metrics import summarize_rows
 
 DECISION_DT = 0.5
@@ -87,12 +90,11 @@ def _config_int(config: Any, key: str, default: int) -> int:
         return int(default)
 
 
-def load_model(ckpt: Optional[str], device: str = "cpu") -> StructuredPlanner:
-    """Load ``StructuredPlanner`` from ``ckpt``; random init only for smoke tests.
+def load_model(ckpt: Optional[str], device: str = "cpu", *, strict: bool = False) -> StructuredPlanner:
+    """Load a checkpoint, validating schema/bounds when metadata is present.
 
-    Checkpoints are expected to be ``{"model": state_dict, "config": {...}}``
-    with optional ``hidden`` / ``heads`` / ``spatial_layers`` keys.  A bare
-    state dict is also accepted with default architecture values.
+    ``strict=True`` rejects legacy/incompatible metadata; the default keeps a
+    warning-only path for old smoke tests. Gate runs must use strict mode.
     """
     if ckpt is None:
         print(
@@ -101,31 +103,17 @@ def load_model(ckpt: Optional[str], device: str = "cpu") -> StructuredPlanner:
             flush=True,
         )
         model = StructuredPlanner()
-        config = {"hidden": H, "heads": HEADS, "spatial_layers": SPATIAL_LAYERS}
-    else:
-        payload = torch.load(ckpt, map_location="cpu", weights_only=False)
-        if isinstance(payload, dict) and "model" in payload:
-            state = payload["model"]
-            config = payload.get("config", {}) or {}
-        else:
-            state = payload
-            config = {}
-        model = StructuredPlanner(
-            hidden=_config_int(config, "hidden", H),
-            heads=_config_int(config, "heads", HEADS),
-            spatial_layers=_config_int(config, "spatial_layers", SPATIAL_LAYERS),
-        )
-        model.load_state_dict(state)
-        config = {
-            "hidden": int(model.hidden),
-            "heads": int(model.heads),
-            "spatial_layers": _config_int(config, "spatial_layers", SPATIAL_LAYERS),
+        model.eval_config = {
+            "hidden": H,
+            "heads": HEADS,
+            "spatial_layers": SPATIAL_LAYERS,
         }
-    # Keep the effective architecture available to main() for metrics.json.
-    model.eval_config = dict(config)
+    else:
+        model = load_model_from_checkpoint(ckpt, device, strict=strict)
+        for warning in getattr(model, "checkpoint_warnings", []):
+            print(f"[eval] checkpoint warning: {warning}", flush=True)
     model.to(device).eval()
     return model
-
 
 def _batch_from_history(hist: Dict[str, Any], device: str = "cpu") -> Dict[str, torch.Tensor]:
     """Batch-first float32 tensors for one history window."""
@@ -282,6 +270,7 @@ def run_episode(
 
         v0 = float(ego.speed)
         h0 = float(ego.heading_theta)
+        p0 = np.asarray(ego.position[:2], dtype=np.float64).copy()
         requested_action = CLEAN_BOUNDS.denormalize(a_norm, clip=True)
         if first_requested_action is None:
             first_requested_action = requested_action.copy()
@@ -328,6 +317,20 @@ def run_episode(
                 tr_exec = _trajectory(executed_action, v0)
                 fallback = True
 
+        # A velocity-profile trajectory must never reach LQR with a negative
+        # speed sample; old action gates could accept such a numerical corner.
+        speeds = np.asarray(getattr(tr_exec, "speeds", []), dtype=np.float64).reshape(-1)
+        if (
+            tr_exec is None
+            or speeds.size == 0
+            or not np.all(np.isfinite(speeds))
+            or float(speeds.min()) < -1e-6
+        ):
+            fallback_count += 1
+            fallback = True
+            executed_action = safe_brake_action(v0)
+            tr_exec = _trajectory(executed_action, v0)
+            speeds = np.asarray(tr_exec.speeds, dtype=np.float64)
         _add_codes(executed_code_counts, tr_exec.codes)
         policy_steps += 1
 
@@ -342,8 +345,19 @@ def run_episode(
         if controller == "exact":
             tracker.arm(env, trajectory=tr_exec)
         else:
+            ref_positions = np.asarray(tr_exec.positions, dtype=np.float64)
+            if ref_positions.ndim != 2 or ref_positions.shape[1] < 3:
+                raise ValueError(f"invalid LQR positions shape {ref_positions.shape}")
+            ref_speeds = np.asarray(tr_exec.speeds, dtype=np.float64).reshape(-1)
+            if ref_speeds.shape != (ref_positions.shape[0],):
+                raise ValueError(
+                    f"LQR speed/position length mismatch {ref_speeds.shape} vs {ref_positions.shape}"
+                )
+            # Tiny negative values (e.g. -1e-9) are numerical dust from the
+            # cubic time law; clamp them before the LQR non-negative check.
+            ref_speeds = np.maximum(ref_speeds, 0.0)
             tracker.set_reference(
-                np.column_stack([tr_exec.positions, tr_exec.speeds]),
+                np.column_stack([ref_positions[:, :3], ref_speeds]),
                 base_pose=obs["pose"],
             )
 
@@ -442,8 +456,16 @@ def run_episode(
                 track_speed.append(terminal_speed_error)
 
         # Match the collector: prev decision state is the segment START, and
-        # prev_action is what was actually executed (including fallback).
-        prev_action = np.asarray(executed_action, dtype=np.float64)
+        # prev_action is the measured realized endpoint, not merely the command.
+        realized_action = relative_action(
+            p0,
+            h0,
+            v0,
+            np.asarray(ego.position[:2], dtype=np.float64),
+            float(ego.heading_theta),
+            float(ego.speed),
+        )
+        prev_action = realized_action
         prev_speed = v0
         prev_heading = h0
         if done:
@@ -497,6 +519,7 @@ def run_episode(
         "control_steps": int(control_steps),
         "requested_action": requested_action.tolist(),
         "executed_action": executed_action.tolist(),
+        "realized_action": realized_action.tolist(),
         "requested_action_codes": requested_code_counts,
         "executed_action_codes": executed_code_counts,
         "preview": "NOT_IMPLEMENTED: 6-step / world-model preview",
@@ -513,8 +536,11 @@ def _limits_dict(limits: DynamicsLimits) -> Dict[str, float]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--specs", required=True)
+    parser.add_argument("--split-manifest", default=None)
+    parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--out", required=True)
     parser.add_argument("--ckpt", default=None, help="optional; random init for smoke")
+    parser.add_argument("--strict-checkpoint", action="store_true")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--controller", choices=("exact", "lqr"), default="exact")
@@ -529,7 +555,7 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    model = load_model(args.ckpt, args.device)
+    model = load_model(args.ckpt, args.device, strict=bool(args.strict_checkpoint))
     lqr_kwargs: Dict[str, Any] = {}
     if args.lqr_speed_gain is not None:
         lqr_kwargs["speed_gain"] = float(args.lqr_speed_gain)
@@ -543,7 +569,15 @@ def main(argv=None) -> int:
         lqr_kwargs["lookahead_base"] = float(args.lqr_lookahead_base)
     if args.lqr_ref_speed_scale is not None:
         lqr_kwargs["ref_speed_scale"] = float(args.lqr_ref_speed_scale)
-    specs = load_specs(args.specs)[: int(args.limit)]
+    all_specs = load_specs(args.specs)
+    if args.split_manifest:
+        verify_split_manifest(
+            args.split_manifest,
+            all_specs,
+            split=args.split,
+            spec_path=args.specs,
+        )
+    specs = all_specs[: int(args.limit)]
 
     rows: List[Dict[str, Any]] = []
     for i, spec in enumerate(specs):
@@ -573,6 +607,8 @@ def main(argv=None) -> int:
         "controller": args.controller,
         "config": {
             "specs": str(args.specs),
+            "split": args.split,
+            "split_manifest": args.split_manifest,
             "ckpt": None if args.ckpt is None else str(args.ckpt),
             "limit": int(args.limit),
             "max_steps": int(args.max_steps),

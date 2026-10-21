@@ -18,3 +18,20 @@ def test_split_is_deterministic_and_disjoint():
     np.testing.assert_array_equal(a[0], b[0])
     np.testing.assert_array_equal(a[1], b[1])
     assert_disjoint((a[0], "train"), (a[1], "val"))
+
+
+def test_frozen_val_and_test_manifests_are_verified():
+    from dataset.splits import verify_split_manifest
+    from env.scenario.spec import load_specs
+
+    val = load_specs("env/specs/scenarios_val500.json")
+    test = load_specs("env/specs/scenarios_test500.json")
+    raw_v = verify_split_manifest(
+        "config/splits/val500.json", val, split="val", spec_path="env/specs/scenarios_val500.json"
+    )
+    raw_t = verify_split_manifest(
+        "config/splits/test500.json", test, split="test", spec_path="env/specs/scenarios_test500.json"
+    )
+    assert raw_v["split"] == "val" and raw_t["split"] == "test"
+    assert {s.seed for s in val}.isdisjoint({s.seed for s in test})
+    assert all(s.split == "test" for s in test)

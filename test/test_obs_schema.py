@@ -27,6 +27,7 @@ from env.obs import (
     OD_DIM,
     OD_INDEX,
     OD_SLOTS,
+    _physics_dt,
     build_observation,
     stack_history,
 )
@@ -389,3 +390,31 @@ def test_history_compensates_geometry_into_current_ego_frame(env_and_obs):
     # Ego features are ego-relative and must not be rotated by stack_history.
     assert np.allclose(rot["ego"][t], obs["ego"])
     assert np.allclose(rot["ego_mask"][t], obs["ego_mask"])
+
+
+def test_physics_dt_follows_metadrive_config():
+    class Engine:
+        global_config = {"physics_world_step_size": 0.02, "decision_repeat": 5}
+
+    class Env:
+        engine = Engine()
+
+    assert abs(_physics_dt(Env()) - 0.1) < 1e-12
+
+    class Broken:
+        engine = None
+
+    assert abs(_physics_dt(Broken()) - 0.1) < 1e-12
+
+
+def test_ld_stable_id_ignores_chunk_s(env_and_obs):
+    _, obs = env_and_obs
+    nxt = copy.deepcopy(obs)
+    nxt["ld_chunk_s"] = np.asarray(nxt["ld_chunk_s"], dtype=np.float32) + 1.0
+    hist = stack_history([nxt, obs], [nxt["pose"], obs["pose"]])
+    last = HISTORY_FRAMES - 1
+    # IDs identify the lane, not the local 20 m crop; chunk_s is a feature.
+    assert np.array_equal(hist["ld_ids"][last], obs["ld_ids"])
+    assert np.array_equal(hist["ld_ids"][last - 1], obs["ld_ids"])
+    assert np.allclose(hist["ld_chunk_s"][last - 1], nxt["ld_chunk_s"])
+    assert np.allclose(hist["ld_chunk_s"][last], obs["ld_chunk_s"])

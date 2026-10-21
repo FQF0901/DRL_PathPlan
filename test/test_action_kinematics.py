@@ -14,6 +14,10 @@ from pipeline.rollout import (
 
 
 class _FakeVehicle:
+    FRONT_WHEELBASE = 1.2
+    REAR_WHEELBASE = 1.3
+    max_steering = 40.0
+
     def __init__(self):
         self.position = np.zeros(3)
         self.heading_theta = 0.0
@@ -139,4 +143,19 @@ def test_exact_tracker_sets_steering_from_path_curvature():
     for _ in range(traj.n_points):
         tracker.apply(env)
     assert abs(float(vehicle.steering)) > 1e-6
+    assert -1.0 <= float(vehicle.steering) <= 1.0
+
+
+def test_exact_tracker_steering_matches_curvature_analytic():
+    vehicle = _FakeVehicle()
+    env = _FakeEnv(vehicle)
+    traj = segment_trajectory(np.array([3.0, 0.5, 0.2, 6.0]), 6.0)
+    tracker = ExactTracker(dt=0.5, hz=10)
+    tracker.arm(env, trajectory=traj)
+    tracker.apply(env, index=0)
+    wheelbase = _FakeVehicle.FRONT_WHEELBASE + _FakeVehicle.REAR_WHEELBASE
+    max_steer = np.deg2rad(_FakeVehicle.max_steering)
+    expected = np.sign(traj.kappa[0]) * np.arctan(wheelbase * abs(traj.kappa[0])) / max_steer
+    assert np.isclose(float(vehicle.steering), float(expected), atol=1e-12)
+    assert np.sign(float(vehicle.steering)) == np.sign(float(traj.kappa[0]))
     assert -1.0 <= float(vehicle.steering) <= 1.0

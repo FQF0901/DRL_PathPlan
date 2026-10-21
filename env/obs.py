@@ -229,8 +229,22 @@ DEFAULT_DT = 0.5
 LD_CHUNK_METERS = 20.0
 LD_POINT_OFFSETS = (0.0, 5.0, 10.0, 20.0, 30.0)
 OD_AGE_NORM_S = 3.0
-#: MetaDrive updates last_velocity at the physics step (0.1 s in this wrapper).
+#: Fallback if the environment cannot expose its physics timing.
 OD_ACC_DT = 0.1
+
+
+def _physics_dt(env: Any) -> float:
+    """Derive the acceleration difference interval from MetaDrive config."""
+    try:
+        cfg = getattr(getattr(env, "engine", None), "global_config", None) or {}
+        physics = float(cfg.get("physics_world_step_size", 0.02))
+        repeat = int(cfg.get("decision_repeat", 5))
+        dt = physics * repeat
+        if math.isfinite(dt) and dt > 0.0:
+            return dt
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return OD_ACC_DT
 EGO_LENGTH_NORM = 5.0
 EGO_WIDTH_NORM = 2.0
 
@@ -769,7 +783,7 @@ def _build_od(env: Any, ego: Any, scene_seed: int, dt: float) -> Dict[str, np.nd
         rel_h = _safe_float(getattr(obj, "heading_theta", theta) - theta)
         rel_h = _wrap_angle(rel_h)
         vx, vy = _rel_velocity(ego, obj) if isinstance(obj, BaseVehicle) else (0.0, 0.0)
-        acc_x, acc_y = _object_acceleration(ego, obj, OD_ACC_DT)
+        acc_x, acc_y = _object_acceleration(ego, obj, _physics_dt(env))
         type_id, static_flag = _type_id(obj)
         length = _safe_positive(getattr(obj, "LENGTH", getattr(obj, "length", 2.0)), 2.0)
         width = _safe_positive(getattr(obj, "WIDTH", getattr(obj, "width", 1.5)), 1.5)

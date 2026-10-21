@@ -11,7 +11,10 @@ loader and tests use the same rule.
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence, Tuple
+import hashlib
+import json
+from pathlib import Path
+from typing import Any, Iterable, Sequence, Tuple
 
 import numpy as np
 
@@ -60,3 +63,45 @@ def assert_disjoint(*masks_and_names: tuple[np.ndarray, str]) -> None:
 
 def unique_seed_count(scene_seed: Iterable[int]) -> int:
     return int(len(np.unique(np.asarray(list(scene_seed), dtype=np.int64))))
+
+
+def file_sha256(path: str | Path) -> str:
+    """SHA-256 of a generated spec file."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def verify_split_manifest(
+    manifest_path: str | Path,
+    specs: Sequence[Any],
+    *,
+    split: str,
+    spec_path: str | Path,
+) -> dict:
+    """Validate that ``specs`` is exactly the frozen seed set for ``split``.
+
+    The manifest is tracked under ``config/splits``; the raw spec file is
+    generated/ignored.  Evaluation must call this before running a gate.
+    """
+    raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    # Support both the compact per-split file (config/splits/val500.json) and
+    # the older combined {val:..., test:...} manifest shape.
+    block = raw.get(split) if isinstance(raw.get(split), dict) else raw
+    if not isinstance(block, dict) or str(block.get("split", split)) != split:
+        raise ValueError(f"manifest {manifest_path} has no valid {split!r} block")
+    seeds = [int(s.seed) for s in specs]
+    expected = [int(x) for x in block.get("seeds", [])]
+    if int(block.get("n", -1)) != len(specs):
+        raise ValueError(
+            f"split {split!r}: manifest n={block.get('n')} != specs n={len(specs)}"
+        )
+    if seeds != expected:
+        raise ValueError(f"split {split!r}: spec seed order/set differs from manifest")
+    if any(str(getattr(s, "split", "")) != split for s in specs):
+        bad = sorted({str(getattr(s, "split", "")) for s in specs})[:5]
+        raise ValueError(f"split {split!r}: specs contain split fields {bad}")
+    digest = file_sha256(spec_path)
+    if digest != str(block.get("sha256", "")):
+        raise ValueError(
+            f"split {split!r}: spec SHA-256 {digest} != manifest {block.get('sha256')}"
+        )
+    return raw

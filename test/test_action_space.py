@@ -135,13 +135,13 @@ def test_negative_dx_is_reported_not_rewritten():
     assert np.allclose(tr.action, [-0.5, 0.0, 0.0, 1.0])
 
 
-def test_short_path_skips_curvature_checks():
-    # arc length < 0.25 m: huge geometric curvature must not produce a hard code
+def test_short_path_checks_curvature_when_moving():
+    # arc length < 0.25 m but moving: high geometric curvature must still reject.
     tr = action_to_trajectory(np.array([0.2, 0.1, 0.8, 1.0]), 1.0, bounds=CLEAN_BOUNDS)
     assert tr.metrics["path_length_m"] < 0.25
-    assert not tr.metrics["curvature_checked"]
-    assert "CURVATURE_SKIPPED" in tr.flags
-    assert not any(code.startswith("HARD_KAPPA") for code in tr.codes)
+    assert tr.metrics["curvature_checked"] is True
+    assert not tr.feasible
+    assert any(code.startswith("HARD_KAPPA") for code in tr.codes)
 
 
 def test_project_clips_components_and_reports():
@@ -228,3 +228,15 @@ def test_trajectory_arrays_finite_for_infeasible_actions():
             assert np.isfinite(getattr(tr, key)).all(), (key, action, v0)
         if tr.feasible:
             assert tr.metrics["speed_nonnegative"]
+
+
+def test_short_path_does_not_bypass_curvature_gate():
+    a = np.array([0.24, 0.0, 0.8, 0.5], dtype=np.float64)
+    tr = action_to_trajectory(a, 0.5, bounds=CLEAN_BOUNDS)
+    assert tr.metrics["path_length_m"] < 0.25
+    assert tr.metrics["curvature_checked"] is True
+    assert not tr.feasible
+    assert "HARD_KAPPA" in tr.codes
+    result = gate(a, 0.5, bounds=CLEAN_BOUNDS)
+    assert result.accepted is False
+    assert "HARD_KAPPA" in result.codes

@@ -75,6 +75,7 @@ from net.action_space import (
 from net.model import SPATIAL_LAYERS, StructuredPlanner
 from pipeline.distributions import TruncatedNormal
 from pipeline.eval import load_model
+from pipeline.execution import relative_action, segment_dt
 
 # ---------------------------------------------------------------------------
 # Timing / action contract
@@ -832,6 +833,7 @@ def collect_episode(
         sampled_np = sampled[0].detach().cpu().numpy().astype(np.float64)
         v0 = float(ego.speed)
         h0 = float(ego.heading_theta)
+        p0 = np.asarray(ego.position[:2], dtype=np.float64).copy()
         resolved = resolve_action(sampled_np, v0)
         executed = np.asarray(resolved["executed_action"], dtype=np.float64)
         tr_exec = resolved["trajectory"]
@@ -849,6 +851,7 @@ def collect_episode(
         seg_info_cost = 0.0
         terminated = False
         truncated = False
+        segment_steps = 0
 
         if tr_exec is None:
             # Defensive: no executable geometry (should not happen for a finite
@@ -863,6 +866,7 @@ def collect_episode(
                     break
                 _, _, term, trunc, info = env.step([0.0, 0.0])
                 n += 1
+                segment_steps += 1
                 tracker.apply(env)
                 info = info or {}
 
@@ -921,11 +925,22 @@ def collect_episode(
             info_cost=seg_info_cost,
         )
 
+        actual_dt = segment_dt(segment_steps, SIM_DT)
+        realized_action = relative_action(
+            p0,
+            h0,
+            v0,
+            np.asarray(ego.position[:2], dtype=np.float64),
+            float(ego.heading_theta),
+            float(ego.speed),
+        )
         transitions.append(
             {
                 "state": {key: batch[key].detach().cpu() for key in INPUT_KEYS},
                 "sampled_norm": sampled[0].detach().cpu(),
                 "executed_action": torch.as_tensor(executed, dtype=torch.float32),
+                "realized_action": torch.as_tensor(realized_action, dtype=torch.float32),
+                "segment_dt": float(actual_dt),
                 "old_logp": old_logp.detach().cpu(),
                 "old_value": old_value.detach().cpu(),
                 "old_cost_value": old_cost_value.detach().cpu(),
@@ -950,8 +965,8 @@ def collect_episode(
         )
         policy_steps += 1
 
-        # Match the collector: segment-start ego state, executed action.
-        prev_action = executed.astype(np.float64)
+        # Match the collector: segment-start ego state, measured realized action.
+        prev_action = realized_action.astype(np.float64)
         prev_speed = v0
         prev_heading = h0
 
@@ -973,7 +988,7 @@ def collect_episode(
                 prev_action=prev_action,
                 prev_speed=prev_speed,
                 prev_heading=prev_heading,
-                dt=DECISION_DT,
+                dt=actual_dt,
             )
             final_frames = frames + [final_obs]
             final_poses = poses + [final_obs["pose"].copy()]

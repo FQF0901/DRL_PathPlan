@@ -29,13 +29,19 @@ Loss
 
 Per-row plan weights implement the failure/privilege policy:
 
-* ``expert_plan_valid == 0`` -> 0 (failed expert episodes never teach the plan);
+* failed expert episode -> terminal segment gets ``--w-failed-expert`` (0.2),
+  earlier segments keep their label unless another gate fails;
 * ``label_valid == 0`` -> 0;
+* ``action_in_bounds == 0`` -> 0;
+* PSTL-infeasible rows -> ``--w-infeasible`` (0.2), not an unconditional drop;
 * source expert (``source == 0``) -> ``--source-weight-expert`` (default 1);
 * other sources -> ``--source-weight-other`` (default 1, DAgger hook);
-* ``privileged_expert_sample`` -> ``--w-privileged`` (default 1, no change);
-* ``residual_xy_norm > 0.5`` or ``|residual_dpsi| > 0.1`` -> ``--w-residual``;
-* ``intervened`` rows -> ``--w-intervened`` (default 3).
+* measured replay / lift -> ``--source-weight-replay/lift``;
+* ``shield`` rows -> ``--w-shield`` (default 3); legacy ``intervened`` is
+  recorded but is not a shield weight;
+* ``privileged_expert_sample`` -> ``--w-privileged`` only when the batch is
+  mixed; a constant multiplier cancels in ``_weighted_mean``;
+* measured/finite residual disagreement -> ``--w-residual``.
 
 Value and risk losses are *not* gated by the plan weight: failed expert
 episodes still provide useful safety labels.
@@ -107,6 +113,8 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "residual_dpsi",
     "comfortable",
     "intervened",
+    "shield",
+    "done",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -146,6 +154,8 @@ _ALL_OPTIONAL_KEYS = (
     "residual_dpsi",
     "comfortable",
     "intervened",
+    "shield",
+    "done",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -187,7 +197,8 @@ class LossConfig:
     # per-row plan weights
     w_privileged: float = 1.0
     w_residual: float = 0.2
-    w_intervened: float = 3.0
+    w_intervened: float = 3.0  # compatibility alias; not applied to replay
+    w_shield: float = 3.0
     w_failed_expert: float = 0.2
     w_infeasible: float = 0.2
     brake_weight: float = 0.0
@@ -203,10 +214,24 @@ class LossConfig:
 # ---------------------------------------------------------------------------
 # Data loading / targets
 # ---------------------------------------------------------------------------
-def _resolve_npz(path: Path) -> Path:
-    if path.is_dir():
-        return path / "expert_bc.npz"
-    return path
+def _resolve_npz_paths(path: Path) -> list[Path]:
+    """Resolve a dataset file or a canonical shard directory.
+
+    Canonical logical datasets hold ``shard_*.npz`` (or ``expert_bc.npz``)
+    directly; historical directories still contain one ``expert_bc.npz``.
+    """
+    if not path.is_dir():
+        return [path]
+    preferred = path / "expert_bc.npz"
+    if preferred.exists():
+        return [preferred]
+    files = sorted(path.glob("*.npz"))
+    if files:
+        return files
+    nested = sorted(path.rglob("*.npz"))
+    if nested:
+        return nested
+    return [preferred]
 
 
 def _default_value(key: str, n: int) -> np.ndarray:
@@ -226,8 +251,10 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
     if not paths:
         raise ValueError("load_data: no input paths")
     parts = []
+    resolved: list[Path] = []
     for raw in paths:
-        npz_path = _resolve_npz(Path(raw))
+        resolved.extend(_resolve_npz_paths(Path(raw)))
+    for npz_path in resolved:
         if not npz_path.exists():
             raise FileNotFoundError(f"schema-v2 dataset not found: {npz_path}")
         with np.load(npz_path) as z:
@@ -365,8 +392,12 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     feasible = np.asarray(data["feasible"], dtype=np.float32)
     label_pass = np.asarray(data["label_pass"], dtype=np.float32)
     action_in_bounds = np.asarray(data["action_in_bounds"], dtype=np.float32)
-    # Do not train the plan on labels the canonical PSTL cannot execute.
-    w *= np.where(expert_plan_valid > 0.5, 1.0, float(cfg.w_failed_expert))
+    done = np.asarray(data.get("done", np.zeros(n)), dtype=np.float32) > 0.5
+    # Failed-expert outcome is episode-level at collection time.  Apply the
+    # downweight to the terminal segment only; earlier timeout/failure segments
+    # remain normal expert labels instead of being collectively zeroed.
+    failed_expert = expert_plan_valid <= 0.5
+    w *= np.where(failed_expert & done, float(cfg.w_failed_expert), 1.0)
     w *= label_valid > 0.5
     # Keep a downweighted signal from PSTL-infeasible expert segments instead
     # of deleting the hard/curve states entirely.  The evaluator still never
@@ -407,9 +438,14 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     )
     w *= np.where(residual, float(cfg.w_residual), 1.0)
 
-    if "intervened" in data:
-        intervened = np.asarray(data["intervened"], dtype=np.float32) > 0.5
-        w *= np.where(intervened, float(cfg.w_intervened), 1.0)
+    # `shield` is the safety intervention; legacy `intervened` meant expert
+    # replay and must not silently become a shield weight.
+    if "shield" in data:
+        shield = np.asarray(data["shield"], dtype=np.float32) > 0.5
+    else:
+        shield = np.zeros(n, dtype=bool)
+    if bool(shield.any()):
+        w *= np.where(shield, float(cfg.w_shield), 1.0)
 
     if cfg.brake_weight > 0.0 or cfg.near_weight > 0.0:
         action = np.asarray(data["action"], dtype=np.float32)
@@ -927,6 +963,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--w-privileged", type=float, default=1.0)
     p.add_argument("--w-residual", type=float, default=0.2)
     p.add_argument("--w-intervened", type=float, default=3.0)
+    p.add_argument("--w-shield", type=float, default=3.0)
     p.add_argument("--w-failed-expert", type=float, default=0.2)
     p.add_argument("--w-infeasible", type=float, default=0.2)
     p.add_argument("--brake-weight", type=float, default=0.0)
@@ -979,6 +1016,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         w_privileged=args.w_privileged,
         w_residual=args.w_residual,
         w_intervened=args.w_intervened,
+        w_shield=args.w_shield,
         w_failed_expert=args.w_failed_expert,
         w_infeasible=args.w_infeasible,
         brake_weight=args.brake_weight,
@@ -1039,15 +1077,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "label_valid_rate": float(np.mean(data["label_valid"] > 0.5)),
         "residual_downweight_rows": int(
             np.sum(
-                (np.asarray(data["residual_xy_norm"]) > cfg.residual_xy_thresh)
-                | (
-                    np.abs(np.asarray(data["residual_dpsi"]))
-                    > cfg.residual_dpsi_thresh
+                (np.asarray(data["label_source"], dtype=np.float32) >= 0.5)
+                & np.isfinite(np.asarray(data["residual_xy_norm"], dtype=np.float32))
+                & np.isfinite(np.asarray(data["residual_dpsi"], dtype=np.float32))
+                & (
+                    (np.asarray(data["residual_xy_norm"], dtype=np.float32)
+                     > cfg.residual_xy_thresh)
+                    | (
+                        np.abs(np.asarray(data["residual_dpsi"], dtype=np.float32))
+                        > cfg.residual_dpsi_thresh
+                    )
                 )
             )
         ),
-        "intervened_rows": int(
-            np.sum(np.asarray(data["intervened"]) > 0.5)
+        "shield_rows": int(np.sum(np.asarray(data.get("shield", np.zeros(len(data["action"])))) > 0.5)),
+        "intervened_rows_legacy": int(
+            np.sum(np.asarray(data.get("intervened", np.zeros(len(data["action"])))) > 0.5)
+        ),
+        "failed_expert_rows": int(np.sum(np.asarray(data["expert_plan_valid"]) <= 0.5)),
+        "failed_expert_terminal_rows": int(
+            np.sum((np.asarray(data["expert_plan_valid"]) <= 0.5)
+                   & (np.asarray(data.get("done", np.zeros(len(data["action"])))) > 0.5))
         ),
     }
 
@@ -1176,8 +1226,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "expert audit fields stay side arrays.",
             "Normalized targets outside [0,1] are clipped for the truncated "
             "Normal NLL and counted by label_oob_rate.",
-            "Failed expert episodes (expert_plan_valid=0) have zero plan "
-            "weight but still supervise value/risk/cost/aux.",
+            "Failed expert episodes downweight only the terminal segment; "
+            "earlier segments keep their label unless label_valid/feasibility "
+            "or bounds fail.  Shield is separate from expert replay.",
             "Per-dimension physical MAE is plan-weight-weighted over rows with "
             "plan_weight > 0.",
             "Smoothness hinges use the collector's provisional HARD_LIMITS "

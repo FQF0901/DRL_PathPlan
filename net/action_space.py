@@ -844,7 +844,13 @@ def action_to_trajectory(
     }
 
     # ---- applicability / classification --------------------------------------
-    curvature_checked = length >= _MIN_CURVATURE_PATH
+    # Short paths still need curvature checks when the vehicle is moving or
+    # rotating; the old pure length test let high-kappa 0.24 m actions pass.
+    curvature_checked = (
+        length >= _MIN_CURVATURE_PATH
+        or max(v0, v1) > _EPS
+        or abs(dpsi) > _EPS
+    )
     stop_class = bool(length < 0.10 and v1 < 0.10 and abs(dpsi) <= 0.05)
     full_stop = bool(chord <= _EPS and v0 <= _EPS and v1 <= _EPS)
     stop_to_go = bool(v0 <= _EPS and v1 > _EPS and length > _EPS)

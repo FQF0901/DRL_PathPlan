@@ -98,7 +98,7 @@ NAV_MANEUVER_LABELS = (
 )
 
 DIFFICULTIES = ("easy", "medium", "hard")
-SPLITS = ("train", "val")
+SPLITS = ("train", "val", "test")
 
 # 几何标签 -> BIG block 字符（见模块 docstring 的源码核对）。
 BLOCK_CHARS = {
