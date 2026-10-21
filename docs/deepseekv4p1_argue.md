@@ -455,7 +455,7 @@ datasets/dagger_r3_hard500/shard_0000.npz
 - OD acceleration：从 `physics_world_step_size × decision_repeat` 推导，保留 0.1 s fallback，并加测试。
 - train_bc：failed expert 只降权 terminal segment；`shield` 与 replay 分开；residual 诊断使用 measured/finite mask；fixture 覆盖 feasible/label_pass/action_in_bounds/label_source；canonical shard loader。
 - Val/Test：迁移到 `config/splits/val500.json` / `test500.json`；Test spec 写 `split="test"`；evaluator 校验 seed/SHA；删除 docs 下的 manifest 和 tools 生成器。
-- 数据/运行清理：`datasets/` 只保留 `train_bc_2k/`、`dagger_r1/`、`dagger_r2/`、`dagger_r3_hard500/`；其他目录移到 `/tmp/opencode/datasets_archive_20261022/`（未删除）。`runs/` 只保留当前 lineage/evidence（59 MiB），旧目录移到 `/tmp/opencode/runs_archive_20261022/`。
+- 数据/运行清理：`datasets/` 只保留 `train_bc_2k/`、`dagger_r1/`、`dagger_r2/`、`dagger_r3_hard500/`；其他目录移到 `/tmp/opencode/datasets_archive_20261022/`（未删除）。`runs/` 只保留当前 lineage/evidence（69 MiB），旧目录移到 `/tmp/opencode/runs_archive_20261022/`。
 - Tests：95 passed, 1 skipped。
 
 ### 实测：先看专家上限

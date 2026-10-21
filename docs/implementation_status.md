@@ -83,7 +83,7 @@ r3b tracking: xy 0.024 m, heading 0.009 rad, speed 0.247 m/s; steer saturation 0
 ### Cleanup
 
 - `datasets/`: four logical dirs, 2.1 GiB; old versioned dirs are archived outside the project.
-- `runs/`: 59 MiB of current lineage/evidence; old run dirs are archived outside the project. `runs/logs` and `runs/monitor` are retained.
+- `runs/`: 69 MiB of current lineage/evidence; old run dirs are archived outside the project. `runs/logs` and `runs/monitor` are retained.
 - Tests: **95 passed, 1 skipped**.
 
 ## Design decisions
