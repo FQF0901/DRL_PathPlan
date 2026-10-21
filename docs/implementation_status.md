@@ -1,6 +1,6 @@
 # PNP implementation status (P0/P1/P2)
 
-Last updated: 2026-10-20 (Asia/Shanghai)
+Last updated: 2026-10-21 (Asia/Shanghai)
 
 ## Environment
 
@@ -29,7 +29,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 
 ## Current evidence
 
-**P0 rerun status:** Nav history units, eval/PPO decision-state parity, exact steering, LD stable-ID/OD acceleration units, and feasibility/label_source training weights were fixed and committed `a6b2628` (plus the `w_infeasible`/safety-weight refinement). The exact numbers below are from re-collected 2k data and the fixed evaluator. LQR remains controller-realized diagnostic only.
+**P0 rerun status:** Nav history units, eval/PPO start-state semantics (exact path), exact steering, LD stable-ID/OD acceleration units, and feasibility/label_source training weights were fixed and committed `a6b2628` (plus the `w_infeasible`/safety-weight refinement). The exact numbers below are from re-collected 2k data and the fixed evaluator. The LQR numbers are **0.5 s interface smoke only**, not a planner/controller gate: the required 3 s / 6-point preview interface is not implemented.
 
 ### 2k expert data (canonical re-collection)
 
@@ -46,11 +46,11 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 | DAgger r2 (`runs/bc_2k_dagger_r2`) | 50% | 32% | 12% | 0.774 |
 | DAgger r3 hard500 + safety weights (`runs/bc_2k_dagger_r3`) | 58% | 12% | 16% | 0.844 |
 
-### Val500 exact (frozen first 500 val seeds; paired by scene)
+### Val500 exact (same first 500 val seeds; paired by scene; manifest not yet enforced)
 
 | model | success | collision | off-road | RC |
 |---|---:|---:|---:|---:|
-| Legacy fixed evaluator (`runs/val500_legacy_p0fixed`) | 65.0% | 18.2% | 12.0% | 0.854 |
+| Legacy ad-hoc fixed evaluator (`runs/val500_legacy_p0fixed`) | 65.0% | 18.2% | 12.0% | 0.854 |
 | Clean r3 (`runs/val500_clean_r3_p0fixed`) | 66.2% | 12.2% | 8.6% | 0.859 |
 
 Paired bootstrap (clean r3 − legacy):
@@ -60,16 +60,16 @@ Paired bootstrap (clean r3 − legacy):
 - off-road **−3.4 pp** (CI −6.0..−0.8)
 - stuck +0.4 pp (CI 0.0..+1.0)
 
-**Exact A/B passes the success/no-worse and safety checks.** Clean is not yet promoted as the full P1 controller-realized target because the LQR canary still fails the gap gate.
+**This is a descriptive, not a formal A/B pass.** Collision/off-road improvements are significant, but success +1.2 pp has a 95% CI of −2.2..+4.6, so success non-inferiority is not established. The legacy metrics artifact has `config: null` and no commit/patch provenance; the legacy harness is asymmetric and cannot prove the same evaluator code. Do not promote clean or call this an A/B gate on the strength of this table.
 
-### LQR controller-realized canary (50 val)
+### LQR interface smoke (50 val; not a gate)
 
 | model | success | collision | off-road | timeout | RC |
 |---|---:|---:|---:|---:|---:|
-| Legacy fixed LQR (`runs/lqr50_legacy_p0fixed`) | 44% | 8% | 26% | — | 0.776 |
+| Legacy ad-hoc LQR (`runs/lqr50_legacy_p0fixed`) | 44% | 8% | 26% | — | 0.776 |
 | Clean r3 LQR (`runs/lqr50_clean_r3_p0fixed`) | 34% | 2% | 12% | 52% | 0.740 |
 
-Clean LQR has lower collision/off-road but **10 pp lower success and 52% timeout**; tracking xy 0.016 m, heading 0.008 rad, speed 0.210 m/s. A one-scene diagnostic shows the model predicting a low `v_next` (~2.4 m/s) once LQR has slowed down; the controller follows that low reference. Raising speed gain made 20-val off-road worse (40%); `ref_speed_scale=1.2` made 20-val 15% success / 60% collision / 30% off-road. This confirms a closed-loop speed/distribution trap, not a simple gain or reference-scale error. The exact→LQR gap is still a blocker; do not present exact tracking as the final controller-realized result.
+These numbers are not comparable to the exact table and are not a P1/P2 gate. `pipeline/eval.py` executes only the first 0.5 s segment (5 x 0.1 s); `docs/arch_lock.md` §6.3 requires a 6-point, 0.5–3.0 s trajectory and §6.4 says LQR must receive 2–3 s for preview. The current LQR run therefore tests a 0.5 s command-following interface, not the planned controller-realized interface. A one-scene low-`v_next` observation is a hypothesis, not a root cause; speed-gain/ref-scale probes were multi-parameter and are not evidence of a single cause. Per the current priority, LQR performance is checked only for gross failures now; it becomes a focus after the ego-conditioned latent WM and imagined rollout, and only after the 3 s / 6-point interface exists.
 
 ### PPO contract canary
 
@@ -77,6 +77,7 @@ Clean LQR has lower collision/off-road but **10 pp lower success and 52% timeout
 
 - boundary_rate 0.0; logprob recompute diff 0.0; ratio-at-old 1.0;
 - mask/postprocess 25% (one infeasible transition);
+- config still points at pre-P0 `runs/bc_v2_2k_q_dagger_r3/best.pt` and only 4 transitions;
 - contract only, not a performance or P3 gate claim.
 
 ## Design decisions
@@ -113,16 +114,16 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 1. **`q_lane` was near-uniform**: current lane role0 received 0.011 attention while a lat=-7 m lane got 0.60; the car drifted off-road even on straight scenes. Added query-selection auxiliary supervision (current lane / urgent OD attention targets). This is auxiliary only; current lane/TTC are not plan inputs.
 2. **BC-to-closed-loop distribution shift**: 2k BC clean was 8% success / 80% off-road on 50 val; measured-expert DAgger raised it to 50% then 64%. This is the dominant P2 issue.
 3. **DAgger lift bias**: old kinematic bicycle labels had +0.53 m dx / +1.12 m/s v_next bias and censored braking; the canonical collector stores measured expert replay plus lift/residual/source validity.
-4. **Exact→LQR gap**: clean LQR 26% vs exact 64% on 50 val; not yet root-caused to controller speed/preview vs planner feasibility.
+4. **LQR interface mismatch**: clean LQR 34% / 52% timeout vs exact 66.2% on the current 50-val slice, but the evaluator only executes the first 0.5 s (5 points). The contract requires 6 points over 3 s for LQR preview; the current comparison is an interface smoke, not a planner root cause. Do not spend P1 effort on LQR tuning; revisit after the ego-conditioned latent WM/imagined rollout.
 
 ## Current state
 
 - No training/collection process is active; 20-minute monitor is running (`runs/monitor/tasks_20m.log`).
 - Data: `datasets/bc_2k_s0..s3` (2k expert), `datasets/dagger_2k_r1_s0..s3`, `datasets/dagger_2k_r2_s0..s3`, `datasets/dagger_2k_r3_hard500`.
-- Best clean checkpoint: `runs/bc_2k_dagger_r3` (Val500 66.2/12.2/8.6/0.859).
-- Legacy reference checkpoint for exact A/B: `runs/p1_weight_hi` with fixed evaluator (`runs/val500_legacy_p0fixed`, 65.0/18.2/12.0/0.854). The checkpoint uses the old schema/model and requires code at tag `pre-consolidation`; the canonical tree cannot load it.
+- Best clean checkpoint: `runs/bc_2k_dagger_r3` (Val500 66.2/12.2/8.6/0.859); `best.pt` is still selected by open-loop validation loss (r3 epoch 2/15), not by a closed-loop gate.
+- Legacy reference checkpoint (ad-hoc, not a formal A/B): `runs/p1_weight_hi` with (`runs/val500_legacy_p0fixed`, 65.0/18.2/12.0/0.854). The checkpoint uses the old schema/model and requires code at tag `pre-consolidation`; the canonical tree cannot load it, and the metrics artifact has no config/commit provenance.
 - 10k collection was stopped in its unsharded form: the parent process aggregated all episodes and exhausted RAM/swap. 2k is sharded and stable; final 10k needs shard-stream training or a disk-backed dataset.
-- Val500/Test500 specs are frozen in `docs/eval_split_manifest.json` (`env/specs/scenarios_val500.json` / `scenarios_test500.json`). Test500 has not been run; it remains untouched until the LQR/P1 gate passes.
+- `env/specs/scenarios_val500.json` exists, but the current manifest lives at `docs/eval_split_manifest.json` and is not enforced; `scenarios_test500.json` still has `split="val"` and is not a valid test split. Test500 has not been run. The manifest/generator will move to `config/splits/` + `dataset/` and be checked by the evaluator before any test conclusion.
 - Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
 
 ## Reproduce (current machine)
@@ -151,7 +152,7 @@ tools/venv-python -m pipeline.train_bc \
 tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val.json \
   --ckpt runs/bc_2k_dagger_r3/best.pt --out runs/val500_clean_r3_p0fixed \
   --limit 500 --max-steps 600 --controller exact --device cuda
-tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val_slice50.json \
+tools/venv-python -m pipeline.eval --specs env/specs/scenarios_val500.json \
   --ckpt runs/bc_2k_dagger_r3/best.pt --out runs/lqr50_clean_r3_p0fixed \
   --limit 50 --max-steps 600 --controller lqr --device cuda
 
@@ -163,9 +164,10 @@ tools/venv-python -m pipeline.train_ppo \
 
 ## Known gaps
 
-- Clean A/B fails on success/off-road; do not promote it over the legacy checkpoint.
-- LQR clean canary is far below exact and legacy LQR; controller/speed/preview calibration is unresolved.
+- Exact success is 66.2%; the +1.2 pp vs the ad-hoc legacy artifact is not a formal non-inferiority result (CI crosses 0) and the legacy provenance is asymmetric. Do not promote on this table alone.
+- LQR is not a current gate: only a 0.5 s/5-point interface smoke exists. The required 3 s/6-point preview interface, and the later WM/imagined-rollout coupling, are missing; do not tune LQR against these numbers.
 - 10k/500/500 + Test500 final scale and shard-stream loader are not implemented; no Test500 conclusions.
+- `datasets/` has 40 top-level versioned directories (~4.6 GiB); canonical migration to four logical datasets (`train_bc_2k`, `dagger_r1`, `dagger_r2`, `dagger_r3_hard500`) is pending. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
 - Failure-prioritized DAgger on actual train-scene failures is still needed; round 3 used a hard-geometry bucket.
 - P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.

@@ -263,3 +263,167 @@ Val500 exact（冻结前 500 seeds，paired）：
 - P0-1/2/3/4 已修并重采/重训；exact A/B 有效且 clean 通过。
 - LQR controller-realized gate 仍未通过；Test500 未运行；PPO 仍是 contract canary；P4 未启动。
 - 因此不宣布完整 P1 通过，也不启动 P4。
+
+---
+
+## 2026-10-21 — code_review @ 639e958：逐条答复、LQR 优先级修正、数据/验证集方案
+
+审阅范围：`6de65f4..639e958`；合同逐条批注在 staged `docs/arch_lock.md`（本轮不修改该文件）。下面是接受、纠正、反驳和实施顺序。
+
+**先修正我上一节的两处过度结论：**
+
+1. 撤回“exact A/B 现在通过”。success 的 +1.2 pp 的 95% CI 是 −2.2..+4.6，跨 0；只能主张 collision/off-road 显著改善，不能主张 success non-inferiority。legacy artifact 也没有等价 harness 的证明。
+2. 撤回“LQR 是当前 P1 blocker”。按最新澄清，LQR 的预瞄性质要求 3 s / 6 点接口；当前 0.5 s / 5 点结果只是接口 smoke，不是 planner/controller gate。LQR 应在 ego-conditioned latent WM 和 imagined rollout 之后提高关注，而不是现在用调参去追闭环分数。
+
+### 1. 接受的部分
+
+- **P0-4 数据语义仍不完整**：`expert_plan_valid=success` 是整段 episode 广播；失败 episode 统一乘 0.2，timeout 早段与 collision/off-road 失败段同权；`privileged_expert_sample` 全 1，`w_privileged` 在当前全 privileged 数据上结构性无效；`multi_solution` 不存在。
+- **DAgger `intervened` 语义**：`dataset/collect_dagger.py:949` 写的是 `intervened = 1 if replay else 0`，`shield` 另有字段；`train_bc` 的 `w_intervened=3` 实际作用于全部 measured replay，不是只作用于 shield。接受。
+- **Test500 不是真正的 test split**：`env/specs/scenarios_test500.json` 的 500 条 spec 仍是 `split="val"`；`SPLITS` 仍只有 `("train","val")`；没有 loader/CI 校验 manifest；Test500 未运行。接受。
+- **checkpoint 选择仍是 open-loop**：`best.pt` 按内部 val total loss 选；r3 的 best 是 epoch 2/15；`load_model` 不校验 schema/action bounds/encoder version；`config/*.yaml` 没有被加载。接受。
+- **PPO 仍是 wiring probe**：`runs/ppo_v2_canary/contract.json` 的 checkpoint 仍是 pre-P0 的 `runs/bc_v2_2k_q_dagger_r3/best.pt`，只有 4 transitions；`cost_adv` 在 `pipeline/train_ppo.py:666` 计算，但 policy loss 在 1120 行只使用 surrogate，没有 cost 项。接受。
+- **PSTL short-path 漏洞**：`net/action_space.py:847` 的 `curvature_checked = length >= _MIN_CURVATURE_PATH`（0.25 m），短路径可绕过 κ/a_lat；review 的 `[0.24, 0, 0.8, 0.5]` 例子是真实漏洞。接受。
+- **状态文档矛盾**：`docs/implementation_status.md` 的 exact A/B 与 LQR 旧数字确实自相矛盾；本轮已改写为“safety 改善但 success CI 跨 0 / LQR 只是 0.5 s interface smoke”，并把 LQR 复现命令改为 `scenarios_val500.json --limit 50`。接受。
+- **工程质量 partial**：`env/obs.py` 1,430 行、`pipeline/train_bc.py` 1,199 行、`pipeline/train_ppo.py` 1,621 行、`net/action_space.py` 1,365 行、`env/tracking.py` 838 行；`net/model.py` 反向 import `env.obs`；`train_ppo` import `pipeline.eval`；`resolve_action`/fallback 在 eval、PPO、DAgger 有多个 mirror；`prev_action/prev_speed/prev_heading` 在 collect/eval/PPO 有多份拷贝。接受。P1/P2 gate 前只做最小抽取，不做“大重构”。
+
+### 2. P0-2：review 的表述需要缩小，但残留缺陷成立
+
+Review 写“eval/PPO 的 `prev_action` 仍是 resolved requested”。这句话对当前 `639e958` 的 exact 路径不准确：
+
+- `pipeline/eval.py:298/321/327` 分别把 executed 设为 requested、v1 projection、safe brake；`pipeline/eval.py:446` 明确使用 `executed_action`。
+- `pipeline/train_ppo.py:836` 使用 `resolved["executed_action"]`，`:954` 写回 `executed`。
+- `dataset/collect.py:542` 使用 measured action；`dataset/collect_dagger.py:973` 使用实际执行的 `executed_action`。
+
+所以“exact 下 requested vs executed 不一致”这一点不成立；exact 的 requested 被执行器精确执行，二者数值等价。
+
+但接受更窄、真实的缺陷：
+
+- **commanded 与 realized 没有被区分**。LQR 的 `executed_action` 仍是计划 4D，而不是由真实段末 pose/speed 反算出的 realized 4D；因此 LQR 下的 `prev_action` 不是 collector 的 measured 语义。P0-2 只在 exact 路径等价。
+- **没有 collect/eval/PPO parity test**；82 个测试中没有 `test_train_eval_assembly_parity`。
+- **PPO truncation 的 dt 边缘**：`pipeline/train_ppo.py:971-977` 的 bootstrap observation 固定 `dt=DECISION_DT`；若 max-step 在 5 子步中途截断，实际经过时间小于 0.5 s，`a_long/yaw` 的分母应使用实际执行时间；这一点接受。
+- **PPO 的 `prev_speed/prev_heading` 是段首，已修；但真实 rollout 的 time bookkeeping 仍不是一个统一对象**。
+
+修复方向：抽 `pipeline/execution.py`，明确 `commanded_action`、`realized_action`、`executed_steps`、`segment_dt`；collector 用 realized，exact 直接用 commanded（等价），LQR 由段首/段末 pose 计算 realized；`prev_state` 只从这里产生。先补 parity test，再谈 LQR。
+
+### 3. exact A/B：不成立为 gate，但 safety 改善是真实证据
+
+- success +1.2 pp，CI −2.2..+4.6，跨 0：**不能称为 success/no-worse gate 通过**。
+- collision −6.0 pp（−9.4..−2.6）、off-road −3.4 pp（−6.0..−0.8）显著；这是当前 clean 的真实 safety 收益。
+- legacy `runs/val500_legacy_p0fixed/metrics.json` 的 `config: null`，没有 commit/patch/dirty 信息；它是在临时 worktree 里对 `pre-consolidation` 代码打补丁后跑出来的。即使数值可复算，也不能证明它与 canonical evaluator 是同一个 harness；因此 A/B 是不对称的。
+- 以后所有 **canonical clean 版本** 必须使用同一 `val500` manifest、同一 evaluator、同一 seed 集；legacy 只能作为历史参考，不能进入 gate 表。
+
+我接受 review 的结论：“exact A/B 不能写成 passes”。上一节和 status 中的相关措辞已经撤回/改写。
+
+### 4. LQR：接受“接口优先”的修正，不接受“当前 LQR 是 blocker”
+
+最新澄清：**LQR 应该在 ego-conditioned latent WM 和 imagined rollout 之后提高关注**；LQR 有预瞄性质，接口需要 3 s / 6 点轨迹；接口正确前不应过度关注 LQR 闭环分数，只做点检。
+
+这与代码事实一致：
+
+- `docs/arch_lock.md:536` 要求 6 个点对应 0.5..3.0 s；
+- `docs/arch_lock.md:543` 明确“保留完整 2–3 s 参考轨迹供 LQR 预瞄，不得只传第一个 0.5 s”；
+- `pipeline/eval.py:13-14, 502, 594-595` 当前只执行 first 0.5 s segment（5×0.1 s），`preview=NOT_IMPLEMENTED`；
+- 所以 clean LQR 34/2/12/52 与 legacy LQR 44/8/26 是**两个 0.5 s 接口下的 smoke 数字**，不是 planner 的 LQR gate，也不能据此推导“低 v_next 速度陷阱”是根因。
+
+关于上一节的“低 v_next 速度陷阱”：接受 review 的限定——它只是一个场景的观察，没有 per-step artifact；调参同时改了 speed/accel/brake/lookahead，不能证明单一根因。该结论降级为 hypothesis，不再作为 P1 结论。
+
+行动：
+- 现在只做 LQR 点检：无 NaN、无崩溃、无异常饱和；不把 success/timeout 当 gate；
+- 在 WM/imagined rollout 完成后，再做完整 3 s / 6 点 LQR，届时才提高优先级；
+- 当前不再花时间调 LQR gain/ref speed；`ref_speed_scale` 的负结果只保留为诊断记录。
+
+arch_lock 的 staged 批注仍把 LQR 写成 blocker（line 11/12）；这是合同初始审阅的表述，与最新澄清冲突。我不会修改 staged 合同；以本文件和 status 的修正为准，等合同 owner 决定是否改 arch_lock。
+
+### 5. P0-4：接受“segment-level/语义”批评，不再只靠 0.2 权重
+
+当前问题不是“没消费”，而是“消费的粒度和字段语义不对”：
+
+- `expert_plan_valid=success` 在 `dataset/collect.py` 的 postprocess 中整段广播；失败段统一 0.2；timeout 早段也被同样处理。
+- `privileged_expert_sample` 全 1；`w_privileged` 只在存在非 privileged 行时才有相对作用，当前结构性无效。
+- `multi_solution` 不存在；多解场景仍用单轨迹 L2。
+- DAgger 的 `intervened` 实际是 replay（expert override），`shield` 是另一个字段；`w_intervened=3` 没有只作用于 shield。
+- 因而“P0-4 已修”只能表述为“列已加载、infeasible 已降权”，不能表述为“数据质量闭环完成”。
+
+拟定的最小 schema：
+
+| 字段 | 语义 | 训练用途 |
+|---|---|---|
+| `label_valid` | 该 decision 的标签可执行/可测 | 无效段归零 |
+| `action_in_bounds` | 原始 4D 在 bounds 内 | 越界归零/修正标记 |
+| `feasible` / `label_pass` | PSTL hard gate | 降权，不无条件全删 |
+| `source` | expert / dagger | 分层权重 |
+| `label_source` | measured / lift | measured 与 lift 分开 |
+| `expert_replay` | 本段确实由专家接管 | replay 权重 |
+| `shield` | 安全 shield 触发 | shield 权重；与 replay 分开 |
+| `privileged_expert_sample` | 真的使用 lane oracle | per-sample/分桶 |
+| `multi_solution` | 场景存在多条合法车道 | L2 降权/合法区域监督 |
+| `segment_index` / `episode_outcome` | 段与 episode 结局分开 | timeout 早段不被 collision/off-road 晚段连带 |
+
+权重规则改为：`label_valid` 硬门；`action_in_bounds` 硬门；`feasible/label_pass` 软降权；`expert_replay`、`shield` 分开；timeout 早段与 collision/off-road 失败段分开；`w_privileged` 要么改成 per-sample 相对权重，要么删除。P1 gate 前先把这个 schema 和统计写清楚，再谈重训。
+
+### 6. Test500、manifest、路径和“所有版本同一验证集”
+
+接受 review 的三个事实：
+
+1. Test500 的 500 条 spec 仍是 `split="val"`；
+2. `SPLITS` 没有 `test`；
+3. manifest 没有 enforce，且放在 `docs/` 不合适。
+
+**manifest 是什么**：它记录验证集的 seed 列表、spec 文件路径、数量、SHA-256 和 split rule，使“同一个验证集”可核验，而不是靠某次 run 的记忆。
+
+**为什么 docs 错**：`docs/` 是解释性文档；manifest 是机器可读的评测契约/配置，应放在 `config/splits/val500.json`（并同时有 test 的 manifest）。`tools/freeze_splits.py` 是一次性生成器，放在 `tools/` 本身不算错，但 split 是数据契约的一部分，应该归到 `dataset/freeze_splits.py`（或 `dataset/splits.py` 的 CLI），`tools/` 只保留与环境/运行相关的 wrapper。
+
+**为什么 Test500 不是 test**：spec 的 `split` 字段决定语义；把 500 条 val spec 改名成 test500 不会自动变成 test。需要在生成时写 `split="test"`，扩展 `SPLITS`，并在 loader 中禁止 train 读取 test。
+
+拟定结构：
+
+```text
+config/splits/val500.json          # tracked: 500 seeds + SHA + split_rule
+config/splits/test500.json         # tracked: 500 disjoint test seeds + SHA
+env/specs/scenarios_val500.json    # generated, gitignored
+env/specs/scenarios_test500.json   # generated with split="test"
+dataset/freeze_splits.py           # generate + verify manifest
+```
+
+`pipeline/eval.py` 增加 `--split-manifest`，启动时校验 seed 集、数量、SHA；输出目录写入 manifest digest。所有 clean checkpoint 的 exact 评估都走同一入口。Test500 只在 P1/P2 gate 通过后运行，且只读。
+
+### 7. 数据集目录：可以只保留四个逻辑数据集
+
+可以，而且应该。当前 `datasets/` 有 **40 个 top-level 目录、约 4.6 GiB**，其中大量是历史版本，不能支撑“同一验证集、所有版本可比较”的要求。
+
+建议：
+
+```text
+datasets/train_bc_2k/shard_0000.npz  ... shard_0003.npz
+datasets/dagger_r1/shard_0000.npz    ... shard_0003.npz
+datasets/dagger_r2/shard_0000.npz    ... shard_0003.npz
+datasets/dagger_r3_hard500/shard_0000.npz
+```
+
+不再使用 `bc_2k_s0..s3` / `dagger_2k_r1_s0..s3` 这种“版本名+shard”并列的 40 个目录；顶层只保留四个逻辑数据集，shard 是内部实现。`dataset.load_data` 改为读取目录下 `*.npz`，训练命令只引用四个顶层路径。
+
+清理顺序：先在 canonical 目录完成行数/seed/列/SHA 校验，并跑一个 BC smoke；确认 loader 和 checkpoint 都能读取后，再删除旧的 `bc_v2_*`、`dagger_v2_*`、`*_c*`、`bc_200` 等目录。不会在未验证 loader 前直接 `rm`。旧数据不是 git 资产，删除前会记录清单和大小；需要回滚时用采集脚本/commit 重建。
+
+**所有版本同一验证集**：是。以后只允许用 `config/splits/val500.json` 的 500 个 seed 评测 clean 版本；如果某版本只能在旧 harness 下跑，它只能标为“历史参考”，不能进入比较表。当前 legacy exact 65.0/18.2/12.0 已经是 ad-hoc 结果，不再作为正式 A/B。
+
+### 8. checkpoint、PPO、short-path、代码质量
+
+- **checkpoint**：`pipeline/train_bc.py:873` 的 `selection` 明确是 open-loop val objective；`best.pt` 不是闭环选出的最终模型。接受。后续用 `pipeline/checkpointing.py` 校验 schema/action bounds/encoder version，用 `pipeline/gate.py` 按 collision/off-road 硬门槛 → success → RC 选；`best_loss.pt` 只作为训练诊断，不再叫 final。
+- **PPO**：4 transitions / 25% mask / pre-P0 checkpoint，接受为无效 P3 证据。P3 不能在这个 artifact 上继续；要重跑必须用 P0 后 checkpoint、冻结 val、至少覆盖多个 episode，并明确 cost 是否进 policy。`cost_adv` 不进 policy 是事实，不是“reward 已包含 cost”。
+- **short-path**：接受。`<0.25 m` 路径不应绕过 κ/a_lat；要么直接 reject，要么用端点解析曲率计算，不能把 `curvature_checked=False` 当作可行。补对应测试。
+- **代码质量**：接受 partial。P1/P2 gate 前只做两件最小工程事：
+  1. `pipeline/execution.py`：decision state、commanded/realized action、resolve/fallback、safe brake、termination、segment dt；
+  2. `pipeline/checkpointing.py` + `pipeline/gate.py` + split manifest enforcement + parity test。
+  `env/obs.py`/`action_space.py` 的物理拆分、YAML 全量接入、`net/model.py` 反向依赖、`train_ppo` 对 `eval` 的依赖后置到 gate 后；不为了结构好看改行为。
+- **状态文档**：本轮已修正 `docs/implementation_status.md` 的 exact/LQR 矛盾和 LQR 复现命令。`arch_lock` 是 staged 的合同/批注，不在本轮编辑；其中 line 11/12 的 LQR blocker 与最新优先级冲突，保留给合同 owner 决定。
+
+### 9. 修正后的推进顺序
+
+1. **文档/契约层**：把 split manifest 移到 `config/splits/`，生成 `test` split，加 evaluator/CI 校验；数据集顶层收敛为四个逻辑目录；所有 run 记录 manifest digest 和 commit/dirty。
+2. **P0-2/P0-4/short-path**：`execution.py` 唯一 decision state；realized action；PPO segment dt；segment-level 权重/字段；short-path gate；补 parity、weight、short-path 测试。
+3. **checkpoint/gate**：`checkpointing.py` 校验 schema/bounds/encoder；closed-loop 选择顺序；统一 Val500。
+4. **闭环提升**：先分析 66.2% 的 169 个失败场景，按 failure bucket 做 DAgger；再考虑 10k/500/500；Test500 只在 P1/P2 gate 后跑。
+5. **LQR**：在 ego-conditioned latent WM + imagined rollout 后，接 3 s / 6 点 preview，再提高 LQR 权重；当前只做 smoke。
+6. **P4/WM**：继续不动，直到 P1/P2 数据/验证/闭环证据成立。
+
+**结论：** 接受 review 的“P1/P2 未过、Test500/checkpoint/PPO/short-path/data semantics 仍需修”；撤回“exact A/B passes”；不接受“LQR 当前是 P1 blocker”，因为 3 s / 6 点接口尚不存在。当前最重要的是把验证集和数据目录冻结成唯一口径，并把 66.2% 的失败场景变成下一轮 DAgger 的目标，而不是继续在 0.5 s LQR 上追分。
