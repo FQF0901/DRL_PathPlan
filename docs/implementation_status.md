@@ -25,7 +25,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 - `pipeline/train_ppo.py`: PPO contract canary (bounded TruncatedNormal, stored sampled-vs-executed separation, per-episode GAE, truncation bootstrap, reward/cost separation).
 - `pipeline/eval.py`: clean exact/LQR closed-loop evaluator (`--controller exact|lqr`), fallback/v1 projection diagnostics.
 - `pipeline/distributions.py`, `pipeline/eval_metrics.py`, `pipeline/rollout.py`: bounded distribution, paired/bootstrap metrics, canonical plan helpers.
-- Tests: `95 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
+- Tests: `96 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
 
 ## Current evidence
 
@@ -60,7 +60,24 @@ This is an upper bound for imitation under the current Expert. The clean model c
 
 Paired r3b − legacy: success **+2.6 pp** (95% CI −1.2..+5.8), collision −2.6 pp (CI −6.0..+0.6), off-road **−4.6 pp** (CI −7.0..−2.2), stuck **+4.6 pp** (CI +2.8..+6.4). Success and collision are not formally significant; stuck is worse. **This is not a gate pass and r3b is not promoted.** r3 remains the safer checkpoint; r3b has higher success but worse collision/stuck.
 
-r4 (DAgger from r3) was **62% / 16% / 12% / 10% on 50 val**; r5 (DAgger from r3b) was **66% / 8% / 14% / 12% on 50 val**, but on Val500 only **64.8% / 13.8% / 11.8%** (stuck 5.0). Neither is promoted.
+r4 (DAgger from r3) was **62% / 16% / 12% / 10% on 50 val**; r5 (DAgger from r3b) was **66% / 8% / 14% / 12% on 50 val**, but on Val500 only **64.8% / 13.8% / 11.8%** (stuck 5.0); r6 with student-failure upweighting was only 60/14/12/14 on 50 val. None is promoted.
+
+### History context ablation (inference, same r3b checkpoint/seed)
+
+Masking older history frames through `hist_valid` on the same 50 val seeds:
+
+| frames | success | collision | off-road | RC |
+|---:|---:|---:|---:|---:|
+| 1 | 16% | 20% | 70% | 0.536 |
+| 2 | 38% | 26% | 38% | 0.656 |
+| 4 | 52% | 34% | 10% | 0.784 |
+| 6 | **68%** | 16% | 10% | 0.857 |
+
+This is a same-checkpoint inference ablation (not a retrained 1/2/4/6 model); it is strong evidence that history is causal, but the contract-required training ablation is still open.
+
+### PPO P3 wiring canary (r3b)
+
+`runs/ppo_v3_canary`: 20 episodes / 5 updates / 399 transitions, max 100 steps; boundary_rate 0, logprob recompute diff 0, ratio-at-old 1.0; cost advantage now enters the policy loss (Lagrangian term); postprocess/mask ~32%; no performance claim. This is still a short wiring canary, not a P3 gate.
 
 ### LQR canary (50 val; contract canary, not final 3 s)
 
@@ -84,7 +101,7 @@ r3b tracking: xy 0.024 m, heading 0.009 rad, speed 0.247 m/s; steer saturation 0
 
 - `datasets/`: four logical dirs, 2.1 GiB; old versioned dirs are archived outside the project.
 - `runs/`: 69 MiB of current lineage/evidence; old run dirs are archived outside the project. `runs/logs` and `runs/monitor` are retained.
-- Tests: **95 passed, 1 skipped**.
+- Tests: **96 passed, 1 skipped**.
 
 ## Design decisions
 
@@ -174,7 +191,8 @@ tools/venv-python -m pipeline.train_ppo \
 - 0.5 s LQR canary is a current contract gate and is **not passing/closed**: r3b 48% success / 36% timeout; r3 34% / 52%. It is not the final 3 s controller-realized score. Report tracking/trackability/saturation and Exact→LQR failure ratio; the full 3 s/6-point interface follows after WM/imagined rollout.
 - 10k/500/500 + Test500 final scale and shard-stream loader are not implemented; no Test500 conclusions.
 - Dataset cleanup is done: four canonical dirs, 2.1 GiB; old dirs archived outside the project. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
-- P0-4 multi-solution/privileged semantics are still open; DAgger failure-prioritized collection beyond the current r4/r5 experiments is needed. `train_bc._plan_weights` diagnostics and the 1/2/4/6-frame LD ablation still need dedicated regression coverage.
+- P0-4 multi-solution/privileged semantics are still open; DAgger failure-prioritized collection beyond the current r4/r5/r6 experiments is needed. The history ablation is inference-only; a retrained 1/2/4/6 ablation, Expert-GT 3 s LQR controller smoke, PPO reward/cost hacking audit, and full 3 s plan/WM path remain open.
+- r6 with `w_student_failure=2` was 60% on 50 val; do not promote it.
 - P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.
 - Comfort violation rate is 100% in current evals under the strict comfort bounds; it is a diagnostic, not yet a training gate.

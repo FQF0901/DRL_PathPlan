@@ -494,3 +494,15 @@ r4 / r5 也未超过：
 - P1/P2 仍未通过：exact success 不显著、stuck 退化；LQR canary 未闭合；Test500 未运行。
 - Expert 上限 73.2%，100% 目标在当前数据/专家下不可实现；下一步应优先 **强 expert / RL / 课程与 failure bucket**，而不是继续在 67% 附近堆 epoch。
 - P4 WM 未启动；继续遵守 arch_lock §13/§20。
+
+### 追加（2026-10-22 02:00）：按 §13/§20 已推进到的位置
+
+在修正 P0/接口后，本轮实际推进了：
+
+- **Stage A2 证据**：用同一 r3b checkpoint/seed 做 `hist_valid` 推理 ablation，1/2/4/6 帧 success = **16/38/52/68%**；证明 history 不是装饰。但这不是重新训练的 1/2/4/6 模型，合同要求的 training ablation 仍 open。
+- **Stage B**：加入 `student_failure` failure-prioritized plan weight；r6（r5 data + `w_student_failure=2`）50 val 只有 60/14/12/14，没有超过 r3b；失败优先权重本身没有解决问题。
+- **Stage C wiring canary**：`runs/ppo_v3_canary` 20 episodes / 5 updates / 399 transitions，boundary 0、logprob diff 0、ratio-at-old 1.0；`cost_adv` 已作为 Lagrangian 项进入 policy loss。仍是短 canary，不是 P3 性能 gate。
+- **P0 仍缺**：Expert-GT 3 s + LQR controller smoke、action-parameterization veto 的完整报告；这两项没有假装完成。
+- **未推进 Stage D/P4**：arch_lock §13 要求 P1/P2 通过后才进 WM；当前 exact success 67.6 vs Expert 73.2，stuck 4.6 vs legacy 0，LQR canary 未闭合，因此不启动 WM。这不是“跳过”，而是 gate 未过。
+
+**为什么没有继续堆 Stage D/P4**：不是不知道 §13/§20，而是继续堆模型会违反“先过 gate 再上 WM”的硬顺序；在本轮 P1/P2 仍未通过、Expert 上限只有 73.2% 的情况下，强行上 WM 只会得到不可解释的数字。下一步应补 Expert-GT 3 s LQR、真正的 1/2/4/6 训练 ablation、P3 hacking audit，或引入更强 Expert/RL；而不是在 67% 附近继续堆 epoch。

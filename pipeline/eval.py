@@ -52,7 +52,7 @@ from net.action_space import (
 from net.model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
 from dataset.splits import verify_split_manifest
 from pipeline.checkpointing import load_model_from_checkpoint
-from pipeline.execution import relative_action
+from pipeline.execution import limit_history, relative_action
 from pipeline.eval_metrics import summarize_rows
 
 DECISION_DT = 0.5
@@ -188,6 +188,7 @@ def run_episode(
     max_steps: int = 600,
     device: str = "cpu",
     lqr_kwargs: Optional[Dict[str, Any]] = None,
+    history_frames: int = HISTORY_FRAMES,
 ) -> Dict[str, Any]:
     """Run one closed-loop episode with 0.5 s segment execution.
 
@@ -262,6 +263,7 @@ def run_episode(
             frames = frames[-HISTORY_FRAMES:]
             poses = poses[-HISTORY_FRAMES:]
         hist = stack_history(frames, poses)
+        hist = limit_history(hist, int(history_frames))
         batch = _batch_from_history(hist, device=device)
 
         with torch.no_grad():
@@ -541,6 +543,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--ckpt", default=None, help="optional; random init for smoke")
     parser.add_argument("--strict-checkpoint", action="store_true")
+    parser.add_argument("--history-frames", type=int, default=HISTORY_FRAMES)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--controller", choices=("exact", "lqr"), default="exact")
@@ -591,6 +594,7 @@ def main(argv=None) -> int:
                 max_steps=int(args.max_steps),
                 device=args.device,
                 lqr_kwargs=lqr_kwargs,
+                history_frames=int(args.history_frames),
             )
         finally:
             env.close()
@@ -618,7 +622,7 @@ def main(argv=None) -> int:
             "decision_dt": DECISION_DT,
             "sim_dt": SIM_DT,
             "steps_per_policy": STEPS_PER_POLICY,
-            "history_frames": HISTORY_FRAMES,
+            "history_frames": int(args.history_frames),
             "action_bounds": CLEAN_BOUNDS.as_dict(),
             "limits": {
                 "hard": _limits_dict(HARD_LIMITS),

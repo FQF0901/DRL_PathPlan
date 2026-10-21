@@ -115,6 +115,7 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "intervened",
     "shield",
     "done",
+    "student_failure",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -156,6 +157,7 @@ _ALL_OPTIONAL_KEYS = (
     "intervened",
     "shield",
     "done",
+    "student_failure",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -199,6 +201,7 @@ class LossConfig:
     w_residual: float = 0.2
     w_intervened: float = 3.0  # compatibility alias; not applied to replay
     w_shield: float = 3.0
+    w_student_failure: float = 2.0
     w_failed_expert: float = 0.2
     w_infeasible: float = 0.2
     brake_weight: float = 0.0
@@ -446,6 +449,13 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
         shield = np.zeros(n, dtype=bool)
     if bool(shield.any()):
         w *= np.where(shield, float(cfg.w_shield), 1.0)
+
+    # Stage B failure-prioritized aggregation: rows from a failed student
+    # episode are the recovery buffer and get extra plan weight.
+    if "student_failure" in data and float(cfg.w_student_failure) != 1.0:
+        student_failure = np.asarray(data["student_failure"], dtype=np.float32) > 0.5
+        if bool(student_failure.any()):
+            w *= np.where(student_failure, float(cfg.w_student_failure), 1.0)
 
     if cfg.brake_weight > 0.0 or cfg.near_weight > 0.0:
         action = np.asarray(data["action"], dtype=np.float32)
@@ -964,6 +974,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--w-residual", type=float, default=0.2)
     p.add_argument("--w-intervened", type=float, default=3.0)
     p.add_argument("--w-shield", type=float, default=3.0)
+    p.add_argument("--w-student-failure", type=float, default=2.0)
     p.add_argument("--w-failed-expert", type=float, default=0.2)
     p.add_argument("--w-infeasible", type=float, default=0.2)
     p.add_argument("--brake-weight", type=float, default=0.0)
@@ -1017,6 +1028,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         w_residual=args.w_residual,
         w_intervened=args.w_intervened,
         w_shield=args.w_shield,
+        w_student_failure=args.w_student_failure,
         w_failed_expert=args.w_failed_expert,
         w_infeasible=args.w_infeasible,
         brake_weight=args.brake_weight,
@@ -1091,6 +1103,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         ),
         "shield_rows": int(np.sum(np.asarray(data.get("shield", np.zeros(len(data["action"])))) > 0.5)),
+        "student_failure_rows": int(
+            np.sum(np.asarray(data.get("student_failure", np.zeros(len(data["action"])))) > 0.5)
+        ),
         "intervened_rows_legacy": int(
             np.sum(np.asarray(data.get("intervened", np.zeros(len(data["action"])))) > 0.5)
         ),

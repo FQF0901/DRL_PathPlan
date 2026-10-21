@@ -104,3 +104,26 @@ class DecisionState:
             "prev_heading": self.prev_heading,
             "dt": float(dt),
         }
+
+
+def limit_history(hist: dict, frames: int) -> dict:
+    """Mask history older than ``frames`` via ``hist_valid`` (inference ablation).
+
+    The model's temporal pool already masks by ``hist_valid``; this keeps the
+    tensor shape fixed while testing single/2/4/6-frame context on the same
+    checkpoint and seed set.
+    """
+    k = int(frames)
+    if k < 1:
+        raise ValueError("history frames must be >= 1")
+    valid = hist.get("hist_valid")
+    if valid is None:
+        return hist
+    T = int(valid.shape[-1])
+    if k >= T:
+        return hist
+    import copy
+    out = dict(hist)
+    out["hist_valid"] = valid.copy()
+    out["hist_valid"][..., : T - k] = 0.0
+    return out

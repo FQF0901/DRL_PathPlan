@@ -1133,6 +1133,11 @@ def ppo_update(
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - float(clip), 1.0 + float(clip)) * adv
             policy_loss = -torch.min(surr1, surr2)[policy_mask].mean()
+            # Cost advantage enters the policy as a Lagrangian penalty.  The
+            # cost critic remains separate; this term is not a reward rewrite.
+            cost_adv = batch["cost_adv"][policy_mask]
+            cost_ratio = ratio[policy_mask]
+            policy_loss = policy_loss + float(cost_coef) * (cost_ratio * cost_adv).mean()
             approx_kl = ((ratio[policy_mask] - 1.0) - log_ratio[policy_mask]).mean()
             clip_frac = (
                 (ratio[policy_mask] - 1.0).abs() > float(clip)

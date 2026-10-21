@@ -153,6 +153,7 @@ def _write_fixture(root: Path) -> Path:
     arrays["label_pass"] = arrays["feasible"].copy()
     arrays["action_in_bounds"] = np.array([1, 1, 1, 1, 1, 0, 1, 1], dtype=np.int8)
     arrays["label_source"] = np.ones(n, dtype=np.int8)
+    arrays["student_failure"] = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int8)
 
     np.savez_compressed(root / "expert_bc.npz", **arrays)
     return root
@@ -193,7 +194,7 @@ def test_targets_oob_value_risk_and_plan_weights(tmp_path):
     # residual and infeasible downweights apply to actual masks.
     np.testing.assert_allclose(
         targets["plan_weight"],
-        np.array([1.0, 3.0, 0.2, 0.0, 1.0, 0.0, 0.2, 0.2], dtype=np.float32),
+        np.array([1.0, 3.0, 0.2, 0.0, 2.0, 0.0, 0.4, 0.4], dtype=np.float32),
         rtol=0.0,
         atol=1e-6,
     )

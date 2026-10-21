@@ -42,3 +42,12 @@ def test_segment_dt_for_truncated_segment():
     assert abs(segment_dt(5) - 0.5) < 1e-12
     assert abs(segment_dt(3) - 0.3) < 1e-12
     assert segment_dt(0) == 0.0
+
+
+def test_limit_history_masks_older_frames():
+    import numpy as np
+    from pipeline.execution import limit_history
+    hist = {"hist_valid": np.ones((1, 6), dtype=np.float32)}
+    out = limit_history(hist, 2)
+    assert out["hist_valid"][0, -2:].tolist() == [1.0, 1.0]
+    assert out["hist_valid"][0, :-2].sum() == 0.0
