@@ -29,7 +29,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 
 ## Current evidence
 
-**P0 rerun status:** Nav history units, eval/PPO start-state semantics (exact path), exact steering, LD stable-ID/OD acceleration units, and feasibility/label_source training weights were fixed and committed `a6b2628` (plus the `w_infeasible`/safety-weight refinement). The exact numbers below are from re-collected 2k data and the fixed evaluator. The LQR numbers are **0.5 s interface smoke only**, not a planner/controller gate: the required 3 s / 6-point preview interface is not implemented.
+**P0 rerun status (partial):** P0-1/P0-3 fixed; P0-2 only exact-requested/executed equivalence, LQR realized action + parity test still open; P0-4 columns loaded and infeasible downweighted, but segment-level/privileged/intervened semantics still open. P0-2/P0-4 are not closed. The exact numbers below are from re-collected 2k data and the fixed evaluator. The 0.5 s LQR canary is a current contract gate; the full 3 s / 6-point interface is not implemented, so the LQR numbers are not the final controller-realized score.
 
 ### 2k expert data (canonical re-collection)
 
@@ -62,14 +62,14 @@ Paired bootstrap (clean r3 − legacy):
 
 **This is a descriptive, not a formal A/B pass.** Collision/off-road improvements are significant, but success +1.2 pp has a 95% CI of −2.2..+4.6, so success non-inferiority is not established. The legacy metrics artifact has `config: null` and no commit/patch provenance; the legacy harness is asymmetric and cannot prove the same evaluator code. Do not promote clean or call this an A/B gate on the strength of this table.
 
-### LQR interface smoke (50 val; not a gate)
+### LQR 0.5 s canary (50 val; contract gate; not final 3 s score)
 
 | model | success | collision | off-road | timeout | RC |
 |---|---:|---:|---:|---:|---:|
 | Legacy ad-hoc LQR (`runs/lqr50_legacy_p0fixed`) | 44% | 8% | 26% | — | 0.776 |
 | Clean r3 LQR (`runs/lqr50_clean_r3_p0fixed`) | 34% | 2% | 12% | 52% | 0.740 |
 
-These numbers are not comparable to the exact table and are not a P1/P2 gate. `pipeline/eval.py` executes only the first 0.5 s segment (5 x 0.1 s); `docs/arch_lock.md` §6.3 requires a 6-point, 0.5–3.0 s trajectory and §6.4 says LQR must receive 2–3 s for preview. The current LQR run therefore tests a 0.5 s command-following interface, not the planned controller-realized interface. A one-scene low-`v_next` observation is a hypothesis, not a root cause; speed-gain/ref-scale probes were multi-parameter and are not evidence of a single cause. Per the current priority, LQR performance is checked only for gross failures now; it becomes a focus after the ego-conditioned latent WM and imagined rollout, and only after the 3 s / 6-point interface exists.
+These numbers are not comparable to the exact table; they are a **0.5 s canary gate**, not the final 3 s controller-realized score. `pipeline/eval.py` executes only the first 0.5 s segment (5 x 0.1 s); `docs/arch_lock.md` §6.3 requires a 6-point, 0.5–3.0 s trajectory and §6.4 says LQR must receive 2–3 s for preview. The current run therefore cannot support a full-closed-loop claim, but it still must report the contract canary metrics: tracking error, trackability, saturation, and Exact-success/LQR-failure ratio on fixed seeds. Current clean r3: success 34%, collision 2%, off-road 12%, timeout 52%, RC 0.740; tracking xy 0.016 m, heading 0.008 rad, speed 0.210 m/s, steer saturation 0.0007, throttle saturation 0.0. This is **not a pass** and must not be replaced by a NaN/crash-only smoke. A one-scene low-`v_next` observation is a hypothesis, not a root cause; speed-gain/ref-scale probes were multi-parameter and are not evidence of a single cause. The 3 s / 6-point interface becomes the focus after the ego-conditioned latent WM and imagined rollout.
 
 ### PPO contract canary
 
@@ -112,9 +112,9 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 ## Root causes found and fixed
 
 1. **`q_lane` was near-uniform**: current lane role0 received 0.011 attention while a lat=-7 m lane got 0.60; the car drifted off-road even on straight scenes. Added query-selection auxiliary supervision (current lane / urgent OD attention targets). This is auxiliary only; current lane/TTC are not plan inputs.
-2. **BC-to-closed-loop distribution shift**: 2k BC clean was 8% success / 80% off-road on 50 val; measured-expert DAgger raised it to 50% then 64%. This is the dominant P2 issue.
+2. **BC-to-closed-loop distribution shift**: on the current re-collected 2k data, BC 2k was 8% success / 70% off-road on 50 val; DAgger r1b/r2/r3 were 44%/50%/58% success. The historical “50% then 64%” came from the old data/evaluator and is not the current r3 number. This remains the dominant P2 issue.
 3. **DAgger lift bias**: old kinematic bicycle labels had +0.53 m dx / +1.12 m/s v_next bias and censored braking; the canonical collector stores measured expert replay plus lift/residual/source validity.
-4. **LQR interface mismatch**: clean LQR 34% / 52% timeout vs exact 66.2% on the current 50-val slice, but the evaluator only executes the first 0.5 s (5 points). The contract requires 6 points over 3 s for LQR preview; the current comparison is an interface smoke, not a planner root cause. Do not spend P1 effort on LQR tuning; revisit after the ego-conditioned latent WM/imagined rollout.
+4. **LQR canary gap**: clean LQR 34% / 52% timeout vs exact 66.2% on the current 50-val slice. The evaluator only executes the first 0.5 s (5 points), so this is a canary gate result, not the final 3 s controller-realized score. Report tracking/trackability/saturation and fixed-seed Exact-vs-LQR failures now; the full 3 s/6-point interface is the focus after the ego-conditioned latent WM/imagined rollout. Do not replace the canary with a NaN/crash-only check.
 
 ## Current state
 
@@ -165,9 +165,10 @@ tools/venv-python -m pipeline.train_ppo \
 ## Known gaps
 
 - Exact success is 66.2%; the +1.2 pp vs the ad-hoc legacy artifact is not a formal non-inferiority result (CI crosses 0) and the legacy provenance is asymmetric. Do not promote on this table alone.
-- LQR is not a current gate: only a 0.5 s/5-point interface smoke exists. The required 3 s/6-point preview interface, and the later WM/imagined-rollout coupling, are missing; do not tune LQR against these numbers.
+- 0.5 s LQR canary is a current contract gate and is **not passing/closed** (clean 34% success, 52% timeout); it is not the final 3 s controller-realized score. Report tracking/trackability/saturation and Exact→LQR failure ratio now; the full 3 s/6-point interface follows after WM/imagined rollout. Do not tune only for 0.5 s success and do not replace the canary with a NaN/crash-only check.
 - 10k/500/500 + Test500 final scale and shard-stream loader are not implemented; no Test500 conclusions.
 - `datasets/` has 40 top-level versioned directories (~4.6 GiB); canonical migration to four logical datasets (`train_bc_2k`, `dagger_r1`, `dagger_r2`, `dagger_r3_hard500`) is pending. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
+- Evidence gaps: exact steering test only checks nonzero/bounded; `_plan_weights` residual diagnostic uses the old mask; `test_train_bc` fixture lacks feasible/label_pass/action_in_bounds/label_source; `OD_ACC_DT=0.1` is hardcoded; LD stable ID has no cross-chunk test or 1/2/4/6-frame ablation.
 - Failure-prioritized DAgger on actual train-scene failures is still needed; round 3 used a hard-geometry bucket.
 - P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.

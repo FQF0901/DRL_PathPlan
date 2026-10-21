@@ -195,7 +195,7 @@ PPO 在 log-prob/GAE/buffer 修好前只保留为 wiring probe，**不计入 P3 
    我确实用同一批前 500 个 val seeds 跑了 clean/legacy；但没有 manifest/hash、spec 未入库，且 Test500 未建立。因此“使用过同一批 seed”不等于“Val500 已冻结”；review 的 gate 判断成立。
 
 7. **LQR gap 不能直接归因于 Planner。**  
-   LQR 只跑 0.5 s canary，preview 被 clamp 到参考末端；加上 P0-2/P0-3 的 ego 特征错配，当时的 26% vs 64% 不能作为架构结论（该旧数已被下一节的 0.5 s interface smoke 修正）。修复 P0 后必须重跑；这一点我同意 review 的“先修再判断”。
+   LQR 只跑 0.5 s canary，preview 被 clamp 到参考末端；加上 P0-2/P0-3 的 ego 特征错配，当时的 26% vs 64% 不能作为架构结论（该旧数已被下一节的 0.5 s canary 修正）。修复 P0 后必须重跑；这一点我同意 review 的“先修再判断”。
 
 ### 3. 我接受的其他关键点
 
@@ -273,7 +273,7 @@ Val500 exact（冻结前 500 seeds，paired）：
 **先修正我上一节的两处过度结论：**
 
 1. 撤回“exact A/B 现在通过”。success 的 +1.2 pp 的 95% CI 是 −2.2..+4.6，跨 0；只能主张 collision/off-road 显著改善，不能主张 success non-inferiority。legacy artifact 也没有等价 harness 的证明。
-2. 撤回“LQR 是当前 P1 blocker”。按最新澄清，LQR 的预瞄性质要求 3 s / 6 点接口；当前 0.5 s / 5 点结果只是接口 smoke，不是 planner/controller gate。LQR 应在 ego-conditioned latent WM 和 imagined rollout 之后提高关注，而不是现在用调参去追闭环分数。
+2. **更正（不是撤回）：0.5 s LQR canary 仍是 `arch_lock` §13 A2/B/C 的 gate，只是它不是最终 3 s controller-realized 成绩。** 我之前把“WM 后提高关注”误写成“当前不是 gate/可以整体推迟”，这是错误的；现在按合同恢复：0.5 s canary 指标现在必须报告，3 s/6 点完整接口在 WM/imagined rollout 后才成为重点。
 
 ### 1. 接受的部分
 
@@ -314,26 +314,19 @@ Review 写“eval/PPO 的 `prev_action` 仍是 resolved requested”。这句话
 
 我接受 review 的结论：“exact A/B 不能写成 passes”。上一节和 status 中的相关措辞已经撤回/改写。
 
-### 4. LQR：接受“接口优先”的修正，不接受“当前 LQR 是 blocker”
+### 4. LQR：0.5 s canary 仍是合同 gate，3 s 才是 WM/rollout 后的重点
 
-最新澄清：**LQR 应该在 ego-conditioned latent WM 和 imagined rollout 之后提高关注**；LQR 有预瞄性质，接口需要 3 s / 6 点轨迹；接口正确前不应过度关注 LQR 闭环分数，只做点检。
+我先纠正上一版本节的错误：我曾写“LQR 不是当前 gate、可以整体推迟到 WM 之后”，并把当前 0.5 s 结果称为“smoke only”。这个判断**不接受**。`docs/arch_lock.md` §13 A2/B/C 把 Plan Head 0.5 s segment + LQR canary 写成 checkpoint/阶段门槛；§6.3/§6.4 又要求最终 3 s / 6 点预瞄。两者是**当前 canary gate**和**后续正式 3 s 口径**的关系，不是“当前可以不做”。
 
-这与代码事实一致：
+正确的表述：
 
-- `docs/arch_lock.md:536` 要求 6 个点对应 0.5..3.0 s；
-- `docs/arch_lock.md:543` 明确“保留完整 2–3 s 参考轨迹供 LQR 预瞄，不得只传第一个 0.5 s”；
-- `pipeline/eval.py:13-14, 502, 594-595` 当前只执行 first 0.5 s segment（5×0.1 s），`preview=NOT_IMPLEMENTED`；
-- 所以 clean LQR 34/2/12/52 与 legacy LQR 44/8/26 是**两个 0.5 s 接口下的 smoke 数字**，不是 planner 的 LQR gate，也不能据此推导“低 v_next 速度陷阱”是根因。
+- **0.5 s canary 是现在的 gate**：必须报告 fixed seeds 上的 tracking error、可跟踪率、steering/brake/throttle saturation，以及 Exact 成功但 LQR canary 失败的比例；不能只用“无 NaN/无崩溃/无异常饱和”替代。
+- **3 s / 6 点完整预瞄是 WM/imagined rollout 后的重点**：当前 evaluator 只执行 first 0.5 s（5×0.1 s），`preview=NOT_IMPLEMENTED`；所以当前 LQR 数字不是最终 controller-realized 成绩，不能作为“clean 完整闭环”结论。这个限定不等于取消当前 canary gate。
+- 当前 clean r3 50-val LQR：34% success / 2% collision / 12% off-road / 52% timeout / RC 0.740；tracking xy 0.016 m、heading 0.008 rad、speed 0.210 m/s、steer saturation 0.0007、throttle saturation 0.0。它说明当前 canary 不通过/未闭环，而不是“可以不管”。
+- 之前“低 `v_next` 速度陷阱”只有一个场景观察，没有 per-step artifact；调参同时改了 speed/accel/brake/lookahead，不能证明单一根因。降级为 hypothesis，不再作为 root cause。
+- 不再为了 0.5 s success 盲调 gain；但必须先把 canary 指标表补齐、固定 seeds、逐 checkpoint 记录。3 s/6 点接口在 WM/rollout 之后接，再提高 LQR 权重。
 
-关于上一节的“低 v_next 速度陷阱”：接受 review 的限定——它只是一个场景的观察，没有 per-step artifact；调参同时改了 speed/accel/brake/lookahead，不能证明单一根因。该结论降级为 hypothesis，不再作为 P1 结论。
-
-行动：
-- 现在只做 LQR 点检：无 NaN、无崩溃、无异常饱和；不把 success/timeout 当 gate；
-- 在 WM/imagined rollout 完成后，再做完整 3 s / 6 点 LQR，届时才提高优先级；
-- 当前不再花时间调 LQR gain/ref speed；`ref_speed_scale` 的负结果只保留为诊断记录。
-
-arch_lock 的 staged 批注仍把 LQR 写成 blocker（line 11/12）；这是合同初始审阅的表述，与最新澄清冲突。我不会修改 staged 合同；以本文件和 status 的修正为准，等合同 owner 决定是否改 arch_lock。
-
+**合同权威**：`arch_lock.md` 是合同真源；`implementation_status.md` 和本文件只能记录实现/争论，不能反向覆盖 §13/§20 的 gate。若“最新澄清”要改变 gate，必须先由合同 owner 修改 `arch_lock.md` 对应正文，或在 `docs/decision_log.md` 记录变更并复审；在此之前按合同执行。此前我在 status/argue 里写“LQR 不是 gate”，已撤回并改为“0.5 s canary gate，非最终 3 s 成绩”。
 ### 5. P0-4：接受“segment-level/语义”批评，不再只靠 0.2 权重
 
 当前问题不是“没消费”，而是“消费的粒度和字段语义不对”：
@@ -415,7 +408,7 @@ datasets/dagger_r3_hard500/shard_0000.npz
   1. `pipeline/execution.py`：decision state、commanded/realized action、resolve/fallback、safe brake、termination、segment dt；
   2. `pipeline/checkpointing.py` + `pipeline/gate.py` + split manifest enforcement + parity test。
   `env/obs.py`/`action_space.py` 的物理拆分、YAML 全量接入、`net/model.py` 反向依赖、`train_ppo` 对 `eval` 的依赖后置到 gate 后；不为了结构好看改行为。
-- **状态文档**：本轮已修正 `docs/implementation_status.md` 的 exact/LQR 矛盾和 LQR 复现命令。`arch_lock` 是 staged 的合同/批注，不在本轮编辑；其中 line 11/12 的 LQR blocker 与最新优先级冲突，保留给合同 owner 决定。
+- **状态文档/合同权威**：本轮修正 `docs/implementation_status.md` 的 exact/LQR 矛盾，但不把 status/argue 当作 contract 真源。`arch_lock` §13 A2/B/C 仍是当前 gate；如果合同 owner 要改变 gate，应先修改 `arch_lock.md` 正文或在 `docs/decision_log.md` 记录并复审。当前不在 staged 合同上做未授权修改。
 
 ### 9. 修正后的推进顺序
 
@@ -423,7 +416,27 @@ datasets/dagger_r3_hard500/shard_0000.npz
 2. **P0-2/P0-4/short-path**：`execution.py` 唯一 decision state；realized action；PPO segment dt；segment-level 权重/字段；short-path gate；补 parity、weight、short-path 测试。
 3. **checkpoint/gate**：`checkpointing.py` 校验 schema/bounds/encoder；closed-loop 选择顺序；统一 Val500。
 4. **闭环提升**：先分析 66.2% 的 169 个失败场景，按 failure bucket 做 DAgger；再考虑 10k/500/500；Test500 只在 P1/P2 gate 后跑。
-5. **LQR**：在 ego-conditioned latent WM + imagined rollout 后，接 3 s / 6 点 preview，再提高 LQR 权重；当前只做 smoke。
+5. **LQR**：当前先按合同跑 0.5 s canary 指标（tracking/可跟踪率/saturation/Exact→LQR 失败比例，fixed seeds、逐 checkpoint）；在 ego-conditioned latent WM + imagined rollout 后，再接 3 s / 6 点 preview 并提高 LQR 权重。不能把当前 canary 说成“不是 gate”。
 6. **P4/WM**：继续不动，直到 P1/P2 数据/验证/闭环证据成立。
 
-**结论：** 接受 review 的“P1/P2 未过、Test500/checkpoint/PPO/short-path/data semantics 仍需修”；撤回“exact A/B passes”；不接受“LQR 当前是 P1 blocker”，因为 3 s / 6 点接口尚不存在。当前最重要的是把验证集和数据目录冻结成唯一口径，并把 66.2% 的失败场景变成下一轮 DAgger 的目标，而不是继续在 0.5 s LQR 上追分。
+### 10. Review 指出、我接受但上一版未覆盖的 5 个残留
+
+这些不是反驳项，直接进入修复清单：
+
+1. **exact steering 测试太弱**：`test/test_action_kinematics.py:133-142` 只断言 `abs(steering)>1e-6` 和 `[-1,1]` 有界；没有验证符号、`wheelbase` 来源、degrees/radians 换算，也没有 collect/eval 的 steering 分布 parity。功能修复保留，但证据等级只能算 P2；补精确解析断言和真实 rollout 分位数对比。
+2. **`train_bc._plan_weights` 与日志漂移**：`pipeline/train_bc.py:1040-1048` 的 `residual_downweight_rows` 仍按原始 residual 计算，没有使用新的 `measured & finite` mask；checkpoint 的 `assumptions` 还写着 “failed expert episodes ... zero plan weight”，但实际已改为 0.2。补诊断字段和测试，不能只改权重不改报告。
+3. **测试不 hermetic**：`test/test_obs_schema.py` / `test/test_eval.py` 依赖 gitignored `env/specs`；`test/test_train_bc.py` 的 fixture 没有 `feasible/label_pass/action_in_bounds/label_source`，`_plan_weights` 的新分支实际上没有被测到。改为 tmp 生成 spec 或带固定 fixture，并直接覆盖新权重分支。
+4. **`OD_ACC_DT` 硬编码 0.1**：`env/obs.py:233,772` 修对了单位，但没有从 `decision_repeat × physics_step` 或配置推导；配置变化会静默回退。应集中到环境常量/配置并加测试。
+5. **LD stable ID 缺跨 chunk 测试/ablation**：`ld_ids=hash(scene_seed, road_pair, lane_id)` 已修，但无跨 20 m chunk 的 history 测试，也无 1/2/4/6 帧 ablation；代码接受，“history 真的带来收益”仍未证明。
+
+这些项不改变当前“P1/P2 未过”的结论；但如果不修，canary/权重/冻结验证集的证据链仍然不闭合。
+
+### 11. 对本次复核的最终答复
+
+- **接受本次复核的 80–85% 判断，并接受两个拒绝项。** 我撤回“0.5 s LQR 不是 gate、可以整体推迟到 WM 后”的说法；撤回“status/argue 可以覆盖 arch_lock”的做法。`arch_lock` §13/§20 是 gate 真源；如果要改变 LQR gate，必须由合同 owner 先修改 contract 正文或在 decision log 记录变更，不能由实现文档反向改写。
+- **保留的只是范围限定，不是 gate 豁免**：0.5 s LQR 是当前 canary gate，3 s/6 点是 WM/rollout 后才成为重点的正式 controller-realized 口径。当前 must-report：fixed-seed tracking error、可跟踪率、steering/brake/throttle saturation、Exact 成功但 LQR 失败的比例。不能用“无 NaN/无崩溃/无饱和”替代。
+- **状态文档已按新口径改**：`implementation_status.md:115` 删除/限定旧的 “50% then 64%”，改为当前 r1b/r2/r3 44/50/58；`:168` 改为“0.5 s canary gate，不是最终 3 s 成绩”；`:32` 改为 P0-1/P0-3 fixed、P0-2/P0-4 partial，不再写成全部 closed。
+- **5 个残留**（steering 测试、plan-weight 诊断、非 hermetic 测试、OD_ACC_DT、LD chunk 测试/ablation）已进入修复清单，不能作为“已证明”计入 gate。
+- **本轮不做代码语义修改**；先把 contract/状态/证据口径修齐，再按 execution.py → checkpointing.py/gate.py → LQR canary 指标 → DAgger 的顺序推进。
+
+**结论：** 接受 review 的“P1/P2 未过、Test500/checkpoint/PPO/short-path/data semantics 仍需修”；撤回“exact A/B passes”；接受“0.5 s LQR canary 仍是合同 gate”，只把 3 s/6 点完整口径放到 WM/rollout 后。当前最重要的是把验证集和数据目录冻结成唯一口径，补齐 canary 指标和 P0-2/P0-4 证据，再把 66.2% 的失败场景变成下一轮 DAgger 的目标。
