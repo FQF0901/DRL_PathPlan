@@ -218,7 +218,7 @@ tools/venv-python -m pipeline.train_ppo \
 - P0-4 multi-solution/privileged semantics are still open; DAgger failure-prioritized collection beyond the current r4/r5/r6 experiments is needed. The history ablation is inference-only; a retrained 1/2/4/6 ablation, Expert-GT 3 s LQR controller smoke, PPO reward/cost hacking audit, and full 3 s plan/WM path remain open.
 - r6 with `w_student_failure=2` was 60% on 50 val; do not promote it.
 - terminalfix2 BC was 12% on 50 val; terminalfix2 DAgger r1 was 48% / 12% / 34% on 50 val and **47.8% / 19.0% / 26.4%** on Val500 (stuck 1.6%). It does not close the B gate; old data debt remains visible.
-- Closed-loop selector on 50 val: selected r3b; r3 eligible (48/14/10), r3b eligible (68/16/10), terminalfix r1 ineligible (off-road 34%). Selection is exact-only, no LQR branch yet, and 50-scene selection is not final. See `runs/selected_checkpoint50/selection.json`.
+- Closed-loop selector on 50 val: selected r3b; r3 eligible (58/12/10), r3b eligible (68/16/10), terminalfix r1 ineligible (off-road 34%). Selection is exact-only, no LQR branch yet, and 50-scene selection is not final. See `runs/selected_checkpoint50/selection.json`.
 - D1/D2 WM smoke exists, but Stage E/F (joint Plan+WM, 3 s LQR, imagined RL) are not started.
 - Checkpoint selection is still open-loop; `best.pt` is not a final model.
 - Stage C is wiring only: per-transition logp passes, but batched diagnostic logp is 1.1–2.6e-5 (>1e-5); cost has no limit/dual; mask/postprocess ~31%; LQR shadow is only 50 val and low-threshold.

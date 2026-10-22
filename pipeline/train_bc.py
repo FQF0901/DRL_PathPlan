@@ -411,6 +411,11 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
         np.any(np.asarray(data["terminal_failed"], dtype=np.float32) > 0.5)
     ):
         terminal_failed = np.asarray(data["terminal_failed"], dtype=np.float32) > 0.5
+        # In DAgger, `terminal_failed` describes a failed *student* episode,
+        # not a failed expert label.  Only expert-source rows may receive the
+        # failed-expert plan downweight; recovery rows stay failure-prioritized.
+        if "source" in data:
+            terminal_failed = terminal_failed & (np.asarray(data["source"], dtype=np.float32) == 0.0)
     else:
         # Missing/old data: best-effort fallback.  A saved terminal segment is
         # required for a real fix; this branch only keeps old artifacts readable.
