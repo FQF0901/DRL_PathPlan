@@ -525,10 +525,10 @@ Oracle 对 `ac8beb7..5932122` 的 review 结论我基本接受：**D1/D2 不能�
 
 ### 新增实测
 
-- `runs/ppo_v6_canary`：20 episodes / 398 transitions；per-transition logp diff 0，TF32 关闭；batch 诊断 1.1–2.6e-5（高于 1e-5，但 update 走 per-transition）；LQR shadow 50 = 40/2/14/44。仍是 wiring canary，不是 P3 gate。
+- `runs/ppo_v7_canary`：20 episodes / 398 transitions；per-transition logp diff 0，TF32 关闭；batch 诊断 1.1–2.6e-5；LQR shadow 50 = 40/2/14/44。仍是 wiring canary，不是 P3 gate。
 - `runs/ppo_v5_tf32off` 证明 **GPU TF32** 是 batch old-logp 0.01 级别偏差的根因；关闭 TF32 后降到 1e-5 量级。
-- `runs/wm_d1_fixed2`：D1 WM 83.39 vs corrected persistence ~1.0，**D1 失败**。
-- `runs/wm_d2_probe_fixed`：held-out 6-depth autoregressive probe；只作探索。
+- `runs/wm_d1_fixed2`：旧指标；已被下文明细修正为 D1 .616 vs 1.051（旧 83.39 是 `masked_mse` 的 128× 放大）。
+- `runs/wm_d2_probe_fixed`：旧、非 held-out probe，已被 `wm_d2_probe_final2` 取代。
 
 ### 判断
 
