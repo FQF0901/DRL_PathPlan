@@ -90,11 +90,12 @@ def _build_pairs(data: Dict[str, np.ndarray], max_pairs: int) -> Tuple[np.ndarra
         for a, b in zip(idx[:-1], idx[1:]):
             if int(step[b]) == int(step[a]) + 1:
                 pairs.append((int(a), int(b)))
-                if len(pairs) >= int(max_pairs):
-                    return (
-                        np.asarray([p[0] for p in pairs], dtype=np.int64),
-                        np.asarray([p[1] for p in pairs], dtype=np.int64),
-                    )
+    if max_pairs > 0 and len(pairs) > int(max_pairs):
+        # Sample across all episodes/datasets instead of taking the first
+        # directory's prefix (the old behavior made "mixed" data expert-only).
+        rng = np.random.default_rng(0)
+        keep = np.sort(rng.choice(len(pairs), size=int(max_pairs), replace=False))
+        pairs = [pairs[int(i)] for i in keep]
     return (
         np.asarray([p[0] for p in pairs], dtype=np.int64),
         np.asarray([p[1] for p in pairs], dtype=np.int64),
@@ -171,7 +172,15 @@ def _make_training_arrays(
         "ld_tmask": ld_tmask,
         "nav_target": encoded["nav"][ni],
         "ego_target": encoded["ego"][ni],
-        "action": np.asarray(data["action"][cur_rows], dtype=np.float32),
+        "action": (
+            np.where(
+                np.isfinite(np.asarray(data.get("executed_action", np.full((len(data["action"]), 4), np.nan)), dtype=np.float32)[cur_rows]),
+                np.asarray(data.get("executed_action", np.full((len(data["action"]), 4), np.nan)), dtype=np.float32)[cur_rows],
+                np.asarray(data["action"][cur_rows], dtype=np.float32),
+            )
+            if "executed_action" in data
+            else np.asarray(data["action"][cur_rows], dtype=np.float32)
+        ),
         "scene_seed": np.asarray(data["scene_seed"][cur_rows], dtype=np.int64),
     }
 
@@ -204,8 +213,13 @@ def _loss(wm, batch: Dict[str, Tensor]) -> Tuple[Tensor, Dict[str, float]]:
 def _persistence(arrays: Dict[str, np.ndarray], idx: np.ndarray) -> Dict[str, float]:
     def mse(a, b, m):
         mask = np.asarray(m, dtype=np.float32)
+        # Reshape [N] / [N,1] masks explicitly; broadcasting [N,1,1] would
+        # otherwise produce an N× larger value for nav/ego.
+        while mask.ndim < a.ndim:
+            mask = mask[..., None]
+        mask = np.broadcast_to(mask, a.shape)
         denom = max(float(mask.sum()), 1.0)
-        return float((((a - b) ** 2) * mask[..., None]).sum() / denom)
+        return float((((a - b) ** 2) * mask).sum() / denom)
     return {
         "od": mse(arrays["od"][idx], arrays["od_target"][idx], arrays["od_tmask"][idx]),
         "ld": mse(arrays["ld"][idx], arrays["ld_target"][idx], arrays["ld_tmask"][idx]),
@@ -228,6 +242,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args(argv)
 
+    torch.manual_seed(int(args.seed))
+    np.random.seed(int(args.seed))
     data = load_data(args.data)
     ids = _load_ids(args.data)
     if len(ids["od_ids"]) != len(data["action"]):
@@ -245,7 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(val_idx) == 0:
         raise ValueError("empty WM validation split")
 
-    model = EgoConditionedLatentWM(hidden=128, od_slots=OD_SLOTS, ld_slots=LD_SLOTS).to(args.device)
+    model = EgoConditionedLatentWM(
+        hidden=80, latent_dim=128, od_slots=OD_SLOTS, ld_slots=LD_SLOTS, layers=1
+    ).to(args.device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -294,12 +312,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "model": model.state_dict(),
                     "config": {
                         "schema": "pnp_latent_wm_d1",
-                        "hidden": 128,
+                        "hidden": 80,
+                        "latent_dim": 128,
+                        "layers": 1,
+                        "params": int(sum(p.numel() for p in model.parameters())),
                         "od_slots": OD_SLOTS,
                         "ld_slots": LD_SLOTS,
                         "action_dim": 4,
                         "target_encoder": args.ckpt,
                         "target_drift": 0.0,
+                        "max_pairs": int(args.max_pairs),
+                        "seed": int(args.seed),
+                        "epochs": int(args.epochs),
+                        "lr": float(args.lr),
+                        "data": list(args.data),
                     },
                     "epoch": epoch,
                     "metrics": record,

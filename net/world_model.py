@@ -21,7 +21,8 @@ class EgoConditionedLatentWM(nn.Module):
     def __init__(
         self,
         *,
-        hidden: int = 128,
+        hidden: int = 80,
+        latent_dim: int = 128,
         od_slots: int = 16,
         ld_slots: int = 16,
         action_dim: int = 4,
@@ -30,16 +31,17 @@ class EgoConditionedLatentWM(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
+        self.latent_dim = int(latent_dim)
         self.od_slots = int(od_slots)
         self.ld_slots = int(ld_slots)
         self.action_dim = int(action_dim)
         self.action_mlp = nn.Sequential(
             nn.Linear(action_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         )
-        self.ego_proj = nn.Linear(hidden, hidden)
-        self.nav_proj = nn.Linear(hidden, hidden)
-        self.od_proj = nn.Linear(hidden, hidden)
-        self.ld_proj = nn.Linear(hidden, hidden)
+        self.ego_proj = nn.Linear(self.latent_dim, hidden)
+        self.nav_proj = nn.Linear(self.latent_dim, hidden)
+        self.od_proj = nn.Linear(self.latent_dim, hidden)
+        self.ld_proj = nn.Linear(self.latent_dim, hidden)
         self.modality = nn.Embedding(4, hidden)  # ego, nav, od, ld
         layer = nn.TransformerEncoderLayer(
             d_model=hidden,
@@ -52,10 +54,10 @@ class EgoConditionedLatentWM(nn.Module):
         )
         self.fusion = nn.TransformerEncoder(layer, num_layers=int(layers))
         self.norm = nn.LayerNorm(hidden)
-        self.od_head = nn.Linear(hidden, hidden)
-        self.ld_head = nn.Linear(hidden, hidden)
-        self.nav_head = nn.Linear(hidden, hidden)
-        self.ego_head = nn.Linear(hidden, hidden)
+        self.od_head = nn.Linear(hidden, self.latent_dim)
+        self.ld_head = nn.Linear(hidden, self.latent_dim)
+        self.nav_head = nn.Linear(hidden, self.latent_dim)
+        self.ego_head = nn.Linear(hidden, self.latent_dim)
         self._init()
 
     def _init(self) -> None:
@@ -66,6 +68,11 @@ class EgoConditionedLatentWM(nn.Module):
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, std=0.02)
+        # Residual heads start at zero so D1 initializes exactly at persistence;
+        # otherwise the WM can be worse than the baseline for many epochs.
+        for head in (self.od_head, self.ld_head, self.nav_head, self.ego_head):
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
 
     def forward(
         self,

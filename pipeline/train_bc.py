@@ -117,6 +117,7 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "done",
     "terminal_failed",
     "student_failure",
+    "executed_action",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -160,6 +161,7 @@ _ALL_OPTIONAL_KEYS = (
     "done",
     "terminal_failed",
     "student_failure",
+    "executed_action",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -240,6 +242,8 @@ def _resolve_npz_paths(path: Path) -> list[Path]:
 
 
 def _default_value(key: str, n: int) -> np.ndarray:
+    if key == "executed_action":
+        return np.full((n, 4), np.nan, dtype=np.float32)
     if key == "residual_xy":
         return np.zeros((n, 2), dtype=np.float32)
     if key in _DEFAULT_ONE_SCALARS:

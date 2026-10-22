@@ -506,3 +506,32 @@ r4 / r5 也未超过：
 - **未推进 Stage D/P4**：arch_lock §13 要求 P1/P2 通过后才进 WM；当前 exact success 67.6 vs Expert 73.2，stuck 4.6 vs legacy 0，LQR canary 未闭合，因此不启动 WM。这不是“跳过”，而是 gate 未过。
 
 **为什么没有继续堆 Stage D/P4**：不是不知道 §13/§20，而是继续堆模型会违反“先过 gate 再上 WM”的硬顺序；在本轮 P1/P2 仍未通过、Expert 上限只有 73.2% 的情况下，强行上 WM 只会得到不可解释的数字。下一步应补 Expert-GT 3 s LQR、真正的 1/2/4/6 训练 ablation、P3 hacking audit，或引入更强 Expert/RL；而不是在 67% 附近继续堆 epoch。
+
+---
+
+## 2026-10-22 — oracle review 回复与修正
+
+Oracle 对 `ac8beb7..5932122` 的 review 结论我基本接受：**D1/D2 不能作为 gate 证据**，ledger 当时确实 overclaim。逐项处理：
+
+### 接受并已修
+
+- **R3 persistence 广播 bug**：`_persistence` 用 `[N,1]` mask 广播成 N×N；已改为显式 reshape/broadcast，并加 2-D mask 单测。修正后 D1 WM **83.39** vs persistence **~1.0**，WM **失败**；不再声称“beats persistence”。
+- **R1 coverage/D2 leakage**：`_build_pairs` 不再取第一个目录前缀；改为全量 pair 后按 seed 抽样；`probe_wm` 只评估 held-out scene，并记录 data/ckpt/split。D1/D2 仍不是 gate。
+- **R2 action condition**：`executed_action` 已进入 loader；`train_wm`/`probe_wm` 用 executed action，缺失时回退 action。
+- **R4 terminal row**：BC collector 之前仍在保存前 break；已删除该 break，实际 terminal segment 会写入，`terminal_failed` 由 `_backfill` 标记。旧 r3b/r4/r5/r6 数据仍不含此语义，已标 debt；terminalfix2 重采已启动。
+- **R5 PPO artifact**：去掉了 contract 里重复/覆盖的 `schema_version`，分别记录 `contract_version`/`obs_schema`；per-transition 容差 1e-5、batch 诊断容差 1e-4；PPO warm-start 改为 strict loader。
+- **R6 WM 参数**：smoke 模型改为 hidden=80/latent=128/layer=1，约 **245,792** params（记录在 config）。
+- **R7 static targets**：还没有按 §9.2 的 static-LD reprojection/Nav re-encode/Ego dynamics 重写；这是未关闭项，不能把 D1 当 gate。
+
+### 新增实测
+
+- `runs/ppo_v6_canary`：20 episodes / 398 transitions；per-transition logp diff 0，TF32 关闭；batch 诊断 1.1–2.6e-5（高于 1e-5，但 update 走 per-transition）；LQR shadow 50 = 40/2/14/44。仍是 wiring canary，不是 P3 gate。
+- `runs/ppo_v5_tf32off` 证明 **GPU TF32** 是 batch old-logp 0.01 级别偏差的根因；关闭 TF32 后降到 1e-5 量级。
+- `runs/wm_d1_fixed2`：D1 WM 83.39 vs corrected persistence ~1.0，**D1 失败**。
+- `runs/wm_d2_probe_fixed`：held-out 6-depth autoregressive probe；只作探索。
+
+### 判断
+
+- Oracle 的 R1–R7 大部分接受；R7 和训练版 A2 ablation 仍未解决。
+- D1/D2 不能进入 Stage E/F；Stage C 仍是 wiring canary。
+- terminalfix2 重采完成后，再决定是否重训 BC/DAgger；旧数据不作为 B-gate 证据。

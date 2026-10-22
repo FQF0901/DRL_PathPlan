@@ -25,7 +25,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 - `pipeline/train_ppo.py`: PPO contract canary (bounded TruncatedNormal, stored sampled-vs-executed separation, per-episode GAE, truncation bootstrap, reward/cost separation).
 - `pipeline/eval.py`: clean exact/LQR closed-loop evaluator (`--controller exact|lqr`), fallback/v1 projection diagnostics.
 - `pipeline/distributions.py`, `pipeline/eval_metrics.py`, `pipeline/rollout.py`: bounded distribution, paired/bootstrap metrics, canonical plan helpers.
-- Tests: `98 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
+- Tests: `99 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
 
 ## Stage ledger (owner policy: proceed, do not use LQR/exact A/B as hard blockers)
 
@@ -36,7 +36,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 | A2 history | **provisional** | inference 1/2/4/6 = 16/38/52/68%; training ablation and per-checkpoint LQR shadow still open. |
 | B DAgger | **provisional / data debt** | terminal failed segment is now saved and `terminal_failed` is consumed; old r3b/r4/r5/r6 data predates this fix and is not gate-clean. |
 | C PPO canary | **wiring pass, not performance** | schema aligned; TF32 disabled and update uses per-transition log-prob; `runs/ppo_v6_canary` 20 episodes / 398 transitions, per-transition logp diff 0, batch diagnostic 1.1–2.6e-5 (above the 1e-5 diagnostic tolerance); cost in policy. No performance claim. |
-| D1 WM | **smoke trained** | `runs/wm_d1_mixed`: 27,157 train / 2,843 val pairs; val MSE 69.37 vs persistence (od 20.0, ld 90.7, nav 8.5k, ego 38.3k); frozen encoder. |
+| D1 WM | **smoke fails baseline** | corrected persistence is od 0.185 / ld 0.648 / nav 0.021 / ego 0.198; WM val 83.39 (od 21.5 / ld 52.9 / nav 1.46 / ego 7.47) on the fixed mixed/held-out run. The WM is currently worse than persistence; D1 does not pass. |
 | D2 WM | **probe implemented** | autoregressive 1/2/3/6 with GT actions; WM beats persistence at every depth, e.g. depth 6 od 53.3 vs 68.0, ego 11.8 vs 61.1; not a trained 1/2/3/6 curriculum gate. |
 | E/F | **not started** | blocked on D1 fidelity and the 3 s assembly; do not claim. |
 | Test500 | **not run** | frozen manifest exists; only run after the final gate. |
@@ -93,10 +93,10 @@ This is a same-checkpoint inference ablation (not a retrained 1/2/4/6 model); it
 
 ### D1/D2 latent WM smoke
 
-- `net/world_model.py`: ego-action-conditioned per-entity latent WM; frozen planner/encoder target.
-- `pipeline/train_wm.py`: one-step training on mixed Expert/DAgger data; `runs/wm_d1_mixed` 5 epochs, val loss 69.37 vs persistence; target drift 0 (frozen encoder).
-- `pipeline/probe_wm.py`: 6-depth autoregressive probe with GT actions; `runs/wm_d2_probe` 200 sequences. WM MSE is below persistence at all depths; e.g. depth 6 od 53.3 vs 68.0, ld 112.6 vs 161.0, ego 11.8 vs 61.1.
-- This is a D1/D2 **smoke**, not a fidelity gate: no 1/2/3/6 training curriculum, no policy action coupling, no imagined RL, no 3 s LQR assembly.
+- `net/world_model.py`: ego-action-conditioned per-entity latent WM; frozen planner/encoder target; 245,792 params (hidden 80, one layer) in the smoke.
+- `pipeline/train_wm.py`: mixed Expert/DAgger sampling (not first-directory prefix), executed-action condition, fixed persistence metric, held-out scene split; `runs/wm_d1_fixed2` val loss 83.39 vs corrected persistence ~1.0. **D1 fails the persistence baseline.**
+- `pipeline/probe_wm.py`: held-out 6-depth autoregressive probe with GT actions; `runs/wm_d2_probe_fixed` is exploratory, not a fidelity gate.
+- Oracle review (2026-10-22) found R1–R7; the code fixes are in progress. No D1/D2 gate claim; Stage E/F not started.
 
 
 ### PPO P3 wiring canary (r3b)
@@ -125,7 +125,7 @@ r3b tracking: xy 0.024 m, heading 0.009 rad, speed 0.247 m/s; steer saturation 0
 
 - `datasets/`: four logical dirs, 2.1 GiB; old versioned dirs are archived outside the project.
 - `runs/`: 69 MiB of current lineage/evidence; old run dirs are archived outside the project. `runs/logs` and `runs/monitor` are retained.
-- Tests: **98 passed, 1 skipped**.
+- Tests: **99 passed, 1 skipped**.
 
 ## Design decisions
 
@@ -220,7 +220,7 @@ tools/venv-python -m pipeline.train_ppo \
 - D1/D2 WM smoke exists, but Stage E/F (joint Plan+WM, 3 s LQR, imagined RL) are not started.
 - Checkpoint selection is still open-loop; `best.pt` is not a final model.
 - Stage C is wiring only: per-transition logp passes, but batched diagnostic logp is 1.1–2.6e-5 (>1e-5); cost has no limit/dual; mask/postprocess ~31%; LQR shadow is only 50 val and low-threshold.
-- D1/D2 are smoke: D1 one-step mixed WM beats persistence on val; D2 is a 200-sequence autoregressive probe with GT actions, not a trained 1/2/3/6 curriculum, and Stage E/F are not started.
+- D1/D2 are not gates: D1 **fails** the corrected persistence baseline (83.39 vs ~1.0); D2 is an exploratory autoregressive probe with GT actions, not a trained 1/2/3/6 curriculum; Stage E/F are not started.
 - Old BC/DAgger r3b/r4/r5/r6 data predates `terminal_failed`; the new collector semantics need re-collection for clean B-gate data.
 - P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.

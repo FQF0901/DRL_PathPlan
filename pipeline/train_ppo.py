@@ -1447,7 +1447,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(args.seed))
 
-    model = load_model(args.ckpt, args.device)
+    model = load_model(args.ckpt, args.device, strict=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr))
     specs = load_specs(args.specs)
     if not specs:
@@ -1558,9 +1558,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     contract = {
         **summary,
         "schema": "drl_pathplan_ppo_contract_v2",
+        "contract_version": 2,
         "schema_version": 1,
         "schema_name": SCHEMA_NAME,
-        "schema_version": SCHEMA_VERSION,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "action_bounds": CLEAN_BOUNDS.as_dict(),
         "support": [SUPPORT_LOW, SUPPORT_HIGH],
@@ -1577,6 +1577,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         "logprob_recompute_scope": "first update, before any optimizer step",
         "logprob_recompute_tolerance": 1e-5,
+        "batch_logprob_recompute_tolerance": 1e-4,
         "ratio_at_old": first_update.get("ratio_at_old_mean"),
         "ratio_at_old_max_abs_dev": first_update.get("ratio_at_old_max_abs_dev"),
         "ratio_at_old_tolerance": 1e-5,

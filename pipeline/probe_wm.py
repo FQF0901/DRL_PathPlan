@@ -14,6 +14,8 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 
+from dataset.splits import split_by_scene_seed
+
 from net.world_model import EgoConditionedLatentWM, masked_mse, rollout_latents
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.train_bc import load_data
@@ -50,6 +52,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--horizon", type=int, default=6)
     p.add_argument("--max-sequences", type=int, default=1000)
+    p.add_argument("--val-frac", type=float, default=0.1)
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args(argv)
 
@@ -59,6 +63,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     seqs = _build_sequences(data, int(args.horizon), int(args.max_sequences))
     if len(seqs) == 0:
         raise SystemExit("no sequences")
+    # Probe only held-out scenes; the previous version evaluated the first
+    # sequences, which were also in the D1 training prefix.
+    seq_seeds = np.asarray(data["scene_seed"][seqs[:, 0]], dtype=np.int64)
+    _train_m, val_m = split_by_scene_seed(seq_seeds, args.val_frac, args.seed)
+    seqs = seqs[val_m]
+    if len(seqs) == 0:
+        raise SystemExit("no held-out WM sequences")
     rows = np.unique(seqs)
     encoder = load_model_from_checkpoint(args.encoder_ckpt, args.device, strict=True)
     encoder.eval()
@@ -66,8 +77,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     row_map = {int(r): i for i, r in enumerate(rows)}
     si = np.asarray([[row_map[int(r)] for r in seq] for seq in seqs], dtype=np.int64)
 
-    wm = EgoConditionedLatentWM(hidden=128, od_slots=16, ld_slots=16).to(args.device)
     payload = torch.load(args.wm_ckpt, map_location="cpu", weights_only=False)
+    cfg = payload.get("config", {})
+    wm = EgoConditionedLatentWM(
+        hidden=int(cfg.get("hidden", 80)),
+        latent_dim=int(cfg.get("latent_dim", 128)),
+        od_slots=int(cfg.get("od_slots", 16)),
+        ld_slots=int(cfg.get("ld_slots", 16)),
+        layers=int(cfg.get("layers", 1)),
+    ).to(args.device)
     wm.load_state_dict(payload["model"])
     wm.eval()
 
@@ -82,8 +100,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "od": torch.from_numpy(enc["od_mask"][si[:, 0]]).to(args.device),
         "ld": torch.from_numpy(enc["ld_mask"][si[:, 0]]).to(args.device),
     }
+    executed = data.get("executed_action")
+    action_rows = data["action"] if executed is None else np.where(
+        np.isfinite(np.asarray(executed, dtype=np.float32)), executed, data["action"]
+    )
     actions = np.asarray(
-        [[data["action"][seq[t]] for t in range(args.horizon)] for seq in seqs],
+        [[action_rows[seq[t]] for t in range(args.horizon)] for seq in seqs],
         dtype=np.float32,
     )
     action_t = torch.from_numpy(actions).to(args.device)
@@ -118,7 +140,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     with torch.no_grad():
         final, history = rollout_latents(wm, init, action_t, masks)
-    result = {"horizon": int(args.horizon), "sequences": int(len(seqs)), "depths": []}
+    result = {
+        "horizon": int(args.horizon),
+        "sequences": int(len(seqs)),
+        "held_out_split": {"val_frac": float(args.val_frac), "seed": int(args.seed)},
+        "data": list(args.data),
+        "encoder_ckpt": args.encoder_ckpt,
+        "wm_ckpt": args.wm_ckpt,
+        "depths": [],
+    }
     prev = init
     for t, pred in enumerate(history, start=1):
         target = targets[t - 1]

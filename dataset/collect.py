@@ -475,10 +475,9 @@ def run_episode(
                         termination = "terminal"
                     break
 
-            if term_any:
-                # Do not save a partial 0.5 s label (same policy as collect.py).
-                break
-
+            # Save the terminal (possibly partial) segment as the failed row.
+            # The old break here discarded the actual failure and left the
+            # preceding valid segment to be downweighted instead.
             p1 = np.asarray(ego.position, dtype=np.float64)[:2]
             h1 = float(ego.heading_theta)
             v1 = float(ego.speed)
