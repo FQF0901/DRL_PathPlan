@@ -70,6 +70,7 @@ from net.action_space import (
     feasible_v1_interval,
 )
 from net.model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
+from pipeline.checkpointing import load_model_from_checkpoint
 
 DECISION_DT = 0.5
 SIM_DT = 0.1
