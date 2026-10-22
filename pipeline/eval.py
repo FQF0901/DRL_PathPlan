@@ -540,6 +540,7 @@ def main(argv=None) -> int:
     parser.add_argument("--specs", required=True)
     parser.add_argument("--split-manifest", default=None)
     parser.add_argument("--split", choices=("val", "test"), default="val")
+    parser.add_argument("--allow-unfrozen-split", action="store_true")
     parser.add_argument("--out", required=True)
     parser.add_argument("--ckpt", default=None, help="optional; random init for smoke")
     parser.add_argument("--strict-checkpoint", action="store_true")
@@ -557,6 +558,8 @@ def main(argv=None) -> int:
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     args = parser.parse_args(argv)
+    if args.split_manifest is None and not args.allow_unfrozen_split:
+        parser.error("--split-manifest is required for evaluation (use --allow-unfrozen-split only for smoke)")
 
     model = load_model(args.ckpt, args.device, strict=bool(args.strict_checkpoint))
     lqr_kwargs: Dict[str, Any] = {}

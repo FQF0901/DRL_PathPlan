@@ -77,6 +77,12 @@ from pipeline.distributions import TruncatedNormal
 from pipeline.eval import load_model
 from pipeline.execution import relative_action, segment_dt
 
+# PPO's stored-vs-recomputed log-prob audit is a numerical contract.  TF32
+# batched matmul changes the result by ~1e-2 on this small transformer and
+# would make a batch update use a different log-prob than the rollout.
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 # ---------------------------------------------------------------------------
 # Timing / action contract
 # ---------------------------------------------------------------------------
@@ -1128,9 +1134,11 @@ def ppo_update(
 
     epoch_history: List[Dict[str, float]] = []
     for _epoch in range(int(epochs)):
+        # The rollout samples one transition at a time.  Using the
+        # per-transition forward here keeps the PPO ratio on the same numerical
+        # path as the stored log-prob; the batched path remains an audit.
+        newlogp = _policy_logprob_per_transition(model, states, sampled)
         out = model(states)
-        dist = _policy_distribution(out)
-        newlogp = dist.log_prob(sampled).sum(-1)
         log_ratio = newlogp - old_logp
         ratio = log_ratio.clamp(-20.0, 20.0).exp()
 
