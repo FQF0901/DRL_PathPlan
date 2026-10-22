@@ -115,6 +115,7 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "intervened",
     "shield",
     "done",
+    "terminal_failed",
     "student_failure",
     "feasible",
     "label_pass",
@@ -157,6 +158,7 @@ _ALL_OPTIONAL_KEYS = (
     "intervened",
     "shield",
     "done",
+    "terminal_failed",
     "student_failure",
     "feasible",
     "label_pass",
@@ -395,12 +397,20 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     feasible = np.asarray(data["feasible"], dtype=np.float32)
     label_pass = np.asarray(data["label_pass"], dtype=np.float32)
     action_in_bounds = np.asarray(data["action_in_bounds"], dtype=np.float32)
-    done = np.asarray(data.get("done", np.zeros(n)), dtype=np.float32) > 0.5
-    # Failed-expert outcome is episode-level at collection time.  Apply the
-    # downweight to the terminal segment only; earlier timeout/failure segments
-    # remain normal expert labels instead of being collectively zeroed.
-    failed_expert = expert_plan_valid <= 0.5
-    w *= np.where(failed_expert & done, float(cfg.w_failed_expert), 1.0)
+    # New collection marks the terminal failed segment explicitly.  The
+    # `done` fallback keeps old data readable, but old data cannot recover a
+    # terminal segment that was never saved.
+    if "terminal_failed" in data and bool(
+        np.any(np.asarray(data["terminal_failed"], dtype=np.float32) > 0.5)
+    ):
+        terminal_failed = np.asarray(data["terminal_failed"], dtype=np.float32) > 0.5
+    else:
+        # Missing/old data: best-effort fallback.  A saved terminal segment is
+        # required for a real fix; this branch only keeps old artifacts readable.
+        failed_expert = expert_plan_valid <= 0.5
+        done = np.asarray(data.get("done", np.zeros(n)), dtype=np.float32) > 0.5
+        terminal_failed = failed_expert & done
+    w *= np.where(terminal_failed, float(cfg.w_failed_expert), 1.0)
     w *= label_valid > 0.5
     # Keep a downweighted signal from PSTL-infeasible expert segments instead
     # of deleting the hard/curve states entirely.  The evaluator still never
@@ -1050,12 +1060,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "seeds); monitoring train split instead"
         )
 
-    model = StructuredPlanner().to(device)
     if args.init:
-        checkpoint = torch.load(args.init, map_location="cpu", weights_only=False)
-        state = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-        model.load_state_dict(state)
+        model = load_model_from_checkpoint(args.init, device, strict=True)
         print(f"[bc] initialized from {args.init}")
+    else:
+        model = StructuredPlanner().to(device)
 
     config = _make_config(model, cfg, args, data, train_mask, val_mask)
     out_dir = Path(args.out)
@@ -1111,8 +1120,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         "failed_expert_rows": int(np.sum(np.asarray(data["expert_plan_valid"]) <= 0.5)),
         "failed_expert_terminal_rows": int(
-            np.sum((np.asarray(data["expert_plan_valid"]) <= 0.5)
-                   & (np.asarray(data.get("done", np.zeros(len(data["action"])))) > 0.5))
+            np.sum(np.asarray(data.get("terminal_failed", np.zeros(len(data["action"])))) > 0.5)
+            if "terminal_failed" in data
+            else np.sum((np.asarray(data["expert_plan_valid"]) <= 0.5)
+                        & (np.asarray(data.get("done", np.zeros(len(data["action"])))) > 0.5))
         ),
     }
 

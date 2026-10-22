@@ -1120,6 +1120,11 @@ def ppo_update(
             "stored log-prob does not match the policy at old parameters: "
             f"max |new-old|={max_diff:.3e}"
         )
+    if batch_max_diff > 1e-4:
+        raise RuntimeError(
+            "batched log-prob does not match the stored log-prob at old parameters: "
+            f"max |new-old|={batch_max_diff:.3e} (per-transition {max_diff:.3e})"
+        )
 
     epoch_history: List[Dict[str, float]] = []
     for _epoch in range(int(epochs)):
@@ -1386,6 +1391,8 @@ def _checkpoint_config(
         "hidden": int(model.hidden),
         "heads": int(model.heads),
         "spatial_layers": int(eval_config.get("spatial_layers", SPATIAL_LAYERS)),
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "action_bounds_name": CLEAN_BOUNDS.name,
         "action_low": CLEAN_BOUNDS.low.tolist(),
@@ -1525,7 +1532,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "action_bounds": CLEAN_BOUNDS.as_dict(),
             "gamma": float(args.gamma),
             "lam": float(args.lam),
-            "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
+            "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
             "training": {
                 "updates": int(args.updates),
                 "episodes_per_update": int(args.episodes),
@@ -1542,6 +1551,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         **summary,
         "schema": "drl_pathplan_ppo_contract_v2",
         "schema_version": 1,
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "action_bounds": CLEAN_BOUNDS.as_dict(),
         "support": [SUPPORT_LOW, SUPPORT_HIGH],

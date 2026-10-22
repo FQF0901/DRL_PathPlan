@@ -165,6 +165,7 @@ ROW_DTYPES: Dict[str, Any] = {
     "termination_id": np.int16,
     "expert_plan_valid": np.int8,
     "expert_failed": np.int8,
+    "terminal_failed": np.int8,
 }
 
 TERMINATION_IDS = {
@@ -386,6 +387,7 @@ def _backfill_outcomes(
         row["termination_id"] = term_id
         row["expert_plan_valid"] = success_i8
         row["expert_failed"] = np.int8(0 if success else 1)
+        row["terminal_failed"] = np.int8(1 if (not success and i == len(rows) - 1) else 0)
 
 
 def run_episode(
@@ -526,6 +528,7 @@ def run_episode(
                     "episode_id": np.int64(0),  # filled by the caller
                     "scene_seed": np.int64(scene_seed),
                     "done": np.int8(0),
+                    "terminal_failed": np.int8(0),
                     "success": np.int8(0),
                     "collision": np.int8(0),
                     "off_road": np.int8(0),
@@ -538,6 +541,8 @@ def run_episode(
                 }
             )
             rows.append(row)
+            if term_any:
+                break
 
             prev_action = action.astype(np.float64)
             prev_speed = v0
@@ -549,6 +554,9 @@ def run_episode(
         if not rows:
             return None
 
+        if not done and ep_step >= max_steps:
+            done = True
+            termination = "timeout"
         _backfill_outcomes(
             rows,
             termination=termination,

@@ -57,8 +57,13 @@ def validate_checkpoint(
     if not isinstance(config, Mapping):
         raise ValueError("checkpoint config must be a mapping")
     warnings: list[str] = []
-    schema_name = config.get("schema_name")
-    schema_version = config.get("schema_version")
+    nested = config.get("obs_schema")
+    if isinstance(nested, Mapping):
+        schema_name = config.get("schema_name") or nested.get("name")
+        schema_version = config.get("schema_version", nested.get("version"))
+    else:
+        schema_name = config.get("schema_name")
+        schema_version = config.get("schema_version")
     if schema_name is None or schema_version is None:
         warnings.append("legacy checkpoint has no schema_name/schema_version")
     else:

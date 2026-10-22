@@ -84,6 +84,7 @@ EXPECTED_ROW_KEYS = {
     "termination_id",
     "expert_plan_valid",
     "expert_failed",
+    "terminal_failed",
 }
 
 FLOAT32_KEYS = {
@@ -138,6 +139,7 @@ INT8_KEYS = {
     "timeout",
     "expert_plan_valid",
     "expert_failed",
+    "terminal_failed",
 }
 INT16_KEYS = {"n_codes", "n_substeps", "termination_id"}
 INT64_KEYS = {

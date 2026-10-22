@@ -187,6 +187,7 @@ ROW_DTYPES: Dict[str, Any] = {
     "episode_id": np.int64,
     "scene_seed": np.int64,
     "done": np.int8,
+    "terminal_failed": np.int8,
     "success": np.int8,
     "collision": np.int8,
     "off_road": np.int8,
@@ -669,28 +670,8 @@ def _config_int(config: Any, key: str, default: int) -> int:
 
 
 def load_model(ckpt: str, device: str = "cpu") -> StructuredPlanner:
-    """Load ``StructuredPlanner`` from a ``{"model": state_dict, "config": {...}}``."""
-    payload = torch.load(ckpt, map_location="cpu", weights_only=False)
-    if isinstance(payload, dict) and "model" in payload:
-        state = payload["model"]
-        config = payload.get("config", {}) or {}
-    else:
-        state = payload
-        config = {}
-    model = StructuredPlanner(
-        hidden=_config_int(config, "hidden", H),
-        heads=_config_int(config, "heads", HEADS),
-        spatial_layers=_config_int(config, "spatial_layers", SPATIAL_LAYERS),
-    )
-    model.load_state_dict(state)
-    model.eval_config = {
-        "hidden": int(model.hidden),
-        "heads": int(model.heads),
-        "spatial_layers": _config_int(config, "spatial_layers", SPATIAL_LAYERS),
-    }
-    model.to(device).eval()
-    return model
-
+    """Strict checkpoint loader shared with eval/training."""
+    return load_model_from_checkpoint(ckpt, device, strict=True)
 
 def _read_ckpt_config(ckpt: str) -> Dict[str, Any]:
     payload = torch.load(ckpt, map_location="cpu", weights_only=False)
@@ -955,6 +936,7 @@ def run_episode(
                 "episode_id": np.int64(0),  # filled by the caller
                 "scene_seed": np.int64(scene_seed),
                 "done": np.int8(0),
+                "terminal_failed": np.int8(0),
                 "success": np.int8(0),
                 "collision": np.int8(0),
                 "off_road": np.int8(0),
