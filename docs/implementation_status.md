@@ -25,7 +25,23 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 - `pipeline/train_ppo.py`: PPO contract canary (bounded TruncatedNormal, stored sampled-vs-executed separation, per-episode GAE, truncation bootstrap, reward/cost separation).
 - `pipeline/eval.py`: clean exact/LQR closed-loop evaluator (`--controller exact|lqr`), fallback/v1 projection diagnostics.
 - `pipeline/distributions.py`, `pipeline/eval_metrics.py`, `pipeline/rollout.py`: bounded distribution, paired/bootstrap metrics, canonical plan helpers.
-- Tests: `96 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
+- Tests: `98 passed, 1 skipped` (`tools/venv-python -m pytest -q`).
+
+## Stage ledger (owner policy: proceed, do not use LQR/exact A/B as hard blockers)
+
+| stage | status | evidence / caveat |
+|---|---|---|
+| Stage 0 | partial | schema/split/expert collector exist; Expert audit and action-bucket quotas still missing. |
+| A1 exact | **provisional pass for progression** | r3b Val500 67.6% vs Expert 73.2%; success A/B CI crosses 0; LQR 0.5 s is a low-threshold canary only. |
+| A2 history | **provisional** | inference 1/2/4/6 = 16/38/52/68%; training ablation and per-checkpoint LQR shadow still open. |
+| B DAgger | **provisional / data debt** | terminal failed segment is now saved and `terminal_failed` is consumed; old r3b/r4/r5/r6 data predates this fix and is not gate-clean. |
+| C PPO canary | **partial** | schema aligned, split manifest available, cost in policy; batch old-logp > tolerance now raises, so the old artifact is invalid until re-run. |
+| D1 WM | **smoke trained** | `runs/wm_d1_mixed`: 27,157 train / 2,843 val pairs; val MSE 69.37 vs persistence (od 20.0, ld 90.7, nav 8.5k, ego 38.3k); frozen encoder. |
+| D2 WM | **probe implemented** | autoregressive 1/2/3/6 with GT actions; WM beats persistence at every depth, e.g. depth 6 od 53.3 vs 68.0, ego 11.8 vs 61.1; not a trained 1/2/3/6 curriculum gate. |
+| E/F | **not started** | blocked on D1 fidelity and the 3 s assembly; do not claim. |
+| Test500 | **not run** | frozen manifest exists; only run after the final gate. |
+
+**Owner decisions recorded:** LQR 0.5 s is a spot-check/canary, not a performance blocker; exact A/B need not be a comprehensive win; exact is close enough to Expert to proceed to RL/WM. Implementation proceeds with these debts recorded, not with false gate claims.
 
 ## Current evidence
 
@@ -75,6 +91,14 @@ Masking older history frames through `hist_valid` on the same 50 val seeds:
 
 This is a same-checkpoint inference ablation (not a retrained 1/2/4/6 model); it is strong evidence that history is causal, but the contract-required training ablation is still open.
 
+### D1/D2 latent WM smoke
+
+- `net/world_model.py`: ego-action-conditioned per-entity latent WM; frozen planner/encoder target.
+- `pipeline/train_wm.py`: one-step training on mixed Expert/DAgger data; `runs/wm_d1_mixed` 5 epochs, val loss 69.37 vs persistence; target drift 0 (frozen encoder).
+- `pipeline/probe_wm.py`: 6-depth autoregressive probe with GT actions; `runs/wm_d2_probe` 200 sequences. WM MSE is below persistence at all depths; e.g. depth 6 od 53.3 vs 68.0, ld 112.6 vs 161.0, ego 11.8 vs 61.1.
+- This is a D1/D2 **smoke**, not a fidelity gate: no 1/2/3/6 training curriculum, no policy action coupling, no imagined RL, no 3 s LQR assembly.
+
+
 ### PPO P3 wiring canary (r3b)
 
 `runs/ppo_v3_canary`: 20 episodes / 5 updates / 399 transitions, max 100 steps; boundary_rate 0, logprob recompute diff 0, ratio-at-old 1.0; cost advantage now enters the policy loss (Lagrangian term); postprocess/mask ~32%; no performance claim. This is still a short wiring canary, not a P3 gate.
@@ -101,7 +125,7 @@ r3b tracking: xy 0.024 m, heading 0.009 rad, speed 0.247 m/s; steer saturation 0
 
 - `datasets/`: four logical dirs, 2.1 GiB; old versioned dirs are archived outside the project.
 - `runs/`: 69 MiB of current lineage/evidence; old run dirs are archived outside the project. `runs/logs` and `runs/monitor` are retained.
-- Tests: **96 passed, 1 skipped**.
+- Tests: **98 passed, 1 skipped**.
 
 ## Design decisions
 
@@ -193,6 +217,8 @@ tools/venv-python -m pipeline.train_ppo \
 - Dataset cleanup is done: four canonical dirs, 2.1 GiB; old dirs archived outside the project. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
 - P0-4 multi-solution/privileged semantics are still open; DAgger failure-prioritized collection beyond the current r4/r5/r6 experiments is needed. The history ablation is inference-only; a retrained 1/2/4/6 ablation, Expert-GT 3 s LQR controller smoke, PPO reward/cost hacking audit, and full 3 s plan/WM path remain open.
 - r6 with `w_student_failure=2` was 60% on 50 val; do not promote it.
+- D1/D2 WM smoke exists, but Stage E/F (joint Plan+WM, 3 s LQR, imagined RL) are not started. The batch old-logp mismatch remains gated, so `runs/ppo_v3_canary` is invalid; a CPU/short re-run is not a P3 gate.
+- Checkpoint selection is still open-loop; `best.pt` is not a final model.
 - P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.
 - Comfort violation rate is 100% in current evals under the strict comfort bounds; it is a diagnostic, not yet a training gate.
