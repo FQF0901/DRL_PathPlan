@@ -34,7 +34,7 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 | Stage 0 | partial | schema/split/expert collector exist; Expert audit and action-bucket quotas still missing. |
 | A1 exact | **provisional pass for progression** | r3b Val500 67.6% vs Expert 73.0%; success A/B CI crosses 0; LQR 0.5 s is a low-threshold canary only. |
 | A2 history | **provisional** | inference 1/2/4/6 = 16/38/52/68%; training ablation and per-checkpoint LQR shadow still open. |
-| B DAgger | **provisional / data debt** | terminal failed segment is now saved and `terminal_failed` is consumed; old r3b/r4/r5/r6 data predates this fix and is not gate-clean. |
+| B DAgger | **provisional / data debt** | terminal partial rows now get `label_valid=0`; termfix3 BC 14/20/66, termfix3 DAgger 48/18/26 on 50; neither closes the B gate. Old r3b/r4/r5/r6 data predates the fix. |
 | C PPO canary | **not clean; wiring only** | `runs/ppo_v8_canary` 20 episodes / 399 transitions; per-transition logp diff 0; batch 1.1–2.6e-5; strict init; cost critic detached from trunk. Actual post-update trust region is still bad: update 1 approx_kl .189 / clip .639, update 5 .015 / .212; no performance claim. |
 | D1 WM | **one-step smoke passes baseline** | `runs/wm_d1_final`: 167,952 params; val 0.616 vs persistence 1.051 (od .162/.185, ld .401/.648, nav .007/.021, ego .046/.198). Static-target/ego-dynamics semantics still open. |
 | D2 WM | **probe implemented** | held-out 1/2/3/6 autoregressive with recorded actions; depth 6 WM od .522 vs persistence .673, ld .990 vs 1.182, ego .133 vs .617; not a trained 1/2/3/6 curriculum gate. |
@@ -217,7 +217,7 @@ tools/venv-python -m pipeline.train_ppo \
 - Dataset cleanup is done: four canonical dirs, 2.1 GiB; old dirs archived outside the project. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
 - P0-4 multi-solution/privileged semantics are still open; DAgger failure-prioritized collection beyond the current r4/r5/r6 experiments is needed. The history ablation is inference-only; a retrained 1/2/4/6 ablation, Expert-GT 3 s LQR controller smoke, PPO reward/cost hacking audit, and full 3 s plan/WM path remain open.
 - r6 with `w_student_failure=2` was 60% on 50 val; do not promote it.
-- terminalfix2 BC was 12% on 50 val; terminalfix2 DAgger r1 was 48% / 12% / 34% on 50 val and **47.8% / 19.0% / 26.4%** on Val500 (stuck 1.6%). It does not close the B gate; old data debt remains visible.
+- terminalfix2 BC was 12% on 50 val; terminalfix2 DAgger r1 was 48% / 12% / 34% on 50 val and **47.8% / 19.0% / 26.4%** on Val500 (stuck 1.6%). Repaired termfix3 BC was 14/20/66; termfix3 DAgger r1 was **48/18/26** on 50 val. It does not close the B gate; old data debt remains visible.
 - Closed-loop selector on 50 val: selected r3b; r3 eligible (58/12/10), r3b eligible (68/16/10), terminalfix r1 ineligible (off-road 34%). Selection is exact-only, no LQR branch yet, and 50-scene selection is not final. See `runs/selected_checkpoint50/selection.json`.
 - D1/D2 WM smoke exists, but Stage E/F (joint Plan+WM, 3 s LQR, imagined RL) are not started.
 - Checkpoint selection is still open-loop; `best.pt` is not a final model.
