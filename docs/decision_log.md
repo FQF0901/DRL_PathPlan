@@ -8,7 +8,7 @@
 
 ## 2026-10-22 — Progression policy
 
-- **Decision:** proceed with Stage B/C/D1/D2 while recording open debt; exact A/B need not be a comprehensive win, and LQR 0.5 s is not a blocker. Exact 67.6% is close to the Expert 73.2% ceiling.
+- **Decision:** proceed with Stage B/C/D1/D2 while recording open debt; exact A/B need not be a comprehensive win, and LQR 0.5 s is not a blocker. Exact 67.6% is close to the Expert 73.0% ceiling (episode-level: collision 14.4%, off-road 6.6%, timeout 6.0%).
 - **Consequences:** the stage ledger marks A1/A2/B as provisional; no claim that failed-expert/DAgger semantics or checkpoint selection are closed. Test500 remains read-only until the final gate.
 - **Data debt:** old r3b/r4/r5/r6 DAgger data predates terminal-failed semantics; terminalfix2 is the replacement lineage.
 

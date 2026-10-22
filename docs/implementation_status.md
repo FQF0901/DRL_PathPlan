@@ -32,10 +32,10 @@ The working tree contains one version. The previous 3D/legacy implementation is 
 | stage | status | evidence / caveat |
 |---|---|---|
 | Stage 0 | partial | schema/split/expert collector exist; Expert audit and action-bucket quotas still missing. |
-| A1 exact | **provisional pass for progression** | r3b Val500 67.6% vs Expert 73.2%; success A/B CI crosses 0; LQR 0.5 s is a low-threshold canary only. |
+| A1 exact | **provisional pass for progression** | r3b Val500 67.6% vs Expert 73.0%; success A/B CI crosses 0; LQR 0.5 s is a low-threshold canary only. |
 | A2 history | **provisional** | inference 1/2/4/6 = 16/38/52/68%; training ablation and per-checkpoint LQR shadow still open. |
 | B DAgger | **provisional / data debt** | terminal failed segment is now saved and `terminal_failed` is consumed; old r3b/r4/r5/r6 data predates this fix and is not gate-clean. |
-| C PPO canary | **wiring pass, not performance** | `runs/ppo_v7_canary` 20 episodes / 398 transitions; per-transition logp diff 0; batch 1.1–2.6e-5; strict init; cost in policy. LQR shadow 40/2/14/44. No performance claim. |
+| C PPO canary | **not clean; wiring only** | `runs/ppo_v8_canary` 20 episodes / 399 transitions; per-transition logp diff 0; batch 1.1–2.6e-5; strict init; cost critic detached from trunk. Actual post-update trust region is still bad: update 1 approx_kl .189 / clip .639, update 5 .015 / .212; no performance claim. |
 | D1 WM | **one-step smoke passes baseline** | `runs/wm_d1_final`: 167,952 params; val 0.616 vs persistence 1.051 (od .162/.185, ld .401/.648, nav .007/.021, ego .046/.198). Static-target/ego-dynamics semantics still open. |
 | D2 WM | **probe implemented** | held-out 1/2/3/6 autoregressive with recorded actions; depth 6 WM od .522 vs persistence .673, ld .990 vs 1.182, ego .133 vs .617; not a trained 1/2/3/6 curriculum gate. |
 | E/F | **not started** | blocked on D1 fidelity and the 3 s assembly; do not claim. |
@@ -62,7 +62,7 @@ The canonical shards are hard-linked to the old payloads; the training loader ac
 
 I collected the expert on the 500 frozen validation seeds:
 
-- expert success **73.2%**, collision **8.7%**, off-road **7.5%**, timeout **10.6%**, stuck 0%.
+- expert success **73.0%**, collision **14.4%**, off-road **6.6%**, timeout **6.0%**, stuck 0%.
 
 This is an upper bound for imitation under the current Expert. The clean model cannot be expected to reach 100% on this validation set without a stronger expert or RL that exceeds it. That is a root-cause finding, not a tuning excuse.
 
@@ -74,7 +74,7 @@ This is an upper bound for imitation under the current Expert. The clean model c
 | Clean r3 (`runs/val500_clean_r3_p0fixed`) | 66.2% | 12.2% | 8.6% | 0.4% | 0.859 |
 | Clean r3b (`runs/val500_clean_r3b_p0fixed`) | **67.6%** | 15.6% | **7.4%** | 4.6% | 0.857 |
 
-Paired r3b − legacy: success **+2.6 pp** (95% CI −1.2..+5.8), collision −2.6 pp (CI −6.0..+0.6), off-road **−4.6 pp** (CI −7.0..−2.2), stuck **+4.6 pp** (CI +2.8..+6.4). Success and collision are not formally significant; stuck is worse. **This is not a gate pass and r3b is not promoted.** r3 remains the safer checkpoint; r3b has higher success but worse collision/stuck.
+Paired r3b − legacy: success **+2.6 pp** (95% CI −1.2..+5.8), collision −2.6 pp (CI −6.0..+0.6), off-road **−4.6 pp** (CI −7.0..−2.2). Success and collision are not formally significant. Legacy metrics have **no stuck field**, so the r3b stuck=4.6% is not a paired regression and must not be cited as one. **This is not a gate pass and r3b is not promoted.**
 
 r4 (DAgger from r3) was **62% / 16% / 12% / 10% on 50 val**; r5 (DAgger from r3b) was **66% / 8% / 14% / 12% on 50 val**, but on Val500 only **64.8% / 13.8% / 11.8%** (stuck 5.0); r6 with student-failure upweighting was only 60/14/12/14 on 50 val. None is promoted.
 
@@ -171,7 +171,7 @@ These are implementation decisions that `docs/arch_lock.md` leaves open: candida
 - Legacy reference checkpoint (ad-hoc, not a formal A/B): `runs/p1_weight_hi` with (`runs/val500_legacy_p0fixed`, 65.0/18.2/12.0/0.854). The checkpoint uses the old schema/model and requires code at tag `pre-consolidation`; the canonical tree cannot load it, and the metrics artifact has no config/commit provenance.
 - 10k collection was stopped in its unsharded form: the parent process aggregated all episodes and exhausted RAM/swap. 2k is sharded and stable; final 10k needs shard-stream training or a disk-backed dataset.
 - Val/Test split is now machine-readable: `config/splits/val500.json` and `config/splits/test500.json`; `scenarios_test500.json` has `split="test"`; `dataset/freeze_splits.py` regenerates them; `pipeline/eval.py --split-manifest ... --split test` verifies seeds/SHA. Test500 has **not** been run.
-- Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. Do not start P4 before the P1/P2 gates pass.
+- Stage numbering: P1 single-frame BC; **P2 = real history + DAgger**; P3 short PPO canary; P4 WM. D1/D2 WM were started out of the original order under the owner's progression policy; this is recorded as a deviation, not a gate pass. Imagine Bank/Ego Dynamics/3 s LQR remain unstarted.
 
 ## Reproduce (current machine)
 
@@ -210,8 +210,8 @@ tools/venv-python -m pipeline.train_ppo \
 
 ## Known gaps
 
-- Val500 exact is **not a formal pass**: r3b success +2.6 pp vs legacy (95% CI −1.2..+5.8), collision −2.6 (CI −6.0..+0.6), off-road −4.6 (CI −7.0..−2.2), stuck **+4.6** (CI +2.8..+6.4). r3 is safer, r3b has higher success; do not promote either on this table.
-- **Expert ceiling is 73.2% success on Val500** (8.7 collision, 7.5 off-road, 10.6 timeout). The clean r3b is 67.6%; 100% is not attainable on this validation set with the current expert/imitation pipeline. Need a stronger expert or RL/curriculum that exceeds it, not just more epochs.
+- Val500 exact is **not a formal pass**: r3b success +2.6 pp vs legacy (95% CI −1.2..+5.8), collision −2.6 (CI −6.0..+0.6), off-road −4.6 (CI −7.0..−2.2). Legacy has no stuck field; r3b stuck 4.6% is not a paired regression. r3 is safer, r3b has higher success; do not promote either on this table.
+- **Expert ceiling is 73.0% success on Val500** (14.4 collision, 6.6 off-road, 6.0 timeout); these are episode-level counts. The clean r3b is 67.6%; 100% is not attainable on this validation set with the current expert/imitation pipeline. Need a stronger expert or RL/curriculum that exceeds it, not just more epochs.
 - 0.5 s LQR canary is a current contract gate and is **not passing/closed**: r3b 48% success / 36% timeout; r3 34% / 52%. It is not the final 3 s controller-realized score. Report tracking/trackability/saturation and Exact→LQR failure ratio; the full 3 s/6-point interface follows after WM/imagined rollout.
 - 10k/500/500 + Test500 final scale and shard-stream loader are not implemented; no Test500 conclusions.
 - Dataset cleanup is done: four canonical dirs, 2.1 GiB; old dirs archived outside the project. Existing `runs/*best.pt` is not a closed-loop-selected final checkpoint.
@@ -224,6 +224,6 @@ tools/venv-python -m pipeline.train_ppo \
 - Stage C is wiring only: per-transition logp passes, but batched diagnostic logp is 1.1–2.6e-5 (>1e-5); cost has no limit/dual; mask/postprocess ~31%; LQR shadow is only 50 val and low-threshold.
 - D1/D2 are not full gates: D1 one-step smoke now passes persistence (0.616 vs 1.051) but static-target/ego-dynamics semantics are incomplete; D2 is an exploratory held-out autoregressive probe, not a trained 1/2/3/6 curriculum; Stage E/F are not started.
 - Old BC/DAgger r3b/r4/r5/r6 data predates `terminal_failed`; `terminalfix2` BC data now has terminal rows and partial terminal labels, but the DAgger terminalfix run needs a fresh pass after the `_backfill` change. Old data is not clean B-gate data.
-- P4 WM / Imagine Bank / Ego Dynamics and P5 full 3 s LQR/joint PPO are not started.
+- Stage D1/D2 code is a smoke; Imagine Bank/Ego Dynamics, joint Plan+WM, and the 3 s LQR/P5 formal path are not started.
 - Expert audit fields are stored, but the multi-solution downweighting policy is still conservative.
 - Comfort violation rate is 100% in current evals under the strict comfort bounds; it is a diagnostic, not yet a training gate.

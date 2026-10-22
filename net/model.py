@@ -393,7 +393,9 @@ class StructuredPlanner(nn.Module):
             "action_logstd": self.logstd(fused).clamp(-5.0, 0.0),
             "value": self.value(fused),
             "risk": self.risk(fused),
-            "cost_value": self.cost_value(fused),
+            # Cost critic is a separate safety head; do not let its large
+            # level loss backpropagate through the shared policy trunk.
+            "cost_value": self.cost_value(fused.detach()),
             "aux": aux,
             "latent": ctx_ego,
         }

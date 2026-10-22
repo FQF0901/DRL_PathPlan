@@ -1214,12 +1214,12 @@ def ppo_update(
         "value_loss": last["value_loss"],
         "cost_loss": last["cost_loss"],
         "total_loss": last["total_loss"],
-        # Primary KL/clip metrics are the first inner epoch, before the first
-        # optimizer step; the last-epoch values are kept separately.
-        "approx_kl": first_epoch["approx_kl"],
-        "clip_frac": first_epoch["clip_frac"],
-        "approx_kl_last": last["approx_kl"],
-        "clip_frac_last": last["clip_frac"],
+        # Report the actual post-update trust-region values.  The pre-update
+        # values are kept separately as an audit.
+        "approx_kl": last["approx_kl"],
+        "clip_frac": last["clip_frac"],
+        "approx_kl_first": first_epoch["approx_kl"],
+        "clip_frac_first": first_epoch["clip_frac"],
         "grad_norm": last["grad_norm"],
         "ratio_mean": last["ratio_mean"],
         "epochs": epoch_history,

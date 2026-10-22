@@ -462,7 +462,7 @@ datasets/dagger_r3_hard500/shard_0000.npz
 
 在 500 个冻结 val seed 上采集当前 Expert：
 
-- success **73.2%**, collision **8.7%**, off-road **7.5%**, timeout **10.6%**, stuck 0%。
+- episode-level success **73.0%**, collision **14.4%**, off-road **6.6%**, timeout **6.0%**, stuck 0%。
 
 因此“用当前 Expert 示范把 Val500 做到 100%”在数据上是不可能的；clean 的当前上限接近 Expert，而不是 100%。这是必须报告的结构性 finding，不能用更多 epoch 或调参掩盖。
 
@@ -474,7 +474,7 @@ datasets/dagger_r3_hard500/shard_0000.npz
 | clean r3 | 66.2% | 12.2% | 8.6% | 0.4% | 0.859 |
 | clean r3b | **67.6%** | 15.6% | **7.4%** | 4.6% | 0.857 |
 
-r3b − legacy：success +2.6 pp（95% CI −1.2..+5.8），collision −2.6（−6.0..+0.6），off-road −4.6（−7.0..−2.2），stuck **+4.6**（+2.8..+6.4）。success/collision 不显著，stuck 显著更差；**不是 gate pass**。r3 更安全，r3b 更高 success，两者都不 promotion。
+r3b − legacy：success +2.6 pp（95% CI −1.2..+5.8），collision −2.6（−6.0..+0.6），off-road −4.6（−7.0..−2.2）。legacy 没有 stuck 字段，不能把 r3b 的 4.6% stuck 写成 paired regression；**不是 gate pass**。r3 更安全，r3b 更高 success，两者都不 promotion。
 
 r4 / r5 也未超过：
 - r4: 50 val 62/16/12/10；
@@ -492,7 +492,7 @@ r4 / r5 也未超过：
 
 - P0-1/P0-3 已修；P0-2/P0-4 仍是 partial，但共享执行/权重语义已明显收敛。
 - P1/P2 仍未通过：exact success 不显著、stuck 退化；LQR canary 未闭合；Test500 未运行。
-- Expert 上限 73.2%，100% 目标在当前数据/专家下不可实现；下一步应优先 **强 expert / RL / 课程与 failure bucket**，而不是继续在 67% 附近堆 epoch。
+- Expert episode-level 上限 73.0%，100% 目标在当前数据/专家下不可实现；下一步应优先 **强 expert / RL / 课程与 failure bucket**，而不是继续在 67% 附近堆 epoch。
 - P4 WM 未启动；继续遵守 arch_lock §13/§20。
 
 ### 追加（2026-10-22 02:00）：按 §13/§20 已推进到的位置
@@ -503,9 +503,9 @@ r4 / r5 也未超过：
 - **Stage B**：加入 `student_failure` failure-prioritized plan weight；r6（r5 data + `w_student_failure=2`）50 val 只有 60/14/12/14，没有超过 r3b；失败优先权重本身没有解决问题。
 - **Stage C wiring canary**：`runs/ppo_v3_canary` 20 episodes / 5 updates / 399 transitions，boundary 0、logprob diff 0、ratio-at-old 1.0；`cost_adv` 已作为 Lagrangian 项进入 policy loss。仍是短 canary，不是 P3 性能 gate。
 - **P0 仍缺**：Expert-GT 3 s + LQR controller smoke、action-parameterization veto 的完整报告；这两项没有假装完成。
-- **未推进 Stage D/P4**：arch_lock §13 要求 P1/P2 通过后才进 WM；当前 exact success 67.6 vs Expert 73.2，stuck 4.6 vs legacy 0，LQR canary 未闭合，因此不启动 WM。这不是“跳过”，而是 gate 未过。
+- **当时的 Stage D/P4 判断**：arch_lock §13 要求 P1/P2 通过后才进 WM；当时 exact 67.6 vs Expert 73.0、LQR canary 未取得逐 ckpt 证据，因此没有启动。后来在 owner 的 progression policy 下启动了 D1/D2 smoke，并明确记录为 out-of-order deviation；不是 gate pass。
 
-**为什么没有继续堆 Stage D/P4**：不是不知道 §13/§20，而是继续堆模型会违反“先过 gate 再上 WM”的硬顺序；在本轮 P1/P2 仍未通过、Expert 上限只有 73.2% 的情况下，强行上 WM 只会得到不可解释的数字。下一步应补 Expert-GT 3 s LQR、真正的 1/2/4/6 训练 ablation、P3 hacking audit，或引入更强 Expert/RL；而不是在 67% 附近继续堆 epoch。
+**为什么当时没有继续堆 Stage D/P4**：不是不知道 §13/§20，而是继续堆模型会违反“先过 gate 再上 WM”的硬顺序；在 Expert 上限 73.0、P1/P2 仍未通过时，强行上 WM 只会得到不可解释的数字。后续 D1/D2 只作为 owner-policy smoke，不作为 gate。
 
 ---
 
@@ -515,12 +515,12 @@ Oracle 对 `ac8beb7..5932122` 的 review 结论我基本接受：**D1/D2 不能�
 
 ### 接受并已修
 
-- **R3 persistence 广播 bug**：`_persistence` 用 `[N,1]` mask 广播成 N×N；已改为显式 reshape/broadcast，并加 2-D mask 单测。修正后 D1 WM **83.39** vs persistence **~1.0**，WM **失败**；不再声称“beats persistence”。
+- **R3 persistence 广播 bug**：`_persistence` 用 `[N,1]` mask 广播成 N×N；已改为显式 reshape/broadcast，并加 2-D mask 单测。当时旧指标 83.39 是 128× 放大；后续 `masked_mse` 修正为 per-element 后，D1 0.616 vs 1.051，旧“D1 fails”结论已撤回。
 - **R1 coverage/D2 leakage**：`_build_pairs` 不再取第一个目录前缀；改为全量 pair 后按 seed 抽样；`probe_wm` 只评估 held-out scene，并记录 data/ckpt/split。D1/D2 仍不是 gate。
 - **R2 action condition**：`executed_action` 已进入 loader；`train_wm`/`probe_wm` 用 executed action，缺失时回退 action。
 - **R4 terminal row**：BC collector 之前仍在保存前 break；已删除该 break，实际 terminal segment 会写入，`terminal_failed` 由 `_backfill` 标记。旧 r3b/r4/r5/r6 数据仍不含此语义，已标 debt；terminalfix2 重采已启动。
 - **R5 PPO artifact**：去掉了 contract 里重复/覆盖的 `schema_version`，分别记录 `contract_version`/`obs_schema`；per-transition 容差 1e-5、batch 诊断容差 1e-4；PPO warm-start 改为 strict loader。
-- **R6 WM 参数**：smoke 模型改为 hidden=80/latent=128/layer=1，约 **245,792** params（记录在 config）。
+- **R6 WM 参数**：smoke 模型 hidden=80/latent=128/layer=1，实际 **167,952** params（`runs/wm_d1_final` config；245,792 是错误记录）。
 - **R7 static targets**：还没有按 §9.2 的 static-LD reprojection/Nav re-encode/Ego dynamics 重写；这是未关闭项，不能把 D1 当 gate。
 
 ### 新增实测
