@@ -1441,6 +1441,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--episodes must be >= 1")
     if args.max_steps < 0:
         raise SystemExit("--max-steps must be >= 0")
+    if not args.ckpt:
+        raise SystemExit("--ckpt is required; PPO gate runs never use random initialization")
 
     torch.manual_seed(int(args.seed))
     np.random.seed(int(args.seed))

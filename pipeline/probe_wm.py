@@ -39,8 +39,6 @@ def _build_sequences(data: Dict[str, np.ndarray], horizon: int, max_sequences: i
             window = idx[start : start + need]
             if np.all(np.diff(step[window]) == 1):
                 seqs.append(window)
-                if len(seqs) >= max_sequences:
-                    return np.asarray(seqs, dtype=np.int64)
     return np.asarray(seqs, dtype=np.int64)
 
 
@@ -60,16 +58,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     data = load_data(args.data)
     ids = _load_ids(args.data)
     data["od_ids"], data["ld_ids"] = ids["od_ids"], ids["ld_ids"]
-    seqs = _build_sequences(data, int(args.horizon), int(args.max_sequences))
+    seqs = _build_sequences(data, int(args.horizon), 0)
     if len(seqs) == 0:
         raise SystemExit("no sequences")
+    wm_payload = torch.load(args.wm_ckpt, map_location="cpu", weights_only=False)
+    wm_cfg = wm_payload.get("config", {})
+    heldout_seeds = set(int(x) for x in wm_cfg.get("val_scene_seeds", []))
+    if heldout_seeds:
+        seqs = seqs[np.asarray([int(data["scene_seed"][s[0]]) in heldout_seeds for s in seqs])]
+        if len(seqs) == 0:
+            raise SystemExit("no sequences in the WM checkpoint's held-out scene set")
+    if len(seqs) > int(args.max_sequences):
+        rng = np.random.default_rng(int(args.seed))
+        keep = np.sort(rng.choice(len(seqs), size=int(args.max_sequences), replace=False))
+        seqs = seqs[keep]
     # Probe only held-out scenes; the previous version evaluated the first
     # sequences, which were also in the D1 training prefix.
-    seq_seeds = np.asarray(data["scene_seed"][seqs[:, 0]], dtype=np.int64)
-    _train_m, val_m = split_by_scene_seed(seq_seeds, args.val_frac, args.seed)
-    seqs = seqs[val_m]
-    if len(seqs) == 0:
-        raise SystemExit("no held-out WM sequences")
+    if not heldout_seeds:
+        seq_seeds = np.asarray(data["scene_seed"][seqs[:, 0]], dtype=np.int64)
+        _train_m, val_m = split_by_scene_seed(seq_seeds, args.val_frac, args.seed)
+        seqs = seqs[val_m]
+        if len(seqs) == 0:
+            raise SystemExit("no held-out WM sequences")
     rows = np.unique(seqs)
     encoder = load_model_from_checkpoint(args.encoder_ckpt, args.device, strict=True)
     encoder.eval()
@@ -77,8 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     row_map = {int(r): i for i, r in enumerate(rows)}
     si = np.asarray([[row_map[int(r)] for r in seq] for seq in seqs], dtype=np.int64)
 
-    payload = torch.load(args.wm_ckpt, map_location="cpu", weights_only=False)
-    cfg = payload.get("config", {})
+    payload = wm_payload
+    cfg = wm_cfg
     wm = EgoConditionedLatentWM(
         hidden=int(cfg.get("hidden", 80)),
         latent_dim=int(cfg.get("latent_dim", 128)),
@@ -143,7 +153,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = {
         "horizon": int(args.horizon),
         "sequences": int(len(seqs)),
-        "held_out_split": {"val_frac": float(args.val_frac), "seed": int(args.seed)},
+        "held_out_split": {
+            "val_frac": float(args.val_frac),
+            "seed": int(args.seed),
+            "scene_seeds": sorted({int(x) for x in data["scene_seed"][seqs[:, 0]]}),
+        },
         "data": list(args.data),
         "encoder_ckpt": args.encoder_ckpt,
         "wm_ckpt": args.wm_ckpt,

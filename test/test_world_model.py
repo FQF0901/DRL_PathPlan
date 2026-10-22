@@ -64,3 +64,11 @@ def test_persistence_uses_true_per_element_mse():
     out = _persistence(arrays, np.arange(2))
     assert abs(out["nav"] - 1.0) < 1e-6
     assert abs(out["ego"] - 1.0) < 1e-6
+
+
+def test_masked_mse_is_per_element():
+    import torch
+    p = torch.zeros(2, 4, 8)
+    t = torch.ones(2, 4, 8) * 10
+    m = torch.ones(2, 4)
+    assert abs(float(masked_mse(p, t, m)) - 100.0) < 1e-6

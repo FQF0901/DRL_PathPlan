@@ -258,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     train_mask, val_mask = split_by_scene_seed(arrays["scene_seed"], args.val_frac, args.seed)
     train_idx = np.flatnonzero(train_mask)
     val_idx = np.flatnonzero(val_mask) if val_mask.any() else train_idx
+    train_seeds = sorted({int(x) for x in arrays["scene_seed"][train_idx]})
+    val_seeds = sorted({int(x) for x in arrays["scene_seed"][val_idx]})
     if len(val_idx) == 0:
         raise ValueError("empty WM validation split")
 
@@ -326,6 +328,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "epochs": int(args.epochs),
                         "lr": float(args.lr),
                         "data": list(args.data),
+                        "train_scene_seeds": train_seeds,
+                        "val_scene_seeds": val_seeds,
+                        "val_frac": float(args.val_frac),
+                        "split_seed": int(args.seed),
                     },
                     "epoch": epoch,
                     "metrics": record,
@@ -343,6 +349,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "val_pairs": int(len(val_idx)),
         "history": history,
         "best_val_loss": best,
+        "train_scene_seeds": train_seeds,
+        "val_scene_seeds": val_seeds,
+        "max_pairs": int(args.max_pairs),
         "best": {"epoch": int(np.argmin([h["val_loss"] for h in history]) + 1)},
     }
     (out / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

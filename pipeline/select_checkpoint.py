@@ -15,13 +15,17 @@ from pipeline.eval_metrics import summarize_rows
 from dataset.splits import verify_split_manifest
 
 
+def _eligible(row: Dict[str, Any], collision_max: float, offroad_max: float) -> bool:
+    return (
+        float(row.get("collision_rate", 1.0)) <= float(collision_max)
+        and float(row.get("off_road_rate", 1.0)) <= float(offroad_max)
+    )
+
+
 def _score(row: Dict[str, Any]) -> tuple:
-    # Safety first, then success, then completion; all metrics are closed-loop.
-    collision = float(row.get("collision_rate", 1.0))
-    offroad = float(row.get("off_road_rate", 1.0))
-    success = float(row.get("success_rate", 0.0))
-    rc = float(row.get("route_completion_mean", 0.0))
-    return (-collision, -offroad, success, rc)
+    # Eligible candidates: maximize success, then completion; safety is a hard
+    # threshold above, not a continuous lexicographic tie-breaker.
+    return (float(row.get("success_rate", 0.0)), float(row.get("route_completion_mean", 0.0)))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -37,6 +41,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--collision-max", type=float, default=0.20)
     p.add_argument("--offroad-max", type=float, default=0.20)
     args = p.parse_args(argv)
+    if args.split == "test":
+        parser.error("Test500 is read-only; checkpoint selection must use val")
 
     all_specs = load_specs(args.specs)
     verify_split_manifest(args.split_manifest, all_specs, split=args.split, spec_path=args.specs)
@@ -56,19 +62,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             rows.append(row)
         summary = summarize_rows(rows)
         record = {"checkpoint": str(ckpt), **summary}
-        record["eligible"] = (
-            float(summary.get("collision_rate", 1.0)) <= args.collision_max
-            and float(summary.get("off_road_rate", 1.0)) <= args.offroad_max
-        )
+        record["eligible"] = _eligible(summary, args.collision_max, args.offroad_max)
         record["score"] = list(_score(summary))
         records.append(record)
         print(f"[select] {ckpt} eligible={record['eligible']} score={record['score']}", flush=True)
 
     eligible = [r for r in records if r["eligible"]]
-    pool = eligible if eligible else records
-    best = max(pool, key=_score)
+    if not eligible:
+        payload = {
+            "selected": None,
+            "candidates": records,
+            "policy": "no candidate met hard collision/off-road thresholds",
+            "split_manifest": args.split_manifest,
+            "limit": int(args.limit),
+            "controller": "exact",
+        }
+        (out / "selection.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print("[select] no eligible candidate; selected=null")
+        return 2
+    best = max(eligible, key=_score)
     shutil.copyfile(best["checkpoint"], out / "selected.pt")
-    payload = {"selected": best, "candidates": records, "policy": "collision<=max, offroad<=max, success, RC"}
+    payload = {
+        "selected": best,
+        "candidates": records,
+        "policy": "hard collision/off-road thresholds -> success -> RC",
+        "split_manifest": args.split_manifest,
+        "limit": int(args.limit),
+        "controller": "exact",
+    }
     (out / "selection.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps({"selected": best["checkpoint"], "score": best["score"]}, indent=2))
     return 0

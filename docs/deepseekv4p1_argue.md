@@ -535,3 +535,16 @@ Oracle 对 `ac8beb7..5932122` 的 review 结论我基本接受：**D1/D2 不能�
 - Oracle 的 R1–R7 大部分接受；R7 和训练版 A2 ablation 仍未解决。
 - D1/D2 不能进入 Stage E/F；Stage C 仍是 wiring canary。
 - terminalfix2 重采完成后，再决定是否重训 BC/DAgger；旧数据不作为 B-gate 证据。
+
+### 2026-10-22 Oracle 第二轮复核后的修正
+
+接受第二轮 review 的 R1–R6；R7 仍未解决。关键修正是：
+
+- **R3 指标**：`masked_mse` 的分母也要扩展到 latent 维度；之前 D1 的 83.39 是 128× 放大值。修正后 `runs/wm_d1_final` 为 **0.616 vs persistence 1.051**（od .162/.185、ld .401/.648、nav .007/.021、ego .046/.198），D1 one-step smoke 通过 baseline；不再写“D1 fails”。
+- **R1/R2**：D1 pair sampling 覆盖 all data，D2 只在 WM checkpoint 的 `val_scene_seeds` 上评测；action 用 `executed_action`；`runs/wm_d2_probe_final2` 是 held-out，depth 6 WM od .522 vs persistence .673、ld .990 vs 1.182、ego .133 vs .617。
+- **R4**：BC terminal partial segment 保存但 `label_valid=0`（不再当作完整 0.5 s 标签）；DAgger `_backfill` 写 `terminal_failed`。旧数据仍不合格。
+- **R5**：PPO contract schema 分为 `contract_version`/`obs_schema`；TF32 关闭；update 走 per-transition logp；`runs/ppo_v7_canary` 20 episodes/398 transitions，per-transition diff 0，batch 诊断 1.1–2.6e-5（独立 1e-4 诊断阈值）。
+- **R6**：WM smoke 实际 **167,952** params（hidden 80/latent 128/1 layer），不是 245,792；planner+WM=1,221,094，略高于 1.2M，作为部署预算偏差记录。
+- **R7**：static LD/Nav/ego target 仍是普通 MSE，没有 reprojection/re-encode/ego-dynamics；Stage E/F 不能开始。
+
+**仍未关闭**：D1/D2 不是训练课程 gate；R7 static-target；`select_checkpoint.py` 的 LQR 分支和测试；Test500 未跑；terminalfix2 的 BC/DAgger 重训结果尚未作为 gate。

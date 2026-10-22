@@ -130,6 +130,9 @@ def masked_mse(pred: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     m = (mask > 0.5).to(pred.dtype)
     while m.ndim < pred.ndim:
         m = m.unsqueeze(-1)
+    # Count every valid latent element, not just valid slots.  Otherwise the
+    # denominator is H× too small and all latent MSEs are inflated.
+    m = m.expand_as(pred)
     denom = m.sum().clamp_min(1.0)
     return ((pred - target).pow(2) * m).sum() / denom
 

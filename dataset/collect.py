@@ -521,7 +521,9 @@ def run_episode(
                     **audit,
                     **diagnostics,
                     "label_source": np.int8(1),
-                    "label_valid": np.int8(1),
+                    # A partial terminal segment is not a valid 0.5 s plan
+                    # label; keep it only for value/risk/outcome supervision.
+                    "label_valid": np.int8(1 if n_substeps == STEPS_PER_POLICY else 0),
                     "n_substeps": np.int16(n_substeps),
                     "step": np.int64(len(rows)),
                     "episode_id": np.int64(0),  # filled by the caller

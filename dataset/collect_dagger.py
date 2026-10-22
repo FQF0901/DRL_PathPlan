@@ -645,6 +645,7 @@ def _backfill_outcomes(
         row["wrong_route"] = np.int8(wrong_route)
         row["stuck"] = np.int8(stuck)
         row["timeout"] = timeout
+        row["terminal_failed"] = np.int8(1 if (failure_i8 and i == len(rows) - 1) else 0)
         row["student_success"] = success_i8
         row["student_failure"] = failure_i8
         row["termination_id"] = term_id

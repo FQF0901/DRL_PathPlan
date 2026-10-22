@@ -77,6 +77,7 @@ from env.obs import (
 )
 from net.action_space import COMFORT_LIMITS, HARD_LIMITS, CLEAN_BOUNDS
 from net.model import StructuredPlanner, count_parameters
+from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.distributions import truncated_normal_nll
 
 #: Feature keys fed to StructuredPlanner.  No IDs / audit / outcome columns here.
@@ -118,6 +119,7 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "terminal_failed",
     "student_failure",
     "executed_action",
+    "n_substeps",
     "feasible",
     "label_pass",
     "action_in_bounds",
@@ -162,6 +164,7 @@ _ALL_OPTIONAL_KEYS = (
     "terminal_failed",
     "student_failure",
     "executed_action",
+    "n_substeps",
     "feasible",
     "label_pass",
     "action_in_bounds",
