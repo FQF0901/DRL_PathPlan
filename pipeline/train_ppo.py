@@ -13,7 +13,7 @@ Action contract
 ---------------
 ``StructuredPlanner`` emits ``action_mu`` in ``[0, 1]`` and a diagonal
 ``TruncatedNormal(mu, exp(logstd), low=0, high=1)`` is used for exploration.
-Every sample is therefore executable under :data:`net.action_space.CLEAN_BOUNDS`
+Every sample is therefore executable under :data:`env.action.action_space.CLEAN_BOUNDS`
 without a post-hoc clamp.  The stored log-prob always belongs to the sampled
 normalized action.  If the state-dependent PSTL feasibility check rejects that
 action, the same v1-projection / safe-brake fallback as :mod:`pipeline.eval`
@@ -65,7 +65,7 @@ from env.obs import (
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
-from net.action_space import (
+from env.action.action_space import (
     COMFORT_LIMITS,
     HARD_LIMITS,
     CLEAN_BOUNDS,

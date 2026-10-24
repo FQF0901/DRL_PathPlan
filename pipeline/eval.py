@@ -7,7 +7,7 @@ The previous exact/LQR split is available only from git history/tag
   ``stack_history``);
 * the policy is :class:`net.model.StructuredPlanner` with normalized
   ``action_mu`` in ``[0, 1]``;
-* actions are denormalized with :data:`net.action_space.CLEAN_BOUNDS` and turned
+* actions are denormalized with :data:`env.action.action_space.CLEAN_BOUNDS` and turned
   into one PSTL 0.5 s segment by ``action_to_trajectory``.
 
 Only the **first 0.5 s segment** of a plan is executed (5 x 0.1 s substeps).
@@ -41,7 +41,7 @@ from env.obs import (
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker, LqrTracker
-from net.action_space import (
+from env.action.action_space import (
     CLEAN_BOUNDS,
     COMFORT_LIMITS,
     HARD_LIMITS,
@@ -71,7 +71,7 @@ WRONG_ROUTE_DROP = 0.05
 # ---------------------------------------------------------------------------
 # Canonical PSTL limits
 # ---------------------------------------------------------------------------
-LIMITS_SOURCE = "net.action_space.HARD_LIMITS"
+LIMITS_SOURCE = "env.action.action_space.HARD_LIMITS"
 
 #: Keys StructuredPlanner.forward consumes (metadata IDs are not needed for acting).
 BATCH_KEYS = (

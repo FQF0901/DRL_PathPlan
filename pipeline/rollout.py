@@ -1,7 +1,7 @@
 """Plan-action helpers for the canonical PSTL planner.
 
 The planner's 4D action is ``(dx, dy, dpsi, v_next)`` and is executed by
-``net.action_space.action_to_trajectory``.  This module only contains the
+``env.action.action_space.action_to_trajectory``.  This module only contains the
 current API; the previous 3D Hermite implementation is available from git
 history (tag ``pre-consolidation``), not as a second live path.
 """
@@ -13,7 +13,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 
-from net.action_space import (
+from env.action.action_space import (
     CLEAN_BOUNDS,
     ActionBounds,
     ActionTrajectory,

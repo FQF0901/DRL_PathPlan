@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from env.obs import _empty_history
-from net.action_space import CLEAN_BOUNDS
+from env.action.action_space import CLEAN_BOUNDS
 from net.model import StructuredPlanner
 from pipeline import train_ppo as ppo
 from pipeline.distributions import TruncatedNormal

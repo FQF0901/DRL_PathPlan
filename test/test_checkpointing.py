@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from net.action_space import CLEAN_BOUNDS
+from env.action.action_space import CLEAN_BOUNDS
 from net.model import StructuredPlanner
 from pipeline.checkpointing import load_model_from_checkpoint, validate_checkpoint
 

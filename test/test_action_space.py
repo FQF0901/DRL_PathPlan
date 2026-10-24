@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from net.action_space import (
+from env.action.action_space import (
     COMFORT_LIMITS,
     DEFAULT_BOUNDS,
     HARD_LIMITS,

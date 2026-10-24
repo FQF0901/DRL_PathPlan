@@ -25,7 +25,7 @@ from env.obs import (
     _empty_history,
 )
 from env.scenario.spec import load_specs
-from net.action_space import CLEAN_BOUNDS
+from env.action.action_space import CLEAN_BOUNDS
 from net.model import StructuredPlanner
 from pipeline.eval import (
     HARD_LIMITS,

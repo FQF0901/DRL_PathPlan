@@ -18,10 +18,10 @@ in ``dataset/collect.py``: it is registered once, then each decision calls
 
 Notes on limits
 ---------------
-``net.action_space.HARD_LIMITS`` is too strict for *continuous PSTL*
+``env.action.action_space.HARD_LIMITS`` is too strict for *continuous PSTL*
 derivatives of expert BC labels (about 24% hard failures on 2k expert rows).
 This collector therefore uses a local provisional clean hard set. If
-``net.action_space`` later exposes ``HARD_LIMITS`` (or
+``env.action.action_space`` later exposes ``HARD_LIMITS`` (or
 ``COMFORT_LIMITS``), that constant is used instead and recorded in meta.
 """
 
@@ -49,7 +49,7 @@ from env.obs import (
     stack_history,
 )
 from env.scenario.spec import load_specs
-from net.action_space import (
+from env.action.action_space import (
     CLEAN_BOUNDS,
     COMFORT_LIMITS,
     HARD_LIMITS,
@@ -65,7 +65,7 @@ ACTION_DIM = 4
 # ---------------------------------------------------------------------------
 # Canonical PSTL limits
 # ---------------------------------------------------------------------------
-HARD_LIMITS_SOURCE = "net.action_space.HARD_LIMITS"
+HARD_LIMITS_SOURCE = "env.action.action_space.HARD_LIMITS"
 
 # ---------------------------------------------------------------------------
 # Output schema
@@ -840,7 +840,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "note": (
                 "Provisional clean limits calibrated on expert BC rows. "
                 "PSTL continuous derivatives are stricter than label "
-                "differences; net.action_space.HARD_LIMITS is intentionally "
+                "differences; env.action.action_space.HARD_LIMITS is intentionally "
                 "not used here."
             ),
         },

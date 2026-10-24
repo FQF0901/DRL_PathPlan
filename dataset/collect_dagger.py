@@ -62,7 +62,7 @@ from env.obs import (
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
-from net.action_space import (
+from env.action.action_space import (
     CLEAN_BOUNDS,
     COMFORT_LIMITS,
     HARD_LIMITS,
@@ -88,7 +88,7 @@ WRONG_ROUTE_DROP = 0.05
 # ---------------------------------------------------------------------------
 # Canonical PSTL limits
 # ---------------------------------------------------------------------------
-HARD_LIMITS_SOURCE = "net.action_space.HARD_LIMITS"
+HARD_LIMITS_SOURCE = "env.action.action_space.HARD_LIMITS"
 
 # ---------------------------------------------------------------------------
 # Output schema
@@ -1495,7 +1495,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "note": (
                 "Provisional clean limits calibrated on expert BC rows. "
                 "PSTL continuous derivatives are stricter than label "
-                "differences; net.action_space.HARD_LIMITS is intentionally "
+                "differences; env.action.action_space.HARD_LIMITS is intentionally "
                 "not used here."
             ),
         },

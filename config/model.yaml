@@ -1,9 +1,39 @@
-# Deployable planner model (P1 baseline)
-hidden: 128
-action_dim: 4
-history_frames: 6
-spatial_layers: 2
-attention_heads: 4
+# Bank-native network configuration.
+# This file is consumed by net/build_net.py.  The bank/rollout sections are
+# runtime configuration; they do not create nn.Module singletons.
+model:
+  hidden: 128
+  action_dim: 4
+  history_frames: 6
+  attention_heads: 4
+  spatial_layers: 2
+
+  encoder:
+    hidden: 128
+
+  temporal_spatial:
+    hidden: 128
+    heads: 4
+    spatial_layers: 2
+
+  world_model:
+    hidden: 128
+    action_dim: 4
+    ld_points: 5
+
+  planner:
+    hidden: 128
+    action_dim: 4
+
+bank:
+  capacity: 6
+  od_slots: 16
+  ld_slots: 16
+  topk: 16
+
+rollout:
+  horizon: 6
+
 deployable_param_target: 1000000
 deployable_param_min: 800000
 deployable_param_max: 1200000

@@ -75,7 +75,7 @@ from env.obs import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
 )
-from net.action_space import COMFORT_LIMITS, HARD_LIMITS, CLEAN_BOUNDS
+from env.action.action_space import COMFORT_LIMITS, HARD_LIMITS, CLEAN_BOUNDS
 from net.model import StructuredPlanner, count_parameters
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.distributions import truncated_normal_nll

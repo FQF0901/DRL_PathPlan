@@ -14,7 +14,7 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from net.action_space import CLEAN_BOUNDS
+from env.action.action_space import CLEAN_BOUNDS
 from net.model import StructuredPlanner
 
 

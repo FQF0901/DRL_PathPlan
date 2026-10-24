@@ -1,4 +1,10 @@
-"""Canonical feature-governance planner (observation schema version 2).
+"""Legacy ``StructuredPlanner`` plus the new bank-native ``DriveModel``.
+
+The legacy class below is kept only so the current BC/PPO/eval scripts and
+their tests keep working during migration.  New code should build
+``DriveModel`` through :mod:`net.build_net`; it does not use ``TemporalPool``.
+
+Legacy description follows.
 
 This is the canonical planner: every environment semantic enters through an
 encoder, the only OD/LD "selection" is a learned query attention, and the plan
@@ -403,3 +409,147 @@ class StructuredPlanner(nn.Module):
 
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+# ---------------------------------------------------------------------------
+# Bank-native top-level model (new path; legacy StructuredPlanner above is
+# retained only until the pipeline is migrated).
+# ---------------------------------------------------------------------------
+
+from net.mem_bank import BankWindow
+from net.encoder import CurrentFrameEncoder
+from net.planner import Planner
+from net.world_model import FactorizedEgoConditionedLatentWM, TemporalSpatialBlock
+
+
+class DriveModel(nn.Module):
+    """Current-frame policy + factorized temporal-spatial + optional WM."""
+
+    def __init__(
+        self,
+        encoder: CurrentFrameEncoder | None = None,
+        temporal_spatial: TemporalSpatialBlock | None = None,
+        planner: Planner | None = None,
+        world_model: FactorizedEgoConditionedLatentWM | None = None,
+        *,
+        hidden: int = 128,
+        heads: int = 4,
+        spatial_layers: int = 2,
+        action_dim: int = 4,
+    ) -> None:
+        super().__init__()
+        self.hidden = int(hidden)
+        self.action_dim = int(action_dim)
+        self.encoder = encoder or CurrentFrameEncoder(hidden=self.hidden)
+        self.temporal_spatial = temporal_spatial or TemporalSpatialBlock(
+            hidden=self.hidden, heads=heads, spatial_layers=spatial_layers
+        )
+        self.planner = planner or Planner(hidden=self.hidden, action_dim=self.action_dim)
+        self.world_model = world_model or FactorizedEgoConditionedLatentWM(
+            hidden=self.hidden, action_dim=self.action_dim
+        )
+
+    def encode_current(self, batch):
+        return self.encoder.encode_current(batch)
+
+    def forward(self, window: BankWindow | Dict[str, Tensor], nav: Tensor | None = None, ego: Tensor | None = None) -> Dict[str, Tensor]:
+        """Dispatch a BankWindow or a current observation batch."""
+        if isinstance(window, BankWindow):
+            if nav is None or ego is None:
+                raise ValueError("forward_window requires nav and ego")
+            return self.forward_window(window, nav, ego)
+        if nav is not None or ego is not None:
+            raise ValueError("forward_current takes only the observation batch")
+        return self.forward_current(window)
+
+    def forward_window(self, window: BankWindow, nav: Tensor, ego: Tensor) -> Dict[str, Tensor]:
+        z = self.temporal_spatial(window, nav, ego)
+        od_valid = window.od_valid[:, -1]
+        ld_valid = window.ld_valid[:, -1]
+        return self.planner(z["od"], z["ld"], nav, ego, od_valid, ld_valid)
+
+    def forward_current(self, batch) -> Dict[str, Tensor]:
+        """Build a one-frame window from the current observation and act.
+
+        This helper is convenience for smoke/inference; the production path
+        should append to a RealMemoryBank and call :meth:`forward_window`.
+        """
+        enc = self.encoder.encode_current(batch)
+        # A short local import avoids changing the legacy model's import graph.
+        from net.mem_bank import BankWindowBuilder, EntityRecord, FrameRecord, NodeType, Source
+
+        records = []
+        for i in range(enc["od_content"].shape[0]):
+            od = tuple(
+                EntityRecord(
+                    slot=s, stable_id=int(enc["od_stable_id"][i, s]), node_type=NodeType.OD,
+                    content=enc["od_content"][i, s], geometry=enc["od_geometry"][i, s],
+                    type_id=int(enc["od_type"][i, s]), valid=bool(enc["od_valid"][i, s]),
+                )
+                for s in range(enc["od_content"].shape[1])
+            )
+            ld = tuple(
+                EntityRecord(
+                    slot=s, stable_id=int(enc["ld_stable_id"][i, s]), node_type=NodeType.LD,
+                    content=enc["ld_content"][i, s], geometry=enc["ld_geometry"][i, s],
+                    type_id=int(enc["ld_type"][i, s]), valid=bool(enc["ld_valid"][i, s]),
+                )
+                for s in range(enc["ld_content"].shape[1])
+            )
+            ego_pose = batch.get("ego_pose")
+            if ego_pose is None:
+                pose = torch.zeros(3, device=enc["od_content"].device)
+            else:
+                pose = (ego_pose[:, -1] if ego_pose.dim() >= 3 else ego_pose)[i]
+            records.append(
+                FrameRecord(
+                    episode_id=str(batch.get("episode_id", "ep")),
+                    frame_id=0, timestamp=0.0, ego_pose=pose,
+                    od=od, ld=ld, source=Source.REAL,
+                )
+            )
+        windows = [BankWindowBuilder(hidden=self.hidden).build((frame,)) for frame in records]
+        window = BankWindow.stack(windows)
+        return self.forward_window(window, enc["nav"], enc["ego"])
+
+    def imagine(
+        self,
+        window: BankWindow,
+        nav: Tensor,
+        ego: Tensor,
+        *,
+        actions: Tensor | None = None,
+        action_provider=None,
+        horizon: int = 6,
+    ) -> list[Dict[str, Tensor]]:
+        """Content-level imagined policy outputs.
+
+        ``policy_n`` is the action at t_n.  Actions are supplied as
+        ``[B,H,4]`` or by an ``action_provider(z, ego, n)`` callback.  Geometry
+        updates are intentionally handled by the Bank/adapter layer; this
+        method only advances the learned OD/LD content state.
+        """
+        z = self.temporal_spatial(window, nav, ego)
+        od, ld = z["od"], z["ld"]
+        outputs: list[Dict[str, Tensor]] = []
+        for n in range(int(horizon)):
+            policy = self.planner(
+                od, ld, nav, ego,
+                window.od_valid[:, -1], window.ld_valid[:, -1],
+            )
+            outputs.append(policy)
+            if n + 1 >= int(horizon):
+                break
+            if actions is not None:
+                a = actions[:, n]
+            elif action_provider is not None:
+                a = action_provider(od, ld, ego, n)
+            else:
+                raise ValueError("imagine requires actions or action_provider")
+            step = self.world_model(od, ld, a)
+            od, ld = step["od"], step["ld"]
+        return outputs
+
+
+# Public domain alias for the bank-native top-level model.
+Model = DriveModel

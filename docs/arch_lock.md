@@ -947,7 +947,7 @@ net/
 env/
   action/
     __init__.py
-    action_space.py       # 原 net/action_space.py：4D action / PSTL / feasibility / bounds
+    action_space.py       # 原 net/action_space.py（已迁移）：4D action / PSTL / feasibility / bounds
 
 pipeline/
   losses.py               # 纯 loss 函数
