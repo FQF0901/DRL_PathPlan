@@ -72,6 +72,10 @@ from env.obs import (
     OD_DIM,
     OD_SLOTS,
 )
+from net.mem_bank import BankWindow, BankWindowBuilder, ImagineMemoryBank, NodeType, RealMemoryBank
+from net.encoder import CurrentFrameEncoder
+from net.planner import Planner
+from net.world_model import FactorizedEgoConditionedLatentWM, TemporalSpatialBlock
 
 H = 128
 HEADS = 4
@@ -110,10 +114,10 @@ class TemporalPool(nn.Module):
     def forward(self, tokens: Tensor, valid: Tensor) -> Tensor:
         # tokens [B,T,N,H], valid [B,T,N]
         B, T, N, Hd = tokens.shape
-        x = tokens.reshape(B * N, T, Hd)
+        x = tokens.permute(0, 2, 1, 3).reshape(B * N, T, Hd)
         q = x[:, -1:, :]
         k = x + self.age.weight[:T].view(1, T, Hd)
-        mask = ~(valid.reshape(B * N, T) > 0.5)
+        mask = ~(valid.permute(0, 2, 1).reshape(B * N, T) > 0.5)
         all_bad = mask.all(dim=1)
         if bool(all_bad.any()):
             mask = mask.clone()
@@ -416,14 +420,8 @@ def count_parameters(model: nn.Module) -> int:
 # retained only until the pipeline is migrated).
 # ---------------------------------------------------------------------------
 
-from net.mem_bank import BankWindow
-from net.encoder import CurrentFrameEncoder
-from net.planner import Planner
-from net.world_model import FactorizedEgoConditionedLatentWM, TemporalSpatialBlock
-
-
 class DriveModel(nn.Module):
-    """Current-frame policy + factorized temporal-spatial + optional WM."""
+    """Current-frame policy + factorized temporal-spatial + factorized WM."""
 
     def __init__(
         self,
@@ -436,10 +434,12 @@ class DriveModel(nn.Module):
         heads: int = 4,
         spatial_layers: int = 2,
         action_dim: int = 4,
+        rollout_horizon: int = 6,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.action_dim = int(action_dim)
+        self.rollout_horizon = int(rollout_horizon)
         self.encoder = encoder or CurrentFrameEncoder(hidden=self.hidden)
         self.temporal_spatial = temporal_spatial or TemporalSpatialBlock(
             hidden=self.hidden, heads=heads, spatial_layers=spatial_layers
@@ -452,65 +452,54 @@ class DriveModel(nn.Module):
     def encode_current(self, batch):
         return self.encoder.encode_current(batch)
 
-    def forward(self, window: BankWindow | Dict[str, Tensor], nav: Tensor | None = None, ego: Tensor | None = None) -> Dict[str, Tensor]:
-        """Dispatch a BankWindow or a current observation batch."""
+    def forward(
+        self,
+        window: BankWindow | Dict[str, Tensor],
+        nav: Tensor | None = None,
+        ego: Tensor | None = None,
+        *,
+        nav_valid: Tensor | None = None,
+        ego_valid: Tensor | None = None,
+    ) -> Dict[str, Tensor]:
         if isinstance(window, BankWindow):
             if nav is None or ego is None:
                 raise ValueError("forward_window requires nav and ego")
-            return self.forward_window(window, nav, ego)
+            return self.forward_window(window, nav, ego, nav_valid=nav_valid, ego_valid=ego_valid)
         if nav is not None or ego is not None:
             raise ValueError("forward_current takes only the observation batch")
         return self.forward_current(window)
 
-    def forward_window(self, window: BankWindow, nav: Tensor, ego: Tensor) -> Dict[str, Tensor]:
-        z = self.temporal_spatial(window, nav, ego)
-        od_valid = window.od_valid[:, -1]
-        ld_valid = window.ld_valid[:, -1]
-        return self.planner(z["od"], z["ld"], nav, ego, od_valid, ld_valid)
+    def forward_window(
+        self,
+        window: BankWindow,
+        nav: Tensor,
+        ego: Tensor,
+        *,
+        nav_valid: Tensor | None = None,
+        ego_valid: Tensor | None = None,
+    ) -> Dict[str, Tensor]:
+        z = self.temporal_spatial(window, nav, ego, nav_valid=nav_valid, ego_valid=ego_valid)
+        return self.planner(
+            z["od"], z["ld"], nav, ego,
+            window.od_valid[:, -1], window.ld_valid[:, -1],
+        )
 
     def forward_current(self, batch) -> Dict[str, Tensor]:
-        """Build a one-frame window from the current observation and act.
-
-        This helper is convenience for smoke/inference; the production path
-        should append to a RealMemoryBank and call :meth:`forward_window`.
-        """
+        """Build one frame-record window from current observation and act."""
         enc = self.encoder.encode_current(batch)
-        # A short local import avoids changing the legacy model's import graph.
-        from net.mem_bank import BankWindowBuilder, EntityRecord, FrameRecord, NodeType, Source
-
-        records = []
-        for i in range(enc["od_content"].shape[0]):
-            od = tuple(
-                EntityRecord(
-                    slot=s, stable_id=int(enc["od_stable_id"][i, s]), node_type=NodeType.OD,
-                    content=enc["od_content"][i, s], geometry=enc["od_geometry"][i, s],
-                    type_id=int(enc["od_type"][i, s]), valid=bool(enc["od_valid"][i, s]),
-                )
-                for s in range(enc["od_content"].shape[1])
-            )
-            ld = tuple(
-                EntityRecord(
-                    slot=s, stable_id=int(enc["ld_stable_id"][i, s]), node_type=NodeType.LD,
-                    content=enc["ld_content"][i, s], geometry=enc["ld_geometry"][i, s],
-                    type_id=int(enc["ld_type"][i, s]), valid=bool(enc["ld_valid"][i, s]),
-                )
-                for s in range(enc["ld_content"].shape[1])
-            )
-            ego_pose = batch.get("ego_pose")
-            if ego_pose is None:
-                pose = torch.zeros(3, device=enc["od_content"].device)
-            else:
-                pose = (ego_pose[:, -1] if ego_pose.dim() >= 3 else ego_pose)[i]
-            records.append(
-                FrameRecord(
-                    episode_id=str(batch.get("episode_id", "ep")),
-                    frame_id=0, timestamp=0.0, ego_pose=pose,
-                    od=od, ld=ld, source=Source.REAL,
-                )
-            )
+        records = self.encoder.frame_records(
+            batch,
+            episode_id=str(batch.get("episode_id", "ep")),
+            frame_id=int(batch.get("frame_id", 0)),
+            timestamp=float(batch.get("timestamp", 0.0)),
+            encoded=enc,
+        )
         windows = [BankWindowBuilder(hidden=self.hidden).build((frame,)) for frame in records]
         window = BankWindow.stack(windows)
-        return self.forward_window(window, enc["nav"], enc["ego"])
+        return self.forward_window(
+            window, enc["nav"], enc["ego"],
+            nav_valid=enc.get("nav_valid"), ego_valid=enc.get("ego_valid"),
+        )
 
     def imagine(
         self,
@@ -520,35 +509,116 @@ class DriveModel(nn.Module):
         *,
         actions: Tensor | None = None,
         action_provider=None,
-        horizon: int = 6,
+        horizon: int | None = None,
+        ego_pose: Tensor | None = None,
+        nav_valid: Tensor | None = None,
+        ego_valid: Tensor | None = None,
+        imagine_bank: ImagineMemoryBank | None = None,
+        detach: bool = True,
     ) -> list[Dict[str, Tensor]]:
-        """Content-level imagined policy outputs.
+        if horizon is None:
+            horizon = self.rollout_horizon
+        if not 1 <= int(horizon) <= 6:
+            raise ValueError("imagine horizon must be in 1..6")
+        """Imagined policy outputs for t0..t_{H-1}.
 
-        ``policy_n`` is the action at t_n.  Actions are supplied as
-        ``[B,H,4]`` or by an ``action_provider(z, ego, n)`` callback.  Geometry
-        updates are intentionally handled by the Bank/adapter layer; this
-        method only advances the learned OD/LD content state.
+        ``policy_n`` is the action at t_n.  If no external action is supplied,
+        the previous policy output is fed into the world model, so t1..tH-1
+        are policy-conditioned rather than requiring an external action script.
+
+        ``ego_pose`` may be ``[B,H,3]``; if omitted the current ego pose is
+        retained (the environment/model integration owns ego propagation).
         """
-        z = self.temporal_spatial(window, nav, ego)
-        od, ld = z["od"], z["ld"]
         outputs: list[Dict[str, Tensor]] = []
+        current_window = imagine_bank.window() if imagine_bank is not None else window
         for n in range(int(horizon)):
-            policy = self.planner(
-                od, ld, nav, ego,
-                window.od_valid[:, -1], window.ld_valid[:, -1],
+            z = self.temporal_spatial(
+                current_window, nav, ego,
+                nav_valid=nav_valid, ego_valid=ego_valid,
             )
+            od_valid = current_window.od_valid[:, -1]
+            ld_valid = current_window.ld_valid[:, -1]
+            policy = self.planner(z["od"], z["ld"], nav, ego, od_valid, ld_valid)
             outputs.append(policy)
             if n + 1 >= int(horizon):
                 break
+
             if actions is not None:
-                a = actions[:, n]
+                if n >= int(actions.shape[1]):
+                    raise ValueError("actions sequence is shorter than horizon")
+                action = actions[:, n]
             elif action_provider is not None:
-                a = action_provider(od, ld, ego, n)
+                action = action_provider(policy, ego, n)
             else:
-                raise ValueError("imagine requires actions or action_provider")
-            step = self.world_model(od, ld, a)
-            od, ld = step["od"], step["ld"]
+                action = policy["action_mu"]
+            if action.shape[-1] != self.action_dim:
+                raise ValueError(f"action must have {self.action_dim} dims")
+
+            source_pose = current_window.ego_pose[:, -1]
+            if ego_pose is not None and ego_pose.dim() == 3:
+                next_idx = min(n + 1, int(ego_pose.shape[1]) - 1)
+                next_pose = ego_pose[:, next_idx]
+            else:
+                next_pose = source_pose
+            base_od = BankWindowBuilder.project_geometry(
+                current_window.od_geometry[:, -1], source_pose, next_pose, NodeType.OD
+            )
+            base_ld = BankWindowBuilder.project_geometry(
+                current_window.ld_geometry[:, -1], source_pose, next_pose, NodeType.LD
+            )
+            step = self.world_model(
+                z["od"], z["ld"], action,
+                od_geometry=base_od,
+                ld_geometry=base_ld,
+                od_valid=od_valid, ld_valid=ld_valid,
+            )
+            if detach:
+                step = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in step.items()}
+            depth = int(current_window.rollout_depth[0, -1].item()) + 1
+            next_window = current_window.advance(
+                od_content=step["od"],
+                od_geometry=step["od_geometry"],
+                od_type=current_window.od_type[:, -1],
+                od_valid=step["od_valid"] if step["od_valid"] is not None else od_valid,
+                od_stable_id=current_window.od_stable_id[:, -1],
+                ld_content=step["ld"],
+                ld_geometry=step["ld_geometry"],
+                ld_type=current_window.ld_type[:, -1],
+                ld_valid=step["ld_valid"] if step["ld_valid"] is not None else ld_valid,
+                ld_stable_id=current_window.ld_stable_id[:, -1],
+                ego_pose=next_pose,
+                source=1,
+                rollout_depth=depth,
+                source_pose=source_pose,
+                target_pose=next_pose,
+                project_new_geometry=False,
+            )
+            if imagine_bank is not None:
+                prev = imagine_bank.frames[-1]
+                record = next_window.to_frame_record(
+                    episode_id=prev.episode_id,
+                    frame_id=prev.frame_id + 1,
+                    timestamp=prev.timestamp + 0.5,
+                    parent_frame_id=prev.frame_id,
+                    action_from_parent=action,
+                )
+                imagine_bank.append(record, detach=detach)
+                current_window = imagine_bank.window()
+            else:
+                current_window = next_window
         return outputs
+
+    def imagine_from_real_bank(
+        self,
+        real_bank: RealMemoryBank,
+        nav: Tensor,
+        ego: Tensor,
+        **kwargs,
+    ) -> list[Dict[str, Tensor]]:
+        """Run imagine from a RealMemoryBank snapshot (copy-on-write)."""
+        imagine_bank = real_bank.snapshot()
+        window = real_bank.window()
+        return self.imagine(window, nav, ego, imagine_bank=imagine_bank, **kwargs)
 
 
 # Public domain alias for the bank-native top-level model.

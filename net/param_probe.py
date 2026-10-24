@@ -5,16 +5,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Allow both ``python -m net.param_probe`` and ``python net/param_probe.py``.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from net.build_net import build_net, load_config
 
 
 def _budget(cfg: dict) -> tuple[int, int]:
+    # Budget keys live at the top level in config/model.yaml; support the
+    # legacy nested-model form as a fallback.
     model = cfg.get("model", cfg)
     if not isinstance(model, dict):
         model = cfg
-    return int(model.get("deployable_param_min", 800_000)), int(model.get("deployable_param_max", 1_200_000))
+    return (
+        int(cfg.get("deployable_param_min", model.get("deployable_param_min", 800_000))),
+        int(cfg.get("deployable_param_max", model.get("deployable_param_max", 1_200_000))),
+    )
 
 
 def main() -> int:

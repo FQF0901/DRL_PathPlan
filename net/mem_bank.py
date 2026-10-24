@@ -16,6 +16,7 @@ built.  Content latents are never rotated.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 from enum import IntEnum
 from typing import Optional, Sequence, Tuple
 
@@ -149,6 +150,138 @@ class BankWindow:
         }
         return cls(**values)
 
+    def to_frame_record(
+        self,
+        *,
+        episode_id: str,
+        frame_id: int,
+        timestamp: float,
+        source: Source | None = None,
+        parent_frame_id: int = -1,
+        encoder_version: int = 0,
+        action_from_parent: Tensor | None = None,
+    ) -> FrameRecord:
+        """Convert the current (last) slice of a B=1 window to a FrameRecord."""
+        if self.batch_size != 1:
+            raise ValueError("to_frame_record requires B=1")
+        i = -1
+
+        def make(content: Tensor, geometry: Tensor, typ: Tensor, valid: Tensor, sid: Tensor, node: NodeType):
+            return tuple(
+                EntityRecord(
+                    slot=s,
+                    stable_id=int(sid[0, i, s]),
+                    node_type=node,
+                    content=content[0, i, s],
+                    geometry=geometry[0, i, s],
+                    type_id=int(typ[0, i, s]),
+                    valid=bool(valid[0, i, s]),
+                )
+                for s in range(content.shape[2])
+            )
+
+        if source is None:
+            raw_source = int(self.source[0, i].item())
+            source = Source(raw_source) if raw_source in (0, 1) else Source.IMAGINED
+        return FrameRecord(
+            episode_id=str(episode_id),
+            frame_id=int(frame_id),
+            timestamp=float(timestamp),
+            ego_pose=self.ego_pose[0, i].detach(),
+            od=make(self.od_content, self.od_geometry, self.od_type, self.od_valid, self.od_stable_id, NodeType.OD),
+            ld=make(self.ld_content, self.ld_geometry, self.ld_type, self.ld_valid, self.ld_stable_id, NodeType.LD),
+            source=source,
+            rollout_depth=int(self.rollout_depth[0, i]),
+            parent_frame_id=int(parent_frame_id),
+            action_from_parent=None if action_from_parent is None else action_from_parent.detach(),
+            encoder_version=int(encoder_version),
+        )
+
+    def advance(
+        self,
+        *,
+        od_content: Tensor,
+        od_geometry: Tensor,
+        od_type: Tensor,
+        od_valid: Tensor,
+        od_stable_id: Tensor,
+        ld_content: Tensor,
+        ld_geometry: Tensor,
+        ld_type: Tensor,
+        ld_valid: Tensor,
+        ld_stable_id: Tensor,
+        ego_pose: Tensor,
+        source: int = 1,
+        rollout_depth: int = 1,
+        source_pose: Tensor | None = None,
+        target_pose: Tensor | None = None,
+        project_new_geometry: bool = True,
+    ) -> "BankWindow":
+        """Shift the window one step and append current entities.
+
+        This is the tensor-level state transition used by ``DriveModel.imagine``.
+        It does not bypass the Bank schema: the caller remains responsible for
+        writing the corresponding FrameRecord to an ImagineMemoryBank if a
+        record-level audit is needed.
+        """
+        def shift_time(x: Tensor, y: Tensor) -> Tensor:
+            return torch.cat([x[:, 1:], y[:, None]], dim=1)
+
+        b = self.batch_size
+        n_od, n_ld = self.od_content.shape[2], self.ld_content.shape[2]
+        expected = {
+            "od_content": (b, n_od, self.od_content.shape[-1]),
+            "od_geometry": (b, n_od, self.od_geometry.shape[-1]),
+            "od_type": (b, n_od),
+            "od_valid": (b, n_od),
+            "od_stable_id": (b, n_od),
+            "ld_content": (b, n_ld, self.ld_content.shape[-1]),
+            "ld_geometry": (b, n_ld, self.ld_geometry.shape[-1]),
+            "ld_type": (b, n_ld),
+            "ld_valid": (b, n_ld),
+            "ld_stable_id": (b, n_ld),
+            "ego_pose": (b, 3),
+        }
+        for name, want in expected.items():
+            got = tuple(locals()[name].shape)
+            if got != want:
+                raise ValueError(f"advance {name} shape {got} != {want}")
+        if int(rollout_depth) > 6:
+            raise ValueError("rollout_depth must be <= 6")
+        old_od = self.od_geometry[:, 1:]
+        old_ld = self.ld_geometry[:, 1:]
+        if source_pose is not None and target_pose is not None:
+            old_od = BankWindowBuilder.project_geometry(old_od, source_pose, target_pose, NodeType.OD)
+            old_ld = BankWindowBuilder.project_geometry(old_ld, source_pose, target_pose, NodeType.LD)
+            if project_new_geometry:
+                new_od = BankWindowBuilder.project_geometry(od_geometry, source_pose, target_pose, NodeType.OD)
+                new_ld = BankWindowBuilder.project_geometry(ld_geometry, source_pose, target_pose, NodeType.LD)
+            else:
+                new_od, new_ld = od_geometry, ld_geometry
+        else:
+            new_od, new_ld = od_geometry, ld_geometry
+        od_geometry = torch.cat([old_od, new_od[:, None]], dim=1)
+        ld_geometry = torch.cat([old_ld, new_ld[:, None]], dim=1)
+        new_source = torch.full((b,), int(source), dtype=self.source.dtype, device=self.source.device)
+        new_depth = torch.full((b,), int(rollout_depth), dtype=self.rollout_depth.dtype, device=self.rollout_depth.device)
+        new_frame = torch.ones((b,), dtype=torch.bool, device=self.frame_valid.device)
+        return BankWindow(
+            od_content=shift_time(self.od_content, od_content),
+            od_geometry=od_geometry,
+            od_type=shift_time(self.od_type, od_type),
+            od_valid=shift_time(self.od_valid, od_valid),
+            od_stable_id=shift_time(self.od_stable_id, od_stable_id),
+            ld_content=shift_time(self.ld_content, ld_content),
+            ld_geometry=ld_geometry,
+            ld_type=shift_time(self.ld_type, ld_type),
+            ld_valid=shift_time(self.ld_valid, ld_valid),
+            ld_stable_id=shift_time(self.ld_stable_id, ld_stable_id),
+            ego_pose=shift_time(self.ego_pose, ego_pose),
+            source=shift_time(self.source, new_source),
+            rollout_depth=shift_time(self.rollout_depth, new_depth),
+            frame_valid=shift_time(self.frame_valid, new_frame),
+        )
+
     @property
     def batch_size(self) -> int:
         return int(self.od_content.shape[0])
@@ -226,8 +359,86 @@ class BankWindowBuilder:
         pts = geometry.reshape(*geometry.shape[:-1], -1, 2)
         center = pts.mean(dim=-2)
         delta = pts[..., -1, :] - pts[..., 0, :]
-        yaw = torch.atan2(delta[..., 1], delta[..., 0])
+        norm = torch.linalg.vector_norm(delta, dim=-1)
+        safe_x = torch.where(norm < 1e-8, torch.ones_like(delta[..., 0]), delta[..., 0])
+        safe_y = torch.where(norm < 1e-8, torch.zeros_like(delta[..., 1]), delta[..., 1])
+        yaw = torch.atan2(safe_y, safe_x)
+        yaw = torch.where(norm < 1e-8, torch.zeros_like(yaw), yaw)
         return torch.stack([center[..., 0], center[..., 1], yaw], dim=-1)
+
+    @staticmethod
+    def project_geometry(
+        geometry: Tensor,
+        source_pose: Tensor,
+        target_pose: Tensor,
+        node_type: NodeType,
+    ) -> Tensor:
+        """Project geometry to a target ego frame, preserving leading dims.
+
+        Supports ``[G]``, ``[N,G]``, ``[B,N,G]`` and ``[B,T,N,G]``.  Pose
+        tensors may be ``[3]``, ``[B,3]`` or ``[B,T,3]``.
+        """
+        if geometry.dim() == 1:
+            return BankWindowBuilder._transform_geometry(
+                geometry, source_pose, target_pose, node_type=node_type
+            )
+        if geometry.dim() == 2:
+            if source_pose.dim() == 1 and target_pose.dim() == 1:
+                return torch.stack(
+                    [
+                        BankWindowBuilder._transform_geometry(
+                            geometry[i], source_pose, target_pose, node_type=node_type
+                        )
+                        for i in range(geometry.shape[0])
+                    ],
+                    dim=0,
+                )
+            raise ValueError("2D geometry needs 1D poses")
+        if geometry.dim() == 3:
+            if source_pose.dim() == 1 and target_pose.dim() == 1:
+                return torch.stack(
+                    [
+                        BankWindowBuilder.project_geometry(
+                            geometry[i], source_pose, target_pose, node_type
+                        )
+                        for i in range(geometry.shape[0])
+                    ],
+                    dim=0,
+                )
+            if source_pose.dim() == 2 and target_pose.dim() == 2:
+                return torch.stack(
+                    [
+                        BankWindowBuilder.project_geometry(
+                            geometry[i], source_pose[i], target_pose[i], node_type
+                        )
+                        for i in range(geometry.shape[0])
+                    ],
+                    dim=0,
+                )
+            raise ValueError("3D geometry needs 1D or [B,3] poses")
+        if geometry.dim() == 4:
+            if source_pose.dim() == 3 and target_pose.dim() == 3:
+                return torch.stack(
+                    [
+                        BankWindowBuilder.project_geometry(
+                            geometry[i], source_pose[i], target_pose[i], node_type
+                        )
+                        for i in range(geometry.shape[0])
+                    ],
+                    dim=0,
+                )
+            if source_pose.dim() == 2 and target_pose.dim() == 2:
+                return torch.stack(
+                    [
+                        BankWindowBuilder.project_geometry(
+                            geometry[i], source_pose[i], target_pose[i], node_type
+                        )
+                        for i in range(geometry.shape[0])
+                    ],
+                    dim=0,
+                )
+            raise ValueError("[B,T,N,G] geometry needs [B,T,3] or [B,3] poses")
+        raise ValueError(f"unsupported geometry shape {tuple(geometry.shape)}")
 
     def _infer_dims(self, frames: Sequence[FrameRecord]) -> Tuple[int, int, int]:
         contents = [e.content.numel() for f in frames for e in (*f.od, *f.ld)]
@@ -249,10 +460,13 @@ class BankWindowBuilder:
         T = self.capacity
         pad = T - len(frames)
         device = frames[-1].ego_pose.device
-        dtype = frames[-1].ego_pose.dtype
+        content_dtype = next(
+            (e.content.dtype for f in frames for e in (*f.od, *f.ld)),
+            torch.float32,
+        )
 
         def zeros(*shape: int) -> Tensor:
-            return torch.zeros(shape, dtype=dtype, device=device)
+            return torch.zeros(shape, dtype=content_dtype, device=device)
 
         od_content = zeros(1, T, self.od_slots, hidden)
         od_geometry = zeros(1, T, self.od_slots, od_g)
@@ -269,38 +483,84 @@ class BankWindowBuilder:
         depth = torch.full((1, T), -1, dtype=torch.long, device=device)
         frame_valid = torch.zeros((1, T), dtype=torch.bool, device=device)
 
-        query_pose = frames[-1].ego_pose
+        # History is indexed by the *current* slot order.  An entity is matched
+        # by stable ID, not by its rank in the historical frame.  This is the
+        # critical difference between a storage slot and an identity.
+        def current_map(field: str) -> dict[int, EntityRecord]:
+            out: dict[int, EntityRecord] = {}
+            for rec in getattr(frames[-1], field):
+                if not rec.valid:
+                    continue
+                if not (0 <= rec.slot < (self.od_slots if field == "od" else self.ld_slots)):
+                    raise ValueError(f"{field} slot {rec.slot} out of range")
+                if rec.stable_id in out:
+                    raise ValueError(f"duplicate stable_id {rec.stable_id} in current {field}")
+                out[int(rec.stable_id)] = rec
+            slots = [rec.slot for rec in out.values()]
+            if len(slots) != len(set(slots)):
+                raise ValueError(f"duplicate {field} slot in current frame")
+            return out
+
+        current_od = current_map("od")
+        current_ld = current_map("ld")
+        query_pose = frames[-1].ego_pose.to(device=device, dtype=content_dtype)
+
+        def frame_map(frame: FrameRecord, field: str, slots: int) -> dict[int, EntityRecord]:
+            out: dict[int, EntityRecord] = {}
+            used_slots: set[int] = set()
+            for rec in getattr(frame, field):
+                expected = NodeType.OD if field == "od" else NodeType.LD
+                if rec.node_type != expected:
+                    raise ValueError(f"{field} record has node_type={rec.node_type}")
+                if not (0 <= rec.slot < slots):
+                    raise ValueError(f"{field} slot {rec.slot} out of range")
+                if rec.valid and rec.slot in used_slots:
+                    raise ValueError(f"duplicate {field} slot {rec.slot} in frame")
+                if rec.valid:
+                    used_slots.add(rec.slot)
+                    if rec.stable_id in out:
+                        raise ValueError(f"duplicate stable_id {rec.stable_id} in {field} frame")
+                    out[int(rec.stable_id)] = rec
+            return out
+
         for t, frame in enumerate(frames, start=pad):
             frame_valid[0, t] = True
             source[0, t] = int(frame.source)
             depth[0, t] = int(frame.rollout_depth)
-            ego_pose[0, t] = frame.ego_pose
-            for rec in frame.od:
-                if not (0 <= rec.slot < self.od_slots):
-                    raise ValueError(f"OD slot {rec.slot} out of range")
+            pose = frame.ego_pose.to(device=device, dtype=content_dtype)
+            ego_pose[0, t] = pose
+            hist_od = frame_map(frame, "od", self.od_slots)
+            hist_ld = frame_map(frame, "ld", self.ld_slots)
+            for sid, cur in current_od.items():
+                rec = hist_od.get(sid)
+                if rec is None:
+                    od_stable[0, t, cur.slot] = int(sid)
+                    continue
                 if rec.content.numel() != hidden:
                     raise ValueError("OD content hidden mismatch")
                 if rec.geometry.numel() != od_g:
                     raise ValueError(f"OD geometry must have {od_g} values")
-                g = self._transform_geometry(rec.geometry, frame.ego_pose, query_pose, node_type=NodeType.OD)
-                od_content[0, t, rec.slot] = rec.content
-                od_geometry[0, t, rec.slot] = g
-                od_type[0, t, rec.slot] = int(rec.type_id)
-                od_valid[0, t, rec.slot] = bool(rec.valid)
-                od_stable[0, t, rec.slot] = int(rec.stable_id)
-            for rec in frame.ld:
-                if not (0 <= rec.slot < self.ld_slots):
-                    raise ValueError(f"LD slot {rec.slot} out of range")
+                g = self._transform_geometry(rec.geometry, pose, query_pose, node_type=NodeType.OD)
+                od_content[0, t, cur.slot] = rec.content.to(dtype=content_dtype, device=device)
+                od_geometry[0, t, cur.slot] = g.to(dtype=content_dtype, device=device)
+                od_type[0, t, cur.slot] = int(cur.type_id)
+                od_valid[0, t, cur.slot] = bool(rec.valid)
+                od_stable[0, t, cur.slot] = int(sid)
+            for sid, cur in current_ld.items():
+                rec = hist_ld.get(sid)
+                if rec is None:
+                    ld_stable[0, t, cur.slot] = int(sid)
+                    continue
                 if rec.content.numel() != hidden:
                     raise ValueError("LD content hidden mismatch")
                 if rec.geometry.numel() != ld_g:
                     raise ValueError(f"LD geometry must have {ld_g} values")
-                g = self._transform_geometry(rec.geometry, frame.ego_pose, query_pose, node_type=NodeType.LD)
-                ld_content[0, t, rec.slot] = rec.content
-                ld_geometry[0, t, rec.slot] = g
-                ld_type[0, t, rec.slot] = int(rec.type_id)
-                ld_valid[0, t, rec.slot] = bool(rec.valid)
-                ld_stable[0, t, rec.slot] = int(rec.stable_id)
+                g = self._transform_geometry(rec.geometry, pose, query_pose, node_type=NodeType.LD)
+                ld_content[0, t, cur.slot] = rec.content.to(dtype=content_dtype, device=device)
+                ld_geometry[0, t, cur.slot] = g.to(dtype=content_dtype, device=device)
+                ld_type[0, t, cur.slot] = int(cur.type_id)
+                ld_valid[0, t, cur.slot] = bool(rec.valid)
+                ld_stable[0, t, cur.slot] = int(sid)
 
         return BankWindow(
             od_content=od_content,
@@ -352,7 +612,7 @@ class RealMemoryBank:
     def snapshot(self) -> "ImagineMemoryBank":
         if not self._frames:
             raise RuntimeError("cannot snapshot an empty RealMemoryBank")
-        return ImagineMemoryBank(self._frames, capacity=self.capacity)
+        return ImagineMemoryBank(copy.deepcopy(self._frames), capacity=self.capacity)
 
     def window(self, *, builder: Optional[BankWindowBuilder] = None) -> BankWindow:
         if not self._frames:
@@ -388,6 +648,8 @@ class ImagineMemoryBank:
             raise ValueError("parent_frame_id must reference the current tail")
         if frame.rollout_depth != prev.rollout_depth + 1:
             raise ValueError("rollout_depth must increase by one")
+        if frame.rollout_depth > self.capacity:
+            raise ValueError(f"rollout_depth must be <= {self.capacity}")
         if frame.timestamp <= prev.timestamp:
             raise ValueError("imagined timestamp must increase")
         self._imagined.append(frame.detached() if detach else frame)

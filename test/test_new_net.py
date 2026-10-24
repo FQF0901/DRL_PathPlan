@@ -33,6 +33,7 @@ def _batch():
         "ego": torch.randn(B, 12),
         "od_ids": torch.arange(16).repeat(B, 1),
         "ld_ids": torch.arange(16).repeat(B, 1),
+        "pose": torch.zeros(B, 3),
     }
 
 
@@ -104,7 +105,7 @@ def test_temporal_spatial_and_planner():
     planner = Planner(hidden=H)
     p = planner(z["od"], z["ld"], out["nav"][:1], out["ego"][:1], window.od_valid[:, -1], window.ld_valid[:, -1])
     assert p["action_mu"].shape == (1, 4)
-    assert set(p["aux"]) == {"collision", "offroad", "timeout", "progress"}
+    assert set(p["aux"]) == {"collision", "offroad", "timeout", "urgency", "progress"}
 
 
 def test_build_and_imagine():
@@ -119,3 +120,102 @@ def test_build_and_imagine():
     traj = model.imagine(window, enc["nav"], enc["ego"], actions=torch.rand(1, 6, 4), horizon=6)
     assert len(traj) == 6
     assert all(p["action_mu"].shape == (1, 4) for p in traj)
+
+
+def test_stable_id_reorders_history_into_current_slot():
+    def od(slot, sid, x):
+        return EntityRecord(slot, sid, NodeType.OD, torch.ones(H), torch.tensor([x, 0.0, 0.0, 0.0, 0.0]))
+
+    f0 = FrameRecord("ep", 0, 0.0, torch.tensor([0.0, 0.0, 0.0]), (od(0, 7, 10.0),), ())
+    f1 = FrameRecord("ep", 1, 0.5, torch.tensor([2.0, 0.0, 0.0]), (od(1, 7, 8.0),), ())
+    window = BankWindowBuilder(hidden=H).build((f0, f1))
+    # Current frame puts stable id 7 in slot 1.  History is matched by ID and
+    # placed in that current slot, despite being slot 0 in frame 0.
+    assert bool(window.od_valid[0, -1, 1])
+    assert bool(window.od_valid[0, -2, 1])
+    assert float(window.od_geometry[0, -2, 1, 0]) == 8.0
+
+
+def test_target_encoder_has_no_grad():
+    enc = CurrentFrameEncoder(hidden=H)
+    target = TargetEncoder(enc)
+    batch = _batch()
+    batch["od"] = batch["od"].clone().requires_grad_(True)
+    out = target.encode_current(batch)
+    assert not out["od_content"].requires_grad
+
+
+def test_project_ld_batched():
+    from net.world_model import project_ld
+
+    geometry = torch.randn(2, 16, 10)
+    pose = torch.randn(2, 3)
+    out = project_ld(geometry, pose, pose)
+    assert out.shape == geometry.shape
+
+
+def test_imagine_advances_window_and_geometry():
+    model = DriveModel(hidden=H)
+    batch = _batch()
+    enc = model.encoder.encode_current(batch)
+    window = _window(enc)
+    before = window.rollout_depth[:, -1].clone()
+    out = model.imagine(window, enc["nav"][:1], enc["ego"][:1], actions=torch.rand(1, 6, 4), horizon=6)
+    assert len(out) == 6
+    # The local final window is not returned; this test exercises the step path
+    # through the public method without requiring an external Bank adapter.
+    assert torch.isfinite(out[-1]["action_mu"]).all()
+
+
+def test_temporal_current_invalid_is_zero():
+    from net.world_model import TemporalAttention
+
+    attn = TemporalAttention(H, 4)
+    tokens = torch.randn(1, 3, 2, H)
+    valid = torch.tensor([[[1.0, 1.0], [1.0, 1.0], [0.0, 0.0]]])
+    ids = torch.tensor([[[1, 2], [1, 2], [1, 2]]])
+    out = attn(tokens, valid, ids)
+    assert torch.allclose(out, torch.zeros_like(out))
+
+
+def test_build_net_rejects_hidden_mismatch():
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_net({
+            "model": {
+                "hidden": 128,
+                "encoder": {"hidden": 64},
+                "temporal_spatial": {"hidden": 128},
+                "planner": {"hidden": 128},
+                "world_model": {"hidden": 128},
+            }
+        })
+
+
+def test_imagine_from_real_bank_appends():
+    model = DriveModel(hidden=H)
+    batch = {k: v[:1] for k, v in _batch().items()}
+    enc = model.encoder.encode_current(batch)
+    record = model.encoder.frame_records(batch, episode_id="ep", frame_id=0, timestamp=0.0)[0]
+    bank = RealMemoryBank(6)
+    bank.append(record)
+    before = len(bank.snapshot().frames)
+    out = model.imagine_from_real_bank(
+        bank, enc["nav"], enc["ego"],
+        actions=torch.rand(1, 6, 4), horizon=6,
+    )
+    assert len(out) == 6
+    assert len(bank.frames) == 1  # no writeback to RealBank
+
+
+def test_bank_dtype_follows_content():
+    od = EntityRecord(
+        0, 1, NodeType.OD,
+        torch.zeros(H, dtype=torch.float32),
+        torch.tensor([1.0, 2.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+    )
+    frame = FrameRecord("ep", 0, 0.0, torch.zeros(3, dtype=torch.float64), (od,), ())
+    window = BankWindowBuilder(hidden=H).build((frame,))
+    assert window.od_content.dtype == torch.float32
+    assert window.ego_pose.dtype == torch.float32

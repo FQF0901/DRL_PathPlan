@@ -1,189 +1,113 @@
-1. 对照 arch_lock
-1.1 明确偏离/违反
-- High §6.5/§8.3 ImagineBank rollout 没有实现 — net/model.py:515-551
-- 只对初始 window 跑一次 TemporalSpatialBlock；之后只循环 planner + WM content。
-- 不建 ImagineBank、不 append、不更新 ego_pose/geometry/type/valid/source/depth、不重跑 TSB。
-- 丢弃 step["od_geometry"] 和 step["ld_residual"]。
-- 必须外部传 actions/action_provider，没有把上一步 policy 输出作为下一步动作。
-- 合同 §6.5/§8.3 要求的是：RealBank.snapshot → 每步 WM/geometry/LD residual → ImagineBank.append → 混合 window → TSB → policy。当前主循环缺了 2/3。
-- High §6.3 LD residual 缺 base_ld，projection+residual 未接通 — net/world_model.py:312-339, 361-370
-- 合同公式是 r_hat_ld = ld_residual(z_ld_t, a_t, base_ld_{t+1})，g_hat_ld = base_ld + r_hat_ld。
-- 代码 LDResidualDecoder.forward(content, action) 只有两个输入，没有 base_ld。
-- project_ld / add_ld_residual 虽然存在，但 WM/model 从未调用。
-- FactorizedEgoConditionedLatentWM.forward 只返回 ld_residual，没有 g_ld。
-- High §13.4 build_net 丢配置、无维度校验 — net/build_net.py:46-83
-- cfg = dict(cfg["model"]) 直接把顶层 bank / rollout 丢掉。
-- bank.capacity、bank.od_slots、bank.ld_slots、history_frames、rollout.horizon、action bounds 全部未读取。
-- 没有校验 encoder.hidden == temporal.hidden == planner.hidden == wm.hidden、heads 整除、ld_points == env.obs.LD_POINTS、slots/capacity 一致性。
-- 复现：encoder.hidden=64 + temporal_spatial.hidden=128 能 build，forward 才报 nav/ego must have hidden size。
-- High §7/§9.5/§5.4 live path 仍有 value/risk、stack_history、TemporalPool — net/model.py:99-411
-- StructuredPlanner 有 value、risk、cost_value（:180-182, :397-404）。
-- TemporalPool 仍用于 OD/LD/nav/ego 时序融合（:151-154）。
-- pipeline 仍全部使用 legacy：train_bc.py:79,1079、eval.py:52、rollout.py:22、train_ppo.py:75、checkpointing.py:18,120-123、train_wm.py:23、probe_wm.py:19。
-- 新 Planner 本身没有 value/risk（net/planner.py:67-84），但 live path 不是它。
-- Medium/High §9.2 target 输出没有 no-grad — net/encoder.py:278-279
-- TargetEncoder.encode_current 只是转发；参数 frozen，但输入带 grad 时输出 requires_grad=True（已复现）。
-- 合同 §9.2 要求“target 输出 no grad”，不能依赖调用方 detach。
-- Medium §2.4 temporal_valid 没有包含当前帧 valid — net/world_model.py:205-213
-- 代码只对 key 做 valid & same_id，没有把 valid[:, -1] 作为整行因子。
-- 复现：当前 valid=0、历史 valid=1、同 stable_id 时，输出 norm≈2.0，而不是 0。
-- 下游 spatial mask 会挡住 invalid 当前实体，所以对 planner 影响有限；但 WM/imagine 直接使用时没有 mask，问题会放大。
-- Medium §4 BankWindow schema 偏离 — net/mem_bank.py:106-126
-- 缺合同列出的 slot: Tensor [N]。
-- 合同是单一 content/geometry/type/valid/stable_id；代码拆成 od_* / ld_* 两套。
-- 新增 frame_valid（额外字段）。
-- OD geometry 5 维、LD geometry 10 维，合同单一 geometry [T,N,G] 本身有歧义，拆分是合理工程选择，但不是字面 schema，需 owner 确认。
-- Medium/A- §5.2 token 额外加了 type/age embedding — net/world_model.py:192, 243-245, 266-267
-- 合同写 token = content latent + relative pose embedding，并说“只加 relative pose”。
-- 代码在 temporal attention 加 age embedding，在 spatial token 加 type_od/type_ld embedding。
-- 禁止清单只点名 distance/dyaw/velocity，没有点名 type/age；如果 owner 认为 token 公式是封闭的，这是违反；否则只是超出字面。
-- Medium/A- §2.1/§2.2 FrameRecord/EntityRecord schema — net/mem_bank.py:43-87
-- FrameRecord 没有统一的 entities tuple，而是 od/ld 两个 tuple。
-- EntityRecord.type 写成 type_id。
-- ego_velocity 缺失，但合同标的是 optional，不构成硬违反。
-- 功能等价，但 schema 不是字面。
-- Medium §6.1 legacy WM 仍预测完整 LD content — net/world_model.py:126-131
-- EgoConditionedLatentWM 返回 ld + ld_head(...)，即完整 LD content。
-- 合同 §6.1 明确“LD 不做完整 content target；LD 走 projection + residual”。
-- 这是 legacy 限定问题；新 FactorizedEgoConditionedLatentWM 返回 "ld": ld 不变是正确的，不要误改。
-- Low §2.1 ImagineBank 允许 depth 7 — net/mem_bank.py:381-395
-- 只检查 prev.rollout_depth + 1，不检查 ≤6；复现 7 步后 depth [2,3,4,5,6,7]。
-- 合同 imagined depth 是 1..6。
-- Medium/歧义 §7 AuxHead 缺 urgency — net/planner.py:53-56
-- 新 AuxHead 只有 collision/offroad/timeout/progress，没有 urgency。
-- 合同 §7 列出 “collision / offroad / timeout / urgency / progress 等”，用了“等”，所以标歧义；但 test_new_net.py:107 把 aux keys 精确断言成 4 个，等于把缺 urgency 固化了。
-- Medium §13.1 pipeline/losses.py 缺失 — 不在 net/，但直接影响新路径验证
-- 合同目标结构明确列出 pipeline/losses.py（纯 loss 函数）。
-- 当前没有该文件；新 WM 的 od_geometry / ld_residual 没有对应 L_od_content/L_od_geo/L_ld_res 接线。
-1.2 超出 arch_lock 范围的代码
-- net/model.py:76-411 的 legacy StructuredPlanner / TemporalPool / count_parameters
-- §13.1 的 model.py 职责是“顶层组合、forward、imagine 编排”，不是第二个完整 planner。
-- 它不只是“保留”，而是 live path；这是最大的结构偏离。
-- net/world_model.py:24-170 的 legacy EgoConditionedLatentWM / masked_mse / rollout_latents
-- §13.1 的 world_model.py 目标职责是新 TSB / 新 WM / OD geometry / LD residual / rollout。
-- legacy WM 预测完整 LD content，与新合同方向相反；仍被 train_wm.py / probe_wm.py 使用。
-- net/param_probe.py 整个文件
-- §13.1 的 net/ 列表只有 6 个文件；param_probe.py 是 CLI 诊断工具，且与 build_net / count_parameters 职责重叠。
-- 还有 bug：_budget 读不到顶层 deployable_param_min/max（net/param_probe.py:13-17），实际永远返回 800k/1.2M。
-- 其他额外项（低风险）
-- DriveModel.forward_current（net/model.py:471-513）：合同没有这个便利入口，且重复实现了 CurrentFrameEncoder.frame_records。
-- BankWindow.frame_valid（net/mem_bank.py:126）。
-- TemporalSpatialBlock 返回 tokens（net/world_model.py:294）。
-- Encoder / EMATargetEncoder 别名（net/encoder.py:282-284）。
-- config/model.yaml:37-39 的 deployable_param_*、bank.topk：不在 §13.4 的 model.yaml 职责列表。
-1.3 arch_lock 要求但 net 未实现/未接通
-- High ImagineBank rollout — 见 1.1，net/model.py:515-551。
-- High LD projection + residual — 见 1.1，net/world_model.py:312-339, 361-370；project_ld 还不支持 batched。
-- High OD geometry decoder 的 rollout 接线 — ODGeometryDecoder 存在，forward 也算了 od_geometry，但 imagine 丢弃；没有写回 Bank，没有每步 ego_pose 更新（net/model.py:549-550）。
-- High target encoder 训练接线 — TargetEncoder 只被 test_new_net.py:90-93 使用；没有 z* = target_encoder(o_{t+1}) 的 stop-grad target 构造，没有 EMA 调度，没有 target 不进 Bank/policy 的验证。
-- High/Medium bank/rollout/action 配置接线 — build_net 忽略 bank.capacity/od_slots/ld_slots、history_frames、rollout.horizon；TemporalAttention 固定 frames=6；imagine(horizon=6) 硬编码；config/model.yaml 没有 action 段。
-- High 维度校验 — 同 1.1；build 成功、forward 才炸。
-- Medium LD type 继承 — Encoder._type 对 LD 回退到 ld[:, :, 0, 7]，即 lane_role，不是 lane/road type（net/encoder.py:99-101）；env.obs 根本没有 ld_taxonomy（只返回 ld_road_ids），所以“LD type 从 t0 继承”没有真正实现。
-- Medium/High valid 传播 — FactorizedEgoConditionedLatentWM.forward 不接受/不输出 valid（net/world_model.py:361-370）；imagine 始终用 t0 的 mask；ImagineBank 的 valid 没有计算/写入。
-- Medium type/source/depth 传播 — imagine 不建 ImagineBank，所以没有 source=IMAGINED、rollout_depth=depth+1、type=inherited 的实际写入。
-- Medium ego_pose / ego motion 更新 — imagine 的 nav/ego 6 步不变；没有每步 ego_pose，policy_n 的输入不是 t_n 的真实 ego 状态。
-- Medium detach 边界 — §12.8 要求 z_hat → policy detach、multi-step hidden 先 detach；imagine 没有任何 detach，输出 action_mu.requires_grad=True（已复现）。
-- Medium multi-step 训练 — FactorizedEgoConditionedLatentWM.rollout 是 @torch.no_grad()（net/world_model.py:372），无法做 §12.5 的 horizon curriculum / 短 BPTT。
-- High/Medium checkpoint 支持 DriveModel — pipeline/checkpointing.py:120-123 只构造 StructuredPlanner；train_bc.py:890 写 "architecture": "StructuredPlanner"。新模型没有 checkpoint schema/loader。
-- High/Medium pose key 适配 — env.obs.build_observation 返回 "pose"（env/obs.py:1134），但 frame_records / forward_current 找 "ego_pose"（net/encoder.py:206-211、net/model.py:499-503）。直接喂 env observation 时 ego_pose 静默变 [0,0,0]，历史 geometry 的 SE(2) 补偿变成恒等变换。
-- High NEW path 未成为 live path — DriveModel/build_net 只被 test/test_new_net.py 使用；训练/评测/checkpoint/rollout 全部 legacy。§9.5 的“没有 stack_history 主路径”“batch 化 BankWindow”“Plan/aux 无 risk/value”因此无法通过。
-- Medium pipeline/rollout.py 不是 model.imagine 的薄 wrapper — pipeline/rollout.py:78-95 仍是 legacy StructuredPlanner 的重复预测，不是 WM rollout。
-2. 逻辑正确性
-High
-- D1. LEGACY TemporalPool reshape 未 permute，T/N 被打乱 — net/model.py:113,116
-x = tokens.reshape(B * N, T, Hd)          # 错
-# 应为 tokens.permute(0, 2, 1, 3).reshape(B * N, T, Hd)
-复现（B=1,T=3,N=2,H=2）：
-- 实际 row0：[[0,1],[2,3],[10,11]]
-- 正确 row0：[[0,1],[10,11],[20,21]]
-- 每个“entity row”实际混了不同 entity/time；query x[:, -1] 不是该 entity 的当前帧；mask 也按错误行分组。OD/LD 时序融合完全错误。
-- nav/ego 的 N=1 时 reshape 恰好正确，所以只有 OD/LD 受影响。
-- test/test_model_shapes.py:58-70 只测 shape/finiteness，没抓到数值语义。
-- D2. project_ld 对 batched geometry/pose 不可用 — net/world_model.py:330-334 → net/mem_bank.py:190-191
-- sx, sy, syaw = source_pose... 只支持 1D [3] pose。
-- 复现：B=1 报 ValueError: not enough values to unpack (expected 3, got 1)；B=2 报 got 2；B=3 报 shape mismatch。
-- 只有单条 geometry=[10], pose=[3] 可用。§6.3/§6.5 的核心函数不能用于 batched BankWindow。
-- D3. build_net 维度不一致可 build、forward 才炸 — net/build_net.py:59-83
-- 见 1.1；应在 build 时 fail fast。
-- D4. TargetEncoder.encode_current 输出带 grad — net/encoder.py:278-279
-- 复现 requires_grad=True、grad_fn=AddBackward0；违反 §9.2/§12.8。
-- D5. TemporalAttention 当前帧 invalid 时输出非零 — net/world_model.py:205-213
-- 复现当前 valid=0、历史 valid=1、同 id 时输出 norm≈2.0。
-- all_bad 只处理“所有 key 都无效”，不处理“当前 query 无效但历史有效”。
-- D17. pose key 不匹配 — env.obs.py:1134 vs net/encoder.py:206-211 / net/model.py:499-503
-- 见 1.3；这是新路径与 env 的直接集成缺口，后果是 SE(2) 补偿失效。
-Medium
-- D6. Encoder 缺 id/mask 时静默降级 — net/encoder.py:74-89
-- 缺 od_ids/ld_ids → 全 -1；缺 od_mask/ld_mask → 全 True。
-- 复现 od_stable_id 全 -1、od_valid 全 True；缺 id 时 temporal attention 输出与“同 id”完全一致。
-- 注意：这是同一 slot 的跨时间混，不是跨 slot；TemporalAttention 是每 slot 一行。slot 复用时旧历史会被错误混入，违反 §2.4。
-- D7. Encoder._current 启发式误切 — net/encoder.py:41-47
-- if x.dim() >= 3 and 1 <= x.shape[1] <= 6: return x[:, -1]。
-- 复现 [2,4,3] -> [2,3]、[2,6,3] -> [2,3]。
-- 今天 16 slot 不触发；但如果 bank.od_slots/ld_slots 配置 ≤6，[B,6,18] 会被当成 history 切掉，直接破坏 encoder。
-- D8. BankWindowBuilder.build 重复 slot 静默覆盖 — net/mem_bank.py:278-303
-- 同一 frame 两条 record 都 slot=0 时，后者覆盖前者，无报错。
-- D9. node_type 未与 od/ld tuple 校验 — net/mem_bank.py:278-303
-- EntityRecord(node_type=NodeType.LD) 放进 frame.od，会被当作 OD 做 geometry transform 并写入 od_*，无报错。
-- D10. NEW WM od_delta 未 zero-init — net/world_model.py:355-357
-- 初始化时 od_next != od，delta norm≈3.93；丢 persistence baseline。
-- §12.9 要求“预测 Δz，保留 persistence baseline”；§12.11 要求 one-step 不低于 persistence。至少应 zero-init 最后一层。
-- D11. NEW WM 无 mask/valid，invalid slot 也预测 — net/world_model.py:361-370
-- 没有 valid 输入/输出；invalid slot 与 valid slot 得到同样 delta。
-- §6.4 要求 OD/LD mask 用 valid；§6.5 要求 ImagineBank 写入 valid。
-- D12/D13. NEW WM rollout 无 geometry/valid/bank，且 @torch.no_grad() — net/world_model.py:372-380
-- 只返回 od/ld/od_geometry/ld_residual，没有 valid/source/rollout_depth，不 append ImagineBank。
-- @torch.no_grad() 使其只能做 inference，不能做 §12.5 的 multi-step 训练。
-- D14. OD type clamp 把 semantic 8 映射成 7 — net/world_model.py:266、net/encoder.py:128
-- env.obs.OD_SEMANTIC_IDS["other"]=8；type_od 只有 8 类，clamp(0,7) 把 “other” 当 “building”。
-- D15. LD type 回退到 lane_role — net/encoder.py:99-101
-- LD_FEATURES[7] 是 lane_role，不是 lane/road type；合同要求 LD type 从 t0 继承。env.obs 没有 ld_taxonomy，当前无法正确继承。
-- D16. TemporalSpatialBlock 忽略 nav_mask/ego_mask — net/world_model.py:281-289
-- 对 ego/nav 始终 ones；legacy 是用的（net/model.py:363-369）。
-- 合同没显式要求 mask，但这是与 legacy 行为不一致的 regression。
-- D18. BankWindowBuilder.build 用 ego_pose.dtype 决定整个 window dtype — net/mem_bank.py:251-255
-- 复现：ego_pose float64 + content float32 → content/geometry 变 float64；forward 报 mat1 and mat2 must have the same dtype。
-- env.obs 的 pose 是 float64（_finite_float(pose)），所以真实接入会触发；应使用 content dtype 或显式 float32。
-Low
-- ImagineMemoryBank 允许 depth 7（net/mem_bank.py:381-395）。
-- ImagineMemoryBank snapshot 是浅拷贝（net/mem_bank.py:352-355）；data_ptr 相同，外部 in-place 修改 prefix tensor 会影响 RealBank。
-- param_probe._budget 读不到顶层配置（net/param_probe.py:13-17）；python net/param_probe.py 还会 ModuleNotFoundError: net。
-- imagine actions 太短直接 IndexError（net/model.py:543-548），无友好报错。
-- imagine 不 detach（net/model.py:532-550），训练违反 §12.8。
-- action_provider docstring 写 (z, ego, n)，实际调用 (od, ld, ego, n)（net/model.py:529,546）。
-- padding 的 source/depth=-1（net/mem_bank.py:268-270）；合同只规定 REAL=0/IMAGINED=1..N，sentinel 未文档化。
-- frame_records B>1 共用同一 episode_id/frame_id/timestamp（net/encoder.py:238-250）；不能直接 append 到同一个 RealBank。
-- BankWindow.stack 不校验 dtype/device（net/mem_bank.py:134-150）。
-- TemporalSpatialBlock 的 od_out/ld_out 切片假设 N==od_slots/ld_slots（net/world_model.py:292-293），无校验。
-- ODGeometryDecoder zero-init 输出 (0,0,0)（net/world_model.py:305-306）；若 target 是绝对 relative pose，初始预测是“在 ego 原点”，不是 persistence。
-- add_ld_residual 不校验形状/valid（net/world_model.py:337-339）；传入 [B,N,10] residual 时 reshape 成 [B,N*10]，广播错误。
-- BankWindowBuilder.build 不检查重复 stable_id（net/mem_bank.py:278-303）；同一 frame 两个 slot 可写同一 stable_id，temporal attention 会把它们当同一实体。
-- TemporalSpatialBlock 在 padding 上仍加 type embedding（net/world_model.py:266-267）；spatial mask 会挡住，但 WM 直接使用时无 mask。
-3. 规范/解耦/内聚
-- 两套 temporal attention 实现，一套有 high bug，一套正确 — net/model.py:99-124（legacy，buggy）vs net/world_model.py:180-214（new，正确）。buggy 的那套是 live path，维护上极易再次改错。
-- legacy 与 new 混在同一文件 — net/model.py 同时有 StructuredPlanner（live）和 DriveModel（new/dead）；net/world_model.py 同时有 EgoConditionedLatentWM（live）和 FactorizedEgoConditionedLatentWM（new）。§13.2 的单一职责被破坏。
-- net/ 依赖 env.obs，进而依赖 MetaDrive — net/encoder.py:19-27、net/model.py:65-74 直接 import env.obs 的 schema 常量；env.obs 顶层 import MetaDrive（env/obs.py:59-63）。后果：net 不能在无 MetaDrive 环境独立 import，build_net 也间接依赖 MetaDrive。§13.3 没有禁止，但“net 只依赖 mem_bank 数据类型”的精神被削弱。
-- 重复实现：
-- DriveModel.forward_current（net/model.py:471-513）重复 CurrentFrameEncoder.frame_records（net/encoder.py:194-251）。
-- DriveModel.imagine（net/model.py:515-551）重复 FactorizedEgoConditionedLatentWM.rollout（net/world_model.py:372-380）。
-- masked_mean 在 net/planner.py:11-13 和 net/model.py:92-96 各一份。
-- 常量在 net/mem_bank.py:25-30、env/obs.py:214-224、net/encoder.py:50-71 三处硬编码，没有单一 source of truth。
-- 跨模块私有访问：net/world_model.py:330-334 调用 BankWindowBuilder._transform_geometry（私有方法），破坏封装；应把几何变换提成 mem_bank 的公共函数。
-- config/model.yaml 注释与行为矛盾 — config/model.yaml:2-3 说 “bank/rollout sections are runtime configuration”，但 build_net 在 :46-47 丢弃它们，整个仓库没有其他消费者。配置看起来可调，实际无效。
-- API 层级不清晰 — DriveModel 同时有 forward(window,nav,ego)、forward_window(window,nav,ego)、forward_current(batch)、imagine(window,nav,ego,...)；nav/ego 在 forward_window/imagine 里期望 encoded hidden，在 forward_current 里期望 raw observation，docstring 没有明确。传 raw [B,108] 会在 TemporalSpatialBlock 报 nav/ego must have hidden size。
-- 测试覆盖远低于 §9 — test/test_new_net.py 只有 4 个 smoke test：
-- 不测 FIFO/reset/reject imagined/padding/slot 复用/source-depth。
-- 不测 target output no-grad、参数独立性。
-- 不测 B>1、k<6 padding、stable_id 变化、permutation、nav_mask。
-- 不测 ImagineBank、geometry、TSB 每步、policy feedback、config。
-- FactorizedEgoConditionedLatentWM 被 import 但完全没用。
-- test_temporal_spatial_and_planner:107 把 aux keys 精确断言成 {"collision","offroad","timeout","progress"}，等于把缺 urgency 固化。
-- test_model_shapes.py:58-70 只测 shape，无法发现 D1；test_world_model.py:7-46 只测 legacy WM。
-- param_probe.py 放在 net/ 里 — 它是 CLI 诊断工具，不是网络模块；建议移到 tools/ 或删除。
-- 文件中部 import — net/world_model.py:177、net/model.py:419-422 在 legacy 类之后 import new modules；不是循环依赖，但风格上应集中到顶部。
-- TargetEncoder 返回 nav/ego — target 只服务 OD content（§6.1），复用 online 的完整输出会返回 nav/ego，容易让调用方误用。
-- 相邻模块偏差（不在 net/，但影响 Bank 内容）：
-- env.obs OD ROI 是 x∈[-20,80], y∈[-20,20]（env/obs.py:774），合同是前方 80、后方 20、左右 25；横向差 5m。
-- env.obs LD gate 是 s0∈[-15,80], |lat|≤20（env/obs.py:166-168），合同是后方 20、左右 25；也不一致。
-- env.obs 没有 ld_taxonomy，导致 LD type 继承无法正确实现。
-- env.obs 返回 pose（float64），net 期望 ego_pose，且 dtype 会被带到 window。
+1. 自检问题：
+1.1. 生产路径仍是 legacy
+- StructuredPlanner / 旧 EgoConditionedLatentWM / stack_history 仍被 pipeline/* 使用；
+- 新 DriveModel 还没有进入 train/eval/PPO/checkpoint。
+1.2. 目标编码器和 loss 未接
+- TargetEncoder 只被测试使用；
+- pipeline/losses.py 不存在；
+- 没有 OD content / OD geometry / LD residual loss；
+- 没有新 checkpoint schema。
+1.3. imagine 仍有语义缺口
+- imagine 的 nav/ego 默认保持 t0；
+- 若需要真正的 policy_n，还需要每步 Nav/Ego 输入或 adapter；
+- world_model.rollout 仍是不带 ego 投影的第二套 rollout，和 DriveModel.imagine 不统一。
+1.4. schema / env 边界
+- BankWindow 的 OD/LD split 与合同单一 schema 是工程化偏差，需要 owner sign-off；
+- env.obs ROI 仍是 20/80/20/20，不是 80/20/25/25。
+
+
+2. 部分修复
+- build_net 维度校验不完整 — net/build_net.py:60-68
+- 只校验四个子模块 hidden 彼此相等，没有校验顶层 model.hidden 与它们相等。
+- 复现：model.hidden=256 + 四个子模块 hidden=128 可以 build，model.hidden 仍是 256；这与 docs/implementation_status.md 声称的 hidden 一致校验不符。
+- 另外 §13.4 的 action bounds/limits 仍没有从 config/model.yaml 读取；当前配置只有 action_dim，没有 action bounds。
+- LD type 继承仍是 fallback — net/encoder.py:95-98
+- 已从 lane_role 改成 road_type_norm * 15，比之前正确；但 env.obs 仍没有 ld_taxonomy，所以不是真正的 “LD type 从 t0 继承”，只是 road type 代理。docs/implementation_status.md 也标为“部分”。
+- valid 传播仍不完整
+- WM 现在接受/返回 od_valid/ld_valid 并做 mask（net/world_model.py:431-443），这是进步。
+- 但 imagine 始终使用当前 window 的 valid（net/model.py:539-540），没有预测/更新 imagined slot 的 validity；advance 也只是把当前 valid 往后 shift。
+- 对固定 top-16、不建模遮挡的版本可能可接受，但 §6.5 的 valid=... 还不是“预测数值有效”。
+- ego/nav 逐步传播仍不完整
+- imagine 支持外部 ego_pose 序列，geometry 会投影（net/model.py:557-568）。
+- 但 nav / ego feature 在 6 步中保持不变；imagine_from_real_bank 默认不传 ego_pose，所以 geometry 投影是 identity。
+- docs/implementation_status.md 也承认“ego/nav 的逐步传播仍依赖外部 ego_pose，没有内置 ego dynamics”。
+- multi-step 训练接口有了，但实际不可用
+- FactorizedEgoConditionedLatentWM.rollout 已去掉 @torch.no_grad()，支持 detach — net/world_model.py:463-487。
+- 但 OD geometry 的 in-place 赋值会让 backward 失败（见第 4 节），所以 L_od_geo 和 imagine(detach=False) 仍不能训练。
+- imagine 与 world_model.rollout 仍是两套 loop
+- DriveModel.imagine 自己实现了完整循环（net/model.py:532-608），没有调用 FactorizedEgoConditionedLatentWM.rollout（net/world_model.py:463-487）。
+- 功能上 now works，但 §13.5 的“模型级 rollout 在 world_model，model 只调用”仍未满足。
+- project_ld 仍耦合私有实现
+- project_ld 仍调用 BankWindowBuilder._transform_geometry（net/world_model.py:346），而 BankWindowBuilder.project_geometry 已经是公共函数；两套递归逻辑重复。
+- 测试覆盖仍低于 §9
+- 新增了 8 个测试，但仍缺 §9.1 FIFO/reset/reject imagined/padding/slot 复用、§9.3 B>1/k<6/permutation、§9.4 LD residual 越界 valid=0/future map 置空/rollout NaN、§9.5 无 stack_history/batch/no risk-value 等。
+- test_imagine_advances_window_and_geometry 实际没有断言 geometry/depth；test_imagine_from_real_bank_appends 没有检查 ImagineBank 内容，只检查 RealBank 没被写回。
+3. 未修复（合同层面）
+- live path 仍是 legacy，这是最大的未修复项
+- pipeline/train_bc.py:79,1079、eval.py:52、rollout.py:22、train_ppo.py:75、checkpointing.py:18,120-123 仍用 StructuredPlanner；
+- pipeline/train_wm.py:23、probe_wm.py:19 仍用 legacy EgoConditionedLatentWM；
+- env.obs.stack_history 仍在用；
+- 新 DriveModel/build_net 仍只被 test/test_new_net.py 使用。
+- 因此 §7/§9.5 的“无 value/risk head、无 stack_history 主路径”事实验收仍不成立。docs/implementation_status.md 也明确写了“新路径仍不是 live path”。
+- Legacy 代码仍留在 net/
+- net/model.py:103-411 仍有 StructuredPlanner / TemporalPool / count_parameters；
+- net/world_model.py:26-172 仍有 EgoConditionedLatentWM / masked_mse / rollout_latents；
+- net/param_probe.py 仍不在 §13.1 目标结构。
+- 虽然 TemporalPool 的 high bug 已修，但“legacy 与 new 混在同一文件”的结构问题仍在。
+- BankWindow / FrameRecord schema 仍非字面
+- BankWindow 仍没有合同 §4 列出的 slot: Tensor [N]（net/mem_bank.py:106-127）；
+- FrameRecord 仍是 od/ld 两个 tuple，而不是统一 entities（net/mem_bank.py:74-88）；
+- EntityRecord.type 仍叫 type_id；
+- ego_velocity 仍是 optional，不构成硬违反，但 schema 仍不是字面。
+- Target encoder 训练接线未做
+- TargetEncoder 仍只出现在 test/test_new_net.py；
+- 没有 z* = target_encoder(o_{t+1}) 的训练 target 构造，没有 EMA 调度，没有 target 不进 Bank/policy 的接线验证。
+- pipeline/losses.py 仍不存在
+- 新 WM 的 L_od_content / L_od_geo / L_ld_res 没有落地文件。
+- DriveModel checkpoint 未接
+- pipeline/checkpointing.py:120-123 仍只构造 StructuredPlanner；train_bc.py:890 仍写 "architecture": "StructuredPlanner"。
+- pipeline/rollout.py 仍不是 model.imagine 的薄 wrapper
+- pipeline/rollout.py:78-95 仍是 legacy StructuredPlanner 的重复预测。
+- action bounds 配置缺失
+- §13.4 要求 config/model.yaml 负责 action bounds/limits；当前 config/model.yaml 只有 action_dim，没有 bounds/limits；build_net 也不读 action 段。
+- env 侧相邻偏差仍在（不在 net/，但影响 Bank 内容）
+- OD ROI 仍是 x[-20,80], y[-20,20]（env/obs.py:774），合同是 80/20/25/25；
+- LD gate 仍是 s0[-15,80], |lat|≤20（env/obs.py:166-168），合同是 80/20/25/25；
+- env.obs 没有 ld_taxonomy；
+- env.obs 的 pose 是 float64，虽然 BankWindow 现在会转 dtype，但 env 仍不是新 Bank 接口。
+4. 修复引入的新问题
+High：WM OD geometry 的 in-place 赋值导致 backward 失败
+net/world_model.py:447-452：
+od_next_geometry = od_geometry.clone()
+od_next_geometry[..., :3] = od_geometry[..., :3] + self.od_geometry(od_next) * od_mask
+od_next_geometry[..., 2] = torch.atan2(
+    torch.sin(od_next_geometry[..., 2]),
+    torch.cos(od_next_geometry[..., 2]),
+)
+od_next_geometry[..., 2] = ... 的 RHS 使用了同一个 view，赋值后 autograd 版本号冲突。复现：
+out = wm(..., od_geometry=base_od, ld_geometry=base_ld)
+out["od_geometry"].sum().backward()
+RuntimeError: one of the variables needed for gradient computation has been
+modified by an inplace operation ... CosBackward0
+- out["od"].sum().backward() 可以过；
+- out["ld_geometry"].sum().backward() 可以过；
+- out["od_geometry"].sum().backward() 失败。
+- 因此 §6.4 的 L_od_geo 目前不能训练；imagine(detach=False) 也会在同一处失败。
+建议：不要对 od_next_geometry 做 in-place；先算 yaw = atan2(...)，再用 torch.cat([xy, yaw.unsqueeze(-1), vel], dim=-1) 构造新 tensor。
+Medium：build_net 顶层 hidden 不一致仍可 build
+net/build_net.py:60-68 只检查四个子模块 hidden 相等，没有检查顶层 model.hidden。复现：
+build_net({"model": {"hidden": 256, "encoder": {"hidden": 128},
+                     "temporal_spatial": {"hidden": 128},
+                     "planner": {"hidden": 128},
+                     "world_model": {"hidden": 128}}})
+# 成功，model.hidden=256, encoder.hidden=128
+建议加 if hidden != enc_hidden: raise。
+Medium：负 stable_id 未被拒绝
+net/mem_bank.py:489-524 只检查重复 stable_id/slot，没有检查 stable_id < 0。复现 valid record with stable_id=-1 会被接受，od_valid 为 True；这会让 temporal attention 把所有 -1 当成同一身份，违反 §2.4 的 stable-ID 语义。docs/implementation_status.md 声称“负 stable_id fail-fast”，代码实际没有。
+Low：DriveModel.imagine.__doc__ 是 None
+net/model.py:519-531 把 docstring 放在 if horizon is None 之后，Python 不会把它当作 imagine 的 docstring。DriveModel.imagine.__doc__ 实测为 None。建议移到函数第一行。
+Low/API：WM 现在强制要求 ld_geometry
+net/world_model.py:439-440：
+if ld_geometry is None:
+    raise ValueError("LD residual requires base ld_geometry")
+如果只做 OD content one-step 训练、不准备 LD base，现在会直接报错。合同 §6.1 的 OD content WM 和 §6.3 的 LD branch 可以解耦；如果训练入口需要 OD-only，建议把 LD branch 做成可选，或明确要求所有调用都传 ld_geometry。

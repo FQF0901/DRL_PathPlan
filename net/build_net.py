@@ -16,6 +16,7 @@ from net.encoder import CurrentFrameEncoder
 from net.model import DriveModel
 from net.planner import Planner
 from net.world_model import FactorizedEgoConditionedLatentWM, TemporalSpatialBlock
+from env.obs import LD_POINTS
 
 
 def load_config(path: str | Path = "config/model.yaml") -> dict[str, Any]:
@@ -37,41 +38,77 @@ def _section(cfg: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 
 def build_net(config: Mapping[str, Any] | str | Path | None = None) -> DriveModel:
     if config is None:
-        cfg = load_config()
+        raw = load_config()
     elif isinstance(config, (str, Path)):
-        cfg = load_config(config)
+        raw = load_config(config)
     else:
-        cfg = dict(config)
+        raw = dict(config)
 
-    if isinstance(cfg.get("model"), Mapping):
-        cfg = dict(cfg["model"])
+    model_cfg = dict(raw.get("model", raw))
+    hidden = int(model_cfg.get("hidden", 128))
+    heads = int(model_cfg.get("attention_heads", model_cfg.get("heads", 4)))
+    spatial_layers = int(model_cfg.get("spatial_layers", 2))
+    action_dim = int(model_cfg.get("action_dim", 4))
 
-    hidden = int(cfg.get("hidden", 128))
-    heads = int(cfg.get("attention_heads", cfg.get("heads", 4)))
-    spatial_layers = int(cfg.get("spatial_layers", 2))
-    action_dim = int(cfg.get("action_dim", 4))
+    enc_cfg = _section(model_cfg, "encoder")
+    temporal_cfg = _section(model_cfg, "temporal_spatial")
+    planner_cfg = _section(model_cfg, "planner")
+    wm_cfg = _section(model_cfg, "world_model")
+    bank_cfg = _section(raw, "bank")
+    rollout_cfg = _section(raw, "rollout")
 
-    enc_cfg = _section(cfg, "encoder")
-    temporal_cfg = _section(cfg, "temporal_spatial")
-    planner_cfg = _section(cfg, "planner")
-    wm_cfg = _section(cfg, "world_model")
+    enc_hidden = int(enc_cfg.get("hidden", hidden))
+    temporal_hidden = int(temporal_cfg.get("hidden", hidden))
+    planner_hidden = int(planner_cfg.get("hidden", hidden))
+    wm_hidden = int(wm_cfg.get("hidden", hidden))
+    if len({enc_hidden, temporal_hidden, planner_hidden, wm_hidden}) != 1:
+        raise ValueError(
+            "hidden mismatch: encoder=%d temporal=%d planner=%d wm=%d"
+            % (enc_hidden, temporal_hidden, planner_hidden, wm_hidden)
+        )
+    if hidden % heads != 0:
+        raise ValueError("hidden must be divisible by attention heads")
+    if int(temporal_cfg.get("heads", heads)) != heads:
+        raise ValueError("temporal heads must match model heads")
+    if int(temporal_cfg.get("spatial_layers", spatial_layers)) != spatial_layers:
+        raise ValueError("temporal spatial_layers must match model spatial_layers")
+    if int(model_cfg.get("history_frames", 6)) != 6:
+        raise ValueError("history_frames is fixed at 6 for this version")
+    if int(bank_cfg.get("capacity", 6)) != 6:
+        raise ValueError("bank.capacity is fixed at 6 for this version")
+    od_slots = int(bank_cfg.get("od_slots", 16))
+    ld_slots = int(bank_cfg.get("ld_slots", 16))
+    if (od_slots, ld_slots) != (16, 16):
+        raise ValueError("bank od_slots/ld_slots are fixed at 16 in this version")
+    ld_points = int(wm_cfg.get("ld_points", LD_POINTS))
+    if ld_points != LD_POINTS:
+        raise ValueError(f"world_model.ld_points must equal env.obs.LD_POINTS={LD_POINTS}")
+    horizon = int(rollout_cfg.get("horizon", 6))
+    if not 1 <= horizon <= 6:
+        raise ValueError("rollout.horizon must be in 1..6")
+    topk = int(bank_cfg.get("topk", 16))
+    if not 1 <= topk <= 16:
+        raise ValueError("bank.topk must be in 1..16")
+    if int(planner_cfg.get("action_dim", action_dim)) != action_dim:
+        raise ValueError("planner action_dim must match model action_dim")
+    if int(wm_cfg.get("action_dim", action_dim)) != action_dim:
+        raise ValueError("world_model action_dim must match model action_dim")
 
-    encoder = CurrentFrameEncoder(hidden=int(enc_cfg.get("hidden", hidden)))
+    encoder = CurrentFrameEncoder(hidden=enc_hidden)
     temporal = TemporalSpatialBlock(
-        hidden=int(temporal_cfg.get("hidden", hidden)),
-        heads=int(temporal_cfg.get("heads", heads)),
-        spatial_layers=int(temporal_cfg.get("spatial_layers", spatial_layers)),
+        hidden=temporal_hidden,
+        heads=heads,
+        spatial_layers=spatial_layers,
+        od_slots=od_slots,
+        ld_slots=ld_slots,
     )
-    planner = Planner(
-        hidden=int(planner_cfg.get("hidden", hidden)),
-        action_dim=int(planner_cfg.get("action_dim", action_dim)),
-    )
+    planner = Planner(hidden=planner_hidden, action_dim=action_dim)
     wm = FactorizedEgoConditionedLatentWM(
-        hidden=int(wm_cfg.get("hidden", hidden)),
-        action_dim=int(wm_cfg.get("action_dim", action_dim)),
-        points=int(wm_cfg.get("ld_points", 5)),
+        hidden=wm_hidden,
+        action_dim=action_dim,
+        points=ld_points,
     )
-    return DriveModel(
+    model = DriveModel(
         encoder=encoder,
         temporal_spatial=temporal,
         planner=planner,
@@ -80,7 +117,13 @@ def build_net(config: Mapping[str, Any] | str | Path | None = None) -> DriveMode
         heads=heads,
         spatial_layers=spatial_layers,
         action_dim=action_dim,
+        rollout_horizon=horizon,
     )
+    # Runtime configuration; not nn.Module singletons.
+    model.memory_config = dict(bank_cfg)
+    model.rollout_config = dict(rollout_cfg)
+    model.model_config = dict(model_cfg)
+    return model
 
 
 __all__ = ["build_net", "load_config"]

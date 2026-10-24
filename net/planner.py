@@ -53,6 +53,7 @@ class AuxHead(nn.Module):
         self.collision = nn.Linear(hidden, 1)
         self.offroad = nn.Linear(hidden, 1)
         self.timeout = nn.Linear(hidden, 1)
+        self.urgency = nn.Linear(hidden, 1)
         self.progress = nn.Linear(hidden, 1)
 
     def forward(self, context: Tensor) -> Dict[str, Tensor]:
@@ -60,6 +61,7 @@ class AuxHead(nn.Module):
             "collision": self.collision(context),
             "offroad": self.offroad(context),
             "timeout": self.timeout(context),
+            "urgency": self.urgency(context),
             "progress": self.progress(context),
         }
 

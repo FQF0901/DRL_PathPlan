@@ -20,6 +20,8 @@ from typing import Dict, Tuple
 import torch
 from torch import Tensor, nn
 
+from net.mem_bank import BankWindow, BankWindowBuilder, NodeType
+
 
 class EgoConditionedLatentWM(nn.Module):
     """One-step latent residual model with ego-action conditioning."""
@@ -174,22 +176,19 @@ def rollout_latents(
 # Factorized temporal-spatial encoder and the new OD/LD world model
 # ---------------------------------------------------------------------------
 
-from net.mem_bank import BankWindow, BankWindowBuilder, NodeType
 
 
 class TemporalAttention(nn.Module):
-    """Per-entity masked temporal attention with stable-ID filtering.
+    """Masked temporal attention over content + relative-pose tokens.
 
     Inputs are batch-first ``[B,T,N,H]``; output is the current entity token
-    ``[B,N,H]``.  The implementation deliberately uses ``permute`` before the
-    reshape so ``N`` and ``T`` are never conflated.
+    ``[B,N,H]``.  The current-frame validity is applied to the whole output.
     """
 
     def __init__(self, hidden: int, heads: int, frames: int = 6) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.frames = int(frames)
-        self.age = nn.Embedding(self.frames, self.hidden)
         self.attn = nn.MultiheadAttention(self.hidden, int(heads), batch_first=True)
         self.norm = nn.LayerNorm(self.hidden)
 
@@ -201,25 +200,24 @@ class TemporalAttention(nn.Module):
         v = valid.permute(0, 2, 1).reshape(b * n, t)
         ids = stable_id.permute(0, 2, 1).reshape(b * n, t)
         q = x[:, -1:, :]
-        k = x + self.age.weight[:t].view(1, t, h)
         same = ids == ids[:, -1:]
         mask = ~((v > 0.5) & same)
         all_bad = mask.all(dim=1)
         if bool(all_bad.any()):
             mask = mask.clone()
             mask[all_bad, -1] = False
-        out = self.attn(q, k, k, key_padding_mask=mask, need_weights=False)[0][:, 0]
+        out = self.attn(q, x, x, key_padding_mask=mask, need_weights=False)[0][:, 0]
         out = self.norm(out + q[:, 0])
-        out = out * (~all_bad).to(out.dtype).unsqueeze(-1)
+        current_valid = v[:, -1].to(out.dtype)
+        out = out * current_valid.unsqueeze(-1) * (~all_bad).to(out.dtype).unsqueeze(-1)
         return out.reshape(b, n, h)
 
 
 class TemporalSpatialBlock(nn.Module):
     """Factorized temporal then current-frame spatial fusion for OD/LD.
 
-    Ego/Nav are current policy inputs, not Bank records.  They participate as
-    conditioning tokens in the spatial transformer but are not returned as
-    bank entities.
+    Ego/Nav are current policy inputs, not Bank records.  Their optional masks
+    are applied in the spatial transformer.
     """
 
     def __init__(
@@ -229,7 +227,6 @@ class TemporalSpatialBlock(nn.Module):
         spatial_layers: int = 2,
         od_slots: int = 16,
         ld_slots: int = 16,
-        type_count: int = 8,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -240,8 +237,6 @@ class TemporalSpatialBlock(nn.Module):
         self.pose = nn.Sequential(
             nn.Linear(3, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         )
-        self.type_od = nn.Embedding(type_count, hidden)
-        self.type_ld = nn.Embedding(type_count, hidden)
         self.modality = nn.Embedding(4, hidden)  # ego, nav, od, ld
         layer = nn.TransformerEncoderLayer(
             d_model=hidden,
@@ -255,20 +250,32 @@ class TemporalSpatialBlock(nn.Module):
         self.spatial = nn.TransformerEncoder(layer, num_layers=int(spatial_layers))
         self.norm = nn.LayerNorm(hidden)
 
-    def forward(self, window: BankWindow, nav: Tensor, ego: Tensor) -> Dict[str, Tensor]:
+    def forward(
+        self,
+        window: BankWindow,
+        nav: Tensor,
+        ego: Tensor,
+        *,
+        nav_valid: Tensor | None = None,
+        ego_valid: Tensor | None = None,
+    ) -> Dict[str, Tensor]:
         if nav.shape[-1] != self.hidden or ego.shape[-1] != self.hidden:
             raise ValueError("nav/ego must have hidden size")
-        od = self.temporal_od(window.od_content, window.od_valid, window.od_stable_id)
-        ld = self.temporal_ld(window.ld_content, window.ld_valid, window.ld_stable_id)
+        if window.od_content.shape[2] != self.od_slots or window.ld_content.shape[2] != self.ld_slots:
+            raise ValueError("BankWindow slot count does not match TemporalSpatialBlock")
 
-        od_pose = BankWindowBuilder.relative_pose(window.od_geometry, NodeType.OD)[:, -1]
-        ld_pose = BankWindowBuilder.relative_pose(window.ld_geometry, NodeType.LD)[:, -1]
-        od = od + self.pose(od_pose) + self.type_od(window.od_type[:, -1].clamp(0, self.type_od.num_embeddings - 1))
-        ld = ld + self.pose(ld_pose) + self.type_ld(window.ld_type[:, -1].clamp(0, self.type_ld.num_embeddings - 1))
+        od_pose = BankWindowBuilder.relative_pose(window.od_geometry, NodeType.OD)
+        ld_pose = BankWindowBuilder.relative_pose(window.ld_geometry, NodeType.LD)
+        od_tokens = window.od_content + self.pose(od_pose)
+        ld_tokens = window.ld_content + self.pose(ld_pose)
+        od = self.temporal_od(od_tokens, window.od_valid, window.od_stable_id)
+        ld = self.temporal_ld(ld_tokens, window.ld_valid, window.ld_stable_id)
 
         b = od.shape[0]
         od_valid = window.od_valid[:, -1]
         ld_valid = window.ld_valid[:, -1]
+        ego_ok = torch.ones((b, 1), dtype=torch.bool, device=od.device) if ego_valid is None else ego_valid.reshape(b, 1) > 0.5
+        nav_ok = torch.ones((b, 1), dtype=torch.bool, device=od.device) if nav_valid is None else nav_valid.reshape(b, 1) > 0.5
         tokens = torch.cat(
             [
                 ego[:, None] + self.modality.weight[0],
@@ -278,15 +285,14 @@ class TemporalSpatialBlock(nn.Module):
             ],
             dim=1,
         )
-        valid = torch.cat(
-            [
-                torch.ones((b, 1), dtype=torch.bool, device=od.device),
-                torch.ones((b, 1), dtype=torch.bool, device=od.device),
-                od_valid > 0.5,
-                ld_valid > 0.5,
-            ],
-            dim=1,
-        )
+        valid = torch.cat([ego_ok, nav_ok, od_valid > 0.5, ld_valid > 0.5], dim=1)
+        # torch's TransformerEncoder can produce NaN if every key is masked.
+        # Keep the ego anchor valid as a numerical fallback; its output is
+        # ignored by the planner when all entity valid masks are false.
+        if not bool(valid.any(dim=1).all()):
+            valid = valid.clone()
+            empty = ~valid.any(dim=1)
+            valid[empty, 0] = True
         out = self.spatial(tokens, src_key_padding_mask=~valid)
         out = self.norm(out)
         od_out = out[:, 2 : 2 + self.od_slots]
@@ -295,7 +301,7 @@ class TemporalSpatialBlock(nn.Module):
 
 
 class ODGeometryDecoder(nn.Module):
-    """Predict OD relative pose in the current query ego frame."""
+    """Predict an OD relative-pose residual in the query ego frame."""
 
     def __init__(self, hidden: int = 128) -> None:
         super().__init__()
@@ -310,41 +316,95 @@ class ODGeometryDecoder(nn.Module):
 
 
 class LDResidualDecoder(nn.Module):
-    """Predict a small LD polyline residual; the explicit projection is the base."""
+    """Predict a small LD polyline residual on top of explicit projection."""
 
     def __init__(self, hidden: int = 128, action_dim: int = 4, points: int = 5) -> None:
         super().__init__()
         self.points = int(points)
         self.net = nn.Sequential(
-            nn.Linear(hidden + action_dim, hidden), nn.GELU(), nn.Linear(hidden, 2 * self.points)
+            nn.Linear(hidden + action_dim + 2 * self.points, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 2 * self.points),
         )
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, content: Tensor, action: Tensor) -> Tensor:
+    def forward(self, content: Tensor, action: Tensor, base_ld: Tensor) -> Tensor:
         b, n, _ = content.shape
         a = action[:, None, :].expand(b, n, -1)
-        return self.net(torch.cat([content, a], dim=-1)).reshape(b, n, self.points, 2)
+        base = base_ld.reshape(b, n, 2 * self.points)
+        return self.net(torch.cat([content, a, base], dim=-1))
 
 
 def project_ld(geometry: Tensor, source_pose: Tensor, target_pose: Tensor) -> Tensor:
-    """Project LD polyline geometry into ``target_pose`` ego coordinates."""
-    return BankWindowBuilder._transform_geometry(
-        geometry, source_pose, target_pose, node_type=NodeType.LD
-    )
+    """Project LD polyline geometry into ``target_pose`` ego coordinates.
+
+    Accepts a single ``[10]`` geometry/``[3]`` pose or batched leading
+    dimensions such as ``[B,16,10]`` with poses ``[B,3]``.
+    """
+    if geometry.dim() == 1:
+        return BankWindowBuilder._transform_geometry(
+            geometry, source_pose, target_pose, node_type=NodeType.LD
+        )
+    if geometry.dim() == 2:
+        if source_pose.dim() == 1 and target_pose.dim() == 1:
+            return torch.stack(
+                [
+                    BankWindowBuilder._transform_geometry(
+                        geometry[i], source_pose, target_pose, node_type=NodeType.LD
+                    )
+                    for i in range(geometry.shape[0])
+                ],
+                dim=0,
+            )
+        if source_pose.dim() == 2 and target_pose.dim() == 2:
+            return torch.stack(
+                [
+                    BankWindowBuilder._transform_geometry(
+                        geometry[i], source_pose[i], target_pose[i], node_type=NodeType.LD
+                    )
+                    for i in range(geometry.shape[0])
+                ],
+                dim=0,
+            )
+        raise ValueError("batched LD projection needs [3] or [B,3] poses")
+    if geometry.dim() == 3:
+        if source_pose.dim() == 2 and target_pose.dim() == 2:
+            # [B,N,10] geometry with [B,3] poses.
+            return torch.stack(
+                [
+                    project_ld(geometry[i], source_pose[i], target_pose[i])
+                    for i in range(geometry.shape[0])
+                ],
+                dim=0,
+            )
+        raise ValueError("LD projection pose dimensions do not match geometry")
+    if geometry.dim() == 4:
+        if source_pose.dim() != 3 or target_pose.dim() != 3:
+            raise ValueError("temporal LD projection needs [B,T,3] poses")
+        return torch.stack(
+            [
+                project_ld(geometry[i], source_pose[i], target_pose[i])
+                for i in range(geometry.shape[0])
+            ],
+            dim=0,
+        )
+    raise ValueError(f"unsupported LD geometry shape {tuple(geometry.shape)}")
 
 
 def add_ld_residual(projected: Tensor, residual: Tensor) -> Tensor:
     """Add a ``[...,5,2]`` residual to flattened ``[...,10]`` LD geometry."""
-    return projected + residual.reshape(*residual.shape[:-2], -1)
+    if projected.shape[-1] != 10:
+        raise ValueError("projected LD geometry must be flattened [...,10]")
+    if residual.shape[-1] == 10:
+        return projected + residual
+    if residual.shape[-2:] == (5, 2):
+        return projected + residual.reshape(*residual.shape[:-2], -1)
+    raise ValueError("LD residual must be [...,5,2] or [...,10]")
 
 
 class FactorizedEgoConditionedLatentWM(nn.Module):
-    """OD content transition + OD pose decoder + LD residual decoder.
-
-    LD content is not a future target.  The LD branch only learns a residual
-    on top of explicit polygon projection.
-    """
+    """OD content transition + OD pose decoder + LD residual decoder."""
 
     def __init__(self, hidden: int = 128, action_dim: int = 4, points: int = 5) -> None:
         super().__init__()
@@ -355,27 +415,74 @@ class FactorizedEgoConditionedLatentWM(nn.Module):
         self.od_delta = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         )
+        nn.init.zeros_(self.od_delta[-1].weight)
+        nn.init.zeros_(self.od_delta[-1].bias)
         self.od_geometry = ODGeometryDecoder(hidden)
         self.ld_residual = LDResidualDecoder(hidden, action_dim=action_dim, points=points)
 
-    def forward(self, od: Tensor, ld: Tensor, action: Tensor) -> Dict[str, Tensor]:
+    def forward(
+        self,
+        od: Tensor,
+        ld: Tensor,
+        action: Tensor,
+        *,
+        od_geometry: Tensor | None = None,
+        ld_geometry: Tensor | None = None,
+        od_valid: Tensor | None = None,
+        ld_valid: Tensor | None = None,
+    ) -> Dict[str, Tensor]:
         b, n, _ = od.shape
         a = self.action(action)[:, None, :].expand(b, n, -1)
-        od_next = od + self.od_delta(torch.cat([od, a], dim=-1))
+        od_mask = torch.ones((b, n, 1), dtype=od.dtype, device=od.device) if od_valid is None else od_valid.unsqueeze(-1).to(od.dtype)
+        ld_mask = torch.ones((b, n, 1), dtype=ld.dtype, device=ld.device) if ld_valid is None else ld_valid.unsqueeze(-1).to(ld.dtype)
+        od_next = od + self.od_delta(torch.cat([od, a], dim=-1)) * od_mask
+        if ld_geometry is None:
+            raise ValueError("LD residual requires base ld_geometry")
+        base_ld = ld_geometry
+        ld_res = self.ld_residual(ld, action, base_ld) * ld_mask
+        ld_next = base_ld + ld_res
+        if od_geometry is None:
+            od_next_geometry = self.od_geometry(od_next)
+        else:
+            od_next_geometry = od_geometry.clone()
+            od_next_geometry[..., :3] = od_geometry[..., :3] + self.od_geometry(od_next) * od_mask
+        od_next_geometry[..., 2] = torch.atan2(
+            torch.sin(od_next_geometry[..., 2]),
+            torch.cos(od_next_geometry[..., 2]),
+        )
         return {
             "od": od_next,
             "ld": ld,
-            "od_geometry": self.od_geometry(od_next),
-            "ld_residual": self.ld_residual(ld, action),
+            "od_geometry": od_next_geometry,
+            "ld_residual": ld_res,
+            "ld_geometry": ld_next,
+            "od_valid": od_valid,
+            "ld_valid": ld_valid,
         }
 
-    @torch.no_grad()
-    def rollout(self, od: Tensor, ld: Tensor, actions: Tensor) -> Dict[str, Tensor]:
-        """Pure tensor rollout helper; actions are ``[B,H,4]``."""
-        state = {"od": od, "ld": ld}
+    def rollout(
+        self,
+        od: Tensor,
+        ld: Tensor,
+        actions: Tensor,
+        *,
+        od_geometry: Tensor | None = None,
+        ld_geometry: Tensor | None = None,
+        od_valid: Tensor | None = None,
+        ld_valid: Tensor | None = None,
+        detach: bool = True,
+    ) -> Dict[str, Tensor]:
+        """Multi-step tensor rollout; no environment and no no-grad wrapper."""
+        state = {"od": od, "ld": ld, "od_geometry": od_geometry, "ld_geometry": ld_geometry}
         history = []
         for t in range(int(actions.shape[1])):
-            state = self(state["od"], state["ld"], actions[:, t])
+            state = self(
+                state["od"], state["ld"], actions[:, t],
+                od_geometry=state["od_geometry"], ld_geometry=state["ld_geometry"],
+                od_valid=od_valid, ld_valid=ld_valid,
+            )
+            if detach:
+                state = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in state.items()}
             history.append(state)
         return {"final": state, "history": history}
 

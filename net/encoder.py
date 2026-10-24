@@ -38,12 +38,12 @@ def _mlp(in_dim: int, hidden: int, out_dim: int) -> nn.Sequential:
     )
 
 
-def _current(x: Tensor) -> Tensor:
-    """Take the last frame if a history axis is present."""
-    # A history batch has shape [B,T,...] with T in 1..6.  Do not mistake
-    # [B,3] ego_pose or [B,N,...] current tensors for history.
-    if x.dim() >= 3 and 1 <= x.shape[1] <= 6:
+def _take_last(x: Tensor, current_ndim: int) -> Tensor:
+    """Take the last history frame when the tensor has one extra axis."""
+    if x.dim() == current_ndim + 1:
         return x[:, -1]
+    if x.dim() != current_ndim:
+        raise ValueError(f"expected {current_ndim}D current or {current_ndim + 1}D history tensor, got {tuple(x.shape)}")
     return x
 
 
@@ -72,18 +72,16 @@ def _geometry_ld(ld: Tensor) -> Tensor:
 
 
 def _ids(batch: Mapping[str, Tensor], key: str, b: int, n: int, device: torch.device) -> Tensor:
-    value = batch.get(key)
-    if value is None:
-        return torch.full((b, n), -1, dtype=torch.long, device=device)
-    value = _current(value)
+    if key not in batch:
+        raise ValueError(f"encoder requires {key!r}; stable IDs must not default to -1")
+    value = _take_last(batch[key], 2)
     return value.reshape(b, n)
 
 
 def _mask(batch: Mapping[str, Tensor], key: str, b: int, n: int, device: torch.device, *, ld: bool = False) -> Tensor:
-    value = batch.get(key)
-    if value is None:
-        return torch.ones((b, n), dtype=torch.bool, device=device)
-    value = _current(value)
+    if key not in batch:
+        raise ValueError(f"encoder requires {key!r}; masks must not default to all-valid")
+    value = _take_last(batch[key], 3 if ld else 2)
     if ld:
         return value.reshape(b, n, -1).any(dim=-1)
     return value.reshape(b, n) > 0.5
@@ -92,12 +90,11 @@ def _mask(batch: Mapping[str, Tensor], key: str, b: int, n: int, device: torch.d
 def _type(batch: Mapping[str, Tensor], key: str, od: Tensor, ld: Tensor, b: int, n: int, device: torch.device, *, ld_node: bool = False) -> Tensor:
     taxonomy = batch.get(key)
     if taxonomy is not None:
-        value = _current(taxonomy)
-        if ld_node:
-            return value.reshape(b, n, -1)[..., 0].long()
+        value = _take_last(taxonomy, 3)
         return value.reshape(b, n, -1)[..., 0].long()
     if ld_node:
-        return ld[:, :, 0, 7].round().long() if ld.shape[-1] > 7 else torch.zeros((b, n), dtype=torch.long, device=device)
+        # env.obs has no ld_taxonomy; use the normalized road type, not lane_role.
+        return (ld[:, :, 0, 13] * 15.0).round().long() if ld.shape[-1] > 14 else torch.zeros((b, n), dtype=torch.long, device=device)
     return od[..., 8].round().long() if od.shape[-1] > 8 else torch.zeros((b, n), dtype=torch.long, device=device)
 
 
@@ -153,28 +150,31 @@ class CurrentFrameEncoder(nn.Module):
         """
         if batch is None:
             batch = kwargs
-        od = _current(batch["od"]).float()
-        ld = _current(batch["ld"]).float()
-        nav = _current(batch["nav"]).float()
-        ego = _current(batch["ego"]).float()
+        od = _take_last(batch["od"], 3).float()
+        ld = _take_last(batch["ld"], 4).float()
+        nav = _take_last(batch["nav"], 2).float()
+        ego = _take_last(batch["ego"], 2).float()
         b = od.shape[0]
         device = od.device
 
         od_mask = _mask(batch, "od_mask", b, OD_SLOTS, device)
         ld_mask = _mask(batch, "ld_mask", b, LD_SLOTS, device, ld=True)
         od_anchor = batch.get("od_anchor")
-        od_anchor = _current(od_anchor) if od_anchor is not None else None
+        od_anchor = _take_last(od_anchor, 3) if od_anchor is not None else None
         if od_anchor is not None:
             od_anchor = od_anchor.reshape(b, OD_SLOTS, 3)
         od_geometry = _geometry_od(od, od_anchor)
         ld_geometry = _geometry_ld(ld)
 
         od_content = self._encode_od(od)
-        ld_content = self._encode_ld(ld, _current(batch["ld_mask"]).reshape(b, LD_SLOTS, LD_POINTS) if "ld_mask" in batch else torch.ones((b, LD_SLOTS, LD_POINTS), device=device))
+        ld_mask_points = _take_last(batch["ld_mask"], 3).reshape(b, LD_SLOTS, LD_POINTS)
+        ld_content = self._encode_ld(ld, ld_mask_points)
         od_type = _type(batch, "od_taxonomy", od, ld, b, OD_SLOTS, device)
         ld_type = _type(batch, "ld_taxonomy", od, ld, b, LD_SLOTS, device, ld_node=True)
         od_ids = _ids(batch, "od_ids", b, OD_SLOTS, device)
         ld_ids = _ids(batch, "ld_ids", b, LD_SLOTS, device)
+        nav_mask = _mask(batch, "nav_mask", b, 1, device) if "nav_mask" in batch else torch.ones((b, 1), dtype=torch.bool, device=device)
+        ego_mask = _mask(batch, "ego_mask", b, 1, device) if "ego_mask" in batch else torch.ones((b, 1), dtype=torch.bool, device=device)
 
         return {
             "od_content": od_content,
@@ -189,6 +189,8 @@ class CurrentFrameEncoder(nn.Module):
             "ld_stable_id": ld_ids,
             "nav": self.nav_encoder(nav),
             "ego": self.ego_encoder(ego),
+            "nav_valid": nav_mask,
+            "ego_valid": ego_mask,
         }
 
     def frame_records(
@@ -200,15 +202,15 @@ class CurrentFrameEncoder(nn.Module):
         timestamp: float,
         ego_pose: Optional[Tensor] = None,
         encoder_version: int = 0,
+        encoded: Optional[Mapping[str, Tensor]] = None,
     ) -> Tuple[FrameRecord, ...]:
         """Build one ``FrameRecord`` per batch element from the current frame."""
-        out = self.encode_current(batch)
+        out = self.encode_current(batch) if encoded is None else encoded
         if ego_pose is None:
-            ego_pose = batch.get("ego_pose")
+            ego_pose = batch.get("ego_pose", batch.get("pose"))
             if ego_pose is None:
-                ego_pose = torch.zeros((out["od_content"].shape[0], 3), device=out["od_content"].device)
-            else:
-                ego_pose = _current(ego_pose)
+                raise ValueError("frame_records requires batch['ego_pose'] or batch['pose']")
+            ego_pose = _take_last(ego_pose, 2)
         records = []
         for i in range(out["od_content"].shape[0]):
             od = tuple(
@@ -275,6 +277,7 @@ class TargetEncoder(nn.Module):
         for target, source in zip(self.online.buffers(), online.buffers()):
             target.copy_(source.detach())
 
+    @torch.no_grad()
     def encode_current(self, batch: Mapping[str, Tensor] | None = None, **kwargs: Tensor) -> Dict[str, Tensor]:
         return self.online.encode_current(batch, **kwargs)
 
