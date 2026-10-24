@@ -160,13 +160,14 @@ def _lane_candidates(env: Any, ego: Any, max_n: int = 16) -> List[Tuple[float, A
     out: List[Tuple[float, Any, float, int]] = []
     for lane in lanes:
         try:
-            s0, lat = lane.local_coordinates(ego.position)
-            s0 = float(np.clip(s0, 0.0, float(lane.length)))
-            # longitudinal / lateral gate in the lane's own frame
-            if s0 < -15.0 or s0 > 80.0:
+            raw_s0, lat = lane.local_coordinates(ego.position)
+            # ROI uses the raw longitudinal coordinate; clipping to the lane
+            # before this check would make the rear-20 gate unreachable.
+            if raw_s0 < -20.0 or raw_s0 > 80.0:
                 continue
-            if abs(float(lat)) > 20.0:
+            if abs(float(lat)) > 25.0:
                 continue
+            s0 = float(np.clip(raw_s0, 0.0, float(lane.length)))
             pos = lane.position(s0, 0.0)
             d = float(np.linalg.norm(np.asarray(pos)[:2] - np.asarray(ego.position)[:2]))
             role = 3
@@ -771,7 +772,7 @@ def _build_od(env: Any, ego: Any, scene_seed: int, dt: float) -> Dict[str, np.nd
             if not isinstance(obj, (BaseVehicle, TrafficCone, BaseBuilding)):
                 continue
             rel = _to_local(ego, obj.position)
-            if not (-20.0 <= rel[0] <= 80.0 and -20.0 <= rel[1] <= 20.0):
+            if not (-20.0 <= rel[0] <= 80.0 and -25.0 <= rel[1] <= 25.0):
                 continue
             objects.append((float(np.linalg.norm(rel)), obj))
     except Exception:  # noqa: BLE001

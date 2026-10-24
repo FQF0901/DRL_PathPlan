@@ -16,7 +16,7 @@
 - TemporalAttention 的 current-valid、历史 pose、stable-ID；
 - LD residual base 与 batched `project_ld`；
 - WM 的 OD geometry / valid / persistence 初始化；
-- DriveModel.imagine 的逐 step TSB、WM、BankWindow 和 ImagineBank；
+- `world_model.imagine_rollout`（模块级 rollout）与 `DriveModel.imagine` 薄 wrapper；
 - build_net 的配置与维度校验；
 - action_space 迁移到 `env/action/`。
 
@@ -38,7 +38,7 @@ gates: unchanged / not promoted
   - 实体从旧 slot 换到新 slot 时，历史不再丢失；
   - 不是按历史 `rec.slot` 直接覆盖。
 - `od/ld` 都按同一规则匹配。
-- 重复 stable_id、重复 slot、负 stable_id、错误 node_type 均 fail-fast。
+- 重复 stable_id、重复 slot、错误 node_type 均 fail-fast；负 stable_id 是 env.obs 的合法 signed hash，不做符号拒绝。
 - `content dtype` 决定 window dtype，不再由 `ego_pose` 的 float64 决定。
 - `ImagineMemoryBank`：
   - `rollout_depth > capacity` 报错；
@@ -66,6 +66,7 @@ gates: unchanged / not promoted
   - 不再把 pose 只加在当前帧 temporal 之后；
   - 不再使用 age/type embedding 作为额外 token 特征；
   - 支持 nav/ego valid mask；
+  - `imagine` 支持可选 `nav_seq` / `ego_seq`，默认仍使用当前输入；
   - 校验 slot 数量。
 - `project_ld` 支持：
   - 单条 `[10]`；
@@ -88,13 +89,15 @@ gates: unchanged / not promoted
 ### 1.5 `net/model.py`
 
 - `DriveModel.forward_current` 复用 `CurrentFrameEncoder.frame_records`，不再手写重复 FrameRecord 逻辑。
-- `DriveModel.imagine`：
+- `world_model.imagine_rollout` + `DriveModel.imagine`：
   - 每个 step 重新跑 TemporalSpatialBlock；
-  - 使用 WM 的 OD geometry 和 LD residual；
+  - OD 用 absolute relative-pose decoder；LD 用 projected base + residual；
   - 使用 `BankWindow.advance` 更新 content/geometry/type/valid/ego_pose/source/depth；
   - 支持 `imagine_bank`，逐步 append 到 ImagineMemoryBank；
   - `imagine_from_real_bank` 使用 RealBank snapshot；
   - 未提供 actions 时，使用上一步 policy 的 action；
+  - 支持可选 nav_seq/ego_seq 与 `ImagineBank`；
+  - `DriveModel.imagine` 只做参数转发，模型级 rollout 在 `world_model.py`；
   - 支持 `ego_pose` 序列和 `detach`。
 - 旧 `StructuredPlanner` 仍保留为 legacy，不用于 `build_net`。
 
@@ -107,7 +110,8 @@ gates: unchanged / not promoted
   - history_frames/capacity 为 6；
   - od/ld slots 为 16；
   - LD points 与 env.obs 一致；
-  - planner/WM action_dim 一致。
+  - planner/WM action_dim 一致；
+- action bounds/limits 仍由 `env/action/action_space.py` 的常量单一真源负责；不保留 config 中的 dead action 段。
 - 保留 `bank` / `rollout` runtime 配置，但不创建 per-episode 单例。
 - `config/model.yaml` 改为模块化结构。
 
@@ -214,12 +218,12 @@ world_model.ld_residual        18,314
    - 没有新 checkpoint schema。
 
 4. **环境边界**
-   - env.obs 的 ROI 仍是 x[-20,80], y[-20,20]，LD gate 仍是 lat≤20，和合同 80/20/25/25 不一致；
-   - env.obs 的 `pose` 是 float64，BankWindow 现在会转换 dtype，但 env 仍不是新 Bank 接口。
+   - env.obs 的 ROI 已改为 x[-20,80], y[-25,25]，LD gate 已改为 s0[-20,80], |lat|≤25；
+   - env.obs 的 `pose` 仍是 float64，BankWindow 现在会转换 dtype，但 env 仍不是新 Bank 接口。
 
 5. **imagine 仍有边界**
    - ImagineBank 已可 append；但 ego/nav 的逐步传播仍依赖外部 `ego_pose`，没有内置 ego dynamics；
-   - `imagine` 的 nav/ego 默认保持不变；
+   - `imagine` 默认仍使用当前 nav/ego；可选 nav_seq/ego_seq 已支持并校验 shape，但没有内置 ego dynamics；
    - 没有正式 multi-step training gate。
 
 ---
@@ -229,7 +233,7 @@ world_model.ld_residual        18,314
 ### 定向测试
 
 ```text
-50 passed
+52 passed
 ```
 
 覆盖：
@@ -247,7 +251,7 @@ world_model.ld_residual        18,314
 ### 完整测试
 
 ```text
-104 passed, 1 skipped
+106 passed, 1 skipped
 1 failed, 7 errors
 ```
 
@@ -282,6 +286,5 @@ world_model.ld_residual        18,314
 2. 接入 `pipeline/losses.py` 和新 TargetEncoder；
 3. 更新 checkpoint 到新 `DriveModel`；
 4. 移除/隔离 legacy `StructuredPlanner` / `EgoConditionedLatentWM`；
-5. 修正 env ROI 到 80/20/25/25，并接入 pose；
 6. 跑严格 net tests + D1/D2 + Val500 + LQR；
 7. 在 gate 证据完成前，不宣称新架构可用。

@@ -61,10 +61,10 @@ def build_net(config: Mapping[str, Any] | str | Path | None = None) -> DriveMode
     temporal_hidden = int(temporal_cfg.get("hidden", hidden))
     planner_hidden = int(planner_cfg.get("hidden", hidden))
     wm_hidden = int(wm_cfg.get("hidden", hidden))
-    if len({enc_hidden, temporal_hidden, planner_hidden, wm_hidden}) != 1:
+    if len({hidden, enc_hidden, temporal_hidden, planner_hidden, wm_hidden}) != 1:
         raise ValueError(
-            "hidden mismatch: encoder=%d temporal=%d planner=%d wm=%d"
-            % (enc_hidden, temporal_hidden, planner_hidden, wm_hidden)
+            "hidden mismatch: model=%d encoder=%d temporal=%d planner=%d wm=%d"
+            % (hidden, enc_hidden, temporal_hidden, planner_hidden, wm_hidden)
         )
     if hidden % heads != 0:
         raise ValueError("hidden must be divisible by attention heads")

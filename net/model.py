@@ -75,7 +75,7 @@ from env.obs import (
 from net.mem_bank import BankWindow, BankWindowBuilder, ImagineMemoryBank, NodeType, RealMemoryBank
 from net.encoder import CurrentFrameEncoder
 from net.planner import Planner
-from net.world_model import FactorizedEgoConditionedLatentWM, TemporalSpatialBlock
+from net.world_model import FactorizedEgoConditionedLatentWM, TemporalSpatialBlock, imagine_rollout
 
 H = 128
 HEADS = 4
@@ -513,100 +513,40 @@ class DriveModel(nn.Module):
         ego_pose: Tensor | None = None,
         nav_valid: Tensor | None = None,
         ego_valid: Tensor | None = None,
+        nav_seq: Tensor | None = None,
+        ego_seq: Tensor | None = None,
+        nav_valid_seq: Tensor | None = None,
+        ego_valid_seq: Tensor | None = None,
         imagine_bank: ImagineMemoryBank | None = None,
         detach: bool = True,
     ) -> list[Dict[str, Tensor]]:
+        """Thin wrapper around the model-level rollout in world_model.py."""
         if horizon is None:
             horizon = self.rollout_horizon
-        if not 1 <= int(horizon) <= 6:
-            raise ValueError("imagine horizon must be in 1..6")
-        """Imagined policy outputs for t0..t_{H-1}.
+        return imagine_rollout(
+            window,
+            nav,
+            ego,
+            temporal_spatial=self.temporal_spatial,
+            planner=self.planner,
+            world_model=self.world_model,
+            actions=actions,
+            action_provider=action_provider,
+            horizon=int(horizon),
+            ego_pose=ego_pose,
+            nav_valid=nav_valid,
+            ego_valid=ego_valid,
+            nav_seq=nav_seq,
+            ego_seq=ego_seq,
+            nav_valid_seq=nav_valid_seq,
+            ego_valid_seq=ego_valid_seq,
+            imagine_bank=imagine_bank,
+            detach=detach,
+        )
 
-        ``policy_n`` is the action at t_n.  If no external action is supplied,
-        the previous policy output is fed into the world model, so t1..tH-1
-        are policy-conditioned rather than requiring an external action script.
-
-        ``ego_pose`` may be ``[B,H,3]``; if omitted the current ego pose is
-        retained (the environment/model integration owns ego propagation).
-        """
-        outputs: list[Dict[str, Tensor]] = []
-        current_window = imagine_bank.window() if imagine_bank is not None else window
-        for n in range(int(horizon)):
-            z = self.temporal_spatial(
-                current_window, nav, ego,
-                nav_valid=nav_valid, ego_valid=ego_valid,
-            )
-            od_valid = current_window.od_valid[:, -1]
-            ld_valid = current_window.ld_valid[:, -1]
-            policy = self.planner(z["od"], z["ld"], nav, ego, od_valid, ld_valid)
-            outputs.append(policy)
-            if n + 1 >= int(horizon):
-                break
-
-            if actions is not None:
-                if n >= int(actions.shape[1]):
-                    raise ValueError("actions sequence is shorter than horizon")
-                action = actions[:, n]
-            elif action_provider is not None:
-                action = action_provider(policy, ego, n)
-            else:
-                action = policy["action_mu"]
-            if action.shape[-1] != self.action_dim:
-                raise ValueError(f"action must have {self.action_dim} dims")
-
-            source_pose = current_window.ego_pose[:, -1]
-            if ego_pose is not None and ego_pose.dim() == 3:
-                next_idx = min(n + 1, int(ego_pose.shape[1]) - 1)
-                next_pose = ego_pose[:, next_idx]
-            else:
-                next_pose = source_pose
-            base_od = BankWindowBuilder.project_geometry(
-                current_window.od_geometry[:, -1], source_pose, next_pose, NodeType.OD
-            )
-            base_ld = BankWindowBuilder.project_geometry(
-                current_window.ld_geometry[:, -1], source_pose, next_pose, NodeType.LD
-            )
-            step = self.world_model(
-                z["od"], z["ld"], action,
-                od_geometry=base_od,
-                ld_geometry=base_ld,
-                od_valid=od_valid, ld_valid=ld_valid,
-            )
-            if detach:
-                step = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in step.items()}
-            depth = int(current_window.rollout_depth[0, -1].item()) + 1
-            next_window = current_window.advance(
-                od_content=step["od"],
-                od_geometry=step["od_geometry"],
-                od_type=current_window.od_type[:, -1],
-                od_valid=step["od_valid"] if step["od_valid"] is not None else od_valid,
-                od_stable_id=current_window.od_stable_id[:, -1],
-                ld_content=step["ld"],
-                ld_geometry=step["ld_geometry"],
-                ld_type=current_window.ld_type[:, -1],
-                ld_valid=step["ld_valid"] if step["ld_valid"] is not None else ld_valid,
-                ld_stable_id=current_window.ld_stable_id[:, -1],
-                ego_pose=next_pose,
-                source=1,
-                rollout_depth=depth,
-                source_pose=source_pose,
-                target_pose=next_pose,
-                project_new_geometry=False,
-            )
-            if imagine_bank is not None:
-                prev = imagine_bank.frames[-1]
-                record = next_window.to_frame_record(
-                    episode_id=prev.episode_id,
-                    frame_id=prev.frame_id + 1,
-                    timestamp=prev.timestamp + 0.5,
-                    parent_frame_id=prev.frame_id,
-                    action_from_parent=action,
-                )
-                imagine_bank.append(record, detach=detach)
-                current_window = imagine_bank.window()
-            else:
-                current_window = next_window
-        return outputs
+    def rollout(self, *args, **kwargs):
+        """Contract §13.5 alias for the model-level imagine rollout."""
+        return self.imagine(*args, **kwargs)
 
     def imagine_from_real_bank(
         self,

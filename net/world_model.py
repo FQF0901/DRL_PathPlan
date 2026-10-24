@@ -20,7 +20,7 @@ from typing import Dict, Tuple
 import torch
 from torch import Tensor, nn
 
-from net.mem_bank import BankWindow, BankWindowBuilder, NodeType
+from net.mem_bank import BankWindow, BankWindowBuilder, ImagineMemoryBank, NodeType
 
 
 class EgoConditionedLatentWM(nn.Module):
@@ -301,7 +301,7 @@ class TemporalSpatialBlock(nn.Module):
 
 
 class ODGeometryDecoder(nn.Module):
-    """Predict an OD relative-pose residual in the query ego frame."""
+    """Predict the absolute OD relative pose in the query ego frame."""
 
     def __init__(self, hidden: int = 128) -> None:
         super().__init__()
@@ -337,59 +337,10 @@ class LDResidualDecoder(nn.Module):
 
 
 def project_ld(geometry: Tensor, source_pose: Tensor, target_pose: Tensor) -> Tensor:
-    """Project LD polyline geometry into ``target_pose`` ego coordinates.
-
-    Accepts a single ``[10]`` geometry/``[3]`` pose or batched leading
-    dimensions such as ``[B,16,10]`` with poses ``[B,3]``.
-    """
-    if geometry.dim() == 1:
-        return BankWindowBuilder._transform_geometry(
-            geometry, source_pose, target_pose, node_type=NodeType.LD
-        )
-    if geometry.dim() == 2:
-        if source_pose.dim() == 1 and target_pose.dim() == 1:
-            return torch.stack(
-                [
-                    BankWindowBuilder._transform_geometry(
-                        geometry[i], source_pose, target_pose, node_type=NodeType.LD
-                    )
-                    for i in range(geometry.shape[0])
-                ],
-                dim=0,
-            )
-        if source_pose.dim() == 2 and target_pose.dim() == 2:
-            return torch.stack(
-                [
-                    BankWindowBuilder._transform_geometry(
-                        geometry[i], source_pose[i], target_pose[i], node_type=NodeType.LD
-                    )
-                    for i in range(geometry.shape[0])
-                ],
-                dim=0,
-            )
-        raise ValueError("batched LD projection needs [3] or [B,3] poses")
-    if geometry.dim() == 3:
-        if source_pose.dim() == 2 and target_pose.dim() == 2:
-            # [B,N,10] geometry with [B,3] poses.
-            return torch.stack(
-                [
-                    project_ld(geometry[i], source_pose[i], target_pose[i])
-                    for i in range(geometry.shape[0])
-                ],
-                dim=0,
-            )
-        raise ValueError("LD projection pose dimensions do not match geometry")
-    if geometry.dim() == 4:
-        if source_pose.dim() != 3 or target_pose.dim() != 3:
-            raise ValueError("temporal LD projection needs [B,T,3] poses")
-        return torch.stack(
-            [
-                project_ld(geometry[i], source_pose[i], target_pose[i])
-                for i in range(geometry.shape[0])
-            ],
-            dim=0,
-        )
-    raise ValueError(f"unsupported LD geometry shape {tuple(geometry.shape)}")
+    """Project LD polyline geometry into ``target_pose`` ego coordinates."""
+    return BankWindowBuilder.project_geometry(
+        geometry, source_pose, target_pose, NodeType.LD
+    )
 
 
 def add_ld_residual(projected: Tensor, residual: Tensor) -> Tensor:
@@ -430,26 +381,29 @@ class FactorizedEgoConditionedLatentWM(nn.Module):
         ld_geometry: Tensor | None = None,
         od_valid: Tensor | None = None,
         ld_valid: Tensor | None = None,
-    ) -> Dict[str, Tensor]:
+    ) -> Dict[str, Tensor | None]:
         b, n, _ = od.shape
         a = self.action(action)[:, None, :].expand(b, n, -1)
         od_mask = torch.ones((b, n, 1), dtype=od.dtype, device=od.device) if od_valid is None else od_valid.unsqueeze(-1).to(od.dtype)
         ld_mask = torch.ones((b, n, 1), dtype=ld.dtype, device=ld.device) if ld_valid is None else ld_valid.unsqueeze(-1).to(ld.dtype)
         od_next = od + self.od_delta(torch.cat([od, a], dim=-1)) * od_mask
         if ld_geometry is None:
-            raise ValueError("LD residual requires base ld_geometry")
-        base_ld = ld_geometry
-        ld_res = self.ld_residual(ld, action, base_ld) * ld_mask
-        ld_next = base_ld + ld_res
-        if od_geometry is None:
-            od_next_geometry = self.od_geometry(od_next)
+            ld_res = None
+            ld_next = None
         else:
-            od_next_geometry = od_geometry.clone()
-            od_next_geometry[..., :3] = od_geometry[..., :3] + self.od_geometry(od_next) * od_mask
-        od_next_geometry[..., 2] = torch.atan2(
-            torch.sin(od_next_geometry[..., 2]),
-            torch.cos(od_next_geometry[..., 2]),
-        )
+            base_ld = ld_geometry
+            ld_res = self.ld_residual(ld, action, base_ld) * ld_mask
+            ld_next = base_ld + ld_res
+
+        # OD decoder is absolute relative pose, not a residual.
+        pose = self.od_geometry(od_next) * od_mask
+        yaw = torch.atan2(torch.sin(pose[..., 2]), torch.cos(pose[..., 2]))
+        if od_geometry is not None and od_geometry.shape[-1] >= 5:
+            od_next_geometry = torch.cat(
+                [pose[..., :2], yaw.unsqueeze(-1), od_geometry[..., 3:]], dim=-1
+            )
+        else:
+            od_next_geometry = torch.cat([pose[..., :2], yaw.unsqueeze(-1)], dim=-1)
         return {
             "od": od_next,
             "ld": ld,
@@ -460,33 +414,154 @@ class FactorizedEgoConditionedLatentWM(nn.Module):
             "ld_valid": ld_valid,
         }
 
-    def rollout(
-        self,
-        od: Tensor,
-        ld: Tensor,
-        actions: Tensor,
-        *,
-        od_geometry: Tensor | None = None,
-        ld_geometry: Tensor | None = None,
-        od_valid: Tensor | None = None,
-        ld_valid: Tensor | None = None,
-        detach: bool = True,
-    ) -> Dict[str, Tensor]:
-        """Multi-step tensor rollout; no environment and no no-grad wrapper."""
-        state = {"od": od, "ld": ld, "od_geometry": od_geometry, "ld_geometry": ld_geometry}
-        history = []
-        for t in range(int(actions.shape[1])):
-            state = self(
-                state["od"], state["ld"], actions[:, t],
-                od_geometry=state["od_geometry"], ld_geometry=state["ld_geometry"],
-                od_valid=od_valid, ld_valid=ld_valid,
-            )
-            if detach:
-                state = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in state.items()}
-            history.append(state)
-        return {"final": state, "history": history}
 
 
 # The old :class:`EgoConditionedLatentWM` above is retained for the legacy
 # D1/D2 pipeline.  New code should use the factorized class.
 EgoConditionedLatentWMV2 = FactorizedEgoConditionedLatentWM
+
+
+
+def _sequence_step(x: Tensor | None, n: int, name: str, *, horizon: int, batch: int, hidden: int | None = None) -> Tensor | None:
+    if x is None:
+        return None
+    if name.endswith("valid_seq") and x.dim() == 2:
+        if x.shape[0] != batch or x.shape[1] < horizon:
+            raise ValueError(f"{name} must be [B,H>=horizon] or [B,H>=horizon,1], got {tuple(x.shape)}")
+        return x[:, n, None]
+    if x.dim() != 3 or x.shape[0] != batch or x.shape[1] < horizon:
+        raise ValueError(f"{name} must be [B,H,D] with H>={horizon}, got {tuple(x.shape)}")
+    if hidden is not None and x.shape[2] != hidden:
+        raise ValueError(f"{name} last dim must be hidden={hidden}, got {x.shape[2]}")
+    return x[:, n]
+
+
+def imagine_rollout(
+    window: BankWindow,
+    nav: Tensor,
+    ego: Tensor,
+    *,
+    temporal_spatial: TemporalSpatialBlock,
+    planner,
+    world_model: FactorizedEgoConditionedLatentWM,
+    actions: Tensor | None = None,
+    action_provider=None,
+    horizon: int = 6,
+    ego_pose: Tensor | None = None,
+    nav_valid: Tensor | None = None,
+    ego_valid: Tensor | None = None,
+    nav_seq: Tensor | None = None,
+    ego_seq: Tensor | None = None,
+    nav_valid_seq: Tensor | None = None,
+    ego_valid_seq: Tensor | None = None,
+    imagine_bank: ImagineMemoryBank | None = None,
+    detach: bool = True,
+) -> list[Dict[str, Tensor]]:
+    """Model-level imagined rollout.
+
+    This is the single rollout implementation.  ``DriveModel.imagine`` delegates
+    here.  ``nav_seq``/``ego_seq`` are encoded hidden vectors ``[B,H,hidden]``;
+    raw observations are not accepted.
+    """
+    if not 1 <= int(horizon) <= 6:
+        raise ValueError("imagine horizon must be in 1..6")
+    b = int(window.batch_size)
+    if imagine_bank is not None and b != 1:
+        raise ValueError("ImagineMemoryBank rollout supports B=1 only")
+    hidden = int(nav.shape[-1])
+    if ego.shape[-1] != hidden:
+        raise ValueError("nav/ego hidden size mismatch")
+    if actions is not None:
+        if actions.dim() != 3 or actions.shape[0] != b or actions.shape[-1] != 4:
+            raise ValueError("actions must be [B,H,4]")
+        if actions.shape[1] < horizon:
+            raise ValueError("actions sequence is shorter than horizon")
+    if ego_pose is not None:
+        if ego_pose.dim() != 3 or ego_pose.shape[0] != b or ego_pose.shape[-1] != 3:
+            raise ValueError("ego_pose must be [B,H,3]")
+        if ego_pose.shape[1] < horizon:
+            raise ValueError("ego_pose sequence is shorter than horizon")
+
+    current_window = imagine_bank.window() if imagine_bank is not None else window
+    outputs: list[Dict[str, Tensor]] = []
+    for n in range(int(horizon)):
+        nav_n = _sequence_step(nav_seq, n, "nav_seq", horizon=horizon, batch=b, hidden=hidden)
+        ego_n = _sequence_step(ego_seq, n, "ego_seq", horizon=horizon, batch=b, hidden=hidden)
+        if nav_n is None:
+            nav_n = nav
+        if ego_n is None:
+            ego_n = ego
+        nav_v = nav_valid if nav_valid_seq is None else _sequence_step(nav_valid_seq, n, "nav_valid_seq", horizon=horizon, batch=b)
+        ego_v = ego_valid if ego_valid_seq is None else _sequence_step(ego_valid_seq, n, "ego_valid_seq", horizon=horizon, batch=b)
+        z = temporal_spatial(current_window, nav_n, ego_n, nav_valid=nav_v, ego_valid=ego_v)
+        od_valid = current_window.od_valid[:, -1]
+        ld_valid = current_window.ld_valid[:, -1]
+        policy = planner(z["od"], z["ld"], nav_n, ego_n, od_valid, ld_valid)
+        outputs.append(policy)
+        if n + 1 >= int(horizon):
+            break
+        if actions is not None:
+            action = actions[:, n]
+        elif action_provider is not None:
+            action = action_provider(policy, ego_n, n)
+        else:
+            action = policy["action_mu"]
+        if action.shape[-1] != 4:
+            raise ValueError("action must have 4 dims")
+
+        source_pose = current_window.ego_pose[:, -1]
+        if ego_pose is not None:
+            next_idx = min(n + 1, int(ego_pose.shape[1]) - 1)
+            next_pose = ego_pose[:, next_idx]
+        else:
+            next_pose = source_pose
+        base_od = BankWindowBuilder.project_geometry(
+            current_window.od_geometry[:, -1], source_pose, next_pose, NodeType.OD
+        )
+        base_ld = BankWindowBuilder.project_geometry(
+            current_window.ld_geometry[:, -1], source_pose, next_pose, NodeType.LD
+        )
+        step = world_model(
+            z["od"], z["ld"], action,
+            od_geometry=base_od, ld_geometry=base_ld,
+            od_valid=od_valid, ld_valid=ld_valid,
+        )
+        if detach:
+            step = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in step.items()}
+        depth = int(current_window.rollout_depth[0, -1].item()) + 1
+        next_window = current_window.advance(
+            od_content=step["od"],
+            od_geometry=step["od_geometry"],
+            od_type=current_window.od_type[:, -1],
+            od_valid=step["od_valid"] if step["od_valid"] is not None else od_valid,
+            od_stable_id=current_window.od_stable_id[:, -1],
+            ld_content=step["ld"],
+            ld_geometry=step["ld_geometry"],
+            ld_type=current_window.ld_type[:, -1],
+            ld_valid=step["ld_valid"] if step["ld_valid"] is not None else ld_valid,
+            ld_stable_id=current_window.ld_stable_id[:, -1],
+            ego_pose=next_pose,
+            source=1,
+            rollout_depth=depth,
+            source_pose=source_pose,
+            target_pose=next_pose,
+            project_new_geometry=False,
+        )
+        if imagine_bank is not None:
+            prev = imagine_bank.frames[-1]
+            record = next_window.to_frame_record(
+                episode_id=prev.episode_id,
+                frame_id=prev.frame_id + 1,
+                timestamp=prev.timestamp + 0.5,
+                parent_frame_id=prev.frame_id,
+                action_from_parent=action,
+            )
+            imagine_bank.append(record, detach=detach)
+            current_window = imagine_bank.window()
+        else:
+            current_window = next_window
+    return outputs
+
+
+# The contract calls this the model-level rollout.
+rollout = imagine_rollout

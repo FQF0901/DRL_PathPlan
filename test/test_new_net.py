@@ -219,3 +219,31 @@ def test_bank_dtype_follows_content():
     window = BankWindowBuilder(hidden=H).build((frame,))
     assert window.od_content.dtype == torch.float32
     assert window.ego_pose.dtype == torch.float32
+
+
+def test_imagine_per_step_nav_ego_validation():
+    import pytest
+    from net.model import DriveModel
+
+    model = DriveModel(hidden=H)
+    batch = {k: v[:1] for k, v in _batch().items()}
+    enc = model.encoder.encode_current(batch)
+    window = _window(enc)
+    # Correct encoded sequences work.
+    nav_seq = enc["nav"].unsqueeze(1).expand(1, 6, H)
+    ego_seq = enc["ego"].unsqueeze(1).expand(1, 6, H)
+    out = model.imagine(window, enc["nav"], enc["ego"], nav_seq=nav_seq, ego_seq=ego_seq, horizon=6)
+    assert len(out) == 6
+    # Raw observation sequences are rejected explicitly.
+    with pytest.raises(ValueError):
+        model.imagine(window, enc["nav"], enc["ego"], nav_seq=batch["nav"].unsqueeze(1).expand(1, 6, 108))
+
+
+def test_wm_ld_branch_is_optional():
+    wm = FactorizedEgoConditionedLatentWM(hidden=H)
+    od = torch.randn(B, 16, H)
+    ld = torch.randn(B, 16, H)
+    action = torch.rand(B, 4)
+    out = wm(od, ld, action, od_geometry=None, ld_geometry=None)
+    assert out["ld_geometry"] is None
+    assert out["ld_residual"] is None
