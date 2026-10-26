@@ -13,7 +13,7 @@ Action contract
 ---------------
 ``StructuredPlanner`` emits ``action_mu`` in ``[0, 1]`` and a diagonal
 ``TruncatedNormal(mu, exp(logstd), low=0, high=1)`` is used for exploration.
-Every sample is therefore executable under :data:`env.action.action_space.CLEAN_BOUNDS`
+Every sample is therefore executable under the config/model.yaml action bounds
 without a post-hoc clamp.  The stored log-prob always belongs to the sampled
 normalized action.  If the state-dependent PSTL feasibility check rejects that
 action, the same v1-projection / safe-brake fallback as :mod:`pipeline.eval`
@@ -61,18 +61,14 @@ from env.obs import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
     build_observation,
-    stack_history,
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
-from env.action.action_space import (
-    COMFORT_LIMITS,
-    HARD_LIMITS,
-    CLEAN_BOUNDS,
-    action_to_trajectory,
-    feasible_v1_interval,
-)
-from net.model import SPATIAL_LAYERS, StructuredPlanner
+from env.action.action_space import action_to_trajectory, feasible_v1_interval
+from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
+from pipeline.legacy_model import SPATIAL_LAYERS, StructuredPlanner
+from pipeline.live_bank import LiveBankRunner
+from net.mem_bank import BankWindow
 from pipeline.distributions import TruncatedNormal
 from pipeline.eval import load_model
 from pipeline.execution import relative_action, segment_dt
@@ -123,6 +119,9 @@ INPUT_KEYS: Tuple[str, ...] = (
     "ego",
     "ego_mask",
     "hist_valid",
+    "od_ids",
+    "ld_ids",
+    "pose",
 )
 REWARD_COMPONENTS: Tuple[str, ...] = ("route_progress", "success", "comfort")
 COST_NAMES: Tuple[str, ...] = (
@@ -237,26 +236,30 @@ def _batch_from_history(hist: Mapping[str, Any], device: str = "cpu") -> Dict[st
     """Batch-first float32 tensors for one schema-v2 history window."""
     batch: Dict[str, Tensor] = {}
     for key in INPUT_KEYS:
-        arr = np.asarray(hist[key], dtype=np.float32)
+        dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
+        arr = np.asarray(hist[key], dtype=dtype)
         batch[key] = torch.from_numpy(arr).unsqueeze(0).to(device)
     return batch
 
 
-def _trajectory(action: Sequence[float], v0: float):
+def _trajectory(
+    action: Sequence[float], v0: float, *,
+    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
+):
     return action_to_trajectory(
         action,
         v0,
         dt=DECISION_DT,
         hz=HZ,
-        bounds=CLEAN_BOUNDS,
-        limits=HARD_LIMITS,
-        comfort_limits=COMFORT_LIMITS,
+        bounds=bounds,
+        limits=limits,
+        comfort_limits=comfort_limits,
     )
 
 
-def _trajectory_or_none(action: Sequence[float], v0: float):
+def _trajectory_or_none(action: Sequence[float], v0: float, **kwargs):
     try:
-        return _trajectory(action, v0)
+        return _trajectory(action, v0, **kwargs)
     except (TypeError, ValueError):
         return None
 
@@ -272,7 +275,10 @@ def safe_brake_action(v0: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Feasibility fallback (mirrors pipeline.eval.run_episode)
 # ---------------------------------------------------------------------------
-def resolve_action(sampled_norm: Sequence[float], v0: float) -> Dict[str, Any]:
+def resolve_action(
+    sampled_norm: Sequence[float], v0: float, *,
+    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
+) -> Dict[str, Any]:
     """Denormalize then resolve the state-dependent PSTL fallback.
 
     The sampled normalized action is never mutated.  The returned
@@ -282,11 +288,11 @@ def resolve_action(sampled_norm: Sequence[float], v0: float) -> Dict[str, Any]:
     sampled = np.asarray(sampled_norm, dtype=np.float64).reshape(-1)
     if sampled.shape != (ACTION_DIM,):
         raise ValueError(f"sampled_norm must have shape (4,), got {sampled.shape}")
-    requested = np.asarray(CLEAN_BOUNDS.denormalize(sampled, clip=True), dtype=np.float64)
+    requested = np.asarray(bounds.denormalize(sampled, clip=False), dtype=np.float64)
 
     if not np.all(np.isfinite(requested)):
         brake = safe_brake_action(v0)
-        traj = _trajectory_or_none(brake, v0)
+        traj = _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
         return {
             "requested_action": requested,
             "executed_action": brake,
@@ -299,7 +305,7 @@ def resolve_action(sampled_norm: Sequence[float], v0: float) -> Dict[str, Any]:
             "codes": tuple(traj.codes) if traj is not None else ("NONFINITE_ACTION",),
         }
 
-    requested_traj = _trajectory_or_none(requested, v0)
+    requested_traj = _trajectory_or_none(requested, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
     requested_codes = (
         tuple(requested_traj.codes) if requested_traj is not None else ("INVALID_ACTION",)
     )
@@ -324,15 +330,15 @@ def resolve_action(sampled_norm: Sequence[float], v0: float) -> Dict[str, Any]:
                 requested,
                 v0,
                 dt=DECISION_DT,
-                bounds=CLEAN_BOUNDS,
-                limits=HARD_LIMITS,
+                bounds=bounds,
+                limits=limits,
             )
         except (TypeError, ValueError):
             interval = None
         if interval is not None and interval.nonempty:
             candidate = requested.copy()
             candidate[3] = float(np.clip(candidate[3], interval.low, interval.high))
-            candidate_traj = _trajectory_or_none(candidate, v0)
+            candidate_traj = _trajectory_or_none(candidate, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
             if candidate_traj is not None and candidate_traj.feasible:
                 executed_codes = tuple(candidate_traj.codes)
                 return {
@@ -348,7 +354,7 @@ def resolve_action(sampled_norm: Sequence[float], v0: float) -> Dict[str, Any]:
                 }
 
     brake = safe_brake_action(v0)
-    brake_traj = _trajectory_or_none(brake, v0)
+    brake_traj = _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
     executed_codes = tuple(brake_traj.codes) if brake_traj is not None else ()
     name = "safe_brake" if brake_traj is not None and brake_traj.feasible else "safe_brake_infeasible"
     return {
@@ -436,7 +442,10 @@ def policy_logprob(
     sampled_norm: Tensor,
 ) -> Tuple[Tensor, Dict[str, Tensor]]:
     """Recompute the stored sampled-action log-prob under current parameters."""
-    out = model(states)
+    if "window" in states:
+        out = model.forward_window(states["window"], states["nav"], states["ego"])
+    else:
+        out = model(states)
     dist = _policy_distribution(out)
     return dist.log_prob(sampled_norm).sum(-1), out
 
@@ -449,7 +458,14 @@ def _policy_logprob_per_transition(
     """Audit log-probs one transition at a time (same batch size as rollout)."""
     logps = []
     for i in range(int(sampled_norm.shape[0])):
-        sub = {key: value[i : i + 1] for key, value in states.items()}
+        if "window" in states:
+            sub = {
+                "window": states["window"].slice(i),
+                "nav": states["nav"][i : i + 1],
+                "ego": states["ego"][i : i + 1],
+            }
+        else:
+            sub = {key: value[i : i + 1] for key, value in states.items()}
         logp, _out = policy_logprob(model, sub, sampled_norm[i : i + 1])
         logps.append(logp.reshape(()))
     return torch.stack(logps) if logps else torch.empty(0, device=sampled_norm.device)
@@ -541,9 +557,13 @@ class RolloutBuffer:
         if missing:
             raise KeyError(f"transition missing fields: {missing}")
         state = transition["state"]
-        missing_state = [key for key in INPUT_KEYS if key not in state]
-        if missing_state:
-            raise KeyError(f"transition state missing fields: {missing_state}")
+        if "window" in state:
+            if not {"nav", "ego"}.issubset(state):
+                raise KeyError("window transition state requires nav and ego")
+        else:
+            missing_state = [key for key in INPUT_KEYS if key not in state]
+            if missing_state:
+                raise KeyError(f"transition state missing fields: {missing_state}")
         sampled = torch.as_tensor(transition["sampled_norm"])
         executed = torch.as_tensor(transition["executed_action"])
         cost_vector = torch.as_tensor(transition["cost_vector"])
@@ -581,15 +601,20 @@ class RolloutBuffer:
         gamma = self.gamma if gamma is None else float(gamma)
         lam = self.lam if lam is None else float(lam)
 
-        states: Dict[str, Tensor] = {}
-        for key in INPUT_KEYS:
-            states[key] = torch.cat(
-                [
-                    torch.as_tensor(tr["state"][key], dtype=torch.float32)
-                    for tr in self.transitions
-                ],
-                dim=0,
+        states: Dict[str, Any] = {}
+        if "window" in self.transitions[0]["state"]:
+            states["window"] = BankWindow.stack(
+                [tr["state"]["window"] for tr in self.transitions]
             ).to(device)
+            states["nav"] = torch.cat([tr["state"]["nav"] for tr in self.transitions], dim=0).to(device)
+            states["ego"] = torch.cat([tr["state"]["ego"] for tr in self.transitions], dim=0).to(device)
+        else:
+            for key in INPUT_KEYS:
+                dtype = torch.int64 if key in ("od_ids", "ld_ids") else torch.float32
+                states[key] = torch.cat(
+                    [torch.as_tensor(tr["state"][key], dtype=dtype) for tr in self.transitions],
+                    dim=0,
+                ).to(device)
 
         sampled_norm = torch.stack(
             [torch.as_tensor(tr["sampled_norm"], dtype=torch.float32) for tr in self.transitions]
@@ -789,6 +814,19 @@ def collect_episode(
     if max_steps < 0:
         raise ValueError("max_steps must be >= 0")
     model.to(device).eval()
+    if getattr(model, "action_low", None) is not None:
+        from env.action.action_space import ActionBounds
+        p_bounds = ActionBounds(
+            low=model.action_low.detach().cpu().numpy(),
+            high=model.action_high.detach().cpu().numpy(),
+            name=getattr(model, "action_config", {}).get("name", "checkpoint"),
+        )
+        p_limits = getattr(model, "action_config", {}).get("limits", {})
+        from env.action.action_space import DynamicsLimits
+        p_hard = DynamicsLimits(**p_limits["hard"]) if "hard" in p_limits else HARD_LIMITS
+        p_comfort = DynamicsLimits(**p_limits["comfort"]) if "comfort" in p_limits else COMFORT_LIMITS
+    else:
+        p_bounds, p_hard, p_comfort = CLEAN_BOUNDS, HARD_LIMITS, COMFORT_LIMITS
     if sampling_seed is not None:
         torch.manual_seed(int(sampling_seed))
 
@@ -796,8 +834,7 @@ def collect_episode(
     ego = env.agent
     tracker = ExactTracker(dt=DECISION_DT, hz=HZ)
 
-    frames: List[Dict[str, Any]] = []
-    poses: List[np.ndarray] = []
+    runner = LiveBankRunner(model, device=device)
     transitions: List[Dict[str, Any]] = []
     prev_action = np.zeros(ACTION_DIM, dtype=np.float64)
     prev_speed: Optional[float] = None
@@ -820,16 +857,9 @@ def collect_episode(
             prev_heading=prev_heading,
             dt=DECISION_DT,
         )
-        frames.append(obs)
-        poses.append(obs["pose"].copy())
-        if len(frames) > HISTORY_FRAMES:
-            frames = frames[-HISTORY_FRAMES:]
-            poses = poses[-HISTORY_FRAMES:]
-        hist = stack_history(frames, poses)
-        batch = _batch_from_history(hist, device=device)
-
+        window, nav, ego_hidden = runner.push(obs)
         with torch.no_grad():
-            out = model(batch)
+            out = model.forward_window(window, nav, ego_hidden)
             dist = _policy_distribution(out)
             sampled = dist.sample()
             old_logp = dist.log_prob(sampled).sum(-1)[0]
@@ -840,7 +870,7 @@ def collect_episode(
         v0 = float(ego.speed)
         h0 = float(ego.heading_theta)
         p0 = np.asarray(ego.position[:2], dtype=np.float64).copy()
-        resolved = resolve_action(sampled_np, v0)
+        resolved = resolve_action(sampled_np, v0, bounds=p_bounds, limits=p_hard, comfort_limits=p_comfort)
         executed = np.asarray(resolved["executed_action"], dtype=np.float64)
         tr_exec = resolved["trajectory"]
         fallback_name = str(resolved["fallback_name"])
@@ -942,7 +972,11 @@ def collect_episode(
         )
         transitions.append(
             {
-                "state": {key: batch[key].detach().cpu() for key in INPUT_KEYS},
+                "state": {
+                    "window": window,
+                    "nav": nav.detach(),
+                    "ego": ego_hidden.detach(),
+                },
                 "sampled_norm": sampled[0].detach().cpu(),
                 "executed_action": torch.as_tensor(executed, dtype=torch.float32),
                 "realized_action": torch.as_tensor(realized_action, dtype=torch.float32),
@@ -996,15 +1030,9 @@ def collect_episode(
                 prev_heading=prev_heading,
                 dt=actual_dt,
             )
-            final_frames = frames + [final_obs]
-            final_poses = poses + [final_obs["pose"].copy()]
-            if len(final_frames) > HISTORY_FRAMES:
-                final_frames = final_frames[-HISTORY_FRAMES:]
-                final_poses = final_poses[-HISTORY_FRAMES:]
-            final_hist = stack_history(final_frames, final_poses)
-            final_batch = _batch_from_history(final_hist, device=device)
+            final_window, final_nav, final_ego = runner.push(final_obs)
             with torch.no_grad():
-                final_out = model(final_batch)
+                final_out = model.forward_window(final_window, final_nav, final_ego)
                 last["bootstrap_value"] = final_out["value"][0, 0].detach().cpu()
                 last["bootstrap_cost_value"] = (
                     final_out["cost_value"][0, 0].detach().cpu()
@@ -1138,7 +1166,10 @@ def ppo_update(
         # per-transition forward here keeps the PPO ratio on the same numerical
         # path as the stored log-prob; the batched path remains an audit.
         newlogp = _policy_logprob_per_transition(model, states, sampled)
-        out = model(states)
+        if "window" in states:
+            out = model.forward_window(states["window"], states["nav"], states["ego"])
+        else:
+            out = model(states)
         log_ratio = newlogp - old_logp
         ratio = log_ratio.clamp(-20.0, 20.0).exp()
 
@@ -1161,11 +1192,11 @@ def ppo_update(
             approx_kl = torch.zeros((), device=out["action_mu"].device)
             clip_frac = torch.zeros((), device=out["action_mu"].device)
 
-        value_pred = out["value"].squeeze(-1)
-        cost_pred = out["cost_value"].squeeze(-1)
-        value_loss = F.mse_loss(value_pred[value_mask], ret[value_mask])
-        cost_loss = F.mse_loss(cost_pred[value_mask], cost_ret[value_mask])
-        total_loss = policy_loss + float(value_coef) * value_loss + float(cost_coef) * cost_loss
+        # The bank-native policy has no value/risk/cost head.  Keep these
+        # diagnostics as constants for legacy logs, but never optimize them.
+        value_loss = torch.zeros((), device=out["action_mu"].device)
+        cost_loss = torch.zeros((), device=out["action_mu"].device)
+        total_loss = policy_loss
 
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
@@ -1377,40 +1408,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _limits_dict() -> Dict[str, float]:
-    return {
-        "a_long_min": float(HARD_LIMITS.a_long_min),
-        "a_long_max": float(HARD_LIMITS.a_long_max),
-        "a_lat_max": float(HARD_LIMITS.a_lat_max),
-        "kappa_max": float(HARD_LIMITS.kappa_max),
-        "kappa_rate_max": float(HARD_LIMITS.kappa_rate_max),
-        "jerk_long_max": float(HARD_LIMITS.jerk_long_max),
-        "jerk_lat_max": float(HARD_LIMITS.jerk_lat_max),
-    }
+def _limits_dict(model=None) -> Dict[str, float]:
+    limits = getattr(model, "action_config", {}).get("limits", {}).get("hard") if model is not None else None
+    if limits is None:
+        limits = {
+            "a_long_min": HARD_LIMITS.a_long_min,
+            "a_long_max": HARD_LIMITS.a_long_max,
+            "a_lat_max": HARD_LIMITS.a_lat_max,
+            "kappa_max": HARD_LIMITS.kappa_max,
+            "kappa_rate_max": HARD_LIMITS.kappa_rate_max,
+            "jerk_long_max": HARD_LIMITS.jerk_long_max,
+            "jerk_lat_max": HARD_LIMITS.jerk_lat_max,
+        }
+    return {key: float(value) for key, value in limits.items()}
 
 
 def _checkpoint_config(
     model: StructuredPlanner, args: argparse.Namespace
 ) -> Dict[str, Any]:
     eval_config = dict(getattr(model, "eval_config", {}) or {})
+    action_bounds = (
+        {
+            "name": str(getattr(model, "action_config", {}).get("name", "clean")),
+            "low": model.action_low.detach().cpu().tolist(),
+            "high": model.action_high.detach().cpu().tolist(),
+        }
+        if getattr(model, "action_low", None) is not None
+        else CLEAN_BOUNDS.as_dict()
+    )
     return {
         "model_type": "clean",
-        "architecture": "StructuredPlanner",
+        "architecture": "DriveModelAdapter",
         "hidden": int(model.hidden),
         "heads": int(model.heads),
         "spatial_layers": int(eval_config.get("spatial_layers", SPATIAL_LAYERS)),
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
-        "action_bounds_name": CLEAN_BOUNDS.name,
-        "action_low": CLEAN_BOUNDS.low.tolist(),
-        "action_high": CLEAN_BOUNDS.high.tolist(),
+        "action_bounds_name": str(getattr(model, "action_config", {}).get("name", CLEAN_BOUNDS.name)),
+        "action_low": model.action_low.detach().cpu().tolist() if getattr(model, "action_low", None) is not None else CLEAN_BOUNDS.low.tolist(),
+        "action_high": model.action_high.detach().cpu().tolist() if getattr(model, "action_high", None) is not None else CLEAN_BOUNDS.high.tolist(),
         "action_support": [SUPPORT_LOW, SUPPORT_HIGH],
         "gamma": float(args.gamma),
         "lam": float(args.lam),
         "clip": float(args.clip),
         "value_coef": float(args.value_coef),
         "cost_coef": float(args.cost_coef),
+        "ego": dict(getattr(model, "ego_config", {})),
         "decision": {
             "dt": DECISION_DT,
             "sim_dt": SIM_DT,
@@ -1419,7 +1463,15 @@ def _checkpoint_config(
             "history_frames": HISTORY_FRAMES,
             "execution": "first 0.5 s segment only (a0); a1..a5 preview not stored",
         },
-        "limits": {"clean_hard": _limits_dict()},
+        "limits": {
+            "hard": _limits_dict(model),
+            "comfort": {
+                key: float(value)
+                for key, value in (
+                    getattr(model, "action_config", {}).get("limits", {}).get("comfort", _limits_dict(model)).items()
+                )
+            },
+        },
         "reward": {
             "route_progress_scale": ROUTE_PROGRESS_SCALE,
             "success": SUCCESS_REWARD,
@@ -1533,13 +1585,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     summary = summarize_rollout(all_episodes, all_transitions)
     first_update = update_records[0] if update_records else {}
+    action_bounds = (
+        {
+            "name": str(getattr(model, "action_config", {}).get("name", "clean")),
+            "low": model.action_low.detach().cpu().tolist(),
+            "high": model.action_high.detach().cpu().tolist(),
+        }
+        if getattr(model, "action_low", None) is not None
+        else CLEAN_BOUNDS.as_dict()
+    )
     checkpoint_path = out_dir / "ppo_canary.pt"
     config = _checkpoint_config(model, args)
     torch.save(
         {
             "model": model.state_dict(),
             "config": config,
-            "action_bounds": CLEAN_BOUNDS.as_dict(),
+            "action_bounds": action_bounds,
             "gamma": float(args.gamma),
             "lam": float(args.lam),
             "schema_name": SCHEMA_NAME,
@@ -1564,8 +1625,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "schema_version": 1,
         "schema_name": SCHEMA_NAME,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
-        "action_bounds": CLEAN_BOUNDS.as_dict(),
+        "action_bounds": action_bounds,
         "support": [SUPPORT_LOW, SUPPORT_HIGH],
+        "ego": dict(getattr(model, "ego_config", {})),
         "decision": {
             "dt": DECISION_DT,
             "sim_dt": SIM_DT,

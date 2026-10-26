@@ -71,6 +71,21 @@ def _geometry_ld(ld: Tensor) -> Tensor:
     return ld[..., :, :2].reshape(ld.shape[0], ld.shape[1], LD_POINTS * 2)
 
 
+def _per_sample(value, batch_size: int, default, cast, name: str):
+    """Expand one scalar or per-batch metadata value to a Python list."""
+    if value is None:
+        value = default
+    if torch.is_tensor(value):
+        value = value.detach().cpu().reshape(-1).tolist()
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            value = value * batch_size
+        if len(value) != batch_size:
+            raise ValueError(f"{name} must be scalar or length {batch_size}, got {len(value)}")
+        return [cast(v) for v in value]
+    return [cast(value)] * batch_size
+
+
 def _ids(batch: Mapping[str, Tensor], key: str, b: int, n: int, device: torch.device) -> Tensor:
     if key not in batch:
         raise ValueError(f"encoder requires {key!r}; stable IDs must not default to -1")
@@ -115,6 +130,8 @@ class CurrentFrameEncoder(nn.Module):
             nn.LayerNorm(self.hidden),
         )
         self.ld_role_embed = nn.Embedding(LANE_ROLE_CLASSES, self.hidden)
+        self.od_geometry_embed = _mlp(5, self.hidden, self.hidden)
+        self.ld_geometry_embed = _mlp(2 * LD_POINTS, self.hidden, self.hidden)
 
         self.nav_encoder = _mlp(NAV_DIM, self.hidden, self.hidden)
         self.ego_encoder = _mlp(EGO_DIM, self.hidden, self.hidden)
@@ -166,9 +183,12 @@ class CurrentFrameEncoder(nn.Module):
         od_geometry = _geometry_od(od, od_anchor)
         ld_geometry = _geometry_ld(ld)
 
-        od_content = self._encode_od(od)
+        # z is a frame-dependent full-state latent: semantic content plus the
+        # explicit anchor.  Geometry is still stored separately for targets
+        # and direct decoders.
+        od_content = self._encode_od(od) + self.od_geometry_embed(od_geometry)
         ld_mask_points = _take_last(batch["ld_mask"], 3).reshape(b, LD_SLOTS, LD_POINTS)
-        ld_content = self._encode_ld(ld, ld_mask_points)
+        ld_content = self._encode_ld(ld, ld_mask_points) + self.ld_geometry_embed(ld_geometry)
         od_type = _type(batch, "od_taxonomy", od, ld, b, OD_SLOTS, device)
         ld_type = _type(batch, "ld_taxonomy", od, ld, b, LD_SLOTS, device, ld_node=True)
         od_ids = _ids(batch, "od_ids", b, OD_SLOTS, device)
@@ -193,13 +213,19 @@ class CurrentFrameEncoder(nn.Module):
             "ego_valid": ego_mask,
         }
 
+    def encode_ego(self, ego: Tensor) -> Tensor:
+        """Encode a raw [B,EGO_DIM] ego vector with the shared ego encoder."""
+        if ego.shape[-1] != EGO_DIM:
+            raise ValueError(f"ego must have {EGO_DIM} features, got {tuple(ego.shape)}")
+        return self.ego_encoder(ego)
+
     def frame_records(
         self,
         batch: Mapping[str, Tensor],
         *,
-        episode_id: str,
-        frame_id: int,
-        timestamp: float,
+        episode_id,
+        frame_id,
+        timestamp,
         ego_pose: Optional[Tensor] = None,
         encoder_version: int = 0,
         encoded: Optional[Mapping[str, Tensor]] = None,
@@ -211,8 +237,12 @@ class CurrentFrameEncoder(nn.Module):
             if ego_pose is None:
                 raise ValueError("frame_records requires batch['ego_pose'] or batch['pose']")
             ego_pose = _take_last(ego_pose, 2)
+        b = out["od_content"].shape[0]
+        episodes = _per_sample(episode_id, b, "ep", str, "episode_id")
+        frame_ids = _per_sample(frame_id, b, 0, int, "frame_id")
+        timestamps = _per_sample(timestamp, b, 0.0, float, "timestamp")
         records = []
-        for i in range(out["od_content"].shape[0]):
+        for i in range(b):
             od = tuple(
                 EntityRecord(
                     slot=s,
@@ -239,9 +269,9 @@ class CurrentFrameEncoder(nn.Module):
             )
             records.append(
                 FrameRecord(
-                    episode_id=episode_id,
-                    frame_id=int(frame_id),
-                    timestamp=float(timestamp),
+                    episode_id=episodes[i],
+                    frame_id=frame_ids[i],
+                    timestamp=timestamps[i],
                     ego_pose=ego_pose[i].detach(),
                     od=od,
                     ld=ld,

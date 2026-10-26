@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from env.tracking import ExactTracker
-from env.action.action_space import CLEAN_BOUNDS
+from pipeline.action_compat import CLEAN_BOUNDS
 from pipeline.rollout import (
     denorm_action,
     denorm_action_with_bounds,

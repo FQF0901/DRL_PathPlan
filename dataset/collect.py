@@ -3,7 +3,7 @@
 Each row is one 0.5 s policy decision:
 
 * OD / LD / road-level Nav / Ego history from :mod:`env.obs`
-  (``HISTORY_FRAMES = 6`` frames, SE(2)-compensated by ``stack_history``);
+  (``HISTORY_FRAMES = 6`` raw frames; BankWindow/TSB handles alignment and delta_pose);
 * a **measured** expert endpoint label ``(dx, dy, dpsi, v_next)`` obtained from
   the ego pose/speed after the expert physically drives 5 x 0.1 s;
 * a kinematic-bicycle 4D lift of the expert's current ``(steer, throttle)``
@@ -46,16 +46,11 @@ from env.obs import (
     SCHEMA_VERSION,
     _stable_hash,
     build_observation,
-    stack_history,
+    raw_history,
 )
 from env.scenario.spec import load_specs
-from env.action.action_space import (
-    CLEAN_BOUNDS,
-    COMFORT_LIMITS,
-    HARD_LIMITS,
-    action_to_trajectory,
-    feasible_v1_interval,
-)
+from env.action.action_space import action_to_trajectory, feasible_v1_interval
+from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
 
 DECISION_DT = 0.5
 SIM_DT = 0.1
@@ -65,12 +60,12 @@ ACTION_DIM = 4
 # ---------------------------------------------------------------------------
 # Canonical PSTL limits
 # ---------------------------------------------------------------------------
-HARD_LIMITS_SOURCE = "env.action.action_space.HARD_LIMITS"
+HARD_LIMITS_SOURCE = "config/model.yaml action.limits.hard"
 
 # ---------------------------------------------------------------------------
 # Output schema
 # ---------------------------------------------------------------------------
-#: History tensors produced by ``stack_history`` (``meta`` is not an array).
+#: Raw history tensors consumed by the Bank training/eval path.
 HISTORY_KEYS: Tuple[str, ...] = (
     "od",
     "od_mask",
@@ -97,6 +92,8 @@ HISTORY_KEYS: Tuple[str, ...] = (
 
 #: Per-row arrays/scalars and their on-disk dtypes.
 ROW_DTYPES: Dict[str, Any] = {
+    # history representation: 1 = raw Bank frames, 0 = legacy projected
+    "history_mode": np.float32,
     # measured label + lift audit
     "action": np.float32,
     "action_lift": np.float32,
@@ -425,7 +422,7 @@ def run_episode(
             )
             frames.append(obs)
             poses.append(obs["pose"].copy())
-            hist = stack_history(frames, poses)
+            hist = raw_history(frames, poses)
             scene_seed = int(obs["meta"]["scene_seed"])
 
             p0 = poses[-1].copy()
@@ -498,6 +495,7 @@ def run_episode(
             residual = lift.astype(np.float64) - action.astype(np.float64)
 
             row: Dict[str, Any] = {key: hist[key] for key in HISTORY_KEYS}
+            row["history_mode"] = np.float32(1.0)
             row.update(
                 {
                     "action": action,
@@ -840,7 +838,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "note": (
                 "Provisional clean limits calibrated on expert BC rows. "
                 "PSTL continuous derivatives are stricter than label "
-                "differences; env.action.action_space.HARD_LIMITS is intentionally "
+                "differences; config/model.yaml action.limits.hard is intentionally "
                 "not used here."
             ),
         },

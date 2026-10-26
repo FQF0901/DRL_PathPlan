@@ -25,8 +25,8 @@ from env.obs import (
     _empty_history,
 )
 from env.scenario.spec import load_specs
-from env.action.action_space import CLEAN_BOUNDS
-from net.model import StructuredPlanner
+from pipeline.action_compat import CLEAN_BOUNDS
+from pipeline.legacy_model import StructuredPlanner
 from pipeline.eval import (
     HARD_LIMITS,
     _batch_from_history,
@@ -87,8 +87,11 @@ def test_batch_from_history_shapes_and_forward():
     assert batch["ego"].shape == (1, HISTORY_FRAMES, EGO_DIM)
     assert batch["ego_mask"].shape == (1, HISTORY_FRAMES, 1)
     assert batch["hist_valid"].shape == (1, HISTORY_FRAMES)
-    for value in batch.values():
-        assert value.dtype == torch.float32
+    for key, value in batch.items():
+        if key in ("od_ids", "ld_ids"):
+            assert value.dtype == torch.int64
+        else:
+            assert value.dtype == torch.float32
 
     out = StructuredPlanner()(batch)
     assert out["action_mu"].shape == (1, 4)

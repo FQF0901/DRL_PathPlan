@@ -13,7 +13,7 @@ import pytest
 from dataset import collect_dagger as dagger
 from dataset import collect
 from env.obs import HISTORY_FRAMES, NAV_DIM, _empty_history, stack_history
-from env.action.action_space import CLEAN_BOUNDS
+from pipeline.action_compat import CLEAN_BOUNDS
 
 #: Fields added by this collector on top of the collect row schema.
 DAGGER_ROW_KEYS = {

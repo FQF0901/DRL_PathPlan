@@ -57,6 +57,8 @@ def main() -> int:
         },
         "budget_min": lo,
         "budget_max": hi,
+        "param_target": int(cfg.get("deployable_param_target", 0) or 0),
+        "target_delta": (total - int(cfg.get("deployable_param_target", 0) or 0)),
         "within_budget": lo <= total <= hi,
     }
     text = json.dumps(report, indent=2)

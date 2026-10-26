@@ -8,8 +8,8 @@ Data contract
 Each input directory (or ``.npz`` file) must contain the arrays written by
 ``dataset.collect``: all ``HISTORY_KEYS`` plus the measured ``action`` row,
 ``scene_seed``, ``episode_id`` and outcome columns.  Only the model feature
-keys below enter ``StructuredPlanner``; IDs, audit fields and outcomes are side
-arrays and never model inputs::
+keys below enter the adapter/DriveModel; IDs are metadata needed for stable
+identity alignment, while audit fields and outcomes remain side arrays::
 
     od, od_mask, ld, ld_mask, nav, nav_mask, ego, ego_mask, hist_valid
 
@@ -75,12 +75,12 @@ from env.obs import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
 )
-from env.action.action_space import COMFORT_LIMITS, HARD_LIMITS, CLEAN_BOUNDS
-from net.model import StructuredPlanner, count_parameters
+from pipeline.action_compat import COMFORT_LIMITS, HARD_LIMITS, CLEAN_BOUNDS
+from pipeline.legacy_model import StructuredPlanner, count_parameters
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.distributions import truncated_normal_nll
 
-#: Feature keys fed to StructuredPlanner.  No IDs / audit / outcome columns here.
+#: Feature keys fed to the adapter.  IDs are metadata, not policy features.
 INPUT_KEYS: Tuple[str, ...] = (
     "od",
     "od_mask",
@@ -91,6 +91,10 @@ INPUT_KEYS: Tuple[str, ...] = (
     "ego",
     "ego_mask",
     "hist_valid",
+    "od_ids",
+    "ld_ids",
+    "pose",
+    "history_mode",
 )
 
 #: Per-row arrays kept in memory (features + labels/weights only).
@@ -124,6 +128,7 @@ KEEP_KEYS = set(INPUT_KEYS) | {
     "label_pass",
     "action_in_bounds",
     "label_source",
+    "pose",
 }
 
 REQUIRED_ROW_KEYS = (
@@ -245,6 +250,10 @@ def _resolve_npz_paths(path: Path) -> list[Path]:
 
 
 def _default_value(key: str, n: int) -> np.ndarray:
+    if key == "history_mode":
+        # Missing marker means the historical collector used stack_history
+        # (query-frame projection); new raw collectors write 1.0 explicitly.
+        return np.zeros(n, dtype=np.float32)
     if key == "executed_action":
         return np.full((n, 4), np.nan, dtype=np.float32)
     if key == "residual_xy":
@@ -321,6 +330,8 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
     merged["scene_seed"] = np.asarray(merged["scene_seed"], dtype=np.int64)
     merged["episode_id"] = np.asarray(merged["episode_id"], dtype=np.int64)
     merged["step"] = np.asarray(merged["step"], dtype=np.int64)
+    if "history_mode" not in merged:
+        merged["history_mode"] = np.zeros(len(merged["action"]), dtype=np.float32)
     for key in _ALL_OPTIONAL_KEYS:
         if key not in merged:
             merged[key] = _default_value(key, len(merged["action"]))
@@ -428,7 +439,6 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
     # of deleting the hard/curve states entirely.  The evaluator still never
     # executes an infeasible action; this is a training-data weight.
     w *= np.where((feasible > 0.5) & (label_pass > 0.5), 1.0, float(cfg.w_infeasible))
-    w *= action_in_bounds > 0.5
 
     source = np.asarray(data["source"], dtype=np.float32)
     w *= np.where(
@@ -500,28 +510,27 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
 
 
 def build_targets(
-    data: Mapping[str, np.ndarray], cfg: LossConfig
+    data: Mapping[str, np.ndarray], cfg: LossConfig, *, action_low=None, action_high=None
 ) -> Dict[str, np.ndarray]:
     """Precompute normalized/physical actions, value/risk/cost and weights."""
     action = np.asarray(data["action"], dtype=np.float32)
-    low = CLEAN_BOUNDS.low.astype(np.float32)
-    high = CLEAN_BOUNDS.high.astype(np.float32)
+    low = CLEAN_BOUNDS.low.astype(np.float32) if action_low is None else np.asarray(action_low, dtype=np.float32)
+    high = CLEAN_BOUNDS.high.astype(np.float32) if action_high is None else np.asarray(action_high, dtype=np.float32)
     width = np.maximum(high - low, 1e-6)
     action_norm = (action - low) / width
     label_oob = (action_norm < 0.0) | (action_norm > 1.0)
     action_norm_clipped = np.clip(action_norm, 0.0, 1.0)
 
-    value, risk, cost = _outcome_targets(data, cfg.gamma)
     plan_weight = _plan_weights(data, cfg)
+    # Bounds are model/checkpoint-specific; do not trust the collector's
+    # clean-box action_in_bounds column.
+    plan_weight = plan_weight * (~label_oob.any(axis=1))
 
     return {
         "action_phys": action.copy(),
         "action_norm": action_norm.astype(np.float32),
         "action_norm_clipped": action_norm_clipped.astype(np.float32),
         "label_oob": label_oob.astype(bool),
-        "value": value,
-        "risk": risk,
-        "cost": cost,
         "plan_weight": plan_weight,
     }
 
@@ -535,15 +544,13 @@ def _batch_from_indices(
     idx = np.asarray(indices, dtype=np.int64)
     batch: Dict[str, Tensor] = {}
     for key in INPUT_KEYS:
-        arr = np.ascontiguousarray(data[key][idx], dtype=np.float32)
+        dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
+        arr = np.ascontiguousarray(data[key][idx], dtype=dtype)
         batch[key] = torch.from_numpy(arr).to(device)
     for key in (
         "action_phys",
         "action_norm",
         "action_norm_clipped",
-        "value",
-        "risk",
-        "cost",
         "plan_weight",
     ):
         arr = np.ascontiguousarray(targets[key][idx], dtype=np.float32)
@@ -563,9 +570,9 @@ def _masked_mean(values: Tensor, mask: Tensor) -> Tensor:
     return _weighted_mean(values, mask.float())
 
 
-def _denorm(mu: Tensor) -> Tensor:
-    low = torch.tensor(CLEAN_BOUNDS.low, dtype=mu.dtype, device=mu.device)
-    high = torch.tensor(CLEAN_BOUNDS.high, dtype=mu.dtype, device=mu.device)
+def _denorm(mu: Tensor, low=None, high=None) -> Tensor:
+    low = torch.tensor(CLEAN_BOUNDS.low if low is None else low, dtype=mu.dtype, device=mu.device)
+    high = torch.tensor(CLEAN_BOUNDS.high if high is None else high, dtype=mu.dtype, device=mu.device)
     return low + mu * (high - low)
 
 
@@ -573,6 +580,10 @@ def compute_losses(
     outputs: Mapping[str, Tensor],
     batch: Mapping[str, Tensor],
     cfg: LossConfig,
+    *,
+    action_low=None,
+    action_high=None,
+    hard_limits=None,
 ) -> Tuple[Tensor, Dict[str, Tensor]]:
     """Return ``(total, components)`` for one batch.
 
@@ -583,7 +594,7 @@ def compute_losses(
     logstd = outputs["action_logstd"]
     weight = batch["plan_weight"]
     target_phys = batch["action_phys"]
-    pred_phys = _denorm(mu)
+    pred_phys = _denorm(mu, action_low, action_high)
 
     # ---- truncated Normal NLL on clipped normalized targets -----------------
     nll_row, _outside = truncated_normal_nll(
@@ -617,104 +628,18 @@ def compute_losses(
     moving = ((target_chord > 0.1) | (target_phys[:, 3] > 0.1)).float()
     smooth_weight = moving * weight
 
+    hard = HARD_LIMITS if hard_limits is None else hard_limits
     curvature_hinge = (
-        F.relu(kappa.abs() - float(HARD_LIMITS.kappa_max)).pow(2)
-        + F.relu(
-            kappa_rate_proxy.abs() - float(HARD_LIMITS.kappa_rate_max)
-        ).pow(2)
+        F.relu(kappa.abs() - float(hard.kappa_max)).pow(2)
+        + F.relu(kappa_rate_proxy.abs() - float(hard.kappa_rate_max)).pow(2)
     )
     accel_hinge = (
-        F.relu(float(HARD_LIMITS.a_long_min) - a_long).pow(2)
-        + F.relu(a_long - float(HARD_LIMITS.a_long_max)).pow(2)
-        + F.relu(
-            jerk_proxy.abs() - float(HARD_LIMITS.jerk_long_max)
-        ).pow(2)
+        F.relu(float(hard.a_long_min) - a_long).pow(2)
+        + F.relu(a_long - float(hard.a_long_max)).pow(2)
+        + F.relu(jerk_proxy.abs() - float(hard.jerk_long_max)).pow(2)
     )
     curvature = _weighted_mean(curvature_hinge, smooth_weight)
     accel = _weighted_mean(accel_hinge, smooth_weight)
-
-    # ---- value / risk / cost ------------------------------------------------
-    value = F.mse_loss(outputs["value"].squeeze(-1), batch["value"])
-    risk = F.binary_cross_entropy_with_logits(outputs["risk"], batch["risk"])
-    cost = F.mse_loss(outputs["cost_value"].squeeze(-1), batch["cost"])
-
-    # ---- auxiliary: lane role + OD gap/TTC/urgent ---------------------------
-    aux = outputs["aux"]
-    ld = batch["ld"]
-    lane_role = ld[:, -1, :, 0, LD_INDEX["lane_role"]].long().clamp(0, 3)
-    lane_valid = (batch["ld_mask"][:, -1] > 0.5).any(dim=-1)
-    lane_ce = F.cross_entropy(
-        aux["lane_role_logits"].reshape(-1, 4),
-        lane_role.reshape(-1),
-        reduction="none",
-    ).reshape(lane_role.shape)
-    lane_role_loss = _masked_mean(lane_ce, lane_valid)
-
-    od = batch["od"][:, -1]
-    od_valid = batch["od_mask"][:, -1] > 0.5
-    dx = od[..., OD_INDEX["dx"]]
-    vx = od[..., OD_INDEX["vx_rel"]]
-    length = od[..., OD_INDEX["length"]]
-    ahead = od_valid & (dx > 0.0)
-
-    # Gap is bumper-to-bumper longitudinal distance (ego front to object rear
-    # approximated by the object center minus half its length).
-    gap_target = (dx - 0.5 * length).clamp_min(0.0)
-    gap_loss = _masked_mean(
-        F.smooth_l1_loss(aux["od_gap"], gap_target, reduction="none", beta=1.0),
-        ahead,
-    )
-
-    closing = ahead & (vx < -0.1)
-    ttc_target = (gap_target / (-vx).clamp_min(0.1)).clamp_max(float(cfg.ttc_cap))
-    ttc_loss = _masked_mean(
-        F.smooth_l1_loss(aux["od_ttc"], ttc_target, reduction="none", beta=0.5),
-        closing,
-    )
-
-    ttc_all = torch.where(
-        vx < -0.1,
-        gap_target / (-vx).clamp_min(0.1),
-        torch.full_like(gap_target, float(cfg.ttc_cap)),
-    )
-    urgent_target = (ttc_all < float(cfg.urgent_ttc)).float()
-    urgent_loss = _masked_mean(
-        F.binary_cross_entropy_with_logits(
-            aux["od_urgent"], urgent_target, reduction="none"
-        ),
-        ahead,
-    )
-
-    # Query-selection supervision: teach q_lane to select the current lane
-    # (role 0) and q_od to select urgent/ahead objects.  These weights are not
-    # plan inputs; they are audit-only supervision of the learned queries.
-    lane_query_target = ((lane_role == 0) & lane_valid).float()
-    lane_query_loss = _masked_mean(
-        F.binary_cross_entropy(
-            aux["lane_query_weights"].clamp(1e-6, 1.0 - 1e-6),
-            lane_query_target,
-            reduction="none",
-        ),
-        lane_valid,
-    )
-    od_query_target = urgent_target
-    od_query_loss = _masked_mean(
-        F.binary_cross_entropy(
-            aux["od_query_weights"].clamp(1e-6, 1.0 - 1e-6),
-            od_query_target,
-            reduction="none",
-        ),
-        od_valid,
-    )
-
-    aux_loss = (
-        float(cfg.w_lane_role) * lane_role_loss
-        + float(cfg.w_gap) * gap_loss
-        + float(cfg.w_ttc) * ttc_loss
-        + float(cfg.w_urgent) * urgent_loss
-        + float(cfg.w_lane_query) * lane_query_loss
-        + float(cfg.w_od_query) * od_query_loss
-    )
 
     total = (
         float(cfg.nll_coef) * nll
@@ -723,10 +648,6 @@ def compute_losses(
         + float(cfg.w_velocity) * velocity
         + float(cfg.w_curvature) * curvature
         + float(cfg.w_accel) * accel
-        + float(cfg.value_coef) * value
-        + float(cfg.risk_coef) * risk
-        + float(cfg.cost_coef) * cost
-        + float(cfg.aux_coef) * aux_loss
     )
 
     components = {
@@ -737,23 +658,19 @@ def compute_losses(
         "velocity": velocity,
         "curvature": curvature,
         "accel": accel,
-        "value": value,
-        "risk": risk,
-        "cost": cost,
-        "aux": aux_loss,
-        "lane_role": lane_role_loss,
-        "od_gap": gap_loss,
-        "od_ttc": ttc_loss,
-        "od_urgent": urgent_loss,
-        "lane_query": lane_query_loss,
-        "od_query": od_query_loss,
     }
     return total, components
 
 
-def physical_mae(outputs: Mapping[str, Tensor], batch: Mapping[str, Tensor]) -> Tuple[Tensor, Tensor]:
+def physical_mae(
+    outputs: Mapping[str, Tensor],
+    batch: Mapping[str, Tensor],
+    *,
+    action_low=None,
+    action_high=None,
+) -> Tuple[Tensor, Tensor]:
     """Plan-weighted per-dimension physical MAE and its weight sum."""
-    pred_phys = _denorm(outputs["action_mu"])
+    pred_phys = _denorm(outputs["action_mu"], action_low, action_high)
     weight = batch["plan_weight"].unsqueeze(-1)
     err = (pred_phys - batch["action_phys"]).abs()
     return (err * weight).sum(dim=0), weight.sum()
@@ -816,7 +733,20 @@ def run_epoch(
             idx = order[start : start + int(batch_size)]
             batch = _batch_from_indices(data, targets, idx, device)
             outputs = model(batch)
-            _loss, components = compute_losses(outputs, batch, cfg)
+            _loss, components = compute_losses(
+                outputs, batch, cfg,
+                action_low=getattr(model, "action_low", None).detach().cpu().numpy()
+                if getattr(model, "action_low", None) is not None else None,
+                action_high=getattr(model, "action_high", None).detach().cpu().numpy()
+                if getattr(model, "action_high", None) is not None else None,
+                hard_limits=(
+                    __import__("env.action.action_space", fromlist=["DynamicsLimits"]).DynamicsLimits(
+                        **model.action_config["limits"]["hard"]
+                    )
+                    if getattr(model, "action_config", {}).get("limits", {}).get("hard")
+                    else None
+                ),
+            )
 
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -827,7 +757,13 @@ def run_epoch(
             plan_sum = float(batch["plan_weight"].sum().detach())
             _accumulate(sums, denoms, components, plan_sum, len(idx))
 
-            mae, wsum = physical_mae(outputs, batch)
+            mae, wsum = physical_mae(
+                outputs, batch,
+                action_low=getattr(model, "action_low", None).detach().cpu().numpy()
+                if getattr(model, "action_low", None) is not None else None,
+                action_high=getattr(model, "action_high", None).detach().cpu().numpy()
+                if getattr(model, "action_high", None) is not None else None,
+            )
             mae_sum += mae.detach().double().cpu()
             mae_weight += wsum.detach().double().cpu()
             n_plan_rows += int((batch["plan_weight"] > 0).sum())
@@ -885,34 +821,39 @@ def _make_config(
 ) -> Dict:
     train_seeds = sorted(int(x) for x in np.unique(data["scene_seed"][train_mask]))
     val_seeds = sorted(int(x) for x in np.unique(data["scene_seed"][val_mask]))
+    from net.build_net import load_config
+    ego = load_config().get("ego", {})
     return {
         "model_type": "clean",
-        "architecture": "StructuredPlanner",
+        "architecture": "DriveModelAdapter",
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
         "hidden": int(model.hidden),
         "heads": int(model.heads),
+        "spatial_layers": int(getattr(model, "spatial_layers", 2)),
         "input_keys": list(INPUT_KEYS),
         "excluded_inputs": [
-            "entity ids",
             "anchors",
             "expert audit fields",
             "episode outcomes",
         ],
-        "action_bounds_name": CLEAN_BOUNDS.name,
-        "action_low": CLEAN_BOUNDS.low.tolist(),
-        "action_high": CLEAN_BOUNDS.high.tolist(),
+        "action_bounds_name": str(getattr(model, "action_config", {}).get("name", "clean")),
+        "action_low": model.action_low.detach().cpu().tolist() if getattr(model, "action_low", None) is not None else CLEAN_BOUNDS.low.tolist(),
+        "action_high": model.action_high.detach().cpu().tolist() if getattr(model, "action_high", None) is not None else CLEAN_BOUNDS.high.tolist(),
         "decision": {
             "dt": float(cfg.dt),
             "steps_per_policy": 5,
             "history_frames": HISTORY_FRAMES,
         },
+        "ego": dict(getattr(model, "ego_config", {
+            "dt": float(ego.get("dt", cfg.dt)),
+            "wheelbase": float(ego.get("wheelbase", 2.46894)),
+            "max_steer_rad": float(ego.get("max_steer_rad", 0.6981317007977318)),
+        })),
         "limits": {
-            "hard": asdict(HARD_LIMITS),
-            "comfort": asdict(COMFORT_LIMITS),
-            "clean_hard": asdict(HARD_LIMITS),
-            "clean_comfort": asdict(COMFORT_LIMITS),
-            "smoothness_hinge": "clean_hard",
+            "hard": dict(getattr(model, "action_config", {}).get("limits", {}).get("hard", asdict(HARD_LIMITS))),
+            "comfort": dict(getattr(model, "action_config", {}).get("limits", {}).get("comfort", asdict(COMFORT_LIMITS))),
+            "smoothness_hinge": "hard",
         },
         "loss": asdict(cfg),
         "split": {
@@ -1064,19 +1005,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     data = load_data(args.data)
-    targets = build_targets(data, cfg)
+    if args.init:
+        model = load_model_from_checkpoint(args.init, device, strict=True)
+        print(f"[bc] initialized from {args.init}")
+    else:
+        model = StructuredPlanner().to(device)
+    action_low = model.action_low.detach().cpu().numpy() if getattr(model, "action_low", None) is not None else None
+    action_high = model.action_high.detach().cpu().numpy() if getattr(model, "action_high", None) is not None else None
+    targets = build_targets(data, cfg, action_low=action_low, action_high=action_high)
     train_mask, val_mask = split_masks(data, args.val_frac, args.seed)
     if not val_mask.any():
         print(
             "[bc] WARNING: validation split is empty (not enough scene "
             "seeds); monitoring train split instead"
         )
-
-    if args.init:
-        model = load_model_from_checkpoint(args.init, device, strict=True)
-        print(f"[bc] initialized from {args.init}")
-    else:
-        model = StructuredPlanner().to(device)
 
     config = _make_config(model, cfg, args, data, train_mask, val_mask)
     out_dir = Path(args.out)

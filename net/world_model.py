@@ -1,189 +1,52 @@
-"""Legacy latent WM plus the factorized bank-native world model.
+"""Bank-native temporal-spatial encoder, latent WM, and imagined rollout.
 
-``EgoConditionedLatentWM`` below is retained for the legacy D1/D2 pipeline.
-New code should use ``TemporalSpatialBlock`` and
-``FactorizedEgoConditionedLatentWM``.
-
-Legacy description follows.
-
-The model operates on the frozen planner's per-entity latents, not raw sensor
-tokens.  It predicts the next per-entity latent for each current slot, with a
-strict ``ego action`` condition.  The target encoder is frozen by the caller;
-this module contains only the transition model and a small autoregressive
-rollout helper for D2 probing.
+Contract highlights (docs/arch_lock.md):
+* ``z`` is a frame-dependent full-state latent; geometry is stored separately.
+* TSB temporal attention uses the same stable ID plus a frame-level
+  ``delta_pose(t -> query)``.  It does not project entity geometry.
+* TSB spatial attention uses current OD/LD plus an ego alignment token; nav is
+  policy-only.
+* The WM predicts a latent residual ``r_z``; geometry decoders are direct and
+  return absolute geometry in the current ego frame.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Callable, Dict, List
 
 import torch
 from torch import Tensor, nn
 
-from net.mem_bank import BankWindow, BankWindowBuilder, ImagineMemoryBank, NodeType
+from net.mem_bank import BankWindow, ImagineMemoryBank
 
 
-class EgoConditionedLatentWM(nn.Module):
-    """One-step latent residual model with ego-action conditioning."""
-
-    def __init__(
-        self,
-        *,
-        hidden: int = 80,
-        latent_dim: int = 128,
-        od_slots: int = 16,
-        ld_slots: int = 16,
-        action_dim: int = 4,
-        layers: int = 2,
-        heads: int = 4,
-    ) -> None:
-        super().__init__()
-        self.hidden = int(hidden)
-        self.latent_dim = int(latent_dim)
-        self.od_slots = int(od_slots)
-        self.ld_slots = int(ld_slots)
-        self.action_dim = int(action_dim)
-        self.action_mlp = nn.Sequential(
-            nn.Linear(action_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden)
-        )
-        self.ego_proj = nn.Linear(self.latent_dim, hidden)
-        self.nav_proj = nn.Linear(self.latent_dim, hidden)
-        self.od_proj = nn.Linear(self.latent_dim, hidden)
-        self.ld_proj = nn.Linear(self.latent_dim, hidden)
-        self.modality = nn.Embedding(4, hidden)  # ego, nav, od, ld
-        layer = nn.TransformerEncoderLayer(
-            d_model=hidden,
-            nhead=heads,
-            dim_feedforward=4 * hidden,
-            dropout=0.0,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.fusion = nn.TransformerEncoder(layer, num_layers=int(layers))
-        self.norm = nn.LayerNorm(hidden)
-        self.od_head = nn.Linear(hidden, self.latent_dim)
-        self.ld_head = nn.Linear(hidden, self.latent_dim)
-        self.nav_head = nn.Linear(hidden, self.latent_dim)
-        self.ego_head = nn.Linear(hidden, self.latent_dim)
-        self._init()
-
-    def _init(self) -> None:
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, std=0.02)
-        # Residual heads start at zero so D1 initializes exactly at persistence;
-        # otherwise the WM can be worse than the baseline for many epochs.
-        for head in (self.od_head, self.ld_head, self.nav_head, self.ego_head):
-            nn.init.zeros_(head.weight)
-            nn.init.zeros_(head.bias)
-
-    def forward(
-        self,
-        *,
-        od: Tensor,
-        ld: Tensor,
-        nav: Tensor,
-        ego: Tensor,
-        od_mask: Tensor,
-        ld_mask: Tensor,
-        action: Tensor,
-    ) -> Dict[str, Tensor]:
-        """Predict next latents in the current slot order.
-
-        Shapes:
-        - od [B,16,H], ld [B,16,H], nav/ego [B,H]
-        - od_mask [B,16], ld_mask [B,16]
-        - action [B,4] physical/normalized action
-        """
-        b = od.shape[0]
-        action_ctx = self.action_mlp(action)
-        ego_t = self.ego_proj(ego) + action_ctx + self.modality.weight[0]
-        nav_t = self.nav_proj(nav) + action_ctx + self.modality.weight[1]
-        od_t = self.od_proj(od) + action_ctx[:, None, :] + self.modality.weight[2]
-        ld_t = self.ld_proj(ld) + action_ctx[:, None, :] + self.modality.weight[3]
-
-        tokens = torch.cat(
-            [ego_t[:, None, :], nav_t[:, None, :], od_t, ld_t], dim=1
-        )
-        valid = torch.cat(
-            [
-                torch.ones((b, 1), dtype=torch.bool, device=od.device),
-                torch.ones((b, 1), dtype=torch.bool, device=od.device),
-                od_mask > 0.5,
-                ld_mask > 0.5,
-            ],
-            dim=1,
-        )
-        out = self.fusion(tokens, src_key_padding_mask=~valid)
-        out = self.norm(out)
-        ego_out = out[:, 0]
-        nav_out = out[:, 1]
-        od_out = out[:, 2 : 2 + self.od_slots]
-        ld_out = out[:, 2 + self.od_slots :]
-        return {
-            "od": od + self.od_head(od_out),
-            "ld": ld + self.ld_head(ld_out),
-            "nav": nav + self.nav_head(nav_out),
-            "ego": ego + self.ego_head(ego_out),
-        }
+def _wrap_angle(x: Tensor) -> Tensor:
+    return torch.atan2(torch.sin(x), torch.cos(x))
 
 
-def masked_mse(pred: Tensor, target: Tensor, mask: Tensor) -> Tensor:
-    """Mean squared error over valid entries, with zero when no entries."""
-    m = (mask > 0.5).to(pred.dtype)
-    while m.ndim < pred.ndim:
-        m = m.unsqueeze(-1)
-    # Count every valid latent element, not just valid slots.  Otherwise the
-    # denominator is H× too small and all latent MSEs are inflated.
-    m = m.expand_as(pred)
-    denom = m.sum().clamp_min(1.0)
-    return ((pred - target).pow(2) * m).sum() / denom
+def frame_delta(ego_pose: Tensor) -> Tensor:
+    """Return ``delta_pose(t -> query)`` for a [B,T,3] pose sequence.
 
-
-def rollout_latents(
-    wm: EgoConditionedLatentWM,
-    initial: Dict[str, Tensor],
-    actions: Tensor,
-    masks: Dict[str, Tensor],
-) -> Tuple[Dict[str, Tensor], list[Dict[str, Tensor]]]:
-    """Autoregressive 1..H rollout with externally supplied actions.
-
-    ``actions`` is [B,H,4].  This is a diagnostic interface for D2; it does not
-    add an imagined reward or change the planner.
+    The result is the query pose expressed in each historical ego frame:
+    ``(dx, dy, dyaw)``.  The last frame is zero; padded/invalid poses simply
+    produce a finite delta and are masked by the caller.
     """
-    state = {key: value for key, value in initial.items()}
-    history: list[Dict[str, Tensor]] = []
-    for t in range(int(actions.shape[1])):
-        state = wm(
-            od=state["od"],
-            ld=state["ld"],
-            nav=state["nav"],
-            ego=state["ego"],
-            od_mask=masks["od"],
-            ld_mask=masks["ld"],
-            action=actions[:, t],
-        )
-        history.append(state)
-    return state, history
-
-
-# ---------------------------------------------------------------------------
-# Factorized temporal-spatial encoder and the new OD/LD world model
-# ---------------------------------------------------------------------------
-
+    if ego_pose.dim() != 3 or ego_pose.shape[-1] != 3:
+        raise ValueError("ego_pose must be [B,T,3]")
+    q = ego_pose[:, -1:]
+    p = ego_pose
+    c = torch.cos(p[..., 2])
+    s = torch.sin(p[..., 2])
+    dx_w = q[..., 0] - p[..., 0]
+    dy_w = q[..., 1] - p[..., 1]
+    dx = c * dx_w + s * dy_w
+    dy = -s * dx_w + c * dy_w
+    dyaw = _wrap_angle(q[..., 2] - p[..., 2])
+    return torch.stack([dx, dy, dyaw], dim=-1)
 
 
 class TemporalAttention(nn.Module):
-    """Masked temporal attention over content + relative-pose tokens.
-
-    Inputs are batch-first ``[B,T,N,H]``; output is the current entity token
-    ``[B,N,H]``.  The current-frame validity is applied to the whole output.
-    """
+    """Masked temporal attention over current entity + same-ID history."""
 
     def __init__(self, hidden: int, heads: int, frames: int = 6) -> None:
         super().__init__()
@@ -192,32 +55,45 @@ class TemporalAttention(nn.Module):
         self.attn = nn.MultiheadAttention(self.hidden, int(heads), batch_first=True)
         self.norm = nn.LayerNorm(self.hidden)
 
-    def forward(self, tokens: Tensor, valid: Tensor, stable_id: Tensor) -> Tensor:
+    def forward(
+        self,
+        tokens: Tensor,
+        valid: Tensor,
+        stable_id: Tensor,
+        frame_valid: Tensor | None = None,
+    ) -> Tensor:
         b, t, n, h = tokens.shape
         if t > self.frames:
             raise ValueError(f"window has {t} frames, max {self.frames}")
+        if frame_valid is not None:
+            if frame_valid.shape != (b, t):
+                raise ValueError("frame_valid must be [B,T]")
+            valid = valid & frame_valid[:, :, None]
         x = tokens.permute(0, 2, 1, 3).reshape(b * n, t, h)
         v = valid.permute(0, 2, 1).reshape(b * n, t)
         ids = stable_id.permute(0, 2, 1).reshape(b * n, t)
-        q = x[:, -1:, :]
         same = ids == ids[:, -1:]
         mask = ~((v > 0.5) & same)
         all_bad = mask.all(dim=1)
         if bool(all_bad.any()):
             mask = mask.clone()
             mask[all_bad, -1] = False
+        # Invalid slots may contain NaN; zero them before the matmul because
+        # key_padding_mask only removes the weight, not the NaN value.
+        x = torch.where(v[..., None] > 0.5, x, torch.zeros_like(x))
+        q = x[:, -1:, :]
         out = self.attn(q, x, x, key_padding_mask=mask, need_weights=False)[0][:, 0]
         out = self.norm(out + q[:, 0])
-        current_valid = v[:, -1].to(out.dtype)
-        out = out * current_valid.unsqueeze(-1) * (~all_bad).to(out.dtype).unsqueeze(-1)
+        keep = ((v[:, -1] > 0.5) & (~all_bad)).unsqueeze(-1)
+        out = torch.where(keep, out, torch.zeros_like(out))
         return out.reshape(b, n, h)
 
 
 class TemporalSpatialBlock(nn.Module):
-    """Factorized temporal then current-frame spatial fusion for OD/LD.
+    """Factorized temporal + current-frame spatial fusion.
 
-    Ego/Nav are current policy inputs, not Bank records.  Their optional masks
-    are applied in the spatial transformer.
+    Temporal tokens carry a frame-level ego delta; spatial tokens carry current
+    OD/LD and one ego alignment token.  Nav is intentionally absent.
     """
 
     def __init__(
@@ -227,17 +103,18 @@ class TemporalSpatialBlock(nn.Module):
         spatial_layers: int = 2,
         od_slots: int = 16,
         ld_slots: int = 16,
+        frames: int = 6,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.od_slots = int(od_slots)
         self.ld_slots = int(ld_slots)
-        self.temporal_od = TemporalAttention(hidden, heads)
-        self.temporal_ld = TemporalAttention(hidden, heads)
-        self.pose = nn.Sequential(
+        self.temporal_od = TemporalAttention(hidden, heads, frames=frames)
+        self.temporal_ld = TemporalAttention(hidden, heads, frames=frames)
+        self.frame_embed = nn.Sequential(
             nn.Linear(3, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         )
-        self.modality = nn.Embedding(4, hidden)  # ego, nav, od, ld
+        self.modality = nn.Embedding(3, hidden)  # ego, od, ld
         layer = nn.TransformerEncoderLayer(
             d_model=hidden,
             nhead=heads,
@@ -253,109 +130,82 @@ class TemporalSpatialBlock(nn.Module):
     def forward(
         self,
         window: BankWindow,
-        nav: Tensor,
         ego: Tensor,
         *,
-        nav_valid: Tensor | None = None,
         ego_valid: Tensor | None = None,
     ) -> Dict[str, Tensor]:
-        if nav.shape[-1] != self.hidden or ego.shape[-1] != self.hidden:
-            raise ValueError("nav/ego must have hidden size")
+        if ego.shape[-1] != self.hidden:
+            raise ValueError("ego must have hidden size")
         if window.od_content.shape[2] != self.od_slots or window.ld_content.shape[2] != self.ld_slots:
             raise ValueError("BankWindow slot count does not match TemporalSpatialBlock")
 
-        od_pose = BankWindowBuilder.relative_pose(window.od_geometry, NodeType.OD)
-        ld_pose = BankWindowBuilder.relative_pose(window.ld_geometry, NodeType.LD)
-        od_tokens = window.od_content + self.pose(od_pose)
-        ld_tokens = window.ld_content + self.pose(ld_pose)
-        od = self.temporal_od(od_tokens, window.od_valid, window.od_stable_id)
-        ld = self.temporal_ld(ld_tokens, window.ld_valid, window.ld_stable_id)
+        # z is frame-dependent; add only a frame-level ego delta.  No entity
+        # geometry is projected or added here.
+        delta = frame_delta(window.ego_pose)
+        frame_token = self.frame_embed(delta)
+        od_tokens = window.od_content + frame_token[:, :, None, :]
+        ld_tokens = window.ld_content + frame_token[:, :, None, :]
+        od = self.temporal_od(od_tokens, window.od_valid, window.od_stable_id, window.frame_valid)
+        ld = self.temporal_ld(ld_tokens, window.ld_valid, window.ld_stable_id, window.frame_valid)
 
         b = od.shape[0]
         od_valid = window.od_valid[:, -1]
         ld_valid = window.ld_valid[:, -1]
-        ego_ok = torch.ones((b, 1), dtype=torch.bool, device=od.device) if ego_valid is None else ego_valid.reshape(b, 1) > 0.5
-        nav_ok = torch.ones((b, 1), dtype=torch.bool, device=od.device) if nav_valid is None else nav_valid.reshape(b, 1) > 0.5
+        ego_ok = (
+            torch.ones((b, 1), dtype=torch.bool, device=od.device)
+            if ego_valid is None
+            else ego_valid.reshape(b, 1) > 0.5
+        )
         tokens = torch.cat(
             [
                 ego[:, None] + self.modality.weight[0],
-                nav[:, None] + self.modality.weight[1],
-                od + self.modality.weight[2],
-                ld + self.modality.weight[3],
+                od + self.modality.weight[1],
+                ld + self.modality.weight[2],
             ],
             dim=1,
         )
-        valid = torch.cat([ego_ok, nav_ok, od_valid > 0.5, ld_valid > 0.5], dim=1)
-        # torch's TransformerEncoder can produce NaN if every key is masked.
-        # Keep the ego anchor valid as a numerical fallback; its output is
-        # ignored by the planner when all entity valid masks are false.
+        valid = torch.cat([ego_ok, od_valid > 0.5, ld_valid > 0.5], dim=1)
         if not bool(valid.any(dim=1).all()):
             valid = valid.clone()
-            empty = ~valid.any(dim=1)
-            valid[empty, 0] = True
+            valid[~valid.any(dim=1), 0] = True
+        tokens = torch.where(valid[..., None], tokens, torch.zeros_like(tokens))
         out = self.spatial(tokens, src_key_padding_mask=~valid)
         out = self.norm(out)
-        od_out = out[:, 2 : 2 + self.od_slots]
-        ld_out = out[:, 2 + self.od_slots : 2 + self.od_slots + self.ld_slots]
+        out = torch.where(valid[..., None], out, torch.zeros_like(out))
+        od_out = out[:, 1 : 1 + self.od_slots]
+        ld_out = out[:, 1 + self.od_slots : 1 + self.od_slots + self.ld_slots]
         return {"od": od_out, "ld": ld_out, "tokens": out}
 
 
 class ODGeometryDecoder(nn.Module):
-    """Predict the absolute OD relative pose in the query ego frame."""
+    """Decode absolute OD geometry ``[x,y,yaw,vx,vy]`` from state latent."""
 
     def __init__(self, hidden: int = 128) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, 3)
+            nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, 5)
         )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, content: Tensor) -> Tensor:
         return self.net(content)
 
 
-class LDResidualDecoder(nn.Module):
-    """Predict a small LD polyline residual on top of explicit projection."""
+class LDGeometryDecoder(nn.Module):
+    """Decode absolute LD polyline ``[x0,y0,...,x4,y4]`` from state latent."""
 
-    def __init__(self, hidden: int = 128, action_dim: int = 4, points: int = 5) -> None:
+    def __init__(self, hidden: int = 128, points: int = 5) -> None:
         super().__init__()
         self.points = int(points)
         self.net = nn.Sequential(
-            nn.Linear(hidden + action_dim + 2 * self.points, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, 2 * self.points),
+            nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, 2 * self.points)
         )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, content: Tensor, action: Tensor, base_ld: Tensor) -> Tensor:
-        b, n, _ = content.shape
-        a = action[:, None, :].expand(b, n, -1)
-        base = base_ld.reshape(b, n, 2 * self.points)
-        return self.net(torch.cat([content, a, base], dim=-1))
+    def forward(self, content: Tensor) -> Tensor:
+        return self.net(content)
 
 
-def project_ld(geometry: Tensor, source_pose: Tensor, target_pose: Tensor) -> Tensor:
-    """Project LD polyline geometry into ``target_pose`` ego coordinates."""
-    return BankWindowBuilder.project_geometry(
-        geometry, source_pose, target_pose, NodeType.LD
-    )
-
-
-def add_ld_residual(projected: Tensor, residual: Tensor) -> Tensor:
-    """Add a ``[...,5,2]`` residual to flattened ``[...,10]`` LD geometry."""
-    if projected.shape[-1] != 10:
-        raise ValueError("projected LD geometry must be flattened [...,10]")
-    if residual.shape[-1] == 10:
-        return projected + residual
-    if residual.shape[-2:] == (5, 2):
-        return projected + residual.reshape(*residual.shape[:-2], -1)
-    raise ValueError("LD residual must be [...,5,2] or [...,10]")
-
-
-class FactorizedEgoConditionedLatentWM(nn.Module):
-    """OD content transition + OD pose decoder + LD residual decoder."""
+class EgoConditionedLatentWM(nn.Module):
+    """Lightweight latent transition plus direct OD/LD geometry decoders."""
 
     def __init__(self, hidden: int = 128, action_dim: int = 4, points: int = 5) -> None:
         super().__init__()
@@ -366,10 +216,22 @@ class FactorizedEgoConditionedLatentWM(nn.Module):
         self.od_delta = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
         )
+        self.ld_delta = nn.Sequential(
+            nn.Linear(2 * hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
+        )
         nn.init.zeros_(self.od_delta[-1].weight)
         nn.init.zeros_(self.od_delta[-1].bias)
+        nn.init.zeros_(self.ld_delta[-1].weight)
+        nn.init.zeros_(self.ld_delta[-1].bias)
         self.od_geometry = ODGeometryDecoder(hidden)
-        self.ld_residual = LDResidualDecoder(hidden, action_dim=action_dim, points=points)
+        self.ld_geometry = LDGeometryDecoder(hidden, points=points)
+        # Slot-storage cue for currently invalid slots.  Target-only/new
+        # entities have no content; without this cue every free slot would
+        # decode from the identical zero vector.  Valid slots are unaffected.
+        self.od_slot_embed = nn.Parameter(torch.zeros(16, hidden))
+        self.ld_slot_embed = nn.Parameter(torch.zeros(16, hidden))
+        nn.init.normal_(self.od_slot_embed, std=0.02)
+        nn.init.normal_(self.ld_slot_embed, std=0.02)
 
     def forward(
         self,
@@ -377,63 +239,62 @@ class FactorizedEgoConditionedLatentWM(nn.Module):
         ld: Tensor,
         action: Tensor,
         *,
-        od_geometry: Tensor | None = None,
-        ld_geometry: Tensor | None = None,
         od_valid: Tensor | None = None,
         ld_valid: Tensor | None = None,
-    ) -> Dict[str, Tensor | None]:
+    ) -> Dict[str, Tensor]:
         b, n, _ = od.shape
+        if not torch.isfinite(action).all():
+            raise ValueError("action must be finite")
+        od_bool = (
+            torch.ones((b, n), dtype=torch.bool, device=od.device)
+            if od_valid is None
+            else od_valid > 0.5
+        )
+        ld_bool = (
+            torch.ones((b, n), dtype=torch.bool, device=ld.device)
+            if ld_valid is None
+            else ld_valid > 0.5
+        )
+        # The encoder may emit NaN for invalid slots; sanitize before the
+        # MLP because 0 * NaN would poison every entity in the batch.
+        od = torch.where(od_bool[..., None], od, torch.zeros_like(od))
+        ld = torch.where(ld_bool[..., None], ld, torch.zeros_like(ld))
         a = self.action(action)[:, None, :].expand(b, n, -1)
-        od_mask = torch.ones((b, n, 1), dtype=od.dtype, device=od.device) if od_valid is None else od_valid.unsqueeze(-1).to(od.dtype)
-        ld_mask = torch.ones((b, n, 1), dtype=ld.dtype, device=ld.device) if ld_valid is None else ld_valid.unsqueeze(-1).to(ld.dtype)
-        od_next = od + self.od_delta(torch.cat([od, a], dim=-1)) * od_mask
-        if ld_geometry is None:
-            ld_res = None
-            ld_next = None
-        else:
-            base_ld = ld_geometry
-            ld_res = self.ld_residual(ld, action, base_ld) * ld_mask
-            ld_next = base_ld + ld_res
-
-        # OD decoder is absolute relative pose, not a residual.
-        pose = self.od_geometry(od_next) * od_mask
-        yaw = torch.atan2(torch.sin(pose[..., 2]), torch.cos(pose[..., 2]))
-        if od_geometry is not None and od_geometry.shape[-1] >= 5:
-            od_next_geometry = torch.cat(
-                [pose[..., :2], yaw.unsqueeze(-1), od_geometry[..., 3:]], dim=-1
-            )
-        else:
-            od_next_geometry = torch.cat([pose[..., :2], yaw.unsqueeze(-1)], dim=-1)
+        od_mask = od_bool.unsqueeze(-1).to(od.dtype)
+        ld_mask = ld_bool.unsqueeze(-1).to(ld.dtype)
+        od_res = self.od_delta(torch.cat([od, a], dim=-1)) * od_mask
+        ld_res = self.ld_delta(torch.cat([ld, a], dim=-1)) * ld_mask
+        od_next = od + od_res
+        ld_next = ld + ld_res
         return {
             "od": od_next,
-            "ld": ld,
-            "od_geometry": od_next_geometry,
+            "ld": ld_next,
+            "od_residual": od_res,
             "ld_residual": ld_res,
-            "ld_geometry": ld_next,
+            # Geometry is decoded for every slot; validity is applied by the
+            # loss mask.  Invalid slots receive a slot-storage cue so
+            # target-only/new entities are distinguishable from each other.
+            "od_geometry": self.od_geometry(
+                od_next + (~od_bool)[..., None] * self.od_slot_embed[:n]
+            ),
+            "ld_geometry": self.ld_geometry(
+                ld_next + (~ld_bool)[..., None] * self.ld_slot_embed[:n]
+            ),
             "od_valid": od_valid,
             "ld_valid": ld_valid,
         }
 
 
-
-# The old :class:`EgoConditionedLatentWM` above is retained for the legacy
-# D1/D2 pipeline.  New code should use the factorized class.
-EgoConditionedLatentWMV2 = FactorizedEgoConditionedLatentWM
-
-
-
-def _sequence_step(x: Tensor | None, n: int, name: str, *, horizon: int, batch: int, hidden: int | None = None) -> Tensor | None:
-    if x is None:
-        return None
-    if name.endswith("valid_seq") and x.dim() == 2:
-        if x.shape[0] != batch or x.shape[1] < horizon:
-            raise ValueError(f"{name} must be [B,H>=horizon] or [B,H>=horizon,1], got {tuple(x.shape)}")
-        return x[:, n, None]
-    if x.dim() != 3 or x.shape[0] != batch or x.shape[1] < horizon:
-        raise ValueError(f"{name} must be [B,H,D] with H>={horizon}, got {tuple(x.shape)}")
-    if hidden is not None and x.shape[2] != hidden:
-        raise ValueError(f"{name} last dim must be hidden={hidden}, got {x.shape[2]}")
-    return x[:, n]
+def compose_pose(pose: Tensor, action: Tensor) -> Tensor:
+    """SE(2) endpoint from current pose and physical ``(dx,dy,dpsi,...)``."""
+    if pose.shape[-1] != 3 or action.shape[-1] < 3:
+        raise ValueError("pose must be [...,3] and action [...,>=3]")
+    c = torch.cos(pose[..., 2])
+    s = torch.sin(pose[..., 2])
+    x = pose[..., 0] + c * action[..., 0] - s * action[..., 1]
+    y = pose[..., 1] + s * action[..., 0] + c * action[..., 1]
+    yaw = _wrap_angle(pose[..., 2] + action[..., 2])
+    return torch.stack([x, y, yaw], dim=-1)
 
 
 def imagine_rollout(
@@ -443,31 +304,48 @@ def imagine_rollout(
     *,
     temporal_spatial: TemporalSpatialBlock,
     planner,
-    world_model: FactorizedEgoConditionedLatentWM,
+    world_model: EgoConditionedLatentWM,
+    action_to_requested: Callable[[Tensor], Tensor],
+    ego_features: Tensor,
+    ego_step: Callable[[Tensor, Tensor, Tensor], tuple[Tensor, Tensor]],
+    ego_encoder: Callable[[Tensor], Tensor],
     actions: Tensor | None = None,
-    action_provider=None,
+    action_provider: Callable[[Dict[str, Tensor], Tensor, int], Tensor] | None = None,
     horizon: int = 6,
-    ego_pose: Tensor | None = None,
-    nav_valid: Tensor | None = None,
     ego_valid: Tensor | None = None,
-    nav_seq: Tensor | None = None,
-    ego_seq: Tensor | None = None,
-    nav_valid_seq: Tensor | None = None,
-    ego_valid_seq: Tensor | None = None,
     imagine_bank: ImagineMemoryBank | None = None,
     detach: bool = True,
-) -> list[Dict[str, Tensor]]:
-    """Model-level imagined rollout.
+) -> List[Dict[str, Tensor]]:
+    """Full model-level 6-transition rollout.
 
-    This is the single rollout implementation.  ``DriveModel.imagine`` delegates
-    here.  ``nav_seq``/``ego_seq`` are encoded hidden vectors ``[B,H,hidden]``;
-    raw observations are not accepted.
+    ``policy_0..policy_5`` are produced at t0..t5.  Each policy supplies one
+    action; action ``a_t`` drives the transition to ``t+1``.  The final
+    transition produces terminal state t6.  ``t6`` has no policy.
     """
     if not 1 <= int(horizon) <= 6:
         raise ValueError("imagine horizon must be in 1..6")
     b = int(window.batch_size)
-    if imagine_bank is not None and b != 1:
-        raise ValueError("ImagineMemoryBank rollout supports B=1 only")
+    device = ego.device
+    window = window.to(device)
+    if imagine_bank is not None:
+        if b != 1:
+            raise ValueError("ImagineMemoryBank rollout supports B=1 only")
+        bank_window = imagine_bank.window().to(device)
+        all_fields = (
+            "od_content", "ld_content", "od_geometry", "ld_geometry", "ego_pose",
+            "od_type", "ld_type", "od_stable_id", "ld_stable_id", "od_valid",
+            "ld_valid", "rollout_depth", "source", "frame_valid",
+        )
+        for field in all_fields:
+            if getattr(window, field).shape != getattr(bank_window, field).shape:
+                raise ValueError(f"window/{field} shape does not match imagine_bank")
+        for field in all_fields:
+            a, bank_value = getattr(window, field), getattr(bank_window, field)
+            if a.is_floating_point():
+                if not torch.allclose(a, bank_value):
+                    raise ValueError(f"window/{field} does not match imagine_bank")
+            elif not torch.equal(a, bank_value):
+                raise ValueError(f"window/{field} does not match imagine_bank")
     hidden = int(nav.shape[-1])
     if ego.shape[-1] != hidden:
         raise ValueError("nav/ego hidden size mismatch")
@@ -476,59 +354,70 @@ def imagine_rollout(
             raise ValueError("actions must be [B,H,4]")
         if actions.shape[1] < horizon:
             raise ValueError("actions sequence is shorter than horizon")
-    if ego_pose is not None:
-        if ego_pose.dim() != 3 or ego_pose.shape[0] != b or ego_pose.shape[-1] != 3:
-            raise ValueError("ego_pose must be [B,H,3]")
-        if ego_pose.shape[1] < horizon:
-            raise ValueError("ego_pose sequence is shorter than horizon")
+        if (
+            not torch.isfinite(actions).all()
+            or bool(((actions < 0.0) | (actions > 1.0)).any())
+        ):
+            raise ValueError("actions must be finite normalized policy actions in [0,1]")
+    if ego_features.shape[0] != b:
+        raise ValueError("ego_features batch mismatch")
 
-    current_window = imagine_bank.window() if imagine_bank is not None else window
-    outputs: list[Dict[str, Tensor]] = []
+    current_window = imagine_bank.window().to(device) if imagine_bank is not None else window
+    current_ego = ego.detach() if detach else ego
+    current_ego_features = ego_features.detach() if (detach and ego_features is not None) else ego_features
+    if detach:
+        nav = nav.detach()
+    outputs: List[Dict[str, Tensor]] = []
     for n in range(int(horizon)):
-        nav_n = _sequence_step(nav_seq, n, "nav_seq", horizon=horizon, batch=b, hidden=hidden)
-        ego_n = _sequence_step(ego_seq, n, "ego_seq", horizon=horizon, batch=b, hidden=hidden)
-        if nav_n is None:
-            nav_n = nav
-        if ego_n is None:
-            ego_n = ego
-        nav_v = nav_valid if nav_valid_seq is None else _sequence_step(nav_valid_seq, n, "nav_valid_seq", horizon=horizon, batch=b)
-        ego_v = ego_valid if ego_valid_seq is None else _sequence_step(ego_valid_seq, n, "ego_valid_seq", horizon=horizon, batch=b)
-        z = temporal_spatial(current_window, nav_n, ego_n, nav_valid=nav_v, ego_valid=ego_v)
+        z = temporal_spatial(current_window, current_ego, ego_valid=ego_valid)
         od_valid = current_window.od_valid[:, -1]
         ld_valid = current_window.ld_valid[:, -1]
-        policy = planner(z["od"], z["ld"], nav_n, ego_n, od_valid, ld_valid)
+        policy = planner(z["od"], z["ld"], nav, current_ego, od_valid, ld_valid)
         outputs.append(policy)
-        if n + 1 >= int(horizon):
-            break
+
         if actions is not None:
             action = actions[:, n]
         elif action_provider is not None:
-            action = action_provider(policy, ego_n, n)
+            action = action_provider(policy, current_ego, n)
         else:
             action = policy["action_mu"]
         if action.shape[-1] != 4:
             raise ValueError("action must have 4 dims")
+        if (
+            not torch.isfinite(action).all()
+            or bool(((action < 0.0) | (action > 1.0)).any())
+        ):
+            raise ValueError("actions must be finite normalized policy actions in [0,1]")
+        if detach:
+            action = action.detach()
 
+        requested = action_to_requested(action)
+        if detach:
+            requested = requested.detach()
         source_pose = current_window.ego_pose[:, -1]
-        if ego_pose is not None:
-            next_idx = min(n + 1, int(ego_pose.shape[1]) - 1)
-            next_pose = ego_pose[:, next_idx]
-        else:
-            next_pose = source_pose
-        base_od = BankWindowBuilder.project_geometry(
-            current_window.od_geometry[:, -1], source_pose, next_pose, NodeType.OD
-        )
-        base_ld = BankWindowBuilder.project_geometry(
-            current_window.ld_geometry[:, -1], source_pose, next_pose, NodeType.LD
-        )
+        next_pose, next_ego_features = ego_step(current_ego_features, requested, source_pose)
+        if detach:
+            next_pose = next_pose.detach()
+            if next_ego_features is not None:
+                next_ego_features = next_ego_features.detach()
+        # WM operates on the current bank state z_hat, not on the policy's
+        # temporally fused TSB output.  This keeps the recurrence literal:
+        # z_hat_{t+1} = z_hat_t + r_z.
+        wm_od = current_window.od_content[:, -1]
+        wm_ld = current_window.ld_content[:, -1]
+        if detach:
+            wm_od = wm_od.detach()
+            wm_ld = wm_ld.detach()
         step = world_model(
-            z["od"], z["ld"], action,
-            od_geometry=base_od, ld_geometry=base_ld,
-            od_valid=od_valid, ld_valid=ld_valid,
+            wm_od,
+            wm_ld,
+            action,
+            od_valid=od_valid,
+            ld_valid=ld_valid,
         )
         if detach:
             step = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in step.items()}
-        depth = int(current_window.rollout_depth[0, -1].item()) + 1
+        depth = current_window.rollout_depth[:, -1] + 1
         next_window = current_window.advance(
             od_content=step["od"],
             od_geometry=step["od_geometry"],
@@ -543,9 +432,6 @@ def imagine_rollout(
             ego_pose=next_pose,
             source=1,
             rollout_depth=depth,
-            source_pose=source_pose,
-            target_pose=next_pose,
-            project_new_geometry=False,
         )
         if imagine_bank is not None:
             prev = imagine_bank.frames[-1]
@@ -554,14 +440,15 @@ def imagine_rollout(
                 frame_id=prev.frame_id + 1,
                 timestamp=prev.timestamp + 0.5,
                 parent_frame_id=prev.frame_id,
-                action_from_parent=action,
+                action_from_parent=requested,
             )
             imagine_bank.append(record, detach=detach)
-            current_window = imagine_bank.window()
+            current_window = imagine_bank.window().to(device)
         else:
             current_window = next_window
+
+        current_ego = ego_encoder(next_ego_features)
+        if detach:
+            current_ego = current_ego.detach()
+        current_ego_features = next_ego_features
     return outputs
-
-
-# The contract calls this the model-level rollout.
-rollout = imagine_rollout

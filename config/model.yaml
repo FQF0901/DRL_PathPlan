@@ -29,12 +29,38 @@ bank:
   capacity: 6
   od_slots: 16
   ld_slots: 16
-  topk: 16
 
 rollout:
   horizon: 6
 
+ego:
+  dt: 0.5
+  wheelbase: 2.46894
+  max_steer_rad: 0.6981317007977318
 
-deployable_param_target: 1000000
+action:
+  bounds:
+    name: clean
+    low: [0.0, -1.5, -0.8, 0.0]
+    high: [7.5, 1.5, 0.8, 15.0]
+  limits:
+    hard:
+      a_long_min: -10.0
+      a_long_max: 3.5
+      a_lat_max: 8.0
+      kappa_max: 0.345
+      kappa_rate_max: 1.0
+      jerk_long_max: 20.0
+      jerk_lat_max: 20.0
+    comfort:
+      a_long_min: -4.0
+      a_long_max: 2.0
+      a_lat_max: 3.0
+      kappa_max: 0.20
+      kappa_rate_max: 0.05
+      jerk_long_max: 5.0
+      jerk_lat_max: 5.0
+
+deployable_param_target: 1300000
 deployable_param_min: 800000
-deployable_param_max: 1200000
+deployable_param_max: 1500000

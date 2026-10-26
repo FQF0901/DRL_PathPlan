@@ -1,3 +1,10 @@
+> **2026-10-26 status update (supersedes details below):** live eval/PPO use
+> `RealMemoryBank`/`BankWindow`; collectors write `raw_history`; BC/PPO no
+> longer train value/risk/cost heads; `pipeline/losses.py` and bank-native
+> `train_wm` are wired; `best_drive.pt` loads through the eval adapter.
+> See `docs/deepseekv4p1_argue.md` for the current review status. The older
+> details below are retained as history.
+
 # Implementation Status
 
 > 日期：2026-10-24

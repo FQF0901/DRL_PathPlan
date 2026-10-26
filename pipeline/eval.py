@@ -3,11 +3,10 @@
 The previous exact/LQR split is available only from git history/tag
 ``pre-consolidation``:
 
-* observation history comes from :mod:`env.obs` (``build_observation`` +
-  ``stack_history``);
+* observation history is maintained by ``RealMemoryBank`` / BankWindow;
 * the policy is :class:`net.model.StructuredPlanner` with normalized
   ``action_mu`` in ``[0, 1]``;
-* actions are denormalized with :data:`env.action.action_space.CLEAN_BOUNDS` and turned
+* actions are denormalized with the checkpoint action bounds and turned
   into one PSTL 0.5 s segment by ``action_to_trajectory``.
 
 Only the **first 0.5 s segment** of a plan is executed (5 x 0.1 s substeps).
@@ -37,22 +36,21 @@ from env.obs import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
     build_observation,
-    stack_history,
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker, LqrTracker
 from env.action.action_space import (
-    CLEAN_BOUNDS,
-    COMFORT_LIMITS,
-    HARD_LIMITS,
+    ActionBounds,
     DynamicsLimits,
     action_to_trajectory,
     feasible_v1_interval,
 )
-from net.model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
+from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
+from pipeline.legacy_model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
 from dataset.splits import verify_split_manifest
 from pipeline.checkpointing import load_model_from_checkpoint
-from pipeline.execution import limit_history, relative_action
+from pipeline.execution import relative_action
+from pipeline.live_bank import LiveBankRunner
 from pipeline.eval_metrics import summarize_rows
 
 DECISION_DT = 0.5
@@ -71,12 +69,12 @@ WRONG_ROUTE_DROP = 0.05
 # ---------------------------------------------------------------------------
 # Canonical PSTL limits
 # ---------------------------------------------------------------------------
-LIMITS_SOURCE = "env.action.action_space.HARD_LIMITS"
+LIMITS_SOURCE = "config/model.yaml action.limits.hard"
 
 #: Keys StructuredPlanner.forward consumes (metadata IDs are not needed for acting).
 BATCH_KEYS = (
     "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask",
-    "ego", "ego_mask", "hist_valid",
+    "ego", "ego_mask", "hist_valid", "od_ids", "ld_ids", "pose",
 )
 
 
@@ -119,7 +117,8 @@ def _batch_from_history(hist: Dict[str, Any], device: str = "cpu") -> Dict[str, 
     """Batch-first float32 tensors for one history window."""
     batch: Dict[str, torch.Tensor] = {}
     for key in BATCH_KEYS:
-        arr = np.asarray(hist[key], dtype=np.float32)
+        dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
+        arr = np.asarray(hist[key], dtype=dtype)
         batch[key] = torch.from_numpy(arr).unsqueeze(0).to(device)
     return batch
 
@@ -132,15 +131,36 @@ def safe_brake_action(v0: float) -> np.ndarray:
     return np.array([dx, 0.0, 0.0, v1], dtype=np.float64)
 
 
-def _trajectory(action: Sequence[float], v0: float):
+def _model_action_contract(model):
+    if getattr(model, "action_low", None) is None or getattr(model, "action_high", None) is None:
+        return CLEAN_BOUNDS, HARD_LIMITS, COMFORT_LIMITS
+    bounds = ActionBounds(
+        low=model.action_low.detach().cpu().numpy(),
+        high=model.action_high.detach().cpu().numpy(),
+        name=getattr(model, "action_config", {}).get("name", "checkpoint"),
+    )
+    limits = getattr(model, "action_config", {}).get("limits", {})
+    hard = DynamicsLimits(**limits["hard"]) if "hard" in limits else HARD_LIMITS
+    comfort = DynamicsLimits(**limits["comfort"]) if "comfort" in limits else COMFORT_LIMITS
+    return bounds, hard, comfort
+
+
+def _trajectory(
+    action: Sequence[float],
+    v0: float,
+    *,
+    bounds: ActionBounds = CLEAN_BOUNDS,
+    limits: DynamicsLimits = HARD_LIMITS,
+    comfort_limits: DynamicsLimits = COMFORT_LIMITS,
+):
     return action_to_trajectory(
         action,
         v0,
         dt=DECISION_DT,
         hz=HZ,
-        bounds=CLEAN_BOUNDS,
-        limits=HARD_LIMITS,
-        comfort_limits=COMFORT_LIMITS,
+        bounds=bounds,
+        limits=limits,
+        comfort_limits=comfort_limits,
     )
 
 
@@ -200,6 +220,7 @@ def run_episode(
         raise ValueError(f"controller must be 'exact' or 'lqr', got {controller!r}")
     max_steps = max(int(max_steps), 0)
     model.to(device).eval()
+    model_bounds, model_hard, model_comfort = _model_action_contract(model)
 
     env.reset()
     ego = env.agent
@@ -214,8 +235,7 @@ def run_episode(
             **(lqr_kwargs or {}),
         )
 
-    frames: List[Dict[str, Any]] = []
-    poses: List[np.ndarray] = []
+    runner = LiveBankRunner(model, device=device, capacity=int(history_frames))
     prev_action = np.zeros(ACTION_DIM, dtype=np.float64)
     prev_speed: Optional[float] = None
     prev_heading: Optional[float] = None
@@ -257,29 +277,21 @@ def run_episode(
             prev_heading=prev_heading,
             dt=DECISION_DT,
         )
-        frames.append(obs)
-        poses.append(obs["pose"].copy())
-        if len(frames) > HISTORY_FRAMES:
-            frames = frames[-HISTORY_FRAMES:]
-            poses = poses[-HISTORY_FRAMES:]
-        hist = stack_history(frames, poses)
-        hist = limit_history(hist, int(history_frames))
-        batch = _batch_from_history(hist, device=device)
-
+        window, nav, ego_hidden = runner.push(obs)
         with torch.no_grad():
-            out = model(batch)
+            out = runner.drive.forward_window(window, nav, ego_hidden)
         a_norm = out["action_mu"][0].detach().cpu().numpy().astype(np.float64)
 
         v0 = float(ego.speed)
         h0 = float(ego.heading_theta)
         p0 = np.asarray(ego.position[:2], dtype=np.float64).copy()
-        requested_action = CLEAN_BOUNDS.denormalize(a_norm, clip=True)
+        requested_action = model_bounds.denormalize(a_norm, clip=False)
         if first_requested_action is None:
             first_requested_action = requested_action.copy()
         requested_codes: Sequence[str] = ()
         requested_tr = None
         if np.all(np.isfinite(requested_action)):
-            requested_tr = _trajectory(requested_action, v0)
+            requested_tr = _trajectory(requested_action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
             requested_codes = requested_tr.codes
             _add_codes(requested_code_counts, requested_codes)
 
@@ -301,13 +313,13 @@ def run_episode(
                     requested_action,
                     v0,
                     dt=DECISION_DT,
-                    bounds=CLEAN_BOUNDS,
-                    limits=HARD_LIMITS,
+                    bounds=model_bounds,
+                    limits=model_hard,
                 )
                 if interval.nonempty:
                     candidate = requested_action.copy()
                     candidate[3] = float(np.clip(candidate[3], interval.low, interval.high))
-                    candidate_tr = _trajectory(candidate, v0)
+                    candidate_tr = _trajectory(candidate, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
                     if candidate_tr.feasible:
                         executed_action = candidate
                         tr_exec = candidate_tr
@@ -316,7 +328,7 @@ def run_episode(
             if not projected:
                 fallback_count += 1
                 executed_action = safe_brake_action(v0)
-                tr_exec = _trajectory(executed_action, v0)
+                tr_exec = _trajectory(executed_action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
                 fallback = True
 
         # A velocity-profile trajectory must never reach LQR with a negative
@@ -331,7 +343,7 @@ def run_episode(
             fallback_count += 1
             fallback = True
             executed_action = safe_brake_action(v0)
-            tr_exec = _trajectory(executed_action, v0)
+            tr_exec = _trajectory(executed_action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
             speeds = np.asarray(tr_exec.speeds, dtype=np.float64)
         _add_codes(executed_code_counts, tr_exec.codes)
         policy_steps += 1
@@ -609,6 +621,7 @@ def main(argv=None) -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    model_bounds, model_hard, model_comfort = _model_action_contract(model)
     payload = {
         **summarize_rows(rows),
         "schema": "drl_pathplan_eval",
@@ -629,10 +642,10 @@ def main(argv=None) -> int:
             "sim_dt": SIM_DT,
             "steps_per_policy": STEPS_PER_POLICY,
             "history_frames": int(args.history_frames),
-            "action_bounds": CLEAN_BOUNDS.as_dict(),
+            "action_bounds": model_bounds.as_dict(),
             "limits": {
-                "hard": _limits_dict(HARD_LIMITS),
-                "comfort": _limits_dict(COMFORT_LIMITS),
+                "hard": _limits_dict(model_hard),
+                "comfort": _limits_dict(model_comfort),
                 "source": LIMITS_SOURCE,
                 "provisional": True,
             },

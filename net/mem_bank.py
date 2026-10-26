@@ -9,8 +9,9 @@ The bank is deliberately a *data* layer, not an ``nn.Module``:
 
 Bank records contain only OD/LD entities.  Ego/Nav are policy inputs and are
 not stored in the bank.  Geometry is stored in each frame's ego frame and is
-transformed lazily into the query (last-frame) ego frame when a window is
-built.  Content latents are never rotated.
+**not** projected when a window is built; the current contract aligns history
+with frame-level ego deltas inside the temporal-spatial encoder.  Content
+latents are frame-dependent state latents and are never rotated here.
 """
 
 from __future__ import annotations
@@ -211,11 +212,8 @@ class BankWindow:
         ld_valid: Tensor,
         ld_stable_id: Tensor,
         ego_pose: Tensor,
-        source: int = 1,
-        rollout_depth: int = 1,
-        source_pose: Tensor | None = None,
-        target_pose: Tensor | None = None,
-        project_new_geometry: bool = True,
+        source: int | Tensor = 1,
+        rollout_depth: int | Tensor = 1,
     ) -> "BankWindow":
         """Shift the window one step and append current entities.
 
@@ -246,24 +244,22 @@ class BankWindow:
             got = tuple(locals()[name].shape)
             if got != want:
                 raise ValueError(f"advance {name} shape {got} != {want}")
-        if int(rollout_depth) > 6:
+        def batch_value(value: int | Tensor, dtype: torch.dtype, device: torch.device, name: str) -> Tensor:
+            if torch.is_tensor(value):
+                value = value.to(device=device, dtype=dtype).reshape(-1)
+                if value.numel() == 1:
+                    return value.expand(b)
+                if value.numel() != b:
+                    raise ValueError(f"{name} must have one value per batch element")
+                return value
+            return torch.full((b,), int(value), dtype=dtype, device=device)
+
+        new_source = batch_value(source, self.source.dtype, self.source.device, "source")
+        new_depth = batch_value(rollout_depth, self.rollout_depth.dtype, self.rollout_depth.device, "rollout_depth")
+        if bool((new_depth > 6).any()):
             raise ValueError("rollout_depth must be <= 6")
-        old_od = self.od_geometry[:, 1:]
-        old_ld = self.ld_geometry[:, 1:]
-        if source_pose is not None and target_pose is not None:
-            old_od = BankWindowBuilder.project_geometry(old_od, source_pose, target_pose, NodeType.OD)
-            old_ld = BankWindowBuilder.project_geometry(old_ld, source_pose, target_pose, NodeType.LD)
-            if project_new_geometry:
-                new_od = BankWindowBuilder.project_geometry(od_geometry, source_pose, target_pose, NodeType.OD)
-                new_ld = BankWindowBuilder.project_geometry(ld_geometry, source_pose, target_pose, NodeType.LD)
-            else:
-                new_od, new_ld = od_geometry, ld_geometry
-        else:
-            new_od, new_ld = od_geometry, ld_geometry
-        od_geometry = torch.cat([old_od, new_od[:, None]], dim=1)
-        ld_geometry = torch.cat([old_ld, new_ld[:, None]], dim=1)
-        new_source = torch.full((b,), int(source), dtype=self.source.dtype, device=self.source.device)
-        new_depth = torch.full((b,), int(rollout_depth), dtype=self.rollout_depth.dtype, device=self.rollout_depth.device)
+        od_geometry = torch.cat([self.od_geometry[:, 1:], od_geometry[:, None]], dim=1)
+        ld_geometry = torch.cat([self.ld_geometry[:, 1:], ld_geometry[:, None]], dim=1)
         new_frame = torch.ones((b,), dtype=torch.bool, device=self.frame_valid.device)
         return BankWindow(
             od_content=shift_time(self.od_content, od_content),
@@ -282,13 +278,15 @@ class BankWindow:
             frame_valid=shift_time(self.frame_valid, new_frame),
         )
 
+    def slice(self, index: int) -> "BankWindow":
+        return BankWindow(**{
+            name: (value[index : index + 1] if torch.is_tensor(value) else value)
+            for name, value in self.__dict__.items()
+        })
+
     @property
     def batch_size(self) -> int:
         return int(self.od_content.shape[0])
-
-
-def _wrap_angle(x: Tensor) -> Tensor:
-    return torch.atan2(torch.sin(x), torch.cos(x))
 
 
 class BankWindowBuilder:
@@ -311,135 +309,6 @@ class BankWindowBuilder:
         self.ld_geom_dim = int(ld_geom_dim)
         self.hidden = None if hidden is None else int(hidden)
 
-    @staticmethod
-    def _transform_geometry(
-        geometry: Tensor,
-        source_pose: Tensor,
-        query_pose: Tensor,
-        *,
-        node_type: NodeType,
-    ) -> Tensor:
-        dtype, device = geometry.dtype, geometry.device
-        sx, sy, syaw = source_pose.to(device=device, dtype=dtype)
-        qx, qy, qyaw = query_pose.to(device=device, dtype=dtype)
-        cs, ss = torch.cos(syaw), torch.sin(syaw)
-        cq, sq = torch.cos(qyaw), torch.sin(qyaw)
-
-        def to_query(x: Tensor, y: Tensor) -> Tuple[Tensor, Tensor]:
-            wx = sx + cs * x - ss * y
-            wy = sy + ss * x + cs * y
-            dx, dy = wx - qx, wy - qy
-            return cq * dx + sq * dy, -sq * dx + cq * dy
-
-        out = geometry.clone()
-        if node_type == NodeType.OD:
-            dx, dy = to_query(geometry[0], geometry[1])
-            out[0], out[1] = dx, dy
-            if geometry.numel() >= 3:
-                out[2] = _wrap_angle(geometry[2] + syaw - qyaw)
-            if geometry.numel() >= 5:
-                vx, vy = geometry[3], geometry[4]
-                wvx = cs * vx - ss * vy
-                wvy = ss * vx + cs * vy
-                out[3] = cq * wvx + sq * wvy
-                out[4] = -sq * wvx + cq * wvy
-            return out
-
-        pts = geometry.reshape(-1, 2)
-        x, y = to_query(pts[:, 0], pts[:, 1])
-        return torch.stack((x, y), dim=-1).reshape(-1)
-
-    @staticmethod
-    def relative_pose(geometry: Tensor, node_type: NodeType) -> Tensor:
-        """Return ``[...,3]`` relative (x,y,yaw) in the query ego frame."""
-        if node_type == NodeType.OD:
-            if geometry.shape[-1] < 3:
-                raise ValueError("OD geometry needs at least x,y,yaw")
-            return geometry[..., :3]
-        pts = geometry.reshape(*geometry.shape[:-1], -1, 2)
-        center = pts.mean(dim=-2)
-        delta = pts[..., -1, :] - pts[..., 0, :]
-        norm = torch.linalg.vector_norm(delta, dim=-1)
-        safe_x = torch.where(norm < 1e-8, torch.ones_like(delta[..., 0]), delta[..., 0])
-        safe_y = torch.where(norm < 1e-8, torch.zeros_like(delta[..., 1]), delta[..., 1])
-        yaw = torch.atan2(safe_y, safe_x)
-        yaw = torch.where(norm < 1e-8, torch.zeros_like(yaw), yaw)
-        return torch.stack([center[..., 0], center[..., 1], yaw], dim=-1)
-
-    @staticmethod
-    def project_geometry(
-        geometry: Tensor,
-        source_pose: Tensor,
-        target_pose: Tensor,
-        node_type: NodeType,
-    ) -> Tensor:
-        """Project geometry to a target ego frame, preserving leading dims.
-
-        Supports ``[G]``, ``[N,G]``, ``[B,N,G]`` and ``[B,T,N,G]``.  Pose
-        tensors may be ``[3]``, ``[B,3]`` or ``[B,T,3]``.
-        """
-        if geometry.dim() == 1:
-            return BankWindowBuilder._transform_geometry(
-                geometry, source_pose, target_pose, node_type=node_type
-            )
-        if geometry.dim() == 2:
-            if source_pose.dim() == 1 and target_pose.dim() == 1:
-                return torch.stack(
-                    [
-                        BankWindowBuilder._transform_geometry(
-                            geometry[i], source_pose, target_pose, node_type=node_type
-                        )
-                        for i in range(geometry.shape[0])
-                    ],
-                    dim=0,
-                )
-            raise ValueError("2D geometry needs 1D poses")
-        if geometry.dim() == 3:
-            if source_pose.dim() == 1 and target_pose.dim() == 1:
-                return torch.stack(
-                    [
-                        BankWindowBuilder.project_geometry(
-                            geometry[i], source_pose, target_pose, node_type
-                        )
-                        for i in range(geometry.shape[0])
-                    ],
-                    dim=0,
-                )
-            if source_pose.dim() == 2 and target_pose.dim() == 2:
-                return torch.stack(
-                    [
-                        BankWindowBuilder.project_geometry(
-                            geometry[i], source_pose[i], target_pose[i], node_type
-                        )
-                        for i in range(geometry.shape[0])
-                    ],
-                    dim=0,
-                )
-            raise ValueError("3D geometry needs 1D or [B,3] poses")
-        if geometry.dim() == 4:
-            if source_pose.dim() == 3 and target_pose.dim() == 3:
-                return torch.stack(
-                    [
-                        BankWindowBuilder.project_geometry(
-                            geometry[i], source_pose[i], target_pose[i], node_type
-                        )
-                        for i in range(geometry.shape[0])
-                    ],
-                    dim=0,
-                )
-            if source_pose.dim() == 2 and target_pose.dim() == 2:
-                return torch.stack(
-                    [
-                        BankWindowBuilder.project_geometry(
-                            geometry[i], source_pose[i], target_pose[i], node_type
-                        )
-                        for i in range(geometry.shape[0])
-                    ],
-                    dim=0,
-                )
-            raise ValueError("[B,T,N,G] geometry needs [B,T,3] or [B,3] poses")
-        raise ValueError(f"unsupported geometry shape {tuple(geometry.shape)}")
-
     def _infer_dims(self, frames: Sequence[FrameRecord]) -> Tuple[int, int, int]:
         contents = [e.content.numel() for f in frames for e in (*f.od, *f.ld)]
         if not contents:
@@ -450,6 +319,10 @@ class BankWindowBuilder:
             hidden = int(contents[0])
             if any(int(x) != hidden for x in contents):
                 raise ValueError("all entity contents must have the same hidden size")
+        if self.hidden is not None and int(self.hidden) != int(hidden):
+            raise ValueError(
+                f"BankWindowBuilder hidden={self.hidden} but entity content hidden={hidden}"
+            )
         return hidden, self.od_geom_dim, self.ld_geom_dim
 
     def build(self, frames: Sequence[FrameRecord]) -> BankWindow:
@@ -503,8 +376,6 @@ class BankWindowBuilder:
 
         current_od = current_map("od")
         current_ld = current_map("ld")
-        query_pose = frames[-1].ego_pose.to(device=device, dtype=content_dtype)
-
         def frame_map(frame: FrameRecord, field: str, slots: int) -> dict[int, EntityRecord]:
             out: dict[int, EntityRecord] = {}
             used_slots: set[int] = set()
@@ -540,9 +411,8 @@ class BankWindowBuilder:
                     raise ValueError("OD content hidden mismatch")
                 if rec.geometry.numel() != od_g:
                     raise ValueError(f"OD geometry must have {od_g} values")
-                g = self._transform_geometry(rec.geometry, pose, query_pose, node_type=NodeType.OD)
                 od_content[0, t, cur.slot] = rec.content.to(dtype=content_dtype, device=device)
-                od_geometry[0, t, cur.slot] = g.to(dtype=content_dtype, device=device)
+                od_geometry[0, t, cur.slot] = rec.geometry.to(dtype=content_dtype, device=device)
                 od_type[0, t, cur.slot] = int(cur.type_id)
                 od_valid[0, t, cur.slot] = bool(rec.valid)
                 od_stable[0, t, cur.slot] = int(sid)
@@ -555,9 +425,8 @@ class BankWindowBuilder:
                     raise ValueError("LD content hidden mismatch")
                 if rec.geometry.numel() != ld_g:
                     raise ValueError(f"LD geometry must have {ld_g} values")
-                g = self._transform_geometry(rec.geometry, pose, query_pose, node_type=NodeType.LD)
                 ld_content[0, t, cur.slot] = rec.content.to(dtype=content_dtype, device=device)
-                ld_geometry[0, t, cur.slot] = g.to(dtype=content_dtype, device=device)
+                ld_geometry[0, t, cur.slot] = rec.geometry.to(dtype=content_dtype, device=device)
                 ld_type[0, t, cur.slot] = int(cur.type_id)
                 ld_valid[0, t, cur.slot] = bool(rec.valid)
                 ld_stable[0, t, cur.slot] = int(sid)

@@ -3,10 +3,6 @@
 import numpy as np
 
 from env.action.action_space import (
-    COMFORT_LIMITS,
-    DEFAULT_BOUNDS,
-    HARD_LIMITS,
-    CLEAN_BOUNDS,
     action_to_trajectory,
     clip_components,
     denormalize,
@@ -15,6 +11,7 @@ from env.action.action_space import (
     normalize,
     project,
 )
+from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, DEFAULT_BOUNDS, HARD_LIMITS
 
 
 def test_bounds_constants():
@@ -39,9 +36,13 @@ def test_normalize_denormalize_roundtrip_and_clip():
     clipped = clip_components(np.array([[-1.0, 9.0, -9.0, 99.0]]), CLEAN_BOUNDS)
     assert np.allclose(clipped, [[0.0, 1.5, -0.8, 15.0]])
 
-    # denormalize clamps normalized values to [0,1] like legacy denorm_action
+    # denormalize does not clip implicitly; clipping must be explicit.
     assert np.allclose(
         denormalize(np.array([[-1.0, 2.0, 0.5, 0.5]]), CLEAN_BOUNDS),
+        [[-7.5, 4.5, 0.0, 7.5]],
+    )
+    assert np.allclose(
+        denormalize(np.array([[-1.0, 2.0, 0.5, 0.5]]), CLEAN_BOUNDS, clip=True),
         [[0.0, 1.5, 0.0, 7.5]],
     )
 
@@ -240,3 +241,13 @@ def test_short_path_does_not_bypass_curvature_gate():
     result = gate(a, 0.5, bounds=CLEAN_BOUNDS)
     assert result.accepted is False
     assert "HARD_KAPPA" in result.codes
+
+
+def test_action_contract_is_loaded_from_config():
+    from env.action.config import load_action_contract
+    contract = load_action_contract()
+    assert contract.bounds.name == "clean"
+    assert np.allclose(contract.bounds.low, CLEAN_BOUNDS.low)
+    assert np.allclose(contract.bounds.high, CLEAN_BOUNDS.high)
+    assert contract.hard.kappa_max == HARD_LIMITS.kappa_max
+    assert contract.comfort.a_long_max == COMFORT_LIMITS.a_long_max

@@ -1,36 +1,28 @@
-"""Autoregressive multi-step probe for the Stage D1 latent WM.
-
-This is an evaluation probe, not an imagined-RL path: actions are the recorded
-real actions, and the target encoder remains frozen.
-"""
+"""Autoregressive probe for the bank-native latent world model."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 import numpy as np
 import torch
 
 from dataset.splits import split_by_scene_seed
-
-from net.world_model import EgoConditionedLatentWM, masked_mse, rollout_latents
-from pipeline.checkpointing import load_model_from_checkpoint
+from net.encoder import TargetEncoder
+from net.world_model import EgoConditionedLatentWM
+from pipeline.checkpointing import load_drive_model_from_checkpoint
+from pipeline.losses import masked_mse
 from pipeline.train_bc import load_data
-from pipeline.train_wm import (
-    _align_by_id,
-    _encode_rows,
-    _load_ids,
-    _rows_to_batch,
-)
+from pipeline.train_wm import _align_by_id, _build_pairs, _encode_rows, _load_ids, _rows_to_batch
 
 
-def _build_sequences(data: Dict[str, np.ndarray], horizon: int, max_sequences: int):
+def _sequences(data: Dict[str, np.ndarray], horizon: int) -> List[np.ndarray]:
     episode_id = np.asarray(data["episode_id"], dtype=np.int64)
     step = np.asarray(data["step"], dtype=np.int64)
-    seqs: List[np.ndarray] = []
+    out = []
     need = horizon + 1
     for eid in np.unique(episode_id):
         idx = np.flatnonzero(episode_id == eid)
@@ -38,12 +30,12 @@ def _build_sequences(data: Dict[str, np.ndarray], horizon: int, max_sequences: i
         for start in range(0, len(idx) - need + 1):
             window = idx[start : start + need]
             if np.all(np.diff(step[window]) == 1):
-                seqs.append(window)
-    return np.asarray(seqs, dtype=np.int64)
+                out.append(window)
+    return out
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Autoregressive WM probe")
+    p = argparse.ArgumentParser(description="Bank-native autoregressive WM probe")
     p.add_argument("--data", nargs="+", required=True)
     p.add_argument("--encoder-ckpt", required=True)
     p.add_argument("--wm-ckpt", required=True)
@@ -58,131 +50,120 @@ def main(argv: Sequence[str] | None = None) -> int:
     data = load_data(args.data)
     ids = _load_ids(args.data)
     data["od_ids"], data["ld_ids"] = ids["od_ids"], ids["ld_ids"]
-    seqs = _build_sequences(data, int(args.horizon), 0)
-    if len(seqs) == 0:
+    seqs = _sequences(data, int(args.horizon))
+    if not seqs:
         raise SystemExit("no sequences")
-    wm_payload = torch.load(args.wm_ckpt, map_location="cpu", weights_only=False)
-    wm_cfg = wm_payload.get("config", {})
-    heldout_seeds = set(int(x) for x in wm_cfg.get("val_scene_seeds", []))
-    if heldout_seeds:
-        seqs = seqs[np.asarray([int(data["scene_seed"][s[0]]) in heldout_seeds for s in seqs])]
-        if len(seqs) == 0:
-            raise SystemExit("no sequences in the WM checkpoint's held-out scene set")
+    payload = torch.load(args.wm_ckpt, map_location="cpu", weights_only=False)
+    cfg = payload.get("config", {})
+    heldout = set(int(x) for x in cfg.get("val_scene_seeds", []))
+    split_val_frac = float(cfg.get("val_frac", args.val_frac))
+    split_seed = int(cfg.get("split_seed", args.seed))
+    if heldout:
+        seqs = [s for s in seqs if int(data["scene_seed"][s[0]]) in heldout]
+        heldout_seeds = sorted(heldout)
+    else:
+        # Split the complete sequence set before any max-sequence subsampling.
+        seq_seeds = np.asarray([int(data["scene_seed"][s[0]]) for s in seqs], dtype=np.int64)
+        _train_m, val_m = split_by_scene_seed(seq_seeds, split_val_frac, split_seed)
+        heldout_seeds = sorted({int(x) for x in seq_seeds[val_m]})
+        seqs = [s for s, keep in zip(seqs, val_m) if keep]
     if len(seqs) > int(args.max_sequences):
         rng = np.random.default_rng(int(args.seed))
         keep = np.sort(rng.choice(len(seqs), size=int(args.max_sequences), replace=False))
-        seqs = seqs[keep]
-    # Probe only held-out scenes; the previous version evaluated the first
-    # sequences, which were also in the D1 training prefix.
-    if not heldout_seeds:
-        seq_seeds = np.asarray(data["scene_seed"][seqs[:, 0]], dtype=np.int64)
-        _train_m, val_m = split_by_scene_seed(seq_seeds, args.val_frac, args.seed)
-        seqs = seqs[val_m]
-        if len(seqs) == 0:
-            raise SystemExit("no held-out WM sequences")
-    rows = np.unique(seqs)
-    encoder = load_model_from_checkpoint(args.encoder_ckpt, args.device, strict=True)
-    encoder.eval()
+        seqs = [seqs[int(i)] for i in keep]
+    if not seqs:
+        raise SystemExit("no held-out WM sequences")
+
+    drive = load_drive_model_from_checkpoint(args.encoder_ckpt, args.device, strict=True)
+    encoder = drive.encoder.eval()
+    rows = np.unique(np.concatenate(seqs))
     enc = _encode_rows(encoder, data, rows, args.device)
+    target = TargetEncoder(encoder).to(args.device).eval()
+    tgt_enc = _encode_rows(target, data, rows, args.device)
     row_map = {int(r): i for i, r in enumerate(rows)}
     si = np.asarray([[row_map[int(r)] for r in seq] for seq in seqs], dtype=np.int64)
 
-    payload = wm_payload
-    cfg = wm_cfg
-    wm = EgoConditionedLatentWM(
-        hidden=int(cfg.get("hidden", 80)),
-        latent_dim=int(cfg.get("latent_dim", 128)),
-        od_slots=int(cfg.get("od_slots", 16)),
-        ld_slots=int(cfg.get("ld_slots", 16)),
-        layers=int(cfg.get("layers", 1)),
-    ).to(args.device)
+    wm = EgoConditionedLatentWM(hidden=int(cfg.get("hidden", getattr(drive, "hidden", 128))), action_dim=4)
     wm.load_state_dict(payload["model"])
-    wm.eval()
-
-    # Initial state, actions, and aligned targets for each horizon.
-    init = {
-        "od": torch.from_numpy(enc["od"][si[:, 0]]).to(args.device),
-        "ld": torch.from_numpy(enc["ld"][si[:, 0]]).to(args.device),
-        "nav": torch.from_numpy(enc["nav"][si[:, 0]]).to(args.device),
-        "ego": torch.from_numpy(enc["ego"][si[:, 0]]).to(args.device),
-    }
-    masks = {
-        "od": torch.from_numpy(enc["od_mask"][si[:, 0]]).to(args.device),
-        "ld": torch.from_numpy(enc["ld_mask"][si[:, 0]]).to(args.device),
-    }
+    wm.to(args.device).eval()
+    if getattr(drive, "action_low", None) is None or getattr(drive, "action_high", None) is None:
+        raise RuntimeError("encoder checkpoint has no action bounds")
+    low = drive.action_low.detach().cpu().numpy().astype(np.float32)
+    high = drive.action_high.detach().cpu().numpy().astype(np.float32)
+    recorded = cfg.get("action_contract", {})
+    if recorded:
+        rec_low = np.asarray(recorded.get("low", []), dtype=np.float32)
+        rec_high = np.asarray(recorded.get("high", []), dtype=np.float32)
+        if rec_low.size and not (np.allclose(rec_low, low) and np.allclose(rec_high, high)):
+            raise ValueError("encoder/WM action bounds mismatch")
+    width = np.maximum(high - low, 1e-6)
     executed = data.get("executed_action")
-    action_rows = data["action"] if executed is None else np.where(
+    actions = data["action"] if executed is None else np.where(
         np.isfinite(np.asarray(executed, dtype=np.float32)), executed, data["action"]
     )
-    actions = np.asarray(
-        [[action_rows[seq[t]] for t in range(args.horizon)] for seq in seqs],
-        dtype=np.float32,
-    )
-    action_t = torch.from_numpy(actions).to(args.device)
+    action_norm = (np.asarray(actions, dtype=np.float32) - low) / width
 
-    targets: List[Dict[str, torch.Tensor]] = []
-    for t in range(1, args.horizon + 1):
-        od = np.zeros_like(enc["od"][si[:, 0]])
-        ld = np.zeros_like(enc["ld"][si[:, 0]])
-        odm = np.zeros_like(enc["od_mask"][si[:, 0]])
-        ldm = np.zeros_like(enc["ld_mask"][si[:, 0]])
-        for n in range(len(seqs)):
-            ci = si[n, 0]
-            ti = si[n, t]
-            od[n], odm[n] = _align_by_id(
-                enc["od"][ci], data["od_ids"][seqs[n, 0], -1], enc["od_mask"][ci],
-                enc["od"][ti], data["od_ids"][seqs[n, t], -1], enc["od_mask"][ti],
-            )
-            ld[n], ldm[n] = _align_by_id(
-                enc["ld"][ci], data["ld_ids"][seqs[n, 0], -1], enc["ld_mask"][ci],
-                enc["ld"][ti], data["ld_ids"][seqs[n, t], -1], enc["ld_mask"][ti],
-            )
-        targets.append(
-            {
-                "od": torch.from_numpy(od).to(args.device),
-                "ld": torch.from_numpy(ld).to(args.device),
-                "od_mask": torch.from_numpy(odm).to(args.device),
-                "ld_mask": torch.from_numpy(ldm).to(args.device),
-                "nav": torch.from_numpy(enc["nav"][si[:, t]]).to(args.device),
-                "ego": torch.from_numpy(enc["ego"][si[:, t]]).to(args.device),
-            }
-        )
-
-    with torch.no_grad():
-        final, history = rollout_latents(wm, init, action_t, masks)
     result = {
         "horizon": int(args.horizon),
-        "sequences": int(len(seqs)),
-        "held_out_split": {
-            "val_frac": float(args.val_frac),
-            "seed": int(args.seed),
-            "scene_seeds": sorted({int(x) for x in data["scene_seed"][seqs[:, 0]]}),
-        },
+        "sequences": len(seqs),
         "data": list(args.data),
         "encoder_ckpt": args.encoder_ckpt,
         "wm_ckpt": args.wm_ckpt,
+        "held_out_split": {
+            "val_frac": split_val_frac,
+            "seed": split_seed,
+            "scene_seeds": heldout_seeds,
+        },
         "depths": [],
     }
-    prev = init
-    for t, pred in enumerate(history, start=1):
-        target = targets[t - 1]
-        parts = {
-            "od": float(masked_mse(pred["od"], target["od"], target["od_mask"])),
-            "ld": float(masked_mse(pred["ld"], target["ld"], target["ld_mask"])),
-            "nav": float(masked_mse(pred["nav"], target["nav"], torch.ones_like(pred["nav"][..., 0]))),
-            "ego": float(masked_mse(pred["ego"], target["ego"], torch.ones_like(pred["ego"][..., 0]))),
-        }
-        # persistence: initial state repeated at every depth
-        persistence = {
-            "od": float(masked_mse(init["od"], target["od"], target["od_mask"])),
-            "ld": float(masked_mse(init["ld"], target["ld"], target["ld_mask"])),
-            "nav": float(masked_mse(init["nav"], target["nav"], torch.ones_like(pred["nav"][..., 0]))),
-            "ego": float(masked_mse(init["ego"], target["ego"], torch.ones_like(pred["ego"][..., 0]))),
-        }
-        result["depths"].append({"depth": t, "wm": parts, "persistence": persistence})
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "metrics.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    with torch.no_grad():
+        for depth in range(1, int(args.horizon) + 1):
+            parts = {"od_content": [], "ld_content": []}
+            persistence = {"od_content": [], "ld_content": []}
+            for n, seq in enumerate(seqs):
+                z_od = torch.from_numpy(enc["od_content"][si[n, 0]]).to(args.device).unsqueeze(0)
+                z_ld = torch.from_numpy(enc["ld_content"][si[n, 0]]).to(args.device).unsqueeze(0)
+                odv = torch.from_numpy(enc["od_valid"][si[n, 0]]).to(args.device).unsqueeze(0)
+                ldv = torch.from_numpy(enc["ld_valid"][si[n, 0]]).to(args.device).unsqueeze(0)
+                for t in range(depth):
+                    a = torch.from_numpy(action_norm[seq[t]]).to(args.device).unsqueeze(0)
+                    step = wm(z_od, z_ld, a, od_valid=odv, ld_valid=ldv)
+                    z_od = step["od"].detach()
+                    z_ld = step["ld"].detach()
+                target = si[n, depth]
+                tgt_od, tm_od = _align_by_id(
+                    z_od[0].cpu().numpy(), data["od_ids"][seq[0], -1], odv[0].cpu().numpy(),
+                    tgt_enc["od_content"][target], data["od_ids"][seq[depth], -1], tgt_enc["od_valid"][target],
+                )
+                tgt_ld, tm_ld = _align_by_id(
+                    z_ld[0].cpu().numpy(), data["ld_ids"][seq[0], -1], ldv[0].cpu().numpy(),
+                    tgt_enc["ld_content"][target], data["ld_ids"][seq[depth], -1], tgt_enc["ld_valid"][target],
+                )
+                parts["od_content"].append(float(masked_mse(
+                    z_od, torch.from_numpy(tgt_od).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tm_od).to(args.device).unsqueeze(0),
+                )))
+                parts["ld_content"].append(float(masked_mse(
+                    z_ld, torch.from_numpy(tgt_ld).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tm_ld).to(args.device).unsqueeze(0),
+                )))
+                persistence["od_content"].append(float(masked_mse(
+                    torch.from_numpy(enc["od_content"][si[n, 0]]).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tgt_od).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tm_od).to(args.device).unsqueeze(0),
+                )))
+                persistence["ld_content"].append(float(masked_mse(
+                    torch.from_numpy(enc["ld_content"][si[n, 0]]).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tgt_ld).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tm_ld).to(args.device).unsqueeze(0),
+                )))
+            result["depths"].append({
+                "depth": depth,
+                "wm": {k: float(np.mean(v)) for k, v in parts.items()},
+                "persistence": {k: float(np.mean(v)) for k, v in persistence.items()},
+            })
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    (Path(args.out) / "metrics.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
     return 0
 

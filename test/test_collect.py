@@ -16,10 +16,11 @@ from env.obs import (
     _empty_history,
     stack_history,
 )
-from env.action.action_space import HARD_LIMITS
+from pipeline.action_compat import HARD_LIMITS
 
 # Independent list of per-row fields (kept explicit so a dropped field fails).
 EXPECTED_ROW_KEYS = {
+    "history_mode",
     "action",
     "action_lift",
     "residual_xy",

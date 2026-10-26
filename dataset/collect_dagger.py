@@ -58,19 +58,20 @@ from env.obs import (
     SCHEMA_VERSION,
     _stable_hash,
     build_observation,
-    stack_history,
+    raw_history,
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
 from env.action.action_space import (
-    CLEAN_BOUNDS,
-    COMFORT_LIMITS,
-    HARD_LIMITS,
+    ActionBounds,
+    DynamicsLimits,
     action_to_trajectory,
     feasible_v1_interval,
 )
-from net.model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
+from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
+from pipeline.legacy_model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
 from pipeline.checkpointing import load_model_from_checkpoint
+from pipeline.live_bank import LiveBankRunner
 
 DECISION_DT = 0.5
 SIM_DT = 0.1
@@ -88,12 +89,12 @@ WRONG_ROUTE_DROP = 0.05
 # ---------------------------------------------------------------------------
 # Canonical PSTL limits
 # ---------------------------------------------------------------------------
-HARD_LIMITS_SOURCE = "env.action.action_space.HARD_LIMITS"
+HARD_LIMITS_SOURCE = "config/model.yaml action.limits.hard"
 
 # ---------------------------------------------------------------------------
 # Output schema
 # ---------------------------------------------------------------------------
-#: History tensors produced by ``stack_history`` (``meta`` is not an array).
+#: Raw history tensors consumed by the Bank training/eval path.
 HISTORY_KEYS: Tuple[str, ...] = (
     "od",
     "od_mask",
@@ -120,6 +121,7 @@ HISTORY_KEYS: Tuple[str, ...] = (
 
 #: Per-row arrays/scalars and their on-disk dtypes.
 ROW_DTYPES: Dict[str, Any] = {
+    "history_mode": np.float32,
     # labels + lift/replay audit
     "action": np.float32,
     "action_lift": np.float32,
@@ -294,27 +296,31 @@ def safe_brake_action(v0: float) -> np.ndarray:
     return np.array([dx, 0.0, 0.0, v1], dtype=np.float64)
 
 
-def _trajectory(action: Sequence[float], v0: float):
+def _trajectory(
+    action: Sequence[float], v0: float, *,
+    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
+):
     return action_to_trajectory(
         action,
         v0,
         dt=DECISION_DT,
         hz=HZ,
-        bounds=CLEAN_BOUNDS,
-        limits=HARD_LIMITS,
-        comfort_limits=COMFORT_LIMITS,
+        bounds=bounds,
+        limits=limits,
+        comfort_limits=comfort_limits,
     )
 
 
-def _trajectory_or_none(action: Sequence[float], v0: float):
+def _trajectory_or_none(action: Sequence[float], v0: float, **kwargs):
     try:
-        return _trajectory(action, v0)
+        return _trajectory(action, v0, **kwargs)
     except (TypeError, ValueError):
         return None
 
 
 def _resolve_student_action(
-    action: Sequence[float], v0: float
+    action: Sequence[float], v0: float, *,
+    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
 ) -> Tuple[np.ndarray, Any, str]:
     """Return ``(executed_action, trajectory, fallback_name)``.
 
@@ -325,9 +331,9 @@ def _resolve_student_action(
     requested = np.asarray(action, dtype=np.float64).reshape(-1)
     if requested.shape != (ACTION_DIM,) or not np.all(np.isfinite(requested)):
         brake = safe_brake_action(v0)
-        return brake, _trajectory_or_none(brake, v0), "nonfinite_safe_brake"
+        return brake, _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits), "nonfinite_safe_brake"
 
-    traj = _trajectory_or_none(requested, v0)
+    traj = _trajectory_or_none(requested, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
     if traj is not None and traj.feasible:
         return requested, traj, "none"
 
@@ -336,21 +342,21 @@ def _resolve_student_action(
             requested,
             v0,
             dt=DECISION_DT,
-            bounds=CLEAN_BOUNDS,
-            limits=HARD_LIMITS,
+            bounds=bounds,
+            limits=limits,
         )
     except (TypeError, ValueError):
         interval = None
     if interval is not None and interval.nonempty:
         candidate = requested.copy()
         candidate[3] = float(np.clip(candidate[3], interval.low, interval.high))
-        candidate = np.asarray(CLEAN_BOUNDS.clip(candidate), dtype=np.float64)
-        candidate_traj = _trajectory_or_none(candidate, v0)
+        candidate = np.asarray(bounds.clip(candidate), dtype=np.float64)
+        candidate_traj = _trajectory_or_none(candidate, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
         if candidate_traj is not None and candidate_traj.feasible:
             return candidate, candidate_traj, "v1_projection"
 
     brake = safe_brake_action(v0)
-    brake_traj = _trajectory_or_none(brake, v0)
+    brake_traj = _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
     if brake_traj is not None and brake_traj.feasible:
         return brake, brake_traj, "safe_brake"
     return brake, brake_traj, "safe_brake_infeasible"
@@ -438,14 +444,17 @@ def _compose_label(
 # ---------------------------------------------------------------------------
 # Label diagnostics / audit
 # ---------------------------------------------------------------------------
-def _label_diagnostics(action: np.ndarray, v0: float) -> Dict[str, Any]:
-    traj = _trajectory(action, v0)
+def _label_diagnostics(
+    action: np.ndarray, v0: float, *,
+    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
+) -> Dict[str, Any]:
+    traj = _trajectory(action, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
     interval = feasible_v1_interval(
         action,
         v0,
         dt=DECISION_DT,
-        bounds=CLEAN_BOUNDS,
-        limits=HARD_LIMITS,
+        bounds=bounds,
+        limits=limits,
     )
     v1_in_interval = bool(interval.contains(float(action[3])))
     metrics = traj.metrics
@@ -493,9 +502,14 @@ def _label_diagnostics(action: np.ndarray, v0: float) -> Dict[str, Any]:
     }
 
 
-def _diagnostics_or_empty(action: np.ndarray, v0: float) -> Dict[str, Any]:
+def _diagnostics_or_empty(
+    action: np.ndarray, v0: float, *,
+    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
+) -> Dict[str, Any]:
     try:
-        return _label_diagnostics(action, v0)
+        return _label_diagnostics(
+            action, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits,
+        )
     except (TypeError, ValueError):
         return {
             "feasible": np.int8(0),
@@ -699,10 +713,13 @@ def _batch_from_history(
         "ego",
         "ego_mask",
         "hist_valid",
+        "od_ids",
+        "ld_ids",
     )
     batch: Dict[str, torch.Tensor] = {}
     for key in keys:
-        arr = np.asarray(hist[key], dtype=np.float32)
+        dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
+        arr = np.asarray(hist[key], dtype=dtype)
         batch[key] = torch.from_numpy(arr).unsqueeze(0).to(device)
     return batch
 
@@ -710,6 +727,20 @@ def _batch_from_history(
 # ---------------------------------------------------------------------------
 # Episode rollout
 # ---------------------------------------------------------------------------
+def _model_action_contract(model):
+    if getattr(model, "action_low", None) is None:
+        return CLEAN_BOUNDS, HARD_LIMITS, COMFORT_LIMITS
+    bounds = ActionBounds(
+        low=model.action_low.detach().cpu().numpy(),
+        high=model.action_high.detach().cpu().numpy(),
+        name=getattr(model, "action_config", {}).get("name", "checkpoint"),
+    )
+    limits = getattr(model, "action_config", {}).get("limits", {})
+    hard = DynamicsLimits(**limits["hard"]) if "hard" in limits else HARD_LIMITS
+    comfort = DynamicsLimits(**limits["comfort"]) if "comfort" in limits else COMFORT_LIMITS
+    return bounds, hard, comfort
+
+
 def run_episode(
     env: Any,
     model: StructuredPlanner,
@@ -733,6 +764,8 @@ def run_episode(
 
     frames: List[Dict[str, Any]] = []
     poses: List[np.ndarray] = []
+    runner = LiveBankRunner(model, device=device)
+    model_bounds, model_hard, model_comfort = _model_action_contract(model)
     rows: List[Dict[str, Any]] = []
     prev_action = np.zeros(ACTION_DIM, dtype=np.float64)
     prev_speed: Optional[float] = None
@@ -759,18 +792,23 @@ def run_episode(
         if len(frames) > HISTORY_FRAMES:
             frames = frames[-HISTORY_FRAMES:]
             poses = poses[-HISTORY_FRAMES:]
-        hist = stack_history(frames, poses)
+        hist = raw_history(frames, poses)
         scene_seed = int(obs["meta"]["scene_seed"])
 
         p0 = poses[-1].copy()
         v0 = float(ego.speed)
         h0 = float(ego.heading_theta)
 
-        batch = _batch_from_history(hist, device=device)
+        window, nav, ego_hidden = runner.push(obs)
         with torch.no_grad():
-            out = model(batch)
+            out = model.forward_window(window, nav, ego_hidden)
         a_norm = out["action_mu"][0].detach().cpu().numpy().astype(np.float64)
-        student_action = np.asarray(CLEAN_BOUNDS.denormalize(a_norm, clip=True), dtype=np.float64)
+        if getattr(model, "action_low", None) is not None:
+            low = model.action_low.detach().cpu().numpy()
+            high = model.action_high.detach().cpu().numpy()
+        else:
+            low, high = CLEAN_BOUNDS.low, CLEAN_BOUNDS.high
+        student_action = np.asarray(low + a_norm * (high - low), dtype=np.float64)
 
         # Expert is queried at the decision state for the lift and the audit.
         expert_raw = expert.act()
@@ -841,7 +879,8 @@ def run_episode(
             replay_rows += 1
         else:
             resolved_action, traj_exec, fallback_name = _resolve_student_action(
-                student_action, v0
+                student_action, v0,
+                bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort,
             )
             executed_action = np.asarray(resolved_action, dtype=np.float64)
             if fallback_name != "none":
@@ -897,13 +936,16 @@ def run_episode(
             v0=v0,
         )
         action = np.asarray(label["action"], dtype=np.float64)
-        diagnostics = _diagnostics_or_empty(action, v0)
+        diagnostics = _diagnostics_or_empty(
+            action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort,
+        )
         audit = _audit_fields(scene_seed, action_info, source=1)
         student_feasible = FALLBACK_IDS["not_evaluated"]
         if not replay:
             student_feasible = 1 if fallback_name == "none" else 0
 
         row: Dict[str, Any] = {key: hist[key] for key in HISTORY_KEYS}
+        row["history_mode"] = np.float32(1.0)
         row.update(
             {
                 "action": np.asarray(action, dtype=np.float32),
@@ -1361,6 +1403,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     model_config = _read_ckpt_config(args.ckpt)
+    _meta_model = load_model(args.ckpt, args.device)
+    model_bounds, model_hard, model_comfort = _model_action_contract(_meta_model)
 
     tasks = [
         (
@@ -1472,7 +1516,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "class": "StructuredPlanner",
             "ckpt": str(args.ckpt),
             "config": model_config,
-            "student_action": "CLEAN_BOUNDS.denormalize(action_mu[0], clip=True)",
+            "student_action": "config/model.yaml action.bounds.denormalize(action_mu[0], clip=False)",
         },
         "expert": {
             "class": expert_class,
@@ -1483,19 +1527,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "static obstacle scan are used; future traffic state is not"
             ),
         },
-        "action_bounds": CLEAN_BOUNDS.as_dict(),
+        "action_bounds": model_bounds.as_dict(),
         "action_limits": {
-            "bounds": CLEAN_BOUNDS.as_dict(),
-            "hard": {**_limits_dict(HARD_LIMITS), "provisional": True},
+            "bounds": model_bounds.as_dict(),
+            "hard": {**asdict(model_hard), "provisional": True},
             "comfort": {
-                **_limits_dict(COMFORT_LIMITS),
+                **asdict(model_comfort),
                 "provisional": True,
             },
             "hard_source": HARD_LIMITS_SOURCE,
             "note": (
                 "Provisional clean limits calibrated on expert BC rows. "
                 "PSTL continuous derivatives are stricter than label "
-                "differences; env.action.action_space.HARD_LIMITS is intentionally "
+                "differences; config/model.yaml action.limits.hard is intentionally "
                 "not used here."
             ),
         },

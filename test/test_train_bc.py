@@ -25,7 +25,7 @@ from env.obs import (
     OD_DIM,
     OD_SLOTS,
 )
-from net.model import StructuredPlanner
+from pipeline.legacy_model import StructuredPlanner
 from pipeline.train_bc import (
     INPUT_KEYS,
     LossConfig,
@@ -176,19 +176,6 @@ def test_targets_oob_value_risk_and_plan_weights(tmp_path):
     assert np.isclose(targets["action_norm_clipped"][5, 0], 1.0)
     assert np.isclose(targets["label_oob"].any(axis=1).mean(), 0.125)
 
-    # Value: success +1, collision/off-road -1, timeout 0, discounted per step.
-    np.testing.assert_allclose(
-        targets["value"],
-        np.array([0.95, 1.0, 0.95, 1.0, -0.95, -1.0, -0.95, -1.0]),
-        rtol=0.0,
-        atol=1e-6,
-    )
-    assert targets["risk"].shape == (8, 5)
-    assert targets["risk"][4, 0] == 1.0 and targets["risk"][4, 4] == 1.0
-    assert targets["risk"][5, 0] == 1.0 and targets["risk"][5, 4] == 0.0
-    assert targets["risk"][6, 1] == 1.0 and targets["risk"][6, 4] == 0.0
-    np.testing.assert_allclose(targets["cost"][[2, 4, 6]], [1.0, 2.0, 1.0])
-
     # Plan weights: invalid labels/action bounds are excluded; failed-expert
     # downweight is terminal-segment only; shield is separate from replay; the
     # residual and infeasible downweights apply to actual masks.
@@ -231,18 +218,10 @@ def test_losses_are_finite_and_differentiable(tmp_path):
 
     model = StructuredPlanner()
     out = model(batch)
-    assert out["risk"].shape == (8, 5)
-    assert out["value"].shape == (8, 1)
-    assert out["cost_value"].shape == (8, 1)
-    assert out["aux"]["lane_role_logits"].shape == (8, 16, 4)
-    assert out["aux"]["od_gap"].shape == (8, 16)
+    assert set(out["aux"]) == {"collision", "offroad", "timeout", "urgency", "progress"}
 
     total, components = compute_losses(out, batch, cfg)
-    expected = {
-        "total", "nll", "point", "heading", "velocity", "curvature", "accel",
-        "value", "risk", "cost", "aux", "lane_role", "od_gap", "od_ttc",
-        "od_urgent", "lane_query", "od_query",
-    }
+    expected = {"total", "nll", "point", "heading", "velocity", "curvature", "accel"}
     assert set(components) == expected
     for key, value in components.items():
         assert value.ndim == 0, (key, value.shape)
@@ -254,7 +233,7 @@ def test_losses_are_finite_and_differentiable(tmp_path):
     assert all(torch.isfinite(g).all() for g in grads)
 
 
-def test_zero_plan_weight_batch_keeps_value_risk_gradient(tmp_path):
+def test_zero_plan_weight_batch_has_zero_plan_loss(tmp_path):
     data = load_data([_fixture(tmp_path)])
     cfg = LossConfig(w_failed_expert=0.0)
     targets = build_targets(data, cfg)
@@ -267,10 +246,7 @@ def test_zero_plan_weight_batch_keeps_value_risk_gradient(tmp_path):
 
     assert float(components["nll"]) == 0.0
     assert float(components["point"]) == 0.0
-    assert float(components["value"]) > 0.0
-    assert float(components["risk"]) > 0.0
-    total.backward()
-    assert model.value.weight.grad is not None
+    assert float(components["total"]) == 0.0
 
 
 def test_one_epoch_smoke(tmp_path):
@@ -311,6 +287,9 @@ def test_one_epoch_smoke(tmp_path):
 
     last = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=False)
     assert last["epoch"] == 1
+    from pipeline.checkpointing import load_model_from_checkpoint
+    loaded = load_model_from_checkpoint(str(out_dir / "best.pt"), "cpu", strict=True)
+    assert loaded.hidden == 128
 
     metrics = json.loads((out_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["label_oob_rate"] == 0.125

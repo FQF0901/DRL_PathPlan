@@ -143,8 +143,10 @@ def _lane_curvature(lane: Any, s: float) -> float:
         return 0.0
 
 
-def _lane_candidates(env: Any, ego: Any, max_n: int = 16) -> List[Tuple[float, Any, float, int]]:
-    """Return (distance, lane, s0, role) sorted by distance.
+def _lane_candidates(
+    env: Any, ego: Any, scene_seed: int, max_n: int = 16
+) -> List[Tuple[float, int, Any, float, int]]:
+    """Return (distance, stable_id, lane, s0, role) sorted by distance/id.
 
     role: 0 current lane, 1 left adjacent, 2 right adjacent, 3 other.
     No target-lane / recommended-lane information is used.
@@ -183,10 +185,12 @@ def _lane_candidates(env: Any, ego: Any, max_n: int = 16) -> List[Tuple[float, A
                             role = 0
             except Exception:
                 pass
-            out.append((d, lane, s0, role))
+            lane_index = getattr(lane, "index", (None, None, None))
+            lane_id = _stable_hash(scene_seed, "ld", lane_index[0], lane_index[1], lane_index[2])
+            out.append((d, lane_id, lane, s0, role))
         except Exception:
             continue
-    out.sort(key=lambda x: x[0])
+    out.sort(key=lambda x: (x[0], x[1]))
     return out[:max_n]
 
 def _transform_xy(x: float, y: float, src_pose: np.ndarray, dst_pose: np.ndarray) -> Tuple[float, float]:
@@ -764,7 +768,7 @@ def _build_od(env: Any, ego: Any, scene_seed: int, dt: float) -> Dict[str, np.nd
     od_age = np.zeros(OD_SLOTS, dtype=np.float32)
 
     theta = _safe_float(getattr(ego, "heading_theta", 0.0))
-    objects: List[Tuple[float, Any]] = []
+    objects: List[Tuple[float, int, Any]] = []
     try:
         for obj in env.engine.get_objects().values():
             if obj is ego:
@@ -774,12 +778,13 @@ def _build_od(env: Any, ego: Any, scene_seed: int, dt: float) -> Dict[str, np.nd
             rel = _to_local(ego, obj.position)
             if not (-20.0 <= rel[0] <= 80.0 and -25.0 <= rel[1] <= 25.0):
                 continue
-            objects.append((float(np.linalg.norm(rel)), obj))
+            stable_id = _stable_hash(scene_seed, "od", _obj_stable_key(obj))
+            objects.append((float(np.linalg.norm(rel)), stable_id, obj))
     except Exception:  # noqa: BLE001
         objects = []
-    objects.sort(key=lambda item: item[0])
+    objects.sort(key=lambda item: (item[0], item[1]))
 
-    for i, (_, obj) in enumerate(objects[:OD_SLOTS]):
+    for i, (_, _stable_id, obj) in enumerate(objects[:OD_SLOTS]):
         rel = _to_local(ego, obj.position)
         rel_h = _safe_float(getattr(obj, "heading_theta", theta) - theta)
         rel_h = _wrap_angle(rel_h)
@@ -827,8 +832,8 @@ def _build_ld(
         road_network = env.current_map.road_network
     except Exception:  # noqa: BLE001
         road_network = None
-    candidates = _lane_candidates(env, ego, max_n=LD_SLOTS)
-    for i, (_, lane, s0, role) in enumerate(candidates):
+    candidates = _lane_candidates(env, ego, scene_seed, max_n=LD_SLOTS)
+    for i, (_, _lane_id, lane, s0, role) in enumerate(candidates):
         try:
             lane_index = tuple(lane.index)
             lane_id = int(lane_index[2])
@@ -1249,6 +1254,44 @@ def _empty_history() -> Dict[str, np.ndarray]:
         "pose": np.zeros((HISTORY_FRAMES, 3), dtype=np.float32),
         "hist_valid": np.zeros(HISTORY_FRAMES, dtype=np.float32),
     }
+
+
+def raw_history(frames: Sequence[Dict[str, Any]], poses: Sequence[Any]) -> Dict[str, Any]:
+    """Stack up to six **raw** frames, one per ego frame, padded on the left.
+
+    Unlike :func:`stack_history`, this does not project geometry/content into
+    the query frame and does not reorder slots.  It is the offline-data path used
+    by Bank training; BankWindow/TSB performs stable-ID alignment and applies
+    ``delta_pose`` from the per-frame pose.
+    """
+    frames = list(frames)
+    if not frames:
+        raise ValueError("raw_history: no frames")
+    n = min(len(frames), HISTORY_FRAMES)
+    frames = frames[-n:]
+    poses = list(poses)[-n:]
+    if len(poses) != n:
+        raise ValueError("raw_history: frames and poses length mismatch")
+    out = _empty_history()
+    pad = HISTORY_FRAMES - n
+    scalar = ("nav_route_id",)
+    for t in range(pad, HISTORY_FRAMES):
+        src = frames[t - pad]
+        for key, dst in out.items():
+            if key == "hist_valid":
+                dst[t] = 1.0
+                continue
+            if key == "pose":
+                dst[t] = np.asarray(poses[t - pad], dtype=np.float32)
+                continue
+            if key not in src:
+                continue
+            value = np.asarray(src[key])
+            if key in scalar:
+                dst[t] = value.reshape(-1)[0]
+            else:
+                dst[t] = value
+    return out
 
 
 def stack_history(frames: Sequence[Dict[str, Any]], poses: Sequence[Any]) -> Dict[str, Any]:

@@ -1,32 +1,34 @@
-# Memory Bank + Factorized Temporal-Spatial Attention + Ego-Conditioned Latent WM
+# Memory Bank + Temporal-Spatial Attention + Policy + Ego-Conditioned Latent WM
 
-> 状态：**owner review draft**，不是最终实现合同。
-> 日期：2026-10-24
-> 范围：确定 Real/Imagine Memory Bank、BankWindow、TemporalSpatialBlock、OD content/geometry、LD projection+residual 和 ego-conditioned latent WM 的接口语义。
-> 明确不做：本文件不修改代码、不训练、不产生 gate 结论。
-> 原则：本文只记录已经讨论并接受的决策；未决项集中放在 §11，不能把“讨论过”当成“已实现”。
+> 状态：**owner-reviewed working contract**
+> 日期：2026-10-25
+> 范围：Real/Imagine Memory Bank、BankWindow、TemporalSpatialBlock、PolicyHead、OD/LD direct geometry decoder、Ego-conditioned latent WM、6-step rollout 和 action/ego 接口。
+> 明确不做：本文件不修改代码、不训练、不产生 gate 结果。
+> 原则：只记录已经讨论并接受的决策；未决项集中在 §11。
 
 ---
 
 ## 0. 结论摘要
 
-主线收敛为：
+主线：
 
 ```text
 单帧 observation
-  → 当前帧 encoder
+  → online encoder
   → RealMemoryBank.append(FrameRecord)
   → BankWindow：固定 6 帧、固定 16 slot
   → TemporalSpatialBlock
-       1) per-entity temporal attention
-       2) current-frame spatial self/cross attention
-  → Plan / aux
+       temporal: 同 stable_id 历史 + frame-level delta_pose
+       spatial: 当前 OD/LD + ego alignment token；不含 nav
+  → policy head
+       ego/nav query OD/LD
+       → policy_action
   → EgoConditionedLatentWM
-       OD content z_hat
-       + OD geometry decoder
-       + LD projection + residual
+       z_hat_t = z_hat_{t-1} + r_z,t
+       OD/LD latent residual
+  → direct OD/LD geometry decoder
   → ImagineMemoryBank.append
-  → rollout
+  → 6 个 policy / 6 个 transition
 ```
 
 已接受的关键决策：
@@ -34,62 +36,65 @@
 1. `env.obs.stack_history` 退出主路径；历史只由 Bank 管理。
 2. Real/Imagine Bank 同 schema、同构；`source` 和 `rollout_depth` 区分真实/想象。
 3. OD/LD 都使用 **固定 16 slot**；slot 只是存储位置，`stable_id` 才是身份。
-4. 时间 attention 只允许同一 `stable_id` 的历史参与；slot 复用时旧历史必须 mask。
-5. OD/LD 都保留 content latent；显式 geometry 单独存。
-6. Spatial attention 只加入 **relative pose**，不加入 distance / dyaw / velocity 等拆分的手工几何特征。
-7. WM 主 target 只有 **OD content**；OD 有 relative-pose decoder；LD 走 **projection + residual**，不预测完整 LD content/polyline。
-8. LD 不查询 future map；future map 只作为训练 target/oracle；LD type 从 t0 继承，不预测。
-9. 没有独立 risk head，也没有 value head；Plan / aux；collision/offroad/timeout 进 aux。
-10. 当前 scope 是“当前可见目标、固定 top-16、短时 rollout”；不考虑短时遮挡，只保留 `valid`。
+4. Temporal attention 只允许同一 `stable_id` 的历史参与；slot 复用时旧历史必须 mask。
+5. **`z` 是 frame-dependent full-state latent**：包含相对位姿、内容、类型等；显式 geometry 仍单独存储，作为监督/诊断/decoder target。
+6. **不再做 entity geometry projection**：TSB 和 decoder 都不把上一帧 geometry 投影到当前帧；历史对齐由 `delta_pose(t -> query)` 完成。
+7. TSB spatial 只接收当前 OD/LD 和 **ego alignment token**；**nav 不进入 TSB**，nav 只进入 policy。
+8. Policy head 使用 ego/nav 对 TSB 输出的 OD/LD 做 cross-attention；policy hidden 不进入 WM。
+9. WM 预测 OD/LD 的 latent residual `r_z`；`z_hat` 累积；OD/LD 都有 EMA content target。
+10. Geometry 使用 **direct absolute decoder**：OD 输出 5D，LD 输出 10D；没有 base projection、没有 geometry residual。
+11. 没有独立 risk head，也没有 value head；Plan/aux；collision/offroad/timeout 进 aux。
+12. 当前 scope 是当前可见目标、固定 top-16、短时 rollout；不考虑短时遮挡，只保留 `valid`。
+13. Rollout 是 **6 个 policy / 6 个 action / 6 个 imagined transition**；t6 是 terminal state。
+14. Action 当前 exact tracking：`requested_action == executed_action`；LQR 引入后才允许区分。
 
 ---
 
-## 1. 术语和坐标约定
+## 1. 术语和坐标
 
 ### 1.1 frame
 
 - `ego frame`：当前时刻自车坐标系；
 - `t0 frame`：rollout 起点的自车坐标系；
-- `world frame`：可用于诊断/可视化的全局坐标系，不作为网络输入。
+- `world frame`：只用于诊断/可视化，不作为网络输入。
 
-Bank 中每个 `FrameRecord` 保存该帧的 `ego_pose`。历史 geometry 在构造 `BankWindow` 时统一变换到 query frame（通常是当前帧 ego frame）。
-
-### 1.2 content / geometry / metadata
+每个 `FrameRecord` 保存该帧 `ego_pose`。
+**当前版本不对历史 geometry 做投影。** TSB 使用 `ego_pose` 计算：
 
 ```text
-content latent：表示“是什么”
-  OD：类别、外观、行为语义
-  LD：车道/道路结构语义、类型、拓扑属性
-
-geometry：表示“在哪里”
-  OD：中心、heading、尺寸、速度等显式 anchor
-  LD：polyline、lane heading、chunk/anchor
-  Nav/Ego：policy 输入，不属于 Bank；包含 route、pose、显式运动学
-
-metadata：
-  stable_id / slot / source / depth / timestamp / encoder_version
-  valid
+delta_pose(t -> query) = inverse(ego_pose_t) ∘ ego_pose_query
 ```
 
-**content 不旋转；geometry 才做 SE(2)/SE(3) 投影。**
+作为历史 token 的 frame alignment 信息。
 
-### 1.3 depth 不是相机深度
+### 1.2 state latent / geometry / metadata
 
-本文所有 `depth` 都指：
+```text
+z（Bank content）: frame-dependent full-state latent
+  OD：类别、外观、行为语义、相对位姿等
+  LD：车道/道路结构、类型、拓扑、相对位姿等
+  注意：z 不要求跨 frame 旋转不变
+
+geometry: 显式 anchor，单独存储
+  OD：[x, y, yaw, vx, vy]
+  LD：10D polyline
+  作用：监督、诊断、decoder target；不参与 TSB projection
+
+metadata:
+  stable_id / slot / source / rollout_depth / timestamp / encoder_version / valid
+```
+
+**TSB 不从 geometry 做 SE(2) 投影。** Geometry 只作为 target 和 decoder 输出。
+
+### 1.3 depth
 
 ```text
 rollout_depth
   REAL     = 0
-  IMAGINED = 1..N
+  IMAGINED = 1..6
 ```
 
-它不是相机深度图，也不是 3D 检测 depth。用途：
-
-- 区分真实/想象；
-- 控制 rollout horizon；
-- 给 imagined loss 做 horizon 加权；
-- 诊断误差累积；
-- 禁止 imagined 记录回写 RealBank。
+用途：区分真实/想象、控制 horizon、loss 加权、误差诊断、禁止 imagined 回写 RealBank。
 
 ---
 
@@ -109,7 +114,8 @@ FrameRecord
   parent_frame_id: int     # -1 for real
   action_from_parent: [4] | None
   encoder_version: int
-  entities: tuple[EntityRecord, ...]
+  od: tuple[EntityRecord, ...]   # OD fixed-slot records
+  ld: tuple[EntityRecord, ...]   # LD fixed-slot records
 ```
 
 ### 2.2 EntityRecord
@@ -119,10 +125,10 @@ EntityRecord
   slot: int                # 0..15 storage bucket
   stable_id: int           # semantic identity
   node_type: OD | LD
-  content: [H]             # online encoder / WM output
-  geometry: [G]            # explicit local geometry; frame documented by FrameRecord
-  type: int                # OD/LD type, inherited from t0; not predicted
-  valid: bool              # numeric/attention/loss validity
+  content: [H]             # state latent z；frame-dependent
+  geometry: [G]            # explicit local geometry
+  type_id: int             # OD/LD type，继承 t0，不预测
+  valid: bool              # padding/NaN/无效 slot 为 False
 ```
 
 ### 2.3 字段语义
@@ -131,186 +137,151 @@ EntityRecord
 |---|---|---|
 | `slot` | 固定 16 槽中的存储位置，不是身份 | Bank/数据管线 |
 | `stable_id` | 实体身份，用于跨帧关联 | env.obs stable ID |
-| `valid` | 该 tensor 是否可用于 attention/loss（非 padding、非 NaN） | 数据管线/模型 |
+| `valid` | 该 tensor 是否可用于 attention/loss | 数据管线/模型 |
 | `source` | REAL 或 IMAGINED | 写入方 |
-| `rollout_depth` | 0 或 1..N | 写入方 |
-| `type` | OD/LD 类型 | t0 继承；不做未来预测 |
+| `rollout_depth` | 0 或 1..6 | 写入方 |
+| `type_id` | OD/LD 类型 | t0 继承；不做未来预测 |
 
-**本版本只保留 `valid`。**
-不考虑短时遮挡生命周期；实体不在当前 top-16 或 imagined slot 无效时，直接 `valid=0`。
+**只保留 `valid`。** 没有 `present` / `alive`。
+`valid=1`：当前帧选中或 imagined 记录有效；`valid=0`：padding、丢弃、无效 slot。
 
-```text
-valid=1   当前帧选中 / imagined slot 可用的实体
-valid=0   padding、丢弃、无效 slot
-```
-
-### 2.4 固定 16 slot 规则
-
-本版本采用：
+### 2.4 固定 16 slot
 
 ```text
 OD: 16 slots
 LD: 16 slots
-Bank 只存 OD/LD；Nav/Ego 由 policy 从当前环境输入单独读取。
+Bank 只存 OD/LD；Nav/Ego 不进入 Bank。
 ```
 
-top-16 的选择归 `env/obs.py`，不是 Bank 或模型：
-
-```text
 ROI：
-  前方 80 m
-  后方 20 m
-  左右各 25 m
-
-OD/LD：
-  先做 ROI filter
-  按到 ego 的距离排序
-  取最近 top-16
-  不足 16：padding，valid=0
-  超过 16：丢弃距离最远的
-```
-
-不引入 confidence；选择是确定性的，距离相同用 stable_id 稳定排序。
-
-- 每帧最多 16 个 OD/LD；
-- 不足 16 个：padding，`valid=0`；
-- slot 可复用；
-- 时间 attention 必须满足：
 
 ```text
-temporal_valid[t, n] = valid[t, n] & valid[t-1.., n] & (stable_id[t, n] == stable_id[历史, n])
+前方 80 m
+后方 20 m
+左右各 25 m
 ```
 
-否则 slot 复用时会把不同实体混在一起。
+OD/LD 先 ROI filter，再按到 ego 距离排序，取最近 top-16；不足 padding `valid=0`；超过丢弃最远。距离相同用 `stable_id` 稳定排序。
 
-> 不采用 variable stable-ID graph nodes 作为当前版本实现。当前 scope 是固定 top-16 当前可见目标；新实体进入、长期遮挡、重识别不建模。
-
-### 2.5 slot 复用
-
-当新实体进入且没有空 slot 时：
+时间 attention 的 mask：
 
 ```text
-选择一个可复用 slot
-  → 清空旧 content/geometry/type
-  → 写入新 stable_id
-  → 所有旧历史 temporal mask=0
-  → valid=1
+temporal_valid[t, n] = valid[t, n]
+                       & valid[t-1.., n]
+                       & (stable_id[t, n] == stable_id[历史, n])
 ```
 
-如果没有可复用 slot，则丢弃该实体；这是当前 top-16 scope 的明确限制。
+slot 复用时清空旧 content/geometry/type，写入新 stable_id，旧历史 temporal mask=0。
 
 ---
 
-## 3. RealMemoryBank 和 ImagineMemoryBank
+## 3. RealMemoryBank / ImagineMemoryBank
 
-### 3.1 同构，不同语义
+### 3.1 同构
 
-两者使用**同一套 FrameRecord / EntityRecord schema**，这样 BankWindow 和 TemporalSpatialBlock 可以共用；区别只在 `source`、`valid`、`depth` 和写入权限。
+两者使用同一套 FrameRecord/EntityRecord schema；区别只在 `source`、`valid`、`depth` 和写入权限。
 
 ### 3.2 RealMemoryBank
 
 ```text
 容量：6 帧
-写入：真实环境 observation
+写入：真实 observation
 source=REAL
 rollout_depth=0
-valid=当前真实帧选中且数值有效
 ```
 
-- 上游是**当前帧 online encoder**；
+- 上游是当前帧 online encoder；
 - 不接收 WM 输出；
 - 不接受 imagined 记录；
 - episode/scene 切换 hard reset；
-- append 时默认 detach；
+- append 默认 detach；
 - 不保存 target encoder 的 `z*`。
 
 ### 3.3 ImagineMemoryBank
 
 ```text
 snapshot = RealBank 的 6 帧副本
-source：real prefix=REAL，新帧=IMAGINED
-rollout_depth：1..6
-valid：预测数值有效；无效 imagined slot 为 0
+real prefix: source=REAL
+新帧: source=IMAGINED
+rollout_depth: 1..6
 ```
 
-- 开头从 RealBank snapshot；
-- 每一步 append 一个 imagined FrameRecord；
+- 从 RealBank snapshot；
+- 每步 append 一个 imagined FrameRecord；
 - 不修改 RealBank；
 - rollout 结束销毁/clear；
-- 不把 imagined content/geometry 回写 RealBank。
+- 不把 imagined 回写 RealBank；
+- FIFO 容量 6；imagined depth 最大 6。
 
-### 3.4 Real/Imagine 的上游网络
+### 3.4 encoder / target encoder
 
-RealBank 的 content 来自：
+RealBank content 来自：
 
 ```text
-metaDrive current observation
-  → single-frame encoder（online）
-  → content latent + explicit geometry + stable ID
+MetaDrive current observation
+  → online single-frame encoder
+  → z（full-state latent）+ explicit geometry + stable ID
   → RealBank.append
 ```
 
-WM target 的 `z*` 来自：
+Target encoder：
 
 ```text
 future real observation
   → independent frozen/EMA target encoder
-  → z*（stop-grad）
+  → z*（OD + LD；stop-grad）
 ```
 
-两者关系：
-
-- **同一套网络结构**（通常同 state_dict 形状）；
-- **不同实例/参数**；
-- target encoder 不能被 online encoder 替代；
-- Phase 0/1 用 frozen copy；Phase 2 one-step 稳定后再启用 EMA；
-- `z*` 只进入 WM loss，不进入 RealBank、ST-GNN 或 policy 输入。
+- target encoder 与 online encoder 同结构、不同实例；
+- Phase 0/1 frozen copy；Phase 2 one-step 稳定后再 EMA；
+- `z*` 只进入 WM loss，不进入 RealBank/policy；
+- OD/LD 都有 content target；
+- target encoder 不做 geometry projection。
 
 ---
 
 ## 4. BankWindow API
 
-Bank 是 per-episode 状态；训练时由 collate 组成 batched window。
-
-建议接口：
-
 ```python
 class BankWindow:
-    content: Tensor       # [T,N,H]
-    geometry: Tensor      # [T,N,G], transformed to query frame
-    type: Tensor          # [T,N]
-    slot: Tensor          # [N]
-    stable_id: Tensor     # [T,N]
-    valid: Tensor         # [T,N] bool
-    source: Tensor        # [T,N] or [T]
-    rollout_depth: Tensor # [T] or [T,N]
-    ego_pose: Tensor      # [T,3]
+    od_content: Tensor       # [B,T,16,H]  z_od
+    od_geometry: Tensor      # [B,T,16,5]  显式 OD geometry
+    od_type: Tensor          # [B,T,16]
+    od_valid: Tensor         # [B,T,16] bool
+    od_stable_id: Tensor     # [B,T,16]
+    ld_content: Tensor       # [B,T,16,H]  z_ld
+    ld_geometry: Tensor      # [B,T,16,10] 显式 LD geometry
+    ld_type: Tensor          # [B,T,16]
+    ld_valid: Tensor         # [B,T,16] bool
+    ld_stable_id: Tensor     # [B,T,16]
+    ego_pose: Tensor         # [B,T,3]
+    source: Tensor           # [B,T] int64
+    rollout_depth: Tensor    # [B,T] int64
+    frame_valid: Tensor      # [B,T] bool
 ```
 
-### 4.1 构造规则
-
-```text
-window = bank.window(last=6)
-```
+### 4.1 构造
 
 - 不足 6 帧：左侧 padding，`valid=0`；
-- 历史 geometry 用每帧 `ego_pose` 变换到 query frame；
-- content 不旋转；
+- `content` 保存各帧自己的 `z`，**不做旋转/投影**；
+- `geometry` 保存各帧自己的显式 geometry，**不做投影**；
+- `ego_pose` 保存各帧 pose，用于 TSB 的 `delta_pose(t -> query)`；
 - `stable_id` 按帧保存；
 - `valid` 按帧保存；
 - `source/depth` 保留；
-- 同一 slot 的历史只有在 `stable_id` 相同且 `valid=1` 时才允许进入 temporal attention。
+- 同一 slot 的历史只有 `stable_id` 相同且 `valid=1` 时进入 temporal attention。
 
 ### 4.2 批处理
 
 ```text
-B 个 episode
-  → [B,T,N,H] content
+B episodes
+  → [B,T,N,H] z
   → [B,T,N,G] geometry
   → [B,T,N] masks / stable_id
+  → [B,T,3] ego_pose
 ```
 
-BankWindow 本身不要求 batch，但训练 collate 必须支持 batch；不能像当前 `BankView` 一样只处理单场景。
+BankWindow 本身不要求 batch；训练 collate 支持 batch。
 
 ---
 
@@ -319,168 +290,175 @@ BankWindow 本身不要求 batch，但训练 collate 必须支持 batch；不能
 ### 5.1 结构
 
 ```text
-input: BankWindow（只含 OD/LD）
-       + current Ego/Nav（不属于 Bank）
-  ↓
+input: BankWindow（OD/LD）
+       + current ego（仅用于 spatial alignment token）
+       + 每帧 delta_pose(t -> query)（仅用于 temporal frame alignment）
+
 per-entity temporal attention
-  query = current frame token
-  key/value = same-slot history
+  query = current entity token
+  key/value = same stable_id 历史 entity token
+  token_t = z_t + FrameEmbed(delta_pose_t)
   mask = valid & same stable_id
-  ↓
-current-frame spatial self/cross attention
-  OD ↔ LD
-  OD/LD 与 current Ego/Nav conditioning
-  ↓
-current OD/LD entity latents
+
+current-frame spatial attention
+  tokens = OD + LD + ego_alignment
+  **不含 nav**
+  OD ↔ LD ↔ ego
 ```
 
-这是 factorized temporal-spatial attention，不要求严格图卷积/message passing。
+TSB 输出：
+
+```text
+z_od: [B,16,H]
+z_ld: [B,16,H]
+```
 
 ### 5.2 token 内容
 
 ```text
-token = content latent + relative pose embedding
+entity token_t = z_t + FrameEmbed(delta_pose_t)
 ```
 
-- 只加 relative pose：`(dx, dy, dψ)`；
-- **不额外加入** distance、dyaw、velocity、geometry delta 等手工拆分特征；
-- relative pose 的参考 frame 固定为当前 query ego frame；
-- 如果后续需要 pairwise relative pose，再单独扩展，不在本版本默认实现。
+- `z_t` 是 frame-dependent full-state latent；
+- `FrameEmbed(delta_pose_t)` 是 frame-level ego 相对运动，不是 entity pose；
+- **不加入** entity `(x,y,yaw)` token；
+- **不加入** nav token；
+- **不做** geometry projection；
+- 不加入 distance/dyaw/velocity 等手工拆分特征；
+- spatial 的 ego token 只用于当前帧对齐/上下文，不代表历史对齐。
 
-### 5.3 输出
+### 5.3 输出用途
 
 ```text
-entity_latent: [B,16,H]（OD/LD）
+z_od/z_ld
+  → policy head
 ```
 
-供：
-
-- Plan；
-- aux；
-- OD content WM / OD geometry / LD residual。
-
-Ego/Nav 由 policy head 从当前输入单独读取，不从 Bank 读取。
+Policy 额外读取 current nav/ego；WM 不读取 TSB 融合输出，而是读取 Bank 当前 `z_hat` 和 action。
+Ego/Nav 不写入 Bank。
 
 ### 5.4 不做什么
 
 - 不把 `TemporalPool` 原样保留在主路径；
 - 不做 variable stable-ID node graph；
-- 不把 historical content 旋转；
+- 不把 geometry 投影到 query frame；
 - 不在 spatial attention 里加入手工 distance/dyaw/velocity 特征；
-- 不用 `stack_history` 作为历史接口。
+- 不用 `stack_history` 作为历史接口；
+- 不把 nav 放进 TSB。
 
 ---
 
-## 6. Ego-Conditioned Latent WM
+## 6. PolicyHead
 
-### 6.1 主 target
+### 6.1 输入
 
 ```text
-z*_{t+1} = target_encoder(o_{t+1})
+z_od, z_ld                 # TSB 输出
+od_valid, ld_valid         # current masks
+ego_hidden                 # 当前 ego 12D 特征编码
+nav_hidden                 # 当前 nav 编码
+```
+
+### 6.2 结构
+
+```text
+query = MLP([ego_hidden, nav_hidden])
+K/V = [z_od, z_ld]（带 valid mask）
+policy_context = CrossAttention(query, K/V)
+action_mu, action_logstd, aux = heads(policy_context)
+```
+
+- policy head 用 ego/nav **query OD/LD**；
+- 不重复 temporal attention；历史已由 TSB 编码；
+- policy hidden 不传给 WM；
+- 不设 value head / risk head；
+- aux：collision/offroad/timeout/urgency/progress。
+
+---
+
+## 7. EgoConditionedLatentWM
+
+### 7.1 输入
+
+```text
+z_hat_od_t, z_hat_ld_t       # 当前想象 state latent
+action_t                     # normalized action
+```
+
+WM **不接收**：
+
+- `v0` / ego hidden；
+- policy hidden；
+- nav；
+- 历史 BankWindow。
+
+WM 只做当前 `t -> t+1` 的 transition；历史由 TSB 负责。
+`action_t` 的 `(dx,dy,dpsi)` 同时提供 current -> next 的 ego frame transform，因此 WM 不需要额外的 `delta_pose`。
+
+### 7.2 action 表示
+
+```text
+policy_action:     [0,1]^4 normalized
+requested_action:  physical (dx,dy,dpsi,v_next)
+executed_action:   physical; 当前 = requested_action
+```
+
+- WM training：`executed_action` → normalize(bounds) → WM；
+- WM rollout：`policy_action` → WM；
+- ego pose/ego feature：`requested_action` physical；
+- 引入 LQR 后，`executed_action` 才允许与 `requested_action` 不同。
+
+### 7.3 latent transition
+
+```text
+z_hat_0 = z_0
+r_z,t   = WM(z_hat_{t-1}, a_{t-1})
+z_hat_t = z_hat_{t-1} + r_z,t
+```
+
+- `r_z` 是 latent residual，不是 geometry residual；
+- `z_hat` 是累积后的 full-state latent，保存在当前帧；
+- `r_z` 最后一层 zero-init，初始化时保持 persistence；
+- OD/LD 都用同一规则累积；
+- `r_z` 学习跨 frame 差异；不做显式 latent 旋转；
+- 历史 frame 的 TSB 对齐由 `delta_pose` 负责；WM 的 current -> next frame transform 由 action 提供。
+
+### 7.4 direct geometry decoder
+
+```text
+g_hat_od,t = Dec_od(z_hat_od,t) -> [x,y,yaw,vx,vy]  # 当前 ego frame
+g_hat_ld,t = Dec_ld(z_hat_ld,t) -> [x0,y0,...,x4,y4] # 当前 ego frame
+```
+
+- 没有 base projection；
+- 没有 geometry residual；
+- OD 输出 5D，LD 输出 10D；
+- **不预测 type**；type 从 t0 继承；
+- 新实体也直接监督 geometry，不依赖历史 base；
+- valid mask 来自当前帧。
+
+### 7.5 target 和 loss
+
+```text
+z*_od_{t+1} = target_encoder(o_{t+1}).od   # stop-grad
+z*_ld_{t+1} = target_encoder(o_{t+1}).ld   # stop-grad
+
 L_od_content = D(z_hat_od, sg(z*_od))
+L_ld_content = D(z_hat_ld, sg(z*_ld))
+L_od_geo     = L1(Dec_od(z_hat_od), g_od_target)
+L_ld_geo     = L1(Dec_ld(z_hat_ld), g_ld_target)
 ```
 
-- `target_encoder`：独立 frozen/EMA copy，同结构、不同实例；
-- `z*`：**只对 OD content**；
-- `z_hat_od`：WM 预测的下一帧 OD content；
-- stop-grad；
-- target encoder 不进入 RealBank，不进入 policy；
-- **LD 不做完整 content target**；LD 走 projection + residual。
-
-### 6.2 OD geometry decoder
-
-```text
-dec_od(z_hat_od) -> (dx, dy, dψ) in current ego frame
-```
-
-- 训练输入以 `z_hat_od` 为主；
-- 可加 `z*` 作为辅助 probe，但不能只训练 `z*`；
-- geometry target 来自真实下一帧显式 anchor，变换到当前 ego frame；
-- 训练/推理一致：rollout 使用 `dec_od(z_hat_od)`；
-- **不预测 OD type**；type 从 t0 继承。
-
-### 6.3 LD projection + residual
-
-LD 不用 OD 式全量 decoder。
-
-```text
-base_ld_{t+1} = project(polyline_t, ego_pose_t -> ego_pose_{t+1})
-r_hat_ld      = ld_residual(z_ld_t, a_t, base_ld_{t+1})
-g_hat_ld      = base_ld_{t+1} + r_hat_ld
-```
-
-- `polyline_t`：t0/当前帧的显式 lane polygon/polyline；
-- `project`：用 ego motion/action 做显式几何传播；
-- `ld_residual`：Bank 里的 LD feature 学习的小残差；
-- `z_ld_t` 是当前 Bank feature，不是未来 LD content target；
-- **不预测 LD type**；type 从 t0 继承；
-- 输出在当前 query ego frame。
-
-future map target：
-
-- 只用于训练 loss/oracle；
-- 从 MetaDrive 的 `road_network` / lane graph 提取 future vector polyline；
-- 不查询 future map 作为 decoder 输入；
-- future map 可以包含 t0 没看到的新 lane，但新 lane 没有 t0 base，residual 接不上；这部分不保证覆盖。
-
-### 6.4 训练损失
-
-```text
-L_od_content = D(z_hat_od, sg(z*_od))
-L_od_geo     = L1(dec_od(z_hat_od), g_od_target)
-L_ld_res     = L1(project(base_ld) + ld_residual(z_ld), g_ld_target)
-L_total      = λ_z * L_od_content
-             + λ_od * L_od_geo
-             + λ_ld * L_ld_res
-             + ...
-```
-
-- OD/LD mask 用 `valid`；
-- LD 只监督 residual/geometry，不监督 LD content；
+- OD/LD 都有 content target；
+- OD/LD 都有 direct geometry target；
+- geometry target 在当前 query ego frame；
+- mask 用 `valid`；
+- `z*` 只进入 loss；
+- future map 只在 target/oracle，不进入 encoder/decoder 输入；
 - 不预测 type；
-- future map 只在 target，不进入 encoder/decoder 输入；
-- 新 lane 无 base 时不监督 residual，或单独标记为 map-completion unknown。
+- 新 OD/LD 没有历史 base 也可以监督。
 
-### 6.5 rollout
-
-```text
-z_hat_od_{t+1} = WM(z_od_t, a_t)
-g_od_{t+1}     = dec_od(z_hat_od)
-base_ld_{t+1}  = project(polyline_ld_t, ego_pose_t -> ego_pose_{t+1})
-g_ld_{t+1}     = base_ld_{t+1} + ld_residual(z_ld_t, a_t)
-ImagineBank.append(
-  content=z_hat_od / z_ld_t,
-  geometry=g_od / g_ld,
-  type=inherited,
-  source=IMAGINED,
-  rollout_depth=depth+1,
-  valid=...
-)
-```
-
-- Bank **只存 OD/LD**；Nav/Ego 不进入 Bank；
-- OD geometry 存 decoded relative pose；
-- LD geometry 存 projection + residual；
-- type 继承 t0；
-- 每一步 geometry 带 frame/ego_pose，之后转到 query frame；
-- ImagineBank 只做 FIFO，不反写 RealBank；
-
-### 6.6 对外输出语义
-
-- **无 rollout**：
-  ```text
-  model.forward -> 仅 t0 policy 结果
-  ```
-  WM/decoder 只作为训练辅助；不对外输出 t1–t5 policy。
-
-- **有 rollout**：
-  ```text
-  model.imagine -> policy_0, policy_1, ..., policy_5
-  ```
-  其中 `policy_n` 表示 **t_n 时刻给出的 action**。
-  `a_0` 来自当前 policy/plan；`a_1..a_5` 来自 rollout 中 policy 的输出。
-
-### 6.7 target encoder 阶段策略
+### 7.6 target encoder 阶段
 
 ```text
 Phase 0/1: frozen copy of online encoder
@@ -490,210 +468,228 @@ Phase 3: 继续 frozen/EMA，不跟随 GRPO policy 更新
 
 - `z*` stop-grad；
 - target encoder 同结构、不同实例；
-- target 只服务 OD content；
-- LD 不依赖 target encoder 的 future content；
+- OD/LD 都走 target encoder；
 - 记录 target drift / latent norm / decoder 误差。
-
-## 7. Heads
-
-```text
-Plan
-aux
-```
-
-- **不设独立 risk head**；
-- **不设 value head**；GRPO 使用 group-relative advantage；
-- collision / offroad / timeout / urgency / progress 等进入 aux；
-- aux 不直接作为 plan 输入，除非明确设计并测试。
 
 ---
 
-## 8. 数据流
+## 8. Rollout
 
-### 8.1 Real
+### 8.1 循环
+
+```text
+RealBank.snapshot()
+  → ImagineBank
+
+for t = 0..5:
+    z_t = TSB(imagine_bank, ego_alignment_t, delta_pose_history)
+    policy_t = PolicyHead(z_t, ego_hidden_t, nav_0)
+    a_t = policy_t.policy_action
+
+    pose_{t+1} = compose(pose_t, requested_action_t)
+    ego_vec_{t+1} = build_ego(ego_vec_t, requested_action_t)
+    ego_hidden_{t+1} = shared_ego_encoder(ego_vec_{t+1})
+
+    r_z,t+1 = WM(z_hat_t, a_t)
+    z_hat_{t+1} = z_hat_t + r_z,t+1
+    g_hat_{t+1} = Dec(z_hat_{t+1})
+
+    append ImagineBank(
+      content=z_hat_od,t+1 / z_hat_ld,t+1,
+      geometry=g_hat_od,t+1 / g_hat_ld,t+1,
+      type=t0 type,
+      source=IMAGINED,
+      rollout_depth=t+1,
+      valid=...
+    )
+```
+
+### 8.2 长度
+
+```text
+policy_0..policy_5     6 个 policy
+a0..a5                 6 个 action
+t1..t6                 6 个 imagined transition
+t6                     terminal state；没有 policy_6
+rollout_depth          1..6
+ego_pose               t0..t6，共 7 个
+actions                [B,6,4]，全部使用
+nav/ego policy inputs  6 个（t0..t5）
+```
+
+- `policy_n` 是 t_n 时刻给出的 action；
+- `a0` 来自 t0 policy；
+- `a5` 产生 t6 terminal state；
+- ImagineBank FIFO 保留最后 6 帧；
+- 不把 imagined 回写 RealBank。
+
+### 8.3 对外输出
+
+- **无 rollout**：`model.forward` 只输出 t0 policy；
+- **有 rollout**：`model.imagine` / `model.rollout` 输出 policy_0..policy_5。
+
+模型级 rollout 在 `net/world_model.py`；`DriveModel.imagine` / `DriveModel.rollout` 是薄 wrapper。
+`pipeline/rollout.py` 至多是 action preview 或 wrapper，不能复制 WM loop。
+
+---
+
+## 9. Ego / action 接口
+
+### 9.1 action 分类
+
+```text
+policy_action     [0,1]^4 normalized（mean 或 sample）
+requested_action  physical (dx,dy,dpsi,v_next)
+executed_action   env 实际执行；当前 exact tracking，等于 requested_action
+```
+
+当前阶段：
+
+```text
+requested_action == executed_action
+```
+
+只有引入 LQR 后，两者才允许不同。
+
+**Eval/PPO safety fallback 例外**：eval 和 PPO rollout 在 requested action
+PSTL-infeasible 时允许显式的 `v_next` projection 或 safe-brake；必须同时记录
+`requested_action` / `executed_action`、fallback code，并对 PPO 样本 mask 或
+重算 executed log-prob。该例外只属于安全执行层，不是 policy 的 exact-tracking
+训练目标。
+
+### 9.2 action bounds / limits
+
+- `config/model.yaml` 负责 action bounds/limits；
+- `env/action/action_space.py` 只负责：
+  - normalize/denormalize；
+  - PSTL action -> trajectory；
+  - 静态诊断；
+- 不再持有第二套 canonical `CLEAN_BOUNDS`；
+- `denormalize` 不做隐式 clip；
+- policy 训练路径不启用 state-dependent fallback；
+- eval/PPO 安全执行层的 fallback 例外见 §9.1；必须记录 requested/executed 并 mask RL 样本或重算 executed log-prob。
+
+### 9.3 ego 更新
+
+```text
+pose_{t+1} = compose(pose_t, requested_action_t)
+```
+
+```text
+speed     = v_next
+a_long    = (v_next - v_prev) / dt
+yaw_rate  = dpsi / dt
+a_lat     = speed * yaw_rate
+curvature = yaw_rate / max(speed, 0.5)
+prev_dx   = dx
+prev_dpsi = dpsi
+v_long    = speed
+v_lat     = 0
+steer     = bicycle approximation
+```
+
+- 共享 `encoder.py` 的 `ego_encoder`；
+- `nav` 固定 t0；
+- `ego_pose` 不在 12D ego feature 内，单独维护；
+- action 的 `(dx,dy,dpsi)` 就是 current -> next frame transform。
+
+---
+
+## 10. 数据流
+
+### 10.1 Real
 
 ```text
 env current observation（OD/LD）
   → online single-frame encoder
-  → content + geometry + stable_id + valid
+  → z + explicit geometry + stable_id + valid
   → RealBank.append
   → BankWindow
-  → TemporalSpatialBlock（OD/LD）
-  → Plan/aux；policy 额外读取 current Nav/Ego
-  → OD content WM / OD geometry / LD residual
+  → TSB（OD/LD + ego alignment；无 nav）
+  → PolicyHead（ego/nav query）
+  → action
+  → WM / decoders（训练辅助）
 ```
 
-### 8.2 Training
+### 10.2 Training
 
 ```text
 real frame t, t+1
-  → online encoder for z_t (OD/LD)
-  → target encoder for z*_{t+1} (OD content only)
-  → WM predicts z_hat_od
-  → OD geometry decoder
-  → LD projection + residual
-  → L_od_content + L_od_geometry + L_ld_residual
+  → online encoder for z_t（OD/LD）
+  → target encoder for z*_{t+1}（OD/LD, stop-grad）
+  → WM predicts r_z
+  → z_hat_{t+1} = z_hat_t + r_z
+  → direct OD/LD geometry decoders
+  → L_od_content + L_ld_content + L_od_geo + L_ld_geo
 ```
 
-### 8.3 Imagine
+- WM training action = executed_action normalized；
+- target `z*` 不进 Bank/policy；
+- 不做 geometry projection；
+- future map 只做 target。
+
+### 10.3 Imagine
 
 ```text
 RealBank.snapshot()
-  → imagine step
-  → WM OD content + OD geometry decoder
-  → LD projection + residual
-  → ImagineBank.append
-  → BankWindow（混合 real prefix + imagined）
-  → TemporalSpatialBlock
-  → policy_0..policy_5 (t_n action)
-  → next action/planning
+  → 6-step rollout
+  → policy_0..policy_5
+  → a0..a5
+  → t1..t6
+  → t6 terminal
 ```
 
-### 8.4 不能做的事
+### 10.4 不能做的事
 
 - 不能把 future map 作为 decoder 输入；
 - 不能把 `z*` 写进 RealBank；
 - 不能用 online encoder 代替 target encoder；
 - 不能让 imagined 记录回写 RealBank；
 - 不能用 slot 直接当 stable identity；
+- 不能把 nav 放进 TSB；
+- 不能对 TSB/decoder 做 entity geometry projection；
 - 本版本只使用 `valid`。
 
 ---
 
-## 9. 验收/测试建议
+## 11. 未决项
 
-### 9.1 Bank
+1. **LQR 的 executed/requested 分离**
+   - 当前 exact tracking；
+   - LQR 后如何记录实际执行动作、如何 mask policy log-prob。
 
-- FIFO 容量 6；
-- scene/episode 切换 reset；
-- RealBank 拒绝 imagined；
-- ImagineBank copy-on-write，不回写；
-- padding 的 `valid=0`；
-- slot 复用后旧历史 temporal mask=0；
-- stable_id 变化时 temporal attention 不混历史；
-- `source/depth` 正确。
+2. **Policy cross-attention 细节**
+   - query 用拼接还是独立 ego/nav token；
+   - cross-attention 层数/heads；
+   - 全 invalid OD/LD 时的 fallback。
 
-### 9.2 Target encoder
+3. **WM transition 结构**
+   - per-entity MLP + global context；
+   - 或轻量 cross-attention；
+   - 参数量/训练数据/闭环误差的对照。
 
-- target encoder 与 online encoder 参数独立；
-- target 输出 no grad；
-- Phase 0/1 frozen target；Phase 2 one-step 稳定后再启用 EMA；
-- 不用 target latent 进 Bank/ST-GNN；
-- encoder version 可追踪。
+4. **LD content target 的权重和 gate**
+   - LD content loss 是否与 OD 同权；
+   - LD latent norm/drift 监控。
 
-### 9.3 TemporalSpatialBlock
-
-- temporal attention 只读同 stable_id；
-- history geometry 变换到 query frame；
-- content 不旋转；
-- B>1、N=16、k<6 padding；
-- 不同实体 permutation 不改变当前实体输出；
-- spatial attention 不接受手工 distance/dyaw/velocity 输入。
-
-### 9.4 WM / decoder
-
-- `dec_od` 在 `z_hat_od` 上训练，不在只在 `z*` 上训练；
-- OD relative pose 的 frame 一致；
-- LD 是 projection + residual，不输出完整 polyline/type；
-- LD type 从 t0 继承；
-- future map 置空时 forward 仍可运行（证明没有泄漏）；
-- rollout 6 步不越界、不产生 NaN；
-- LD residual 超出 t0 base 时明确 `valid=0`，不假装覆盖新 lane；
-- 评估 OD content/geometry、LD residual/projection coverage，而不只看 latent MSE。
-
-### 9.5 训练/评测
-
-- 没有 `stack_history` 主路径；
-- batch 化 BankWindow；
-- future map 只在 target；
-- Plan/aux；无独立 risk head、无 value head；
-- 所有 artifact 记录 commit、checkpoint、split、source/depth、encoder version。
+5. **action fallback**
+   - 当前关闭；
+   - 未来 fallback 与 RL feedback 的契约。
 
 ---
 
-## 10. 与旧方案的关系
+## 12. 训练阶段（提案，不是 gate 结果）
 
-- 旧的 `env.obs.stack_history` + `TemporalPool` 不再是主路径；
-- 旧的 `InstanceBank` slot 继承 / `InstanceQueue` ID matching 只作为参考，不直接照搬；
-- 旧 `arch_lock` 中关于 D1/D2 target encoder 的 EMA 冲突仍需要 owner 决策；本文件不修改合同；
-- 旧的 `r3b` / history / WM D1/D2 结果继续只作诊断，不能作为本设计的 gate 证据。
+### 12.1 原则
 
----
+- policy 数据和 WM 数据分开；
+- WM 始终用真实下一帧 observation 的 target；
+- action condition 训练用 executed，rollout 用 policy；
+- one-step 先于 multi-step；
+- 6-step plan 不等于执行 6 步；
+- detach 边界显式。
 
-## 11. 未决项（需要 owner review）
-
-1. **LD residual 的几何细节**
-   - residual 是点级、polyline 参数级，还是中心线级；
-   - residual 的尺度和 clamp；
-   - 投影 base 后，哪些点参与 loss；
-   - 新 lane 没有 t0 base 时如何标记 `valid=0`；
-   - 需要 LD residual/projection 的评估协议。
-
-2. **target encoder 的冻结/EMA 时点**
-   - Phase 0/1 建议 frozen copy；
-   - Phase 2 one-step 稳定后再 EMA；
-   - 具体 EMA decay、更新频率、target drift 监控。
-
-3. **LD future map target 的生成**
-   - 从 MetaDrive road_network/lane graph 提取 vector polyline，而不是渲染图；
-   - future ego pose/ROI 选择 top-16；
-   - 只作为训练 target，不能进入 decoder 输入；
-   - 新 lane 目标存在但无 t0 base 时，不作为 residual 正样本。
-
-4. **slot eviction**
-   - 固定 16 slot 满时丢最远实体；
-   - slot 复用时 stable_id 变更与旧历史 mask；
-   - 因为不考虑遮挡，`valid` 是唯一状态。
-
-5. **GRPO**
-   - reference policy 与 KL 权重；
-   - reward model 的验证与安全约束；
-   - 动作 postprocess/fallback 后的 log-prob 记录；
-   - 是否允许 WM 在 GRPO 期间继续更新。
-
-
----
-
-## 12. 训练方案与分布漂移控制
-
-> 本节是训练提案，不是 gate 结果，也不表示代码已经实现。
-> 目的是把 IL、DAgger、WM 训练、GRPO、LQR 的数据流和 detach 边界定清楚，避免把 policy 分布、WM 分布、动作条件和 rollout 混在一起。
-
-### 12.1 核心原则
-
-1. **policy 数据和 WM 数据分开**
-   - policy 用 expert/student/RL 的动作标签或 reward；
-   - WM 始终用**真实下一帧 observation 的 latent target**，不能用自己的 imagined latent 当 target。
-
-2. **action condition 用实际执行动作**
-   - IL 可以用 expert action；
-   - DAgger/RL 应优先用 `a_executed`（经过 policy、PSTL、LQR、fallback 后的实际动作）；
-   - 同时记录 requested action 和 executed action，便于诊断。
-
-3. **one-step 先于 multi-step**
-   - 第一版 WM 只做 one-step；
-   - 没有 rollout 时不需要 ImagineBank；
-   - multi-step 先用 horizon curriculum，再进入 policy 使用。
-
-4. **6-step plan 不等于执行 6 步**
-   - WM/plan 可以预览 6 × 0.5 s；
-   - 真实环境每个 step 只执行第一个 0.5 s；
-   - 下一步重新观测、重新 plan，采用 receding horizon。
-
-5. **detach 边界必须显式**
-   - target encoder / `z*` / `a_exec` / 初始 `z_t` / policy 对 imagined state 的梯度，默认断开；
-   - decoder 对 `z_hat` 的梯度可以保留；
-   - multi-step 先 detach，稳定后再考虑短 BPTT。
-
-### 12.2 推荐训练阶段
-
-用户原始顺序是：
-
-```text
-IL → DAgger → GRPO → LQR
-```
-
-建议把 **WM multi-step curriculum** 插到 GRPO 之前：
+### 12.2 阶段
 
 ```text
 Phase 0: IL + one-step WM auxiliary
@@ -703,251 +699,77 @@ Phase 3: GRPO
 Phase 4: LQR / receding horizon
 ```
 
-如果必须保持 IL → DAgger → GRPO 的顺序，那么至少在 GRPO 使用 WM 之前完成 horizon curriculum；不能让 policy 直接依赖一个只见过 one-step 的 WM。
-
-### 12.3 Phase 0：IL
-
-数据：
-
-```text
-RealMemoryBank：真实当前/历史
-policy：expert action
-WM：expert action + real next latent target
-```
-
-训练：
+### 12.3 Phase 0 loss
 
 ```text
 L_policy_il = L_action(policy(z_t, nav_t, ego_t), a_expert)
-L_wm       = λ_z * D(z_hat_od_{t+1}, sg(z*_od_{t+1}))
-           + λ_od * L1(dec_od(z_hat_od), g_od_target)
-           + λ_ld * L1(project(g_ld_t) + ld_residual(z_ld_t), g_ld_target)
-L_total    = L_policy_il + L_wm
+L_wm = λ_z * (D(z_hat_od, sg(z*_od)) + D(z_hat_ld, sg(z*_ld)))
+     + λ_od_geo * L1(Dec_od(z_hat_od), g_od_target)
+     + λ_ld_geo * L1(Dec_ld(z_hat_ld), g_ld_target)
 ```
 
-建议第一版：
+- `z_hat = z_prev + r_z`；
+- target encoder both OD/LD；
+- 不做 geometry projection；
+- decoder 对 `z_hat` 保留梯度；
+- `z_t`、action、target 默认 detach/no-grad。
+
+### 12.4 Phase 2 horizon
 
 ```text
-z*_od = target_encoder(o_{t+1})     # OD only, stop-grad
-z_t    = online_encoder(o_t).detach() # 先不让 WM loss 改 policy encoder
-a      = expert_action.detach()
-z_hat_od -> dec_od                  # 保留 decoder 对 z_hat 的梯度
-z_ld -> ld_residual                 # LD 只学 residual，不做 future content target
+horizon: 1 → 2 → 3 → 6   # transition 数
 ```
 
-- 不创建 ImagineBank；
-- one-step `z_hat` 只用于 WM/decoder loss；
-- target encoder 独立，Phase 0/1 frozen；Phase 2 稳定后再 EMA；
-- 如果后续确认 WM auxiliary 对 encoder 有帮助，再以很小系数放开 `z_t` 梯度，并监控 IL loss。
+每个 depth 都有真实 target；每个 depth 记录 vs persistence 的误差。
+Phase 2 起启用 ImagineBank；depth 最大 6。
 
-### 12.4 Phase 1：DAgger
-
-数据：
-
-```text
-policy 输入：student 访问到的真实状态
-policy 标签：expert action
-WM 输入：current latent + executed action
-WM target：真实 next observation
-```
-
-训练：
-
-```text
-L_policy_dagger + L_wm_one_step
-```
-
-注意：
-
-- DAgger 改变的是 **policy 状态分布**，不是 WM 的 latent teacher forcing；
-- WM 仍然用真实 next observation，不改成 free-running predicted latent；
-- `a_exec` 用实际执行动作，不使用未执行的 requested action；
-- `a_exec.detach()`；
-- 低置信度/fallback 动作要记录，不要静默当成正常 expert 动作。
-
-### 12.5 Phase 2：WM horizon curriculum
-
-目的：在 policy 依赖 WM 之前，让 WM 适应自己的预测误差。
-
-```text
-horizon: 1 → 2 → 3 → 6
-```
-
-训练：
-
-```text
-L_wm = Σ_k w_k * D(z_hat_od_k, sg(z*_od_k))
-       + λ_geo Σ_k L_geo(dec_od(z_hat_od_k), g_od_k)
-       + λ_ld Σ_k L1(project(g_ld_k) + ld_residual(z_ld_k), g_ld_target_k)
-```
-
-其中 `k` 是 rollout depth；每个 depth 都有真实 target，不是只在最后一步算 loss。
-
-建议：
-
-- 开始 detach 每个 step 的 hidden state；
-- 稳定后再用 2–3 步截断 BPTT；
-- `z*` 永远 stop-grad；
-- 每个 depth 记录 vs persistence 的误差；
-- LD 只校验 projection + residual，不要求完整 lane 生成；
-- 如果 depth 2 已经明显差于 persistence，不允许 depth 6 gate。
-
-Phase 2 起才真正启用 `ImagineBank`：
-
-```text
-RealBank.snapshot()
-  → 每个 imagined step append
-  → source=IMAGINED, rollout_depth=k
-  → rollout 结束 reset
-```
-
-Phase 0/1 的 one-step 只需要 `z_hat`，不需要 ImagineBank。
-
-### 12.6 Phase 3：GRPO
-
-GRPO 不需要 value head，但“只有 reward model 监督 policy”风险较高。
-
-建议：
-
-```text
-L_policy = L_grpo
-         + λ_kl * KL(policy || reference_policy)
-         + λ_aux * aux
-```
-
-- `reference_policy` 可用 DAgger 结束时的策略；
-- 如果完全不用 KL/BC anchor，要严格监控 entropy、action saturation、fallback、reward hacking；
-- reward model 必须有验证集；不能让 reward model 自己无限优化；
-- 环境 reward/cost 可用时，优先用环境信号，不把 learned reward 当唯一真值。
-
-GRPO 采样：
-
-```text
-同一 state / prompt
-  → K 个 policy action
-  → 真实环境执行
-  → reward
-  → group-relative advantage
-  → policy update
-```
-
-- 不要 value head；
-- log-prob 必须对采样动作计算；
-- 如果动作经过 gate/fallback/LQR 改写，必须记录 `executed_action` 和 mask；
-- 不要对 LQR 后的动作反算 policy log-prob。
-
-WM 在 Phase 3 建议：
-
-- 先 freeze WM；
-- 或只做真实 transition 的离线 WM loss；
-- 不让 policy gradient 穿过 imagined state 反传 WM；
-- 如果要做 model-based RL，必须单独设计，不混进第一版 GRPO。
-
-### 12.7 Phase 4：LQR / receding horizon
-
-每个真实 step：
-
-```text
-1. 观测 current
-2. WM 想象 6 步 / policy 输出 6 步 plan
-3. LQR 只跟踪第一个 0.5 s
-4. 下一真实 step 重新观测、重新 plan
-```
-
-对外输出：
-
-- 无 rollout：只输出 t0 policy 结果；
-- 有 rollout：输出 t0..t5 policy 结果，`policy_n` 是 t_n 的 action。
-
-不要：
-
-```text
-6 步 trajectory 开环交给 LQR 执行 3 s
-```
-
-如果 policy 输出 4D action，GRPO 的 log-prob 仍针对 4D action；
-如果 policy 输出整条 trajectory，动作空间、采样、log-prob、group 都要重新定义，第一版不建议改。
-
-### 12.8 detach 规则
+### 12.5 detach
 
 | 边界 | 默认 | 说明 |
 |---|---|---|
-| `z*` | detach | target encoder 输出，不进梯度 |
-| target encoder | no grad | frozen/EMA copy，更新在 optimizer 后 |
-| `z_t` → WM | detach | 第一版避免 WM loss 拉坏 policy encoder |
-| `a_exec` → WM | detach | 动作是条件/标签，不从 WM loss 反传 policy |
-| `z_hat` → decoder | 允许梯度 | decoder loss 需要训练 WM/decoder |
-| `z_hat` → policy | detach | 第一版不让 policy 通过 imagined state 训练 WM |
+| `z*` | detach | target encoder 输出 |
+| target encoder | no grad | frozen/EMA |
+| `z_t` → WM | detach | 第一版 |
+| `action` → WM | detach | 条件/标签 |
+| policy hidden → WM | 不传入 | WM 不接收 |
+| `z_hat` → decoder | 允许梯度 | decoder loss 训练 WM/decoder |
 | multi-step hidden | 先 detach | 稳定后再短 BPTT |
-| geometry target | detach | target 只作监督 |
+| geometry target | detach | 只作监督 |
 
-如果之后要放开 `z_t` 或 imagined state 的梯度，必须单独做对照实验，并监控 policy loss、WM loss、梯度范数和闭环指标。
+### 12.6 gate 建议
 
-### 12.9 WM 漂移控制
+- Phase 0：one-step content/geometry 不低于 persistence；
+- Phase 1：DAgger 在 student 状态上不崩；
+- Phase 2：depth 1/2/3/6 误差曲线可接受；
+- Phase 3：GRPO 不出现 entropy collapse/saturation/reward hacking；
+- Phase 4：LQR 只执行第一段时闭环稳定。
 
-1. **horizon curriculum**：1 → 2 → 3 → 6；
-2. **scheduled sampling**：训练时按概率使用 predicted latent，概率逐步升高；
-3. **multi-step loss**：每个 depth 都对真实 target；
-4. **residual + normalization**：预测 `Δz`，保留 persistence baseline；
-5. **真实重锚定**：每个真实 step 从真实 observation 重新 encode，ImagineBank 不跨真实 step 继承；
-6. **action coverage**：expert / DAgger student / RL policy / 扰动动作都要覆盖；
-7. **uncertainty/fallback**：高不确定时退回 persistence 或更短 horizon；
-8. **geometry consistency**：OD relative pose、LD polyline 每步校验；
-9. **receding horizon**：只执行第一段，避免开环 3 s。
-
-### 12.10 policy 漂移控制
-
-- IL → DAgger：用 student 状态上的 expert 标签；
-- DAgger → GRPO：保留 KL/BC anchor；
-- 训练覆盖 fallback、LQR tracking error、低置信度状态；
-- 不要只在干净 IL 状态上训练 policy；
-- GRPO 的 reward 必须和真实 safety/cost 对齐，避免只优化 reward model。
-
-### 12.11 训练 gate 建议
-
-- Phase 0：one-step content/geometry 不低于 persistence，decoder 有效；
-- Phase 1：DAgger 在 student 状态上不崩，fallback 可追踪；
-- Phase 2：depth 1/2/3/6 误差曲线单调可接受，且明显优于 persistence；
-- Phase 3：GRPO 不出现 entropy collapse / saturation / reward hacking；
-- Phase 4：LQR 只执行第一段时闭环稳定，不出现长时间 open-loop 跟踪漂移。
-
-### 12.12 仍未决
-
-- `z_t.detach()` 是否长期保留，还是 WM 稳定后放开小梯度；
-- WM loss 与 policy loss 的权重/调度；
-- target encoder 从 Phase 0 就 frozen，还是先 EMA；
-- action condition 用 requested 还是 executed（本文件建议 executed）；
-- GRPO 的 reference policy / KL 权重；
-- reward model 的验证与安全约束；
-- 6-step plan 与 LQR preview 的正式接口。
+`persistence` 在 latent 空间指 `z_hat_t = z_hat_{t-1}`；geometry 仍由 decoder 输出。
+不存在 geometry base/residual persistence。
 
 ---
 
-## 13. 文件/文件夹管理（owner approved）
-
-> 这是目标结构，不代表本轮已经修改代码。`action_space.py` 的实际迁移在后续单独任务中完成；迁移前保持 pending，不能出现两份 live 实现。
-
-### 13.1 目标目录
+## 13. 文件/职责
 
 ```text
 config/
-  model.yaml              # 网络结构、Bank 配置、rollout 配置
+  model.yaml              # 网络结构、Bank、rollout、action bounds/limits
   env.yaml
   train_bc.yaml
   eval_thresholds.yaml
 
 net/
-  mem_bank.py             # EntityRecord / FrameRecord / RealBank / ImagineBank / BankWindow
+  mem_bank.py             # EntityRecord/FrameRecord/RealBank/ImagineBank/BankWindow
   encoder.py              # online current-frame encoder + target/EMA encoder
-  world_model.py          # TemporalSpatialBlock / EgoConditionedLatentWM / OD geometry / LD residual / rollout
-  planner.py              # PlanHead / AuxHead
-  model.py                # 顶层组合、forward、imagine 编排
-  build_net.py            # config/model.yaml -> 构造 net/model.py 的组件
+  world_model.py          # TSB / WM / direct geometry decoders / rollout
+  planner.py              # PolicyHead cross-attention + aux
+  model.py                # 顶层组合、forward、imagine/rollout
+  build_net.py            # config -> model
 
 env/
   action/
     __init__.py
-    action_space.py       # 原 net/action_space.py（已迁移）：4D action / PSTL / feasibility / bounds
+    action_space.py       # normalize/denormalize + PSTL + 静态诊断；无 canonical bounds
 
 pipeline/
   losses.py               # 纯 loss 函数
@@ -955,86 +777,63 @@ pipeline/
   train_wm.py
   train_ppo.py
   eval.py
-  rollout.py              # 仅保留 action preview / 旧 wrapper，不是 WM rollout
+  rollout.py              # 单步 preview 或 model.imagine 薄 wrapper
 ```
 
-### 13.2 模块职责
+职责：
 
-| 路径 | 职责 | 不负责 |
+| 路径 | 负责 | 不负责 |
 |---|---|---|
-| `net/mem_bank.py` | Real/Imagine OD/LD 状态、FIFO、SE(2) 补偿、stable-ID/valid、BankWindow | 网络前向、loss、env |
-| `net/encoder.py` | 当前帧 online encoder；独立的 frozen/EMA target encoder | Bank 状态、WM rollout |
-| `net/world_model.py` | TemporalSpatialBlock、WM（OD content）、OD geometry decoder、LD projection+residual、模型级 rollout | env step、训练循环、loss |
-| `net/planner.py` | Plan / aux | Bank、WM、risk head、value head |
-| `net/model.py` | 顶层组合、forward、调用 `world_model` rollout | YAML 解析、训练、env |
-| `net/build_net.py` | 读 YAML、实例化并返回 `Model` | per-episode Bank 单例 |
-| `env/action/action_space.py` | 4D action、PSTL、bounds、feasibility、gate/project | 网络、checkpoint、Bank |
+| `mem_bank.py` | Bank 状态、FIFO、stable-ID/valid、BankWindow | 网络前向、loss、env |
+| `encoder.py` | online encoder、target/EMA encoder | Bank 状态、rollout |
+| `world_model.py` | TSB、WM、direct OD/LD decoders、模型级 rollout | env step、训练循环、loss |
+| `planner.py` | policy cross-attention、Plan/aux | Bank、WM、risk/value head |
+| `model.py` | 顶层组合、forward、调用 rollout | YAML 解析、训练、env |
+| `build_net.py` | 读 YAML、实例化、维度校验 | per-episode Bank、训练 |
+| `env/action/action_space.py` | normalize/denormalize、PSTL、静态诊断 | 网络、checkpoint、Bank |
 | `pipeline/losses.py` | 纯 loss 函数 | target encoder、数据加载 |
-| `pipeline/train_*.py` | target 构造、loss 组合、optimizer、checkpoint | 网络结构定义 |
-| `pipeline/eval.py` | 真实环境闭环评测 | imagined rollout |
 
-### 13.3 依赖方向
+依赖方向：
 
 ```text
 mem_bank.py
   ↑
-encoder.py          # 可产生 FrameRecord
+encoder.py
   ↑
-world_model.py      # 只依赖 mem_bank 的数据类型；rollout 接收 action/action_provider
+world_model.py
   ↑
 planner.py
 
-model.py            # 组合 encoder + world_model + planner
-build_net.py        # 读 config/model.yaml，构造 model.py 的组件
+model.py
+build_net.py
 ```
 
-约束：
+- `mem_bank.py` 不 import encoder/world_model/planner/model；
+- `world_model.py` 不 import planner/model/build_net；
+- `model.py` 只做编排；
+- `env/action/action_space.py` 不被 mem_bank/world_model 反向依赖；
+- `pipeline/losses.py` 不 import model.py。
 
-- `mem_bank.py` 不 import `encoder/world_model/planner/model`；
-- `world_model.py` 不 import `planner/model/build_net`；
-- `model.py` 只做编排，不实现 encoder/WM/planner 细节；
-- `env/action/action_space.py` 不被 `mem_bank.py` 或 `world_model.py` 反向依赖；
-- `pipeline/losses.py` 不 import `model.py`，只接收预测/target；
-- `net/model.py` 保留为顶层组合，不改名为 `drive.py`。
+### 13.1 config/model.yaml 边界
 
-### 13.4 `config/model.yaml` 的边界
+负责：
 
-`config/model.yaml` 负责：
+- encoder/temporal_spatial/world_model/planner 结构与超参数；
+- bank.capacity/od_slots/ld_slots；
+- rollout.horizon；
+- action bounds/limits（只配置，不 build nn.Module）。
 
-- `encoder` / `temporal_spatial` / `world_model` / `planner` 的结构与超参数；
-- `bank.capacity`、`bank.od_slots`、`bank.ld_slots`；
-- `rollout.horizon` 和 decoder 开关；
-- `action` 的 bounds/limits（仅配置；不 build `nn.Module`）。
+`build_net.py` 负责读取、实例化、校验；不创建 per-episode Bank，不训练。
 
-`build_net.py` 负责：
-
-- 读取 YAML；
-- 实例化子模块；
-- 校验维度；
-- 返回 `Model`。
-
-不负责：
-
-- 创建 per-episode `RealMemoryBank` 单例；
-- 创建 target encoder 的 EMA 状态作为 inference 参数；
-- 训练循环 / loss / env step。
-
-### 13.5 rollout 归属
+### 13.2 rollout 归属
 
 - 模型级 rollout：`net/world_model.py`；
-- 顶层调用：`net/model.py` 的 `imagine` / `rollout` 方法；
+- 顶层调用：`net/model.py` 的 `imagine` / `rollout`；
 - 训练/评测调度：`pipeline/train_wm.py`、`pipeline/eval.py`；
-- **不放** `pipeline/imagination.py`，也不在 `pipeline/rollout.py` 里复制一套 WM loop。
-
-`pipeline/rollout.py` 只保留：
-
-- 单步 action preview；
-- 或对 `model.imagine` 的薄 wrapper。
-
-它不是第二个 rollout 真源。
+- `pipeline/rollout.py` 只保留单步 preview 或 `model.imagine` 薄 wrapper，不是第二个 WM loop。
 
 ---
 
 ## 14. 一句话版本
 
-> **Real/Imagine Bank 只存 OD/LD；固定 16 slot、stable ID、valid mask；TemporalSpatialBlock 做同 ID 时序 attention 和当前帧 spatial attention；WM 主 target 是 OD content，OD 用当前 ego frame 的 relative-pose decoder，LD 用 projection + residual（不查询 future map），type 从 t0 继承；预测结果写入 Imagine Bank 做 6 步 rollout；Plan/aux 不设 risk head 或 value head。**
+> Real/Imagine Bank 只存 OD/LD；固定 16 slot、stable ID、valid mask；`z` 是 frame-dependent full-state latent；TSB 用同 stable-ID 历史 + `delta_pose` 做 temporal，用 OD/LD + ego 做 spatial（不含 nav、不做 geometry projection）；policy 用 ego/nav query TSB；WM 预测 latent residual `r_z`，`z_hat` 累积并用 EMA target 监督 OD/LD；OD/LD geometry 由 direct absolute decoder 输出；6 个 policy / 6 个 action / 6 个 transition；Plan/aux，无 risk head、无 value head；当前 action exact tracking，LQR 后才区分 requested/executed。

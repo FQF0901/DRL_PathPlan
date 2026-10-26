@@ -16,8 +16,8 @@ Expert BC 2k rows (provisional)::
     v_next max = 13.90
     stop rows = 0.975 %; stop-to-go rows = 45
 
-The canonical action box is ``[0,7.5],[-1.5,1.5],[-0.8,0.8],[0,15]``
-(:data:`CLEAN_BOUNDS` / :data:`DEFAULT_BOUNDS`).
+The canonical action box is loaded from ``config/model.yaml`` by
+:mod:`env.action.config`; ``CLEAN_BOUNDS`` is only a compatibility alias.
 
 Hard/comfort feasibility limits below are provisional audit recommendations::
 
@@ -99,10 +99,6 @@ __all__ = [
     "ProjectionResult",
     "V1Interval",
     "GateResult",
-    "CLEAN_BOUNDS",
-    "DEFAULT_BOUNDS",
-    "HARD_LIMITS",
-    "COMFORT_LIMITS",
     "normalize",
     "denormalize",
     "clip_components",
@@ -127,12 +123,25 @@ _GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(16)
 # ======================================================================================
 # Bounds and limits
 # ======================================================================================
+@dataclass(frozen=True)
+class DynamicsLimits:
+    """Acceleration/curvature/jerk limits loaded from config/model.yaml."""
+
+    a_long_min: float
+    a_long_max: float
+    a_lat_max: float
+    kappa_max: float
+    kappa_rate_max: float
+    jerk_long_max: float
+    jerk_lat_max: float
+
+
 @dataclass(frozen=True, eq=False)
 class ActionBounds:
     """Static box for ``(dx, dy, dpsi, v_next)``.
 
-    Bounds are *static*: they never depend on ``v0``.  ``DEFAULT_BOUNDS`` is
-    the canonical box (:data:`CLEAN_BOUNDS`).
+    Bounds are *static*: they never depend on ``v0``.  The canonical box is
+    loaded from ``config/model.yaml`` by :mod:`env.action.contract`.
     """
 
     low: np.ndarray
@@ -146,8 +155,8 @@ class ActionBounds:
             raise ValueError(f"ActionBounds 需要 4 维 low/high，收到 {low.shape}/{high.shape}")
         if not (np.all(np.isfinite(low)) and np.all(np.isfinite(high))):
             raise ValueError("ActionBounds 含非有限值")
-        if np.any(low > high):
-            raise ValueError(f"ActionBounds low > high: {low} / {high}")
+        if np.any(low >= high):
+            raise ValueError(f"ActionBounds low must be < high: {low} / {high}")
         low.setflags(write=False)
         high.setflags(write=False)
         object.__setattr__(self, "low", low)
@@ -172,7 +181,7 @@ class ActionBounds:
     def normalize(self, action: Any, *, clip: bool = False) -> np.ndarray:
         return normalize(action, self, clip=clip)
 
-    def denormalize(self, normalized: Any, *, clip: bool = True) -> np.ndarray:
+    def denormalize(self, normalized: Any, *, clip: bool = False) -> np.ndarray:
         return denormalize(normalized, self, clip=clip)
 
     def clip(self, action: Any) -> np.ndarray:
@@ -189,14 +198,18 @@ class ActionBounds:
         comfort_limits: "DynamicsLimits | None" = None,
     ) -> "ProjectionResult":
         """Static-box projection bound to this action box."""
+        if limits is None or comfort_limits is None:
+            contract = _default_contract()
+            limits = contract.hard if limits is None else limits
+            comfort_limits = contract.comfort if comfort_limits is None else comfort_limits
         return project(
             action,
             v0,
             dt=dt,
             hz=hz,
             bounds=self,
-            limits=HARD_LIMITS if limits is None else limits,
-            comfort_limits=COMFORT_LIMITS if comfort_limits is None else comfort_limits,
+            limits=limits,
+            comfort_limits=comfort_limits,
         )
 
     def contains(self, action: Any, *, atol: float = _LIMIT_TOL) -> Any:
@@ -208,37 +221,16 @@ class ActionBounds:
         return {"name": self.name, "low": self.low.tolist(), "high": self.high.tolist()}
 
 
-CLEAN_BOUNDS = ActionBounds(
-    low=np.array([0.0, -1.5, -0.8, 0.0]),
-    high=np.array([7.5, 1.5, 0.8, 15.0]),
-    name="clean",
-)
-DEFAULT_BOUNDS = CLEAN_BOUNDS
+
+from functools import lru_cache
 
 
-@dataclass(frozen=True)
-class DynamicsLimits:
-    """Acceleration/curvature/jerk limits (provisional, canonical calibration)."""
+@lru_cache(maxsize=1)
+def _default_contract():
+    """Load the canonical contract lazily; no module-level constants live here."""
+    from env.action.config import load_action_contract
+    return load_action_contract()
 
-    a_long_min: float = -10.0
-    a_long_max: float = 3.5
-    a_lat_max: float = 8.0
-    kappa_max: float = 0.345
-    kappa_rate_max: float = 1.0
-    jerk_long_max: float = 20.0
-    jerk_lat_max: float = 20.0
-
-
-HARD_LIMITS = DynamicsLimits()
-COMFORT_LIMITS = DynamicsLimits(
-    a_long_min=-4.0,
-    a_long_max=2.0,
-    a_lat_max=3.0,
-    kappa_max=0.20,
-    kappa_rate_max=0.05,
-    jerk_long_max=5.0,
-    jerk_lat_max=5.0,
-)
 
 # ======================================================================================
 # Small helpers
@@ -297,8 +289,10 @@ def _bounds_codes(action: np.ndarray, bounds: ActionBounds) -> Tuple[list, list]
 # ======================================================================================
 # Normalization
 # ======================================================================================
-def normalize(action: Any, bounds: ActionBounds = DEFAULT_BOUNDS, *, clip: bool = False) -> np.ndarray:
+def normalize(action: Any, bounds: ActionBounds | None = None, *, clip: bool = False) -> np.ndarray:
     """Affine ``(action - low) / (high - low)``; optional static clipping first."""
+    if bounds is None:
+        bounds = _default_contract().bounds
     arr = _as_actions(action)
     if clip:
         arr = clip_components(arr, bounds)
@@ -310,15 +304,17 @@ def normalize(action: Any, bounds: ActionBounds = DEFAULT_BOUNDS, *, clip: bool 
 
 def denormalize(
     normalized: Any,
-    bounds: ActionBounds = DEFAULT_BOUNDS,
+    bounds: ActionBounds | None = None,
     *,
-    clip: bool = True,
+    clip: bool = False,
 ) -> np.ndarray:
     """Affine ``low + normalized * (high - low)``.
 
-    ``clip=True`` (default) clamps normalized values to
-    ``[0, 1]``; it is a static box clamp, not a state-dependent rewrite.
+    ``clip=False`` by default; callers must request clipping explicitly and
+    record requested vs executed when they do so.
     """
+    if bounds is None:
+        bounds = _default_contract().bounds
     arr = np.asarray(normalized, dtype=np.float64)
     if arr.ndim == 0 or arr.shape[-1] != 4:
         raise ValueError(f"normalized action 需要形状 (...,4)，收到 {arr.shape}")
@@ -327,8 +323,10 @@ def denormalize(
     return bounds.low + arr * bounds.width
 
 
-def clip_components(action: Any, bounds: ActionBounds = DEFAULT_BOUNDS) -> np.ndarray:
+def clip_components(action: Any, bounds: ActionBounds | None = None) -> np.ndarray:
     """Clip each component to the static bounds (no state-dependent logic)."""
+    if bounds is None:
+        bounds = _default_contract().bounds
     arr = _as_actions(action)
     return np.minimum(np.maximum(arr, bounds.low), bounds.high)
 
@@ -692,9 +690,9 @@ def action_to_trajectory(
     v0: float,
     dt: float = 0.5,
     hz: int = 10,
-    bounds: ActionBounds = DEFAULT_BOUNDS,
-    limits: DynamicsLimits = HARD_LIMITS,
-    comfort_limits: DynamicsLimits = COMFORT_LIMITS,
+    bounds: ActionBounds | None = None,
+    limits: DynamicsLimits | None = None,
+    comfort_limits: DynamicsLimits | None = None,
 ) -> ActionTrajectory:
     """Execute a 4D action as a PSTL trajectory.
 
@@ -711,6 +709,11 @@ def action_to_trajectory(
         :class:`ActionTrajectory`.  The action is **not** clipped here; use
         :func:`project` for the static-box projection path.
     """
+    if bounds is None or limits is None or comfort_limits is None:
+        contract = _default_contract()
+        bounds = contract.bounds if bounds is None else bounds
+        limits = contract.hard if limits is None else limits
+        comfort_limits = contract.comfort if comfort_limits is None else comfort_limits
     a = _as_single_action(action)
     v0 = float(v0)
     if not np.isfinite(v0) or v0 < 0.0:
@@ -1135,8 +1138,8 @@ def feasible_v1_interval(
     action: Any,
     v0: float,
     dt: float = 0.5,
-    bounds: ActionBounds = DEFAULT_BOUNDS,
-    limits: DynamicsLimits = HARD_LIMITS,
+    bounds: ActionBounds | None = None,
+    limits: DynamicsLimits | None = None,
 ) -> V1Interval:
     """Hard-feasible interval for ``v_next`` given ``(dx, dy, dpsi, v0)``.
 
@@ -1149,6 +1152,10 @@ def feasible_v1_interval(
     acceleration, and non-negative time-law speed.  Lateral/curvature limits
     remain a post-hoc check in :func:`action_to_trajectory`.
     """
+    if bounds is None or limits is None:
+        contract = _default_contract()
+        bounds = contract.bounds if bounds is None else bounds
+        limits = contract.hard if limits is None else limits
     a = _as_single_action(action)
     v0 = float(v0)
     if not np.isfinite(v0) or v0 < 0.0:
@@ -1238,9 +1245,9 @@ def gate(
     v0: float,
     dt: float = 0.5,
     hz: int = 10,
-    bounds: ActionBounds = DEFAULT_BOUNDS,
-    limits: DynamicsLimits = HARD_LIMITS,
-    comfort_limits: DynamicsLimits = COMFORT_LIMITS,
+    bounds: ActionBounds | None = None,
+    limits: DynamicsLimits | None = None,
+    comfort_limits: DynamicsLimits | None = None,
     *,
     require_comfort: bool = False,
 ) -> GateResult:
@@ -1250,6 +1257,11 @@ def gate(
     violations, or ``v_next`` outside :func:`feasible_v1_interval`.  Codes are
     stable strings; reasons are human-readable.
     """
+    if bounds is None or limits is None or comfort_limits is None:
+        contract = _default_contract()
+        bounds = contract.bounds if bounds is None else bounds
+        limits = contract.hard if limits is None else limits
+        comfort_limits = contract.comfort if comfort_limits is None else comfort_limits
     a = _as_single_action(action)
     traj = action_to_trajectory(a, v0, dt=dt, hz=hz, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
     interval = feasible_v1_interval(a, v0, dt=dt, bounds=bounds, limits=limits)
@@ -1292,9 +1304,9 @@ def project(
     v0: float,
     dt: float = 0.5,
     hz: int = 10,
-    bounds: ActionBounds = DEFAULT_BOUNDS,
-    limits: DynamicsLimits = HARD_LIMITS,
-    comfort_limits: DynamicsLimits = COMFORT_LIMITS,
+    bounds: ActionBounds | None = None,
+    limits: DynamicsLimits | None = None,
+    comfort_limits: DynamicsLimits | None = None,
 ) -> ProjectionResult:
     """Static component clipping + PSTL feasibility diagnosis.
 
@@ -1304,6 +1316,11 @@ def project(
     ``component_clipped`` records every per-component clip, including a tiny
     negative ``dx`` drift clipped to zero.
     """
+    if bounds is None or limits is None or comfort_limits is None:
+        contract = _default_contract()
+        bounds = contract.bounds if bounds is None else bounds
+        limits = contract.hard if limits is None else limits
+        comfort_limits = contract.comfort if comfort_limits is None else comfort_limits
     requested = _as_single_action(action)
     executed = clip_components(requested, bounds)
     clipped_mask = np.abs(executed - requested) > 0.0
