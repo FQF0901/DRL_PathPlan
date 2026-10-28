@@ -2,14 +2,14 @@
 
 用法
 ----
-    tools/venv-python -m env.scenario.cli                       # 全量 10k/1k -> env/specs/
+    tools/venv-python -m env.scenario.cli                       # 全量 10k/1k -> data/specs/
     tools/venv-python -m env.scenario.cli --slice 200           # P1a 切片 + 全量
     tools/venv-python -m env.scenario.cli --slice 200 --no-validate
 
 输出文件
 --------
-- 全量：``scenarios_train.json`` / ``scenarios_val.json``
-- 切片：``scenarios_train_slice{N}.json``（N 条）+ ``scenarios_val_slice{M}.json``
+- 全量：``train_10000.json`` / ``val_1000.json``
+- 切片：``train_slice{N}.json``（N 条）+ ``val_slice{M}.json``
   （M = max(1, N//4)，与 L1a 冒烟 ``build_specs(200, 50, ...)`` 口径一致）
 
 生成后默认惰性调用 L1b 的 ``env.scenario.validator`` 做实例化校验；该模块尚不存在时
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"额外生成 P1a 切片：训练 N 条 + 验证 max(1, N//{SLICE_VAL_RATIO}) 条（不带值时 N={DEFAULT_SLICE}）",
     )
     parser.add_argument("--workers", type=int, default=16, help="实例化校验并行进程数（默认 16；内存紧张时用 8）")
-    parser.add_argument("--out-dir", type=Path, default=Path("env/specs"), help="spec 输出目录（默认 env/specs）")
+    parser.add_argument("--out-dir", type=Path, default=Path("data/specs/source"), help="spec 输出目录（默认 data/specs/source）")
     parser.add_argument(
         "--seed-range",
         type=int,
@@ -129,8 +129,8 @@ def main(argv: "list[str] | None" = None) -> int:
         train_specs, val_specs = build_specs(args.n_train, args.n_val, train_seeds, val_seeds, rng_seed=args.rng_seed)
         outputs.append(("scenarios_train", train_specs))
         outputs.append(("scenarios_val", val_specs))
-        _write("scenarios_train.json", train_specs, args.out_dir)
-        _write("scenarios_val.json", val_specs, args.out_dir)
+        _write("train_10000.json", train_specs, args.out_dir)
+        _write("val_1000.json", val_specs, args.out_dir)
 
         # P1a 切片：独立分层（保证切片内每类几何也有覆盖），seed 取同一区间前缀。
         if args.slice is not None:
@@ -138,10 +138,10 @@ def main(argv: "list[str] | None" = None) -> int:
             slice_train_specs, slice_val_specs = build_specs(
                 args.slice, slice_val, train_seeds, val_seeds, rng_seed=args.rng_seed
             )
-            outputs.append((f"scenarios_train_slice{args.slice}", slice_train_specs))
-            outputs.append((f"scenarios_val_slice{slice_val}", slice_val_specs))
-            _write(f"scenarios_train_slice{args.slice}.json", slice_train_specs, args.out_dir)
-            _write(f"scenarios_val_slice{slice_val}.json", slice_val_specs, args.out_dir)
+            outputs.append((f"train_slice{args.slice}", slice_train_specs))
+            outputs.append((f"val_slice{slice_val}", slice_val_specs))
+            _write(f"train_slice{args.slice}.json", slice_train_specs, args.out_dir)
+            _write(f"val_slice{slice_val}.json", slice_val_specs, args.out_dir)
     except ValueError as exc:
         print(f"[gene_env] 错误: {exc}", file=sys.stderr)
         return 2

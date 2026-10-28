@@ -79,11 +79,11 @@ def verify_split_manifest(
 ) -> dict:
     """Validate that ``specs`` is exactly the frozen seed set for ``split``.
 
-    The manifest is tracked under ``config/splits``; the raw spec file is
+    The manifest is tracked under ``data/splits``; the raw spec file is
     generated/ignored.  Evaluation must call this before running a gate.
     """
     raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    # Support both the compact per-split file (config/splits/val500.json) and
+    # Support both the compact per-split file (data/splits/val_500.json) and
     # the older combined {val:..., test:...} manifest shape.
     block = raw.get(split) if isinstance(raw.get(split), dict) else raw
     if not isinstance(block, dict) or str(block.get("split", split)) != split:

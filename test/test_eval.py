@@ -37,7 +37,7 @@ from pipeline.eval import (
 )
 from pipeline.eval_metrics import summarize_rows
 
-SPEC_PATH = "env/specs/scenarios_train_slice200.json"
+SPEC_PATH = "data/specs/mini_train_100.json"
 
 
 def test_load_model_random_warns(capsys):

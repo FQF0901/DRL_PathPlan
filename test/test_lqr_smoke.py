@@ -45,7 +45,7 @@ def test_lqr_set_reference_4col_uses_provided_speeds():
 
 
 def test_lqr_straight_reference_smoke():
-    spec = load_specs("env/specs/scenarios_train_slice200.json")[0]
+    spec = load_specs("data/specs/mini_train_100.json")[0]
     env = build_env(spec, use_render=False)
     try:
         env.reset(); ego = env.agent

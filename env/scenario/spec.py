@@ -2,7 +2,7 @@
 
 用途
 ----
-generator 产出、validator / env 封装消费；落盘为 ``env/specs/*.json``（已 gitignore）。
+generator 产出、validator / env 封装消费；落盘为 ``data/specs/*.json``（已 gitignore）。
 只依赖标准库与本包 taxonomy，import 无副作用。
 
 关键接口

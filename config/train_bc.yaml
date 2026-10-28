@@ -1,5 +1,8 @@
 data:
-  - datasets/bc_2k
+  - data/episodes/train_2000/il_expert
+val_data:
+  - data/episodes/val_500/expert_reference
+# val_data is the fixed 500-scene held-out set; val_frac is ignored when it is set.
 out: runs/bc_2k
 epochs: 30
 batch_size: 256

@@ -24,14 +24,28 @@ def test_frozen_val_and_test_manifests_are_verified():
     from dataset.splits import verify_split_manifest
     from env.scenario.spec import load_specs
 
-    val = load_specs("env/specs/scenarios_val500.json")
-    test = load_specs("env/specs/scenarios_test500.json")
+    val = load_specs("data/specs/val_500.json")
+    test = load_specs("data/specs/test_500.json")
     raw_v = verify_split_manifest(
-        "config/splits/val500.json", val, split="val", spec_path="env/specs/scenarios_val500.json"
+        "data/splits/val_500.json", val, split="val", spec_path="data/specs/val_500.json"
     )
     raw_t = verify_split_manifest(
-        "config/splits/test500.json", test, split="test", spec_path="env/specs/scenarios_test500.json"
+        "data/splits/test_500.json", test, split="test", spec_path="data/specs/test_500.json"
     )
     assert raw_v["split"] == "val" and raw_t["split"] == "test"
     assert {s.seed for s in val}.isdisjoint({s.seed for s in test})
     assert all(s.split == "test" for s in test)
+
+
+def test_canonical_train_val_test_sizes_and_disjoint():
+    from env.scenario.spec import load_specs
+
+    train = load_specs("data/specs/train_2000.json")
+    val = load_specs("data/specs/val_500.json")
+    test = load_specs("data/specs/test_500.json")
+    assert len(train) == 2000 and len(val) == 500 and len(test) == 500
+    assert min(s.seed for s in train) == 1000 and max(s.seed for s in train) == 2999
+    tr = {s.seed for s in train}
+    va = {s.seed for s in val}
+    te = {s.seed for s in test}
+    assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)

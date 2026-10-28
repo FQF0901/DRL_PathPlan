@@ -33,7 +33,7 @@ from env.obs import (
 )
 from env.scenario.spec import load_specs
 
-SPEC_PATH = "env/specs/scenarios_train_slice200.json"
+SPEC_PATH = "data/specs/mini_train_100.json"
 
 
 @pytest.fixture(scope="module")

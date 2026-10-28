@@ -1,8 +1,9 @@
 {
   "schema": "pnp_eval_split_v2",
+  "name": "test_500",
   "split": "test",
-  "source": "env/specs/scenarios_val.json",
-  "spec_path": "env/specs/scenarios_test500.json",
+  "source": "data/specs/source/val_1000.json",
+  "spec_path": "data/specs/test_500.json",
   "n": 500,
   "seed_range": [
     5000500,

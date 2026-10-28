@@ -1,0 +1,163 @@
+{
+  "schema": "pnp_data_registry_v1",
+  "created": "2026-10-28",
+  "canonical_root": "data",
+  "splits": {
+    "train": {
+      "name": "train_2000",
+      "scenes": 2000,
+      "seeds": [
+        1000,
+        2999
+      ],
+      "manifest": "data/splits/train_2000.json",
+      "spec": "data/specs/train_2000.json"
+    },
+    "val": {
+      "name": "val_500",
+      "scenes": 500,
+      "seeds": [
+        5000000,
+        5000499
+      ],
+      "manifest": "data/splits/val_500.json",
+      "spec": "data/specs/val_500.json"
+    },
+    "test": {
+      "name": "test_500",
+      "scenes": 500,
+      "seeds": [
+        5000500,
+        5000999
+      ],
+      "manifest": "data/splits/test_500.json",
+      "spec": "data/specs/test_500.json"
+    }
+  },
+  "episodes": {
+    "il_expert": {
+      "path": "data/episodes/train_2000/il_expert",
+      "shards": 4,
+      "rows": 139605,
+      "episodes": 2000,
+      "scenes": 2000,
+      "stage": "IL/BC",
+      "purpose": "expert BC training on train_2000",
+      "success_episodes": 1403,
+      "success_kind": "expert"
+    },
+    "val_500_expert_reference": {
+      "path": "data/episodes/val_500/expert_reference",
+      "shards": 1,
+      "rows": 33916,
+      "episodes": 500,
+      "scenes": 500,
+      "stage": "VAL",
+      "purpose": "offline validation labels; never train",
+      "success_episodes": 365,
+      "success_kind": "expert"
+    },
+    "train_2000": {
+      "spec_path": "data/specs/train_2000.json",
+      "seeds": 2000,
+      "split_manifest": "data/splits/train_2000.json",
+      "sha256": "e5fc94b808d07067b6c70821355f1cf33b007a705d23aa7058b51316c3a4917f"
+    },
+    "val_500": {
+      "spec_path": "data/specs/val_500.json",
+      "seeds": 500,
+      "split_manifest": "data/splits/val_500.json",
+      "sha256": "44fdf309c6bad8ee924978bbbccd98a96e9b1e489fa5de396636fcf9378878a3"
+    },
+    "test_500": {
+      "spec_path": "data/specs/test_500.json",
+      "seeds": 500,
+      "split_manifest": "data/splits/test_500.json",
+      "sha256": "0e356189dba1117f01d64691649a8e68828e7a0c10e7319d7e1740aead558f73"
+    },
+    "mini_train_100": {
+      "spec_path": "data/specs/mini_train_100.json",
+      "seeds": 100,
+      "split_manifest": "data/splits/mini_train_100.json",
+      "sha256": "cb4c2e09a6850fed11e4915f8e332f1bae9be8613bfd490d9fb5579db2c60f49"
+    },
+    "mini_val_20": {
+      "spec_path": "data/specs/mini_val_20.json",
+      "seeds": 20,
+      "split_manifest": "data/splits/mini_val_20.json",
+      "sha256": "e7ccc1d21e3e53c1f683d7dfde0cb23ed13a4542287bebef180dd7ef855b4ee9"
+    },
+    "mini_il_train_100": {
+      "path": "data/episodes/mini/il_train_100",
+      "stage": "MINI",
+      "purpose": "smoke-test subset",
+      "rows": 6996,
+      "scenes": 100,
+      "episodes": 100,
+      "success_episodes": 73
+    },
+    "mini_dagger_train_100": {
+      "path": "data/episodes/mini/dagger_train_100",
+      "stage": "MINI",
+      "purpose": "smoke-test subset",
+      "rows": 6324,
+      "scenes": 100,
+      "episodes": 100,
+      "success_episodes": 57
+    },
+    "mini_val_20_expert": {
+      "path": "data/episodes/mini/val_20_expert",
+      "stage": "MINI",
+      "purpose": "smoke-test subset",
+      "rows": 1323,
+      "scenes": 20,
+      "episodes": 20,
+      "success_episodes": 14
+    },
+    "il_dagger": {
+      "path": "data/episodes/train_2000/il_dagger",
+      "shards": 4,
+      "rows": 127526,
+      "episodes": 2000,
+      "scenes": 2000,
+      "stage": "DAgger",
+      "purpose": "student DAgger round 1 on the same train_2000 scenes",
+      "success_episodes": 1002,
+      "success_kind": "student"
+    }
+  },
+  "stages": {
+    "IL": {
+      "train": [
+        "data/episodes/train_2000/il_expert"
+      ],
+      "val": [
+        "data/episodes/val_500/expert_reference"
+      ]
+    },
+    "DAgger": {
+      "train": [
+        "data/episodes/train_2000/il_dagger"
+      ],
+      "val": [
+        "data/episodes/val_500/expert_reference"
+      ]
+    },
+    "RL": {
+      "train_spec": "data/specs/train_2000.json",
+      "val_spec": "data/specs/val_500.json",
+      "test_spec": "data/specs/test_500.json",
+      "offline_episodes": []
+    },
+    "MINI": {
+      "il_train": "data/episodes/mini/il_train_100",
+      "dagger_train": "data/episodes/mini/dagger_train_100",
+      "val": "data/episodes/mini/val_20_expert"
+    }
+  },
+  "archive": [
+    "archive/datasets",
+    "archive/specs",
+    "archive/config_splits"
+  ]
+}

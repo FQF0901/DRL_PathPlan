@@ -346,6 +346,22 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
     return merged
 
 
+def concat_data(parts: Sequence[Mapping[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+    """Concatenate data shards/pools by row; all keys must be present."""
+    if not parts:
+        raise ValueError("concat_data: no parts")
+    keys = set(parts[0])
+    for part in parts[1:]:
+        keys &= set(part)
+    out: Dict[str, np.ndarray] = {}
+    for key in keys:
+        values = [np.asarray(part[key]) for part in parts]
+        if len({tuple(v.shape[1:]) for v in values}) != 1:
+            raise ValueError(f"concat_data: incompatible trailing shape for {key!r}")
+        out[key] = np.concatenate(values, axis=0)
+    return out
+
+
 def split_masks(
     data: Mapping[str, np.ndarray], val_frac: float, seed: int
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -858,6 +874,7 @@ def _make_config(
         "loss": asdict(cfg),
         "split": {
             "by": "scene_seed",
+            "mode": "fixed_val_data" if args.val_data else "scene_seed_fraction",
             "val_frac": float(args.val_frac),
             "seed": int(args.seed),
             "train_seeds": train_seeds,
@@ -865,11 +882,13 @@ def _make_config(
             "n_train_rows": int(train_mask.sum()),
             "n_val_rows": int(val_mask.sum()),
             "val_split_empty": bool(not val_mask.any()),
+            "val_data": None if not args.val_data else [str(p) for p in args.val_data],
         },
         "train_seeds": train_seeds,
         "val_seeds": val_seeds,
         "params": count_parameters(model),
         "data": [str(p) for p in args.data],
+        "val_data": None if not args.val_data else [str(p) for p in args.val_data],
         "training": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
@@ -900,6 +919,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--data", nargs="+", required=True,
                    help="dirs containing expert_bc.npz (or .npz files)")
+    p.add_argument(
+        "--val-data",
+        nargs="+",
+        default=None,
+        help="optional fixed validation .npz file(s)/directory(ies)",
+    )
     p.add_argument("--out", required=True)
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
@@ -1004,7 +1029,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         residual_dpsi_thresh=args.residual_dpsi_thresh,
     )
 
-    data = load_data(args.data)
+    train_data = load_data(args.data)
+    if args.val_data:
+        val_data = load_data(args.val_data)
+        train_seeds = set(int(x) for x in np.unique(train_data["scene_seed"]))
+        val_seeds = set(int(x) for x in np.unique(val_data["scene_seed"]))
+        overlap = train_seeds & val_seeds
+        if overlap:
+            raise SystemExit(f"--data/--val-data scene_seed overlap: {sorted(overlap)[:10]}")
+        n_train = len(train_data["action"])
+        data = concat_data([train_data, val_data])
+        train_mask = np.zeros(len(data["action"]), dtype=bool)
+        train_mask[:n_train] = True
+        val_mask = ~train_mask
+        print(f"[bc] fixed val_data={args.val_data} scenes={len(val_seeds)}")
+    else:
+        data = train_data
+        train_mask = val_mask = None
     if args.init:
         model = load_model_from_checkpoint(args.init, device, strict=True)
         print(f"[bc] initialized from {args.init}")
@@ -1013,7 +1054,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     action_low = model.action_low.detach().cpu().numpy() if getattr(model, "action_low", None) is not None else None
     action_high = model.action_high.detach().cpu().numpy() if getattr(model, "action_high", None) is not None else None
     targets = build_targets(data, cfg, action_low=action_low, action_high=action_high)
-    train_mask, val_mask = split_masks(data, args.val_frac, args.seed)
+    if train_mask is None or val_mask is None:
+        train_mask, val_mask = split_masks(data, args.val_frac, args.seed)
     if not val_mask.any():
         print(
             "[bc] WARNING: validation split is empty (not enough scene "
