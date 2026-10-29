@@ -208,16 +208,15 @@ class DriveModel(nn.Module):
             window, enc["nav"], enc["ego"], ego_valid=enc.get("ego_valid")
         )
 
-    def forward_history(self, batch, *, zero_pose: bool = False) -> Dict[str, Tensor]:
-        """Build a real BankWindow from a legacy [B,T,...] history batch.
+    def build_history_window(self, batch, *, zero_pose: bool | Tensor = False):
+        """Encode a [B,T,...] history batch into a BankWindow.
 
-        The Bank is the temporal owner: each history frame is encoded with the
-        shared current-frame encoder and assembled into one fixed-slot window.
-        This is the bridge used by existing evaluation/training call sites.
+        This is the offline bridge used by BC/WM training and legacy eval.  The
+        live path uses ``LiveBankRunner`` and calls ``forward_window`` directly.
         """
         od = batch["od"]
         if od.dim() != 4:
-            raise ValueError("forward_history expects od [B,T,16,18]")
+            raise ValueError("history expects od [B,T,16,18]")
         b, t = int(od.shape[0]), int(od.shape[1])
         batch = dict(batch)
         # Legacy synthetic/history fixtures often use 0 for every ID.  The
@@ -245,14 +244,18 @@ class DriveModel(nn.Module):
                     if int(valid.sum()) > 1 and len(set(int(x) for x in vals.tolist())) < int(valid.sum()):
                         cleaned[bi, ti] = torch.arange(n, dtype=ids.dtype, device=ids.device)
             batch[key] = cleaned
-        if zero_pose:
+        pose = batch.get("ego_pose", batch.get("pose"))
+        if pose is None:
             pose = torch.zeros((b, t, 3), dtype=od.dtype, device=od.device)
-        else:
-            pose = batch.get("ego_pose", batch.get("pose"))
-            if pose is None:
-                pose = torch.zeros((b, t, 3), dtype=od.dtype, device=od.device)
-            if pose.dim() != 3 or pose.shape[0] != b or pose.shape[1] != t:
-                raise ValueError("history pose must be [B,T,3]")
+        if pose.dim() != 3 or pose.shape[0] != b or pose.shape[1] != t:
+            raise ValueError("history pose must be [B,T,3]")
+        if torch.is_tensor(zero_pose):
+            if zero_pose.dim() != 1 or zero_pose.shape[0] != b:
+                raise ValueError("zero_pose tensor must be [B]")
+            pose = pose.clone()
+            pose[zero_pose.to(device=pose.device, dtype=torch.bool)] = 0.0
+        elif zero_pose:
+            pose = torch.zeros((b, t, 3), dtype=od.dtype, device=od.device)
         metadata = {}
         defaults = {"episode_id": "ep", "frame_id": 0, "timestamp": 0.0}
         for key in ("episode_id", "frame_id", "timestamp"):
@@ -311,6 +314,11 @@ class DriveModel(nn.Module):
                     fv[:, -n_hist:] = fv[:, -n_hist:] & hist_valid[:, -n_hist:]
                     window.frame_valid = fv
         assert last_enc is not None
+        return window, last_enc
+
+    def forward_history(self, batch, *, zero_pose: bool = False) -> Dict[str, Tensor]:
+        """Policy forward from a [B,T,...] history batch."""
+        window, last_enc = self.build_history_window(batch, zero_pose=zero_pose)
         return self.forward_window(
             window, last_enc["nav"], last_enc["ego"], ego_valid=last_enc.get("ego_valid")
         )

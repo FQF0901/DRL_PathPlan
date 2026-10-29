@@ -156,7 +156,7 @@ def test_wm_residual_and_direct_geometry():
     od = torch.randn(B, 16, H)
     ld = torch.randn(B, 16, H)
     action = torch.rand(B, 4)
-    out = wm(od, ld, action)
+    out = wm(od, ld, action, od_base=od, ld_base=ld)
     assert out["od_residual"].shape == (B, 16, H)
     assert out["ld_residual"].shape == (B, 16, H)
     assert out["od_geometry"].shape == (B, 16, 5)

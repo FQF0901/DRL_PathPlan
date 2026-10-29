@@ -235,37 +235,49 @@ class EgoConditionedLatentWM(nn.Module):
 
     def forward(
         self,
-        od: Tensor,
-        ld: Tensor,
+        od_context: Tensor,
+        ld_context: Tensor,
         action: Tensor,
         *,
+        od_base: Tensor,
+        ld_base: Tensor,
         od_valid: Tensor | None = None,
         ld_valid: Tensor | None = None,
     ) -> Dict[str, Tensor]:
-        b, n, _ = od.shape
+        """Predict next-state residuals from TSB history context.
+
+        ``od_context/ld_context`` are the per-entity TSB outputs ``h_t``.
+        ``od_base/ld_base`` are the required raw Bank state ``z_hat_t`` to which
+        the residuals are added.  There is no direct-context fallback.
+        """
+        b, n, _ = od_context.shape
+        if od_base.shape != od_context.shape or ld_base.shape != ld_context.shape:
+            raise ValueError("WM context and Bank base shapes must match")
         if not torch.isfinite(action).all():
             raise ValueError("action must be finite")
         od_bool = (
-            torch.ones((b, n), dtype=torch.bool, device=od.device)
+            torch.ones((b, n), dtype=torch.bool, device=od_context.device)
             if od_valid is None
             else od_valid > 0.5
         )
         ld_bool = (
-            torch.ones((b, n), dtype=torch.bool, device=ld.device)
+            torch.ones((b, n), dtype=torch.bool, device=ld_context.device)
             if ld_valid is None
             else ld_valid > 0.5
         )
         # The encoder may emit NaN for invalid slots; sanitize before the
         # MLP because 0 * NaN would poison every entity in the batch.
-        od = torch.where(od_bool[..., None], od, torch.zeros_like(od))
-        ld = torch.where(ld_bool[..., None], ld, torch.zeros_like(ld))
+        od_context = torch.where(od_bool[..., None], od_context, torch.zeros_like(od_context))
+        ld_context = torch.where(ld_bool[..., None], ld_context, torch.zeros_like(ld_context))
+        od_base = torch.where(od_bool[..., None], od_base, torch.zeros_like(od_base))
+        ld_base = torch.where(ld_bool[..., None], ld_base, torch.zeros_like(ld_base))
         a = self.action(action)[:, None, :].expand(b, n, -1)
-        od_mask = od_bool.unsqueeze(-1).to(od.dtype)
-        ld_mask = ld_bool.unsqueeze(-1).to(ld.dtype)
-        od_res = self.od_delta(torch.cat([od, a], dim=-1)) * od_mask
-        ld_res = self.ld_delta(torch.cat([ld, a], dim=-1)) * ld_mask
-        od_next = od + od_res
-        ld_next = ld + ld_res
+        od_mask = od_bool.unsqueeze(-1).to(od_context.dtype)
+        ld_mask = ld_bool.unsqueeze(-1).to(ld_context.dtype)
+        od_res = self.od_delta(torch.cat([od_context, a], dim=-1)) * od_mask
+        ld_res = self.ld_delta(torch.cat([ld_context, a], dim=-1)) * ld_mask
+        od_next = od_base + od_res
+        ld_next = ld_base + ld_res
         return {
             "od": od_next,
             "ld": ld_next,
@@ -400,18 +412,23 @@ def imagine_rollout(
             next_pose = next_pose.detach()
             if next_ego_features is not None:
                 next_ego_features = next_ego_features.detach()
-        # WM operates on the current bank state z_hat, not on the policy's
-        # temporally fused TSB output.  This keeps the recurrence literal:
-        # z_hat_{t+1} = z_hat_t + r_z.
-        wm_od = current_window.od_content[:, -1]
-        wm_ld = current_window.ld_content[:, -1]
+        # TSB context h_t is shared by policy and WM.  WM predicts the
+        # residual r_z; the residual base is the raw Bank state z_hat_t.
+        wm_context_od = z["od"]
+        wm_context_ld = z["ld"]
+        wm_base_od = current_window.od_content[:, -1]
+        wm_base_ld = current_window.ld_content[:, -1]
         if detach:
-            wm_od = wm_od.detach()
-            wm_ld = wm_ld.detach()
+            wm_context_od = wm_context_od.detach()
+            wm_context_ld = wm_context_ld.detach()
+            wm_base_od = wm_base_od.detach()
+            wm_base_ld = wm_base_ld.detach()
         step = world_model(
-            wm_od,
-            wm_ld,
+            wm_context_od,
+            wm_context_ld,
             action,
+            od_base=wm_base_od,
+            ld_base=wm_base_ld,
             od_valid=od_valid,
             ld_valid=ld_valid,
         )

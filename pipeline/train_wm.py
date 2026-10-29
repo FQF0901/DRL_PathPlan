@@ -53,6 +53,55 @@ def _rows_to_batch(data: Dict[str, np.ndarray], idx: np.ndarray, device: str) ->
     return out
 
 
+def _history_batch(data: Dict[str, np.ndarray], idx: np.ndarray, device: str) -> Dict[str, Tensor]:
+    """Batch-first history tensors for the shared TSB encoder."""
+    keys = (
+        "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask", "ego", "ego_mask",
+        "hist_valid", "od_ids", "ld_ids", "pose",
+    )
+    out: Dict[str, Tensor] = {}
+    for key in keys:
+        if key not in data:
+            continue
+        dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
+        out[key] = torch.from_numpy(np.asarray(data[key][idx], dtype=dtype)).to(device)
+    return out
+
+
+@torch.no_grad()
+def _encode_history(drive, data: Dict[str, np.ndarray], rows: np.ndarray, device: str, batch_size: int = 128):
+    """Encode current history windows and run the frozen TSB once per batch.
+
+    Returns the TSB context h_t plus the raw Bank state z_t that is the
+    residual base for the WM.
+    """
+    chunks: List[Dict[str, np.ndarray]] = []
+    for start in range(0, len(rows), batch_size):
+        idx = rows[start : start + batch_size]
+        batch = _history_batch(data, idx, device)
+        mode = data.get("history_mode")
+        if mode is None:
+            zero_pose = torch.zeros(len(idx), dtype=torch.bool, device=device)
+        else:
+            mode_vals = torch.from_numpy(np.asarray(mode[idx], dtype=np.float32)).to(device)
+            zero_pose = mode_vals.reshape(-1) < 0.5
+        window, last_enc = drive.build_history_window(batch, zero_pose=zero_pose)
+        h = drive.temporal_spatial(window, last_enc["ego"], ego_valid=last_enc.get("ego_valid"))
+        chunks.append(
+            {
+                "od_context": h["od"].detach().cpu().numpy(),
+                "ld_context": h["ld"].detach().cpu().numpy(),
+                "od_base": window.od_content[:, -1].detach().cpu().numpy(),
+                "ld_base": window.ld_content[:, -1].detach().cpu().numpy(),
+                "od_valid": window.od_valid[:, -1].detach().cpu().numpy(),
+                "ld_valid": window.ld_valid[:, -1].detach().cpu().numpy(),
+            }
+        )
+    if not chunks:
+        raise ValueError("no history rows to encode")
+    return {key: np.concatenate([c[key] for c in chunks], axis=0) for key in chunks[0]}
+
+
 @torch.no_grad()
 def _encode_rows(encoder, data: Dict[str, np.ndarray], rows: np.ndarray, device: str, batch_size: int = 256):
     chunks: List[Dict[str, np.ndarray]] = []
@@ -155,23 +204,24 @@ def _normalize_executed(actions: np.ndarray, low=None, high=None) -> np.ndarray:
 
 
 def _make_training_arrays(
-    data: Dict[str, np.ndarray], encoder, target_encoder, device: str, max_pairs: int,
+    data: Dict[str, np.ndarray], drive, target_encoder, device: str, max_pairs: int,
     *, action_low=None, action_high=None,
 ):
     cur_rows, next_rows = _build_pairs(data, max_pairs)
     if len(cur_rows) == 0:
         raise ValueError("no consecutive-frame pairs found")
-    cur = _encode_rows(encoder, data, cur_rows, device)
+    cur = _encode_history(drive, data, cur_rows, device)
     nxt = _encode_rows(target_encoder, data, next_rows, device)
     out = {
-        "od": cur["od_content"], "ld": cur["ld_content"],
+        "od_context": cur["od_context"], "ld_context": cur["ld_context"],
+        "od_base": cur["od_base"], "ld_base": cur["ld_base"],
         "od_valid": cur["od_valid"], "ld_valid": cur["ld_valid"],
-        "od_target": np.zeros_like(cur["od_content"]),
-        "ld_target": np.zeros_like(cur["ld_content"]),
+        "od_target": np.zeros_like(cur["od_context"]),
+        "ld_target": np.zeros_like(cur["ld_context"]),
         "od_tmask": np.zeros_like(cur["od_valid"]),
         "ld_tmask": np.zeros_like(cur["ld_valid"]),
-        "od_geometry": np.zeros_like(cur["od_geometry"]),
-        "ld_geometry": np.zeros_like(cur["ld_geometry"]),
+        "od_geometry": np.zeros_like(nxt["od_geometry"]),
+        "ld_geometry": np.zeros_like(nxt["ld_geometry"]),
         "od_gmask": np.zeros_like(cur["od_valid"]),
         "ld_gmask": np.zeros_like(cur["ld_valid"]),
         "scene_seed": np.asarray(data["scene_seed"][cur_rows], dtype=np.int64),
@@ -182,11 +232,11 @@ def _make_training_arrays(
         cur_ids_ld = data["ld_ids"][cur_rows[p], -1]
         tgt_ids_ld = data["ld_ids"][next_rows[p], -1]
         out["od_target"][p], out["od_tmask"][p] = _align_by_id(
-            cur["od_content"][p], cur_ids_od, cur["od_valid"][p],
+            cur["od_base"][p], cur_ids_od, cur["od_valid"][p],
             nxt["od_content"][p], tgt_ids_od, nxt["od_valid"][p],
         )
         out["ld_target"][p], out["ld_tmask"][p] = _align_by_id(
-            cur["ld_content"][p], cur_ids_ld, cur["ld_valid"][p],
+            cur["ld_base"][p], cur_ids_ld, cur["ld_valid"][p],
             nxt["ld_content"][p], tgt_ids_ld, nxt["ld_valid"][p],
         )
         out["od_geometry"][p], out["od_gmask"][p] = _align_geometry_by_id(
@@ -224,25 +274,36 @@ def _make_training_arrays(
 
 def _tensors(arrays: Dict[str, np.ndarray], idx: np.ndarray, device: str) -> Dict[str, Tensor]:
     keys = (
-        "od", "ld", "od_valid", "ld_valid", "od_target", "ld_target",
+        "od_context", "ld_context", "od_base", "ld_base",
+        "od_valid", "ld_valid", "od_target", "ld_target",
         "od_tmask", "ld_tmask", "od_geometry", "ld_geometry", "od_gmask", "ld_gmask",
         "action",
     )
     return {key: torch.from_numpy(np.asarray(arrays[key][idx], dtype=np.float32)).to(device) for key in keys}
 
 
-def _loss(wm, batch: Dict[str, Tensor]):
-    pred = wm(batch["od"], batch["ld"], batch["action"], od_valid=batch["od_valid"], ld_valid=batch["ld_valid"])
+def _loss(wm, batch: Dict[str, Tensor], *, content_weight: float = 1.0, geometry_weight: float = 0.1):
+    pred = wm(
+        batch["od_context"], batch["ld_context"], batch["action"],
+        od_base=batch["od_base"], ld_base=batch["ld_base"],
+        od_valid=batch["od_valid"], ld_valid=batch["ld_valid"],
+    )
     return wm_losses(
         pred,
         od_target=batch["od_target"], ld_target=batch["ld_target"],
         od_valid=batch["od_tmask"], ld_valid=batch["ld_tmask"],
         od_geometry_target=batch["od_geometry"], ld_geometry_target=batch["ld_geometry"],
         od_geometry_mask=batch["od_gmask"], ld_geometry_mask=batch["ld_gmask"],
+        content_weight=content_weight,
+        od_geometry_weight=geometry_weight,
+        ld_geometry_weight=geometry_weight,
     )
 
 
-def _persistence(arrays: Dict[str, np.ndarray], idx: np.ndarray) -> Dict[str, float]:
+def _persistence(
+    arrays: Dict[str, np.ndarray], idx: np.ndarray,
+    *, content_weight: float = 1.0, geometry_weight: float = 1.0,
+) -> Dict[str, float]:
     def mse(a, b, m):
         mask = np.asarray(m, dtype=np.float32)
         while mask.ndim < a.ndim:
@@ -260,24 +321,38 @@ def _persistence(arrays: Dict[str, np.ndarray], idx: np.ndarray) -> Dict[str, fl
         return float((np.abs(a - b) * mask).sum() / denom)
 
     return {
-        "od_content": mse(arrays["od"][idx], arrays["od_target"][idx], arrays["od_tmask"][idx]),
-        "ld_content": mse(arrays["ld"][idx], arrays["ld_target"][idx], arrays["ld_tmask"][idx]),
+        "od_content": float(content_weight) * mse(arrays["od_base"][idx], arrays["od_target"][idx], arrays["od_tmask"][idx]),
+        "ld_content": float(content_weight) * mse(arrays["ld_base"][idx], arrays["ld_target"][idx], arrays["ld_tmask"][idx]),
         # Contract geometry has no persistence baseline; report the zero
         # decoder baseline separately, using the same L1 as the loss.
-        "od_geometry_zero_baseline": mae(np.zeros_like(arrays["od_geometry"][idx]), arrays["od_geometry"][idx], arrays["od_gmask"][idx]),
-        "ld_geometry_zero_baseline": mae(np.zeros_like(arrays["ld_geometry"][idx]), arrays["ld_geometry"][idx], arrays["ld_gmask"][idx]),
+        "od_geometry_zero_baseline": float(geometry_weight) * mae(np.zeros_like(arrays["od_geometry"][idx]), arrays["od_geometry"][idx], arrays["od_gmask"][idx]),
+        "ld_geometry_zero_baseline": float(geometry_weight) * mae(np.zeros_like(arrays["ld_geometry"][idx]), arrays["ld_geometry"][idx], arrays["ld_gmask"][idx]),
     }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Bank-native one-step latent WM")
     p.add_argument("--data", nargs="+", required=True)
+    p.add_argument(
+        "--val-data",
+        nargs="+",
+        default=None,
+        help="fixed validation episode pool, e.g. data/episodes/val_500/expert_reference",
+    )
+    p.add_argument("--val-split", default="data/splits/val_500.json")
+    p.add_argument(
+        "--allow-random-val",
+        action="store_true",
+        help="explicitly allow the old random scene-seed validation fallback",
+    )
     p.add_argument("--ckpt", required=True, help="bank-native DriveModel checkpoint")
     p.add_argument("--out", required=True)
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--max-pairs", type=int, default=60000)
+    p.add_argument("--content-weight", type=float, default=1.0)
+    p.add_argument("--geometry-weight", type=float, default=0.1)
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -291,31 +366,69 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("WM ID metadata length does not match loaded rows")
     data["od_ids"], data["ld_ids"] = ids["od_ids"], ids["ld_ids"]
 
+    if not args.val_data and not args.allow_random_val:
+        raise SystemExit(
+            "WM training requires --val-data with the fixed val500 episodes; "
+            "use --allow-random-val only for legacy debug"
+        )
+    val_data = None
+    if args.val_data:
+        val_data = load_data(args.val_data)
+        val_ids = _load_ids(args.val_data)
+        if len(val_ids["od_ids"]) != len(val_data["action"]):
+            raise ValueError("WM validation ID metadata length does not match loaded rows")
+        val_data["od_ids"], val_data["ld_ids"] = val_ids["od_ids"], val_ids["ld_ids"]
+        expected = {int(x) for x in json.loads(Path(args.val_split).read_text())["seeds"]}
+        actual = {int(x) for x in np.unique(val_data["scene_seed"])}
+        if actual != expected:
+            raise ValueError(
+                f"WM validation scene seeds do not match {args.val_split}: "
+                f"missing={len(expected - actual)} extra={len(actual - expected)}"
+            )
+        overlap = {int(x) for x in np.unique(data["scene_seed"])} & actual
+        if overlap:
+            raise ValueError(f"WM train/val scene overlap: {sorted(overlap)[:10]}")
+
     drive = load_drive_model_from_checkpoint(args.ckpt, args.device, strict=True)
     encoder = drive.encoder
     for p_ in encoder.parameters():
         p_.requires_grad_(False)
     encoder.eval()
+    # TSB is shared with policy, but frozen while the WM is trained.
+    for p_ in drive.temporal_spatial.parameters():
+        p_.requires_grad_(False)
+    drive.temporal_spatial.eval()
     target = TargetEncoder(encoder).to(args.device).eval()
     if getattr(drive, "action_low", None) is None or getattr(drive, "action_high", None) is None:
         raise ValueError("encoder checkpoint has no action bounds; cannot normalize WM actions")
     action_low = drive.action_low.detach().cpu().numpy()
     action_high = drive.action_high.detach().cpu().numpy()
-    arrays = _make_training_arrays(
-        data, encoder, target, args.device, int(args.max_pairs),
+    train_arrays = _make_training_arrays(
+        data, drive, target, args.device, int(args.max_pairs),
         action_low=action_low, action_high=action_high,
     )
-    train_mask, val_mask = split_by_scene_seed(arrays["scene_seed"], args.val_frac, args.seed)
-    train_idx = np.flatnonzero(train_mask)
-    val_idx = np.flatnonzero(val_mask)
+    if val_data is not None:
+        val_arrays = _make_training_arrays(
+            val_data, drive, target, args.device, int(args.max_pairs),
+            action_low=action_low, action_high=action_high,
+        )
+        train_idx = np.arange(len(train_arrays["scene_seed"]), dtype=np.int64)
+        val_idx = np.arange(len(val_arrays["scene_seed"]), dtype=np.int64)
+        arrays = train_arrays
+    else:
+        arrays = train_arrays
+        val_arrays = arrays
+        train_mask, val_mask = split_by_scene_seed(arrays["scene_seed"], args.val_frac, args.seed)
+        train_idx = np.flatnonzero(train_mask)
+        val_idx = np.flatnonzero(val_mask)
     if len(train_idx) == 0:
         raise ValueError("empty WM training split")
     if len(val_idx) == 0:
         raise ValueError("empty WM validation split; choose --val-frac > 0 with disjoint scenes")
-    if set(int(x) for x in arrays["scene_seed"][train_idx]) & set(int(x) for x in arrays["scene_seed"][val_idx]):
+    if set(int(x) for x in arrays["scene_seed"][train_idx]) & set(int(x) for x in val_arrays["scene_seed"][val_idx]):
         raise ValueError("WM train/validation scene seeds overlap")
     train_seeds = sorted({int(x) for x in arrays["scene_seed"][train_idx]})
-    val_seeds = sorted({int(x) for x in arrays["scene_seed"][val_idx]})
+    val_seeds = sorted({int(x) for x in val_arrays["scene_seed"][val_idx]})
 
     hidden = int(getattr(drive, "hidden", 128))
     wm = EgoConditionedLatentWM(hidden=hidden, action_dim=4).to(args.device)
@@ -332,7 +445,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         n_batches = 0
         for start in range(0, len(perm), int(args.batch_size)):
             batch = _tensors(arrays, perm[start : start + int(args.batch_size)], args.device)
-            losses = _loss(wm, batch)
+            losses = _loss(
+                wm, batch,
+                content_weight=args.content_weight,
+                geometry_weight=args.geometry_weight,
+            )
             opt.zero_grad(set_to_none=True)
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(wm.parameters(), 1.0)
@@ -344,8 +461,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parts: Dict[str, float] = {}
         with torch.no_grad():
             for start in range(0, len(val_idx), int(args.batch_size)):
-                batch = _tensors(arrays, val_idx[start : start + int(args.batch_size)], args.device)
-                losses = _loss(wm, batch)
+                batch = _tensors(val_arrays, val_idx[start : start + int(args.batch_size)], args.device)
+                losses = _loss(
+                    wm, batch,
+                    content_weight=args.content_weight,
+                    geometry_weight=args.geometry_weight,
+                )
                 val_total += float(losses["total"].detach())
                 for key, value in losses.items():
                     parts[key] = parts.get(key, 0.0) + float(value.detach())
@@ -355,7 +476,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "train_loss": total / max(1, n_batches),
             "val_loss": val_total / n_val,
             "val_parts": {k: v / n_val for k, v in parts.items()},
-            "persistence": _persistence(arrays, val_idx),
+            "persistence": _persistence(
+                val_arrays, val_idx,
+                content_weight=args.content_weight,
+                geometry_weight=args.geometry_weight,
+            ),
         }
         history.append(record)
         if record["val_loss"] < best:
@@ -371,10 +496,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "target_encoder": args.ckpt,
                         "train_scene_seeds": train_seeds,
                         "val_scene_seeds": val_seeds,
-                        "val_frac": float(args.val_frac),
+                        "val_frac": 0.0 if args.val_data else float(args.val_frac),
+                        "validation_mode": "fixed_val_data" if args.val_data else "random_scene_seed",
                         "split_seed": int(args.seed),
                         "max_pairs": int(args.max_pairs),
                         "data": list(args.data),
+                        "val_data": None if not args.val_data else list(args.val_data),
+                        "val_split": args.val_split if args.val_data else None,
+                        "content_weight": float(args.content_weight),
+                        "geometry_weight": float(args.geometry_weight),
                         "action_contract": {
                             "low": action_low.tolist() if action_low is not None else [],
                             "high": action_high.tolist() if action_high is not None else [],
@@ -394,10 +524,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "history": history,
             "train_scene_seeds": train_seeds,
             "val_scene_seeds": val_seeds,
-            "val_frac": float(args.val_frac),
+            "val_frac": 0.0 if args.val_data else float(args.val_frac),
+            "validation_mode": "fixed_val_data" if args.val_data else "random_scene_seed",
             "split_seed": int(args.seed),
             "max_pairs": int(args.max_pairs),
             "data": list(args.data),
+            "val_data": None if not args.val_data else list(args.val_data),
+            "val_split": args.val_split if args.val_data else None,
+            "content_weight": float(args.content_weight),
+            "geometry_weight": float(args.geometry_weight),
         }, indent=2),
         encoding="utf-8",
     )

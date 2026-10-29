@@ -34,7 +34,7 @@ def _window(h=16, t=2):
 def test_wm_shapes_residual_and_gradient():
     wm = EgoConditionedLatentWM(hidden=16)
     b = _wm_batch()
-    out = wm(b["od"], b["ld"], b["action"], od_valid=b["od_valid"], ld_valid=b["ld_valid"])
+    out = wm(b["od"], b["ld"], b["action"], od_base=b["od"], ld_base=b["ld"], od_valid=b["od_valid"], ld_valid=b["ld_valid"])
     assert out["od"].shape == (2, 4, 16)
     assert out["ld"].shape == (2, 4, 16)
     assert out["od_residual"].shape == (2, 4, 16)
@@ -74,7 +74,7 @@ def test_wm_sanitizes_nan_in_invalid_slots():
     od[0, 1] = float("nan")
     ld[1, 2] = float("nan")
     valid = torch.tensor([[1, 0, 1, 1], [1, 1, 0, 1]], dtype=torch.bool)
-    out = wm(od, ld, torch.rand(2, 4), od_valid=valid, ld_valid=valid)
+    out = wm(od, ld, torch.rand(2, 4), od_base=od, ld_base=ld, od_valid=valid, ld_valid=valid)
     assert torch.isfinite(out["od"]).all()
     assert torch.isfinite(out["ld"]).all()
     assert torch.isfinite(out["od_geometry"]).all()

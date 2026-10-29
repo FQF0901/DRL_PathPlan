@@ -251,9 +251,9 @@ def _resolve_npz_paths(path: Path) -> list[Path]:
 
 def _default_value(key: str, n: int) -> np.ndarray:
     if key == "history_mode":
-        # Missing marker means the historical collector used stack_history
-        # (query-frame projection); new raw collectors write 1.0 explicitly.
-        return np.zeros(n, dtype=np.float32)
+        # Shipped canonical data stores raw per-frame history; missing marker
+        # means raw (1), not the old query-frame-projected 0.
+        return np.ones(n, dtype=np.float32)
     if key == "executed_action":
         return np.full((n, 4), np.nan, dtype=np.float32)
     if key == "residual_xy":
@@ -331,7 +331,7 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
     merged["episode_id"] = np.asarray(merged["episode_id"], dtype=np.int64)
     merged["step"] = np.asarray(merged["step"], dtype=np.int64)
     if "history_mode" not in merged:
-        merged["history_mode"] = np.zeros(len(merged["action"]), dtype=np.float32)
+        merged["history_mode"] = np.ones(len(merged["action"]), dtype=np.float32)
     for key in _ALL_OPTIONAL_KEYS:
         if key not in merged:
             merged[key] = _default_value(key, len(merged["action"]))

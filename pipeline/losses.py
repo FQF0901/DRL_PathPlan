@@ -73,6 +73,7 @@ def wm_losses(
     ld_geometry_target: Optional[Tensor] = None,
     od_geometry_mask: Optional[Tensor] = None,
     ld_geometry_mask: Optional[Tensor] = None,
+    content_weight: float = 1.0,
     od_geometry_weight: float = 1.0,
     ld_geometry_weight: float = 1.0,
 ) -> Dict[str, Tensor]:
@@ -82,8 +83,8 @@ def wm_losses(
     ``ld_geometry``).  Targets/valid masks are current-frame, slot-aligned.
     """
     out = {
-        "od_content": masked_mse(pred["od"], od_target, od_valid),
-        "ld_content": masked_mse(pred["ld"], ld_target, ld_valid),
+        "od_content": float(content_weight) * masked_mse(pred["od"], od_target, od_valid),
+        "ld_content": float(content_weight) * masked_mse(pred["ld"], ld_target, ld_valid),
     }
     if od_geometry_target is not None:
         out["od_geometry"] = float(od_geometry_weight) * masked_l1(

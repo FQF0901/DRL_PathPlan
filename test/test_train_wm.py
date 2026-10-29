@@ -29,6 +29,7 @@ def test_train_wm_and_probe_smoke(tmp_path):
         "--batch-size", "4",
         "--max-pairs", "20",
         "--val-frac", "0.5",
+        "--allow-random-val",
         "--seed", "1",
         "--device", "cpu",
     ])
