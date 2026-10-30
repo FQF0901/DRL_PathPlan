@@ -20,7 +20,7 @@ env/obs.py     env -> net 的观测 schema
 | 文件 | 作用 |
 |---|---|
 | `collect.py` | 用 `PurePursuitIDMPolicy` 采集 expert IL/BC 数据；生成观测、实测 expert endpoint、PSTL 诊断、audit 字段和 episode outcome。 |
-| `collect_dagger.py` | 用 student `StructuredPlanner` 做 DAgger roll-in；逐状态查询 expert，按 replay/lift 生成动作标签；生成 student outcome 和 DAgger 诊断。 |
+| `collect_dagger.py` | 用 student `DriveModel` 做 DAgger roll-in；逐状态查询 expert，按 replay/lift 生成动作标签；生成 student outcome 和 DAgger 诊断。 |
 | `freeze_splits.py` | 从 `data/specs/source/` 生成固定的 train/val/test/mini specs，并写出 `data/splits/*.json` manifest 与 SHA-256。 |
 | `splits.py` | 纯 split 工具：按 `scene_seed` 划分、重叠检查、seed 计数、文件 SHA-256、manifest 校验。 |
 | `__init__.py` | 空文件，仅用于声明 Python package。 |

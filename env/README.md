@@ -264,7 +264,7 @@ aux:
 ```
 
 当前 policy contract 没有 value head、risk head 或 cost head。
-`pipeline/legacy_model.py` 里的零值兼容键不是可训练 head。
+旧 compatible adapter 已删除；`net/` 中没有 value/risk/cost head。
 
 ### 动作到 env
 

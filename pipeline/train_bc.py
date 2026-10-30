@@ -24,8 +24,6 @@ Loss
 * point / heading / velocity losses on the *physical* denormalized action;
 * curvature / longitudinal-acceleration / jerk-proxy hinge smoothness on the
   predicted action, active only on moving actions;
-* value / risk / cost-value supervision from episode outcome and row comfort;
-* auxiliary lane-role CE and OD gap/TTC/urgent heads.
 
 Per-row plan weights implement the failure/privilege policy:
 
@@ -43,11 +41,16 @@ Per-row plan weights implement the failure/privilege policy:
   mixed; a constant multiplier cancels in ``_weighted_mean``;
 * measured/finite residual disagreement -> ``--w-residual``.
 
-Value and risk losses are *not* gated by the plan weight: failed expert
-episodes still provide useful safety labels.
 """
 
 from __future__ import annotations
+
+
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import argparse
 import json
@@ -75,10 +78,17 @@ from env.obs import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
 )
-from pipeline.action_compat import COMFORT_LIMITS, HARD_LIMITS, CLEAN_BOUNDS
-from pipeline.legacy_model import StructuredPlanner, count_parameters
+from env.action.config import load_action_contract
+from net.build_net import build_net
+from net.model import DriveModel, count_parameters
+
+_CONTRACT = load_action_contract()
+CLEAN_BOUNDS = _CONTRACT.bounds
+COMFORT_LIMITS = _CONTRACT.comfort
+HARD_LIMITS = _CONTRACT.hard
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.distributions import truncated_normal_nll
+from pipeline.train_config import parse_train_args, timestamped_run_dir
 
 #: Feature keys fed to the adapter.  IDs are metadata, not policy features.
 INPUT_KEYS: Tuple[str, ...] = (
@@ -142,7 +152,6 @@ REQUIRED_ROW_KEYS = (
     "timeout",
 )
 
-RISK_NAMES = ("collision", "off_road", "wrong_route", "stuck", "comfort_violation")
 PLAN_KEYS = {"nll", "point", "heading", "velocity", "curvature", "accel"}
 
 #: Columns that must be available (hence required above) or can be defaulted.
@@ -182,10 +191,6 @@ class LossConfig:
     """Loss and plan-weight configuration (serialized into checkpoints)."""
 
     nll_coef: float = 1.0
-    value_coef: float = 0.5
-    risk_coef: float = 0.5
-    cost_coef: float = 0.1
-    aux_coef: float = 0.2
 
     # physical-action plan terms
     w_point: float = 1.0
@@ -194,24 +199,12 @@ class LossConfig:
     w_curvature: float = 0.1
     w_accel: float = 0.1
 
-    # auxiliary heads (all inside aux_coef)
-    w_lane_role: float = 1.0
-    w_gap: float = 1.0
-    w_ttc: float = 1.0
-    w_urgent: float = 1.0
-    w_lane_query: float = 1.0
-    w_od_query: float = 0.5
-
     # targets / units
-    gamma: float = 0.95
     dt: float = 0.5
-    ttc_cap: float = 10.0
-    urgent_ttc: float = 2.0
 
     # per-row plan weights
     w_privileged: float = 1.0
     w_residual: float = 0.2
-    w_intervened: float = 3.0  # compatibility alias; not applied to replay
     w_shield: float = 3.0
     w_student_failure: float = 2.0
     w_failed_expert: float = 0.2
@@ -251,9 +244,9 @@ def _resolve_npz_paths(path: Path) -> list[Path]:
 
 def _default_value(key: str, n: int) -> np.ndarray:
     if key == "history_mode":
-        # Shipped canonical data stores raw per-frame history; missing marker
-        # means raw (1), not the old query-frame-projected 0.
-        return np.ones(n, dtype=np.float32)
+        # The shipped shards are query-frame projected by stack_history; new
+        # raw collectors write 1.0 explicitly.
+        return np.zeros(n, dtype=np.float32)
     if key == "executed_action":
         return np.full((n, 4), np.nan, dtype=np.float32)
     if key == "residual_xy":
@@ -331,7 +324,7 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
     merged["episode_id"] = np.asarray(merged["episode_id"], dtype=np.int64)
     merged["step"] = np.asarray(merged["step"], dtype=np.int64)
     if "history_mode" not in merged:
-        merged["history_mode"] = np.ones(len(merged["action"]), dtype=np.float32)
+        merged["history_mode"] = np.zeros(len(merged["action"]), dtype=np.float32)
     for key in _ALL_OPTIONAL_KEYS:
         if key not in merged:
             merged[key] = _default_value(key, len(merged["action"]))
@@ -380,45 +373,6 @@ def split_masks(
         raise AssertionError(f"scene seeds leak across split: {sorted(overlap)}")
     assert_disjoint((train_mask, "train"), (val_mask, "val"))
     return train_mask, val_mask
-
-
-def _outcome_targets(
-    data: Mapping[str, np.ndarray], gamma: float
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Value / 5 risk labels / scalar cost targets from episode outcomes."""
-    n = len(data["action"])
-    episode = np.asarray(data["episode_id"], dtype=np.int64)
-    step = np.asarray(data["step"], dtype=np.int64)
-
-    risk = np.zeros((n, 5), dtype=np.float32)
-    for i, name in enumerate(RISK_NAMES[:4]):
-        risk[:, i] = np.asarray(data[name], dtype=np.float32) > 0.5
-    comfortable = np.asarray(data["comfortable"], dtype=np.float32)
-    comfort_violation = np.where(comfortable >= 0.0, 1.0 - comfortable, 0.0)
-    risk[:, 4] = np.clip(comfort_violation, 0.0, 1.0).astype(np.float32)
-
-    value = np.zeros(n, dtype=np.float32)
-    for ep in np.unique(episode):
-        idx = np.flatnonzero(episode == ep)
-        if len(idx) == 0:
-            continue
-        success = bool(np.max(np.asarray(data["success"])[idx]) > 0.5)
-        collision = bool(np.max(np.asarray(data["collision"])[idx]) > 0.5)
-        off_road = bool(np.max(np.asarray(data["off_road"])[idx]) > 0.5)
-        if success:
-            outcome = 1.0
-        elif collision or off_road:
-            outcome = -1.0
-        else:
-            outcome = 0.0
-        last_step = int(np.max(step[idx]))
-        remaining = np.maximum(last_step - step[idx], 0)
-        value[idx] = outcome * np.power(float(gamma), remaining.astype(np.float64))
-        # Episode-level terminal risk labels are broadcast to every row.
-        for i, name in enumerate(RISK_NAMES[:4]):
-            risk[idx, i] = float(np.max(np.asarray(data[name])[idx]) > 0.5)
-    cost = risk[:, :4].sum(axis=1) + risk[:, 4]
-    return value.astype(np.float32), risk, cost.astype(np.float32)
 
 
 def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray:
@@ -528,7 +482,7 @@ def _plan_weights(data: Mapping[str, np.ndarray], cfg: LossConfig) -> np.ndarray
 def build_targets(
     data: Mapping[str, np.ndarray], cfg: LossConfig, *, action_low=None, action_high=None
 ) -> Dict[str, np.ndarray]:
-    """Precompute normalized/physical actions, value/risk/cost and weights."""
+    """Precompute normalized/physical actions and plan weights."""
     action = np.asarray(data["action"], dtype=np.float32)
     low = CLEAN_BOUNDS.low.astype(np.float32) if action_low is None else np.asarray(action_low, dtype=np.float32)
     high = CLEAN_BOUNDS.high.astype(np.float32) if action_high is None else np.asarray(action_high, dtype=np.float32)
@@ -603,8 +557,7 @@ def compute_losses(
 ) -> Tuple[Tensor, Dict[str, Tensor]]:
     """Return ``(total, components)`` for one batch.
 
-    Plan components use ``batch['plan_weight']`` as their row weight; value,
-    risk, cost and auxiliary components use all rows.
+    Plan components use ``batch['plan_weight']`` as their row weight.
     """
     mu = outputs["action_mu"]
     logstd = outputs["action_logstd"]
@@ -716,7 +669,7 @@ def _finalize(sums: Mapping[str, float], denoms: Mapping[str, float]) -> Dict[st
 
 
 def run_epoch(
-    model: StructuredPlanner,
+    model: DriveModel,
     data: Mapping[str, np.ndarray],
     targets: Mapping[str, np.ndarray],
     indices: np.ndarray,
@@ -811,7 +764,7 @@ def _jsonable(value):
 
 def _save_checkpoint(
     path: Path,
-    model: StructuredPlanner,
+    model: DriveModel,
     config: Mapping,
     epoch: int,
     metrics: Mapping,
@@ -828,7 +781,7 @@ def _save_checkpoint(
 
 
 def _make_config(
-    model: StructuredPlanner,
+    model: DriveModel,
     cfg: LossConfig,
     args: argparse.Namespace,
     data: Mapping[str, np.ndarray],
@@ -841,7 +794,7 @@ def _make_config(
     ego = load_config().get("ego", {})
     return {
         "model_type": "clean",
-        "architecture": "DriveModelAdapter",
+        "architecture": "DriveModel",
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
         "hidden": int(model.hidden),
@@ -889,6 +842,8 @@ def _make_config(
         "params": count_parameters(model),
         "data": [str(p) for p in args.data],
         "val_data": None if not args.val_data else [str(p) for p in args.val_data],
+        "config_file": getattr(args, "config", None),
+        "run_dir": str(getattr(args, "out", "")),
         "training": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
@@ -915,9 +870,14 @@ def _fmt(values: Mapping[str, float], key: str) -> str:
 # ---------------------------------------------------------------------------
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Schema-v2 BC training for StructuredPlanner"
+        description="Schema-v2 BC training for DriveModel"
     )
-    p.add_argument("--data", nargs="+", required=True,
+    p.add_argument(
+        "--config",
+        default="config/train_bc.yaml",
+        help="YAML training config (CLI flags override it)",
+    )
+    p.add_argument("--data", nargs="+", default=None,
                    help="dirs containing expert_bc.npz (or .npz files)")
     p.add_argument(
         "--val-data",
@@ -925,7 +885,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional fixed validation .npz file(s)/directory(ies)",
     )
-    p.add_argument("--out", required=True)
+    p.add_argument("--out", default=None)
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -939,28 +899,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--init", default=None)
     p.add_argument("--nll-coef", type=float, default=1.0)
-    p.add_argument("--value-coef", type=float, default=0.5)
-    p.add_argument("--risk-coef", type=float, default=0.5)
-    p.add_argument("--cost-coef", type=float, default=0.1)
-    p.add_argument("--aux-coef", type=float, default=0.2)
     p.add_argument("--w-point", type=float, default=1.0)
     p.add_argument("--w-heading", type=float, default=1.0)
     p.add_argument("--w-velocity", type=float, default=0.2)
     p.add_argument("--w-curvature", type=float, default=0.1)
     p.add_argument("--w-accel", type=float, default=0.1)
-    p.add_argument("--w-lane-role", type=float, default=1.0)
-    p.add_argument("--w-gap", type=float, default=1.0)
-    p.add_argument("--w-ttc", type=float, default=1.0)
-    p.add_argument("--w-urgent", type=float, default=1.0)
-    p.add_argument("--w-lane-query", type=float, default=1.0)
-    p.add_argument("--w-od-query", type=float, default=0.5)
-    p.add_argument("--gamma", type=float, default=0.95)
     p.add_argument("--dt", type=float, default=0.5)
-    p.add_argument("--ttc-cap", type=float, default=10.0)
-    p.add_argument("--urgent-ttc", type=float, default=2.0)
     p.add_argument("--w-privileged", type=float, default=1.0)
     p.add_argument("--w-residual", type=float, default=0.2)
-    p.add_argument("--w-intervened", type=float, default=3.0)
     p.add_argument("--w-shield", type=float, default=3.0)
     p.add_argument("--w-student-failure", type=float, default=2.0)
     p.add_argument("--w-failed-expert", type=float, default=0.2)
@@ -977,7 +923,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    args = parse_train_args(build_arg_parser(), argv, "config/train_bc.yaml")
+    if not args.data:
+        raise SystemExit("--data is required (CLI or config)")
+    if not args.out:
+        raise SystemExit("--out is required (CLI or config)")
+    args.out = str(timestamped_run_dir(args.out))
+    print(f"[bc] run_dir={args.out}")
     if args.epochs < 1:
         raise SystemExit("--epochs must be >= 1")
     if args.batch_size < 1:
@@ -990,31 +942,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     device = torch.device(args.device)
+    print(f"[bc] config={args.config}")
 
     cfg = LossConfig(
         nll_coef=args.nll_coef,
-        value_coef=args.value_coef,
-        risk_coef=args.risk_coef,
-        cost_coef=args.cost_coef,
-        aux_coef=args.aux_coef,
         w_point=args.w_point,
         w_heading=args.w_heading,
         w_velocity=args.w_velocity,
         w_curvature=args.w_curvature,
         w_accel=args.w_accel,
-        w_lane_role=args.w_lane_role,
-        w_gap=args.w_gap,
-        w_ttc=args.w_ttc,
-        w_urgent=args.w_urgent,
-        w_lane_query=args.w_lane_query,
-        w_od_query=args.w_od_query,
-        gamma=args.gamma,
         dt=args.dt,
-        ttc_cap=args.ttc_cap,
-        urgent_ttc=args.urgent_ttc,
         w_privileged=args.w_privileged,
         w_residual=args.w_residual,
-        w_intervened=args.w_intervened,
         w_shield=args.w_shield,
         w_student_failure=args.w_student_failure,
         w_failed_expert=args.w_failed_expert,
@@ -1050,7 +989,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         model = load_model_from_checkpoint(args.init, device, strict=True)
         print(f"[bc] initialized from {args.init}")
     else:
-        model = StructuredPlanner().to(device)
+        model = build_net().to(device)
     action_low = model.action_low.detach().cpu().numpy() if getattr(model, "action_low", None) is not None else None
     action_high = model.action_high.detach().cpu().numpy() if getattr(model, "action_high", None) is not None else None
     targets = build_targets(data, cfg, action_low=action_low, action_high=action_high)
@@ -1065,6 +1004,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config = _make_config(model, cfg, args, data, train_mask, val_mask)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Loss-only TensorBoard monitoring; no weight histograms or model graph.
+    tb_writer = None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(log_dir=str(out_dir / "tensorboard"))
+        print(f"[bc] tensorboard: {out_dir / 'tensorboard'}")
+    except Exception as exc:  # pragma: no cover - environment fallback
+        print(f"[bc] WARNING: tensorboard disabled: {exc}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -1184,6 +1132,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         history.append(record)
 
+        if tb_writer is not None:
+            for split_name, split_metrics in (("train", train_metrics), ("eval", eval_metrics)):
+                for key, value in split_metrics.items():
+                    try:
+                        scalar = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(scalar):
+                        tb_writer.add_scalar(f"loss/{split_name}_{key}", scalar, epoch)
+            tb_writer.flush()
+
         print(
             f"[bc] epoch {epoch:03d} "
             f"train total={_fmt(train_metrics, 'total')} "
@@ -1193,18 +1152,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"velocity={_fmt(train_metrics, 'velocity')} "
             f"curv={_fmt(train_metrics, 'curvature')} "
             f"accel={_fmt(train_metrics, 'accel')} "
-            f"value={_fmt(train_metrics, 'value')} "
-            f"risk={_fmt(train_metrics, 'risk')} "
-            f"cost={_fmt(train_metrics, 'cost')} "
-            f"aux={_fmt(train_metrics, 'aux')} "
             f"mae={np.round(train_mae, 4).tolist()} | "
             f"eval/{selection_split} total={_fmt(eval_metrics, 'total')} "
             f"nll={_fmt(eval_metrics, 'nll')} "
             f"point={_fmt(eval_metrics, 'point')} "
             f"heading={_fmt(eval_metrics, 'heading')} "
             f"velocity={_fmt(eval_metrics, 'velocity')} "
-            f"value={_fmt(eval_metrics, 'value')} "
-            f"risk={_fmt(eval_metrics, 'risk')} "
             f"mae={np.round(eval_mae, 4).tolist()}"
         )
 
@@ -1257,6 +1210,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "and are gated to moving expert labels.",
         ],
     }
+    if tb_writer is not None:
+        tb_writer.close()
     (out_dir / "metrics.json").write_text(
         json.dumps(_jsonable(metrics), ensure_ascii=False, indent=2),
         encoding="utf-8",

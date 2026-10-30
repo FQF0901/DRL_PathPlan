@@ -4,7 +4,7 @@ This collector keeps the
 v2 observation/audit/row contract of :mod:`dataset.collect` and adds the
 DAgger roll-in fields:
 
-* the **student** (``net.model.StructuredPlanner``) is rolled in through the
+* the **student** (``net.model.DriveModel``) is rolled in through the
   same 0.5 s decision / 5 x 0.1 s PSTL execution layer as ``pipeline.eval``
   (``CLEAN_BOUNDS.denormalize(action_mu[0])`` + :class:`env.tracking.ExactTracker`);
 * at every decision state the expert (``PurePursuitIDMPolicy``) is queried and
@@ -68,8 +68,13 @@ from env.action.action_space import (
     action_to_trajectory,
     feasible_v1_interval,
 )
-from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
-from pipeline.legacy_model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
+from env.action.config import load_action_contract
+from net.model import DriveModel
+
+_CONTRACT = load_action_contract()
+CLEAN_BOUNDS = _CONTRACT.bounds
+COMFORT_LIMITS = _CONTRACT.comfort
+HARD_LIMITS = _CONTRACT.hard
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.live_bank import LiveBankRunner
 
@@ -685,7 +690,7 @@ def _config_int(config: Any, key: str, default: int) -> int:
         return int(default)
 
 
-def load_model(ckpt: str, device: str = "cpu") -> StructuredPlanner:
+def load_model(ckpt: str, device: str = "cpu") -> DriveModel:
     """Strict checkpoint loader shared with eval/training."""
     return load_model_from_checkpoint(ckpt, device, strict=True)
 
@@ -693,10 +698,11 @@ def _read_ckpt_config(ckpt: str) -> Dict[str, Any]:
     payload = torch.load(ckpt, map_location="cpu", weights_only=False)
     config = payload.get("config", {}) if isinstance(payload, dict) else {}
     config = dict(config or {})
+    model_cfg = config.get("model", {}) if isinstance(config.get("model"), dict) else {}
     return {
-        "hidden": _config_int(config, "hidden", H),
-        "heads": _config_int(config, "heads", HEADS),
-        "spatial_layers": _config_int(config, "spatial_layers", SPATIAL_LAYERS),
+        "hidden": _config_int(model_cfg or config, "hidden", 128),
+        "heads": _config_int(model_cfg or config, "attention_heads", 4),
+        "spatial_layers": _config_int(model_cfg or config, "spatial_layers", 2),
     }
 
 
@@ -743,7 +749,7 @@ def _model_action_contract(model):
 
 def run_episode(
     env: Any,
-    model: StructuredPlanner,
+    model: DriveModel,
     spec: Any,
     *,
     max_steps: int,
@@ -1068,7 +1074,7 @@ def _termination_name(
     return "terminal"
 
 
-_WORKER_MODEL: Optional[StructuredPlanner] = None
+_WORKER_MODEL: Optional[DriveModel] = None
 _WORKER_DEVICE = "cpu"
 _WORKER_CKPT = ""
 
@@ -1429,7 +1435,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         import multiprocessing as mp
 
-        # Use spawn for every multi-worker run: the StructuredPlanner may live on
+        # Use spawn for every multi-worker run: the DriveModel may live on
         # CUDA, and CUDA cannot be re-initialized in a forked child.  Spawn also
         # guarantees each worker loads its own model instead of inheriting the
         # parent's CUDA context.
@@ -1513,7 +1519,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "spec_ids": [getattr(spec, "id", None) for spec in specs],
         "git_commit": _git_commit(),
         "model": {
-            "class": "StructuredPlanner",
+            "class": "DriveModel",
             "ckpt": str(args.ckpt),
             "config": model_config,
             "student_action": "config/model.yaml action.bounds.denormalize(action_mu[0], clip=False)",

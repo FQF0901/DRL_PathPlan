@@ -11,7 +11,7 @@ Contract references: ``docs/arch_lock.md`` §6.5 (probability action),
 
 Action contract
 ---------------
-``StructuredPlanner`` emits ``action_mu`` in ``[0, 1]`` and a diagonal
+``DriveModel`` emits ``action_mu`` in ``[0, 1]`` and a diagonal
 ``TruncatedNormal(mu, exp(logstd), low=0, high=1)`` is used for exploration.
 Every sample is therefore executable under the config/model.yaml action bounds
 without a post-hoc clamp.  The stored log-prob always belongs to the sampled
@@ -43,6 +43,13 @@ GAE is computed per episode.  Episode boundaries never leak: ``done``
 
 from __future__ import annotations
 
+
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import math
@@ -65,12 +72,18 @@ from env.obs import (
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
 from env.action.action_space import action_to_trajectory, feasible_v1_interval
-from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
-from pipeline.legacy_model import SPATIAL_LAYERS, StructuredPlanner
+from env.action.config import load_action_contract
+from net.model import DriveModel
+
+_CONTRACT = load_action_contract()
+CLEAN_BOUNDS = _CONTRACT.bounds
+COMFORT_LIMITS = _CONTRACT.comfort
+HARD_LIMITS = _CONTRACT.hard
 from pipeline.live_bank import LiveBankRunner
 from net.mem_bank import BankWindow
 from pipeline.distributions import TruncatedNormal
 from pipeline.eval import load_model
+from pipeline.train_config import parse_train_args, timestamped_run_dir
 from pipeline.execution import relative_action, segment_dt
 
 # PPO's stored-vs-recomputed log-prob audit is a numerical contract.  TF32
@@ -437,7 +450,7 @@ def _policy_distribution(out: Mapping[str, Tensor]) -> TruncatedNormal:
 
 
 def policy_logprob(
-    model: StructuredPlanner,
+    model: DriveModel,
     states: Mapping[str, Tensor],
     sampled_norm: Tensor,
 ) -> Tuple[Tensor, Dict[str, Tensor]]:
@@ -451,7 +464,7 @@ def policy_logprob(
 
 
 def _policy_logprob_per_transition(
-    model: StructuredPlanner,
+    model: DriveModel,
     states: Mapping[str, Tensor],
     sampled_norm: Tensor,
 ) -> Tensor:
@@ -796,7 +809,7 @@ def _termination_name(
 
 def collect_episode(
     env: Any,
-    model: StructuredPlanner,
+    model: DriveModel,
     spec: Any = None,
     *,
     max_steps: int = 200,
@@ -863,8 +876,10 @@ def collect_episode(
             dist = _policy_distribution(out)
             sampled = dist.sample()
             old_logp = dist.log_prob(sampled).sum(-1)[0]
-            old_value = out["value"][0, 0]
-            old_cost_value = out["cost_value"][0, 0]
+            # The bank-native policy has no value/cost head; PPO uses a zero
+            # baseline and returns are computed without a learned critic.
+            old_value = torch.zeros((), dtype=out["action_mu"].dtype, device=out["action_mu"].device)
+            old_cost_value = torch.zeros((), dtype=out["action_mu"].dtype, device=out["action_mu"].device)
 
         sampled_np = sampled[0].detach().cpu().numpy().astype(np.float64)
         v0 = float(ego.speed)
@@ -1033,10 +1048,8 @@ def collect_episode(
             final_window, final_nav, final_ego = runner.push(final_obs)
             with torch.no_grad():
                 final_out = model.forward_window(final_window, final_nav, final_ego)
-                last["bootstrap_value"] = final_out["value"][0, 0].detach().cpu()
-                last["bootstrap_cost_value"] = (
-                    final_out["cost_value"][0, 0].detach().cpu()
-                )
+                last["bootstrap_value"] = torch.tensor(0.0, dtype=torch.float32)
+                last["bootstrap_cost_value"] = torch.tensor(0.0, dtype=torch.float32)
             truncation_bootstrap_count = 1
 
     fallback_counts = Counter(str(tr["fallback_name"]) for tr in transitions)
@@ -1082,7 +1095,7 @@ def collect_episode(
 # PPO update
 # ---------------------------------------------------------------------------
 def ppo_update(
-    model: StructuredPlanner,
+    model: DriveModel,
     optimizer: torch.optim.Optimizer,
     batch: Mapping[str, Any],
     *,
@@ -1385,13 +1398,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Clean-schema PPO contract canary (schema v2, no WM)"
     )
-    parser.add_argument("--specs", required=True)
+    parser.add_argument(
+        "--config",
+        default="config/train_ppo.yaml",
+        help="YAML training config (CLI flags override it)",
+    )
+    parser.add_argument("--specs", default=None)
     parser.add_argument(
         "--ckpt",
         default=None,
         help="clean BC/DAgger checkpoint; random init only for a smoke run",
     )
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--out", default=None)
     parser.add_argument("--updates", type=int, default=1)
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=200)
@@ -1424,7 +1442,7 @@ def _limits_dict(model=None) -> Dict[str, float]:
 
 
 def _checkpoint_config(
-    model: StructuredPlanner, args: argparse.Namespace
+    model: DriveModel, args: argparse.Namespace
 ) -> Dict[str, Any]:
     eval_config = dict(getattr(model, "eval_config", {}) or {})
     action_bounds = (
@@ -1438,10 +1456,10 @@ def _checkpoint_config(
     )
     return {
         "model_type": "clean",
-        "architecture": "DriveModelAdapter",
+        "architecture": "DriveModel",
         "hidden": int(model.hidden),
         "heads": int(model.heads),
-        "spatial_layers": int(eval_config.get("spatial_layers", SPATIAL_LAYERS)),
+        "spatial_layers": int(eval_config.get("spatial_layers", 2)),
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
@@ -1449,6 +1467,8 @@ def _checkpoint_config(
         "action_low": model.action_low.detach().cpu().tolist() if getattr(model, "action_low", None) is not None else CLEAN_BOUNDS.low.tolist(),
         "action_high": model.action_high.detach().cpu().tolist() if getattr(model, "action_high", None) is not None else CLEAN_BOUNDS.high.tolist(),
         "action_support": [SUPPORT_LOW, SUPPORT_HIGH],
+        "config_file": getattr(args, "config", None),
+        "run_dir": str(args.out),
         "gamma": float(args.gamma),
         "lam": float(args.lam),
         "clip": float(args.clip),
@@ -1486,7 +1506,13 @@ def _checkpoint_config(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    args = parse_train_args(build_arg_parser(), argv, "config/train_ppo.yaml")
+    if not args.specs:
+        raise SystemExit("--specs is required (CLI or config)")
+    if not args.out:
+        raise SystemExit("--out is required (CLI or config)")
+    args.out = str(timestamped_run_dir(args.out))
+    print(f"[ppo] config={args.config} run_dir={args.out}")
     if args.updates < 1:
         raise SystemExit("--updates must be >= 1")
     if args.episodes < 1:

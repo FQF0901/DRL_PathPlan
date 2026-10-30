@@ -16,7 +16,9 @@ from env.obs import (
     _empty_history,
     stack_history,
 )
-from pipeline.action_compat import HARD_LIMITS
+from env.action.config import load_action_contract
+
+HARD_LIMITS = load_action_contract().hard
 
 # Independent list of per-row fields (kept explicit so a dropped field fails).
 EXPECTED_ROW_KEYS = {

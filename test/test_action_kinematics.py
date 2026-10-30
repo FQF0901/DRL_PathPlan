@@ -3,14 +3,33 @@ import math
 import numpy as np
 import torch
 
+from env.action.action_space import ActionBounds, action_to_trajectory
+from env.action.config import load_action_contract
 from env.tracking import ExactTracker
-from pipeline.action_compat import CLEAN_BOUNDS
-from pipeline.rollout import (
-    denorm_action,
-    denorm_action_with_bounds,
-    first_segment_trajectory,
-    segment_trajectory,
-)
+
+CLEAN_BOUNDS = load_action_contract().bounds
+
+
+def denorm_action(a: torch.Tensor) -> torch.Tensor:
+    low = torch.as_tensor(CLEAN_BOUNDS.low, dtype=a.dtype, device=a.device)
+    high = torch.as_tensor(CLEAN_BOUNDS.high, dtype=a.dtype, device=a.device)
+    return low + a * (high - low)
+
+
+def denorm_action_with_bounds(a, bounds: ActionBounds):
+    if isinstance(a, torch.Tensor):
+        low = torch.as_tensor(bounds.low, dtype=a.dtype, device=a.device)
+        high = torch.as_tensor(bounds.high, dtype=a.dtype, device=a.device)
+        return low + a * (high - low)
+    return bounds.denormalize(np.asarray(a, dtype=np.float32), clip=False)
+
+
+def segment_trajectory(action, v0, *, dt=0.5, hz=10, bounds=CLEAN_BOUNDS):
+    return action_to_trajectory(action, v0, dt=dt, hz=hz, bounds=bounds)
+
+
+def first_segment_trajectory(action, v0, *, dt=0.5, hz=10, bounds=CLEAN_BOUNDS):
+    return segment_trajectory(action, v0, dt=dt, hz=hz, bounds=bounds)
 
 
 class _FakeVehicle:

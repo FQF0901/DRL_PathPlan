@@ -4,7 +4,7 @@ The previous exact/LQR split is available only from git history/tag
 ``pre-consolidation``:
 
 * observation history is maintained by ``RealMemoryBank`` / BankWindow;
-* the policy is :class:`net.model.StructuredPlanner` with normalized
+* the policy is :class:`net.model.DriveModel` with normalized
   ``action_mu`` in ``[0, 1]``;
 * actions are denormalized with the checkpoint action bounds and turned
   into one PSTL 0.5 s segment by ``action_to_trajectory``.
@@ -45,8 +45,14 @@ from env.action.action_space import (
     action_to_trajectory,
     feasible_v1_interval,
 )
-from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
-from pipeline.legacy_model import H, HEADS, SPATIAL_LAYERS, StructuredPlanner
+from env.action.config import load_action_contract
+from net.build_net import build_net
+from net.model import DriveModel
+
+_CONTRACT = load_action_contract()
+CLEAN_BOUNDS = _CONTRACT.bounds
+COMFORT_LIMITS = _CONTRACT.comfort
+HARD_LIMITS = _CONTRACT.hard
 from dataset.splits import verify_split_manifest
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.execution import relative_action
@@ -71,7 +77,7 @@ WRONG_ROUTE_DROP = 0.05
 # ---------------------------------------------------------------------------
 LIMITS_SOURCE = "config/model.yaml action.limits.hard"
 
-#: Keys StructuredPlanner.forward consumes (metadata IDs are not needed for acting).
+#: Keys DriveModel.forward consumes (metadata IDs are not needed for acting).
 BATCH_KEYS = (
     "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask",
     "ego", "ego_mask", "hist_valid", "od_ids", "ld_ids", "pose",
@@ -88,24 +94,19 @@ def _config_int(config: Any, key: str, default: int) -> int:
         return int(default)
 
 
-def load_model(ckpt: Optional[str], device: str = "cpu", *, strict: bool = False) -> StructuredPlanner:
+def load_model(ckpt: Optional[str], device: str = "cpu", *, strict: bool = True) -> DriveModel:
     """Load a checkpoint, validating schema/bounds when metadata is present.
 
-    ``strict=True`` rejects legacy/incompatible metadata; the default keeps a
-    warning-only path for old smoke tests. Gate runs must use strict mode.
+    ``strict=True`` is the default; explicitly disable it only for a known
+    debug/smoke checkpoint.
     """
     if ckpt is None:
         print(
             "[eval] WARNING: no --ckpt given; using a randomly initialized "
-            "StructuredPlanner for smoke only",
+            "DriveModel for smoke only",
             flush=True,
         )
-        model = StructuredPlanner()
-        model.eval_config = {
-            "hidden": H,
-            "heads": HEADS,
-            "spatial_layers": SPATIAL_LAYERS,
-        }
+        model = build_net()
     else:
         model = load_model_from_checkpoint(ckpt, device, strict=strict)
         for warning in getattr(model, "checkpoint_warnings", []):
@@ -201,7 +202,7 @@ def _add_codes(counts: Dict[str, int], codes: Sequence[str]) -> None:
 # ---------------------------------------------------------------------------
 def run_episode(
     env: Any,
-    model: StructuredPlanner,
+    model: DriveModel,
     spec: Any,
     *,
     controller: str = "exact",
@@ -556,7 +557,7 @@ def main(argv=None) -> int:
     parser.add_argument("--allow-final-test", action="store_true")
     parser.add_argument("--out", required=True)
     parser.add_argument("--ckpt", default=None, help="optional; random init for smoke")
-    parser.add_argument("--strict-checkpoint", action="store_true")
+    parser.add_argument("--strict-checkpoint", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--history-frames", type=int, default=HISTORY_FRAMES)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=600)

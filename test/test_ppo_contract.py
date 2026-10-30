@@ -15,15 +15,19 @@ import pytest
 import torch
 
 from env.obs import _empty_history
-from pipeline.action_compat import CLEAN_BOUNDS
-from pipeline.legacy_model import StructuredPlanner
+from env.action.config import load_action_contract
+from net.build_net import build_net
+from net.model import DriveModel
+
+_C = load_action_contract()
+CLEAN_BOUNDS = _C.bounds
 from pipeline import train_ppo as ppo
 from pipeline.distributions import TruncatedNormal
 
 
-def _tiny_model() -> StructuredPlanner:
+def _tiny_model() -> DriveModel:
     torch.manual_seed(0)
-    return StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
+    return build_net()
 
 
 def _state() -> dict:
@@ -38,7 +42,7 @@ def _state() -> dict:
 
 
 def _make_transition(
-    model: StructuredPlanner,
+    model: DriveModel,
     *,
     state: dict | None = None,
     sampled_norm: torch.Tensor | None = None,
@@ -74,9 +78,9 @@ def _make_transition(
         )
         old_logp = dist.log_prob(sampled_norm).sum(-1)[0]
         if old_value is None:
-            old_value = float(out["value"][0, 0])
+            old_value = 0.0
         if old_cost_value is None:
-            old_cost_value = float(out["cost_value"][0, 0])
+            old_cost_value = 0.0
 
     executed = CLEAN_BOUNDS.denormalize(sampled_norm[0].numpy(), clip=True)
     if cost_vector is None:

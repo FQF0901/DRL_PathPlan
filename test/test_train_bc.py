@@ -25,7 +25,7 @@ from env.obs import (
     OD_DIM,
     OD_SLOTS,
 )
-from pipeline.legacy_model import StructuredPlanner
+from net.build_net import build_net
 from pipeline.train_bc import (
     INPUT_KEYS,
     LossConfig,
@@ -216,7 +216,7 @@ def test_losses_are_finite_and_differentiable(tmp_path):
     assert not ({"scene_seed", "episode_id", "expert_target_lane_id"} & set(batch))
     assert set(INPUT_KEYS) <= set(batch)
 
-    model = StructuredPlanner()
+    model = build_net()
     out = model(batch)
     assert set(out["aux"]) == {"collision", "offroad", "timeout", "urgency", "progress"}
 
@@ -240,7 +240,7 @@ def test_zero_plan_weight_batch_has_zero_plan_loss(tmp_path):
     # Rows with no usable plan label: plan terms must be zero, value/risk flow.
     idx = np.array([3, 5])
     batch = _batch_from_indices(data, targets, idx, "cpu")
-    model = StructuredPlanner()
+    model = build_net()
     out = model(batch)
     total, components = compute_losses(out, batch, cfg)
 
@@ -252,8 +252,11 @@ def test_zero_plan_weight_batch_has_zero_plan_loss(tmp_path):
 def test_one_epoch_smoke(tmp_path):
     data_dir = _fixture(tmp_path)
     out_dir = tmp_path / "out"
+    cfg_path = tmp_path / "empty.yaml"
+    cfg_path.write_text("{}\n", encoding="utf-8")
     rc = main(
         [
+            "--config", str(cfg_path),
             "--data", str(data_dir),
             "--out", str(out_dir),
             "--epochs", "1",
@@ -266,6 +269,9 @@ def test_one_epoch_smoke(tmp_path):
         ]
     )
     assert rc == 0
+    run_dirs = list(tmp_path.glob("out_*"))
+    assert len(run_dirs) == 1, run_dirs
+    out_dir = run_dirs[0]
     for name in ("best.pt", "last.pt", "metrics.json"):
         assert (out_dir / name).exists(), name
 
@@ -309,3 +315,7 @@ def test_canonical_shard_directory_loader(tmp_path):
     data = load_data([canonical])
     assert len(data["action"]) == 8
     assert len(set(data["scene_seed"].tolist())) == 3
+
+def test_missing_history_mode_defaults_to_projected(tmp_path):
+    data = load_data([_fixture(tmp_path)])
+    assert set(data["history_mode"].tolist()) == {0.0}

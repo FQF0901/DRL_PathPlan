@@ -11,7 +11,11 @@ from env.action.action_space import (
     normalize,
     project,
 )
-from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, DEFAULT_BOUNDS, HARD_LIMITS
+from env.action.config import load_action_contract
+
+_C = load_action_contract()
+CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS = _C.bounds, _C.comfort, _C.hard
+DEFAULT_BOUNDS = CLEAN_BOUNDS
 
 
 def test_bounds_constants():

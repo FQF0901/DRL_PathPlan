@@ -13,7 +13,9 @@ import pytest
 from dataset import collect_dagger as dagger
 from dataset import collect
 from env.obs import HISTORY_FRAMES, NAV_DIM, _empty_history, stack_history
-from pipeline.action_compat import CLEAN_BOUNDS
+from env.action.config import load_action_contract
+
+CLEAN_BOUNDS = load_action_contract().bounds
 
 #: Fields added by this collector on top of the collect row schema.
 DAGGER_ROW_KEYS = {

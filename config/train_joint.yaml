@@ -1,0 +1,20 @@
+# Optional Phase 2b joint policy + WM fine-tune defaults.
+data:
+  - data/episodes/train_2000/il_dagger
+val_data:
+  - data/episodes/val_500/expert_reference
+val_split: data/splits/val_500.json
+ckpt: runs/wm_2k/best_drive.pt
+out: runs/joint_2k
+epochs: 1
+batch_size: 128
+max_pairs: 60000
+lr: 0.00002
+tsb_lr: 0.000001
+policy_weight: 1.0
+wm_weight: 1.0
+policy_tol: 0.05
+content_weight: 1.0
+geometry_weight: 0.1
+seed: 0
+device: auto

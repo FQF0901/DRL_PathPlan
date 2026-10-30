@@ -25,8 +25,13 @@ from env.obs import (
     _empty_history,
 )
 from env.scenario.spec import load_specs
-from pipeline.action_compat import CLEAN_BOUNDS
-from pipeline.legacy_model import StructuredPlanner
+from env.action.config import load_action_contract
+from net.build_net import build_net
+from net.model import DriveModel
+from pipeline.checkpointing import save_drive_model_checkpoint
+
+_C = load_action_contract()
+CLEAN_BOUNDS = _C.bounds
 from pipeline.eval import (
     HARD_LIMITS,
     _batch_from_history,
@@ -44,7 +49,7 @@ def test_load_model_random_warns(capsys):
     model = load_model(None, "cpu")
     captured = capsys.readouterr().out.lower()
 
-    assert isinstance(model, StructuredPlanner)
+    assert isinstance(model, DriveModel)
     assert not model.training
     assert "warning" in captured and "smoke" in captured
     assert model.eval_config["hidden"] == model.hidden
@@ -57,23 +62,16 @@ def _synthetic_history():
 
 
 def test_load_model_from_checkpoint(tmp_path):
-    state = StructuredPlanner(hidden=64, heads=4, spatial_layers=1)
+    state = build_net()
     ckpt = tmp_path / "clean.pt"
-    torch.save(
-        {
-            "model": state.state_dict(),
-            "config": {"hidden": 64, "heads": 4, "spatial_layers": 1},
-        },
-        ckpt,
-    )
+    save_drive_model_checkpoint(state, str(ckpt))
 
     model = load_model(str(ckpt), "cpu")
-    assert isinstance(model, StructuredPlanner)
+    assert isinstance(model, DriveModel)
     assert not model.training
-    assert model.hidden == 64
+    assert model.hidden == 128
     assert model.heads == 4
-    assert model.eval_config == {"hidden": 64, "heads": 4, "spatial_layers": 1}
-
+    assert model.eval_config == {"hidden": 128, "heads": 4, "spatial_layers": 2}
 
 def test_batch_from_history_shapes_and_forward():
     batch = _batch_from_history(_synthetic_history(), device="cpu")
@@ -93,7 +91,7 @@ def test_batch_from_history_shapes_and_forward():
         else:
             assert value.dtype == torch.float32
 
-    out = StructuredPlanner()(batch)
+    out = build_net()(batch)
     assert out["action_mu"].shape == (1, 4)
     assert torch.isfinite(out["action_mu"]).all()
     assert torch.all(out["action_mu"] >= 0.0)

@@ -1,126 +1,68 @@
-"""Checkpoint schema/action-bound validation tests."""
+"""Checkpoint schema/action-bound validation tests for DriveModel."""
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
-from pipeline.action_compat import CLEAN_BOUNDS
-from pipeline.legacy_model import StructuredPlanner
-from pipeline.checkpointing import load_model_from_checkpoint, validate_checkpoint
+from env.action.config import load_action_contract
+from net.model import DriveModel
+from pipeline.checkpointing import (
+    load_drive_model_from_checkpoint,
+    load_model_from_checkpoint,
+    save_drive_model_checkpoint,
+)
 
 
-def _payload(*, bounds=None):
-    model = StructuredPlanner(hidden=32, heads=2, spatial_layers=1)
-    low = CLEAN_BOUNDS.low if bounds is None else bounds[0]
-    high = CLEAN_BOUNDS.high if bounds is None else bounds[1]
-    return {
-        "model": model.state_dict(),
-        "config": {
-            "architecture": "StructuredPlanner",
-            "schema_name": "drl_pathplan_obs",
-            "schema_version": 2,
-            "hidden": 32,
-            "heads": 2,
-            "spatial_layers": 1,
-            "action_low": list(map(float, low)),
-            "action_high": list(map(float, high)),
-            "decision": {"dt": 0.5, "steps_per_policy": 5, "history_frames": 6},
-        },
-    }
+def _model(hidden: int = 32, *, low=None, high=None) -> DriveModel:
+    contract = load_action_contract()
+    return DriveModel(
+        hidden=hidden,
+        heads=2,
+        spatial_layers=1,
+        action_low=contract.bounds.low if low is None else low,
+        action_high=contract.bounds.high if high is None else high,
+        ego_dt=0.5,
+        ego_wheelbase=2.46894,
+        ego_max_steer_rad=0.6981317007977318,
+    )
 
 
-def test_valid_checkpoint_passes_strict(tmp_path):
-    path = tmp_path / "clean.pt"
-    torch.save(_payload(), path)
-    model = load_model_from_checkpoint(str(path), "cpu", strict=True)
-    assert model.hidden == 32
-    assert model.eval_config["hidden"] == 32
+def test_drive_checkpoint_strict_roundtrip(tmp_path):
+    model = _model()
+    path = tmp_path / "drive.pt"
+    save_drive_model_checkpoint(model, str(path))
+    loaded = load_model_from_checkpoint(str(path), "cpu", strict=True)
+    assert isinstance(loaded, DriveModel)
+    assert loaded.hidden == 32
+    assert loaded.eval_config["hidden"] == 32
 
 
-def test_incompatible_action_bounds_are_rejected(tmp_path):
-    path = tmp_path / "bad.pt"
-    torch.save(_payload(bounds=([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0])), path)
-    with pytest.raises(ValueError, match="action_"):
+def test_custom_action_bounds_roundtrip(tmp_path):
+    low = [0.5, -1.25, -0.7, 0.0]
+    high = [8.0, 1.25, 0.7, 16.0]
+    model = _model(low=low, high=high)
+    path = tmp_path / "custom.pt"
+    save_drive_model_checkpoint(model, str(path))
+    loaded = load_drive_model_from_checkpoint(str(path), "cpu", strict=True)
+    assert np.allclose(loaded.action_low.tolist(), low)
+    assert np.allclose(loaded.action_high.tolist(), high)
+
+
+def test_legacy_checkpoint_is_rejected(tmp_path):
+    path = tmp_path / "legacy.pt"
+    torch.save({"model": {"value.weight": torch.zeros(1, 1)}, "config": {}}, path)
+    with pytest.raises(ValueError, match="unsupported|must have|validation failed"):
         load_model_from_checkpoint(str(path), "cpu", strict=True)
 
 
-def test_legacy_checkpoint_is_explicitly_warned():
-    payload = _payload()
-    payload["config"] = {"hidden": 32, "heads": 2, "spatial_layers": 1}
-    _state, _config, info = validate_checkpoint(payload, strict=False)
-    assert info.warnings
-    assert any("schema_name" in w for w in info.warnings)
-
-
-def test_load_drive_model_from_adapter_checkpoint(tmp_path):
-    from pipeline.checkpointing import load_drive_model_from_checkpoint
-    from pipeline.legacy_model import StructuredPlanner
-    from env.action.config import load_action_contract
-
-    model = StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
-    contract = load_action_contract()
-    path = tmp_path / "drive.pt"
-    torch.save({
-        "model": model.state_dict(),
-        "config": {
-            "architecture": "DriveModelAdapter",
-            "hidden": 32,
-            "heads": 4,
-            "spatial_layers": 1,
-            "action": {
-                "bounds": {
-                    "low": contract.bounds.low.tolist(),
-                    "high": contract.bounds.high.tolist(),
-                }
-            },
-            "ego": {
-                "dt": 0.5,
-                "wheelbase": 2.46894,
-                "max_steer_rad": 0.6981317007977318,
-            },
-        },
-    }, path)
-    loaded = load_drive_model_from_checkpoint(str(path), "cpu", strict=True)
-    assert loaded.hidden == 32
-    assert loaded.training is False
-
-
-def test_load_drive_model_from_top_level_action_checkpoint(tmp_path):
-    from pipeline.checkpointing import load_drive_model_from_checkpoint
-    from pipeline.legacy_model import StructuredPlanner
-
-    model = StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
-    path = tmp_path / "adapter-top.pt"
-    payload = _payload()
-    payload["model"] = model.state_dict()
-    payload["config"]["architecture"] = "DriveModelAdapter"
-    payload["config"]["hidden"] = 32
-    payload["config"]["heads"] = 4
-    payload["config"]["spatial_layers"] = 1
-    torch.save(payload, path)
-    loaded = load_drive_model_from_checkpoint(str(path), "cpu", strict=True)
-    assert loaded.hidden == 32
-
-
-def test_merge_wm_into_drive_checkpoint_roundtrip(tmp_path):
-    from pipeline.checkpointing import load_drive_model_from_checkpoint, merge_wm_into_drive
-    from pipeline.legacy_model import StructuredPlanner
+def test_merge_wm_into_drive_roundtrip(tmp_path):
     from net.world_model import EgoConditionedLatentWM
+    from pipeline.checkpointing import merge_wm_into_drive
 
-    adapter = StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
     drive_path = tmp_path / "drive.pt"
-    torch.save({
-        "model": adapter.state_dict(),
-        "config": {
-            "architecture": "DriveModelAdapter",
-            "hidden": 32,
-            "heads": 4,
-            "spatial_layers": 1,
-            "action_low": [0.0, -1.5, -0.8, 0.0],
-            "action_high": [7.5, 1.5, 0.8, 15.0],
-        },
-    }, drive_path)
+    save_drive_model_checkpoint(_model(), str(drive_path))
     wm = EgoConditionedLatentWM(hidden=32, action_dim=4)
     wm_path = tmp_path / "wm.pt"
     torch.save({"model": wm.state_dict(), "config": {"hidden": 32, "action_dim": 4}}, wm_path)
@@ -130,60 +72,29 @@ def test_merge_wm_into_drive_checkpoint_roundtrip(tmp_path):
     assert loaded.world_model is not None
 
 
-def test_drive_checkpoint_preserves_custom_action_bounds(tmp_path):
-    from env.action.config import load_action_contract
-    from pipeline.checkpointing import load_drive_model_from_checkpoint, save_drive_model_checkpoint
-    from pipeline.legacy_model import StructuredPlanner
-
-    low = [0.5, -1.25, -0.7, 0.0]
-    high = [8.0, 1.25, 0.7, 16.0]
-    adapter = StructuredPlanner(hidden=32, heads=4, spatial_layers=1, action_low=low, action_high=high)
-    path = tmp_path / "custom.pt"
-    save_drive_model_checkpoint(adapter.drive, str(path))
-    loaded = load_drive_model_from_checkpoint(str(path), "cpu", strict=True)
-    import numpy as np
-    assert np.allclose(loaded.action_low.tolist(), low)
-    assert np.allclose(loaded.action_high.tolist(), high)
-
-
-def test_best_drive_loads_into_eval_adapter(tmp_path):
-    from pipeline.checkpointing import load_model_from_checkpoint, save_drive_model_checkpoint
-    from pipeline.legacy_model import StructuredPlanner
-
-    adapter = StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
+def test_best_drive_loads_as_drive_model(tmp_path):
     path = tmp_path / "best_drive.pt"
-    save_drive_model_checkpoint(adapter.drive, str(path))
+    save_drive_model_checkpoint(_model(), str(path))
     loaded = load_model_from_checkpoint(str(path), "cpu", strict=True)
-    assert isinstance(loaded, StructuredPlanner)
-    assert loaded.hidden == 32
+    assert isinstance(loaded, DriveModel)
 
+def test_bad_schema_is_rejected_in_strict_mode(tmp_path):
+    from pipeline.checkpointing import load_model_from_checkpoint, save_drive_model_checkpoint
 
-def test_legacy_action_limits_are_preserved(tmp_path):
-    from pipeline.checkpointing import load_model_from_checkpoint
-    from pipeline.legacy_model import StructuredPlanner
-
-    model = StructuredPlanner(hidden=32, heads=4, spatial_layers=1)
-    payload = {
-        "model": model.state_dict(),
-        "config": {
-            "architecture": "DriveModelAdapter",
-            "schema_name": "drl_pathplan_obs",
-            "schema_version": 2,
-            "hidden": 32,
-            "heads": 4,
-            "spatial_layers": 1,
-            "action_bounds_name": "custom",
-            "action_low": [0.0, -1.5, -0.8, 0.0],
-            "action_high": [7.5, 1.5, 0.8, 15.0],
-            "limits": {
-                "hard": {"a_long_min": -9, "a_long_max": 3.5, "a_lat_max": 8, "kappa_max": 0.5, "kappa_rate_max": 1, "jerk_long_max": 20, "jerk_lat_max": 20},
-                "comfort": {"a_long_min": -4, "a_long_max": 2, "a_lat_max": 3, "kappa_max": 0.25, "kappa_rate_max": 0.05, "jerk_long_max": 5, "jerk_lat_max": 5},
-            },
-            "decision": {"dt": 0.5, "steps_per_policy": 5, "history_frames": 6},
-        },
-    }
-    path = tmp_path / "custom-limits.pt"
+    path = tmp_path / "bad.pt"
+    save_drive_model_checkpoint(_model(), str(path))
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload["config"]["schema_version"] = 999
     torch.save(payload, path)
-    loaded = load_model_from_checkpoint(str(path), "cpu", strict=True)
-    assert loaded.action_config["limits"]["hard"]["kappa_max"] == 0.5
-    assert loaded.action_config["limits"]["comfort"]["kappa_max"] == 0.25
+    with pytest.raises(ValueError, match="validation failed"):
+        load_model_from_checkpoint(str(path), "cpu", strict=True)
+
+
+def test_mutated_top_level_bounds_are_rejected(tmp_path):
+    path = tmp_path / "bounds.pt"
+    save_drive_model_checkpoint(_model(), str(path))
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload["config"]["action_low"] = [0.0, 0.0, 0.0, 0.0]
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="validation failed"):
+        load_model_from_checkpoint(str(path), "cpu", strict=True)

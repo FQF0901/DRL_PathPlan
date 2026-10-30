@@ -1,0 +1,18 @@
+# History-conditioned WM training defaults.  Encoder/TSB/target stay frozen.
+data:
+  - data/episodes/train_2000/il_expert
+val_data:
+  - data/episodes/val_500/expert_reference
+val_split: data/splits/val_500.json
+ckpt: runs/bc_2k/best.pt
+out: runs/wm_2k
+epochs: 5
+batch_size: 128
+lr: 0.001
+max_pairs: 60000
+content_weight: 1.0
+geometry_weight: 0.1
+val_frac: 0.1
+seed: 0
+device: auto
+allow_random_val: false

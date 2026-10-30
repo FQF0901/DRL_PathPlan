@@ -14,8 +14,10 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from pipeline.action_compat import CLEAN_BOUNDS
-from pipeline.legacy_model import StructuredPlanner
+from env.action.config import load_action_contract
+
+_CONTRACT = load_action_contract()
+CLEAN_BOUNDS = _CONTRACT.bounds
 
 
 @dataclass(frozen=True)
@@ -117,91 +119,14 @@ def load_model_from_checkpoint(
     device: str = "cpu",
     *,
     strict: bool = False,
-) -> StructuredPlanner:
-    payload = torch.load(ckpt, map_location="cpu", weights_only=False)
-    raw_state = payload.get("model", {}) if isinstance(payload, dict) else {}
-    if isinstance(raw_state, Mapping) and raw_state and any(
-        str(key).startswith("encoder.") for key in raw_state
-    ) and not any(str(key).startswith("drive.") for key in raw_state):
-        # Pure DriveModel checkpoint (e.g. train_wm best_drive.pt): load it
-        # into a compatibility adapter for the legacy eval/BC/PPO entrypoints.
-        drive = load_drive_model_from_checkpoint(ckpt, device, strict=True)
-        cfg = payload.get("config", {}) or {}
-        model_cfg = cfg.get("model", {}) if isinstance(cfg, Mapping) else {}
-        adapter = StructuredPlanner(
-            hidden=drive.hidden,
-            heads=int(model_cfg.get("attention_heads", 4)),
-            spatial_layers=int(model_cfg.get("spatial_layers", 2)),
-            action_low=drive.action_low,
-            action_high=drive.action_high,
-        )
-        adapter.drive.load_state_dict(drive.state_dict(), strict=True)
-        adapter.drive.action_config = dict(drive.action_config)
-        adapter.drive.ego_config = dict(drive.ego_config)
-        adapter.eval_config = {
-            "hidden": drive.hidden,
-            "heads": adapter.heads,
-            "spatial_layers": adapter.spatial_layers,
-        }
-        adapter.checkpoint_warnings = []
-        adapter.to(device).eval()
-        return adapter
-    raw_cfg = payload.get("config", {}) or {}
-    custom_name = str(raw_cfg.get("action_bounds_name", "clean")) if isinstance(raw_cfg, Mapping) else "clean"
-    if (
-        isinstance(raw_cfg, Mapping)
-        and custom_name != "clean"
-        and "action_low" in raw_cfg
-        and "action_high" in raw_cfg
-    ):
-        state, config, info = validate_checkpoint(
-            payload,
-            expected_low=raw_cfg["action_low"],
-            expected_high=raw_cfg["action_high"],
-            strict=strict,
-        )
-    else:
-        state, config, info = validate_checkpoint(payload, strict=strict)
-    if not any(str(key).startswith("drive.") for key in state):
-        raise ValueError(
-            "legacy StructuredPlanner checkpoint is unsupported by the bank-native "
-            "adapter; retrain/save a DriveModelAdapter checkpoint"
-        )
-    model = StructuredPlanner(
-        hidden=info.hidden,
-        heads=info.heads,
-        spatial_layers=info.spatial_layers,
-    )
-    model.load_state_dict(state, strict=True)
-    if isinstance(config.get("action"), Mapping):
-        model.drive.action_config = {
-            "name": str(config["action"].get("bounds", {}).get("name", "clean")),
-            "low": list(map(float, config["action"].get("bounds", {}).get("low", []))),
-            "high": list(map(float, config["action"].get("bounds", {}).get("high", []))),
-            "limits": dict(config["action"].get("limits", {})),
-        }
-    else:
-        from env.action.config import load_action_contract
-        fallback = load_action_contract()
-        limits = dict(config.get("limits", {}) or {})
-        hard = limits.get("hard", asdict(fallback.hard))
-        comfort = limits.get("comfort", asdict(fallback.comfort))
-        model.drive.action_config = {
-            "name": str(config.get("action_bounds_name", "clean")),
-            "low": list(map(float, config.get("action_low", fallback.bounds.low.tolist()))),
-            "high": list(map(float, config.get("action_high", fallback.bounds.high.tolist()))),
-            "limits": {"hard": hard, "comfort": comfort},
-        }
-    if isinstance(config.get("ego"), Mapping):
-        model.drive.ego_config = dict(config["ego"])
-    model.eval_config = {
-        "hidden": info.hidden,
-        "heads": info.heads,
-        "spatial_layers": info.spatial_layers,
-    }
-    model.checkpoint_warnings = list(info.warnings)
-    model.to(device).eval()
-    return model
+):
+    """Load the current bank-native ``DriveModel`` policy.
+
+    Legacy adapters are no longer accepted.  This is intentionally a thin
+    alias over :func:`load_drive_model_from_checkpoint` so BC/eval/PPO all use
+    one checkpoint format.
+    """
+    return load_drive_model_from_checkpoint(ckpt, device, strict=strict)
 
 
 def load_drive_model_from_checkpoint(
@@ -213,8 +138,8 @@ def load_drive_model_from_checkpoint(
     """Load the bank-native ``DriveModel`` from a new-schema checkpoint.
 
     New checkpoints store the config under ``config`` with a ``model`` mapping
-    (and action/ego metadata).  Legacy ``StructuredPlanner`` checkpoints are
-    explicitly rejected; retrain/save a ``DriveModelAdapter`` checkpoint.
+    (and action/ego metadata).  Legacy checkpoints are
+    explicitly rejected; retrain/save a bank-native ``DriveModel`` checkpoint.
     """
     from net.build_net import build_net
     from net.model import DriveModel
@@ -225,6 +150,25 @@ def load_drive_model_from_checkpoint(
     config = payload.get("config", {}) or {}
     if not isinstance(config, Mapping):
         raise ValueError("checkpoint config must be a mapping")
+    # Validate schema/decision metadata as a contract boundary.  Use the
+    # checkpoint's own serialized action bounds as the expected bounds here;
+    # the caller's env/action contract is validated by eval/PPO separately.
+    raw_action = config.get("action", {})
+    raw_bounds = raw_action.get("bounds", {}) if isinstance(raw_action, Mapping) else {}
+    action_name = str(raw_bounds.get("name", config.get("action_bounds_name", "clean")))
+    if action_name in ("clean", "None"):
+        contract = load_action_contract()
+        expected_low = contract.bounds.low
+        expected_high = contract.bounds.high
+    else:
+        expected_low = raw_bounds.get("low", config.get("action_low", CLEAN_BOUNDS.low))
+        expected_high = raw_bounds.get("high", config.get("action_high", CLEAN_BOUNDS.high))
+    _state, _cfg, info = validate_checkpoint(
+        payload,
+        expected_low=expected_low,
+        expected_high=expected_high,
+        strict=strict,
+    )
     model_cfg = config.get("model")
     if isinstance(model_cfg, Mapping):
         raw = dict(config)
@@ -249,17 +193,16 @@ def load_drive_model_from_checkpoint(
             ego_max_steer_rad=float(ego.get("max_steer_rad", 0.6981317007977318)),
         )
     state = payload["model"]
-    if not any(str(key).startswith(("drive.", "encoder.", "temporal_spatial.")) for key in state):
-        raise ValueError(
-            "legacy StructuredPlanner checkpoint is unsupported by DriveModel; "
-            "retrain/save a DriveModelAdapter checkpoint"
-        )
     if any(str(key).startswith("drive.") for key in state):
-        state = {
-            str(key)[6:]: value
-            for key, value in state.items()
-            if str(key).startswith("drive.")
-        }
+        raise ValueError(
+            "legacy drive.* checkpoint is unsupported; retrain/save a "
+            "bank-native DriveModel checkpoint"
+        )
+    if not any(str(key).startswith(("encoder.", "temporal_spatial.")) for key in state):
+        raise ValueError(
+            "legacy checkpoint is unsupported by DriveModel; "
+            "retrain/save a bank-native DriveModel checkpoint"
+        )
     model.load_state_dict(state, strict=bool(strict))
     model.model_config = dict(config.get("model", {})) if isinstance(config.get("model"), Mapping) else {
         "hidden": hidden,
@@ -286,7 +229,12 @@ def load_drive_model_from_checkpoint(
         "wheelbase": float(ego_cfg.get("wheelbase", 2.46894)),
         "max_steer_rad": float(ego_cfg.get("max_steer_rad", 0.6981317007977318)),
     }
-    model.checkpoint_warnings = []
+    model.eval_config = {
+        "hidden": int(getattr(model, "hidden", 128)),
+        "heads": int(getattr(model, "heads", 4)),
+        "spatial_layers": int(getattr(model, "spatial_layers", 2)),
+    }
+    model.checkpoint_warnings = list(info.warnings)
     model.to(device).eval()
     return model
 

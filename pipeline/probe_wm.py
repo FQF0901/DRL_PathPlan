@@ -124,7 +124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def _mode_zero(row: int) -> bool:
         mode = data.get("history_mode")
         if mode is None:
-            return False
+            return True
         return bool(float(np.asarray(mode)[row]) < 0.5)
 
     result = {

@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from pipeline.action_compat import CLEAN_BOUNDS
+from env.action.config import load_action_contract
+
+CLEAN_BOUNDS = load_action_contract().bounds
 from net.build_net import build_net, load_config
 from net.encoder import CurrentFrameEncoder, TargetEncoder
 from net.mem_bank import (

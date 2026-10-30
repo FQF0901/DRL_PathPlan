@@ -544,7 +544,7 @@ nav/ego policy inputs  6 个（t0..t5）
 - **有 rollout**：`model.imagine` / `model.rollout` 输出 policy_0..policy_5。
 
 模型级 rollout 在 `net/world_model.py`；`DriveModel.imagine` / `DriveModel.rollout` 是薄 wrapper。
-`pipeline/rollout.py` 至多是 action preview 或 wrapper，不能复制 WM loop。
+model-level rollout 只在 `net/world_model.py` / `net/model.py`，不另设 rollout 文件。
 
 ---
 
@@ -644,6 +644,14 @@ real frame t-5..t, t+1
 - target `z*` 不进 Bank/policy；
 - 不做 geometry projection；
 - future map 只做 target。
+
+### 10.3 Legacy projected data
+
+Shipped pre-cutover NPZ shards are `stack_history` query-frame projected and
+carry no `history_mode` marker.  The loader treats missing markers as projected
+(`0`) and uses zero pose delta for them.  This is an offline compatibility path,
+not a raw Bank corpus.  A closed-loop gate must use raw-history shards
+(`history_mode=1`) produced by the current collectors.
 
 ### 10.3 Imagine
 
@@ -787,6 +795,9 @@ config/
   model.yaml              # 网络结构、Bank、rollout、action bounds/limits
   env.yaml
   train_bc.yaml
+  train_wm.yaml           # WM training defaults
+  train_joint.yaml        # optional Phase 2b defaults
+  train_ppo.yaml          # PPO canary defaults
   eval_thresholds.yaml
 
 net/
@@ -806,9 +817,9 @@ pipeline/
   losses.py               # 纯 loss 函数
   train_bc.py
   train_wm.py
+  train_joint.py           # optional Phase 2b policy+WM fine-tune
   train_ppo.py
   eval.py
-  rollout.py              # 单步 preview 或 model.imagine 薄 wrapper
 ```
 
 职责：
@@ -861,7 +872,7 @@ build_net.py
 - 模型级 rollout：`net/world_model.py`；
 - 顶层调用：`net/model.py` 的 `imagine` / `rollout`；
 - 训练/评测调度：`pipeline/train_wm.py`、`pipeline/eval.py`；
-- `pipeline/rollout.py` 只保留单步 preview 或 `model.imagine` 薄 wrapper，不是第二个 WM loop。
+- rollout 只在 `net/world_model.py` / `net/model.py`，不再有独立的 `pipeline/rollout.py`。
 
 ---
 

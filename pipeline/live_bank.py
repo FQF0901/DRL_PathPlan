@@ -26,7 +26,7 @@ from net.mem_bank import RealMemoryBank
 
 
 def _drive(model):
-    return getattr(model, "drive", model)
+    return model
 
 
 def _tensor(value, dtype=torch.float32):

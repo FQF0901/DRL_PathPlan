@@ -39,6 +39,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from env.action.config import load_action_contract
+
+_CONTRACT = load_action_contract()
+CLEAN_BOUNDS = _CONTRACT.bounds
+COMFORT_LIMITS = _CONTRACT.comfort
+HARD_LIMITS = _CONTRACT.hard
+
 from env.metadrive_env import build_env
 from env.obs import (
     HISTORY_FRAMES,
@@ -50,7 +57,6 @@ from env.obs import (
 )
 from env.scenario.spec import load_specs
 from env.action.action_space import action_to_trajectory, feasible_v1_interval
-from pipeline.action_compat import CLEAN_BOUNDS, COMFORT_LIMITS, HARD_LIMITS
 
 DECISION_DT = 0.5
 SIM_DT = 0.1

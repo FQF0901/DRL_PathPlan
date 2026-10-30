@@ -1,6 +1,6 @@
 """Bank-native top-level DriveModel.
 
-The old ``StructuredPlanner`` / ``TemporalPool`` path has been removed from the
+The old legacy wrapper path has been removed from the
 network package.  Policy, world model and rollout are all composed here from
 the bank-native components.
 """
@@ -56,6 +56,8 @@ class DriveModel(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
+        self.heads = int(heads)
+        self.spatial_layers = int(spatial_layers)
         self.action_dim = int(action_dim)
         self.rollout_horizon = int(rollout_horizon)
         if ego_dt is None or ego_wheelbase is None or ego_max_steer_rad is None:
@@ -93,10 +95,15 @@ class DriveModel(nn.Module):
             }
         self.model_config = {
             "hidden": self.hidden,
-            "attention_heads": heads,
-            "spatial_layers": spatial_layers,
+            "attention_heads": int(heads),
+            "spatial_layers": int(spatial_layers),
             "history_frames": 6,
             "action_dim": self.action_dim,
+        }
+        self.eval_config = {
+            "hidden": self.hidden,
+            "heads": int(heads),
+            "spatial_layers": int(spatial_layers),
         }
         self.ego_config = {
             "dt": self.ego_dt,
@@ -318,6 +325,12 @@ class DriveModel(nn.Module):
 
     def forward_history(self, batch, *, zero_pose: bool = False) -> Dict[str, Tensor]:
         """Policy forward from a [B,T,...] history batch."""
+        if not zero_pose:
+            mode = batch.get("history_mode")
+            if torch.is_tensor(mode):
+                mode = mode.reshape(-1)
+                if mode.numel() == int(batch["od"].shape[0]):
+                    zero_pose = mode < 0.5
         window, last_enc = self.build_history_window(batch, zero_pose=zero_pose)
         return self.forward_window(
             window, last_enc["nav"], last_enc["ego"], ego_valid=last_enc.get("ego_valid")

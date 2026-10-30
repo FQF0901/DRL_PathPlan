@@ -7,11 +7,18 @@ losses live in :mod:`pipeline.losses`.
 
 from __future__ import annotations
 
+
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -25,6 +32,7 @@ from net.world_model import EgoConditionedLatentWM
 from pipeline.checkpointing import load_drive_model_from_checkpoint
 from pipeline.losses import wm_losses
 from pipeline.train_bc import _resolve_npz_paths, load_data
+from pipeline.train_config import parse_train_args, timestamped_run_dir
 
 
 def _load_ids(paths: Sequence[str]) -> Dict[str, np.ndarray]:
@@ -81,7 +89,7 @@ def _encode_history(drive, data: Dict[str, np.ndarray], rows: np.ndarray, device
         batch = _history_batch(data, idx, device)
         mode = data.get("history_mode")
         if mode is None:
-            zero_pose = torch.zeros(len(idx), dtype=torch.bool, device=device)
+            zero_pose = torch.ones(len(idx), dtype=torch.bool, device=device)
         else:
             mode_vals = torch.from_numpy(np.asarray(mode[idx], dtype=np.float32)).to(device)
             zero_pose = mode_vals.reshape(-1) < 0.5
@@ -332,7 +340,12 @@ def _persistence(
 
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Bank-native one-step latent WM")
-    p.add_argument("--data", nargs="+", required=True)
+    p.add_argument(
+        "--config",
+        default="config/train_wm.yaml",
+        help="YAML training config (CLI flags override it)",
+    )
+    p.add_argument("--data", nargs="+", default=None)
     p.add_argument(
         "--val-data",
         nargs="+",
@@ -345,8 +358,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="explicitly allow the old random scene-seed validation fallback",
     )
-    p.add_argument("--ckpt", required=True, help="bank-native DriveModel checkpoint")
-    p.add_argument("--out", required=True)
+    p.add_argument("--ckpt", default=None, help="bank-native DriveModel checkpoint")
+    p.add_argument("--out", default=None)
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -356,7 +369,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    args = p.parse_args(argv)
+    args = parse_train_args(p, argv, "config/train_wm.yaml")
+    if not args.data:
+        raise SystemExit("--data is required (CLI or config)")
+    if not args.ckpt:
+        raise SystemExit("--ckpt is required (CLI or config)")
+    if not args.out:
+        raise SystemExit("--out is required (CLI or config)")
+    args.out = str(timestamped_run_dir(args.out))
+    print(f"[wm] config={args.config} run_dir={args.out}")
 
     torch.manual_seed(int(args.seed))
     np.random.seed(int(args.seed))
@@ -390,6 +411,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError(f"WM train/val scene overlap: {sorted(overlap)[:10]}")
 
     drive = load_drive_model_from_checkpoint(args.ckpt, args.device, strict=True)
+    policy_payload = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    inherited_extra = {}
+    inherited_cfg = policy_payload.get("config", {}) if isinstance(policy_payload, Mapping) else {}
+    if isinstance(inherited_cfg, Mapping) and isinstance(inherited_cfg.get("loss"), Mapping):
+        inherited_extra["loss"] = dict(inherited_cfg["loss"])
     encoder = drive.encoder
     for p_ in encoder.parameters():
         p_.requires_grad_(False)
@@ -503,6 +529,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "data": list(args.data),
                         "val_data": None if not args.val_data else list(args.val_data),
                         "val_split": args.val_split if args.val_data else None,
+                        "config_file": getattr(args, "config", None),
+                        "run_dir": str(args.out),
                         "content_weight": float(args.content_weight),
                         "geometry_weight": float(args.geometry_weight),
                         "action_contract": {
@@ -518,7 +546,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if best_state is not None:
         drive.world_model.load_state_dict(best_state, strict=True)
         from pipeline.checkpointing import save_drive_model_checkpoint
-        save_drive_model_checkpoint(drive, str(out / "best_drive.pt"))
+        save_drive_model_checkpoint(
+            drive, str(out / "best_drive.pt"),
+            extra={
+                **inherited_extra,
+                "target_encoder": args.ckpt,
+                "train_scene_seeds": train_seeds,
+                "val_scene_seeds": val_seeds,
+            },
+        )
     (out / "metrics.json").write_text(
         json.dumps({
             "history": history,

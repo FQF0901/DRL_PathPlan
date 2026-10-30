@@ -64,3 +64,13 @@ do not tune or select on it.
 
 Superseded data and generated specs are under `archive/` and are not part of
 the canonical path.  Do not use them for new runs.
+
+## History compatibility
+
+The shards collected before the raw-history cutover (including the current
+`il_expert`, `il_dagger`, and `val_500/expert_reference`) are `stack_history`
+query-frame projected and have no `history_mode` column.  The loader treats a
+missing marker as projected (`0`).  They are valid for offline compatibility,
+but they are **not** a substitute for a raw-history live/gate corpus.  New
+collectors write `history_mode=1` and raw per-frame history; regenerate the
+canonical shards with the current collectors before quoting closed-loop gates.
