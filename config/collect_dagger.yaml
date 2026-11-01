@@ -13,7 +13,7 @@ max_steps: 600
 # More expert labels around failure states than round 1.
 expert_ratio: 0.6
 shield_ttc: 2.5
-# Force expert takeover after 20 low-speed decision steps (~10 s).
+# Force expert takeover after 20 low-speed 0.1 s substeps (~2 s).
 stuck_shield_steps: 20
 round: 2
 seed: 0

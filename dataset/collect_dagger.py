@@ -617,7 +617,7 @@ def _needs_shield(obs: Dict[str, np.ndarray], ttc_thresh: float) -> bool:
 
 
 def _needs_stuck_shield(low_speed_run: int, step_threshold: float) -> bool:
-    """Force expert replay after a sustained low-speed run (0 = off)."""
+    """Force expert replay after a sustained low-speed substep run (0 = off)."""
     return bool(float(step_threshold) > 0.0 and int(low_speed_run) > float(step_threshold))
 
 
@@ -1404,7 +1404,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--stuck-shield-steps",
         type=float,
         default=0.0,
-        help="force expert replay after this many low-speed decision steps (0=off)",
+        help="force expert replay after this many low-speed 0.1 s substeps (0=off)",
     )
     parser.add_argument(
         "--difficulties",
