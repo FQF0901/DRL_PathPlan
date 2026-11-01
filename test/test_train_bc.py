@@ -155,6 +155,7 @@ def _write_fixture(root: Path) -> Path:
     arrays["label_source"] = np.ones(n, dtype=np.int8)
     arrays["student_failure"] = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int8)
 
+    arrays["history_mode"] = np.ones(n, dtype=np.float32)
     np.savez_compressed(root / "expert_bc.npz", **arrays)
     return root
 
@@ -316,6 +317,151 @@ def test_canonical_shard_directory_loader(tmp_path):
     assert len(data["action"]) == 8
     assert len(set(data["scene_seed"].tolist())) == 3
 
-def test_missing_history_mode_defaults_to_projected(tmp_path):
+def test_missing_history_mode_is_rejected(tmp_path):
+    data_dir = _fixture(tmp_path)
+    path = data_dir / "expert_bc.npz"
+    with np.load(path) as z:
+        arrays = {k: z[k] for k in z.files if k != "history_mode"}
+    np.savez_compressed(path, **arrays)
+    with np.testing.assert_raises(ValueError):
+        load_data([data_dir])
+
+
+def test_fast_history_window_matches_record_path(tmp_path):
+    from net.build_net import build_net
+    from pipeline.scene_batches import make_scene_batches
+
     data = load_data([_fixture(tmp_path)])
-    assert set(data["history_mode"].tolist()) == {0.0}
+    cfg = LossConfig()
+    targets = build_targets(data, cfg)
+    idx = np.arange(len(data["action"]))
+    batch = _batch_from_indices(data, targets, idx, "cpu")
+    model = build_net().eval()
+    zero = torch.zeros(len(idx), dtype=torch.bool)
+    slow, slow_enc = model.build_history_window(batch)
+    fast, fast_enc = model.build_history_window_fast(batch)
+    assert model._can_use_fast_history(batch)
+    for key in slow.__dataclass_fields__:
+        a, c = getattr(slow, key), getattr(fast, key)
+        if a.dtype.is_floating_point:
+            assert torch.allclose(a, c, atol=5e-6, rtol=0), key
+        else:
+            assert torch.equal(a, c), key
+    for key in ("nav", "ego", "nav_valid", "ego_valid"):
+        if key in slow_enc:
+            a, c = slow_enc[key], fast_enc[key]
+            if a.dtype.is_floating_point:
+                assert torch.allclose(a, c, atol=5e-6, rtol=0), key
+            else:
+                assert torch.equal(a, c), key
+
+    sequences = make_scene_batches(data, idx, scenes_per_batch=2)
+    assert len(sequences) == 2
+    assert all(sb.rows.shape[0] <= 2 for sb in sequences)
+    for sb in sequences:
+        for b, length in enumerate(sb.lengths):
+            steps = data["step"][sb.rows[b, :length]]
+            assert np.all(np.diff(steps) > 0)
+
+
+def test_sequence_epoch_smoke(tmp_path):
+    data_dir = _fixture(tmp_path)
+    out = tmp_path / "seq"
+    cfg_path = tmp_path / "empty.yaml"
+    cfg_path.write_text("{}\n", encoding="utf-8")
+    rc = main([
+        "--config", str(cfg_path),
+        "--data", str(data_dir),
+        "--out", str(out),
+        "--epochs", "1",
+        "--batch-size", "4",
+        "--sequence-batch",
+        "--scenes-per-batch", "2",
+        "--tbptt-chunk", "2",
+        "--val-frac", "0.5",
+        "--device", "cpu",
+    ])
+    assert rc == 0
+    assert list(tmp_path.glob("seq_*"))
+
+
+def test_sequence_fifo_alignment_matches_fresh_window(tmp_path):
+    from net.build_net import build_net
+
+    data = load_data([_fixture(tmp_path)])
+    cfg = LossConfig()
+    targets = build_targets(data, cfg)
+    # Fixture rows are ordered; use two adjacent rows from one episode.
+    ep = data["episode_id"]
+    rows = np.flatnonzero(ep == ep[np.flatnonzero(np.diff(data["step"]) == 1)[0]])
+    rows = rows[np.argsort(data["step"][rows])]
+    assert len(rows) >= 2
+    model = build_net().eval()
+    b0 = _batch_from_indices(data, targets, rows[:1], "cpu")
+    b1 = _batch_from_indices(data, targets, rows[1:2], "cpu")
+    w0, _ = model.build_history_window_fast(b0)
+    enc1 = model.prepare_current_encoding(model.encoder.encode_current(b1))
+    advanced = model.align_window_to_current(w0, enc1)
+    pose = b1["pose"][:, -1].clone()
+    pose[:] = 0.0  # projected-history fixture
+    advanced = advanced.advance(
+        od_content=enc1["od_content"], od_geometry=enc1["od_geometry"],
+        od_type=enc1["od_type"], od_valid=enc1["od_valid"],
+        od_stable_id=enc1["od_stable_id"],
+        ld_content=enc1["ld_content"], ld_geometry=enc1["ld_geometry"],
+        ld_type=enc1["ld_type"], ld_valid=enc1["ld_valid"],
+        ld_stable_id=enc1["ld_stable_id"], ego_pose=pose,
+        source=0, rollout_depth=0,
+    )
+    fresh, _ = model.build_history_window_fast(b1)
+    for key in fresh.__dataclass_fields__:
+        a, c = getattr(advanced, key), getattr(fresh, key)
+        if a.dtype.is_floating_point:
+            assert torch.allclose(a, c, atol=5e-6, rtol=0), key
+        else:
+            assert torch.equal(a, c), key
+
+
+def test_fifo_append_safe_detects_reentering_entity(tmp_path):
+    from net.build_net import build_net
+
+    data = load_data([_fixture(tmp_path)])
+    cfg = LossConfig()
+    targets = build_targets(data, cfg)
+    rows = np.flatnonzero(data["episode_id"] == data["episode_id"][0])
+    rows = rows[np.argsort(data["step"][rows])]
+    assert len(rows) >= 2
+    model = build_net().eval()
+    b0 = _batch_from_indices(data, targets, rows[:1], "cpu")
+    b1 = _batch_from_indices(data, targets, rows[1:2], "cpu")
+    window, _ = model.build_history_window_fast(b0)
+    enc = model.prepare_current_encoding(model.encoder.encode_current(b1))
+    assert model.fifo_append_safe(window, enc)
+    # Inject a current entity ID that was absent from the previous frame.
+    enc["od_stable_id"] = enc["od_stable_id"].clone()
+    enc["od_valid"] = enc["od_valid"].clone()
+    enc["od_valid"][0, 0] = True
+    enc["od_stable_id"][0, 0] = 987654321
+    assert not model.fifo_append_safe(window, enc)
+
+
+def test_closed_loop_score_is_lexicographic_success_first():
+    from pipeline.train_bc import _closed_loop_score
+
+    good = {
+        "success_rate": 0.9,
+        "route_completion_mean": 1.0,
+        "collision_rate": 0.0,
+        "off_road_rate": 0.0,
+        "fallback_rate": 0.0,
+        "infeasible_count_mean": 10.0,
+    }
+    bad = {
+        "success_rate": 0.1,
+        "route_completion_mean": 0.1,
+        "collision_rate": 0.0,
+        "off_road_rate": 0.0,
+        "fallback_rate": 0.0,
+        "infeasible_count_mean": 0.0,
+    }
+    assert _closed_loop_score(good) > _closed_loop_score(bad)

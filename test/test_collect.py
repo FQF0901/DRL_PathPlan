@@ -2,7 +2,7 @@
 
 These tests do not build MetaDrive or run a collection.  They exercise the
 pure packing/schema helpers with synthetic v2 history tensors produced by
-``stack_history`` (no env required) and check the provisional clean limits.
+``raw_history`` (no env required) and check the provisional clean limits.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from env.obs import (
     HISTORY_FRAMES,
     NAV_DIM,
     _empty_history,
-    stack_history,
+    raw_history,
 )
 from env.action.config import load_action_contract
 
@@ -170,7 +170,9 @@ def _synthetic_hist():
         "timestamp": 0.0,
         "source": "REAL",
     }
-    return stack_history([frame], [np.zeros(3, dtype=np.float64)])
+    hist = raw_history([frame], [np.zeros(3, dtype=np.float64)])
+    hist["meta"] = dict(frame["meta"])
+    return hist
 
 
 def _synthetic_rows(hist, n=2):

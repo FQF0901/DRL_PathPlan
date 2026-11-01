@@ -7,7 +7,7 @@ the bank-native components.
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Mapping
 
 import torch
 from torch import Tensor, nn
@@ -215,12 +215,15 @@ class DriveModel(nn.Module):
             window, enc["nav"], enc["ego"], ego_valid=enc.get("ego_valid")
         )
 
-    def build_history_window(self, batch, *, zero_pose: bool | Tensor = False):
-        """Encode a [B,T,...] history batch into a BankWindow.
+    def build_history_window(self, batch):
+        """Encode a raw [B,T,...] history batch into a BankWindow.
 
-        This is the offline bridge used by BC/WM training and legacy eval.  The
-        live path uses ``LiveBankRunner`` and calls ``forward_window`` directly.
+        This is the offline bridge used by BC/WM training.  The live path uses
+        ``LiveBankRunner`` and calls ``forward_window`` directly.
         """
+        mode = batch.get("history_mode")
+        if mode is None or not torch.is_tensor(mode) or bool((mode.reshape(-1) != 1.0).any()):
+            raise ValueError("build_history_window requires raw history_mode=1")
         od = batch["od"]
         if od.dim() != 4:
             raise ValueError("history expects od [B,T,16,18]")
@@ -253,16 +256,9 @@ class DriveModel(nn.Module):
             batch[key] = cleaned
         pose = batch.get("ego_pose", batch.get("pose"))
         if pose is None:
-            pose = torch.zeros((b, t, 3), dtype=od.dtype, device=od.device)
+            raise ValueError("raw history requires ego_pose/pose")
         if pose.dim() != 3 or pose.shape[0] != b or pose.shape[1] != t:
             raise ValueError("history pose must be [B,T,3]")
-        if torch.is_tensor(zero_pose):
-            if zero_pose.dim() != 1 or zero_pose.shape[0] != b:
-                raise ValueError("zero_pose tensor must be [B]")
-            pose = pose.clone()
-            pose[zero_pose.to(device=pose.device, dtype=torch.bool)] = 0.0
-        elif zero_pose:
-            pose = torch.zeros((b, t, 3), dtype=od.dtype, device=od.device)
         metadata = {}
         defaults = {"episode_id": "ep", "frame_id": 0, "timestamp": 0.0}
         for key in ("episode_id", "frame_id", "timestamp"):
@@ -323,15 +319,267 @@ class DriveModel(nn.Module):
         assert last_enc is not None
         return window, last_enc
 
-    def forward_history(self, batch, *, zero_pose: bool = False) -> Dict[str, Tensor]:
-        """Policy forward from a [B,T,...] history batch."""
-        if not zero_pose:
+    def _can_use_fast_history(self, batch) -> bool:
+        """Whether the batch can use the tensor-only window builder.
+
+        The fast builder is raw-history only: it aligns every historical frame
+        to the current frame's stable-ID slot order, matching
+        ``BankWindowBuilder``.  It requires a 6-frame history, explicit IDs and
+        a history_mode=1 marker; malformed/legacy batches fall back.
+        """
+        mode = batch.get("history_mode")
+        if mode is None or not torch.is_tensor(mode):
+            return False
+        mode = mode.reshape(-1)
+        if mode.numel() != int(batch["od"].shape[0]):
+            return False
+        if bool((mode != 1.0).any()):
+            return False
+        if int(batch["od"].shape[1]) != 6:
+            return False
+        if int(batch["ld"].shape[0]) != int(batch["od"].shape[0]) or int(batch["ld"].shape[1]) != 6:
+            return False
+        pose = batch.get("ego_pose", batch.get("pose"))
+        if pose is not None and (pose.dim() != 3 or pose.shape[0] != int(batch["od"].shape[0]) or pose.shape[1] != 6):
+            return False
+        for ids_key, mask_key, n in (
+            ("od_ids", "od_mask", int(batch["od"].shape[2])),
+            ("ld_ids", "ld_mask", int(batch["ld"].shape[2])),
+        ):
+            ids = batch.get(ids_key)
+            mask = batch.get(mask_key)
+            if not (torch.is_tensor(ids) and torch.is_tensor(mask)):
+                return False
+            if ids.dim() != 3 or ids.shape[0] != int(batch["od"].shape[0]):
+                return False
+            if ids.shape[1] != 6 or ids.shape[2] != n:
+                return False
+        return True
+
+    @staticmethod
+    def _sanitize_ids(ids: Tensor, mask: Tensor) -> Tensor:
+        """Vectorized equivalent of the duplicate-ID fallback.
+
+        A frame with duplicate valid stable IDs is replaced by slot IDs, just
+        like the record-path loop in ``build_history_window``.
+        """
+        valid = mask
+        if valid.dim() == 4:
+            valid = valid.any(dim=-1)
+        valid = valid.bool()
+        ids = torch.where(valid, ids.long(), torch.full_like(ids.long(), -1))
+        sentinel = torch.full_like(ids, -(2**62))
+        ordered, order = torch.where(valid, ids, sentinel).sort(dim=-1)
+        ordered_valid = valid.gather(-1, order)
+        duplicate = (
+            (ordered[..., 1:] == ordered[..., :-1])
+            & ordered_valid[..., 1:]
+            & ordered_valid[..., :-1]
+        )
+        bad = duplicate.any(dim=-1)[..., None]
+        if ids.dim() == 2:
+            slots = torch.arange(ids.shape[-1], dtype=ids.dtype, device=ids.device).view(1, -1)
+        else:
+            slots = torch.arange(ids.shape[-1], dtype=ids.dtype, device=ids.device).view(1, 1, -1)
+        return torch.where(bad, slots, ids)
+
+    @staticmethod
+    def _align_history(
+        content: Tensor,
+        geometry: Tensor,
+        type_id: Tensor,
+        valid: Tensor,
+        ids: Tensor,
+        current_ids: Tensor,
+        current_valid: Tensor,
+        current_type: Tensor,
+    ):
+        """Align [B,T,S,...] history to current-frame slot order by stable ID."""
+        b, t, old_slots = ids.shape
+        new_slots = current_ids.shape[1]
+        out_content = content.new_zeros((b, t, new_slots, *content.shape[3:]))
+        out_geometry = geometry.new_zeros((b, t, new_slots, *geometry.shape[3:]))
+        out_type = current_type.new_zeros((b, t, new_slots))
+        out_valid = torch.zeros((b, t, new_slots), dtype=torch.bool, device=ids.device)
+        out_ids = torch.full((b, t, new_slots), -1, dtype=torch.long, device=ids.device)
+        for ti in range(t):
+            eq = current_ids[:, :, None] == ids[:, ti, None, :]
+            match = eq & valid[:, ti, None, :] & current_valid[:, :, None]
+            has = match.any(dim=-1)
+            idx = match.to(torch.int64).argmax(dim=-1)
+            gather_dim = 1
+            c = content[:, ti].gather(gather_dim, idx[..., None].expand(-1, -1, content.shape[-1]))
+            g = geometry[:, ti].gather(gather_dim, idx[..., None].expand(-1, -1, geometry.shape[-1]))
+            out_content[:, ti] = torch.where(has[..., None], c, torch.zeros_like(c))
+            out_geometry[:, ti] = torch.where(has[..., None], g, torch.zeros_like(g))
+            out_type[:, ti] = torch.where(has, current_type, torch.zeros_like(current_type))
+            out_valid[:, ti] = has
+            # The record builder keeps the current stable ID even when the
+            # history frame has no matching entity; ``valid`` carries the
+            # missing-history signal.
+            out_ids[:, ti] = torch.where(current_valid, current_ids, torch.full_like(current_ids, -1))
+        return out_content, out_geometry, out_type, out_valid, out_ids
+
+    def build_history_window_fast(self, batch):
+        """Build a 6-frame ``BankWindow`` with one batched encoder call.
+
+        Historical entity slots are reindexed to the current frame's stable-ID
+        order.  This path is raw-history only; the record path remains for
+        malformed/legacy batches.
+        """
+        if not self._can_use_fast_history(batch):
             mode = batch.get("history_mode")
-            if torch.is_tensor(mode):
-                mode = mode.reshape(-1)
-                if mode.numel() == int(batch["od"].shape[0]):
-                    zero_pose = mode < 0.5
-        window, last_enc = self.build_history_window(batch, zero_pose=zero_pose)
+            if mode is None or not torch.is_tensor(mode) or bool((mode.reshape(-1) != 1.0).any()):
+                raise ValueError("fast history requires raw history_mode=1")
+            return self.build_history_window(batch)
+        od = batch["od"]
+        b, t = int(od.shape[0]), int(od.shape[1])
+        od_ids = self._sanitize_ids(batch["od_ids"], batch["od_mask"])
+        ld_ids = self._sanitize_ids(batch["ld_ids"], batch["ld_mask"])
+        frame_keys = (
+            "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask", "ego", "ego_mask",
+            "od_anchor", "od_taxonomy", "ld_taxonomy",
+        )
+        flat = {}
+        for key in frame_keys:
+            value = batch.get(key)
+            if torch.is_tensor(value) and value.dim() >= 2 and value.shape[0] == b and value.shape[1] == t:
+                flat[key] = value.reshape(b * t, *value.shape[2:])
+        flat["od_ids"] = od_ids.reshape(b * t, -1)
+        flat["ld_ids"] = ld_ids.reshape(b * t, -1)
+        enc = self.encoder.encode_current(flat)
+        def unflat(value: Tensor) -> Tensor:
+            return value.reshape(b, t, *value.shape[1:])
+        od_content = unflat(enc["od_content"])
+        ld_content = unflat(enc["ld_content"])
+        od_geometry = unflat(enc["od_geometry"])
+        ld_geometry = unflat(enc["ld_geometry"])
+        od_type = unflat(enc["od_type"])
+        ld_type = unflat(enc["ld_type"])
+        od_valid = unflat(enc["od_valid"]).bool()
+        ld_valid = unflat(enc["ld_valid"]).bool()
+        od_stable = unflat(enc["od_stable_id"])
+        ld_stable = unflat(enc["ld_stable_id"])
+        cur_od_ids = od_stable[:, -1]
+        cur_ld_ids = ld_stable[:, -1]
+        cur_od_valid = od_valid[:, -1]
+        cur_ld_valid = ld_valid[:, -1]
+        cur_od_type = od_type[:, -1]
+        cur_ld_type = ld_type[:, -1]
+        (
+            od_content, od_geometry, od_type, od_valid, od_stable,
+        ) = self._align_history(
+            od_content, od_geometry, od_type, od_valid, od_stable,
+            cur_od_ids, cur_od_valid, cur_od_type,
+        )
+        (
+            ld_content, ld_geometry, ld_type, ld_valid, ld_stable,
+        ) = self._align_history(
+            ld_content, ld_geometry, ld_type, ld_valid, ld_stable,
+            cur_ld_ids, cur_ld_valid, cur_ld_type,
+        )
+        pose = batch.get("ego_pose", batch.get("pose"))
+        if pose is None:
+            raise ValueError("raw history requires ego_pose/pose")
+        pose = pose.to(device=od.device, dtype=enc["od_content"].dtype)
+        hist_valid = batch.get("hist_valid")
+        if hist_valid is None:
+            frame_valid = torch.ones((b, t), dtype=torch.bool, device=od.device)
+        else:
+            if hist_valid.dim() != 2 or tuple(hist_valid.shape) != (b, t):
+                raise ValueError("hist_valid must be [B,T]")
+            frame_valid = hist_valid.to(device=od.device).bool()
+        source = torch.zeros((b, t), dtype=torch.long, device=od.device)
+        depth = torch.zeros((b, t), dtype=torch.long, device=od.device)
+        window = BankWindow(
+            od_content=od_content, od_geometry=od_geometry, od_type=od_type,
+            od_valid=od_valid, od_stable_id=od_stable,
+            ld_content=ld_content, ld_geometry=ld_geometry, ld_type=ld_type,
+            ld_valid=ld_valid, ld_stable_id=ld_stable,
+            ego_pose=pose, source=source, rollout_depth=depth, frame_valid=frame_valid,
+        )
+        last_enc = {
+            key: enc[key].reshape(b, t, *enc[key].shape[1:])[:, -1]
+            for key in enc
+        }
+        return window, last_enc
+
+    def prepare_current_encoding(self, enc: Mapping[str, Tensor]) -> Dict[str, Tensor]:
+        """Mask invalid entities and sanitize IDs before FIFO append."""
+        out = dict(enc)
+        od_valid = out["od_valid"].bool()
+        ld_valid = out["ld_valid"].bool()
+        out["od_stable_id"] = torch.where(
+            od_valid,
+            self._sanitize_ids(out["od_stable_id"], od_valid),
+            torch.full_like(out["od_stable_id"], -1),
+        )
+        out["ld_stable_id"] = torch.where(
+            ld_valid,
+            self._sanitize_ids(out["ld_stable_id"], ld_valid),
+            torch.full_like(out["ld_stable_id"], -1),
+        )
+        out["od_content"] = torch.where(od_valid[..., None], out["od_content"], torch.zeros_like(out["od_content"]))
+        out["ld_content"] = torch.where(ld_valid[..., None], out["ld_content"], torch.zeros_like(out["ld_content"]))
+        out["od_geometry"] = torch.where(od_valid[..., None], out["od_geometry"], torch.zeros_like(out["od_geometry"]))
+        out["ld_geometry"] = torch.where(ld_valid[..., None], out["ld_geometry"], torch.zeros_like(out["ld_geometry"]))
+        out["od_type"] = torch.where(od_valid, out["od_type"], torch.zeros_like(out["od_type"]))
+        out["ld_type"] = torch.where(ld_valid, out["ld_type"], torch.zeros_like(out["ld_type"]))
+        return out
+
+    def fifo_append_safe(self, window: BankWindow, enc: Mapping[str, Tensor]) -> bool:
+        """Check whether every current entity exists in the previous frame.
+
+        ``BankWindow.advance`` shifts an already entity-filtered view.  If a
+        current entity was absent in the previous frame but exists in older
+        history, the filtered FIFO would lose that older history; the trainer
+        must rebuild instead.  A disappearing entity is safe to shift.
+        """
+        checks = (
+            (window.od_stable_id[:, -1], window.od_valid[:, -1], enc["od_stable_id"], enc["od_valid"]),
+            (window.ld_stable_id[:, -1], window.ld_valid[:, -1], enc["ld_stable_id"], enc["ld_valid"]),
+        )
+        for prev_ids, prev_valid, cur_ids, cur_valid in checks:
+            cur_ids = self._sanitize_ids(cur_ids, cur_valid)
+            cur_valid = cur_valid.bool()
+            hit = (cur_ids[:, :, None] == prev_ids[:, None, :]) & prev_valid[:, None, :]
+            missing = cur_valid & ~hit.any(dim=-1)
+            if bool(missing.any()):
+                return False
+        return True
+
+    def align_window_to_current(self, window: BankWindow, enc: Mapping[str, Tensor]) -> BankWindow:
+        """Reindex a BankWindow's history to ``enc``'s current slot order."""
+        od_ids = self._sanitize_ids(enc["od_stable_id"], enc["od_valid"])
+        ld_ids = self._sanitize_ids(enc["ld_stable_id"], enc["ld_valid"])
+        od = self._align_history(
+            window.od_content, window.od_geometry, window.od_type,
+            window.od_valid, window.od_stable_id,
+            od_ids, enc["od_valid"].bool(), enc["od_type"],
+        )
+        ld = self._align_history(
+            window.ld_content, window.ld_geometry, window.ld_type,
+            window.ld_valid, window.ld_stable_id,
+            ld_ids, enc["ld_valid"].bool(), enc["ld_type"],
+        )
+        return BankWindow(
+            od_content=od[0], od_geometry=od[1], od_type=od[2],
+            od_valid=od[3], od_stable_id=od[4],
+            ld_content=ld[0], ld_geometry=ld[1], ld_type=ld[2],
+            ld_valid=ld[3], ld_stable_id=ld[4],
+            ego_pose=window.ego_pose, source=window.source,
+            rollout_depth=window.rollout_depth, frame_valid=window.frame_valid,
+        )
+
+    def forward_history(self, batch) -> Dict[str, Tensor]:
+        """Policy forward from a raw [B,T,...] history batch."""
+        if self._can_use_fast_history(batch):
+            window, last_enc = self.build_history_window_fast(batch)
+        else:
+            mode = batch.get("history_mode")
+            if mode is None or not torch.is_tensor(mode) or bool((mode.reshape(-1) != 1.0).any()):
+                raise ValueError("forward_history requires raw history_mode=1")
+            window, last_enc = self.build_history_window(batch)
         return self.forward_window(
             window, last_enc["nav"], last_enc["ego"], ego_valid=last_enc.get("ego_valid")
         )

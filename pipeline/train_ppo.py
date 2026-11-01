@@ -83,7 +83,7 @@ from pipeline.live_bank import LiveBankRunner
 from net.mem_bank import BankWindow
 from pipeline.distributions import TruncatedNormal
 from pipeline.eval import load_model
-from pipeline.train_config import parse_train_args, timestamped_run_dir
+from pipeline.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
 from pipeline.execution import relative_action, segment_dt
 
 # PPO's stored-vs-recomputed log-prob audit is a numerical contract.  TF32
@@ -252,6 +252,7 @@ def _batch_from_history(hist: Mapping[str, Any], device: str = "cpu") -> Dict[st
         dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
         arr = np.asarray(hist[key], dtype=dtype)
         batch[key] = torch.from_numpy(arr).unsqueeze(0).to(device)
+    batch["history_mode"] = torch.ones((1,), dtype=torch.float32, device=device)
     return batch
 
 
@@ -626,6 +627,11 @@ class RolloutBuffer:
                 dtype = torch.int64 if key in ("od_ids", "ld_ids") else torch.float32
                 states[key] = torch.cat(
                     [torch.as_tensor(tr["state"][key], dtype=dtype) for tr in self.transitions],
+                    dim=0,
+                ).to(device)
+            if "history_mode" in self.transitions[0]["state"]:
+                states["history_mode"] = torch.cat(
+                    [torch.as_tensor(tr["state"]["history_mode"], dtype=torch.float32) for tr in self.transitions],
                     dim=0,
                 ).to(device)
 
@@ -1512,6 +1518,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.out:
         raise SystemExit("--out is required (CLI or config)")
     args.out = str(timestamped_run_dir(args.out))
+    latest_run_alias(args.out)
     print(f"[ppo] config={args.config} run_dir={args.out}")
     if args.updates < 1:
         raise SystemExit("--updates must be >= 1")

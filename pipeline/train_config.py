@@ -66,3 +66,29 @@ def timestamped_run_dir(out: str | Path) -> Path:
     path = Path(out)
     stamp = datetime.now().strftime("%y%m%d%H%M%S")
     return path.with_name(f"{path.name}_{stamp}")
+
+
+def latest_run_alias(run_dir: str | Path) -> Path:
+    """Create/replace a stable sibling symlink for the timestamped run.
+
+    The actual run directory keeps its timestamp; ``runs/name`` points at the
+    newest run so downstream YAML can use a stable checkpoint path.
+    """
+    run = Path(run_dir)
+    name = run.name
+    suffix = name[-13:] if len(name) > 13 else ""
+    if not (suffix.startswith("_") and suffix[1:].isdigit()):
+        return run
+    alias = run.with_name(name[:-13])
+    try:
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        if alias.is_symlink():
+            alias.unlink()
+        elif alias.exists():
+            return run
+        alias.symlink_to(run.name, target_is_directory=True)
+    except OSError:
+        # A filesystem without symlink permission still leaves the real run
+        # directory usable; operators can pass --ckpt explicitly.
+        pass
+    return alias

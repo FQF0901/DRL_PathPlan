@@ -1,12 +1,17 @@
 # BC / DAgger training defaults.  CLI flags override every value below.
 data:
-  - data/episodes/train_2000/il_expert
+  - data/episodes/train_2000/il_expert_raw
 val_data:
-  - data/episodes/val_500/expert_reference
+  - data/episodes/val_500/expert_raw
 # val_data is the fixed 500-scene held-out set; val_frac is ignored when set.
-out: runs/bc_2k
-epochs: 30
-batch_size: 1024
+out: runs/bc_2k_raw
+epochs: 20
+# row-wise fallback batch differs from scenes_per_batch
+batch_size: 256
+sequence_batch: true
+scenes_per_batch: 256
+clip_length: 100
+tbptt_chunk: 8
 lr: 0.001
 weight_decay: 0.0001
 max_grad_norm: 1.0
@@ -39,3 +44,11 @@ source_weight_replay: 1.0
 source_weight_lift: 0.5
 residual_xy_thresh: 0.5
 residual_dpsi_thresh: 0.1
+closed_loop: true
+closed_loop_specs: data/specs/val_500.json
+closed_loop_split_manifest: data/splits/val_500.json
+closed_loop_limit: 100
+closed_loop_final_limit: 500
+closed_loop_every: 5
+closed_loop_patience: 3
+closed_loop_max_steps: 600

@@ -81,6 +81,7 @@ LIMITS_SOURCE = "config/model.yaml action.limits.hard"
 BATCH_KEYS = (
     "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask",
     "ego", "ego_mask", "hist_valid", "od_ids", "ld_ids", "pose",
+    "od_anchor", "od_taxonomy",
 )
 
 
@@ -121,6 +122,7 @@ def _batch_from_history(hist: Dict[str, Any], device: str = "cpu") -> Dict[str, 
         dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
         arr = np.asarray(hist[key], dtype=dtype)
         batch[key] = torch.from_numpy(arr).unsqueeze(0).to(device)
+    batch["history_mode"] = torch.ones((1,), dtype=torch.float32, device=device)
     return batch
 
 

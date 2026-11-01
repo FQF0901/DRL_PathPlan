@@ -645,15 +645,14 @@ real frame t-5..t, t+1
 - 不做 geometry projection；
 - future map 只做 target。
 
-### 10.3 Legacy projected data
+### 10.3 Raw history only
 
-Shipped pre-cutover NPZ shards are `stack_history` query-frame projected and
-carry no `history_mode` marker.  The loader treats missing markers as projected
-(`0`) and uses zero pose delta for them.  This is an offline compatibility path,
-not a raw Bank corpus.  A closed-loop gate must use raw-history shards
-(`history_mode=1`) produced by the current collectors.
+Canonical training/eval data must be raw per-frame history produced by the
+current collectors (`history_mode=1`, real per-frame pose). Projected
+`stack_history` shards are legacy/archive only and are rejected by the loader;
+they are not a training or gate input.
 
-### 10.3 Imagine
+### 10.4 Imagine
 
 ```text
 RealBank.snapshot()
@@ -664,7 +663,7 @@ RealBank.snapshot()
   → t6 terminal
 ```
 
-### 10.4 不能做的事
+### 10.5 不能做的事
 
 - 不能把 future map 作为 decoder 输入；
 - 不能把 `z*` 写进 RealBank；
@@ -815,7 +814,8 @@ env/
 
 pipeline/
   losses.py               # 纯 loss 函数
-  train_bc.py
+  train_bc.py             # row-wise and scene-sequence BC/DAgger
+  scene_batches.py        # scene-level ordered sequence batches
   train_wm.py
   train_joint.py           # optional Phase 2b policy+WM fine-tune
   train_ppo.py

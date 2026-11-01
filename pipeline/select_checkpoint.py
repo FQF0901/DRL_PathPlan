@@ -22,10 +22,17 @@ def _eligible(row: Dict[str, Any], collision_max: float, offroad_max: float) -> 
     )
 
 
-def _score(row: Dict[str, Any]) -> tuple:
-    # Eligible candidates: maximize success, then completion; safety is a hard
-    # threshold above, not a continuous lexicographic tie-breaker.
-    return (float(row.get("success_rate", 0.0)), float(row.get("route_completion_mean", 0.0)))
+def _score(row: Dict[str, Any], max_steps: int = 600) -> tuple:
+    # Same success-first order as train_bc; eligible candidates already passed
+    # the hard collision/off-road thresholds.
+    return (
+        float(row.get("success_rate", 0.0)),
+        -float(row.get("collision_rate", 0.0)),
+        -float(row.get("off_road_rate", 0.0)),
+        float(row.get("route_completion_mean", 0.0)),
+        -float(row.get("fallback_rate", 0.0)),
+        -float(row.get("infeasible_count_mean", 0.0)) / max(1.0, float(max_steps)),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--offroad-max", type=float, default=0.20)
     args = p.parse_args(argv)
     if args.split == "test":
-        parser.error("Test500 is read-only; checkpoint selection must use val")
+        p.error("Test500 is read-only; checkpoint selection must use val")
 
     all_specs = load_specs(args.specs)
     verify_split_manifest(args.split_manifest, all_specs, split=args.split, spec_path=args.specs)
@@ -63,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary = summarize_rows(rows)
         record = {"checkpoint": str(ckpt), **summary}
         record["eligible"] = _eligible(summary, args.collision_max, args.offroad_max)
-        record["score"] = list(_score(summary))
+        record["score"] = list(_score(summary, args.max_steps))
         records.append(record)
         print(f"[select] {ckpt} eligible={record['eligible']} score={record['score']}", flush=True)
 
@@ -80,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         (out / "selection.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print("[select] no eligible candidate; selected=null")
         return 2
-    best = max(eligible, key=_score)
+    best = max(eligible, key=lambda r: _score(r, args.max_steps))
     shutil.copyfile(best["checkpoint"], out / "selected.pt")
     payload = {
         "selected": best,

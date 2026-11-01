@@ -121,12 +121,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     action_norm = (np.asarray(actions, dtype=np.float32) - low) / width
 
-    def _mode_zero(row: int) -> bool:
-        mode = data.get("history_mode")
-        if mode is None:
-            return True
-        return bool(float(np.asarray(mode)[row]) < 0.5)
-
     result = {
         "horizon": int(args.horizon),
         "sequences": len(seqs),
@@ -147,9 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             for n, seq in enumerate(seqs):
                 # Initial real 6-frame window, encoded by the frozen TSB.
                 first_batch = _history_batch(data, np.asarray([seq[0]], dtype=np.int64), args.device)
-                window, last_enc = drive.build_history_window(
-                    first_batch, zero_pose=_mode_zero(int(seq[0]))
-                )
+                window, last_enc = drive.build_history_window_fast(first_batch)
                 base_od = window.od_content[:, -1].clone()
                 base_ld = window.ld_content[:, -1].clone()
                 z_od = base_od

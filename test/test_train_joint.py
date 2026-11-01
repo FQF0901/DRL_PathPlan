@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
+
+import numpy as np
 import torch
 
 from net.build_net import build_net
 from pipeline.checkpointing import load_drive_model_from_checkpoint, save_drive_model_checkpoint
 from pipeline.train_joint import main as joint_main
+from test_train_bc import _fixture
+
+
+def _subset_raw(src: Path, dst: Path, seeds: set[int]) -> None:
+    dst.mkdir(parents=True, exist_ok=True)
+    with np.load(next(src.glob("*.npz"))) as z:
+        arrays = {k: z[k] for k in z.files}
+    keep = np.isin(arrays["scene_seed"], list(seeds))
+    arrays = {k: v[keep] for k, v in arrays.items()}
+    arrays["history_mode"] = np.ones(len(arrays["action"]), dtype=np.float32)
+    np.savez_compressed(dst / "expert_bc.npz", **arrays)
 
 
 def test_joint_trainer_smoke(tmp_path):
@@ -16,11 +31,18 @@ def test_joint_trainer_smoke(tmp_path):
     out = tmp_path / "joint"
     cfg_path = tmp_path / "empty.yaml"
     cfg_path.write_text("{}\n", encoding="utf-8")
+    source = _fixture(tmp_path)
+    train = tmp_path / "train_raw"
+    val = tmp_path / "val_raw"
+    _subset_raw(source, train, {100})
+    _subset_raw(source, val, {101, 102})
+    split = tmp_path / "val.json"
+    split.write_text(json.dumps({"seeds": [101, 102]}), encoding="utf-8")
     rc = joint_main([
         "--config", str(cfg_path),
-        "--data", "data/episodes/mini/il_train_100",
-        "--val-data", "data/episodes/mini/val_20_expert",
-        "--val-split", "data/splits/mini_val_20.json",
+        "--data", str(train),
+        "--val-data", str(val),
+        "--val-split", str(split),
         "--ckpt", str(ckpt),
         "--out", str(out),
         "--epochs", "1",
@@ -38,7 +60,7 @@ def test_joint_trainer_smoke(tmp_path):
     assert (out / "last_drive.pt").exists()
     metrics = json.loads((out / "metrics.json").read_text())
     assert metrics["best_epoch"] >= 0
-    assert len(metrics["val_scene_seeds"]) == 20
+    assert len(metrics["val_scene_seeds"]) == 2
     loaded = load_drive_model_from_checkpoint(str(out / "best_drive.pt"), "cpu", strict=True)
     initial = load_drive_model_from_checkpoint(str(ckpt), "cpu", strict=True)
     # Joint training must actually step policy/TSB heads, not only measure them.

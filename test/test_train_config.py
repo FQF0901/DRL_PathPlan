@@ -42,6 +42,10 @@ def test_checked_in_bc_config_is_loadable():
     assert args.data == cfg["data"]
     assert args.out == cfg["out"]
     assert args.val_data == cfg["val_data"]
+    assert args.sequence_batch is True
+    assert args.scenes_per_batch == 256
+    assert args.tbptt_chunk == 8
+    assert args.closed_loop is True
 
 
 def test_timestamped_run_dir_suffix():
@@ -65,3 +69,14 @@ def test_missing_config_fails(tmp_path):
             ["--config", str(tmp_path / "missing.yaml")],
             "config/train_bc.yaml",
         )
+
+
+def test_latest_run_alias_creates_missing_parent(tmp_path):
+    from pipeline.train_config import latest_run_alias, timestamped_run_dir
+
+    run = timestamped_run_dir(tmp_path / "runs" / "example")
+    # Target directory need not exist yet; alias should still be created.
+    alias = latest_run_alias(run)
+    assert alias == tmp_path / "runs" / "example"
+    assert alias.is_symlink()
+    assert alias.resolve() == run

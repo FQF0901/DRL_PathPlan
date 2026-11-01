@@ -1,10 +1,8 @@
 """Forward structured observation schema v2 (OD / LD / road-level Nav / Ego).
 
-This module is the *new* forward contract (``schema_version=2``).  It does not
-modify and does not call the legacy ``env.obs.build_observation`` /
-``env.obs.stack_history`` behavior; it only reuses the low-level geometry
-helpers (ego pose, local transform, relative velocity, line-type mapping,
-curvature, lane candidate filter).
+This module is the forward contract (``schema_version=2``).  It provides the
+current-frame observation and the raw per-frame history used by Bank training;
+it has no query-frame projected-history path.
 
 Design facts / assumptions that are intentionally explicit
 -----------------------------------------------------------
@@ -20,9 +18,8 @@ Design facts / assumptions that are intentionally explicit
   ``scene_seed`` plus the entity/topology key.  They are alignment/diagnostic
   metadata, not policy inputs.
 * OD / LD anchors below are ``(dx, dy, heading_rel)`` in the ego frame at the
-  time the frame was captured.  ``stack_history`` SE(2)-compensates the
-  anchors and the geometry features into the current (newest) ego frame, while
-  IDs / taxonomy / masks are preserved.
+  time the frame was captured.  Raw history stores each frame in its own ego
+  frame; stable-ID alignment and pose deltas happen in BankWindow/TSB.
 * LD chunk anchor: ``floor(s0 / LD_CHUNK_METERS) * LD_CHUNK_METERS`` along the
   lane.  It is part of the LD stable ID (``ld_chunk_s``) so a local crop-window
   change does not silently reuse an old same-ID latent as if nothing changed.
@@ -43,7 +40,7 @@ Shapes
 ``ld``             [LD_SLOTS, LD_POINTS, LD_DIM]       = [16, 5, 16]
 ``nav``            [NAV_ROADS * NAV_ROAD_DIM + NAV_GLOBAL_DIM] = [108]
 ``ego``            [EGO_DIM]                           = [12]
-``stack_history`` prepends a history axis of ``HISTORY_FRAMES`` to every
+``raw_history`` prepends a raw history axis of ``HISTORY_FRAMES`` to every
 tensor and returns all metadata tensors with the same history axis.
 """
 
@@ -193,24 +190,20 @@ def _lane_candidates(
     out.sort(key=lambda x: (x[0], x[1]))
     return out[:max_n]
 
-def _transform_xy(x: float, y: float, src_pose: np.ndarray, dst_pose: np.ndarray) -> Tuple[float, float]:
-    # src ego frame -> world
-    th = float(src_pose[2])
-    c, s = math.cos(th), math.sin(th)
-    wx = float(src_pose[0]) + c * x - s * y
-    wy = float(src_pose[1]) + s * x + c * y
-    # world -> dst ego frame
-    dx, dy = wx - float(dst_pose[0]), wy - float(dst_pose[1])
-    th2 = float(dst_pose[2])
-    c2, s2 = math.cos(th2), math.sin(th2)
-    return float(c2 * dx + s2 * dy), float(-s2 * dx + c2 * dy)
-
-
-def _rotate_xy(x: float, y: float, angle: float) -> Tuple[float, float]:
-    c, s = math.cos(angle), math.sin(angle)
-    return float(c * x - s * y), float(s * x + c * y)
-
-
+def _physics_dt(env: Any) -> float:
+    """Derive the acceleration difference interval from MetaDrive config."""
+    try:
+        cfg = getattr(getattr(env, "engine", None), "global_config", None) or {}
+        physics = float(cfg.get("physics_world_step_size", 0.02))
+        repeat = int(cfg.get("decision_repeat", 5))
+        dt = physics * repeat
+        if math.isfinite(dt) and dt > 0.0:
+            return dt
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return OD_ACC_DT
+EGO_LENGTH_NORM = 5.0
+EGO_WIDTH_NORM = 2.0
 
 # ---------------------------------------------------------------------------
 # Fixed schema sizes
@@ -237,21 +230,6 @@ OD_AGE_NORM_S = 3.0
 #: Fallback if the environment cannot expose its physics timing.
 OD_ACC_DT = 0.1
 
-
-def _physics_dt(env: Any) -> float:
-    """Derive the acceleration difference interval from MetaDrive config."""
-    try:
-        cfg = getattr(getattr(env, "engine", None), "global_config", None) or {}
-        physics = float(cfg.get("physics_world_step_size", 0.02))
-        repeat = int(cfg.get("decision_repeat", 5))
-        dt = physics * repeat
-        if math.isfinite(dt) and dt > 0.0:
-            return dt
-    except (AttributeError, TypeError, ValueError):
-        pass
-    return OD_ACC_DT
-EGO_LENGTH_NORM = 5.0
-EGO_WIDTH_NORM = 2.0
 
 # OD feature layout: base fields first, then taxonomy/age fields.
 OD_FEATURES = (
@@ -1155,81 +1133,6 @@ def build_observation(
 # Stable-ID temporal alignment with SE(2) geometry compensation
 # ---------------------------------------------------------------------------
 
-def _as_pose(value: Any, fallback: np.ndarray) -> np.ndarray:
-    try:
-        pose = np.asarray(value, dtype=np.float64).reshape(-1)
-        if pose.size >= 3 and np.isfinite(pose[:3]).all():
-            return np.array([pose[0], pose[1], _wrap_angle(pose[2])], dtype=np.float64)
-    except Exception:  # noqa: BLE001
-        pass
-    return np.array(fallback, dtype=np.float64)
-
-
-def _compensate_od_row(
-    row: np.ndarray,
-    anchor: np.ndarray,
-    src_pose: np.ndarray,
-    dst_pose: np.ndarray,
-    dtheta: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    out = np.array(row, dtype=np.float32, copy=True)
-    out[0], out[1] = _transform_xy(float(out[0]), float(out[1]), src_pose, dst_pose)
-    c, s = _rotate_xy(float(out[OD_INDEX["cos_theta"]]), float(out[OD_INDEX["sin_theta"]]), dtheta)
-    out[OD_INDEX["cos_theta"]], out[OD_INDEX["sin_theta"]] = c, s
-    vx, vy = _rotate_xy(float(out[OD_INDEX["vx_rel"]]), float(out[OD_INDEX["vy_rel"]]), dtheta)
-    out[OD_INDEX["vx_rel"]], out[OD_INDEX["vy_rel"]] = vx, vy
-    ax, ay = _rotate_xy(float(out[OD_INDEX["acc_x"]]), float(out[OD_INDEX["acc_y"]]), dtheta)
-    out[OD_INDEX["acc_x"]], out[OD_INDEX["acc_y"]] = ax, ay
-    anchor_out = np.array(anchor, dtype=np.float32, copy=True)
-    anchor_out[0], anchor_out[1] = _transform_xy(float(anchor[0]), float(anchor[1]), src_pose, dst_pose)
-    anchor_out[2] = _wrap_angle(float(anchor[2]) + dtheta)
-    return out, anchor_out
-
-
-def _compensate_ld_point(row: np.ndarray, src_pose: np.ndarray, dst_pose: np.ndarray, dtheta: float) -> np.ndarray:
-    out = np.array(row, dtype=np.float32, copy=True)
-    out[LD_INDEX["dx"]], out[LD_INDEX["dy"]] = _transform_xy(
-        float(out[LD_INDEX["dx"]]), float(out[LD_INDEX["dy"]]), src_pose, dst_pose
-    )
-    out[LD_INDEX["heading_rel"]] = _wrap_angle(float(out[LD_INDEX["heading_rel"]]) + dtheta)
-    return out
-
-
-def _compensate_nav_xy(x: float, y: float, src_pose: np.ndarray, dst_pose: np.ndarray) -> Tuple[float, float]:
-    """Compensate a normalized Nav xy pair without mixing metres and /100 units.
-
-    Nav features are stored divided by 100 for scale; pose translation is in
-    metres.  Convert to metres for the SE(2) transform, then back.
-    """
-    mx, my = _transform_xy(float(x) * 100.0, float(y) * 100.0, src_pose, dst_pose)
-    return float(mx) / 100.0, float(my) / 100.0
-
-
-def _compensate_nav_road(block: np.ndarray, src_pose: np.ndarray, dst_pose: np.ndarray, dtheta: float) -> np.ndarray:
-    out = np.array(block, dtype=np.float32, copy=True)
-    for dx_i, dy_i in ((NAV_ROAD_INDEX["entry_dx"], NAV_ROAD_INDEX["entry_dy"]),
-                       (NAV_ROAD_INDEX["mid_dx"], NAV_ROAD_INDEX["mid_dy"]),
-                       (NAV_ROAD_INDEX["exit_dx"], NAV_ROAD_INDEX["exit_dy"])):
-        out[dx_i], out[dy_i] = _compensate_nav_xy(float(out[dx_i]), float(out[dy_i]), src_pose, dst_pose)
-    out[NAV_ROAD_INDEX["entry_heading_rel"]] = float(
-        _wrap_angle(float(out[NAV_ROAD_INDEX["entry_heading_rel"]]) + dtheta)
-    )
-    out[NAV_ROAD_INDEX["exit_heading_rel"]] = float(
-        _wrap_angle(float(out[NAV_ROAD_INDEX["exit_heading_rel"]]) + dtheta)
-    )
-    return out
-
-
-def _compensate_nav_global(nav_vec: np.ndarray, src_pose: np.ndarray, dst_pose: np.ndarray, dtheta: float) -> None:
-    dx_i = NAV_GLOBAL_INDEX["dest_dx"]
-    dy_i = NAV_GLOBAL_INDEX["dest_dy"]
-    nav_vec[dx_i], nav_vec[dy_i] = _compensate_nav_xy(float(nav_vec[dx_i]), float(nav_vec[dy_i]), src_pose, dst_pose)
-    sin_i = NAV_GLOBAL_INDEX["dest_heading_sin"]
-    cos_i = NAV_GLOBAL_INDEX["dest_heading_cos"]
-    cos_new, sin_new = _rotate_xy(float(nav_vec[cos_i]), float(nav_vec[sin_i]), dtheta)
-    nav_vec[cos_i], nav_vec[sin_i] = cos_new, sin_new
-
-
 def _empty_history() -> Dict[str, np.ndarray]:
     return {
         "od": np.zeros((HISTORY_FRAMES, OD_SLOTS, OD_DIM), dtype=np.float32),
@@ -1259,10 +1162,10 @@ def _empty_history() -> Dict[str, np.ndarray]:
 def raw_history(frames: Sequence[Dict[str, Any]], poses: Sequence[Any]) -> Dict[str, Any]:
     """Stack up to six **raw** frames, one per ego frame, padded on the left.
 
-    Unlike :func:`stack_history`, this does not project geometry/content into
-    the query frame and does not reorder slots.  It is the offline-data path used
-    by Bank training; BankWindow/TSB performs stable-ID alignment and applies
-    ``delta_pose`` from the per-frame pose.
+    This does not project geometry/content into the query frame and does not
+    reorder slots.  It is the offline-data path used by Bank training;
+    BankWindow/TSB performs stable-ID alignment and applies ``delta_pose`` from
+    the per-frame pose.
     """
     frames = list(frames)
     if not frames:
@@ -1291,198 +1194,4 @@ def raw_history(frames: Sequence[Dict[str, Any]], poses: Sequence[Any]) -> Dict[
                 dst[t] = value.reshape(-1)[0]
             else:
                 dst[t] = value
-    return out
-
-
-def stack_history(frames: Sequence[Dict[str, Any]], poses: Sequence[Any]) -> Dict[str, Any]:
-    """Stack up to ``HISTORY_FRAMES`` v2 frames, oldest first.
-
-    Alignment is by stable ID into the **current frame's slot order**, not by
-    distance rank.  Geometry and geometry anchors are SE(2)-compensated from
-    each historical ego frame into the current ego frame.  IDs / taxonomy /
-    masks are not rotated.  A historical entity missing by ID gets mask=0 and
-    zero geometry; warm-up padding is zero with ``hist_valid=0``.
-
-    Metadata ID tensors (``od_ids`` / ``ld_ids`` / ``ld_road_ids`` /
-    ``nav_road_ids``) are filled with the *current* slot IDs for every history
-    frame so that a history tensor can be indexed with the current slot order;
-    the corresponding mask says whether that entity exists in that frame.
-
-    Nav is reordered by ``nav_road_ids[:, 0]`` (road ID) into the current nav
-    slot order; slot 0 is the current frame's current road.  A route-ID change
-    (which should only occur on reset) invalidates the historical nav.
-    """
-    frames = list(frames)
-    if not frames:
-        raise ValueError("stack_history: no frames")
-    n = min(len(frames), HISTORY_FRAMES)
-    frames = frames[-n:]
-    if poses is None:
-        poses = [frame.get("pose") for frame in frames]
-    poses = list(poses)[-n:]
-    if len(poses) != n:
-        raise ValueError("stack_history: frames and poses length mismatch")
-    for key in ("od_ids", "ld_ids", "nav_road_ids"):
-        if key not in frames[-1]:
-            raise ValueError(f"stack_history requires v2 frames with {key!r}")
-
-    current = frames[-1]
-    dst_pose_raw = poses[-1]
-    dst_pose = _as_pose(dst_pose_raw, np.asarray(current.get("pose", [0.0, 0.0, 0.0])))
-    current_meta = current.get("meta", {}) if isinstance(current.get("meta"), dict) else {}
-    dt = max(_safe_float(current_meta.get("dt", DEFAULT_DT), DEFAULT_DT), 1e-6)
-    scene_seed = int(current_meta.get("scene_seed", 0) or 0)
-
-    cur_od_ids = np.asarray(current["od_ids"], dtype=np.int64)
-    cur_od_mask = np.asarray(current["od_mask"], dtype=np.float32)
-    cur_ld_ids = np.asarray(current["ld_ids"], dtype=np.int64)
-    cur_ld_mask = np.asarray(current["ld_mask"], dtype=np.float32)
-    cur_ld_road_ids = np.asarray(current["ld_road_ids"], dtype=np.int64)
-    cur_nav_road_ids = np.asarray(current["nav_road_ids"], dtype=np.int64)
-    cur_nav_road_mask = np.asarray(current["nav_road_mask"], dtype=np.float32)
-    cur_nav_mask = np.asarray(current["nav_mask"], dtype=np.float32)
-    cur_route_id = int(np.asarray(current["nav_route_id"]).reshape(-1)[0])
-
-    out = _empty_history()
-    pad = HISTORY_FRAMES - n
-
-    for t in range(HISTORY_FRAMES):
-        if t < pad:
-            continue
-        src = t - pad
-        frame = frames[src]
-        src_pose = _as_pose(poses[src], np.asarray(frame.get("pose", [0.0, 0.0, 0.0])))
-        dtheta = _wrap_angle(float(src_pose[2]) - float(dst_pose[2]))
-
-        # ---- Ego (features are already ego-relative) ----
-        out["ego"][t] = np.asarray(frame["ego"], dtype=np.float32)
-        out["ego_mask"][t] = np.asarray(frame["ego_mask"], dtype=np.float32)
-        out["pose"][t] = src_pose.astype(np.float32)
-        out["hist_valid"][t] = 1.0
-
-        # ---- OD ----
-        src_od_ids = np.asarray(frame["od_ids"], dtype=np.int64)
-        src_od_mask = np.asarray(frame["od_mask"], dtype=np.float32)
-        src_od = np.asarray(frame["od"], dtype=np.float32)
-        src_od_anchor = np.asarray(frame["od_anchor"], dtype=np.float32)
-        src_od_taxonomy = np.asarray(frame["od_taxonomy"], dtype=np.int64)
-        src_od_age = np.asarray(frame["od_age"], dtype=np.float32)
-        od_map = {int(src_od_ids[i]): i for i in range(OD_SLOTS) if src_od_mask[i] > 0.5}
-        out["od_ids"][t] = cur_od_ids
-        for j in range(OD_SLOTS):
-            if cur_od_mask[j] <= 0.5:
-                continue
-            src_i = od_map.get(int(cur_od_ids[j]))
-            if src_i is None:
-                continue
-            row, anchor = _compensate_od_row(src_od[src_i], src_od_anchor[src_i], src_pose, dst_pose, dtheta)
-            out["od"][t, j] = row
-            out["od_mask"][t, j] = src_od_mask[src_i]
-            out["od_anchor"][t, j] = anchor
-            out["od_taxonomy"][t, j] = src_od_taxonomy[src_i]
-            out["od_age"][t, j] = src_od_age[src_i]
-
-        # ---- LD ----
-        src_ld_ids = np.asarray(frame["ld_ids"], dtype=np.int64)
-        src_ld_mask = np.asarray(frame["ld_mask"], dtype=np.float32)
-        src_ld = np.asarray(frame["ld"], dtype=np.float32)
-        src_ld_anchor = np.asarray(frame["ld_anchor"], dtype=np.float32)
-        src_ld_chunk_s = np.asarray(frame["ld_chunk_s"], dtype=np.float32)
-        ld_map = {int(src_ld_ids[i]): i for i in range(LD_SLOTS) if src_ld_mask[i].any()}
-        out["ld_ids"][t] = cur_ld_ids
-        out["ld_road_ids"][t] = cur_ld_road_ids
-        for j in range(LD_SLOTS):
-            if not cur_ld_mask[j].any():
-                continue
-            src_i = ld_map.get(int(cur_ld_ids[j]))
-            if src_i is None:
-                continue
-            for k in range(LD_POINTS):
-                if src_ld_mask[src_i, k] <= 0.5:
-                    continue
-                out["ld"][t, j, k] = _compensate_ld_point(src_ld[src_i, k], src_pose, dst_pose, dtheta)
-                out["ld_mask"][t, j, k] = 1.0
-            anchor = np.array(src_ld_anchor[src_i], dtype=np.float32, copy=True)
-            anchor[0], anchor[1] = _transform_xy(float(anchor[0]), float(anchor[1]), src_pose, dst_pose)
-            anchor[2] = _wrap_angle(float(anchor[2]) + dtheta)
-            out["ld_anchor"][t, j] = anchor
-            out["ld_chunk_s"][t, j] = src_ld_chunk_s[src_i]
-
-        # ---- Nav ----
-        src_nav_mask = np.asarray(frame["nav_mask"], dtype=np.float32)
-        src_nav_road_mask = np.asarray(frame["nav_road_mask"], dtype=np.float32)
-        src_nav_road_ids = np.asarray(frame["nav_road_ids"], dtype=np.int64)
-        src_nav = np.asarray(frame["nav"], dtype=np.float32)
-        src_route_id = int(np.asarray(frame["nav_route_id"]).reshape(-1)[0])
-        out["nav_road_ids"][t] = cur_nav_road_ids
-        out["nav_route_id"][t] = np.int64(src_route_id if src_nav_mask[0] > 0.5 else 0)
-        route_match = (
-            src_nav_mask[0] > 0.5
-            and cur_nav_mask[0] > 0.5
-            and src_route_id == cur_route_id
-        )
-        if not route_match:
-            continue
-        src_road_map = {
-            int(src_nav_road_ids[i, 0]): i
-            for i in range(NAV_ROADS)
-            if src_nav_road_mask[i] > 0.5
-        }
-        for j in range(NAV_ROADS):
-            if cur_nav_road_mask[j] <= 0.5:
-                continue
-            src_i = src_road_map.get(int(cur_nav_road_ids[j, 0]))
-            if src_i is None:
-                continue
-            block = _compensate_nav_road(
-                src_nav[src_i * NAV_ROAD_DIM:(src_i + 1) * NAV_ROAD_DIM], src_pose, dst_pose, dtheta
-            )
-            # Slot-role flags describe the destination/current slot order.
-            block[NAV_ROAD_INDEX["is_current"]] = 1.0 if j == 0 else 0.0
-            block[NAV_ROAD_INDEX["is_next"]] = 1.0 if j == 1 else 0.0
-            out["nav"][t, j * NAV_ROAD_DIM:(j + 1) * NAV_ROAD_DIM] = block
-            out["nav_road_mask"][t, j] = 1.0
-        out["nav"][t, NAV_ROADS * NAV_ROAD_DIM:] = src_nav[NAV_ROADS * NAV_ROAD_DIM:]
-        _compensate_nav_global(out["nav"][t], src_pose, dst_pose, dtheta)
-        out["nav"][t, NAV_GLOBAL_INDEX["nav_valid"]] = 1.0
-        out["nav_mask"][t, 0] = 1.0
-
-    # ---- OD observation age (seconds tracked continuously in this window) ----
-    for t in range(HISTORY_FRAMES):
-        if out["hist_valid"][t] <= 0.5:
-            continue
-        if t > 0 and out["hist_valid"][t - 1] > 0.5:
-            same = (out["od_mask"][t] > 0.5) & (out["od_ids"][t] == out["od_ids"][t - 1])
-            ages = np.where(same, out["od_age"][t - 1] + dt, 0.0).astype(np.float32)
-        else:
-            ages = np.zeros(OD_SLOTS, dtype=np.float32)
-        out["od_age"][t] = ages
-        out["od"][t, :, OD_AGE_INDEX] = np.clip(ages / OD_AGE_NORM_S, 0.0, 1.0)
-
-    # ---- finite guarantee ----
-    for key in ("od", "od_mask", "od_anchor", "od_age", "ld", "ld_mask", "ld_anchor",
-                "ld_chunk_s", "nav", "nav_mask", "nav_road_mask", "ego", "ego_mask",
-                "pose", "hist_valid"):
-        out[key] = _finite_float(np.asarray(out[key]))
-
-    timestamps = np.zeros(HISTORY_FRAMES, dtype=np.float32)
-    sources: List[str] = []
-    for t in range(HISTORY_FRAMES):
-        if out["hist_valid"][t] <= 0.5:
-            sources.append("PAD")
-            continue
-        meta = frames[t - pad].get("meta", {})
-        meta = meta if isinstance(meta, dict) else {}
-        timestamps[t] = _safe_float(meta.get("timestamp", float(t - pad) * dt), 0.0)
-        sources.append(str(meta.get("source", "REAL")))
-
-    out["meta"] = {
-        "schema": SCHEMA_NAME,
-        "schema_version": SCHEMA_VERSION,
-        "scene_seed": int(scene_seed),
-        "dt": float(dt),
-        "timestamps": timestamps,
-        "sources": sources,
-        "source": "REAL",
-    }
     return out

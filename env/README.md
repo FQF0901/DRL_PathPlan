@@ -8,7 +8,7 @@
 | 路径 | 作用 |
 |---|---|
 | `env/metadrive_env.py` | MetaDrive 环境封装：按 spec 建图、写限速、安装 events、`build_env()` / reset / step。 |
-| `env/obs.py` | **env → net 的唯一观测 schema**（schema v2）。当前帧、raw history、legacy projected history。 |
+| `env/obs.py` | **env → net 的唯一观测 schema**（schema v2）。当前帧和 raw history。 |
 | `env/action/action_space.py` | 4D action、PSTL 轨迹、动作可行性检查。 |
 | `env/action/config.py` | 从 `config/model.yaml` 读取 canonical action bounds/limits。 |
 | `env/action/contract.py` | action contract 的统一入口/校验。 |
@@ -308,7 +308,7 @@ env.reset()
   → env.step()
 ```
 
-使用 `pipeline/live_bank.py`，不使用 `stack_history`。
+使用 `pipeline/live_bank.py`；不保留 projected `stack_history` 路径。
 
 ### Offline BC / WM
 
@@ -318,8 +318,8 @@ data/episodes/*.npz
   → DriveModel.forward_history() 或 BankWindow
 ```
 
-旧 projected 数据通过 `history_mode=0` 兼容；
-新 raw collector 使用 `history_mode=1`，TSB 使用真实 `pose` delta。
+Canonical 数据只使用 raw collector：`history_mode=1`，TSB 使用真实 `pose` delta。
+数据只使用 raw_history；projected 路径已删除。
 
 ---
 
@@ -343,12 +343,11 @@ data/episodes/*.npz
 
 - live：`RealMemoryBank` 保存最近 6 帧 raw frame；
 - offline collector：`raw_history` 保存 6 帧 raw history；
-- legacy 数据：`stack_history` 保存 query-frame projected history，`history_mode=0`；
-- 新 collector：`history_mode=1`；
+- canonical 数据：`history_mode=1`；
 - `DriveModel.forward_window()` 是 live 的 canonical 入口；
-- `DriveModel.forward_history()` 是已有 NPZ 数据的兼容入口。
+- `DriveModel.forward_history()` 是 raw NPZ 的 canonical 入口。
 
-`stack_history` 不再用于 live policy 路径。
+`stack_history` / projected-history 已删除；raw history 是唯一路径。
 
 ---
 
@@ -379,7 +378,7 @@ mini_*        smoke subsets
 ## 9. 不要做的事
 
 - 不要在 `net` 中直接读 MetaDrive 对象；状态必须经过 `env.obs`。
-- 不要在 live path 使用 `stack_history`。
+- live 和离线训练都只使用 raw history；projected 路径不存在。
 - 不要绕过 `ActionBounds` / `action_to_trajectory` 直接拼物理动作。
 - 不要把 `test_500` 的 episode 数据或指标用于调参。
 - 不要把 val/test scene seed 放进 train。

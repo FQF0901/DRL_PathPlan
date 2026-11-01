@@ -88,7 +88,8 @@ COMFORT_LIMITS = _CONTRACT.comfort
 HARD_LIMITS = _CONTRACT.hard
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.distributions import truncated_normal_nll
-from pipeline.train_config import parse_train_args, timestamped_run_dir
+from pipeline.scene_batches import SceneBatch, iter_scene_chunks
+from pipeline.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
 
 #: Feature keys fed to the adapter.  IDs are metadata, not policy features.
 INPUT_KEYS: Tuple[str, ...] = (
@@ -104,11 +105,13 @@ INPUT_KEYS: Tuple[str, ...] = (
     "od_ids",
     "ld_ids",
     "pose",
-    "history_mode",
+    "od_anchor",
+    "od_taxonomy",
 )
 
 #: Per-row arrays kept in memory (features + labels/weights only).
 KEEP_KEYS = set(INPUT_KEYS) | {
+    "history_mode",
     "action",
     "scene_seed",
     "episode_id",
@@ -152,7 +155,7 @@ REQUIRED_ROW_KEYS = (
     "timeout",
 )
 
-PLAN_KEYS = {"nll", "point", "heading", "velocity", "curvature", "accel"}
+PLAN_KEYS = {"total", "nll", "point", "heading", "velocity", "curvature", "accel"}
 
 #: Columns that must be available (hence required above) or can be defaulted.
 _DEFAULT_ONE_SCALARS = (
@@ -243,10 +246,6 @@ def _resolve_npz_paths(path: Path) -> list[Path]:
 
 
 def _default_value(key: str, n: int) -> np.ndarray:
-    if key == "history_mode":
-        # The shipped shards are query-frame projected by stack_history; new
-        # raw collectors write 1.0 explicitly.
-        return np.zeros(n, dtype=np.float32)
     if key == "executed_action":
         return np.full((n, 4), np.nan, dtype=np.float32)
     if key == "residual_xy":
@@ -324,7 +323,16 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
     merged["episode_id"] = np.asarray(merged["episode_id"], dtype=np.int64)
     merged["step"] = np.asarray(merged["step"], dtype=np.int64)
     if "history_mode" not in merged:
-        merged["history_mode"] = np.zeros(len(merged["action"]), dtype=np.float32)
+        raise ValueError(
+            "raw history requires history_mode=1; regenerate shards with the "
+            "current dataset.collect"
+        )
+    mode = np.asarray(merged["history_mode"], dtype=np.float32)
+    if not np.all(np.isfinite(mode)) or not np.all(mode == 1.0):
+        raise ValueError(
+            "projected history is no longer supported; regenerate raw shards "
+            "with the current dataset.collect (history_mode=1)"
+        )
     for key in _ALL_OPTIONAL_KEYS:
         if key not in merged:
             merged[key] = _default_value(key, len(merged["action"]))
@@ -525,6 +533,10 @@ def _batch_from_indices(
     ):
         arr = np.ascontiguousarray(targets[key][idx], dtype=np.float32)
         batch[key] = torch.from_numpy(arr).to(device)
+    if "history_mode" in data:
+        batch["history_mode"] = torch.from_numpy(
+            np.asarray(data["history_mode"][idx], dtype=np.float32)
+        ).to(device)
     return batch
 
 
@@ -743,6 +755,153 @@ def run_epoch(
     return _finalize(sums, denoms), mae, n_plan_rows
 
 
+def run_scene_epoch(
+    model: DriveModel,
+    data: Mapping[str, np.ndarray],
+    targets: Mapping[str, np.ndarray],
+    scene_batches: Sequence[SceneBatch],
+    cfg: LossConfig,
+    device: torch.device | str,
+    *,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    max_grad_norm: float = 1.0,
+    tbptt_chunk: int = 16,
+) -> Tuple[Dict[str, float], np.ndarray, int]:
+    """TBPTT over scene-ordered frames with chunk-boundary FIFO rebuilds.
+
+    Frames are never shuffled inside a scene.  At every chunk boundary the
+    initial 6-frame window is rebuilt from stored history with the *current*
+    weights, so a post-step FIFO never carries stale encoder features.
+    """
+    training = optimizer is not None
+    model.train(training)
+    sums: Dict[str, float] = {}
+    denoms: Dict[str, float] = {}
+    mae_sum = torch.zeros(4, dtype=torch.float64)
+    mae_weight = torch.zeros(1, dtype=torch.float64)
+    n_plan_rows = 0
+    hard_limits = (
+        __import__("env.action.action_space", fromlist=["DynamicsLimits"]).DynamicsLimits(
+            **model.action_config["limits"]["hard"]
+        )
+        if getattr(model, "action_config", {}).get("limits", {}).get("hard")
+        else None
+    )
+    action_low = (
+        model.action_low.detach().cpu().numpy()
+        if getattr(model, "action_low", None) is not None else None
+    )
+    action_high = (
+        model.action_high.detach().cpu().numpy()
+        if getattr(model, "action_high", None) is not None else None
+    )
+
+    context = torch.enable_grad() if training else torch.no_grad()
+    with context:
+        for scene_batch in scene_batches:
+            if scene_batch.batch_size == 0 or scene_batch.max_length == 0:
+                continue
+            chunks = list(iter_scene_chunks(scene_batch, tbptt_chunk))
+            # Fold a short tail into the previous chunk so AdamW does not give
+            # the final few frames a disproportionately large per-frame step.
+            if len(chunks) > 1 and (chunks[-1][1] - chunks[-1][0]) < int(tbptt_chunk):
+                chunks[-2] = (chunks[-2][0], chunks[-1][1])
+                chunks.pop()
+            for chunk_start, chunk_stop in chunks:
+                if not bool((scene_batch.lengths > chunk_start).any()):
+                    break
+                chunk_loss = torch.zeros((), dtype=torch.float32, device=device)
+                chunk_plan_sum = 0.0
+                chunk_has_rows = False
+                for t in range(chunk_start, chunk_stop):
+                    rows = scene_batch.rows[:, t]
+                    batch = dict(_batch_from_indices(data, targets, rows, device))
+                    active = torch.from_numpy(
+                        (scene_batch.lengths > t).astype(np.float32)
+                    ).to(device)
+                    if not bool((active > 0.5).any()):
+                        break
+                    plan_weight = batch["plan_weight"] * active
+                    batch["plan_weight"] = plan_weight
+                    enc = None
+                    if t > chunk_start:
+                        enc = model.prepare_current_encoding(
+                            model.encoder.encode_current(batch)
+                        )
+                    use_fifo = (
+                        t > chunk_start
+                        and enc is not None
+                        and model.fifo_append_safe(window, enc)
+                    )
+                    if use_fifo:
+                        prev_rows = scene_batch.rows[:, t - 1]
+                        active_np = scene_batch.lengths > t
+                        step_ok = data["step"][rows[active_np]] == data["step"][prev_rows[active_np]] + 1
+                        hist_ok = batch["hist_valid"][:, -1].detach().cpu().numpy() > 0.5
+                        use_fifo = bool(np.all(step_ok) and np.all(hist_ok[active_np]))
+                    if not use_fifo:
+                        # Raw data can have a re-entering entity that the
+                        # filtered BankWindow FIFO cannot recover.
+                        window, last_enc = model.build_history_window_fast(batch)
+                    else:
+                        window = model.align_window_to_current(window, enc)
+                        pose = batch.get("ego_pose", batch.get("pose"))
+                        if pose is None:
+                            raise ValueError("raw sequence requires ego_pose/pose")
+                        pose = pose[:, -1]
+                        window = window.advance(
+                            od_content=enc["od_content"],
+                            od_geometry=enc["od_geometry"],
+                            od_type=enc["od_type"],
+                            od_valid=enc["od_valid"],
+                            od_stable_id=enc["od_stable_id"],
+                            ld_content=enc["ld_content"],
+                            ld_geometry=enc["ld_geometry"],
+                            ld_type=enc["ld_type"],
+                            ld_valid=enc["ld_valid"],
+                            ld_stable_id=enc["ld_stable_id"],
+                            ego_pose=pose,
+                            source=0,
+                            rollout_depth=0,
+                        )
+                        last_enc = enc
+                    outputs = model.forward_window(
+                        window, last_enc["nav"], last_enc["ego"],
+                        ego_valid=last_enc.get("ego_valid"),
+                    )
+                    loss, components = compute_losses(
+                        outputs, batch, cfg,
+                        action_low=action_low,
+                        action_high=action_high,
+                        hard_limits=hard_limits,
+                    )
+                    plan_sum = float(plan_weight.sum().detach())
+                    chunk_loss = chunk_loss + loss * plan_sum
+                    chunk_plan_sum += plan_sum
+                    chunk_has_rows = True
+                    active_rows = int((plan_weight > 0).sum())
+                    _accumulate(sums, denoms, components, plan_sum, active_rows)
+                    mae, wsum = physical_mae(
+                        outputs, batch,
+                        action_low=action_low,
+                        action_high=action_high,
+                    )
+                    mae_sum += mae.detach().double().cpu()
+                    mae_weight += wsum.detach().double().cpu()
+                    n_plan_rows += int((plan_weight > 0).sum())
+                if training and chunk_has_rows:
+                    chunk_loss = chunk_loss / max(chunk_plan_sum, 1e-12)
+                    optimizer.zero_grad(set_to_none=True)
+                    chunk_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    optimizer.step()
+
+    mae = (mae_sum / mae_weight.clamp_min(1e-12)).numpy()
+    if float(mae_weight) <= 0.0:
+        mae = np.full(4, np.nan, dtype=np.float64)
+    return _finalize(sums, denoms), mae, n_plan_rows
+
+
 # ---------------------------------------------------------------------------
 # Checkpoints / serialization
 # ---------------------------------------------------------------------------
@@ -844,6 +1003,22 @@ def _make_config(
         "val_data": None if not args.val_data else [str(p) for p in args.val_data],
         "config_file": getattr(args, "config", None),
         "run_dir": str(getattr(args, "out", "")),
+        "sequence": {
+            "enabled": bool(args.sequence_batch),
+            "scenes_per_batch": int(args.scenes_per_batch),
+            "clip_length": int(args.clip_length),
+            "tbptt_chunk": int(args.tbptt_chunk),
+        },
+        "closed_loop": {
+            "enabled": bool(args.closed_loop),
+            "specs": args.closed_loop_specs,
+            "split_manifest": args.closed_loop_split_manifest,
+            "limit": int(args.closed_loop_limit),
+            "final_limit": int(args.closed_loop_final_limit),
+            "every": int(args.closed_loop_every),
+            "patience": int(args.closed_loop_patience),
+            "max_steps": int(args.closed_loop_max_steps),
+        },
         "training": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
@@ -863,6 +1038,72 @@ def _make_config(
 
 def _fmt(values: Mapping[str, float], key: str) -> str:
     return f"{float(values.get(key, 0.0)):.5f}"
+
+
+def run_closed_loop_validation(
+    model: DriveModel,
+    *,
+    specs_path: str,
+    split_manifest: str | None,
+    limit: int,
+    max_steps: int,
+    device: str,
+) -> Dict:
+    """Run fixed val scenes through the real env and LiveBankRunner."""
+    from env.metadrive_env import build_env
+    from env.scenario.spec import load_specs
+    from pipeline.eval import run_episode
+    from pipeline.eval_metrics import summarize_rows
+    from dataset.splits import verify_split_manifest
+
+    all_specs = load_specs(specs_path)
+    if split_manifest:
+        verify_split_manifest(
+            split_manifest, all_specs, split="val", spec_path=specs_path
+        )
+    specs = all_specs[: max(0, int(limit))]
+    rows = []
+    for spec in specs:
+        env = build_env(spec, use_render=False, lru_size=0)
+        try:
+            rows.append(
+                run_episode(
+                    env, model, spec,
+                    controller="exact",
+                    max_steps=int(max_steps),
+                    device=device,
+                    history_frames=HISTORY_FRAMES,
+                )
+            )
+        finally:
+            env.close()
+    summary = summarize_rows(rows)
+    summary["scenes_requested"] = int(limit)
+    summary["specs"] = str(specs_path)
+    summary["split_manifest"] = None if split_manifest is None else str(split_manifest)
+    return {"summary": summary, "rows": rows}
+
+
+def _closed_loop_score(summary: Mapping, *, max_steps: int = 600) -> tuple:
+    """Lexicographic success-first closed-loop ordering.
+
+    A high success rate is never compensated by a lower infeasible/fallback
+    count.  Collision, off-road, route completion and safety diagnostics are
+    tie-breakers in that order.
+    """
+    infeasible = float(summary.get("infeasible_count_mean", 0.0)) / max(1.0, float(max_steps))
+    return (
+        float(summary.get("success_rate", 0.0)),
+        -float(summary.get("collision_rate", 0.0)),
+        -float(summary.get("off_road_rate", 0.0)),
+        float(summary.get("route_completion_mean", 0.0)),
+        -float(summary.get("fallback_rate", 0.0)),
+        -infeasible,
+    )
+
+
+def _score_is_finite(score: tuple) -> bool:
+    return all(math.isfinite(float(x)) for x in score)
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +1129,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None)
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument(
+        "--sequence-batch", action=argparse.BooleanOptionalAction, default=False,
+        help="scene-level ordered training with tensor FIFO (default from config)",
+    )
+    p.add_argument("--scenes-per-batch", type=int, default=1024)
+    p.add_argument("--clip-length", type=int, default=100)
+    p.add_argument("--tbptt-chunk", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -919,6 +1167,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-weight-lift", type=float, default=0.5)
     p.add_argument("--residual-xy-thresh", type=float, default=0.5)
     p.add_argument("--residual-dpsi-thresh", type=float, default=0.1)
+    p.add_argument(
+        "--closed-loop", action=argparse.BooleanOptionalAction, default=False,
+        help="run fixed val500 closed-loop validation each epoch",
+    )
+    p.add_argument("--closed-loop-specs", default="data/specs/val_500.json")
+    p.add_argument("--closed-loop-split-manifest", default="data/splits/val_500.json")
+    p.add_argument("--closed-loop-limit", type=int, default=50)
+    p.add_argument("--closed-loop-final-limit", type=int, default=500)
+    p.add_argument("--closed-loop-every", type=int, default=1)
+    p.add_argument("--closed-loop-patience", type=int, default=5)
+    p.add_argument("--closed-loop-max-steps", type=int, default=600)
     return p
 
 
@@ -929,11 +1188,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.out:
         raise SystemExit("--out is required (CLI or config)")
     args.out = str(timestamped_run_dir(args.out))
+    latest_run_alias(args.out)
     print(f"[bc] run_dir={args.out}")
     if args.epochs < 1:
         raise SystemExit("--epochs must be >= 1")
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be >= 1")
+    if args.scenes_per_batch < 1:
+        raise SystemExit("--scenes-per-batch must be >= 1")
+    if args.tbptt_chunk < 1:
+        raise SystemExit("--tbptt-chunk must be >= 1")
+    if args.clip_length < 1:
+        raise SystemExit("--clip-length must be >= 1")
+    if args.closed_loop_every < 1:
+        raise SystemExit("--closed-loop-every must be >= 1")
+    if args.closed_loop_limit < 0 or args.closed_loop_final_limit < 0:
+        raise SystemExit("--closed-loop limits must be >= 0")
+    if args.closed_loop_patience < 1:
+        raise SystemExit("--closed-loop-patience must be >= 1")
     if not (0.0 <= args.val_frac < 1.0):
         raise SystemExit("--val-frac must be in [0, 1)")
 
@@ -1018,7 +1290,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     rng = np.random.default_rng(args.seed)
-
     label_oob = targets["label_oob"]
     oob_stats = {
         "all": float(label_oob.any(axis=1).mean()),
@@ -1087,32 +1358,69 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     history = []
     best_score = math.inf
     best_epoch = -1
+    best_closed_score = None
+    best_closed_epoch = -1
+    closed_loop_wait = 0
+    stop_reason = None
+    closed_dir = out_dir / "closed_loop"
+    if args.closed_loop:
+        closed_dir.mkdir(parents=True, exist_ok=True)
     eval_mask = val_mask if val_mask.any() else train_mask
     selection_split = "val" if val_mask.any() else "train"
+    closed_loop_selectable = bool(args.closed_loop)
+    if args.sequence_batch:
+        from pipeline.scene_batches import make_scene_batches
+        eval_scene_batches = make_scene_batches(
+            data, np.flatnonzero(eval_mask), args.scenes_per_batch,
+            clip_length=args.clip_length,
+        )
+        print(
+            f"[bc] sequence_batch scenes_per_batch={args.scenes_per_batch} "
+            f"clip_length={args.clip_length} tbptt_chunk={args.tbptt_chunk} "
+            f"eval_scene_batches={len(eval_scene_batches)}"
+        )
+    else:
+        eval_scene_batches = None
 
     for epoch in range(1, args.epochs + 1):
-        train_metrics, train_mae, train_plan_rows = run_epoch(
-            model,
-            data,
-            targets,
-            np.flatnonzero(train_mask),
-            cfg,
-            device,
-            args.batch_size,
-            optimizer=optimizer,
-            rng=rng,
-            max_grad_norm=args.max_grad_norm,
-        )
-        eval_metrics, eval_mae, eval_plan_rows = run_epoch(
-            model,
-            data,
-            targets,
-            np.flatnonzero(eval_mask),
-            cfg,
-            device,
-            args.batch_size,
-            optimizer=None,
-        )
+        if args.sequence_batch:
+            from pipeline.scene_batches import make_scene_batches
+            train_scene_batches = make_scene_batches(
+                data, np.flatnonzero(train_mask), args.scenes_per_batch,
+                rng=rng, clip_length=args.clip_length,
+            )
+            train_metrics, train_mae, train_plan_rows = run_scene_epoch(
+                model, data, targets, train_scene_batches, cfg, device,
+                optimizer=optimizer, max_grad_norm=args.max_grad_norm,
+                tbptt_chunk=args.tbptt_chunk,
+            )
+            eval_metrics, eval_mae, eval_plan_rows = run_scene_epoch(
+                model, data, targets, eval_scene_batches or [], cfg, device,
+                optimizer=None, tbptt_chunk=args.tbptt_chunk,
+            )
+        else:
+            train_metrics, train_mae, train_plan_rows = run_epoch(
+                model,
+                data,
+                targets,
+                np.flatnonzero(train_mask),
+                cfg,
+                device,
+                args.batch_size,
+                optimizer=optimizer,
+                rng=rng,
+                max_grad_norm=args.max_grad_norm,
+            )
+            eval_metrics, eval_mae, eval_plan_rows = run_epoch(
+                model,
+                data,
+                targets,
+                np.flatnonzero(eval_mask),
+                cfg,
+                device,
+                args.batch_size,
+                optimizer=None,
+            )
 
         record = {
             "epoch": epoch,
@@ -1132,6 +1440,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         history.append(record)
 
+        if (
+            args.closed_loop
+            and int(args.closed_loop_limit) > 0
+            and epoch % int(args.closed_loop_every) == 0
+        ):
+            try:
+                closed = run_closed_loop_validation(
+                    model,
+                    specs_path=args.closed_loop_specs,
+                    split_manifest=args.closed_loop_split_manifest,
+                    limit=args.closed_loop_limit,
+                    max_steps=args.closed_loop_max_steps,
+                    device=str(device),
+                )
+            except Exception as exc:
+                # Keep the offline checkpoint/metrics path alive when the
+                # simulator/headless stack is unavailable; do not select a
+                # closed-loop checkpoint from an empty/failed evaluation.
+                record["closed_loop_error"] = f"{type(exc).__name__}: {exc}"
+                print(f"[bc] WARNING closed-loop unavailable: {record['closed_loop_error']}", flush=True)
+                closed = None
+            if closed is not None:
+                closed_summary = closed["summary"]
+                score = _closed_loop_score(closed_summary, max_steps=args.closed_loop_max_steps)
+                if int(closed_summary.get("n", 0)) <= 0 or not _score_is_finite(score):
+                    record["closed_loop_error"] = "empty or non-finite closed-loop summary"
+                    print(f"[bc] WARNING {record['closed_loop_error']}", flush=True)
+                else:
+                    record["closed_loop"] = closed_summary
+                    record["closed_loop_score"] = list(score)
+                    (closed_dir / f"epoch_{epoch:04d}.json").write_text(
+                        json.dumps(_jsonable({"epoch": epoch, "score": score, **closed}), ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    if closed_loop_selectable:
+                        if best_closed_score is None or score > best_closed_score:
+                            best_closed_score = score
+                            best_closed_epoch = epoch
+                            closed_loop_wait = 0
+                            _save_checkpoint(
+                                out_dir / "best_closed_loop.pt", model, config, epoch, record
+                            )
+                        else:
+                            closed_loop_wait += 1
+                    print(
+                        f"[bc] closed-loop epoch {epoch:03d} score={score} "
+                        f"success={closed_summary.get('success_rate', float('nan')):.4f} "
+                        f"collision={closed_summary.get('collision_rate', float('nan')):.4f} "
+                        f"route={closed_summary.get('route_completion_mean', float('nan')):.4f} "
+                        f"best_epoch={best_closed_epoch} wait={closed_loop_wait}"
+                    )
+
         if tb_writer is not None:
             for split_name, split_metrics in (("train", train_metrics), ("eval", eval_metrics)):
                 for key, value in split_metrics.items():
@@ -1140,7 +1500,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     except (TypeError, ValueError):
                         continue
                     if math.isfinite(scalar):
-                        tb_writer.add_scalar(f"loss/{split_name}_{key}", scalar, epoch)
+                        tb_writer.add_scalar(f"{split_name}_loss/{key}", scalar, epoch)
+            if "closed_loop" in record:
+                for key, value in record["closed_loop"].items():
+                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        tb_writer.add_scalar(f"closed_loop/{key}", float(value), epoch)
             tb_writer.flush()
 
         print(
@@ -1171,7 +1535,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _save_checkpoint(
                 out_dir / "best.pt", model, config, epoch, record
             )
+        if closed_loop_selectable and closed_loop_wait >= int(args.closed_loop_patience):
+            stop_reason = f"closed_loop_patience_{int(args.closed_loop_patience)}"
+            print(f"[bc] early stop: {stop_reason}", flush=True)
+            break
 
+    closed_selected = (out_dir / "best_closed_loop.pt").exists()
     metrics = {
         "config": config,
         "history": history,
@@ -1180,10 +1549,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "objective": best_score,
             "split": selection_split,
             "note": (
-                "Selection by the total weighted validation objective; all "
-                "components and physical MAE are logged alongside. Open-loop "
-                "diagnostic only, not a closed-loop claim."
+                "Open-loop selection by the total weighted validation objective; "
+                "all components and physical MAE are logged alongside. "
+                "Not a closed-loop claim."
             ),
+        },
+        "closed_loop": {
+            "enabled": bool(args.closed_loop),
+            "specs": args.closed_loop_specs,
+            "split_manifest": args.closed_loop_split_manifest,
+            "limit_per_epoch": int(args.closed_loop_limit),
+            "every": int(args.closed_loop_every),
+            "patience": int(args.closed_loop_patience),
+            "best_epoch": best_closed_epoch,
+            "selectable": bool(args.closed_loop and closed_selected),
+            "selected_checkpoint": str(out_dir / "best_closed_loop.pt") if closed_selected else None,
+            "best_score": None if best_closed_score is None else list(best_closed_score),
+            "stopped_by": stop_reason,
+            "history": [h.get("closed_loop", {}).get("success_rate") for h in history],
         },
         "label_oob_rate": oob_stats["all"],
         "label_oob_rate_by_split": {
@@ -1210,6 +1593,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "and are gated to moving expert labels.",
         ],
     }
+    closed_loop_final = None
+    if (
+        args.closed_loop
+        and int(args.closed_loop_final_limit) > 0
+        and (out_dir / "best_closed_loop.pt").exists()
+    ):
+        try:
+            best_payload = torch.load(out_dir / "best_closed_loop.pt", map_location="cpu", weights_only=False)
+            model.load_state_dict(best_payload["model"], strict=True)
+            final_closed = run_closed_loop_validation(
+                model,
+                specs_path=args.closed_loop_specs,
+                split_manifest=args.closed_loop_split_manifest,
+                limit=int(args.closed_loop_final_limit),
+                max_steps=args.closed_loop_max_steps,
+                device=str(device),
+            )
+            closed_loop_final = final_closed["summary"]
+            final_score = _closed_loop_score(closed_loop_final, max_steps=args.closed_loop_max_steps)
+            if int(closed_loop_final.get("n", 0)) <= 0 or not _score_is_finite(final_score):
+                raise RuntimeError("final closed-loop summary is empty or non-finite")
+            (closed_dir / "best_final.json").write_text(
+                json.dumps(_jsonable({"score": final_score, **final_closed}), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(
+                f"[bc] closed-loop final best_epoch={best_closed_epoch} "
+                f"n={closed_loop_final.get('n')} success={closed_loop_final.get('success_rate')} "
+                f"collision={closed_loop_final.get('collision_rate')}",
+                flush=True,
+            )
+        except Exception as exc:
+            closed_loop_final = {"error": f"{type(exc).__name__}: {exc}"}
+            print(f"[bc] WARNING final closed-loop unavailable: {closed_loop_final['error']}", flush=True)
+    metrics["closed_loop"]["final"] = closed_loop_final
     if tb_writer is not None:
         tb_writer.close()
     (out_dir / "metrics.json").write_text(
@@ -1220,6 +1638,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         f"[bc] wrote {out_dir / 'best.pt'} (epoch {best_epoch}, "
         f"{selection_split} objective {best_score:.6f}) and {out_dir / 'last.pt'}"
     )
+    if args.closed_loop and not closed_selected:
+        print(
+            "[bc] ERROR: closed-loop selection was enabled but no "
+            "best_closed_loop.pt was produced; downstream must not consume "
+            "this run as a closed-loop-selected checkpoint.",
+            flush=True,
+        )
+        return 2
     return 0
 
 

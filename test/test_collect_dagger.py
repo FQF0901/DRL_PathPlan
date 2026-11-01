@@ -12,7 +12,7 @@ import pytest
 
 from dataset import collect_dagger as dagger
 from dataset import collect
-from env.obs import HISTORY_FRAMES, NAV_DIM, _empty_history, stack_history
+from env.obs import HISTORY_FRAMES, NAV_DIM, _empty_history, raw_history
 from env.action.config import load_action_contract
 
 CLEAN_BOUNDS = load_action_contract().bounds
@@ -58,7 +58,9 @@ def _synthetic_hist():
         "timestamp": 0.0,
         "source": "REAL",
     }
-    return stack_history([frame], [np.zeros(3, dtype=np.float64)])
+    hist = raw_history([frame], [np.zeros(3, dtype=np.float64)])
+    hist["meta"] = dict(frame["meta"])
+    return hist
 
 
 def _synthetic_rows(hist, n=2):

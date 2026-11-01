@@ -36,23 +36,23 @@
   },
   "episodes": {
     "il_expert": {
-      "path": "data/episodes/train_2000/il_expert",
+      "path": "data/episodes/train_2000/il_expert_raw",
       "shards": 4,
       "rows": 139605,
       "episodes": 2000,
       "scenes": 2000,
-      "stage": "IL/BC",
+      "stage": "RAW IL/BC",
       "purpose": "expert BC training on train_2000",
       "success_episodes": 1403,
       "success_kind": "expert"
     },
     "val_500_expert_reference": {
-      "path": "data/episodes/val_500/expert_reference",
+      "path": "data/episodes/val_500/expert_raw",
       "shards": 1,
-      "rows": 33916,
+      "rows": 34386,
       "episodes": 500,
       "scenes": 500,
-      "stage": "VAL",
+      "stage": "RAW VAL",
       "purpose": "offline validation labels; never train",
       "success_episodes": 365,
       "success_kind": "expert"
@@ -88,8 +88,8 @@
       "sha256": "e7ccc1d21e3e53c1f683d7dfde0cb23ed13a4542287bebef180dd7ef855b4ee9"
     },
     "mini_il_train_100": {
-      "path": "data/episodes/mini/il_train_100",
-      "stage": "MINI",
+      "path": "data/episodes/mini/il_train_100_raw",
+      "stage": "RAW MINI",
       "purpose": "smoke-test subset",
       "rows": 6996,
       "scenes": 100,
@@ -97,8 +97,8 @@
       "success_episodes": 73
     },
     "mini_dagger_train_100": {
-      "path": "data/episodes/mini/dagger_train_100",
-      "stage": "MINI",
+      "path": "data/episodes/mini/dagger_train_100_raw",
+      "stage": "RAW MINI",
       "purpose": "smoke-test subset",
       "rows": 6324,
       "scenes": 100,
@@ -106,8 +106,8 @@
       "success_episodes": 57
     },
     "mini_val_20_expert": {
-      "path": "data/episodes/mini/val_20_expert",
-      "stage": "MINI",
+      "path": "data/episodes/mini/val_20_expert_raw",
+      "stage": "RAW MINI",
       "purpose": "smoke-test subset",
       "rows": 1323,
       "scenes": 20,
@@ -115,12 +115,12 @@
       "success_episodes": 14
     },
     "il_dagger": {
-      "path": "data/episodes/train_2000/il_dagger",
+      "path": "data/episodes/train_2000/il_dagger_raw",
       "shards": 4,
       "rows": 127526,
       "episodes": 2000,
       "scenes": 2000,
-      "stage": "DAgger",
+      "stage": "RAW DAgger",
       "purpose": "student DAgger round 1 on the same train_2000 scenes",
       "success_episodes": 1002,
       "success_kind": "student"
@@ -129,18 +129,18 @@
   "stages": {
     "IL": {
       "train": [
-        "data/episodes/train_2000/il_expert"
+        "data/episodes/train_2000/il_expert_raw"
       ],
       "val": [
-        "data/episodes/val_500/expert_reference"
+        "data/episodes/val_500/expert_raw"
       ]
     },
     "DAgger": {
       "train": [
-        "data/episodes/train_2000/il_dagger"
+        "data/episodes/train_2000/il_dagger_raw"
       ],
       "val": [
-        "data/episodes/val_500/expert_reference"
+        "data/episodes/val_500/expert_raw"
       ]
     },
     "RL": {
@@ -150,9 +150,9 @@
       "offline_episodes": []
     },
     "MINI": {
-      "il_train": "data/episodes/mini/il_train_100",
-      "dagger_train": "data/episodes/mini/dagger_train_100",
-      "val": "data/episodes/mini/val_20_expert"
+      "il_train": "data/episodes/mini/il_train_100_raw",
+      "dagger_train": "data/episodes/mini/dagger_train_100_raw",
+      "val": "data/episodes/mini/val_20_expert_raw"
     }
   },
   "archive": [

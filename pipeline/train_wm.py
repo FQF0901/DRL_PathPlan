@@ -32,7 +32,7 @@ from net.world_model import EgoConditionedLatentWM
 from pipeline.checkpointing import load_drive_model_from_checkpoint
 from pipeline.losses import wm_losses
 from pipeline.train_bc import _resolve_npz_paths, load_data
-from pipeline.train_config import parse_train_args, timestamped_run_dir
+from pipeline.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
 
 
 def _load_ids(paths: Sequence[str]) -> Dict[str, np.ndarray]:
@@ -65,7 +65,8 @@ def _history_batch(data: Dict[str, np.ndarray], idx: np.ndarray, device: str) ->
     """Batch-first history tensors for the shared TSB encoder."""
     keys = (
         "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask", "ego", "ego_mask",
-        "hist_valid", "od_ids", "ld_ids", "pose",
+        "hist_valid", "od_ids", "ld_ids", "pose", "history_mode",
+        "od_anchor", "od_taxonomy",
     )
     out: Dict[str, Tensor] = {}
     for key in keys:
@@ -87,13 +88,7 @@ def _encode_history(drive, data: Dict[str, np.ndarray], rows: np.ndarray, device
     for start in range(0, len(rows), batch_size):
         idx = rows[start : start + batch_size]
         batch = _history_batch(data, idx, device)
-        mode = data.get("history_mode")
-        if mode is None:
-            zero_pose = torch.ones(len(idx), dtype=torch.bool, device=device)
-        else:
-            mode_vals = torch.from_numpy(np.asarray(mode[idx], dtype=np.float32)).to(device)
-            zero_pose = mode_vals.reshape(-1) < 0.5
-        window, last_enc = drive.build_history_window(batch, zero_pose=zero_pose)
+        window, last_enc = drive.build_history_window_fast(batch)
         h = drive.temporal_spatial(window, last_enc["ego"], ego_valid=last_enc.get("ego_valid"))
         chunks.append(
             {
@@ -267,6 +262,13 @@ def _make_training_arrays(
                 slot = free.pop(0)
                 out[geom_key][p, slot] = nxt[geom_key][p, j]
                 out[gmask_key][p, slot] = 1.0
+                # New target-only entities have no history base, but still
+                # have a target-encoder content target.
+                target_key = "od_target" if prefix == "od" else "ld_target"
+                tmask_key = "od_tmask" if prefix == "od" else "ld_tmask"
+                content_key = "od_content" if prefix == "od" else "ld_content"
+                out[target_key][p, slot] = nxt[content_key][p, j]
+                out[tmask_key][p, slot] = 1.0
     phys = (
         np.where(
             np.isfinite(np.asarray(data.get("executed_action", np.full((len(data["action"]), 4), np.nan)), dtype=np.float32)[cur_rows]),
@@ -294,7 +296,10 @@ def _loss(wm, batch: Dict[str, Tensor], *, content_weight: float = 1.0, geometry
     pred = wm(
         batch["od_context"], batch["ld_context"], batch["action"],
         od_base=batch["od_base"], ld_base=batch["ld_base"],
-        od_valid=batch["od_valid"], ld_valid=batch["ld_valid"],
+        od_valid=torch.maximum(batch["od_valid"], batch["od_tmask"]),
+        ld_valid=torch.maximum(batch["ld_valid"], batch["ld_tmask"]),
+        od_current_valid=batch["od_valid"],
+        ld_current_valid=batch["ld_valid"],
     )
     return wm_losses(
         pred,
@@ -350,7 +355,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--val-data",
         nargs="+",
         default=None,
-        help="fixed validation episode pool, e.g. data/episodes/val_500/expert_reference",
+        help="fixed validation episode pool, e.g. data/episodes/val_500/expert_raw",
     )
     p.add_argument("--val-split", default="data/splits/val_500.json")
     p.add_argument(
@@ -377,6 +382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.out:
         raise SystemExit("--out is required (CLI or config)")
     args.out = str(timestamped_run_dir(args.out))
+    latest_run_alias(args.out)
     print(f"[wm] config={args.config} run_dir={args.out}")
 
     torch.manual_seed(int(args.seed))

@@ -322,6 +322,7 @@ def test_forward_history_respects_hist_valid():
             history[key] = value
     history["od"] = history["od"] + torch.arange(6).view(1, 6, 1, 1)
     history["hist_valid"] = torch.ones(1, 6)
+    history["history_mode"] = torch.ones(1, 1)
     full = model.forward_history(history)["action_mu"]
     history["hist_valid"] = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 1.0]])
     current_only = model.forward_history(history)["action_mu"]

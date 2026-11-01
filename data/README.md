@@ -22,14 +22,14 @@ data/
     mini_val_20.json
   episodes/                  # collected episode tensors (gitignored; large)
     train_2000/
-      il_expert/             # IL/BC expert data, 2000 scenes
-      il_dagger/             # DAgger student data, same 2000 scenes
+      il_expert_raw/         # raw-history IL/BC expert data, 2000 scenes
+      il_dagger_raw/         # raw-history DAgger data, same 2000 scenes
     val_500/
-      expert_reference/      # expert labels for offline BC validation only
+      expert_raw/            # raw-history expert labels / closed-loop val
     mini/
-      il_train_100/          # 100-scene IL smoke subset
-      dagger_train_100/      # 100-scene DAgger smoke subset
-      val_20_expert/         # 20-scene validation smoke subset
+      il_train_100_raw/      # raw-history IL smoke subset
+      dagger_train_100_raw/  # raw-history DAgger smoke subset
+      val_20_expert_raw/     # raw-history validation smoke subset
   manifests/
     datasets.json            # registry: purpose, size, source
 ```
@@ -49,11 +49,11 @@ are also disjoint.  Never train on validation or test scenes.
 
 ## Episode pools
 
-`episodes/train_2000/il_expert` and `episodes/train_2000/il_dagger` cover the
-same 2000 train scenes but are different policies/stages.  DAgger/RL may add
+`episodes/train_2000/il_expert_raw` and `episodes/train_2000/il_dagger_raw`
+cover the same 2000 train scenes but are different policies/stages.  DAgger/RL may add
 new episodes on the same train scenes; they must not change the split.
 
-`episodes/val_500/expert_reference` is expert data on the held-out 500
+`episodes/val_500/expert_raw` is expert raw-history data on the held-out 500
 validation scenes.  It is for offline validation/stability checks, not
 training.
 
@@ -65,12 +65,17 @@ do not tune or select on it.
 Superseded data and generated specs are under `archive/` and are not part of
 the canonical path.  Do not use them for new runs.
 
-## History compatibility
+## Raw history only
 
-The shards collected before the raw-history cutover (including the current
-`il_expert`, `il_dagger`, and `val_500/expert_reference`) are `stack_history`
-query-frame projected and have no `history_mode` column.  The loader treats a
-missing marker as projected (`0`).  They are valid for offline compatibility,
-but they are **not** a substitute for a raw-history live/gate corpus.  New
-collectors write `history_mode=1` and raw per-frame history; regenerate the
-canonical shards with the current collectors before quoting closed-loop gates.
+Canonical training/validation/closed-loop data must be produced by the current
+raw collectors:
+
+```text
+raw_history
+history_mode = 1
+real per-frame pose
+```
+
+The loader rejects missing or projected (`history_mode=0`) shards.  Old
+`stack_history` query-frame projected episodes are legacy/archive only and must
+not remain in the canonical `data/episodes` path.

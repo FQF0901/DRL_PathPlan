@@ -243,6 +243,8 @@ class EgoConditionedLatentWM(nn.Module):
         ld_base: Tensor,
         od_valid: Tensor | None = None,
         ld_valid: Tensor | None = None,
+        od_current_valid: Tensor | None = None,
+        ld_current_valid: Tensor | None = None,
     ) -> Dict[str, Tensor]:
         """Predict next-state residuals from TSB history context.
 
@@ -265,6 +267,8 @@ class EgoConditionedLatentWM(nn.Module):
             if ld_valid is None
             else ld_valid > 0.5
         )
+        od_current_bool = od_bool if od_current_valid is None else od_current_valid > 0.5
+        ld_current_bool = ld_bool if ld_current_valid is None else ld_current_valid > 0.5
         # The encoder may emit NaN for invalid slots; sanitize before the
         # MLP because 0 * NaN would poison every entity in the batch.
         od_context = torch.where(od_bool[..., None], od_context, torch.zeros_like(od_context))
@@ -274,24 +278,32 @@ class EgoConditionedLatentWM(nn.Module):
         a = self.action(action)[:, None, :].expand(b, n, -1)
         od_mask = od_bool.unsqueeze(-1).to(od_context.dtype)
         ld_mask = ld_bool.unsqueeze(-1).to(ld_context.dtype)
-        od_res = self.od_delta(torch.cat([od_context, a], dim=-1)) * od_mask
-        ld_res = self.ld_delta(torch.cat([ld_context, a], dim=-1)) * ld_mask
+        # Target-only slots have no current content.  Feed an explicit slot
+        # cue into the residual MLP so two new entities remain distinguishable.
+        od_delta_input = torch.where(
+            od_current_bool[..., None], od_context, self.od_slot_embed[:n].unsqueeze(0)
+        )
+        ld_delta_input = torch.where(
+            ld_current_bool[..., None], ld_context, self.ld_slot_embed[:n].unsqueeze(0)
+        )
+        od_res = self.od_delta(torch.cat([od_delta_input, a], dim=-1)) * od_mask
+        ld_res = self.ld_delta(torch.cat([ld_delta_input, a], dim=-1)) * ld_mask
         od_next = od_base + od_res
         ld_next = ld_base + ld_res
+        # Target-only slots have no current content; add a slot cue to the
+        # content state itself so multiple new entities are distinguishable
+        # even when the residual head is zero-initialized.
+        od_state = od_next + (~od_current_bool)[..., None] * self.od_slot_embed[:n]
+        ld_state = ld_next + (~ld_current_bool)[..., None] * self.ld_slot_embed[:n]
         return {
-            "od": od_next,
-            "ld": ld_next,
+            "od": od_state,
+            "ld": ld_state,
             "od_residual": od_res,
             "ld_residual": ld_res,
             # Geometry is decoded for every slot; validity is applied by the
-            # loss mask.  Invalid slots receive a slot-storage cue so
-            # target-only/new entities are distinguishable from each other.
-            "od_geometry": self.od_geometry(
-                od_next + (~od_bool)[..., None] * self.od_slot_embed[:n]
-            ),
-            "ld_geometry": self.ld_geometry(
-                ld_next + (~ld_bool)[..., None] * self.ld_slot_embed[:n]
-            ),
+            # loss mask.
+            "od_geometry": self.od_geometry(od_state),
+            "ld_geometry": self.ld_geometry(ld_state),
             "od_valid": od_valid,
             "ld_valid": ld_valid,
         }

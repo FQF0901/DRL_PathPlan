@@ -35,7 +35,7 @@ from pipeline.train_bc import (
     compute_losses,
     load_data,
 )
-from pipeline.train_config import parse_train_args, timestamped_run_dir
+from pipeline.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
 from pipeline.train_wm import (
     _build_pairs,
     _make_training_arrays,
@@ -74,13 +74,7 @@ def _joint_step(
 ):
     # One TSB pass feeds both heads.  The policy batch already contains the
     # 6-frame history and stable IDs.
-    mode = policy_batch.get("history_mode")
-    zero_pose = torch.ones(policy_batch["od"].shape[0], dtype=torch.bool, device=device)
-    if torch.is_tensor(mode):
-        mode = mode.reshape(-1)
-        if mode.numel() == zero_pose.numel():
-            zero_pose = mode < 0.5
-    window, last_enc = drive.build_history_window(policy_batch, zero_pose=zero_pose)
+    window, last_enc = drive.build_history_window_fast(policy_batch)
     h = drive.temporal_spatial(window, last_enc["ego"], ego_valid=last_enc.get("ego_valid"))
     policy_out = drive.planner(
         h["od"], h["ld"], last_enc["nav"], last_enc["ego"],
@@ -96,8 +90,10 @@ def _joint_step(
         h["od"], h["ld"], wm_batch["action"],
         od_base=window.od_content[:, -1],
         ld_base=window.ld_content[:, -1],
-        od_valid=window.od_valid[:, -1],
-        ld_valid=window.ld_valid[:, -1],
+        od_valid=torch.maximum(window.od_valid[:, -1], wm_batch["od_tmask"]),
+        ld_valid=torch.maximum(window.ld_valid[:, -1], wm_batch["ld_tmask"]),
+        od_current_valid=window.od_valid[:, -1],
+        ld_current_valid=window.ld_valid[:, -1],
     )
     wm_parts = wm_losses(
         wm_out,
@@ -187,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.out:
         raise SystemExit("--out is required (CLI or config)")
     args.out = str(timestamped_run_dir(args.out))
+    latest_run_alias(args.out)
     print(f"[joint] config={args.config} run_dir={args.out}")
     if args.epochs < 1:
         raise SystemExit("--epochs must be >= 1")

@@ -27,7 +27,7 @@
 - build_net 的配置与维度校验；
 - action_space 迁移到 `env/action/`。
 
-**新路径仍不是 live path**：`env.obs.stack_history`、旧 `StructuredPlanner` 和旧 WM 仍被训练/评测代码使用。因此：
+**新路径已切到 raw Bank**：旧 `stack_history` projected 数据路径、旧 `StructuredPlanner` 和旧 WM 已退出 canonical 训练/评测路径。因此：
 
 ```text
 new net: implemented scaffold
@@ -199,7 +199,7 @@ world_model.ld_residual        18,314
 | LD type t0 继承 | 部分：env.obs 没有 `ld_taxonomy`，当前用 road type fallback |
 | Plan/aux、无 value/risk | 已实现（旧 legacy 仍有 value/risk） |
 | build_net 配置/维度校验 | 已实现 |
-| `stack_history` 退出主路径 | **未完成** |
+| `stack_history` 退出主路径 | **完成（legacy/archive only）** |
 | 生产训练/评测/checkpoint 接入 | **未完成** |
 | Target encoder 训练接线 | **未完成** |
 | loss / checkpoint / full rollout gate | **未完成** |
@@ -210,7 +210,7 @@ world_model.ld_residual        18,314
 
 1. **live path 仍是 legacy**
    - `train_bc.py`、`eval.py`、`train_ppo.py`、`checkpointing.py`、`train_wm.py` 仍 import 旧 `StructuredPlanner` / 旧 WM。
-   - `env.obs.stack_history` 仍在用。
+   - `env.obs.stack_history` 已删除；raw collector / LiveBankRunner 是唯一历史入口。
    - 新 `DriveModel` 不能被这些脚本直接训练/评测。
 
 2. **旧类仍在新文件里**

@@ -3,7 +3,7 @@
 The environment supplies one current observation per step.  This helper encodes
 that frame, appends a real FrameRecord to a 6-frame RealMemoryBank, and returns
 the latest BankWindow plus the current nav/ego latents.  It intentionally does
-not use ``env.obs.stack_history``.
+do not use a projected-history bridge.
 """
 
 from __future__ import annotations
@@ -60,6 +60,8 @@ class LiveBankRunner:
             "ego": (EGO_DIM,),
             "od_ids": (OD_SLOTS,),
             "ld_ids": (LD_SLOTS,),
+            "od_anchor": (OD_SLOTS, 3),
+            "od_taxonomy": (OD_SLOTS, 4),
             "pose": (3,),
         }
         batch: Dict[str, torch.Tensor] = {}
