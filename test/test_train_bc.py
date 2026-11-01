@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from env.obs import (
@@ -465,3 +466,25 @@ def test_closed_loop_score_is_lexicographic_success_first():
         "infeasible_count_mean": 0.0,
     }
     assert _closed_loop_score(good) > _closed_loop_score(bad)
+
+
+def test_load_data_row_cap_keeps_whole_episodes_and_is_deterministic(tmp_path):
+    fixture = _fixture(tmp_path)
+    full = load_data([fixture])
+    capped_a = load_data([fixture], max_rows=[4], seed=0)
+    capped_b = load_data([fixture], max_rows=[4], seed=0)
+
+    assert len(capped_a["action"]) == 4
+    assert len(capped_a["action"]) < len(full["action"])
+    np.testing.assert_array_equal(capped_a["episode_id"], capped_b["episode_id"])
+    np.testing.assert_array_equal(capped_a["action"], capped_b["action"])
+    # Every selected episode keeps all of its rows.
+    for episode in np.unique(capped_a["episode_id"]):
+        rows = np.flatnonzero(capped_a["episode_id"] == episode)
+        source_rows = np.flatnonzero(full["episode_id"] == full["episode_id"][rows[0]])
+        assert len(rows) == len(source_rows)
+
+
+def test_load_data_row_cap_count_must_match_paths(tmp_path):
+    with pytest.raises(ValueError, match="row caps"):
+        load_data([_fixture(tmp_path)], max_rows=[1, 2])

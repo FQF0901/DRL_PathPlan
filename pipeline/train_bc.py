@@ -259,52 +259,121 @@ def _default_value(key: str, n: int) -> np.ndarray:
     return np.zeros(n, dtype=np.float32)
 
 
-def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
-    """Load and concatenate one or more ``expert_bc.npz`` datasets."""
+def _sample_episode_rows(
+    z: np.lib.npyio.NpzFile, max_rows: int, rng: np.random.Generator
+) -> Optional[np.ndarray]:
+    """Return row indices covering whole episodes, or ``None`` for no cap.
+
+    Sampling whole episodes keeps the 6-frame history sequences intact.  The
+    cap is a budget, not an exact target: the first selected episode may be
+    larger than what remains.
+    """
+    n = int(len(np.asarray(z["episode_id"])))
+    if max_rows <= 0 or n <= max_rows:
+        return None
+    episode_id = np.asarray(z["episode_id"], dtype=np.int64)
+    unique, counts = np.unique(episode_id, return_counts=True)
+    chosen: list[int] = []
+    total = 0
+    for index in rng.permutation(len(unique)):
+        count = int(counts[index])
+        if chosen and total + count > max_rows:
+            continue
+        chosen.append(int(unique[index]))
+        total += count
+        if total >= max_rows:
+            break
+    keep = np.isin(episode_id, np.asarray(chosen, dtype=np.int64))
+    return np.flatnonzero(keep)
+
+
+def _split_cap(max_rows: int, shards: int) -> list[int]:
+    """Split one input-path row cap evenly across its npz shards."""
+    if max_rows <= 0 or shards <= 1:
+        return [max_rows] * max(1, shards)
+    base, extra = divmod(int(max_rows), int(shards))
+    return [base + (1 if i < extra else 0) for i in range(shards)]
+
+
+def load_data(
+    paths: Sequence[str | Path],
+    max_rows: Optional[Sequence[int] | int] = None,
+    seed: int = 0,
+) -> Dict[str, np.ndarray]:
+    """Load and concatenate one or more ``expert_bc.npz`` datasets.
+
+    ``max_rows`` optionally caps each input path; ``0`` disables the cap.  If
+    one integer is given it applies to every path, otherwise one value per
+    path is required.  Complement episodes are sampled whole, deterministically
+    from ``seed``.
+    """
     if not paths:
         raise ValueError("load_data: no input paths")
+    if max_rows is None:
+        caps = [0] * len(paths)
+    elif isinstance(max_rows, (int, np.integer)):
+        caps = [int(max_rows)] * len(paths)
+    else:
+        caps = [int(value) for value in max_rows]
+        if len(caps) == 1:
+            caps *= len(paths)
+        elif len(caps) != len(paths):
+            raise ValueError(
+                f"load_data: got {len(caps)} row caps for {len(paths)} paths"
+            )
     parts = []
-    resolved: list[Path] = []
-    for raw in paths:
-        resolved.extend(_resolve_npz_paths(Path(raw)))
-    for npz_path in resolved:
-        if not npz_path.exists():
-            raise FileNotFoundError(f"schema-v2 dataset not found: {npz_path}")
-        with np.load(npz_path) as z:
-            files = set(z.files)
-            missing_hist = [key for key in HISTORY_KEYS if key not in files]
-            if missing_hist:
-                raise ValueError(
-                    f"{npz_path}: missing schema-v2 history keys {missing_hist}"
-                )
-            missing_rows = [key for key in REQUIRED_ROW_KEYS if key not in files]
-            if missing_rows:
-                raise ValueError(f"{npz_path}: missing required row keys {missing_rows}")
-            part = {
-                key: np.asarray(z[key])
-                for key in files
-                if key in KEEP_KEYS
-            }
-        action = np.asarray(part["action"], dtype=np.float32)
-        if action.ndim != 2 or action.shape[1] != 4:
-            raise ValueError(f"{npz_path}: action must be [N,4], got {action.shape}")
-        if not np.all(np.isfinite(action)):
-            raise ValueError(f"{npz_path}: action contains NaN/Inf")
-        n = int(action.shape[0])
-        if n == 0:
-            raise ValueError(f"{npz_path}: zero rows")
-        for key in REQUIRED_ROW_KEYS:
-            if key in part and len(part[key]) != n:
-                raise ValueError(f"{npz_path}: {key} length {len(part[key])} != {n}")
-        # Never silently merge episode 0 from two collection shards.
-        episode_id = np.asarray(part["episode_id"], dtype=np.int64).copy()
-        if parts:
-            episode_id = episode_id + (int(parts[-1]["_episode_offset"]) + 1)
-        part["_episode_offset"] = np.int64(
-            int(episode_id.max()) if len(episode_id) else -1
-        )
-        part["episode_id"] = episode_id
-        parts.append(part)
+    for path_index, (raw, cap) in enumerate(zip(paths, caps)):
+        resolved = _resolve_npz_paths(Path(raw))
+        shard_caps = _split_cap(cap, len(resolved))
+        for shard_index, npz_path in enumerate(resolved):
+            if not npz_path.exists():
+                raise FileNotFoundError(f"schema-v2 dataset not found: {npz_path}")
+            with np.load(npz_path) as z:
+                files = set(z.files)
+                missing_hist = [key for key in HISTORY_KEYS if key not in files]
+                if missing_hist:
+                    raise ValueError(
+                        f"{npz_path}: missing schema-v2 history keys {missing_hist}"
+                    )
+                missing_rows = [key for key in REQUIRED_ROW_KEYS if key not in files]
+                if missing_rows:
+                    raise ValueError(
+                        f"{npz_path}: missing required row keys {missing_rows}"
+                    )
+                rng = np.random.default_rng(int(seed) + path_index)
+                row_idx = _sample_episode_rows(z, shard_caps[shard_index], rng)
+                part = {
+                    key: np.asarray(
+                        z[key] if row_idx is None else z[key][row_idx]
+                    )
+                    for key in files
+                    if key in KEEP_KEYS
+                }
+                if row_idx is not None:
+                    print(
+                        f"[bc] sampled {len(row_idx)}/{len(np.asarray(z['episode_id']))} "
+                        f"rows from {npz_path} (cap={shard_caps[shard_index]})"
+                    )
+            action = np.asarray(part["action"], dtype=np.float32)
+            if action.ndim != 2 or action.shape[1] != 4:
+                raise ValueError(f"{npz_path}: action must be [N,4], got {action.shape}")
+            if not np.all(np.isfinite(action)):
+                raise ValueError(f"{npz_path}: action contains NaN/Inf")
+            n = int(action.shape[0])
+            if n == 0:
+                raise ValueError(f"{npz_path}: zero rows")
+            for key in REQUIRED_ROW_KEYS:
+                if key in part and len(part[key]) != n:
+                    raise ValueError(f"{npz_path}: {key} length {len(part[key])} != {n}")
+            # Never silently merge episode 0 from two collection shards.
+            episode_id = np.asarray(part["episode_id"], dtype=np.int64).copy()
+            if parts:
+                episode_id = episode_id + (int(parts[-1]["_episode_offset"]) + 1)
+            part["_episode_offset"] = np.int64(
+                int(episode_id.max()) if len(episode_id) else -1
+            )
+            part["episode_id"] = episode_id
+            parts.append(part)
 
     merged: Dict[str, np.ndarray] = {}
     keys = set().union(*(set(part) for part in parts)) - {"_episode_offset"}
@@ -317,6 +386,7 @@ def load_data(paths: Sequence[str | Path]) -> Dict[str, np.ndarray]:
             merged[key] = np.concatenate(arrays, axis=0)
         except ValueError as exc:  # e.g. incompatible residual_xy shapes
             raise ValueError(f"cannot concatenate {key!r}: {exc}") from exc
+    del parts, arrays
 
     merged["action"] = np.asarray(merged["action"], dtype=np.float32)
     merged["scene_seed"] = np.asarray(merged["scene_seed"], dtype=np.int64)
@@ -1000,6 +1070,11 @@ def _make_config(
         "val_seeds": val_seeds,
         "params": count_parameters(model),
         "data": [str(p) for p in args.data],
+        "data_max_rows": (
+            None
+            if not getattr(args, "data_max_rows", None)
+            else [int(value) for value in args.data_max_rows]
+        ),
         "val_data": None if not args.val_data else [str(p) for p in args.val_data],
         "config_file": getattr(args, "config", None),
         "run_dir": str(getattr(args, "out", "")),
@@ -1121,6 +1196,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--data", nargs="+", default=None,
                    help="dirs containing expert_bc.npz (or .npz files)")
     p.add_argument(
+        "--data-max-rows",
+        nargs="+",
+        type=int,
+        default=None,
+        help="optional per-input row caps; whole episodes are sampled; 0=off",
+    )
+    p.add_argument(
         "--val-data",
         nargs="+",
         default=None,
@@ -1208,6 +1290,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--closed-loop-patience must be >= 1")
     if not (0.0 <= args.val_frac < 1.0):
         raise SystemExit("--val-frac must be in [0, 1)")
+    if args.data_max_rows and any(int(value) < 0 for value in args.data_max_rows):
+        raise SystemExit("--data-max-rows values must be >= 0")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -1240,7 +1324,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         residual_dpsi_thresh=args.residual_dpsi_thresh,
     )
 
-    train_data = load_data(args.data)
+    train_data = load_data(
+        args.data,
+        max_rows=args.data_max_rows,
+        seed=args.seed,
+    )
     if args.val_data:
         val_data = load_data(args.val_data)
         train_seeds = set(int(x) for x in np.unique(train_data["scene_seed"]))
@@ -1250,6 +1338,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise SystemExit(f"--data/--val-data scene_seed overlap: {sorted(overlap)[:10]}")
         n_train = len(train_data["action"])
         data = concat_data([train_data, val_data])
+        del train_data, val_data
         train_mask = np.zeros(len(data["action"]), dtype=bool)
         train_mask[:n_train] = True
         val_mask = ~train_mask

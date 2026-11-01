@@ -1,6 +1,8 @@
 # BC / DAgger training defaults.  CLI flags override every value below.
 data:
   - data/episodes/train_2000/il_expert_raw
+# Optional per-input whole-episode row caps for mixing rounds on a 12 GB host:
+# data_max_rows: [30000, 20000, 0]
 val_data:
   - data/episodes/val_500/expert_raw
 # val_data is the fixed 500-scene held-out set; val_frac is ignored when set.
