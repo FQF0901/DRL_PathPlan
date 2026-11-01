@@ -69,21 +69,20 @@ python -m dataset.collect \
   --workers 8 \
   --max-steps 600
 
-# DAgger 数据
-python -m dataset.collect_dagger \
-  --specs data/specs/train_2000.json \
-  --ckpt runs/bc_2k_raw/best_closed_loop.pt \
-  --out data/episodes/train_2000/il_dagger_raw \
-  --workers 8 \
-  --max-steps 600
+# DAgger 数据（默认参数见 config/collect_dagger.yaml）
+python dataset/collect_dagger.py
 ```
 
 `collect_dagger.py` 还支持：
 
 - `--expert-ratio`：expert replay 概率
 - `--shield-ttc`：TTC 过低时强制 expert replay
+- `--stuck-shield-steps`：低速持续超过该步数后强制 expert takeover
+- `--difficulties`：只采集指定难度，例如 `--difficulties medium hard`
 - `--round` / `--seed`：DAgger 轮次和随机种子
 - `--device`：CPU/CUDA
+
+零参数运行时读取 `config/collect_dagger.yaml`；任何 CLI 参数都会覆盖 YAML。
 
 ## 输出格式
 

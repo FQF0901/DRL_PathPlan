@@ -162,6 +162,14 @@ def test_mode_selection_probability_and_shield():
     ) == (True, True)
 
 
+def test_stuck_shield_steps():
+    assert not dagger._needs_stuck_shield(0, 20)
+    assert not dagger._needs_stuck_shield(20, 20)
+    assert dagger._needs_stuck_shield(21, 20)
+    # Zero disables the stuck takeover.
+    assert not dagger._needs_stuck_shield(10_000, 0)
+
+
 def test_episode_rng_seed_is_deterministic_per_spec():
     class _Spec:
         def __init__(self, seed):

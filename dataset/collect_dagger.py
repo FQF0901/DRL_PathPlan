@@ -38,6 +38,12 @@ Artifacts (same names as :mod:`dataset.collect`)::
 
 from __future__ import annotations
 
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import math
@@ -77,6 +83,7 @@ COMFORT_LIMITS = _CONTRACT.comfort
 HARD_LIMITS = _CONTRACT.hard
 from pipeline.checkpointing import load_model_from_checkpoint
 from pipeline.live_bank import LiveBankRunner
+from pipeline.train_config import parse_train_args
 
 DECISION_DT = 0.5
 SIM_DT = 0.1
@@ -609,6 +616,11 @@ def _needs_shield(obs: Dict[str, np.ndarray], ttc_thresh: float) -> bool:
     return bool(np.any(mask & lateral & (ttc < ttc_thresh)))
 
 
+def _needs_stuck_shield(low_speed_run: int, step_threshold: float) -> bool:
+    """Force expert replay after a sustained low-speed run (0 = off)."""
+    return bool(float(step_threshold) > 0.0 and int(low_speed_run) > float(step_threshold))
+
+
 # ---------------------------------------------------------------------------
 # Packing / outcomes
 # ---------------------------------------------------------------------------
@@ -756,6 +768,7 @@ def run_episode(
     device: str,
     expert_ratio: float,
     shield_ttc: float,
+    stuck_shield_steps: float,
     round_id: int,
     seed: int,
 ) -> Optional[Tuple[Dict[str, np.ndarray], Dict[str, Any]]]:
@@ -831,7 +844,9 @@ def run_episode(
             brake_action_scale=float(expert.brake_action_scale),
         )
 
-        shield = _needs_shield(obs, shield_ttc)
+        shield = _needs_shield(obs, shield_ttc) or _needs_stuck_shield(
+            low_speed_run, stuck_shield_steps
+        )
         replay, shield = _select_mode(
             shield=shield, expert_ratio=expert_ratio, rng=rng
         )
@@ -1087,9 +1102,9 @@ def _init_worker(ckpt: str, device: str) -> None:
 
 
 def _worker(
-    args: Tuple[int, Any, int, float, float, int, int]
+    args: Tuple[int, Any, int, float, float, float, int, int]
 ) -> Tuple[int, Optional[Dict[str, np.ndarray]], float, str, Optional[Dict[str, Any]]]:
-    idx, spec, max_steps, expert_ratio, shield_ttc, round_id, seed = args
+    idx, spec, max_steps, expert_ratio, shield_ttc, stuck_shield_steps, round_id, seed = args
     t0 = time.time()
     model = _WORKER_MODEL
     try:
@@ -1105,6 +1120,7 @@ def _worker(
                 device=_WORKER_DEVICE,
                 expert_ratio=float(expert_ratio),
                 shield_ttc=float(shield_ttc),
+                stuck_shield_steps=float(stuck_shield_steps),
                 round_id=int(round_id),
                 seed=int(seed),
             )
@@ -1356,17 +1372,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Schema-v2 DAgger collection with measured expert replay"
     )
-    parser.add_argument("--specs", required=True)
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--ckpt", required=True)
+    parser.add_argument(
+        "--config", default="config/collect_dagger.yaml",
+        help="YAML collection config; CLI flags override it",
+    )
+    parser.add_argument("--specs", default=None)
+    parser.add_argument("--out", default=None)
+    parser.add_argument("--ckpt", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
         "--device",
-        default=None,
-        help="torch device; defaults to cuda when available, else cpu",
+        default="auto",
+        help="torch device; auto resolves to cuda when available",
     )
     parser.add_argument(
         "--expert-ratio",
@@ -1380,24 +1400,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=0.0,
         help="force expert replay when closest in-path TTC is below this (0=off)",
     )
+    parser.add_argument(
+        "--stuck-shield-steps",
+        type=float,
+        default=0.0,
+        help="force expert replay after this many low-speed decision steps (0=off)",
+    )
+    parser.add_argument(
+        "--difficulties",
+        nargs="+",
+        default=None,
+        help="optional difficulty filter, e.g. --difficulties medium hard",
+    )
     parser.add_argument("--round", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args(argv)
+    args = parse_train_args(parser, argv, "config/collect_dagger.yaml")
+    if not args.specs:
+        parser.error("--specs is required (CLI or config)")
+    if not args.out:
+        parser.error("--out is required (CLI or config)")
+    if not args.ckpt:
+        parser.error("--ckpt is required (CLI or config)")
+    print(f"[collect_dagger] config={args.config}")
 
     if not 0.0 <= float(args.expert_ratio) <= 1.0:
         parser.error("--expert-ratio must be in [0, 1]")
     if float(args.shield_ttc) < 0.0:
         parser.error("--shield-ttc must be >= 0")
+    if float(args.stuck_shield_steps) < 0.0:
+        parser.error("--stuck-shield-steps must be >= 0")
     if int(args.workers) < 1:
         parser.error("--workers must be >= 1")
     if int(args.round) < 0:
         parser.error("--round must be >= 0")
-    # Resolve lazily so an explicit --device cpu never initializes CUDA in the
-    # parent process (fork-safety), and so the default matches the other tools.
-    if not args.device:
-        args.device = "cuda" if torch.cuda.is_available() else "cpu"
-
     specs = load_specs(args.specs)
+    if args.difficulties:
+        wanted = {str(value) for value in args.difficulties}
+        specs = [spec for spec in specs if str(spec.difficulty) in wanted]
+        print(
+            f"[collect_dagger] difficulties={sorted(wanted)} specs={len(specs)}",
+            flush=True,
+        )
     offset = max(0, int(args.offset))
     specs = specs[offset:]
     if args.limit is not None:
@@ -1419,6 +1462,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             int(args.max_steps),
             float(args.expert_ratio),
             float(args.shield_ttc),
+            float(args.stuck_shield_steps),
             int(args.round),
             int(args.seed),
         )
@@ -1501,6 +1545,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "ckpt": str(args.ckpt),
         "specs": str(args.specs),
         "out": str(out_dir),
+        "config_file": str(args.config),
         "limit": args.limit,
         "offset": args.offset,
         "workers": args.workers,
@@ -1509,6 +1554,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "device": str(args.device),
         "expert_ratio": float(args.expert_ratio),
         "shield_ttc": float(args.shield_ttc),
+        "stuck_shield_steps": float(args.stuck_shield_steps),
+        "difficulties": list(args.difficulties) if args.difficulties else None,
         "round": int(args.round),
         "seed": int(args.seed),
         "decision_dt": DECISION_DT,
