@@ -10,3 +10,6 @@ data/episodes/
 archive/
 r3_demo_*.mp4
 r3_demo_manifest.json
+r3_topdown_*.mp4
+r3_topdown_manifest.json
+r3_demo_3d/
