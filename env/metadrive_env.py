@@ -632,6 +632,11 @@ def build_env(
     use_render: bool = False,
     lru_size: int = DEFAULT_LRU_SIZE,
     seed_pool: tuple[int, int] | None = None,
+    image_observation: bool = False,
+    sensors: dict[str, Any] | None = None,
+    window_size: tuple[int, int] | None = None,
+    show_interface: bool | None = None,
+    image_source: str | None = None,
 ) -> SpecMetaDriveEnv:
     """按 spec 建环境（不 reset）。
 
@@ -642,6 +647,8 @@ def build_env(
       反复采样）。要求池内所有 spec 的 ``blocks`` 相同（地图配置在构造期固化），
       且每次 reset 前用 :meth:`SpecMetaDriveEnv.bind_spec` 更新 spec（MetaDriveWrapper 已处理）；
     - 限速/线型后处理与 behaviors.install 在每次 ``env.reset()`` 后自动重放。
+    - ``image_observation=True`` + ``sensors`` 打开 headless RGB 相机；调用方可用
+      ``env.engine.get_sensor(name).get_image(env.agent)`` 取帧。默认关闭，不影响训练/评测。
     """
     blocks = _spec_blocks(spec)
     seed = _spec_seed(spec)
@@ -683,8 +690,17 @@ def build_env(
             show_line_to_dest=False,
             show_line_to_navi_mark=False,
             show_navigation_arrow=False,
+            **({} if image_source is None else {"image_source": str(image_source)}),
         ),
     )
+    if image_observation:
+        config["image_observation"] = True
+    if window_size is not None:
+        config["window_size"] = tuple(window_size)
+    if show_interface is not None:
+        config["show_interface"] = bool(show_interface)
+    if sensors is not None:
+        config["sensors"] = dict(sensors)
     env = SpecMetaDriveEnv(config, map_lru_size=lru_size)
     env.bind_spec(spec)
     logger.info(
