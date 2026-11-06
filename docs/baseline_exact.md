@@ -86,7 +86,7 @@ r3: medium+hard,   expert_ratio=0.65, shield_ttc=3.5, stuck_shield_steps=20
 r3 采集内 student outcome（含 expert replay，不是纯 student）：
 
 ```text
-success 0.563 / collision 0.226 / off-road 0.094 / max_step 0.117
+success 0.559 / collision 0.225 / off-road 0.104 / max_step 0.111
 ```
 
 ## 4. 训练 recipe
