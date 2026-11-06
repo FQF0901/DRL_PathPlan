@@ -44,8 +44,8 @@ dataset/freeze_splits.py
 
 data/specs/train_2000.json
         │
-        ├─ dataset/collect.py                → data/episodes/train_2000/il_expert_raw
-        └─ dataset/collect_dagger.py         → data/episodes/train_2000/il_dagger_raw
+        ├─ dataset/collect.py                → data/episodes/train_2000/il_expert_exact
+        └─ dataset/collect_dagger.py         → data/episodes/train_2000/il_dagger_exact_r*
 
 data/specs/val_500.json
         │
@@ -65,7 +65,7 @@ python -m dataset.freeze_splits
 # IL/expert BC 数据
 python -m dataset.collect \
   --specs data/specs/train_2000.json \
-  --out data/episodes/train_2000/il_expert_raw \
+  --out data/episodes/train_2000/il_expert_exact \
   --workers 8 \
   --max-steps 600
 
@@ -117,7 +117,7 @@ NPZ 主要字段：
   - `test_500`：500 scenes，只用于最终验收，不调参
   - `mini_train_100` / `mini_val_20`：只用于 smoke test
 - `test_500` 没有 episode NPZ；最终评测由 `pipeline/eval.py` 现场生成环境。
-- `val_500/expert_raw` 是 raw offline BC validation labels，不是闭环 KPI 数据；闭环验证只用 `data/specs/val_500.json` + `data/splits/val_500.json`。
+- `val_500/expert_exact` 是 exact raw offline BC validation labels，不是闭环 KPI 数据；闭环验证只用 `data/specs/val_500.json` + `data/splits/val_500.json`。
 
 ## 相关路径
 
@@ -128,9 +128,11 @@ data/specs/test_500.json         # 500 个最终测试场景
 data/splits/train_2000.json      # 固定 seed / SHA-256
 data/splits/val_500.json
 data/splits/test_500.json
-data/episodes/train_2000/il_expert_raw
-data/episodes/train_2000/il_dagger_raw
-data/episodes/val_500/expert_raw
+data/episodes/train_2000/il_expert_exact
+data/episodes/train_2000/il_dagger_exact_r1
+data/episodes/train_2000/il_dagger_exact_r2
+data/episodes/train_2000/il_dagger_exact_r3
+data/episodes/val_500/expert_exact
 ```
 
 旧数据在 `archive/`，不是 canonical 路径；不要用于新训练。

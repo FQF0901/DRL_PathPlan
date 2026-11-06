@@ -22,10 +22,12 @@ data/
     mini_val_20.json
   episodes/                  # collected episode tensors (gitignored; large)
     train_2000/
-      il_expert_raw/         # raw-history IL/BC expert data, 2000 scenes
-      il_dagger_raw/         # raw-history DAgger data, same 2000 scenes
+      il_expert_exact/       # exact-execution raw IL/BC expert data, 2000 scenes
+      il_dagger_exact_r1/    # exact DAgger round 1, 2000 scenes
+      il_dagger_exact_r2/    # exact DAgger round 2, 1268 medium/hard scenes
+      il_dagger_exact_r3/    # exact DAgger round 3, 1268 medium/hard scenes
     val_500/
-      expert_raw/            # raw-history expert labels / closed-loop val
+      expert_exact/          # exact raw expert labels / closed-loop val
     mini/
       il_train_100_raw/      # raw-history IL smoke subset
       dagger_train_100_raw/  # raw-history DAgger smoke subset
@@ -49,11 +51,11 @@ are also disjoint.  Never train on validation or test scenes.
 
 ## Episode pools
 
-`episodes/train_2000/il_expert_raw` and `episodes/train_2000/il_dagger_raw`
+`episodes/train_2000/il_expert_exact` and the `il_dagger_exact_r*` pools
 cover the same 2000 train scenes but are different policies/stages.  DAgger/RL may add
 new episodes on the same train scenes; they must not change the split.
 
-`episodes/val_500/expert_raw` is expert raw-history data on the held-out 500
+`episodes/val_500/expert_exact` is exact expert raw-history data on the held-out 500
 validation scenes.  It is for offline validation/stability checks, not
 training.
 

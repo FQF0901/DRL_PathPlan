@@ -357,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--val-data",
         nargs="+",
         default=None,
-        help="fixed validation episode pool, e.g. data/episodes/val_500/expert_raw",
+        help="fixed validation episode pool, e.g. data/episodes/val_500/expert_exact",
     )
     p.add_argument("--val-split", default="data/splits/val_500.json")
     p.add_argument(
