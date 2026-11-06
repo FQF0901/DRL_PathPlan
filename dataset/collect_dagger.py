@@ -843,37 +843,42 @@ def run_episode(
                 done = True
                 termination = "invalid_action"
             else:
-                tracker.arm(env, trajectory=traj_exec)
-                for _ in range(STEPS_PER_POLICY):
-                    if ep_step >= max_steps:
-                        break
-                    _, _, term, trunc, info = env.step([0.0, 0.0])
-                    ep_step += 1
-                    n_substeps += 1
-                    tracker.apply(env)
-                    info = info or {}
-                    rc = _safe_float(info.get("route_completion"), rc)
-                    success = int(success or bool(info.get("arrive_dest", False)))
-                    collision = int(collision or bool(info.get("crash", False)))
-                    off_road = int(off_road or bool(info.get("out_of_road", False)))
-                    wrong_route = int(
-                        wrong_route
-                        or bool(info.get("wrong_route", False))
-                        or bool(info.get("wrong_way", False))
-                    )
-                    low_speed_run, stuck_run = _speed_run(
-                        float(ego.speed), low_speed_run, stuck_run
-                    )
-                    if term or trunc:
-                        done = True
-                        termination = _termination_name(
-                            success=success,
-                            collision=collision,
-                            off_road=off_road,
-                            term=term,
-                            trunc=trunc,
+                try:
+                    tracker.arm(env, trajectory=traj_exec)
+                except (TypeError, ValueError):
+                    done = True
+                    termination = "invalid_action"
+                else:
+                    for _ in range(STEPS_PER_POLICY):
+                        if ep_step >= max_steps:
+                            break
+                        _, _, term, trunc, info = env.step([0.0, 0.0])
+                        ep_step += 1
+                        n_substeps += 1
+                        tracker.apply(env)
+                        info = info or {}
+                        rc = _safe_float(info.get("route_completion"), rc)
+                        success = int(success or bool(info.get("arrive_dest", False)))
+                        collision = int(collision or bool(info.get("crash", False)))
+                        off_road = int(off_road or bool(info.get("out_of_road", False)))
+                        wrong_route = int(
+                            wrong_route
+                            or bool(info.get("wrong_route", False))
+                            or bool(info.get("wrong_way", False))
                         )
-                        break
+                        low_speed_run, stuck_run = _speed_run(
+                            float(ego.speed), low_speed_run, stuck_run
+                        )
+                        if term or trunc:
+                            done = True
+                            termination = _termination_name(
+                                success=success,
+                                collision=collision,
+                                off_road=off_road,
+                                term=term,
+                                trunc=trunc,
+                            )
+                            break
             lift_rows += 1
 
         if rc < segment_rc_start - WRONG_ROUTE_DROP:

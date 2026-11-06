@@ -344,7 +344,12 @@ def run_episode(
         max_jerk = max(max_jerk, _safe_float(metrics.get("max_abs_jerk_long")))
 
         if controller == "exact":
-            tracker.arm(env, trajectory=tr_exec)
+            try:
+                tracker.arm(env, trajectory=tr_exec)
+            except (TypeError, ValueError):
+                done = True
+                termination = "invalid_action"
+                break
         else:
             ref_positions = np.asarray(tr_exec.positions, dtype=np.float64)
             if ref_positions.ndim != 2 or ref_positions.shape[1] < 3:

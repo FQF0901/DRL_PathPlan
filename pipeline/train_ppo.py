@@ -812,7 +812,12 @@ def collect_episode(
             terminated = True
             break
         else:
-            tracker.arm(env, trajectory=tr_exec)
+            try:
+                tracker.arm(env, trajectory=tr_exec)
+            except (TypeError, ValueError):
+                termination = "invalid_action"
+                terminated = True
+                break
             for _ in range(STEPS_PER_POLICY):
                 if n >= max_steps:
                     break
