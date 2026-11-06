@@ -1,400 +1,978 @@
-# arch_lock review response — 审阅结论（2026-11-03）
-
-> 审阅对象：`docs/deepseekv4p1_argue.md`（对 arch_lock 审阅的答复）
-> 对照：`docs/arch_lock.md`、当前代码、run artifacts
-> 结论：**答复总体成立，主判断接受；两条反驳都正确；但 P1-2 的修正依赖图仍有错误，P1-8 只是部分接受，需要落到代码/诊断，不能只改文字。**
-
-## 0. 总判断
-
-这份答复的质量高于上一版：
-
-- 没有继续声称 “ACCEPT no P0/P1”；
-- 接受了 `ego_velocity`、exact tracking、Phase 2c、WM gate、probe persistence、target mask、run-specific 细节等主要问题；
-- 两条反驳是正确的，之前审阅中的对应 finding 应撤回；
-- 但仍有一处**新引入的依赖图错误**，以及一处“只改文档、不改生产行为”的不完整接受。
-
-### 结论速览
+我从“如果我是 reviewer，要把这个项目搞死” 的角度来审。
 
-| 答复项 | 审阅结论 |
-|---|---|
-| P0-1 `ego_velocity` | **接受**，删除字段 |
-| P1-1 exact tracking | **接受**，统一表述 |
-| P1-2 `model.py` 责任表 | **部分接受**；文档可改，但答复里的依赖图仍错 |
-| P1-3 Phase 2b/2c | **接受**，统一 2c |
-| P1-4 Phase 2c 回滚 | **接受**，改成 `policy_tol` 实际逻辑 |
-| P1-5 WM gate / drift / norm | **接受**，标 TODO/proposed |
-| P1-6 probe persistence | **接受**，区分 initial/previous-step |
-| P1-7 valid mask / 新实体 | **接受**，改成 target mask 语义 |
-| P1-8 slot fallback | **部分接受**；必须补生产 fail-fast/diagnostic，不能只写“例外” |
-| P1-9 run-specific 细节 | **接受**，移到 baseline 文档 |
-| P2-1 selector 双定义 | **接受**，明确 canonical gate |
-| P2-2 ego_pose 7 个 | **解释成立**，文档写清概念/API 差异 |
-| P2-3 PolicyHead | **接受** |
-| P2-4 world frame | **接受** |
-| P2-5 rollout_depth | **接受** |
-| P2-6 Bank 字段 | **接受** |
-| P2-7 train_bc env | **接受** |
-| P2-8 文件表/§14.1 | **接受** |
-| P2-9 Phase 3/4 状态 | **接受** |
-| P2-10 `--allow-random-val` | **接受** |
-| P2-11 默认 ckpt | **接受** |
-| P2-12 `select_checkpoint` NameError | **反驳成立**，撤回原 finding |
-| P2-13 probe 隔离 | **部分接受**，改成“隔离 action 输入” |
-| P2-14 `od_age`/anchor/taxonomy | **部分反驳成立**；anchor/taxonomy 在 INPUT_KEYS，od_age 仍是死特征 |
-
----
-
-## 1. 接受：P0-1 `ego_velocity`
+先说结论：
 
-`docs/arch_lock.md:208` 的 `FrameRecord.ego_velocity: [2]` 在 `net/mem_bank.py:75-89` 不存在；代码字段为：
-
-```text
-episode_id, frame_id, timestamp, ego_pose, od, ld,
-source, rollout_depth, parent_frame_id,
-action_from_parent, encoder_version
-```
+总体方向：正确
+主要风险：不是RL，不是GRPO
 
-全仓库只有 arch_lock 出现 `ego_velocity`。答复接受删除，正确。
-这是 doc-only 错误；不需要为了文档新增代码字段。
+而是：
 
----
+1. Policy/WM状态定义不统一
+2. Action语义与轨迹语义混杂
+3. LD未来表示不闭合
+4. DAgger成功率可能被评估口径误导
+5. 未来WM上线时会出现representation drift
 
-## 2. 接受：P1-1 exact tracking 限定范围
 
-答复接受“§0 #14 / §9.1 / §14 内部矛盾”，正确。
+其中我认为真正的P0问题是前3个。
 
-代码事实：
+P0. 当前最大的疑问
 
-- `pipeline/eval.py:301-349` 会做 `v_next` projection / safe-brake；
-- `pipeline/train_ppo.py:293-383` 同样，并 mask PPO 样本；
-- `§9.1` 已允许该例外。
+你现在说：
 
-文档应统一为：
+IL = 2%
+DAgger r3 = 61%
 
-```text
-BC/DAgger policy 训练路径：requested_action == executed_action。
-eval/PPO 安全执行层：允许显式 v_next projection / safe-brake；
-记录 requested/executed，并在 RL loss 中 mask 或重算 log-prob。
-```
 
-删除 §0 #14、§9.1 开头、§14 的绝对表述即可；代码无需改。
+但我第一反应不是高兴。
 
----
+而是：
 
-## 3. 部分接受：P1-2 `model.py` 责任表 —— 答复的依赖图仍错
+61% 是谁开的车？
 
-答复同意“文档可改，不搬代码”，这个取舍本身可以接受：
-`net/model.py` 的 raw-history adapter / FIFO-safe alignment 是模型侧的编排逻辑，强行搬进 `mem_bank.py` 可能让存储层依赖 encoder 语义。把责任写清楚即可。
 
-但答复给出的依赖图仍然不正确：
+因为我看到当前配置：
 
-```text
-mem_bank.py
-  ↑
-encoder.py
-  ↑
-world_model.py
-  ↑
-model.py
-  ↑
-build_net.py
+expert_ratio = 0.65
+shield_ttc = 3.5
+stuck shield = 20
 
-planner.py
-  ↑
-model.py
-```
 
-实际 import：
+来自 DRL_PathPlan_Code.txt。
 
-- `net/world_model.py` 只 import `net.mem_bank`，**不 import `encoder.py`**；
-- `net/encoder.py` import `env.obs`、`net.mem_bank`；
-- `net/planner.py` 不 import `world_model.py`；
-- `net/build_net.py` import `encoder.py`、`model.py`、`planner.py`、`world_model.py`；
-- `net/model.py` import `encoder.py`、`mem_bank.py`、`planner.py`、`world_model.py`。
+我会怀疑：
 
-因此依赖图应类似：
+61%
+=
+Student能力
++
+Shield能力
++
+Expert介入能力
 
-```text
-mem_bank.py
-  ↑
-encoder.py
-  ↑
-model.py
-  ↑
-build_net.py
 
-mem_bank.py
-  ↑
-world_model.py
-  ↑
-model.py
+而不是：
 
-planner.py
-  ↑
-model.py
-```
+纯Student
 
-`world_model.py` 与 `encoder.py` 是并列依赖 `mem_bank.py`，不是 `world_model → encoder`。
-如果按答复当前的图写进 arch_lock，会再次引入 doc-code 不一致。
 
-**审阅结论：接受“改文档、不搬代码”，但不接受答复里的依赖图；必须修正。**
+能力。
 
----
+我建议马上做：
 
-## 4. 接受：P1-3 Phase 2b/2c 统一为 2c
+expert_ratio:
+0.65
+0.4
+0.2
+0
 
-答复接受统一为 Phase 2c，正确。当前冲突是：
 
-- `docs/arch_lock.md:835/918/943` → 2c；
-- `pipeline/train_joint.py:1`、`:359` → 2b；
-- `config/train_joint.yaml:1` → 2b；
-- `test/test_train_joint.py:1` → 2b。
+以及：
 
-需要改代码/config/test 的注释和 `joint_phase`，不能只改文档。旧 checkpoint 的 `"2b"` 可保留为历史 metadata，但不能用于路径分派。
+shield:
+ON
+OFF
 
----
 
-## 5. 接受：P1-4 Phase 2c 回滚条件
+矩阵。
 
-答复接受改成实际实现，正确。`pipeline/train_joint.py:347-352` 当前是：
+如果：
 
-```python
-policy_budget = policy_tol * abs(initial_policy)
-policy_ok = (val_policy - initial_policy) <= policy_budget
-if val_wm < best_val and policy_ok:
-    ...
-```
+61%
+↓
+58%
+↓
+54%
+↓
+49%
 
-没有 closed-loop success。
-文档应写“val policy loss 相对初始退化不超过 `policy_tol`，且 val WM loss 改善”；若要 policy success，需先实现 closed-loop gate。
 
----
+很好。
 
-## 6. 接受：P1-5 WM gate / target drift / latent norm
+如果：
 
-答复接受标 TODO/proposed，正确。当前：
+61%
+↓
+35%
+↓
+18%
+↓
+8%
 
-- `pipeline/train_wm.py:506-520` 只按 `val_loss` 选 best；
-- `pipeline/probe_wm.py:266-270` 只输出 content/geometry/persistence 均值；
-- 没有 target drift、latent norm、latent collapse 指标，也没有 pass/fail gate。
 
-文档 §7.6/§12.6 应明确：
+那其实还没到RL阶段。
 
-```text
-target drift / latent norm / latent collapse: TODO, 当前未实现。
-WM gate: proposed, 当前只记录 loss/persistence，不做 pass/fail。
-```
+P1. 当前Net最大的结构问题
 
-不能把“必须优于 persistence/zero、不能 collapse”写成当前已执行行为。
+我认为是：
 
----
+Action
+=
+(dx,dy,dpsi,v_next)
 
-## 7. 接受：P1-6 probe persistence 定义
 
-答复接受区分 initial-frame / previous-step，正确。当前 `pipeline/probe_wm.py:258-265`：
+和：
 
-```python
-base_od = window.od_content[:, -1].clone()
-base_ld = window.ld_content[:, -1].clone()
-...
-persistence["od_content"].append(masked_mse(base_od, target, mask))
-```
+Trajectory
+=
+6-step rollout
 
-depth>1 时这是 **initial-frame persistence**，不是文档 §12.6 写的 `z_hat_t = z_hat_{t-1}`。
-建议：
 
-- 当前指标改名 `initial_frame_persistence`；
-- 另加 `previous_step_persistence`，用上一步 `z_od/z_ld`；
-- 文档分别定义两者。
+的语义混在一起。
 
----
+你现在实际上在学：
 
-## 8. 接受：P1-7 valid mask / 新实体 slot
+a_t
+→ 0.5s future endpoint
 
-答复接受 target mask 语义，正确。当前 `pipeline/train_wm.py:295-313` 使用：
 
-- `od_tmask/ld_tmask`：content target mask；
-- `od_gmask/ld_gmask`：geometry target mask；
-- `od_valid=maximum(current, tmask)`；
-- `od_current_valid` 区分 target-only slot。
+但是评估的是：
 
-文档应改成：
+3s trajectory
 
-```text
-content 用 content target mask；
-geometry 用 geometry target mask；
-current valid 只用于区分当前实体与 target-only 新实体；
-新实体只在当前帧 free slot 中监督，16 slot 全满时不监督。
-```
 
-“target-only content target 缺失”是旧 finding；当前 `train_wm.py:251-271` 已填，不能继续报。
+这里有个隐患：
 
----
+step local optimum
+≠
+trajectory optimum
 
-## 9. 部分接受：P1-8 slot fallback —— 需要代码/诊断，不只是文档
 
-答复承认 slot fallback 是例外，并提出“生产数据优先 fail-fast 或 diagnostic counter”，方向正确。
-但当前代码仍然是静默 fallback：
+例如：
 
-- `net/model.py:232-256`：duplicate stable ID → slot ID；
-- `net/model.py:359-384`：`_sanitize_ids` 同样；
-- `pipeline/train_wm.py:152-171`：当前 ID 全 0 时 slot alignment。
+每个0.5s都合法
 
-如果只改文档写“legacy 例外”，生产数据出现 duplicate stable ID 时仍然会静默把 slot 当身份，和 §0 #4 / §10.5 的 stable-ID 契约冲突。
-**审阅结论：部分接受；必须至少做一项：**
+但连续拼接
 
-1. 生产路径 fail-fast（duplicate stable ID 直接报错）；或
-2. 记录 diagnostic counter，并在 metrics 中暴露；或
-3. 在合同中明确“slot fallback 是生产可接受的降级”，并说明影响。
+最后蛇形振荡
 
-不能只写“legacy 例外”而不改代码/诊断。
 
----
+所以我建议增加一个loss：
 
-## 10. 接受：P1-9 §0.1 run-specific 细节
+segment consistency
 
-答复接受移到 `docs/baseline_r3.md`，正确。
-`arch_lock.md:88-144` 的 r3 init 路径、epochs/lr、near_weight/w_shield、data mix、1268 scenes、expert_ratio、shield_ttc、checkpoint 路径、val500 指标、r1 对比、failure distribution 都是实验记录，不是架构不变量。
-arch_lock 只保留：
 
-```text
-当前 baseline 是 DAgger r3；
-raw Bank + TSB + planner；
-val500 gate 规则；
-WM 不在 policy 前向路径。
-```
+检查：
 
-r3 数字本身已核实正确，不需要改数；只是不应放在 arch_lock。
+step_i endpoint
+vs
+step_i+1 startpoint
 
----
 
-## 11. P2 逐项结论
+一致性。
 
-### 11.1 接受：P2-1 canonical gate
+否则：
 
-`train_bc._closed_loop_score` 是纯 lexicographic，无 collision/off-road 硬阈值；`select_checkpoint` 先硬过滤再排序。r3 由 `train_bc` 选出。
-文档应明确：**当前 canonical gate 是 train_bc 的 lexicographic success-first；`select_checkpoint` 是可选 stricter selector**。答复接受，正确。
+DAgger
+很好
 
-### 11.2 解释成立：P2-2 ego_pose 7 个
+RL
+突然开始抖方向
 
-概念上 t0..t6 共 7 个 pose；`ImagineMemoryBank`/BankWindow 只保留最后 6 帧，`imagine_rollout` 返回 6 个 policy dict，不暴露 7-pose 轨迹。
-文档写成“概念 t0..t6；Bank 保留 t1..t6；API 返回 6 个 policy”即可，不是代码 bug。
 
-### 11.3 接受：P2-3 PolicyHead 结构
+很常见。
 
-实际是：
+P2. 文件架构有一个问题
 
-```text
-query = Linear(2*hidden, hidden)([ego, nav])
-cross-attention over [OD, LD] with valid mask
-attn = norm(attn + query)
-attn = attn + FFN(attn)
-context = MLP([attn, ego, nav, masked_mean(OD), masked_mean(LD)])
-action_mu = sigmoid(Linear(context))
-action_logstd = clamp(Linear(context), -5, 0)
-```
+我看你之前几版合同。
 
-文档应照此写，不能只写“query = MLP”。
+实际上有：
 
-### 11.4 接受：P2-4 world frame
+dataset/
+net/
+pipeline/
+env/
 
-world pose 不直接输入，但 `ego_pose` 用于计算 `delta_pose` 再进入 `FrameEmbed`。
-文档应改成“world pose 不直接输入网络，只用于计算 frame-level delta_pose”。
 
-### 11.5 接受：P2-5 rollout_depth
+这很好。
 
-代码只用于存储、FIFO、`advance` 的 `<=6` 检查，没有 loss 加权/误差诊断。
-删掉“loss 加权/误差诊断”，或标未来用途。
+但有一个缺失层：
 
-### 11.6 接受：P2-6 Bank 字段
+representation/
 
-`BankWindow` 还包含 `od_type/ld_type/source/rollout_depth/frame_valid`；文档字段列表补全。
 
-### 11.7 接受：P2-7 train_bc env
+或者：
 
-`train_bc.run_closed_loop_validation` 会 `build_env` 并调用 `run_episode`。
-改成“不负责训练数据采集/env rollout；负责 closed-loop validation 调度”。
+schema/
 
-### 11.8 接受：P2-8 文件表 / §14.1
 
-补 `env/obs.py`、`dataset/collect.py`、`dataset/splits.py`、`env/tracking.py`；把 `dataset/splits.py` 的 `§14.1` 引用改为 §14，或在 arch_lock 增加 §14.1。
+因为现在：
 
-### 11.9 接受：P2-9 Phase 3/4 状态
+OD token
+LD token
+Nav
+Action
+Trajectory
+Memory
 
-`train_ppo.py` 是 PPO canary，不是 GRPO；LQR 有 eval 支持但不在 baseline。
-阶段表加 `implemented / proposal / eval-only` 标签。
 
-### 11.10 接受：P2-10 allow-random-val
+定义散落在：
 
-默认 false，是 legacy debug 开关；文档应注明“不进入 gate”。
+dataset
+net
+pipeline
 
-### 11.11 接受：P2-11 默认 ckpt
 
-`config/train_wm.yaml`、`config/train_ppo.yaml` 仍指向 `runs/bc_2k_raw`（旧 IL-only run），不是 r3；`config/train_joint.yaml` 指向不存在的 `runs/wm_2k/best_drive.pt`。
-应更新为 r3，或明确标为 template 必须 `--ckpt` 覆盖。
+里面。
 
-### 11.12 反驳成立：P2-12 `select_checkpoint` NameError
+后面改WM的时候一定出事。
 
-当前 `pipeline/select_checkpoint.py:52` 是：
+我会单独搞：
 
-```python
-p.error("Test500 is read-only; checkpoint selection must use val")
-```
+schema/
+  observation.py
+  action.py
+  trajectory.py
+  memory.py
 
-不是 `parser.error`；实测当前不会 NameError。
-**之前审阅的该 finding 应撤回**。建议补一个 `--split test` CLI 回归测试，防止未来回退；不需要修 bug。
 
-### 11.13 部分接受：P2-13 probe 隔离
+整个工程所有地方：
 
-`probe_wm` 使用真实 action，确实隔离 action 输入误差；但 ego/pose 仍按 imagine 递推，TSB ego token 来自模型 ego encoder。
-文档应改成“隔离 action 输入，不隔离 ego/pose/TSB 递推误差”；完整评估需要 live-env parallel probe。
+import schema
 
-### 11.14 部分反驳成立：P2-14 od_age / anchor / taxonomy
 
-`pipeline/train_bc.INPUT_KEYS` 当前确实包含：
+而不是：
 
-```text
-od_anchor
-od_taxonomy
-```
+每个模块自己定义
 
-并且 encoder 使用它们；`KEEP_KEYS` 也包含。**之前“loader 丢弃 anchor/taxonomy”的说法不准确，应撤回。**
+P3. WM上线时最大的炸点
 
-仍然成立的是：
+这个不是现在。
 
-- `env.obs` 的 `od_age` 永远为 0，且不在 `INPUT_KEYS/KEEP_KEYS`，是死特征；
-- `ld_taxonomy` 没有提供，`_type` fallback 到 road type。
+但要提前设计。
 
-文档应明确：
+你现在：
 
-```text
-od_anchor / od_taxonomy 是特征；
-od_age 是 dead feature，后续删除或接入真实语义；
-ld_taxonomy 当前 fallback，不是完整 taxonomy。
-```
+Policy
 
----
 
-## 12. 测试/证据
+看：
 
-- 当前 `pytest test -q`：**133 passed, 1 skipped, 1 failed, 2 errors**；失败/错误均为 MetaDrive/Panda3D headless。
-- r3 指标/path/override 已在 `runs/bc_dagger_raw_r3_261101235342` 验证：
-  - success 0.610 / collision 0.180 / off_road 0.112 / route 0.832 / feasible 0.856 / fallback 0.094 / timeout 0.106 / stuck 0.086；
-  - best_epoch 10；
-  - `init` 只在 `runs/logs/train_bc_dagger_raw_r3.log:8`，不在 checkpoint config；这是可复现性弱点。
-- target-only 新实体 content target 已在 `pipeline/train_wm.py:251-271` 接通；不要重复旧 P1。
-- `select_checkpoint` NameError 是旧版本残留；当前 `p.error` 正确。
-- `od_anchor/od_taxonomy` 在 INPUT_KEYS；`od_age` 是死特征。
+OD
+LD
+Nav
+Ego
 
----
 
-## 13. 最终建议
+未来WM：
 
-**接受这份答复的主判断和大多数修正项；但先完成以下 3 件事再锁 arch_lock：**
+OD'
+LD'
 
-1. **修正 P1-2 的依赖图**：`world_model.py` 不依赖 `encoder.py`；`planner.py` 不依赖 `world_model.py`；`build_net.py` 依赖 encoder/model/planner/world_model。
-2. **P1-8 不能只改文档**：生产 duplicate stable ID 必须 fail-fast 或记录 diagnostic；否则 stable-ID 契约仍有静默例外。
-3. **P1-3/P1-4 要落到代码/config/test**：Phase 2b→2c 和 `policy_tol` 逻辑不能只写在 arch_lock。
 
-其余接受项按答复执行即可；两条反驳（`select_checkpoint`、`INPUT_KEYS`）成立，原 review 对应 finding 已撤回。
-修订完成后，arch_lock 才适合作为 pre-RL architecture contract。
+提供：
+
+imagined state
+
+
+问题：
+
+WM loss很好
+
+
+不等于：
+
+Policy还能决策
+
+
+因为：
+
+latent fidelity
+≠
+decision fidelity
+
+
+这是目前方案里最大的潜在炸点。
+
+我建议提前定义：
+
+Action Consistency
+
+
+指标。
+
+同一个真实状态：
+
+Real
+→ Policy
+→ a_real
+
+
+和：
+
+WM one-step
+→ Policy
+→ a_wm
+
+
+比较：
+
+KL
+MSE
+
+
+未来：
+
+WM上线条件
+
+
+不要写：
+
+latent mse
+
+
+而写：
+
+action consistency
+
+P4. 关于你想做GRPO
+
+我其实支持。
+
+但是有个前提。
+
+你现在：
+
+action
+=
+(dx,dy,dpsi,v_next)
+
+
+GRPO天然适合：
+
+一次采样G条
+
+
+例如：
+
+G=8
+
+
+然后：
+
+rollout
+
+
+比较：
+
+collision
+progress
+comfort
+
+
+但是这里有个问题。
+
+如果你现在：
+
+single-step action
+
+
+打分。
+
+GRPO意义不大。
+
+因为：
+
+轨迹质量
+
+
+通常需要：
+
+1~3s horizon
+
+
+才能看出来。
+
+所以你的GRPO应该长这样：
+
+Policy
+↓
+sample 8 trajectories
+↓
+rollout 3s
+↓
+group ranking
+↓
+GRPO
+
+
+而不是：
+
+sample 8 actions
+↓
+0.5s reward
+↓
+GRPO
+
+
+后者收益有限。
+
+P5. 关于RealBank
+
+这里我和你站一边。
+
+我不赞成：
+
+Bank:
+OD
+LD
+NAV
+EGO
+
+
+全塞进去。
+
+我更喜欢：
+
+Bank:
+OD
+LD
+
+
+然后：
+
+Nav
+Ego
+
+
+是条件输入。
+
+原因：
+
+WM
+
+
+学的是：
+
+世界变化
+
+
+而：
+
+Nav
+
+
+不是世界状态。
+
+是任务条件。
+
+否则：
+
+换个导航
+
+
+WM状态就变了。
+
+逻辑很怪。
+
+如果我是现在的Adversarial Reviewer
+
+我会给：
+
+✅ 通过
+History memory
+DAgger
+4D action
+GRPO方向
+OD/LD中心表示
+
+⚠️ 必须补
+Pure student success率
+Shield影响量化
+Action consistency gate
+Schema统一
+Trajectory consistency loss
+
+❌ 不建议现在做
+WM
+Dreamer
+Imagined RL
+复杂GRPO reward
+
+
+一句话总结：
+
+当前架构最大的风险已经不是表达能力，而是“你以为61%是学生学会了，但实际上可能有大量 expert/shield 成分”。在确认 pure-student 能稳定达到 50%+ 之前，我不会把主要资源投入 WM，而会先把评估口径、trajectory consistency 和 GRPO 基础打扎实。
+
+=====================================================
+我觉得你已经碰到自动驾驶 WM 最核心的问题了，而且这个问题实际上比：
+
+WM MSE
+WM rollout error
+
+
+更重要。
+
+你说的本质是：
+
+Policy 在真实ENV上训练
+
+WM 在拟合ENV
+
+二者永远不可能完全一致
+
+
+所以目标不应该是：
+
+WM = ENV
+
+
+而应该是：
+
+WM 对 Policy 来说是有用的
+
+
+这是两种完全不同的思路。
+
+1. 你说的其实是“Decision Fidelity”而不是“State Fidelity”
+
+很多项目死在这里：
+
+WM latent loss ↓↓↓
+
+Policy性能 ↓
+
+
+因为他们优化的是：
+
+State Fidelity
+
+
+例如：
+
+L_wm
+=
+MSE(z_hat,z_gt)
+
+
+但是自动驾驶真正需要的是：
+
+Decision Fidelity
+
+
+即：
+
+在同一个状态下
+
+WM给Policy的决策
+
+≈
+
+真实ENV给Policy的决策
+
+
+举例：
+
+真实世界：
+
+前车距离 12m
+
+
+WM：
+
+前车距离 11m
+
+
+MSE不小。
+
+但是：
+
+Policy
+
+都选择刹车
+
+
+那么：
+
+Decision Error ≈ 0
+
+
+反过来：
+
+真实世界：
+
+前车距离 10m
+
+
+WM：
+
+前车距离 10.2m
+
+
+MSE很小。
+
+但：
+
+真实 -> 刹车
+
+WM -> 加速
+
+
+那么：
+
+Decision Error 很大
+
+
+所以我越来越觉得：
+
+Policy Consistency
+
+
+应该是主指标之一。
+
+不是Probe。
+
+而是Loss。
+
+2. 我会怎么解决WM/Policy漂移
+
+我不建议：
+
+先训练WM
+
+训练完
+
+再接Policy
+
+
+因为一定漂。
+
+我的建议：
+
+Phase D1
+
+只训练：
+
+L_wm
+
+
+得到：
+
+one-step WM
+
+Phase D2
+
+冻结Policy。
+
+增加：
+
+L_consistency
+=
+KL(
+ Policy(z_real),
+ Policy(z_wm)
+)
+
+
+即：
+
+真实状态
+↓
+Policy
+↓
+a_real
+
+
+和：
+
+WM one-step
+↓
+Policy
+↓
+a_wm
+
+
+对齐。
+
+此时：
+
+WM
+
+
+必须学会：
+
+给Policy有意义的latent
+
+
+而不只是：
+
+MSE最小
+
+3. 为什么我觉得这个比Joint更稳
+
+很多人第一反应：
+
+Policy
++
+WM
+
+一起训练
+
+
+实际上容易变成：
+
+Policy适应WM错误
+
+WM适应Policy错误
+
+
+然后：
+
+一起漂
+
+
+非常像：
+
+GAN collapse
+
+
+所以我更喜欢：
+
+Step1
+
+固定Policy
+
+训练WM
+
+Step2
+
+对齐：
+
+Policy(z_real)
+
+≈
+
+Policy(z_wm)
+
+Step3
+
+最后再Joint。
+
+这样：
+
+Policy
+
+
+相当于：
+
+Teacher
+
+
+WM：
+
+Student
+
+4. 你现在其实有一个天然优势
+
+你和很多Dreamer项目不一样。
+
+因为：
+
+Policy
+
+
+不是从WM里长出来的。
+
+而是：
+
+IL
+↓
+DAgger
+↓
+GRPO
+
+
+在真实ENV里长出来的。
+
+这意味着：
+
+Policy
+
+
+是可信的。
+
+所以：
+
+Policy
+
+
+可以作为：
+
+WM的语义教师
+
+
+而不是：
+
+WM当教师
+Policy当学生
+
+
+这点非常重要。
+
+5. 我会把WM目标改成三层
+
+现在很多人只有：
+
+L_wm
+=
+latent mse
+
+
+我建议：
+
+Layer1
+L_transition
+
+
+普通：
+
+latent loss
+
+Layer2
+L_decision
+
+=
+KL(
+ Policy(z_real),
+ Policy(z_wm)
+)
+
+Layer3
+L_value
+
+=
+MSE(
+ Value(z_real),
+ Value(z_wm)
+)
+
+
+这样：
+
+WM必须同时保持：
+
+状态相似
+
+决策相似
+
+价值相似
+
+
+这比只追：
+
+latent mse
+
+
+靠谱得多。
+
+6. 你前面说 a_t rollout 6次得到3s trajectory
+
+这个我同意。
+
+所以我认为现在最大的好消息是：
+
+你的Policy
+
+本身已经是
+
+latent planner
+
+
+而不是：
+
+waypoint predictor
+
+
+因此：
+
+RealBank
+↓
+Policy
+↓
+a1..a6
+
+
+和：
+
+RealBank
+↓
+WM
+↓
+Policy
+↓
+a1..a6
+
+
+天然就能比较。
+
+所以未来我不会只比较：
+
+z_real
+
+vs
+
+z_wm
+
+
+我会比较：
+
+trajectory_real
+
+vs
+
+trajectory_wm
+
+
+甚至：
+
+GRPO reward_real
+
+vs
+
+GRPO reward_wm
+
+最后的结论
+
+你现在最值得关注的已经不是：
+
+WM怎么更准
+
+
+而是：
+
+WM怎么对Policy更有用
+
+
+我建议把未来的WM验收顺序改成：
+
+Latent Fidelity
+      ↓
+Action Consistency
+      ↓
+Value Consistency
+      ↓
+3s Trajectory Consistency
+      ↓
+Joint Training
+
+
+而不是：
+
+Latent Fidelity
+      ↓
+Joint Training
+
+
+因为对于你这种：
+
+IL
+→ DAgger
+→ GRPO
+→ WM
+
+
+路线，
+
+Policy 是老师，WM 是学生。
+
+只要坚持这个原则，WM/Policy 漂移问题会比 Dreamer 系列容易控制很多。

@@ -1,3 +1,7 @@
+> **Historical note (2026-11-07):** 本文件记录 exact execution / stable-ID contract 之前的
+> 规划与审阅状态。当前合同见 `docs/arch_lock.md`，当前 baseline 见
+> `docs/baseline_exact.md`；文中旧 checkpoint、all-zero fixture fallback、test 数字均已过期。
+>
 # arch_lock pre-RL review response
 
 > 2026-11-05 update: 当前合同不再使用 Phase 2b/2c 等阶段编号；下文相关段落是当时的审阅记录，实施状态见文末 §7。
