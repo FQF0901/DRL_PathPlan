@@ -1,7 +1,7 @@
 # PPO canary defaults.  Use --ckpt for a gate-compatible policy checkpoint.
 specs: data/specs/val_500.json
-ckpt: runs/bc_dagger_raw_r3_261101235342/best_closed_loop.pt
-out: runs/ppo_r3
+ckpt: runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt
+out: runs/ppo_r3_exact
 updates: 1
 episodes: 2
 max_steps: 200

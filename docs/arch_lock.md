@@ -1,9 +1,9 @@
 # Memory Bank + Temporal-Spatial Attention + Policy + Ego-Conditioned Latent WM
 
 > 状态：**owner-reviewed working contract — pre-RL baseline**
-> 日期：2026-11-03
+> 日期：2026-11-07
 > 范围：Real/Imagine Memory Bank、BankWindow、TemporalSpatialBlock、PolicyHead、OD/LD direct geometry decoder、Ego-conditioned latent WM、BC/DAgger 训练、固定 val500 闭环 gate、WM 独立训练/评测；RL 部分仍为提案。
-> 当前状态：旧 DAgger r3 是 **with safety fallback** 的历史 baseline（见 `docs/baseline_r3.md`）；exact 重跑完成后更新本引用。
+> 当前基线：exact DAgger r3，val500 success **66.4%** / collision **17.8%**（见 `docs/baseline_exact.md`）。旧 `docs/baseline_r3.md` 是 with safety fallback 的历史记录。
 > 明确不做：本文件不修改代码；不记录排模试错过程；RL 走通前不修改 §12 的 GRPO/RL 合同。
 > 原则：只把已经走通并接受的现状写成架构与设计细节；未走通的 RL 方案集中在 §12。
 
@@ -52,7 +52,7 @@
 
 ### 0.1 当前基线（BC/DAgger）
 
-当前 accepted baseline 是 **DAgger r3**。详细的 run recipe、数据量、val500 指标和失败分布放在 `docs/baseline_r3.md`；本节只保留架构相关事实。
+当前 accepted baseline 是 **exact DAgger r3**（`runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt`，epoch 15）。详细的 run recipe、数据量、val500 指标和失败分布放在 `docs/baseline_exact.md`；本节只保留架构相关事实。
 
 - canonical policy：raw Bank → TSB → ego/nav planner；不使用 projected history，不含 value/risk head。
 - WM 不在 policy 前向路径；WM 独立训练/评测，model-based RL 之前必须先通过 WM gate。
@@ -818,7 +818,7 @@ z_hat_{t+1} = z_hat_t + r_z,t
 
 ### 12.6 gate
 
-- IL/DAgger（policy）：固定 val500 闭环 success-first；100-scene subset 每 5 epoch，`best_closed_loop.pt` 由 lexicographic score 选择，最终必须跑完整 500。当前 accepted baseline 是 DAgger r3，具体数字见 `docs/baseline_r3.md`。
+- IL/DAgger（policy）：固定 val500 闭环 success-first；100-scene subset 每 5 epoch，`best_closed_loop.pt` 由 lexicographic score 选择，最终必须跑完整 500。当前 accepted baseline 是 exact DAgger r3，success 0.664 / collision 0.178，具体数字见 `docs/baseline_exact.md`。
 - canonical gate 是 `pipeline/train_bc.py::_closed_loop_score` 的 success-first lexicographic；`pipeline/select_checkpoint.py` 是可选的 stricter safety selector（先 collision/off-road 硬阈值），不是当前 r3 的选择路径。
 - WM（proposed gate，当前未实现）：one-step content/geometry 应优于 persistence / zero baseline；depth 1..6 误差曲线不能出现爆炸或 latent collapse；固定 val500 场景，不使用 test500。当前 `train_wm.py` 只按 val_loss 选 best，`probe_wm.py` 只输出均值，尚无 pass/fail gate。
 - GRPO（proposal / not implemented）：不出现 entropy collapse/saturation/reward hacking。

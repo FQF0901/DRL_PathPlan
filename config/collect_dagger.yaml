@@ -2,10 +2,10 @@
 # Run from the repository root with no arguments:
 #   python dataset/collect_dagger.py
 specs: data/specs/train_2000.json
-# Round 3 keeps the medium/hard focus and adds earlier near-collision takeover.
+# Defaults for the next medium/hard DAgger round (round 4).
 difficulties: [medium, hard]
-out: data/episodes/train_2000/il_dagger_raw_r3
-ckpt: runs/bc_dagger_raw_r2_safety_261101225359/best_closed_loop.pt
+out: data/episodes/train_2000/il_dagger_exact_r4
+ckpt: runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt
 limit: null
 offset: 0
 workers: 4
@@ -13,6 +13,6 @@ max_steps: 600
 expert_ratio: 0.65
 shield_ttc: 3.5
 stuck_shield_steps: 20
-round: 3
+round: 4
 seed: 0
 device: auto
