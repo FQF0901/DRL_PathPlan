@@ -128,6 +128,12 @@ def _write_fixture(root: Path) -> Path:
     arrays["scene_seed"] = np.array([100, 100, 100, 100, 101, 101, 102, 102], dtype=np.int64)
     arrays["episode_id"] = np.array([10, 10, 11, 11, 12, 12, 13, 13], dtype=np.int64)
     arrays["step"] = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int64)
+    for i, eid in enumerate(arrays["episode_id"]):
+        base = 1000 + 10 * int(eid)
+        arrays["od_ids"][i, :, 0] = base + 1
+        arrays["od_ids"][i, :, 1] = base + 2
+        arrays["ld_ids"][i, :, 0] = base + 3
+        arrays["ld_ids"][i, :, 1] = base + 4
     arrays["success"] = np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=np.int8)
     arrays["collision"] = np.array([0, 0, 0, 0, 1, 1, 0, 0], dtype=np.int8)
     arrays["off_road"] = np.array([0, 0, 0, 0, 0, 0, 1, 1], dtype=np.int8)
@@ -454,7 +460,6 @@ def test_closed_loop_score_is_lexicographic_success_first():
         "route_completion_mean": 1.0,
         "collision_rate": 0.0,
         "off_road_rate": 0.0,
-        "fallback_rate": 0.0,
         "infeasible_count_mean": 10.0,
     }
     bad = {
@@ -462,7 +467,6 @@ def test_closed_loop_score_is_lexicographic_success_first():
         "route_completion_mean": 0.1,
         "collision_rate": 0.0,
         "off_road_rate": 0.0,
-        "fallback_rate": 0.0,
         "infeasible_count_mean": 0.0,
     }
     assert _closed_loop_score(good) > _closed_loop_score(bad)

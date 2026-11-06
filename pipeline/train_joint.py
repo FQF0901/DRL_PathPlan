@@ -1,4 +1,4 @@
-"""Phase 2b joint policy + history-WM fine-tuning.
+"""Optional joint policy + history-WM fine-tuning.
 
 The encoder and target encoder stay frozen.  The shared TSB is unfrozen with a
 separate small learning rate; the policy head and WM/decoder are trained
@@ -356,7 +356,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "target_encoder": args.ckpt,
         "train_scene_seeds": sorted({int(x) for x in train_data["scene_seed"]}),
         "val_scene_seeds": sorted({int(x) for x in val_data["scene_seed"]}),
-        "joint_phase": "2b",
         "config_file": getattr(args, "config", None),
         "run_dir": str(out),
     }

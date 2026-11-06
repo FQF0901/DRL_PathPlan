@@ -126,6 +126,8 @@ def test_current_frame_shapes_finite_and_stable_ids(env_and_obs):
 
     od_valid_ids = obs["od_ids"][obs["od_mask"] > 0.5]
     ld_valid_ids = obs["ld_ids"][obs["ld_mask"].any(axis=1)]
+    assert np.all(od_valid_ids != 0)
+    assert np.all(ld_valid_ids != 0)
     assert len(set(od_valid_ids.tolist())) == len(od_valid_ids)
     assert len(set(ld_valid_ids.tolist())) == len(ld_valid_ids)
 
@@ -182,3 +184,21 @@ def test_physics_dt_follows_metadrive_config():
         engine = None
 
     assert abs(_physics_dt(Broken()) - 0.1) < 1e-12
+
+
+def test_validate_stable_ids_rejects_zero_and_duplicates():
+    from env.obs import validate_stable_ids
+    import pytest
+
+    with pytest.raises(ValueError, match="stable_id=0"):
+        validate_stable_ids(
+            np.array([0, 2], dtype=np.int64),
+            np.array([True, True]),
+            field="od",
+        )
+    with pytest.raises(ValueError, match="duplicate stable_id"):
+        validate_stable_ids(
+            np.array([2, 2], dtype=np.int64),
+            np.array([True, True]),
+            field="ld",
+        )

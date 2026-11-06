@@ -1,11 +1,13 @@
-# Optional Phase 2b joint policy + WM fine-tune defaults.
+# Optional joint policy + WM fine-tune defaults.
+# The r3 policy checkpoint contains an untrained WM module; replace it with a
+# trained bank-native WM checkpoint before a real joint run.
 data:
   - data/episodes/train_2000/il_expert_raw
 val_data:
   - data/episodes/val_500/expert_raw
 val_split: data/splits/val_500.json
-ckpt: runs/wm_2k/best_drive.pt
-out: runs/joint_2k
+ckpt: runs/bc_dagger_raw_r3_261101235342/best_closed_loop.pt
+out: runs/joint_r3
 epochs: 1
 batch_size: 128
 max_pairs: 60000

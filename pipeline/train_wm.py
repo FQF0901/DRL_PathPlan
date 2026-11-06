@@ -139,59 +139,61 @@ def _build_pairs(data: Dict[str, np.ndarray], max_pairs: int) -> Tuple[np.ndarra
     return np.asarray([p[0] for p in pairs], np.int64), np.asarray([p[1] for p in pairs], np.int64)
 
 
-def _slot_align(cur, cur_mask, tgt, tgt_mask) -> Tuple[np.ndarray, np.ndarray]:
-    out = np.zeros_like(cur, dtype=np.float32)
-    mask = np.zeros_like(cur_mask, dtype=np.float32)
-    for j in range(cur.shape[0]):
-        if cur_mask[j] > 0.5 and tgt_mask[j] > 0.5:
-            out[j] = tgt[j]
-            mask[j] = 1.0
-    return out, mask
+def _usable_current_ids(cur_ids, cur_mask) -> list[int]:
+    """Return validated current-frame stable IDs for target alignment.
+
+    Valid zero IDs and duplicate IDs are contract violations; there is no
+    all-zero/slot fallback in the canonical path.
+    """
+    valid = np.asarray(cur_mask, dtype=np.float32) > 0.5
+    ids = [int(x) for x in np.asarray(cur_ids)[valid]]
+    if any(x == 0 for x in ids):
+        raise ValueError("valid stable_id=0; refusing slot alignment")
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate stable IDs; refusing slot alignment")
+    return sorted(set(ids))
+
+
+def _target_hit(ident: int, tgt_ids, tgt_mask) -> int:
+    """Return the unique valid target slot for ``ident``; fail on duplicates."""
+    hits = np.flatnonzero(
+        (np.asarray(tgt_ids) == int(ident))
+        & (np.asarray(tgt_mask, dtype=np.float32) > 0.5)
+    )
+    if hits.size > 1:
+        raise ValueError(
+            f"duplicate target stable ID {int(ident)} ({hits.size} valid slots)"
+        )
+    return int(hits[0]) if hits.size == 1 else -1
 
 
 def _align_by_id(cur, cur_ids, cur_mask, tgt, tgt_ids, tgt_mask) -> Tuple[np.ndarray, np.ndarray]:
-    valid_cur = cur_mask > 0.5
-    valid_tgt = tgt_mask > 0.5
-    usable = sorted({int(x) for x in cur_ids[valid_cur]}) if valid_cur.any() else []
-    # Legacy/synthetic data often has 0 for every slot.  Slot alignment is the
-    # only meaningful fallback there; do not map all entities to target[0].
-    if not usable or set(usable) == {0}:
-        return _slot_align(cur, cur_mask, tgt, tgt_mask)
+    usable = _usable_current_ids(cur_ids, cur_mask)
     out = np.zeros_like(cur, dtype=np.float32)
     mask = np.zeros_like(cur_mask, dtype=np.float32)
     for j in range(cur.shape[0]):
         if cur_mask[j] <= 0.5:
             continue
         ident = int(cur_ids[j])
-        hit = np.flatnonzero(tgt_ids == ident)
-        if hit.size == 0 or tgt_mask[int(hit[0])] <= 0.5:
+        hit = _target_hit(ident, tgt_ids, tgt_mask)
+        if hit < 0:
             continue
-        out[j] = tgt[int(hit[0])]
+        out[j] = tgt[hit]
         mask[j] = 1.0
     return out, mask
 
 
 def _align_geometry_by_id(cur_ids, cur_mask, tgt, tgt_ids, tgt_mask) -> Tuple[np.ndarray, np.ndarray]:
-    valid_cur = cur_mask > 0.5
-    valid_tgt = tgt_mask > 0.5
-    usable = sorted({int(x) for x in cur_ids[valid_cur]}) if valid_cur.any() else []
-    if not usable or set(usable) == {0}:
-        out = np.zeros_like(tgt, dtype=np.float32)
-        mask = np.zeros_like(cur_mask, dtype=np.float32)
-        for j in range(len(cur_ids)):
-            if cur_mask[j] > 0.5 and tgt_mask[j] > 0.5:
-                out[j] = tgt[j]
-                mask[j] = 1.0
-        return out, mask
+    _usable_current_ids(cur_ids, cur_mask)
     out = np.zeros_like(tgt, dtype=np.float32)
     mask = np.zeros_like(cur_mask, dtype=np.float32)
     for j in range(len(cur_ids)):
         if cur_mask[j] <= 0.5:
             continue
-        hit = np.flatnonzero(tgt_ids == int(cur_ids[j]))
-        if hit.size == 0 or tgt_mask[int(hit[0])] <= 0.5:
+        hit = _target_hit(int(cur_ids[j]), tgt_ids, tgt_mask)
+        if hit < 0:
             continue
-        out[j] = tgt[int(hit[0])]
+        out[j] = tgt[hit]
         mask[j] = 1.0
     return out, mask
 

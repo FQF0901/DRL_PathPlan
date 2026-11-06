@@ -62,3 +62,22 @@ def test_train_wm_and_probe_smoke(tmp_path):
     metrics = json.loads((probe_out / "metrics.json").read_text())
     assert "held_out_split" in metrics
     assert metrics["depths"][0]["depth"] == 1
+
+
+def test_wm_alignment_rejects_zero_and_target_duplicates():
+    import numpy as np
+    import pytest
+    from pipeline.train_wm import _align_by_id, _usable_current_ids
+
+    with pytest.raises(ValueError, match="stable_id=0"):
+        _usable_current_ids(np.array([0, 2]), np.array([1.0, 1.0]))
+    with pytest.raises(ValueError, match="duplicate stable"):
+        _usable_current_ids(np.array([2, 2]), np.array([1.0, 1.0]))
+
+    cur = np.zeros((1, 4), dtype=np.float32)
+    tgt = np.zeros((2, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="duplicate target stable ID"):
+        _align_by_id(
+            cur, np.array([2]), np.array([1.0]),
+            tgt, np.array([2, 2]), np.array([1.0, 1.0]),
+        )

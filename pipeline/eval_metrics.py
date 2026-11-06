@@ -14,13 +14,13 @@ import numpy as np
 
 BOOL_KEYS = (
     "success", "collision", "off_road", "wrong_route", "stuck",
-    "timeout", "comfort_violation", "feasible", "fallback",
+    "timeout", "comfort_violation", "feasible",
 )
 FLOAT_KEYS = (
     "route_completion", "tracking_error_xy", "tracking_error_heading",
     "tracking_error_speed", "steer_saturation", "throttle_saturation",
     "max_curvature", "max_lateral_accel", "max_jerk",
-    "infeasible_count", "fallback_count", "postprocess_count",
+    "infeasible_count",
 )
 
 

@@ -89,19 +89,16 @@ def test_masked_mse_ignores_nan_in_masked_slots():
     assert float(masked_mse(pred, target, mask)) == pytest.approx(1.0)
 
 
-def test_align_by_id_zero_ids_falls_back_to_slots():
+def test_align_by_id_zero_ids_fail_fast():
     from pipeline.train_wm import _align_by_id, _align_geometry_by_id
     cur = np.arange(8, dtype=np.float32).reshape(2, 4)
     tgt = cur + 10
     ids = np.zeros(2, dtype=np.int64)
     mask = np.ones(2, dtype=np.float32)
-    out, om = _align_by_id(cur, ids, mask, tgt, ids, mask)
-    assert np.allclose(out, tgt)
-    assert om.tolist() == [1.0, 1.0]
-    geom = np.arange(8, dtype=np.float32).reshape(2, 4)
-    gout, gm = _align_geometry_by_id(ids, mask, geom, ids, mask)
-    assert np.allclose(gout, geom)
-    assert gm.tolist() == [1.0, 1.0]
+    with pytest.raises(ValueError, match="stable_id=0"):
+        _align_by_id(cur, ids, mask, tgt, ids, mask)
+    with pytest.raises(ValueError, match="stable_id=0"):
+        _align_geometry_by_id(ids, mask, cur, ids, mask)
 
 
 def test_align_by_id_single_nonzero_id_uses_id_not_slot():

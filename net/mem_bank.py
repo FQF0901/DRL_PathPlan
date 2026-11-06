@@ -364,6 +364,11 @@ class BankWindowBuilder:
             for rec in getattr(frames[-1], field):
                 if not rec.valid:
                     continue
+                if int(rec.stable_id) == 0:
+                    raise ValueError(
+                        f"valid {field} stable_id=0 in current frame "
+                        f"(episode={frames[-1].episode_id}, frame={frames[-1].frame_id})"
+                    )
                 if not (0 <= rec.slot < (self.od_slots if field == "od" else self.ld_slots)):
                     raise ValueError(f"{field} slot {rec.slot} out of range")
                 if rec.stable_id in out:
@@ -389,6 +394,11 @@ class BankWindowBuilder:
                     raise ValueError(f"duplicate {field} slot {rec.slot} in frame")
                 if rec.valid:
                     used_slots.add(rec.slot)
+                    if int(rec.stable_id) == 0:
+                        raise ValueError(
+                            f"valid {field} stable_id=0 in frame "
+                            f"(episode={frame.episode_id}, frame={frame.frame_id})"
+                        )
                     if rec.stable_id in out:
                         raise ValueError(f"duplicate stable_id {rec.stable_id} in {field} frame")
                     out[int(rec.stable_id)] = rec

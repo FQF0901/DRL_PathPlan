@@ -3,7 +3,7 @@
 > 状态：**owner-reviewed working contract — pre-RL baseline**
 > 日期：2026-11-03
 > 范围：Real/Imagine Memory Bank、BankWindow、TemporalSpatialBlock、PolicyHead、OD/LD direct geometry decoder、Ego-conditioned latent WM、BC/DAgger 训练、固定 val500 闭环 gate、WM 独立训练/评测；RL 部分仍为提案。
-> 当前基线：DAgger r3，val500 success **61.0%**，collision **18.0%**。
+> 当前状态：旧 DAgger r3 是 **with safety fallback** 的历史 baseline（见 `docs/baseline_r3.md`）；exact 重跑完成后更新本引用。
 > 明确不做：本文件不修改代码；不记录排模试错过程；RL 走通前不修改 §12 的 GRPO/RL 合同。
 > 原则：只把已经走通并接受的现状写成架构与设计细节；未走通的 RL 方案集中在 §12。
 
@@ -48,102 +48,16 @@
 11. 没有独立 risk head，也没有 value head；Plan/aux；collision/offroad/timeout 进 aux。
 12. 当前 scope 是当前可见目标、固定 top-16、短时 rollout；不考虑短时遮挡，只保留 `valid`。
 13. Rollout 是 **6 个 policy / 6 个 action / 6 个 imagined transition**；t6 是 terminal state。
-14. Action 当前 exact tracking：`requested_action == executed_action`；LQR 引入后才允许区分。
+14. 所有 canonical 路径（BC/DAgger、collection、eval、PPO）exact tracking：`requested_action == executed_action`；不做 `v_next` projection、safe-brake、clip 或额外平滑。非有限/不可执行动作直接终止或报错。LQR 是后续阶段，才允许 requested/executed 分离。
 
-### 0.1 当前已走通的基线（BC/DAgger）
+### 0.1 当前基线（BC/DAgger）
 
-当前 canonical policy 是 raw Bank 原生路径，不含 projected history、不含 value/risk head：
+当前 accepted baseline 是 **DAgger r3**。详细的 run recipe、数据量、val500 指标和失败分布放在 `docs/baseline_r3.md`；本节只保留架构相关事实。
 
-```text
-raw observation
-  → online encoder
-  → RealMemoryBank / BankWindow（6 帧、16 OD + 16 LD slot）
-  → TemporalSpatialBlock
-  → ego/nav query planner
-  → 4D truncated-Normal action
-```
-
-当前模型：
-
-```text
-DriveModel parameters: 1,270,748
-action: normalized [0,1]^4, TruncatedNormal
-history: raw per-frame pose, history_mode=1
-bank: 6 frames, 16 OD slots, 16 LD slots
-```
-
-当前 policy 训练配方（默认）：
-
-```text
-sequence_batch: true
-scenes_per_batch: 256
-clip_length: 100
-tbptt_chunk: 8
-epochs: 20
-lr: 0.001
-val_data: data/episodes/val_500/expert_raw
-selection: closed-loop subset every 5 epochs → full val500 final
-```
-
-当前 r3 baseline 的 fine-tune overrides：
-
-```text
-init: runs/bc_dagger_raw_r2_safety_261101225359/best_closed_loop.pt
-epochs: 15
-lr: 5e-4
-near_weight: 1.5
-w_shield: 4.0
-data mix: IL 20k + previous DAgger 25k + latest DAgger all
-```
-
-DAgger 采集与训练：
-
-```text
-IL expert: data/episodes/train_2000/il_expert_raw
-DAgger r3: data/episodes/train_2000/il_dagger_raw_r3
-student: runs/bc_dagger_raw_r2_safety_261101225359/best_closed_loop.pt
-focus: medium + hard, 1268 scenes
-expert_ratio: 0.65
-shield_ttc: 3.5
-stuck_shield_steps: 20
-mixed training: IL + previous DAgger subset + latest DAgger
-```
-
-当前最佳 checkpoint 与 gate：
-
-```text
-runs/bc_dagger_raw_r3_261101235342/best_closed_loop.pt  (epoch 10)
-
-val500:
-  success             0.610
-  collision           0.180
-  off_road            0.112
-  route_completion    0.832
-  feasible            0.856
-  fallback            0.094
-  timeout             0.106
-  stuck               0.086
-```
-
-相对上一版 DAgger r1 baseline（success 0.512 / collision 0.176）：
-
-```text
-success   +9.8 pt
-collision +0.4 pt
-off-road  -8.0 pt
-timeout   -1.6 pt
-stuck     -1.0 pt
-```
-
-当前剩余失败集中区：
-
-```text
-easy    success 0.839, collision 0.056, off-road 0.111
-medium  success 0.568, collision 0.165, off-road 0.199
-hard    success 0.375, collision 0.354, timeout 0.264, stuck 0.243
-```
-
-WM 状态：bank-native 训练/评测链路已实现（`pipeline/train_wm.py`、`pipeline/probe_wm.py`），但当前 policy 前向路径**不依赖 WM rollout**；模型型 RL 之前必须先完成 WM 的训练与 gate。
+- canonical policy：raw Bank → TSB → ego/nav planner；不使用 projected history，不含 value/risk head。
+- WM 不在 policy 前向路径；WM 独立训练/评测，model-based RL 之前必须先通过 WM gate。
+- canonical closed-loop gate：每 5 epoch 跑 100-scene subset，最终跑完整 val500；score 为 success-first lexicographic。
+- `test500` 不参与调参；raw `history_mode=1` 不回退。
 
 ---
 
@@ -153,7 +67,7 @@ WM 状态：bank-native 训练/评测链路已实现（`pipeline/train_wm.py`、
 
 - `ego frame`：当前时刻自车坐标系；
 - `t0 frame`：rollout 起点的自车坐标系；
-- `world frame`：只用于诊断/可视化，不作为网络输入。
+- `world frame`：world pose 不直接作为网络输入；只用于计算 frame-level `delta_pose` 和诊断/可视化。
 
 每个 `FrameRecord` 保存该帧 `ego_pose`。
 **当前版本不对历史 geometry 做投影。** TSB 使用 `ego_pose` 计算：
@@ -191,7 +105,7 @@ rollout_depth
   IMAGINED = 1..6
 ```
 
-用途：区分真实/想象、控制 horizon、loss 加权、误差诊断、禁止 imagined 回写 RealBank。
+用途：区分真实/想象、控制 FIFO/advance horizon（<=6）、禁止 imagined 回写 RealBank。当前没有 loss 加权或误差诊断。
 
 ---
 
@@ -205,7 +119,6 @@ FrameRecord
   frame_id: int
   timestamp: float
   ego_pose: [3]            # x,y,yaw in world/t0-consistent frame
-  ego_velocity: [2]        # optional, diagnostic
   source: REAL | IMAGINED
   rollout_depth: int       # real=0, imagined=1..6
   parent_frame_id: int     # -1 for real
@@ -239,6 +152,8 @@ EntityRecord
 | `rollout_depth` | 0 或 1..6 | 写入方 |
 | `type_id` | OD/LD 类型 | t0 继承；不做未来预测 |
 
+`od_anchor` 与 `od_taxonomy` 是 encoder 输入，不是 audit；`od_age` 当前恒为 0，是 dead feature；`ld_taxonomy` 当前没有真实数据，`_type` fallback 到 road type。
+
 **只保留 `valid`。** 没有 `present` / `alive`。
 `valid=1`：当前帧选中或 imagined 记录有效；`valid=0`：padding、丢弃、无效 slot。
 
@@ -269,6 +184,8 @@ temporal_valid[t, n] = valid[t, n]
 ```
 
 slot 复用时清空旧 content/geometry/type，写入新 stable_id，旧历史 temporal mask=0。
+
+valid OD/LD stable ID 必须非零且同帧唯一；违反时生成端和所有使用端都 fail-fast。skipping/padding slot 才允许 ID=0。生产路径不存在 slot-ID fallback。
 
 ---
 
@@ -330,7 +247,7 @@ future real observation
 ```
 
 - target encoder 与 online encoder 同结构、不同实例；
-- Phase 0/1/2a/2b/2c 当前 frozen copy；未来 online encoder 参与训练时再评估 EMA；
+- 当前 WM/joint 训练使用 frozen copy；未来 online encoder 参与训练时再评估 EMA；
 - `z*` 只进入 WM loss，不进入 RealBank/policy；
 - OD/LD 都有 content target；
 - target encoder 不做 geometry projection。
@@ -433,7 +350,7 @@ h_t = TSB(BankWindow_t, ego_t)
 ```
 
 - `h_t` 是 TSB 的 per-entity context，不写入 Bank；
-- Bank 只保存 raw `z_hat`、geometry、pose、valid、stable_id；
+- Bank 保存 raw `z_hat`、geometry、type、pose、valid、stable_id、source、rollout_depth、frame_valid；
 - WM 的 residual base 是 Bank 当前 `z_hat_t`，不是 `h_t`；
 - Ego/Nav 不写入 Bank。
 
@@ -462,10 +379,17 @@ nav_hidden                 # 当前 nav 编码
 ### 6.2 结构
 
 ```text
-query = MLP([ego_hidden, nav_hidden])
+query = Linear(2*hidden, hidden)([ego_hidden, nav_hidden])
 K/V = [z_od, z_ld]（带 valid mask）
-policy_context = CrossAttention(query, K/V)
-action_mu, action_logstd, aux = heads(policy_context)
+attn = CrossAttention(query, K/V)
+attn = norm(attn + query)
+attn = attn + FFN(attn)
+od_pool = masked_mean(z_od)
+ld_pool = masked_mean(z_ld)
+policy_context = MLP([attn, ego_hidden, nav_hidden, od_pool, ld_pool])
+action_mu = sigmoid(Linear(policy_context))
+action_logstd = clamp(Linear(policy_context), -5, 0)
+aux = aux_head(policy_context)
 ```
 
 - policy head 用 ego/nav **query OD/LD**；
@@ -544,7 +468,7 @@ g_hat_ld,t = Dec_ld(z_hat_ld,t) -> [x0,y0,...,x4,y4] # 当前 ego frame
 - OD 输出 5D，LD 输出 10D；
 - **不预测 type**；type 从 t0 继承；
 - 新实体也直接监督 geometry，不依赖历史 base；
-- valid mask 来自当前帧。
+- geometry 使用 geometry target mask；current valid 只用于区分当前实体与 target-only 新实体。
 
 ### 7.5 target 和 loss
 
@@ -561,26 +485,26 @@ L_ld_geo     = L1(Dec_ld(z_hat_ld), g_ld_target)
 - OD/LD 都有 content target；
 - OD/LD 都有 direct geometry target；
 - geometry target 在当前 query ego frame；
-- mask 用 `valid`；
+- content 使用 content target mask；geometry 使用 geometry target mask；
 - `z*` 只进入 loss；
 - future map 只在 target/oracle，不进入 encoder/decoder 输入；
 - 不预测 type；
-- 新 OD/LD 没有历史 base 也可以监督。
+- 新 OD/LD 没有历史 base 也可以监督：新实体填入当前帧 free slot；
+- 16 slot 全满时，新实体不再监督。
 
 ### 7.6 target encoder 阶段
 
 ```text
-Phase 0/1: frozen copy of online encoder
-Phase 2a/2b: 当前不启用 EMA；保持 frozen target
-Phase 2c: 保持 frozen target
-Phase 3: 继续 frozen target，不跟随 GRPO policy 更新
+当前 WM / joint 训练: frozen copy of online encoder
+当前不启用 EMA: 保持 frozen target
+GRPO: 继续 frozen target，不跟随 policy 更新
 ```
 
 - `z*` stop-grad；
 - target encoder 同结构、不同实例；
 - OD/LD 都走 target encoder；
 - 当前 WM 训练时 online encoder/TSB 都冻结，因此 target 与 online encoder 不漂移；
-- 记录 target drift / latent norm / decoder 误差。
+- TODO：target drift / latent norm / decoder 误差监控当前尚未实现。
 - 只有未来 online encoder 参与训练时才重新评估 EMA。
 
 ---
@@ -624,7 +548,7 @@ a0..a5                 6 个 action
 t1..t6                 6 个 imagined transition
 t6                     terminal state；没有 policy_6
 rollout_depth          1..6
-ego_pose               t0..t6，共 7 个
+ego_pose               概念 t0..t6；Bank 只保留 t1..t6 六帧；API 不暴露 7-pose 轨迹
 actions                [B,6,4]，全部使用
 nav/ego policy inputs  6 个（t0..t5）
 ```
@@ -633,6 +557,7 @@ nav/ego policy inputs  6 个（t0..t5）
 - `a0` 来自 t0 policy；
 - `a5` 产生 t6 terminal state；
 - ImagineBank FIFO 保留最后 6 帧；
+- `imagine_rollout` 返回 6 个 policy dict，不返回 7 个 pose；
 - 不把 imagined 回写 RealBank。
 
 ### 8.3 对外输出
@@ -652,22 +577,18 @@ model-level rollout 只在 `net/world_model.py` / `net/model.py`，不另设 rol
 ```text
 policy_action     [0,1]^4 normalized（mean 或 sample）
 requested_action  physical (dx,dy,dpsi,v_next)
-executed_action   env 实际执行；当前 exact tracking，等于 requested_action
+executed_action   env 实际执行
 ```
 
-当前阶段：
+BC/DAgger policy 训练路径：
 
 ```text
 requested_action == executed_action
 ```
 
-只有引入 LQR 后，两者才允许不同。
-
-**Eval/PPO safety fallback 例外**：eval 和 PPO rollout 在 requested action
-PSTL-infeasible 时允许显式的 `v_next` projection 或 safe-brake；必须同时记录
-`requested_action` / `executed_action`、fallback code，并对 PPO 样本 mask 或
-重算 executed log-prob。该例外只属于安全执行层，不是 policy 的 exact-tracking
-训练目标。
+canonical collection/eval/PPO 都执行 net 的 requested action；PSTL
+feasibility/comfort 只作为诊断，不改写动作。非有限或无法构造轨迹的动作直接
+终止 episode 或报错，不使用 safe-brake。
 
 ### 9.2 action bounds / limits
 
@@ -678,8 +599,8 @@ PSTL-infeasible 时允许显式的 `v_next` projection 或 safe-brake；必须�
   - 静态诊断；
 - 不再持有第二套 canonical `CLEAN_BOUNDS`；
 - `denormalize` 不做隐式 clip；
-- policy 训练路径不启用 state-dependent fallback；
-- eval/PPO 安全执行层的 fallback 例外见 §9.1；必须记录 requested/executed 并 mask RL 样本或重算 executed log-prob。
+- canonical collection/eval/PPO 不启用 state-dependent fallback；
+- `feasible`/`comfort` 只作诊断；不改变动作、不 mask finite infeasible action。
 
 ### 9.3 ego 更新
 
@@ -767,7 +688,7 @@ RealBank.snapshot()
 - 不能把 `z*` 写进 RealBank；
 - 不能用 online encoder 代替 target encoder；
 - 不能让 imagined 记录回写 RealBank；
-- 不能用 slot 直接当 stable identity；
+- 不能用 slot 直接当 stable identity；valid stable ID 必须非零且同帧唯一，违反 fail-fast；
 - 不能把 nav 放进 TSB；
 - 不能对 TSB/decoder 做 entity geometry projection；
 - 本版本只使用 `valid`。
@@ -779,8 +700,7 @@ RealBank.snapshot()
 已经走通、不再作为未决项的决策：
 
 1. **Policy cross-attention**
-   - `query = MLP([ego_hidden, nav_hidden])`；
-   - 对当前 OD/LD 做单层 cross-attention；
+   - 结构见 §6.2：linear query + cross-attention + residual/FFN + pooled OD/LD context；
    - 全 invalid 时只保留数值 anchor，不改变语义；
    - policy hidden 不进入 WM。
 
@@ -797,10 +717,10 @@ RealBank.snapshot()
    - `geometry_weight` 默认 0.1；
    - 不再有 LD base projection。
 
-4. **Action fallback**
-   - policy 训练路径 exact tracking；
-   - eval/PPO 安全执行层允许 `v_next` projection / safe-brake；
-   - fallback 样本必须记录 requested/executed，并在 RL loss 中 mask 或重算 log-prob。
+4. **Action execution**
+   - 所有 canonical 路径 exact tracking；
+   - 不保留 `v_next` projection / safe-brake / postprocess；
+   - 非有限或不可执行动作终止 episode 或报错。
 
 RL 前仍需完成：
 
@@ -818,37 +738,37 @@ LQR 的 executed/requested 分离仍属于 RL 之后的事项，不在当前 bas
 
 - policy 与 WM 分开训练；当前 BC/DAgger 训练**不包含** WM loss。
 - policy 训练更新 encoder/TSB/planner；WM 训练冻结 encoder/TSB/target，只训练 WM/decoder。
-- WM 训练固定使用 `data/splits/val_500.json` 对应的 held-out val 场景。
+- WM 训练固定使用 `data/splits/val_500.json` 对应的 held-out val 场景；`--allow-random-val` 是 legacy debug 开关（默认 false），不进入 gate。
 - WM 始终用真实下一帧 observation 的 target encoder 输出；target 不进入 Bank/policy。
 - action condition 训练用 `executed_action`；rollout 用 `policy_action`。
 - one-step 先于 multi-step；6-step plan 不等于执行 6 步。
 - 当前 policy baseline 不读取 WM rollout；WM 只能通过显式 `imagine`/`rollout` 接口进入后续 RL。
 - detach 边界显式，见 §12.5。
 
-### 12.2 阶段
+### 12.2 训练目标（不使用阶段编号）
 
 ```text
-Phase 0: IL expert BC（policy only）
-Phase 1: DAgger rounds（policy only）
-Phase 2a: bank-native WM one-step（encoder/TSB/target frozen）
-Phase 2b: WM horizon probe 1→2→3→6
-Phase 2c: 可选 joint fine-tune（policy + WM；TSB 小学习率，encoder/target 冻结）
-Phase 3: GRPO
-Phase 4: LQR / receding horizon
+IL expert BC                 # policy only
+DAgger rounds                # policy only
+bank-native WM one-step      # encoder/TSB/target frozen
+WM horizon probe 1→2→3→6    # evaluation, no policy update
+joint policy + WM fine-tune  # optional; TSB small lr, encoder/target frozen
+GRPO                         # proposal / not implemented
+LQR / receding horizon       # eval-only / not baseline
 ```
 
-- Phase 0/1 只训练 policy/BC：encoder、TSB、planner；不使用 WM loss，也不要求 WM checkpoint。
-- Phase 2a/2b 只训练 WM/decoder：encoder、TSB、target encoder 全部冻结；policy 不更新。
-- Phase 2c 是**可选**阶段，不是当前 baseline：
+- IL/DAgger 只训练 policy：encoder、TSB、planner；不使用 WM loss，也不要求 WM checkpoint。
+- WM one-step 与 horizon probe 只训练/评估 WM/decoder：encoder、TSB、target encoder 全部冻结；policy 不更新。
+- joint policy + WM fine-tune 是**可选**目标，不是当前 baseline：
   - 只有在 policy 和 WM 分别收敛、val500 稳定后才允许；
   - encoder/target encoder 仍冻结；
   - TSB 解冻，但使用独立的小学习率（例如 base lr 的 0.01–0.05）和单独 param group；
   - policy head 与 WM 的 loss 同时开启，必须记录各自梯度范数和 validation；
-  - 若 policy success 或 WM 指标退化，回滚到 Phase 1/2 checkpoint；
-  - test500 仍然不可参与该阶段调参。
-- 当前 accepted baseline 是 Phase 0/1 的 DAgger r3；WM 尚未进入 policy 前向路径。
+  - 当前实现按 `val_policy` 相对初始值退化不超过 `policy_tol`，且 `val_wm` 改善来接受 checkpoint；没有 closed-loop success 回滚。若 owner 需要 success gate，必须先实现 closed-loop validation。
+  - test500 仍然不可参与该目标调参。
+- 当前 accepted baseline 是 DAgger r3；WM 尚未进入 policy 前向路径。
 
-### 12.3 Policy loss（Phase 0/1）
+### 12.3 Policy loss（BC/DAgger）
 
 ```text
 L_policy = NLL(action_mu, action_logstd; a_expert)
@@ -877,7 +797,8 @@ z_hat_{t+1} = z_hat_t + r_z,t
 - target encoder 同时提供 OD/LD content target；单帧、不接 history、stop-grad。
 - decoder 对 `z_hat_{t+1}` 保留梯度；`z_hat_t`、`h_t`、action、target 默认 detach/no-grad。
 - `pipeline/train_wm.py` 负责 one-step；`pipeline/probe_wm.py` 负责 depth 1..6 自回归评测。
-- probe 使用真实 action 序列隔离 WM transition error；报告 content MSE vs persistence、geometry L1 vs zero baseline。
+- probe 使用真实 action 序列，隔离 **action 输入**误差；ego/pose/TSB 仍按 imagine 递推，不隔离它们的误差。
+- probe 报告 `initial_frame` 和 `previous_step` 两种 persistence；geometry 报告 L1 vs zero baseline。
 - offline probe 用 `BankWindow.advance`；policy-conditioned `ImagineBank` rollout 只在 `imagine`/`rollout` 路径使用，depth 最大 6。
 - WM gate 通过前，GRPO 不使用 model-based imagination。
 
@@ -897,13 +818,23 @@ z_hat_{t+1} = z_hat_t + r_z,t
 
 ### 12.6 gate
 
-- Phase 0/1（policy）：固定 val500 闭环 success-first；100-scene subset 每 5 epoch，`best_closed_loop.pt` 由 lexicographic score 选择，最终必须跑完整 500。当前 accepted baseline：r3，success 0.610 / collision 0.180。
-- Phase 2（WM）：one-step content/geometry 必须优于 persistence / zero baseline；depth 1..6 误差曲线不能出现爆炸或 latent collapse；固定 val500 场景，不使用 test500。
-- Phase 3：GRPO 不出现 entropy collapse/saturation/reward hacking。
-- Phase 4：LQR 只执行第一段时闭环稳定。
+- IL/DAgger（policy）：固定 val500 闭环 success-first；100-scene subset 每 5 epoch，`best_closed_loop.pt` 由 lexicographic score 选择，最终必须跑完整 500。当前 accepted baseline 是 DAgger r3，具体数字见 `docs/baseline_r3.md`。
+- canonical gate 是 `pipeline/train_bc.py::_closed_loop_score` 的 success-first lexicographic；`pipeline/select_checkpoint.py` 是可选的 stricter safety selector（先 collision/off-road 硬阈值），不是当前 r3 的选择路径。
+- WM（proposed gate，当前未实现）：one-step content/geometry 应优于 persistence / zero baseline；depth 1..6 误差曲线不能出现爆炸或 latent collapse；固定 val500 场景，不使用 test500。当前 `train_wm.py` 只按 val_loss 选 best，`probe_wm.py` 只输出均值，尚无 pass/fail gate。
+- GRPO（proposal / not implemented）：不出现 entropy collapse/saturation/reward hacking。
+- LQR（eval-only / not baseline）：只执行第一段时闭环稳定。
 
-`persistence` 在 latent 空间指 `z_hat_t = z_hat_{t-1}`；geometry 仍由 decoder 输出。
-不存在 geometry base/residual persistence。
+WM recurrence 是 `z_hat_{t+1} = z_hat_t + r_z,t`。persistence baseline 是 `r_z,t = 0`，即 `z_hat_{t+1} = z_hat_t`。
+
+```text
+initial_frame:  用 z_t0 作为每个 depth 的 baseline
+previous_step:  用 z_hat_t（下一个 residual 之前的状态）作为 depth d 的 baseline
+```
+
+当前 probe 同时报告两者；geometry 仍由 decoder 输出。
+
+geometry 仍由 decoder 输出；不存在 geometry base/residual persistence。
+target drift / latent norm / latent collapse 目前是 TODO，不是已实现指标。
 
 ---
 
@@ -914,9 +845,9 @@ config/
   model.yaml              # 网络结构、Bank、rollout、action bounds/limits
   env.yaml
   train_bc.yaml
-  train_wm.yaml           # WM training defaults
-  train_joint.yaml        # optional Phase 2c defaults
-  train_ppo.yaml          # PPO canary defaults
+  train_wm.yaml           # WM defaults; ckpt=r3 policy checkpoint
+  train_joint.yaml        # optional joint defaults; r3 ckpt has untrained WM, replace for real run
+  train_ppo.yaml          # PPO canary defaults; ckpt=r3 policy checkpoint
   eval_thresholds.yaml
 
 net/
@@ -928,9 +859,17 @@ net/
   build_net.py            # config -> model
 
 env/
+  obs.py                  # observation schema / raw_history / ego build
+  tracking.py             # Exact/LQR tracking and execution adapter
   action/
     __init__.py
     action_space.py       # normalize/denormalize + PSTL + 静态诊断；无 canonical bounds
+
+dataset/
+  collect.py              # expert IL collection
+  collect_dagger.py       # DAgger collection
+  splits.py               # scene-level split helpers
+  freeze_splits.py        # specs/split manifest generation
 
 pipeline/
   losses.py               # 纯 loss 函数
@@ -940,11 +879,11 @@ pipeline/
   checkpointing.py        # checkpoint load/save + strict load
   train_wm.py             # bank-native one-step WM；encoder/TSB frozen
   probe_wm.py             # depth 1..6 autoregressive WM probe
-  train_joint.py          # optional Phase 2c policy+WM fine-tune
+  train_joint.py          # optional joint policy+WM fine-tune
   train_ppo.py            # PPO canary；GRPO 尚未实现
   eval.py                 # closed-loop eval
   eval_metrics.py         # closed-loop summary rows
-  select_checkpoint.py    # checkpoint selection helper
+  select_checkpoint.py    # optional stricter safety selector
   live_bank.py            # online RealBank / FIFO runner
   execution.py            # action segment / relative action helpers
   distributions.py        # TruncatedNormal
@@ -958,14 +897,15 @@ pipeline/
 | `encoder.py` | online encoder、frozen target encoder | Bank 状态、rollout |
 | `world_model.py` | TSB、WM、direct OD/LD decoders、模型级 rollout | env step、训练循环、loss |
 | `planner.py` | policy cross-attention、Plan/aux | Bank、WM、risk/value head |
-| `model.py` | 顶层组合、forward、调用 rollout | YAML 解析、训练、env |
+| `model.py` | 顶层组合、forward、rollout、raw-history adapter、FIFO-safe alignment | YAML 解析、训练、env |
 | `build_net.py` | 读 YAML、实例化、维度校验 | per-episode Bank、训练 |
 | `env/action/action_space.py` | normalize/denormalize、PSTL、静态诊断 | 网络、checkpoint、Bank |
 | `pipeline/losses.py` | 纯 policy/WM loss | target encoder、数据加载 |
-| `pipeline/train_bc.py` | BC/DAgger、raw Bank 序列、closed-loop selection | WM loss、env step |
+| `pipeline/train_bc.py` | BC/DAgger、raw Bank 序列、closed-loop validation 调度 | 训练数据采集、WM loss |
 | `pipeline/train_wm.py` | one-step WM 训练、frozen encoder/TSB | policy 更新、closed-loop |
-| `pipeline/probe_wm.py` | depth 1..6 自回归评测、persistence/zero 对照 | policy 训练、env step |
+| `pipeline/probe_wm.py` | depth 1..6 自回归评测、initial/previous persistence、zero 对照 | policy 训练、env step |
 | `pipeline/train_ppo.py` | PPO contract canary | GRPO、WM 训练 |
+| `pipeline/select_checkpoint.py` | optional hard collision/off-road safety selector | canonical train_bc selection |
 | `pipeline/live_bank.py` | online BankWindow / FIFO | 网络结构、训练 |
 
 依赖方向：
@@ -975,17 +915,26 @@ mem_bank.py
   ↑
 encoder.py
   ↑
+model.py
+  ↑
+build_net.py
+
+mem_bank.py
+  ↑
 world_model.py
   ↑
-planner.py
-
 model.py
-build_net.py
+
+planner.py
+  ↑
+model.py
 ```
 
 - `mem_bank.py` 不 import encoder/world_model/planner/model；
-- `world_model.py` 不 import planner/model/build_net；
-- `model.py` 只做编排；
+- `world_model.py` 只依赖 `mem_bank.py`，不依赖 `encoder.py` / `planner.py` / `model.py`；
+- `planner.py` 不依赖 `world_model.py`；
+- `model.py` 组合 encoder / mem_bank / planner / world_model；
+- `build_net.py` 依赖 `encoder.py`、`model.py`、`planner.py`、`world_model.py`；
 - `env/action/action_space.py` 不被 mem_bank/world_model 反向依赖；
 - `pipeline/losses.py` 不 import model.py。
 
@@ -1011,4 +960,8 @@ build_net.py
 
 ## 14. 一句话版本
 
-> Real/Imagine Bank 只存 OD/LD；固定 16 slot、stable ID、valid mask；`z` 是 frame-dependent full-state latent；TSB 用同 stable-ID 历史 + `delta_pose` 做 temporal，用 OD/LD + ego 做 spatial（不含 nav、不做 geometry projection）；TSB 的 per-entity `h_t` 同时服务 policy 和 WM；policy 用 ego/nav query TSB，policy head hidden 不进入 WM；WM 用 `h_t + action` 预测 latent residual `r_z`，`z_hat_{t+1}=z_hat_t+r_z`，并用单帧 frozen target 监督 OD/LD（当前不启用 EMA）；OD/LD geometry 由 direct absolute decoder 输出；6 个 policy / 6 个 action / 6 个 transition；Plan/aux，无 risk head、无 value head；当前 action exact tracking，LQR 后才区分 requested/executed。当前 BC/DAgger baseline 为 raw Bank + TSB + planner，DAgger r3 val500 success 61.0% / collision 18.0%；WM 独立训练/评测，不在 policy 前向路径。
+> Real/Imagine Bank 只存 OD/LD；固定 16 slot、stable ID、valid mask；valid stable ID 非零且同帧唯一；`z` 是 frame-dependent full-state latent；TSB 用同 stable-ID 历史 + `delta_pose` 做 temporal，用 OD/LD + ego 做 spatial（不含 nav、不做 geometry projection）；TSB 的 per-entity `h_t` 同时服务 policy 和 WM；policy 用 ego/nav query TSB，policy head hidden 不进入 WM；WM 用 `h_t + action` 预测 latent residual `r_z`，`z_hat_{t+1}=z_hat_t+r_z`，并用单帧 frozen target 监督 OD/LD（当前不启用 EMA）；OD/LD geometry 由 direct absolute decoder 输出；6 个 policy / 6 个 action / 6 个 transition；Plan/aux，无 risk head、无 value head；所有 canonical 路径 exact tracking，requested == executed，不做 projection/safe-brake/clip；WM 独立训练/评测，不在 policy 前向路径。
+
+### 14.1 Scene-level split
+
+Train/validation/test leakage is forbidden by **scene seed**, not by episode id. The same scene can be re-collected as multiple BC/DAgger episodes; splitting by episode can put copies of one scene on both sides. `dataset/splits.py` is the single implementation of this rule, and fixed val500/test500 manifests are verified before evaluation.

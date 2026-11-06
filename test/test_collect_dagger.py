@@ -1,7 +1,7 @@
 """Contract tests for the schema-v2 DAgger collector.
 
 The synthetic tests do not build MetaDrive.  They exercise the pure schema,
-mode-selection, label-composition, audit and fallback helpers; the end-to-end
+mode-selection, label-composition and audit helpers; the end-to-end
 1-scene smoke is run from the shell with ``tools/venv-python``.
 """
 
@@ -25,8 +25,6 @@ DAGGER_ROW_KEYS = {
     "expert_action",
     "intervened",
     "shield",
-    "student_feasible",
-    "fallback",
     "round",
     "student_success",
     "student_failure",
@@ -292,37 +290,6 @@ def test_audit_fields_mark_privileged_flags_and_source():
         11, {"pp_target_lane": "lane", "pp_anchor_lane": "lane"}, source=1
     )
     assert int(same["expert_lane_change_decision"]) == 0
-
-
-def test_fallback_projects_v1_or_brakes_but_never_executes_infeasible():
-    # Requested action is within CLEAN_BOUNDS but PSTL-infeasible (v_next outside
-    # the hard-feasible interval); projection keeps the geometry.
-    v0 = 5.0
-    requested = np.array([2.0, 0.0, 0.0, 12.0])
-    assert not dagger._trajectory(requested, v0).feasible
-    executed, traj, name = dagger._resolve_student_action(requested, v0)
-    assert name == "v1_projection"
-    assert traj is not None and traj.feasible
-    assert np.all(np.isfinite(executed))
-    assert executed[3] < requested[3]
-    np.testing.assert_allclose(executed[:3], requested[:3])
-
-    # Zero-length path with speed cannot be repaired by v_next projection.
-    requested = np.array([0.0, 0.0, 0.0, 8.0])
-    v0 = 8.0
-    assert not dagger._trajectory(requested, v0).feasible
-    executed, traj, name = dagger._resolve_student_action(requested, v0)
-    assert name == "safe_brake"
-    assert traj is not None and traj.feasible
-    assert executed[3] == pytest.approx(v0 - 6.0 * dagger.DECISION_DT)
-
-    # A feasible student action is executed unchanged.
-    requested = np.array([3.0, 0.0, 0.0, 6.0])
-    v0 = 6.0
-    assert dagger._trajectory(requested, v0).feasible
-    executed, _traj, name = dagger._resolve_student_action(requested, v0)
-    assert name == "none"
-    np.testing.assert_allclose(executed, requested)
 
 
 def test_backfill_outcomes_keeps_label_validity_separate():

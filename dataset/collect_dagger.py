@@ -195,8 +195,6 @@ ROW_DTYPES: Dict[str, Any] = {
     "n_substeps": np.int16,
     "intervened": np.int8,
     "shield": np.int8,
-    "student_feasible": np.int8,
-    "fallback": np.int8,
     "round": np.int32,
     "step": np.int64,
     "episode_id": np.int64,
@@ -225,17 +223,6 @@ TERMINATION_IDS = {
     "terminal": 4,
     "invalid_action": 5,
 }
-
-#: ``fallback`` column codes (the student action was not executed as-is).
-FALLBACK_IDS = {
-    "none": 0,
-    "v1_projection": 1,
-    "safe_brake": 2,
-    "nonfinite_safe_brake": 3,
-    "safe_brake_infeasible": 4,
-    "not_evaluated": -1,
-}
-
 
 def _wrap(a: float) -> float:
     return float((a + math.pi) % (2.0 * math.pi) - math.pi)
@@ -300,14 +287,6 @@ def _lift_action(
 # ---------------------------------------------------------------------------
 # Action / label helpers
 # ---------------------------------------------------------------------------
-def safe_brake_action(v0: float) -> np.ndarray:
-    """Explicit safe-brake action: decelerate at 6 m/s^2, no lateral motion."""
-    v0 = max(float(v0), 0.0)
-    v1 = max(0.0, v0 - 6.0 * DECISION_DT)
-    dx = (v0 + v1) * DECISION_DT / 2.0
-    return np.array([dx, 0.0, 0.0, v1], dtype=np.float64)
-
-
 def _trajectory(
     action: Sequence[float], v0: float, *,
     bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
@@ -328,50 +307,6 @@ def _trajectory_or_none(action: Sequence[float], v0: float, **kwargs):
         return _trajectory(action, v0, **kwargs)
     except (TypeError, ValueError):
         return None
-
-
-def _resolve_student_action(
-    action: Sequence[float], v0: float, *,
-    bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
-) -> Tuple[np.ndarray, Any, str]:
-    """Return ``(executed_action, trajectory, fallback_name)``.
-
-    The student action is never silently executed when its PSTL trajectory is
-    infeasible.  The fallback order is: keep geometry and project ``v_next`` to
-    the hard-feasible interval, then an explicit safe brake.
-    """
-    requested = np.asarray(action, dtype=np.float64).reshape(-1)
-    if requested.shape != (ACTION_DIM,) or not np.all(np.isfinite(requested)):
-        brake = safe_brake_action(v0)
-        return brake, _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits), "nonfinite_safe_brake"
-
-    traj = _trajectory_or_none(requested, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-    if traj is not None and traj.feasible:
-        return requested, traj, "none"
-
-    try:
-        interval = feasible_v1_interval(
-            requested,
-            v0,
-            dt=DECISION_DT,
-            bounds=bounds,
-            limits=limits,
-        )
-    except (TypeError, ValueError):
-        interval = None
-    if interval is not None and interval.nonempty:
-        candidate = requested.copy()
-        candidate[3] = float(np.clip(candidate[3], interval.low, interval.high))
-        candidate = np.asarray(bounds.clip(candidate), dtype=np.float64)
-        candidate_traj = _trajectory_or_none(candidate, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-        if candidate_traj is not None and candidate_traj.feasible:
-            return candidate, candidate_traj, "v1_projection"
-
-    brake = safe_brake_action(v0)
-    brake_traj = _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-    if brake_traj is not None and brake_traj.feasible:
-        return brake, brake_traj, "safe_brake"
-    return brake, brake_traj, "safe_brake_infeasible"
 
 
 def _select_mode(
@@ -796,7 +731,7 @@ def run_episode(
     rc = 0.0
     low_speed_run = 0
     stuck_run = False
-    replay_rows = lift_rows = shield_rows = fallback_rows = 0
+    replay_rows = lift_rows = shield_rows = 0
 
     while ep_step < max_steps:
         obs = build_observation(
@@ -853,7 +788,6 @@ def run_episode(
 
         n_substeps = 0
         segment_rc_start = rc
-        fallback_name = "not_evaluated"
         executed_action = lift.astype(np.float64)
         replay_action: Optional[np.ndarray] = None
 
@@ -899,15 +833,13 @@ def run_episode(
             )
             replay_rows += 1
         else:
-            resolved_action, traj_exec, fallback_name = _resolve_student_action(
-                student_action, v0,
-                bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort,
-            )
-            executed_action = np.asarray(resolved_action, dtype=np.float64)
-            if fallback_name != "none":
-                fallback_rows += 1
-            if traj_exec is None:
-                # The safe brake can only be unavailable for a non-finite state.
+            executed_action = np.asarray(student_action, dtype=np.float64)
+            try:
+                traj_exec = _trajectory(
+                    student_action, v0,
+                    bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort,
+                )
+            except (TypeError, ValueError):
                 done = True
                 termination = "invalid_action"
             else:
@@ -961,9 +893,6 @@ def run_episode(
             action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort,
         )
         audit = _audit_fields(scene_seed, action_info, source=1)
-        student_feasible = FALLBACK_IDS["not_evaluated"]
-        if not replay:
-            student_feasible = 1 if fallback_name == "none" else 0
 
         row: Dict[str, Any] = {key: hist[key] for key in HISTORY_KEYS}
         row["history_mode"] = np.float32(1.0)
@@ -994,8 +923,6 @@ def run_episode(
                 "n_substeps": np.int16(label["n_substeps"]),
                 "intervened": np.int8(1 if replay else 0),
                 "shield": np.int8(1 if shield else 0),
-                "student_feasible": np.int8(student_feasible),
-                "fallback": np.int8(FALLBACK_IDS[fallback_name]),
                 "round": np.int32(round_id),
                 "step": np.int64(len(rows)),
                 "episode_id": np.int64(0),  # filled by the caller
@@ -1057,7 +984,6 @@ def run_episode(
         "replay_rows": int(replay_rows),
         "lift_rows": int(lift_rows),
         "shield_rows": int(shield_rows),
-        "fallback_rows": int(fallback_rows),
         "label_valid_rows": int(np.sum(data["label_valid"])),
     }
     return data, info
@@ -1228,7 +1154,6 @@ def _dagger_summary(merged: Dict[str, np.ndarray]) -> Dict[str, Any]:
     replay_mask = merged["label_source"] > 0.5
     shield_mask = merged["shield"] > 0.5
     intervened_mask = merged["intervened"] > 0.5
-    fallback = merged["fallback"]
     replay_rows = int(np.count_nonzero(replay_mask))
     shield_rows = int(np.count_nonzero(shield_mask))
     intervened_rows = int(np.count_nonzero(intervened_mask))
@@ -1244,27 +1169,6 @@ def _dagger_summary(merged: Dict[str, np.ndarray]) -> Dict[str, Any]:
         ),
         "intervened_rows": intervened_rows,
         "intervention_rate": float(intervened_rows / n) if n else 0.0,
-        "fallback_rows": int(
-            np.count_nonzero(np.isin(fallback, (1, 2, 3, 4)))
-        ),
-        "v1_projection_rows": int(
-            np.count_nonzero(fallback == FALLBACK_IDS["v1_projection"])
-        ),
-        "safe_brake_rows": int(
-            np.count_nonzero(fallback == FALLBACK_IDS["safe_brake"])
-        ),
-        "nonfinite_safe_brake_rows": int(
-            np.count_nonzero(fallback == FALLBACK_IDS["nonfinite_safe_brake"])
-        ),
-        "student_feasible_rows": int(
-            np.count_nonzero(merged["student_feasible"] == 1)
-        ),
-        "student_infeasible_rows": int(
-            np.count_nonzero(merged["student_feasible"] == 0)
-        ),
-        "student_feasible_not_evaluated_rows": int(
-            np.count_nonzero(merged["student_feasible"] < 0)
-        ),
         "label_valid_rows": int(np.count_nonzero(merged["label_valid"] > 0.5)),
         "partial_label_rows": int(np.count_nonzero(merged["label_valid"] == 0)),
         "source_counts": {
@@ -1327,7 +1231,6 @@ def _episode_audit(
         "replay_rows": int(info.get("replay_rows", 0)),
         "lift_rows": int(info.get("lift_rows", 0)),
         "shield_rows": int(info.get("shield_rows", 0)),
-        "fallback_rows": int(info.get("fallback_rows", 0)),
         "label_valid_rows": int(info.get("label_valid_rows", 0)),
         "lane_change_rows": int(
             np.count_nonzero(shard["expert_lane_change_decision"])
@@ -1679,7 +1582,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         f"episodes={len(shards)} failed={len(failed_indices)} "
         f"replay={dagger['replay_rows']} lift={dagger['lift_rows']} "
         f"intervention={dagger['intervention_rate']:.4f} "
-        f"fallback={dagger['fallback_rows']} "
         f"valid={dagger['label_valid_rows']}"
     )
     print(f"[collect_dagger] meta {meta_path}")

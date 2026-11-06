@@ -229,9 +229,8 @@ class DriveModel(nn.Module):
             raise ValueError("history expects od [B,T,16,18]")
         b, t = int(od.shape[0]), int(od.shape[1])
         batch = dict(batch)
-        # Legacy synthetic/history fixtures often use 0 for every ID.  The
-        # Bank requires stable identity uniqueness within a frame; fall back to
-        # slot IDs only for rows that have duplicate IDs.
+        # Bank identity is stable_id, not slot.  Valid zero IDs and duplicate
+        # IDs are contract violations; never substitute slot storage silently.
         for key, mask_key, n in (
             ("od_ids", "od_mask", int(od.shape[2])),
             ("ld_ids", "ld_mask", int(batch["ld"].shape[2])),
@@ -242,18 +241,21 @@ class DriveModel(nn.Module):
                 continue
             if ids.dim() != 3 or ids.shape[0] != b or ids.shape[-1] != n:
                 continue
-            cleaned = ids.clone()
             for bi in range(b):
                 for ti in range(t):
                     m = mask[bi, ti]
                     if m.dim() > 1:
                         m = m.any(dim=-1)
                     valid = m > 0.5
-                    row = cleaned[bi, ti]
-                    vals = row[valid]
-                    if int(valid.sum()) > 1 and len(set(int(x) for x in vals.tolist())) < int(valid.sum()):
-                        cleaned[bi, ti] = torch.arange(n, dtype=ids.dtype, device=ids.device)
-            batch[key] = cleaned
+                    vals = ids[bi, ti][valid]
+                    if bool((vals == 0).any()):
+                        raise ValueError(
+                            f"valid stable_id=0 in history frame {bi}/{ti} ({key})"
+                        )
+                    if vals.numel() > 1 and vals.unique().numel() < vals.numel():
+                        raise ValueError(
+                            f"duplicate stable IDs in history frame {bi}/{ti} ({key})"
+                        )
         pose = batch.get("ego_pose", batch.get("pose"))
         if pose is None:
             raise ValueError("raw history requires ego_pose/pose")
@@ -358,16 +360,20 @@ class DriveModel(nn.Module):
 
     @staticmethod
     def _sanitize_ids(ids: Tensor, mask: Tensor) -> Tensor:
-        """Vectorized equivalent of the duplicate-ID fallback.
+        """Validate valid stable IDs and mask invalid slots to -1.
 
-        A frame with duplicate valid stable IDs is replaced by slot IDs, just
-        like the record-path loop in ``build_history_window``.
+        Valid IDs must be non-zero and unique within each frame.  There is no
+        all-zero/slot-ID fallback in the canonical path; test fixtures must use
+        explicit non-zero synthetic IDs.
         """
         valid = mask
         if valid.dim() == 4:
             valid = valid.any(dim=-1)
         valid = valid.bool()
-        ids = torch.where(valid, ids.long(), torch.full_like(ids.long(), -1))
+        raw = ids.long()
+        if bool(((raw == 0) & valid).any()):
+            raise ValueError("valid stable_id=0; refusing slot-ID fallback")
+        ids = torch.where(valid, raw, torch.full_like(raw, -1))
         sentinel = torch.full_like(ids, -(2**62))
         ordered, order = torch.where(valid, ids, sentinel).sort(dim=-1)
         ordered_valid = valid.gather(-1, order)
@@ -376,12 +382,9 @@ class DriveModel(nn.Module):
             & ordered_valid[..., 1:]
             & ordered_valid[..., :-1]
         )
-        bad = duplicate.any(dim=-1)[..., None]
-        if ids.dim() == 2:
-            slots = torch.arange(ids.shape[-1], dtype=ids.dtype, device=ids.device).view(1, -1)
-        else:
-            slots = torch.arange(ids.shape[-1], dtype=ids.dtype, device=ids.device).view(1, 1, -1)
-        return torch.where(bad, slots, ids)
+        if bool(duplicate.any()):
+            raise ValueError("duplicate stable IDs; refusing slot-ID fallback")
+        return ids
 
     @staticmethod
     def _align_history(

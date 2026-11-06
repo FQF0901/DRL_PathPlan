@@ -338,7 +338,7 @@ OD_STATE_NORM = 3.0
 # ---------------------------------------------------------------------------
 
 def _stable_hash(scene_seed: int, *parts: Any) -> int:
-    """Return a deterministic signed int64 BLAKE2b hash."""
+    """Return a deterministic non-zero signed int64 BLAKE2b hash."""
     digest = hashlib.blake2b(digest_size=8, person=b"drlppv2")
     digest.update(struct.pack("<q", int(scene_seed)))
     for part in parts:
@@ -352,7 +352,59 @@ def _stable_hash(scene_seed: int, *parts: Any) -> int:
             digest.update(f"{part:.6f}".encode("ascii"))
         else:
             digest.update(str(part).encode("utf-8"))
-    return int.from_bytes(digest.digest(), "little", signed=True)
+    value = int.from_bytes(digest.digest(), "little", signed=True)
+    # 0 is the padding/invalid-slot ID.  A 1/2^64 hash collision must not turn
+    # into a silent identity contract violation.
+    return 1 if value == 0 else value
+
+
+def validate_stable_ids(
+    ids: Any,
+    valid: Any,
+    *,
+    field: str,
+    context: str = "",
+) -> None:
+    """Fail fast on valid zero IDs or duplicate IDs within one frame.
+
+    ``ids``/``valid`` may be ``[S]`` or ``[..., S]``.  Leading dimensions are
+    flattened so each frame is checked independently.  Invalid/padding slots
+    are allowed to carry ID ``0``.
+    """
+    ids_arr = np.asarray(ids, dtype=np.int64)
+    valid_arr = np.asarray(valid, dtype=bool)
+    if ids_arr.shape != valid_arr.shape:
+        raise ValueError(
+            f"{field}: ids/valid shape mismatch {ids_arr.shape} vs {valid_arr.shape}"
+        )
+    if ids_arr.ndim == 0:
+        raise ValueError(f"{field}: stable IDs must be an array")
+    slots = int(ids_arr.shape[-1])
+    ids_mat = ids_arr.reshape(-1, slots)
+    valid_mat = valid_arr.reshape(-1, slots)
+    zero = (ids_mat == 0) & valid_mat
+    if bool(zero.any()):
+        row, slot = np.argwhere(zero)[0]
+        raise ValueError(
+            f"{field}: valid stable_id=0 at frame={int(row)} slot={int(slot)}"
+            + (f" ({context})" if context else "")
+        )
+    sentinel = np.iinfo(np.int64).min
+    order = np.argsort(np.where(valid_mat, ids_mat, sentinel), axis=-1)
+    sorted_ids = np.take_along_axis(ids_mat, order, axis=-1)
+    sorted_valid = np.take_along_axis(valid_mat, order, axis=-1)
+    duplicate = (
+        (sorted_ids[:, 1:] == sorted_ids[:, :-1])
+        & sorted_valid[:, 1:]
+        & sorted_valid[:, :-1]
+    )
+    if bool(duplicate.any()):
+        row, pos = np.argwhere(duplicate)[0]
+        ident = int(sorted_ids[row, pos])
+        raise ValueError(
+            f"{field}: duplicate stable_id={ident} in frame={int(row)}"
+            + (f" ({context})" if context else "")
+        )
 
 
 def _scene_seed(env: Any) -> int:
@@ -783,7 +835,7 @@ def _build_od(env: Any, ego: Any, scene_seed: int, dt: float) -> Dict[str, np.nd
             float(state) / OD_STATE_NORM,
         ], dtype=np.float32)
         od_mask[i] = 1.0
-        od_ids[i] = _stable_hash(scene_seed, "od", _obj_stable_key(obj))
+        od_ids[i] = _stable_id
         od_anchor[i] = np.array([rel[0], rel[1], rel_h], dtype=np.float32)
         od_taxonomy[i] = np.array([semantic, mobility, geometry, state], dtype=np.int64)
     return {
@@ -1095,6 +1147,14 @@ def build_observation(
     pose = np.asarray(ego_pose(env), dtype=np.float64)
 
     timestamp, step = _scene_timestamp(env, dt)
+    validate_stable_ids(
+        od["od_ids"], od["od_mask"] > 0.5,
+        field="od", context=f"scene_seed={scene_seed} step={step}",
+    )
+    validate_stable_ids(
+        ld["ld_ids"], ld["ld_mask"].any(axis=1) > 0.5,
+        field="ld", context=f"scene_seed={scene_seed} step={step}",
+    )
     out: Dict[str, Any] = {
         "od": _finite_float(od["od"]),
         "od_mask": _finite_float(od["od_mask"]),

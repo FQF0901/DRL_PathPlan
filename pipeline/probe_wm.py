@@ -132,20 +132,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             "seed": split_seed,
             "scene_seeds": heldout_seeds,
         },
+        "persistence_definitions": {
+            "initial_frame": "z_t0 for every depth",
+            "previous_step": "z_hat_t before the next residual, i.e. r_z=0 in z_hat_{t+1}=z_hat_t+r_z,t",
+            "geometry_zero": "zero decoder output",
+        },
         "depths": [],
     }
     with torch.no_grad():
         for depth in range(1, int(args.horizon) + 1):
             parts = {"od_content": [], "ld_content": [], "od_geometry": [], "ld_geometry": []}
-            persistence = {"od_content": [], "ld_content": [], "od_geometry_zero": [], "ld_geometry_zero": []}
+            persistence = {
+                "od_content_initial_frame": [],
+                "ld_content_initial_frame": [],
+                "od_content_previous_step": [],
+                "ld_content_previous_step": [],
+                "od_geometry_zero": [],
+                "ld_geometry_zero": [],
+            }
             for n, seq in enumerate(seqs):
                 # Initial real 6-frame window, encoded by the frozen TSB.
                 first_batch = _history_batch(data, np.asarray([seq[0]], dtype=np.int64), args.device)
                 window, last_enc = drive.build_history_window_fast(first_batch)
-                base_od = window.od_content[:, -1].clone()
-                base_ld = window.ld_content[:, -1].clone()
-                z_od = base_od
-                z_ld = base_ld
+                initial_od = window.od_content[:, -1].clone()
+                initial_ld = window.ld_content[:, -1].clone()
+                z_od = initial_od
+                z_ld = initial_ld
                 ego_hidden = last_enc["ego"]
                 ego_features = torch.from_numpy(
                     np.asarray(data["ego"][seq[0], -1], dtype=np.float32)
@@ -155,6 +167,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ).to(args.device).unsqueeze(0)
                 h = drive.temporal_spatial(window, ego_hidden, ego_valid=last_enc.get("ego_valid"))
                 for t in range(depth):
+                    previous_od = z_od
+                    previous_ld = z_ld
                     a = torch.from_numpy(action_norm[seq[t]]).to(args.device).unsqueeze(0)
                     step = wm(
                         h["od"],
@@ -255,12 +269,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     z_ld, torch.from_numpy(tgt_ld).to(args.device).unsqueeze(0),
                     torch.from_numpy(tm_ld).to(args.device).unsqueeze(0),
                 )))
-                persistence["od_content"].append(float(masked_mse(
-                    base_od, torch.from_numpy(tgt_od).to(args.device).unsqueeze(0),
+                persistence["od_content_initial_frame"].append(float(masked_mse(
+                    initial_od, torch.from_numpy(tgt_od).to(args.device).unsqueeze(0),
                     torch.from_numpy(tm_od).to(args.device).unsqueeze(0),
                 )))
-                persistence["ld_content"].append(float(masked_mse(
-                    base_ld, torch.from_numpy(tgt_ld).to(args.device).unsqueeze(0),
+                persistence["ld_content_initial_frame"].append(float(masked_mse(
+                    initial_ld, torch.from_numpy(tgt_ld).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tm_ld).to(args.device).unsqueeze(0),
+                )))
+                persistence["od_content_previous_step"].append(float(masked_mse(
+                    previous_od, torch.from_numpy(tgt_od).to(args.device).unsqueeze(0),
+                    torch.from_numpy(tm_od).to(args.device).unsqueeze(0),
+                )))
+                persistence["ld_content_previous_step"].append(float(masked_mse(
+                    previous_ld, torch.from_numpy(tgt_ld).to(args.device).unsqueeze(0),
                     torch.from_numpy(tm_ld).to(args.device).unsqueeze(0),
                 )))
             result["depths"].append({

@@ -3,7 +3,7 @@
 These tests are CPU-only, simulator-free and use tiny synthetic transitions.
 They check the probability-action contract, stored-log-prob recomputation,
 per-episode GAE / max-step bootstrapping, buffer fields, reward/cost
-separation, fallback masking and a one-update smoke.
+separation, exact execution and a one-update smoke.
 """
 
 from __future__ import annotations
@@ -35,7 +35,9 @@ def _state() -> dict:
     hist = _empty_history()
     hist["hist_valid"][:] = 1.0
     hist["od_mask"][:, 0] = 1.0
+    hist["od_ids"][:, 0] = 1
     hist["ld_mask"][:, 0, 0] = 1.0
+    hist["ld_ids"][:, 0] = 2
     hist["nav_mask"][:] = 1.0
     hist["ego_mask"][:] = 1.0
     return ppo._batch_from_history(hist, device="cpu")
@@ -56,9 +58,6 @@ def _make_transition(
     truncated: bool = False,
     episode_id: int = 0,
     t: int = 0,
-    fallback: int = 0,
-    fallback_name: str = "none",
-    masked: bool = False,
     bootstrap_value: float = 0.0,
     bootstrap_cost_value: float = 0.0,
 ) -> dict:
@@ -82,7 +81,7 @@ def _make_transition(
         if old_cost_value is None:
             old_cost_value = 0.0
 
-    executed = CLEAN_BOUNDS.denormalize(sampled_norm[0].numpy(), clip=True)
+    executed = CLEAN_BOUNDS.denormalize(sampled_norm[0].numpy(), clip=False)
     if cost_vector is None:
         cost_vector = [float(cost), 0.0, 0.0, 0.0, 0.0, 0.0]
     return {
@@ -105,9 +104,7 @@ def _make_transition(
         "truncated": bool(truncated),
         "episode_id": int(episode_id),
         "t": int(t),
-        "fallback": int(fallback),
-        "fallback_name": str(fallback_name),
-        "masked": bool(masked),
+        "feasible": True,
         "codes": (),
         "requested_codes": (),
         "executed_codes": (),
@@ -153,19 +150,20 @@ def test_stored_logp_recomputes_at_old_params():
     assert float((newlogp - batch["old_logp"]).abs().max()) < 1e-5
 
 
-def test_infeasible_sample_is_masked_and_not_rewritten():
+def test_infeasible_sample_is_executed_faithfully():
     # dx=0 with v0=14 and v_next=15 is a zero-length path with speed: the
-    # requested action is hard-infeasible, so the explicit safe brake executes.
+    # requested action is hard-infeasible, but Plan A executes it exactly.
     sampled = np.array([0.0, 0.5, 0.5, 1.0], dtype=np.float64)
     resolved = ppo.resolve_action(sampled, v0=14.0)
 
-    assert resolved["masked"] is True
-    assert resolved["fallback_name"] != "none"
+    assert resolved["feasible"] is False
+    assert resolved["invalid"] is False
     assert resolved["requested_action"][3] == pytest.approx(15.0)
     assert "ZERO_LENGTH_WITH_SPEED" in resolved["requested_codes"]
-    assert not np.allclose(
+    np.testing.assert_allclose(
         resolved["requested_action"], resolved["executed_action"]
     )
+    assert resolved["trajectory"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +196,6 @@ def test_buffer_has_required_transition_fields():
         "truncated",
         "episode_id",
         "t",
-        "fallback",
-        "masked",
         "codes",
         "valid",
         "policy_valid",
@@ -320,9 +316,6 @@ def test_contract_summary_exposes_required_metrics():
         "n_episodes",
         "transitions",
         "boundary_rate",
-        "postprocess_rate",
-        "mask_rate",
-        "fallback_rate",
         "truncation_bootstrap_count",
         "reward",
         "cost",
@@ -385,7 +378,6 @@ def test_one_update_cpu_smoke():
 
     assert record["transitions"] == 4
     assert record["policy_valid_transitions"] == 4
-    assert record["masked_transitions"] == 0
     assert record["truncation_bootstrap_count"] == 1
     assert record["logprob_recompute_max_abs_diff"] < 1e-5
     assert abs(record["ratio_at_old_mean"] - 1.0) < 1e-5

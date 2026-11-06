@@ -1,4 +1,4 @@
-"""Smoke test for the optional Phase 2b joint trainer."""
+"""Smoke test for the optional joint policy+WM trainer."""
 
 from __future__ import annotations
 

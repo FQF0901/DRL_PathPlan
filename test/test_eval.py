@@ -35,10 +35,10 @@ CLEAN_BOUNDS = _C.bounds
 from pipeline.eval import (
     HARD_LIMITS,
     _batch_from_history,
+    _resolve_exact_execution,
     _trajectory,
     load_model,
     run_episode,
-    safe_brake_action,
 )
 from pipeline.eval_metrics import summarize_rows
 
@@ -98,20 +98,15 @@ def test_batch_from_history_shapes_and_forward():
     assert torch.all(out["action_mu"] <= 1.0)
 
 
-def test_safe_brake_action_is_feasible():
-    for v0 in (0.0, 2.0, 10.0, 14.0):
-        action = safe_brake_action(v0)
-        expected_v1 = max(0.0, v0 - 3.0)
-        assert action[1] == 0.0 and action[2] == 0.0
-        assert action[3] == pytest.approx(expected_v1)
-        assert action[0] == pytest.approx((v0 + expected_v1) * 0.5 / 2.0)
-        assert np.all(action >= CLEAN_BOUNDS.low)
-        assert np.all(action <= CLEAN_BOUNDS.high)
-
-        tr = _trajectory(action, v0)
-        assert tr.feasible, tr.codes
-        assert tr.speeds[-1] == pytest.approx(expected_v1)
-        assert not tr.codes
+def test_infeasible_requested_action_is_executed_faithfully():
+    requested = np.array([0.0, 0.0, 0.0, 10.0])
+    executed, trajectory, feasible, codes = _resolve_exact_execution(
+        requested, v0=10.0
+    )
+    np.testing.assert_allclose(executed, requested)
+    assert trajectory is not None
+    assert feasible is False
+    assert "ZERO_LENGTH_WITH_SPEED" in codes
 
 
 def test_clean_limits_are_provisional_values():
@@ -131,7 +126,6 @@ def test_summarize_rows_accepts_clean_schema():
             "timeout": False,
             "comfort_violation": False,
             "feasible": True,
-            "fallback": False,
             "route_completion": 1.0,
             "tracking_error_xy": 0.10,
             "tracking_error_heading": 0.02,
@@ -152,7 +146,6 @@ def test_summarize_rows_accepts_clean_schema():
             "timeout": False,
             "comfort_violation": True,
             "feasible": False,
-            "fallback": True,
             "route_completion": 0.4,
             "tracking_error_xy": 0.30,
             "tracking_error_heading": 0.06,
@@ -170,7 +163,6 @@ def test_summarize_rows_accepts_clean_schema():
     assert summary["n"] == 2
     assert summary["success_rate"] == pytest.approx(0.5)
     assert summary["collision_rate"] == pytest.approx(0.5)
-    assert summary["fallback_rate"] == pytest.approx(0.5)
     assert summary["route_completion_mean"] == pytest.approx(0.7)
     assert summary["tracking_error_xy_mean"] == pytest.approx(0.2)
     assert summary["max_jerk_mean"] == pytest.approx(3.0)
@@ -199,7 +191,7 @@ def test_run_episode_one_scene_smoke():
     assert isinstance(row["success"], bool)
     assert isinstance(row["collision"], bool)
     assert isinstance(row["feasible"], bool)
-    assert isinstance(row["fallback"], bool)
+    assert "fallback" not in row
     assert row["preview"].startswith("NOT_IMPLEMENTED")
     assert "requested_action_codes" in row
     assert "executed_action_codes" in row

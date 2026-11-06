@@ -77,6 +77,7 @@ from env.obs import (
     OD_INDEX,
     SCHEMA_NAME,
     SCHEMA_VERSION,
+    validate_stable_ids,
 )
 from env.action.config import load_action_contract
 from net.build_net import build_net
@@ -362,6 +363,14 @@ def load_data(
             n = int(action.shape[0])
             if n == 0:
                 raise ValueError(f"{npz_path}: zero rows")
+            validate_stable_ids(
+                part["od_ids"], part["od_mask"] > 0.5,
+                field="od", context=str(npz_path),
+            )
+            validate_stable_ids(
+                part["ld_ids"], part["ld_mask"].any(axis=-1) > 0.5,
+                field="ld", context=str(npz_path),
+            )
             for key in REQUIRED_ROW_KEYS:
                 if key in part and len(part[key]) != n:
                     raise ValueError(f"{npz_path}: {key} length {len(part[key])} != {n}")
@@ -1162,8 +1171,8 @@ def run_closed_loop_validation(
 def _closed_loop_score(summary: Mapping, *, max_steps: int = 600) -> tuple:
     """Lexicographic success-first closed-loop ordering.
 
-    A high success rate is never compensated by a lower infeasible/fallback
-    count.  Collision, off-road, route completion and safety diagnostics are
+    A high success rate is never compensated by a lower infeasible count.
+    Collision, off-road, route completion and safety diagnostics are
     tie-breakers in that order.
     """
     infeasible = float(summary.get("infeasible_count_mean", 0.0)) / max(1.0, float(max_steps))
@@ -1172,7 +1181,6 @@ def _closed_loop_score(summary: Mapping, *, max_steps: int = 600) -> tuple:
         -float(summary.get("collision_rate", 0.0)),
         -float(summary.get("off_road_rate", 0.0)),
         float(summary.get("route_completion_mean", 0.0)),
-        -float(summary.get("fallback_rate", 0.0)),
         -infeasible,
     )
 

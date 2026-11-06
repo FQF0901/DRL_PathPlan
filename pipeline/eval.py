@@ -12,10 +12,10 @@ The previous exact/LQR split is available only from git history/tag
 Only the **first 0.5 s segment** of a plan is executed (5 x 0.1 s substeps).
 The 6-step / world-model preview is deliberately **not implemented** here.
 
-Feasibility is diagnosed, never silently repaired: if the requested action
-fails ``ActionTrajectory.feasible``, a safe-brake action is built explicitly,
-the executed (fallback) action is what the tracker receives, and both the
-requested codes and the fallback flag are written to the episode row.
+The policy action is executed faithfully: ``requested_action ==
+executed_action``.  PSTL feasibility/comfort are diagnostics only; they never
+rewrite, project, or brake the action.  Non-finite or unconstructible actions
+terminate the episode as ``invalid_action`` and are never replaced.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from env.action.action_space import (
     ActionBounds,
     DynamicsLimits,
     action_to_trajectory,
-    feasible_v1_interval,
 )
 from env.action.config import load_action_contract
 from net.build_net import build_net
@@ -126,14 +125,6 @@ def _batch_from_history(hist: Dict[str, Any], device: str = "cpu") -> Dict[str, 
     return batch
 
 
-def safe_brake_action(v0: float) -> np.ndarray:
-    """Explicit safe-brake action: decelerate at 6 m/s^2, no lateral motion."""
-    v0 = max(float(v0), 0.0)
-    v1 = max(0.0, v0 - 6.0 * DECISION_DT)
-    dx = (v0 + v1) * DECISION_DT / 2.0
-    return np.array([dx, 0.0, 0.0, v1], dtype=np.float64)
-
-
 def _model_action_contract(model):
     if getattr(model, "action_low", None) is None or getattr(model, "action_high", None) is None:
         return CLEAN_BOUNDS, HARD_LIMITS, COMFORT_LIMITS
@@ -166,6 +157,31 @@ def _trajectory(
         comfort_limits=comfort_limits,
     )
 
+
+
+
+def _resolve_exact_execution(
+    action: Sequence[float],
+    v0: float,
+    *,
+    bounds: ActionBounds = CLEAN_BOUNDS,
+    limits: DynamicsLimits = HARD_LIMITS,
+    comfort_limits: DynamicsLimits = COMFORT_LIMITS,
+):
+    """Return ``(executed_action, trajectory, feasible, codes)`` exactly.
+
+    The requested action is returned unchanged.  No projection or safe brake
+    is ever constructed.
+    """
+    requested = np.asarray(action, dtype=np.float64).reshape(-1)
+    try:
+        trajectory = _trajectory(
+            requested, v0,
+            bounds=bounds, limits=limits, comfort_limits=comfort_limits,
+        )
+    except (TypeError, ValueError):
+        return requested, None, False, ("INVALID_ACTION",)
+    return requested, trajectory, bool(trajectory.feasible), tuple(trajectory.codes)
 
 def _wrap_angle(value: Any) -> float:
     return float(wrap_to_pi(float(value)))
@@ -255,7 +271,6 @@ def run_episode(
     stuck_run = False
 
     infeasible_count = 0
-    fallback_count = 0
     comfort_violation = False
     max_curvature = max_lateral_accel = max_jerk = 0.0
     terminal_speed_error: Optional[float] = None
@@ -269,8 +284,8 @@ def run_episode(
     executed_code_counts: Dict[str, int] = {}
     requested_action = np.zeros(ACTION_DIM, dtype=np.float64)
     first_requested_action: Optional[np.ndarray] = None
-    postprocess_count = 0
     executed_action = np.zeros(ACTION_DIM, dtype=np.float64)
+    realized_action = np.zeros(ACTION_DIM, dtype=np.float64)
 
     while n < max_steps:
         obs = build_observation(
@@ -291,63 +306,32 @@ def run_episode(
         requested_action = model_bounds.denormalize(a_norm, clip=False)
         if first_requested_action is None:
             first_requested_action = requested_action.copy()
-        requested_codes: Sequence[str] = ()
-        requested_tr = None
-        if np.all(np.isfinite(requested_action)):
-            requested_tr = _trajectory(requested_action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
-            requested_codes = requested_tr.codes
-            _add_codes(requested_code_counts, requested_codes)
-
-        requested_feasible = bool(requested_tr is not None and requested_tr.feasible)
-        if requested_feasible:
-            tr_exec = requested_tr
-            executed_action = requested_action.copy()
-        else:
+        executed_action, requested_tr, requested_feasible, requested_codes = (
+            _resolve_exact_execution(
+                requested_action, v0,
+                bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort,
+            )
+        )
+        _add_codes(requested_code_counts, requested_codes)
+        if requested_tr is None:
             infeasible_count += 1
-            if requested_tr is None:
-                requested_codes = ("NONFINITE_ACTION",)
-                _add_codes(requested_code_counts, requested_codes)
-            # First try the least-rewrite fallback: keep geometry and project only
-            # v_next into the PSTL hard-feasible interval.  This is an explicit
-            # evaluation post-process, never a PPO log-prob rewrite.
-            projected = False
-            if np.all(np.isfinite(requested_action)):
-                interval = feasible_v1_interval(
-                    requested_action,
-                    v0,
-                    dt=DECISION_DT,
-                    bounds=model_bounds,
-                    limits=model_hard,
-                )
-                if interval.nonempty:
-                    candidate = requested_action.copy()
-                    candidate[3] = float(np.clip(candidate[3], interval.low, interval.high))
-                    candidate_tr = _trajectory(candidate, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
-                    if candidate_tr.feasible:
-                        executed_action = candidate
-                        tr_exec = candidate_tr
-                        projected = True
-                        postprocess_count += 1
-            if not projected:
-                fallback_count += 1
-                executed_action = safe_brake_action(v0)
-                tr_exec = _trajectory(executed_action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
-                fallback = True
-
-        # A velocity-profile trajectory must never reach LQR with a negative
-        # speed sample; old action gates could accept such a numerical corner.
+            done = True
+            termination = "invalid_action"
+            break
+        # Plan A: the policy action is executed exactly.  Feasibility is a
+        # diagnostic only; it never rewrites or brakes the action.
+        tr_exec = requested_tr
+        if not requested_feasible:
+            infeasible_count += 1
         speeds = np.asarray(getattr(tr_exec, "speeds", []), dtype=np.float64).reshape(-1)
         if (
-            tr_exec is None
-            or speeds.size == 0
+            speeds.size == 0
             or not np.all(np.isfinite(speeds))
             or float(speeds.min()) < -1e-6
         ):
-            fallback_count += 1
-            fallback = True
-            executed_action = safe_brake_action(v0)
-            tr_exec = _trajectory(executed_action, v0, bounds=model_bounds, limits=model_hard, comfort_limits=model_comfort)
-            speeds = np.asarray(tr_exec.speeds, dtype=np.float64)
+            done = True
+            termination = "invalid_action"
+            break
         _add_codes(executed_code_counts, tr_exec.codes)
         policy_steps += 1
 
@@ -512,11 +496,7 @@ def run_episode(
         "route_completion_drop_events": int(wrong_route_drops),
         "comfort_violation": bool(comfort_violation),
         "feasible": bool(infeasible_count == 0),
-        "fallback": bool(fallback_count > 0),
         "infeasible_count": int(infeasible_count),
-        "fallback_count": int(fallback_count),
-        "postprocess_count": int(postprocess_count),
-        "v1_projection_count": int(postprocess_count),
         "first_requested_action": (
             None if first_requested_action is None else first_requested_action.tolist()
         ),

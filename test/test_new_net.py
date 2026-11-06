@@ -53,8 +53,8 @@ def _batch(b: int = B):
         "ld_mask": torch.ones(b, 16, 5),
         "nav": torch.randn(b, 108),
         "ego": torch.randn(b, 12),
-        "od_ids": torch.arange(16).repeat(b, 1),
-        "ld_ids": torch.arange(16).repeat(b, 1),
+        "od_ids": torch.arange(1, 17).repeat(b, 1),
+        "ld_ids": torch.arange(1, 17).repeat(b, 1),
         "pose": torch.zeros(b, 3),
         "episode_id": "ep",
         "frame_id": 0,
@@ -229,6 +229,20 @@ def test_stable_id_reorders_history_into_current_slot():
     assert float(window.od_geometry[0, -2, 1, 0]) == 10.0
 
 
+def test_duplicate_nonzero_stable_ids_fail_fast():
+    ids = torch.tensor([[7, 7, 8]], dtype=torch.long)
+    mask = torch.ones((1, 3), dtype=torch.bool)
+    with pytest.raises(ValueError, match="duplicate stable"):
+        DriveModel._sanitize_ids(ids, mask)
+
+
+def test_zero_stable_id_fails_fast():
+    ids = torch.tensor([[0, 2, 3]], dtype=torch.long)
+    mask = torch.ones((1, 3), dtype=torch.bool)
+    with pytest.raises(ValueError, match="stable_id=0"):
+        DriveModel._sanitize_ids(ids, mask)
+
+
 def test_invalid_nan_slots_are_sanitized():
     attn = TemporalAttention(H, 4)
     tokens = torch.randn(1, 3, 2, H)
@@ -327,3 +341,23 @@ def test_forward_history_respects_hist_valid():
     history["hist_valid"] = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 1.0]])
     current_only = model.forward_history(history)["action_mu"]
     assert not torch.allclose(full, current_only)
+
+
+def test_bank_window_builder_rejects_invalid_stable_ids():
+    def od(slot, sid):
+        return EntityRecord(
+            slot, sid, NodeType.OD, torch.ones(H),
+            torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0]),
+        )
+
+    frame_zero = FrameRecord(
+        "ep", 0, 0.0, torch.zeros(3), (od(0, 0),), ()
+    )
+    with pytest.raises(ValueError, match="stable_id=0"):
+        BankWindowBuilder(hidden=H).build((frame_zero,))
+
+    frame_dup = FrameRecord(
+        "ep", 0, 0.0, torch.zeros(3), (od(0, 7), od(1, 7)), ()
+    )
+    with pytest.raises(ValueError, match="duplicate stable_id"):
+        BankWindowBuilder(hidden=H).build((frame_dup,))

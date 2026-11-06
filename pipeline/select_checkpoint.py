@@ -30,7 +30,6 @@ def _score(row: Dict[str, Any], max_steps: int = 600) -> tuple:
         -float(row.get("collision_rate", 0.0)),
         -float(row.get("off_road_rate", 0.0)),
         float(row.get("route_completion_mean", 0.0)),
-        -float(row.get("fallback_rate", 0.0)),
         -float(row.get("infeasible_count_mean", 0.0)) / max(1.0, float(max_steps)),
     )
 

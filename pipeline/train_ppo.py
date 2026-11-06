@@ -15,11 +15,10 @@ Action contract
 ``TruncatedNormal(mu, exp(logstd), low=0, high=1)`` is used for exploration.
 Every sample is therefore executable under the config/model.yaml action bounds
 without a post-hoc clamp.  The stored log-prob always belongs to the sampled
-normalized action.  If the state-dependent PSTL feasibility check rejects that
-action, the same v1-projection / safe-brake fallback as :mod:`pipeline.eval`
-is executed, the transition is marked ``masked`` and its policy term is
-excluded from the PPO loss.  The projected/fallback action is *never* assigned
-the sampled action's log-prob.
+normalized action.  The sampled action is executed faithfully:
+``requested_action == executed_action``.  PSTL feasibility is a diagnostic
+only; finite infeasible actions are neither projected nor masked.  Non-finite
+or unconstructible actions terminate the episode and never enter the update.
 
 Execution / preview
 -------------------
@@ -53,7 +52,6 @@ if __package__ in (None, ""):
 import argparse
 import json
 import math
-from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -71,7 +69,7 @@ from env.obs import (
 )
 from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
-from env.action.action_space import action_to_trajectory, feasible_v1_interval
+from env.action.action_space import action_to_trajectory
 from env.action.config import load_action_contract
 from net.model import DriveModel
 
@@ -145,14 +143,6 @@ COST_NAMES: Tuple[str, ...] = (
     "comfort",
     "overspeed",
 )
-
-FALLBACK_IDS: Dict[str, int] = {
-    "none": 0,
-    "v1_projection": 1,
-    "safe_brake": 2,
-    "nonfinite_safe_brake": 3,
-    "safe_brake_infeasible": 4,
-}
 
 PREVIEW_LABEL = (
     "PLACEHOLDER_NOT_IMPLEMENTED: only a0 (first 0.5 s segment) is executed and "
@@ -278,109 +268,36 @@ def _trajectory_or_none(action: Sequence[float], v0: float, **kwargs):
         return None
 
 
-def safe_brake_action(v0: float) -> np.ndarray:
-    """Explicit safe brake: 6 m/s^2 deceleration, no lateral motion."""
-    v0 = max(float(v0), 0.0)
-    v1 = max(0.0, v0 - 6.0 * DECISION_DT)
-    dx = (v0 + v1) * DECISION_DT / 2.0
-    return np.array([dx, 0.0, 0.0, v1], dtype=np.float64)
-
-
-# ---------------------------------------------------------------------------
-# Feasibility fallback (mirrors pipeline.eval.run_episode)
-# ---------------------------------------------------------------------------
 def resolve_action(
     sampled_norm: Sequence[float], v0: float, *,
     bounds=CLEAN_BOUNDS, limits=HARD_LIMITS, comfort_limits=COMFORT_LIMITS,
 ) -> Dict[str, Any]:
-    """Denormalize then resolve the state-dependent PSTL fallback.
+    """Denormalize and execute the sampled action faithfully.
 
-    The sampled normalized action is never mutated.  The returned
-    ``requested_action`` is the exact denormalized sample; ``executed_action``
-    may differ only through the explicit v1-projection / safe-brake fallback.
+    No v1 projection, no safe brake, no masking for finite infeasible actions.
+    A non-finite or unconstructible action returns ``invalid=True``; the
+    rollout terminates the episode without stepping the env.
     """
     sampled = np.asarray(sampled_norm, dtype=np.float64).reshape(-1)
     if sampled.shape != (ACTION_DIM,):
         raise ValueError(f"sampled_norm must have shape (4,), got {sampled.shape}")
     requested = np.asarray(bounds.denormalize(sampled, clip=False), dtype=np.float64)
-
-    if not np.all(np.isfinite(requested)):
-        brake = safe_brake_action(v0)
-        traj = _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-        return {
-            "requested_action": requested,
-            "executed_action": brake,
-            "trajectory": traj,
-            "fallback": FALLBACK_IDS["nonfinite_safe_brake"],
-            "fallback_name": "nonfinite_safe_brake",
-            "masked": True,
-            "requested_codes": ("NONFINITE_ACTION",),
-            "executed_codes": tuple(traj.codes) if traj is not None else (),
-            "codes": tuple(traj.codes) if traj is not None else ("NONFINITE_ACTION",),
-        }
-
-    requested_traj = _trajectory_or_none(requested, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-    requested_codes = (
+    requested_traj = _trajectory_or_none(
+        requested, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits
+    )
+    codes = (
         tuple(requested_traj.codes) if requested_traj is not None else ("INVALID_ACTION",)
     )
-    if requested_traj is not None and requested_traj.feasible:
-        return {
-            "requested_action": requested,
-            "executed_action": requested.copy(),
-            "trajectory": requested_traj,
-            "fallback": FALLBACK_IDS["none"],
-            "fallback_name": "none",
-            "masked": False,
-            "requested_codes": requested_codes,
-            "executed_codes": requested_codes,
-            "codes": requested_codes,
-        }
-
-    # Least-rewrite fallback: keep geometry, project only v_next into the
-    # hard-feasible interval (identical to pipeline.eval).
-    if requested_traj is not None:
-        try:
-            interval = feasible_v1_interval(
-                requested,
-                v0,
-                dt=DECISION_DT,
-                bounds=bounds,
-                limits=limits,
-            )
-        except (TypeError, ValueError):
-            interval = None
-        if interval is not None and interval.nonempty:
-            candidate = requested.copy()
-            candidate[3] = float(np.clip(candidate[3], interval.low, interval.high))
-            candidate_traj = _trajectory_or_none(candidate, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-            if candidate_traj is not None and candidate_traj.feasible:
-                executed_codes = tuple(candidate_traj.codes)
-                return {
-                    "requested_action": requested,
-                    "executed_action": candidate,
-                    "trajectory": candidate_traj,
-                    "fallback": FALLBACK_IDS["v1_projection"],
-                    "fallback_name": "v1_projection",
-                    "masked": True,
-                    "requested_codes": requested_codes,
-                    "executed_codes": executed_codes,
-                    "codes": tuple(dict.fromkeys(requested_codes + executed_codes)),
-                }
-
-    brake = safe_brake_action(v0)
-    brake_traj = _trajectory_or_none(brake, v0, bounds=bounds, limits=limits, comfort_limits=comfort_limits)
-    executed_codes = tuple(brake_traj.codes) if brake_traj is not None else ()
-    name = "safe_brake" if brake_traj is not None and brake_traj.feasible else "safe_brake_infeasible"
+    feasible = bool(requested_traj is not None and requested_traj.feasible)
     return {
         "requested_action": requested,
-        "executed_action": brake,
-        "trajectory": brake_traj,
-        "fallback": FALLBACK_IDS[name],
-        "fallback_name": name,
-        "masked": True,
-        "requested_codes": requested_codes,
-        "executed_codes": executed_codes,
-        "codes": tuple(dict.fromkeys(requested_codes + executed_codes)),
+        "executed_action": requested.copy(),
+        "trajectory": requested_traj,
+        "feasible": feasible,
+        "invalid": requested_traj is None,
+        "requested_codes": codes,
+        "executed_codes": codes,
+        "codes": codes,
     }
 
 
@@ -515,9 +432,6 @@ REQUIRED_TRANSITION_KEYS: Tuple[str, ...] = (
     "truncated",
     "episode_id",
     "t",
-    "fallback",
-    "fallback_name",
-    "masked",
     "codes",
     "requested_codes",
     "executed_codes",
@@ -589,9 +503,6 @@ class RolloutBuffer:
             raise ValueError(
                 f"cost_vector must be ({len(COST_NAMES)},), got {tuple(cost_vector.shape)}"
             )
-        fallback = int(transition["fallback"])
-        if fallback not in FALLBACK_IDS.values():
-            raise ValueError(f"unknown fallback id {fallback}")
         self.transitions.append(dict(transition))
 
     def add_episode(self, transitions: Sequence[Mapping[str, Any]]) -> None:
@@ -672,17 +583,6 @@ class RolloutBuffer:
         t = torch.tensor(
             [int(tr["t"]) for tr in self.transitions], dtype=torch.long, device=device
         )
-        fallback = torch.tensor(
-            [int(tr["fallback"]) for tr in self.transitions],
-            dtype=torch.long,
-            device=device,
-        )
-        masked = torch.tensor(
-            [bool(tr["masked"]) for tr in self.transitions],
-            dtype=torch.bool,
-            device=device,
-        )
-        fallback_name = [str(tr["fallback_name"]) for tr in self.transitions]
         codes = [tuple(tr["codes"]) for tr in self.transitions]
         requested_codes = [tuple(tr["requested_codes"]) for tr in self.transitions]
         executed_codes = [tuple(tr["executed_codes"]) for tr in self.transitions]
@@ -709,7 +609,7 @@ class RolloutBuffer:
             & torch.isfinite(cost)
             & torch.isfinite(cost_vector).all(dim=-1)
         )
-        policy_valid = valid & (~masked)
+        policy_valid = valid
 
         adv, ret = self._gae_grouped(
             old_value, reward, terminated, episode_id, bootstrap_value, gamma, lam
@@ -736,9 +636,6 @@ class RolloutBuffer:
             "truncated": truncated,
             "episode_id": episode_id,
             "t": t,
-            "fallback": fallback,
-            "fallback_name": fallback_name,
-            "masked": masked,
             "codes": codes,
             "requested_codes": requested_codes,
             "executed_codes": executed_codes,
@@ -894,8 +791,6 @@ def collect_episode(
         resolved = resolve_action(sampled_np, v0, bounds=p_bounds, limits=p_hard, comfort_limits=p_comfort)
         executed = np.asarray(resolved["executed_action"], dtype=np.float64)
         tr_exec = resolved["trajectory"]
-        fallback_name = str(resolved["fallback_name"])
-        masked = bool(resolved["masked"])
 
         rc0 = _route_completion(ego, {}, rc)
         seg_success = False
@@ -911,11 +806,11 @@ def collect_episode(
         segment_steps = 0
 
         if tr_exec is None:
-            # Defensive: no executable geometry (should not happen for a finite
-            # sample under CLEAN_BOUNDS).  End the episode without inventing steps.
+            # No faithful execution is possible: terminate, never invent a
+            # fallback action or a policy transition.
             termination = "invalid_action"
             terminated = True
-            resolved["codes"] = tuple(dict.fromkeys(tuple(resolved["codes"]) + ("EXECUTION_UNAVAILABLE",)))
+            break
         else:
             tracker.arm(env, trajectory=tr_exec)
             for _ in range(STEPS_PER_POLICY):
@@ -1014,9 +909,7 @@ def collect_episode(
                 "truncated": bool(truncated),
                 "episode_id": int(episode_id),
                 "t": int(policy_steps),
-                "fallback": int(resolved["fallback"]),
-                "fallback_name": fallback_name,
-                "masked": masked,
+                "feasible": bool(resolved["feasible"]),
                 "codes": tuple(resolved["codes"]),
                 "requested_codes": tuple(resolved["requested_codes"]),
                 "executed_codes": tuple(resolved["executed_codes"]),
@@ -1058,16 +951,7 @@ def collect_episode(
                 last["bootstrap_cost_value"] = torch.tensor(0.0, dtype=torch.float32)
             truncation_bootstrap_count = 1
 
-    fallback_counts = Counter(str(tr["fallback_name"]) for tr in transitions)
-    v1_projection_count = int(fallback_counts.get("v1_projection", 0))
-    safe_brake_count = int(
-        sum(
-            count
-            for name, count in fallback_counts.items()
-            if name in ("safe_brake", "nonfinite_safe_brake", "safe_brake_infeasible")
-        )
-    )
-    masked_count = int(sum(1 for tr in transitions if tr["masked"]))
+    infeasible_count = int(sum(1 for tr in transitions if not bool(tr.get("feasible", True))))
     summary = {
         "episode_id": int(episode_id),
         "spec_id": getattr(spec, "id", None),
@@ -1085,12 +969,7 @@ def collect_episode(
         "route_completion": float(rc),
         "reward_sum": float(sum(float(tr["reward"]) for tr in transitions)),
         "cost_sum": float(sum(float(tr["cost"]) for tr in transitions)),
-        "infeasible_count": int(masked_count),
-        "fallback_count": int(safe_brake_count),
-        "postprocess_count": int(v1_projection_count),
-        "v1_projection_count": int(v1_projection_count),
-        "masked_count": int(masked_count),
-        "fallback_counts": dict(fallback_counts),
+        "infeasible_count": int(infeasible_count),
         "truncation_bootstrap_count": int(truncation_bootstrap_count),
         "preview": PREVIEW_LABEL,
     }
@@ -1238,19 +1117,12 @@ def ppo_update(
     first_epoch = epoch_history[0]
     last = epoch_history[-1]
     boundary = boundary_rate(sampled)
-    fallback = batch["fallback"]
-    fallback_names = batch["fallback_name"]
     transitions = int(sampled.shape[0])
-    postprocess_count = sum(1 for name in fallback_names if name == "v1_projection")
     record = {
         "update": int(update_index) + 1,
         "transitions": transitions,
         "policy_valid_transitions": int(policy_mask.sum()),
         "value_valid_transitions": int(value_mask.sum()),
-        "masked_transitions": int(batch["masked"].sum()),
-        "fallback_rate": float((fallback != 0).float().mean()),
-        "mask_rate": float(batch["masked"].float().mean()),
-        "postprocess_rate": float(postprocess_count / max(transitions, 1)),
         "boundary_rate": float(boundary),
         "boundary_free_rate": float(1.0 - boundary),
         "logprob_recompute_max_abs_diff": max_diff,
@@ -1289,12 +1161,9 @@ def summarize_rollout(
     episodes: Sequence[Mapping[str, Any]],
     transitions: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Aggregate reward/cost, fallback/mask, boundary and episode summaries."""
+    """Aggregate reward/cost, boundary and episode summaries."""
     n_episodes = int(len(episodes))
     n_transitions = int(len(transitions))
-    fallback_counts = Counter(str(tr["fallback_name"]) for tr in transitions)
-    masked_count = int(sum(1 for tr in transitions if bool(tr["masked"])))
-    postprocess_count = int(fallback_counts.get("v1_projection", 0))
     truncation_bootstrap_count = int(
         sum(
             1
@@ -1334,20 +1203,6 @@ def summarize_rollout(
         "transitions": n_transitions,
         "boundary_rate": float(boundary),
         "boundary_free_rate": float(1.0 - boundary),
-        "postprocess_rate": float(postprocess_count / denom),
-        "postprocess_count": int(postprocess_count),
-        "v1_projection_count": int(postprocess_count),
-        "safe_brake_count": int(
-            sum(
-                count
-                for name, count in fallback_counts.items()
-                if name in ("safe_brake", "nonfinite_safe_brake", "safe_brake_infeasible")
-            )
-        ),
-        "mask_rate": float(masked_count / denom),
-        "masked_count": int(masked_count),
-        "fallback_rate": float(masked_count / denom),
-        "fallback_counts": dict(fallback_counts),
         "truncation_bootstrap_count": int(truncation_bootstrap_count),
         "reward": {
             "sum": reward_sum,
@@ -1606,7 +1461,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "value_loss",
                         "cost_loss",
                         "boundary_rate",
-                        "fallback_rate",
                         "logprob_recompute_max_abs_diff",
                         "ratio_at_old_mean",
                     )
@@ -1703,9 +1557,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Only a0 (the first 0.5 s PSTL segment) is executed and stored; "
             "a1..a5 preview is a labelled placeholder and is not stored or credited.",
             "PPO ratios use the stored log-prob of the sampled normalized action; "
-            "fallback/projected executed actions never receive that log-prob.",
-            "Masked/fallback transitions are excluded from the policy loss; value "
-            "and cost critics use all finite real transitions.",
+            "the sampled action is executed faithfully.",
+            "Finite infeasible actions are not masked; non-finite actions terminate "
+            "the episode and never enter the update.",
             "GAE is per episode: termination uses 0 next value, truncation/max-step "
             "bootstraps V(s_T).",
             "Reward is route progress + success + comfort; collision/off-road/"
@@ -1739,9 +1593,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "n_episodes",
                     "transitions",
                     "boundary_rate",
-                    "postprocess_rate",
-                    "mask_rate",
-                    "fallback_rate",
                     "truncation_bootstrap_count",
                     "logprob_recompute_max_abs_diff",
                 )
