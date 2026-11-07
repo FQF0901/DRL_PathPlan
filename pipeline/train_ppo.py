@@ -758,6 +758,7 @@ def collect_episode(
 
     n = 0
     policy_steps = 0
+    invalid_action_count = 0
     termination = "max_step"
     success = collision = off_road = wrong_route = False
     low_speed_run = 0
@@ -807,7 +808,12 @@ def collect_episode(
 
         if tr_exec is None:
             # No faithful execution is possible: terminate, never invent a
-            # fallback action or a policy transition.
+            # fallback action or a policy transition.  The last stored
+            # transition is the terminal boundary for GAE/audit.
+            invalid_action_count += 1
+            if transitions:
+                transitions[-1]["terminated"] = True
+                transitions[-1]["truncated"] = False
             termination = "invalid_action"
             terminated = True
             break
@@ -815,6 +821,10 @@ def collect_episode(
             try:
                 tracker.arm(env, trajectory=tr_exec)
             except (TypeError, ValueError):
+                invalid_action_count += 1
+                if transitions:
+                    transitions[-1]["terminated"] = True
+                    transitions[-1]["truncated"] = False
                 termination = "invalid_action"
                 terminated = True
                 break
@@ -956,7 +966,9 @@ def collect_episode(
                 last["bootstrap_cost_value"] = torch.tensor(0.0, dtype=torch.float32)
             truncation_bootstrap_count = 1
 
-    infeasible_count = int(sum(1 for tr in transitions if not bool(tr.get("feasible", True))))
+    infeasible_count = int(
+        sum(1 for tr in transitions if not bool(tr.get("feasible", True)))
+    ) + int(invalid_action_count)
     summary = {
         "episode_id": int(episode_id),
         "spec_id": getattr(spec, "id", None),
@@ -975,6 +987,7 @@ def collect_episode(
         "reward_sum": float(sum(float(tr["reward"]) for tr in transitions)),
         "cost_sum": float(sum(float(tr["cost"]) for tr in transitions)),
         "infeasible_count": int(infeasible_count),
+        "invalid_action_count": int(invalid_action_count),
         "truncation_bootstrap_count": int(truncation_bootstrap_count),
         "preview": PREVIEW_LABEL,
     }

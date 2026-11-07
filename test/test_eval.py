@@ -109,6 +109,17 @@ def test_infeasible_requested_action_is_executed_faithfully():
     assert "ZERO_LENGTH_WITH_SPEED" in codes
 
 
+def test_invalid_requested_action_has_no_execution():
+    requested = np.array([np.nan, 0.0, 0.0, 1.0])
+    executed, trajectory, feasible, codes = _resolve_exact_execution(
+        requested, v0=1.0
+    )
+    assert trajectory is None
+    assert feasible is False
+    assert codes == ("INVALID_ACTION",)
+    np.testing.assert_allclose(executed, requested, equal_nan=True)
+
+
 def test_clean_limits_are_provisional_values():
     assert HARD_LIMITS.a_long_max == 3.5
     assert HARD_LIMITS.kappa_max == 0.345

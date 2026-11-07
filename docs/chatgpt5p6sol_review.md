@@ -1,978 +1,468 @@
-我从“如果我是 reviewer，要把这个项目搞死” 的角度来审。
+# exact execution + stable-ID 迁移审阅结论
 
-先说结论：
+> 审阅范围：`01ca19f183932bcf1f10a34dbf10801442bf6712..5a2a14837941f6fdd2ae5ccf9430b4a30d73a78d`
+> 关键提交：`e7bbb8a`、`73fead3`、`4d1f583`、`96724b6`、`ae42bb5`、`afe1d29`、`5a2a148`
+> 对照：当前代码、`runs/`、`data/`、`docs/arch_lock.md`、`docs/baseline_exact.md`、`docs/baseline_r3.md`
+> 结论：**代码主线可以接受；`arch_lock` 暂不能锁为 pre-RL contract。没有 P0；有 2 个 P1 和若干 P2/P3。**
 
-总体方向：正确
-主要风险：不是RL，不是GRPO
+---
 
-而是：
+## 0. 总判断
 
-1. Policy/WM状态定义不统一
-2. Action语义与轨迹语义混杂
-3. LD未来表示不闭合
-4. DAgger成功率可能被评估口径误导
-5. 未来WM上线时会出现representation drift
+这次迁移整体方向正确：
 
+- stable ID 在生成端、窗口构建端、训练 loader 端都加了非零/唯一校验；
+- canonical eval / PPO / DAgger collection 已改为 exact execution，不再做 v1 projection / safe-brake；
+- exact baseline 的指标、数据量、checkpoint、config 路径基本都能对上；
+- `docs/baseline_r3.md` 已正确标成 with safety fallback 的历史 baseline；
+- 新增测试覆盖了 zero/duplicate ID、BankWindowBuilder、eval/PPO exact 行为。
 
-其中我认为真正的P0问题是前3个。
+但还不能直接锁合同，原因是：
 
-P0. 当前最大的疑问
+1. `docs/arch_lock.md:409` 的 `h_valid` 仍写成 “current valid mask”，和 WM 训练实际使用的 `current_valid ∪ target_mask` 不一致；
+2. `pipeline/eval.py` 新增的 exact invalid 分支存在 `termination=invalid_action` 但 `feasible=True` 的语义漏洞；
+3. 另有 target-only ID 校验缺口、PPO invalid transition 回填、stale data registry、若干文档/历史路径问题。
 
-你现在说：
+---
 
-IL = 2%
-DAgger r3 = 61%
+## 1. P1
 
+### P1-1 `h_valid` 合同定义错误（doc-only）
 
-但我第一反应不是高兴。
+`docs/arch_lock.md:409`：
 
-而是：
+```text
+h_valid  # current valid mask
+```
 
-61% 是谁开的车？
+但实际 WM 训练传入的是：
 
+```python
+# pipeline/train_wm.py:301-304
+od_valid=torch.maximum(batch["od_valid"], batch["od_tmask"]),
+ld_valid=torch.maximum(batch["ld_valid"], batch["ld_tmask"]),
+od_current_valid=batch["od_valid"],
+ld_current_valid=batch["ld_valid"],
+```
 
-因为我看到当前配置：
+`pipeline/train_joint.py:93-96` 同样。
 
-expert_ratio = 0.65
-shield_ttc = 3.5
-stuck shield = 20
+正确语义：
 
+```text
+h_valid       = current_valid ∪ target_mask   # WM 需要产生预测的 slot
+current_valid = current_valid                 # 当前帧真实存在的实体，用于 target-only slot cue
+```
 
-来自 DRL_PathPlan_Code.txt。
+`od_current_valid` / `ld_current_valid` 才是 current valid。
+如果按 §7.1 字面实现，target-only 新实体所在的 slot 会被当成 invalid，residual/geometry 被 mask 掉，新实体监督丢失。
 
-我会怀疑：
+**性质：** doc-only；不是本次新引入的代码行为，但本次 range 修改了 `arch_lock`，这个合同错误仍未修，锁合同前必须修。
 
-61%
-=
-Student能力
-+
-Shield能力
-+
-Expert介入能力
+---
 
+### P1-2 `pipeline/eval.py` 的 `feasible` 在 invalid_action 分支可能为 True
 
-而不是：
+`pipeline/eval.py:503`：
 
-纯Student
+```python
+"feasible": bool(infeasible_count == 0),
+```
 
+但新增的 exact 分支：
 
-能力。
+```python
+# :346-352
+try:
+    tracker.arm(env, trajectory=tr_exec)
+except (TypeError, ValueError):
+    done = True
+    termination = "invalid_action"
+    break
+```
 
-我建议马上做：
+没有递增 `infeasible_count`。
+`speeds` 非有限/负值分支（`:327-334`）在 trajectory 本身 feasible 时也没有递增。
 
-expert_ratio:
-0.65
-0.4
-0.2
-0
+因此理论上可以产生：
 
+```text
+termination == "invalid_action"
+feasible == True
+```
 
-以及：
+这与“invalid action 是非 feasible”的语义冲突，也会让 `_closed_loop_score` 的 infeasible tie-breaker 低估该 episode。
 
-shield:
-ON
-OFF
+**性质：** code bug，本次 range 新增 exact 分支引入；可达性低（正常 `ActionTrajectory` 不太会让 `tracker.arm` 抛 `ValueError`），但属于合同级诊断语义。
 
+**修法：**
 
-矩阵。
+- `termination == "invalid_action"` 时强制 `feasible=False`，或统一递增 `infeasible_count`；
+- 对 `tracker.arm` 失败、speeds 非法、`requested_tr is None` 三类 invalid 分支统一处理；
+- 增加 fake tracker 抛 `ValueError` 的测试。
 
-如果：
+---
 
-61%
-↓
-58%
-↓
-54%
-↓
-49%
+## 2. P2
 
+### P2-1 target-only stable ID 校验仍有缺口
 
-很好。
+`pipeline/train_wm.py:170-183` 的 `_align_by_id` 只校验 current frame：
 
-如果：
+```python
+usable = _usable_current_ids(cur_ids, cur_mask)
+```
 
-61%
-↓
-35%
-↓
-18%
-↓
-8%
+`_target_hit` 只对“当前实体实际匹配到的 target ID”检查重复：
 
+```python
+# :157-167
+hits = np.flatnonzero((tgt_ids == ident) & (tgt_mask > 0.5))
+if hits.size > 1:
+    raise ValueError("duplicate target stable ID")
+```
 
-那其实还没到RL阶段。
+因此 target 中 **target-only** 的 valid zero ID、或不在 current 中的 duplicate ID，不会触发 `_target_hit`。随后 `_make_training_arrays` 的 target-only 循环会把它们直接塞进 free slot：
 
-P1. 当前Net最大的结构问题
+```python
+# pipeline/train_wm.py:255-273
+for j, (ident, valid) in enumerate(zip(tgt_ids, tgt_mask)):
+    if valid <= 0.5 or int(ident) in known or not free:
+        continue
+    slot = free.pop(0)
+    ...
+```
 
-我认为是：
+当前 canonical 路径被 `pipeline/train_bc.load_data` 的 `validate_stable_ids` 兜住（`:366-372`），所以生产数据不会真正触发；但 `_align_by_id` / `_align_geometry_by_id` 作为“消费者”本身没有完全 fail-fast，与 `docs/arch_lock.md:188` 的“所有使用端都 fail-fast”不一致。
 
-Action
-=
-(dx,dy,dpsi,v_next)
+**建议：** 在 `_align_by_id` / `_align_geometry_by_id` 开头对整个 target frame 做 `validate_stable_ids`，或在 target-only 循环前显式校验 `tgt_ids[tgt_mask]`。
 
+---
 
-和：
+### P2-2 PPO invalid action 发生在已有 transition 之后时，最后一条 transition 未标记 terminated
 
-Trajectory
-=
-6-step rollout
+`pipeline/train_ppo.py:808-820`：
 
+```python
+if tr_exec is None:
+    termination = "invalid_action"
+    terminated = True
+    break
+else:
+    try:
+        tracker.arm(...)
+    except (TypeError, ValueError):
+        termination = "invalid_action"
+        terminated = True
+        break
+```
 
-的语义混在一起。
+如果 invalid action 发生在第 2 个及以后 policy step，之前 append 的 transition 仍是：
 
-你现在实际上在学：
+```python
+"terminated": False,
+"truncated": False,
+```
 
-a_t
-→ 0.5s future endpoint
+`compute_gae` 对最后一条使用 `bootstrap_value`（这里为 0），数值上等价于 terminal，但 transition 的 `terminated` 标志和 summary 的 `termination=invalid_action` 不一致，后续审计/统计会误判为“非终止最后一步”。
 
+**建议：** break 前把 `transitions[-1]["terminated"] = True`（若存在），或记录 `invalid_action_count` 并明确 bootstrap 语义。
 
-但是评估的是：
+---
 
-3s trajectory
+### P2-3 PPO invalid action / arm failure 不计入 `infeasible_count`
 
+`pipeline/train_ppo.py:959`：
 
-这里有个隐患：
+```python
+infeasible_count = sum(1 for tr in transitions if not bool(tr.get("feasible", True)))
+```
 
-step local optimum
-≠
-trajectory optimum
+如果 invalid action 在第一步就发生，`transitions=[]`，summary 里 `infeasible_count=0`，但 `termination=invalid_action`。
+这会让 invalid action episode 在 PPO summary 中看起来没有 infeasible 行为。
 
+**建议：** 增加 `invalid_action_count`，或把 invalid action 计为 infeasible。
 
-例如：
+---
 
-每个0.5s都合法
+### P2-4 `data/manifests/datasets.json` 仍指向已删除的旧数据路径
 
-但连续拼接
+`data/manifests/datasets.json:38-127` 仍包含：
 
-最后蛇形振荡
+```text
+data/episodes/train_2000/il_expert_raw
+data/episodes/val_500/expert_raw
+data/episodes/train_2000/il_dagger_raw
+data/episodes/mini/il_train_100_raw
+data/episodes/mini/dagger_train_100_raw
+data/episodes/mini/val_20_expert_raw
+```
 
+这些路径当前全部不存在。`data/README.md:36` 仍把该文件称为 “registry: purpose, size, source”，本次 range 更新了 data README/config，但没有更新 registry，导致 “canonical data layout” 内部不一致。
 
-所以我建议增加一个loss：
+**性质：** 不是本次新引入的 stale 内容，但本次 exact data path 迁移没有覆盖它；代码目前不读这个 registry，所以是 P2。
 
-segment consistency
+**建议：** 改为 `il_expert_exact`、`val_500/expert_exact`、`il_dagger_exact_r1/r2/r3`，并更新 rows/episodes/success；mini 旧路径删除或标注 optional/not collected。
 
+---
 
-检查：
+### P2-5 `arch_lock` 的 “所有使用端 fail-fast” 过强
 
-step_i endpoint
-vs
-step_i+1 startpoint
+`docs/arch_lock.md:188`：
 
+```text
+valid OD/LD stable ID 必须非零且同帧唯一；违反时生成端和所有使用端都 fail-fast。
+```
 
-一致性。
+实际：
 
-否则：
+- `net/encoder.py:89-93` 的 `_ids` 只要求 key 存在，不校验 valid zero / duplicate；
+- `net/model.py:243-264` 的 raw-history 循环只在 shape 匹配时校验，shape 不匹配会 `continue`；
+- `pipeline/train_wm.py` 的 target-only 路径如上。
 
-DAgger
-很好
+canonical 路径最终会在 `BankWindowBuilder`、`_sanitize_ids` 或 `load_data` 处 fail-fast，但“所有使用端”这个绝对表述不成立。
 
-RL
-突然开始抖方向
+**建议：** 改成“canonical 入口/窗口构建处 fail-fast”，并考虑把 `validate_stable_ids` 做成共享 tensor/numpy helper，供 encoder/model/train_wm 复用。
 
+---
 
-很常见。
+### P2-6 exact tracking 文档对 DAgger replay rows 过泛
 
-P2. 文件架构有一个问题
+`docs/arch_lock.md:589`：
 
-我看你之前几版合同。
+```text
+canonical collection/eval/PPO 都执行 net 的 requested action
+```
 
-实际上有：
+但 `dataset/collect_dagger.py:800-830` 的 replay 分支执行的是：
 
-dataset/
-net/
-pipeline/
-env/
+```python
+env.step(expert.act())
+```
 
+并记录实测 `executed_action`，不是 net 的 `requested_action`。这不违反“student lift 行 exact execution”，但文档应明确限定为 student/lift 行；否则与代码事实不符。
 
-这很好。
+---
 
-但有一个缺失层：
+### P2-7 `env/obs.py` 的 LD chunk 文档与代码不一致
 
-representation/
+`env/obs.py:23-27` 说：
 
+```text
+It is part of the LD stable ID (ld_chunk_s) ...
+```
 
-或者：
+但 `env/obs.py:918` 的 LD ID 只 hash：
 
-schema/
+```python
+_stable_hash(scene_seed, "ld", lane_index[0], lane_index[1], lane_id)
+```
 
+没有 `chunk_s`。
+这是 pre-existing doc/code mismatch。需要决定：要么把 `chunk_s` 纳入 ID（会改变跨 chunk 的历史对齐语义，并需要重采数据），要么修正文档为“chunk anchor 是 feature，不是 ID 的一部分”。
 
-因为现在：
+---
 
-OD token
-LD token
-Nav
-Action
-Trajectory
-Memory
+## 3. P3
 
+### P3-1 重复 geometry 句子
 
-定义散落在：
+`docs/arch_lock.md:834`：
 
-dataset
-net
-pipeline
+```text
+当前 probe 同时报告两者；geometry 仍由 decoder 输出。
+```
 
+`docs/arch_lock.md:836`：
 
-里面。
+```text
+geometry 仍由 decoder 输出；不存在 geometry base/residual persistence。
+```
 
-后面改WM的时候一定出事。
+同一句重复；删掉其中一句。
 
-我会单独搞：
+### P3-2 `data/README.md` 的 mini 路径不存在
 
-schema/
-  observation.py
-  action.py
-  trajectory.py
-  memory.py
+`data/README.md:31-34` 列出：
 
+```text
+data/episodes/mini/il_train_100_raw
+data/episodes/mini/dagger_train_100_raw
+data/episodes/mini/val_20_expert_raw
+```
 
-整个工程所有地方：
+当前 `data/episodes/mini` 不存在。它们可能是可选的 smoke 数据，但 README 把它们写成 canonical layout；应删除或标注 “optional / not collected”。
 
-import schema
+### P3-3 `docs/baseline_r3.md` 历史路径全部 missing
 
+该文件已正确标为 historical，但正文仍给出：
 
-而不是：
+- `runs/bc_dagger_raw_r3_261101235342/best_closed_loop.pt`
+- `runs/logs/train_bc_dagger_raw_r3.log`
+- `runs/bc_dagger_raw_r1_261101173703/eval_val500/metrics.json`
+- `runs/bc_dagger_raw_r2_safety_261101225359/best_closed_loop.pt`
+- `data/episodes/train_2000/il_dagger_raw_r3`
 
-每个模块自己定义
+这些当前全部 missing。头部说“旧 checkpoint 与旧 data 已清理”，但没有说日志/旧 r1 metrics 也已不可用。建议标注 “artifacts removed / not reproducible”。
 
-P3. WM上线时最大的炸点
+### P3-4 `docs/baseline_exact.md` 的 r3 collection 日志来源有歧义
 
-这个不是现在。
+`runs/logs/exact_pipeline.log:10611` 的第一次 r3 采集是：
 
-但要提前设计。
+```text
+rows=96632 episodes=1267 failed=1
+```
 
-你现在：
+而 `runs/logs/exact_r3.log:1408` 的重采是：
 
-Policy
+```text
+rows=96706 episodes=1268 failed=0
+```
 
+`docs/baseline_exact.md` 的数字匹配 `exact_r3.log` 和当前 NPZ，是正确的；但文档同时列出两个日志，读者可能看到 96,632/1267 与 96,706/1268 的差异。建议在 §3 或 §5 加一句“r3 第一次采集有 1 个 failed episode，当前 baseline 使用 exact_r3.log 的重采结果”。
 
-看：
+### P3-5 eval invalid row 的 `executed_action` 语义
 
-OD
-LD
-Nav
-Ego
+`pipeline/eval.py:522-523`：
 
+```python
+"requested_action": requested_action.tolist(),
+"executed_action": executed_action.tolist(),
+```
 
-未来WM：
+当 `requested_tr is None` 时，`executed_action` 等于 requested（可能是 NaN），但实际没有执行任何动作；`realized_action` 仍是上一步或零。合同写 `executed_action = env 实际执行`，这里严格说不是。建议 invalid row 将 `executed_action` 设为 `None` 或明确标注 `execution_unavailable`。
 
-OD'
-LD'
+### P3-6 sentinel 碰撞边界
 
+- `env/obs.py:396-399` 用 `np.iinfo(np.int64).min` 作为 invalid sort sentinel；
+- `net/model.py:377` 用 `-(2**62)` 作为 sentinel。
 
-提供：
+若某个 valid stable ID 恰好等于 sentinel，且同一 frame 中还有 invalid slot，duplicate 检测的相邻比较可能被 invalid slot 隔开而漏检。概率极低，但既然合同是 fail-fast，建议用 `lexsort` 或 valid 作为第一排序键，彻底消除 sentinel 依赖。
 
-imagined state
+### P3-7 `pipeline/train_wm.py` 未使用变量
 
+- `pipeline/train_wm.py:171`：`usable = _usable_current_ids(...)` 之后未使用；
+- `pipeline/train_wm.py:187`：`_usable_current_ids(...)` 返回值被丢弃（仅作校验）。
 
-问题：
+不是 bug，但会误导读者。
 
-WM loss很好
+### P3-8 WM 训练 action 的 `executed_action` fallback 未文档化
 
+`pipeline/train_wm.py:276-281` 和 `pipeline/probe_wm.py:118-121`：
 
-不等于：
+```python
+np.where(np.isfinite(executed_action), executed_action, action)
+```
 
-Policy还能决策
+IL/val expert 数据没有 `executed_action` 列（只有 `action`），所以实际使用 `action`。`docs/arch_lock.md:743` 写“WM 训练 action 用 executed_action”，没有说明这个 fallback。语义上 `collect.py` 的 `action` 是实测 expert endpoint，基本等价，但文档应明确“IL 数据无 executed_action 时使用实测 action”。
 
+---
 
-因为：
+## 4. 已验证正确的部分
 
-latent fidelity
-≠
-decision fidelity
+### 4.1 exact execution
 
+代码事实：
 
-这是目前方案里最大的潜在炸点。
+- `pipeline/eval.py:306`、`pipeline/train_ppo.py:284` 都是 `denormalize(..., clip=False)`；
+- `pipeline/eval.py:309-323`、`pipeline/train_ppo.py:791-793` 使用 requested 构造 trajectory，`executed_action == requested_action`；
+- `pipeline/eval.py` 已删除 `safe_brake_action`、`feasible_v1_interval` 投影逻辑；
+- `pipeline/train_ppo.py` 已删除 fallback/mask 字段；
+- `dataset/collect_dagger.py` lift 分支不再调用 `_resolve_student_action`，而是直接 `_trajectory(student_action)` + `tracker.arm`；
+- `pipeline/select_checkpoint.py` 和 `pipeline/train_bc.py::_closed_loop_score` 已移除 `fallback_rate`；
+- `pipeline/eval_metrics.py` 已移除 `fallback`/`fallback_count`/`postprocess_count`；
+- `test/test_eval.py`、`test/test_ppo_contract.py`、`test/test_collect_dagger.py` 已同步移除旧 fallback 字段。
 
-我建议提前定义：
+### 4.2 stable ID 生成/数据
 
-Action Consistency
+对 5 个 canonical NPZ 全量检查：
 
+```text
+il_expert_exact:       139,620 rows / 2,000 scenes
+val_500/expert_exact:   34,368 rows /   500 scenes
+il_dagger_exact_r1:     135,897 rows / 2,000 episodes
+il_dagger_exact_r2:      96,034 rows / 1,268 episodes
+il_dagger_exact_r3:      96,706 rows / 1,268 episodes
+```
 
-指标。
+OD/LD valid zero = 0，duplicate = 0，invalid nonzero = 0。
+说明 `_stable_hash` 的非零映射、`validate_stable_ids` 和当前数据生成路径一致。
 
-同一个真实状态：
+### 4.3 baseline 数字
 
-Real
-→ Policy
-→ a_real
+`docs/baseline_exact.md` 与 `runs/bc_*_exact_*/closed_loop/best_final.json` 全部一致：
 
+- r3：success 0.664 / collision 0.178 / off_road 0.120 / route 0.851 / feasible 0.812 / timeout 0.048 / stuck 0.006 / comfort 0.996；
+- 终止分布：arrive 332 / collision 89 / out_of_road 55 / timeout 24；
+- 难度：easy 180 / medium 176 / hard 144；easy 0.850/0.067/0.106/0.006/0.000，medium 0.648/0.119/0.199/0.034/0.006，hard 0.451/0.389/0.042/0.118/0.014；
+- IL/r1/r2/r3 四阶段表格全部匹配；
+- best_closed_loop epoch：IL 20 / r1 15 / r2 5 / r3 15，匹配 `metrics.json`；
+- 训练 rows：IL 139,620 / r1 119,985 / r2 136,016 / r3 141,688，匹配 `exact_pipeline.log` 和 `exact_r3.log`；
+- r3 collection outcome 0.559/0.225/0.104/0.111，匹配 `expert_bc.meta.json`；
+- `test500` 在日志中没有出现，符合“不参与调参”。
 
-和：
+### 4.4 config / checkpoint / data 路径
 
-WM one-step
-→ Policy
-→ a_wm
+- `config/train_bc.yaml`、`train_wm.yaml`、`train_joint.yaml`、`train_ppo.yaml`、`collect_dagger.yaml` 的 `data/val_data/specs/ckpt/val_split/closed_loop_*` 路径全部存在；
+- `runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt` 可 strict load，参数 1,270,748，action bounds `[0,-1.5,-0.8,0]` / `[7.5,1.5,0.8,15]`；
+- `data/specs/val_500.json` / `train_2000.json` / `test_500.json` 的 SHA-256 与 split manifest 一致；`verify_split_manifest` 通过；
+- val data scene seeds 与 `data/splits/val_500.json` 完全一致；train/val 无 overlap。
 
+### 4.5 tests
 
-比较：
+完整 pytest：
 
-KL
-MSE
+```text
+137 passed, 1 failed, 2 errors, 1 skipped
+```
 
+失败/错误均为环境问题，不是本 range 逻辑回归：
 
-未来：
+- `test/test_lqr_smoke.py::test_lqr_straight_reference_smoke`：MetaDrive/Panda3D `GraphicsPipeSelection.getGlobalPtr().getPipeTypes()` → `IndexError`；
+- `test/test_obs_schema.py::test_current_frame_shapes_finite_and_stable_ids`：同一 MetaDrive 初始化错误；
+- `test/test_obs_schema.py::test_build_observation_never_reads_lane_level_nav`：同一错误；
+- `test/test_eval.py::test_run_episode_one_scene_smoke` 默认 skip，需要 `RUN_EVAL_CLEAN_SMOKE=1`。
 
-WM上线条件
+通过的新测试包括：
 
+- `test_validate_stable_ids_rejects_zero_and_duplicates`
+- `test_zero_stable_id_fails_fast`
+- `test_duplicate_nonzero_stable_ids_fail_fast`
+- `test_bank_window_builder_rejects_invalid_stable_ids`
+- `test_wm_alignment_rejects_zero_and_target_duplicates`
+- `test_infeasible_requested_action_is_executed_faithfully`
+- `test_infeasible_sample_is_executed_faithfully`
 
-不要写：
+**测试缺口：** `test_obs_schema` 的 env-dependent 新断言（OD/LD valid ID 非零、唯一）在本环境因 MetaDrive 初始化失败而没有被执行；这是证据缺口，不能算已完全验证。
 
-latent mse
+---
 
+## 5. 锁合同前必须修
 
-而写：
+1. `docs/arch_lock.md:409` 的 `h_valid` 改为双 mask 语义：
+   ```text
+   h_valid       = current_valid ∪ target_mask
+   current_valid = current_valid
+   ```
+2. `pipeline/eval.py` 的 invalid_action / arm failure / speeds invalid 分支统一设置 `feasible=False` 或递增 `infeasible_count`，并补 fake tracker 测试。
+3. 补 target-only ID 校验（`_align_by_id` / `_align_geometry_by_id` 对整个 target frame 校验，或 target-only 循环前显式校验）。
+4. 修 PPO invalid-action 终止回填：已有 transition 的最后一条标记 `terminated=True`，并记录 `invalid_action_count`。
+5. 更新 `data/manifests/datasets.json`，避免 canonical data registry 指向已删除路径。
 
-action consistency
+## 6. 建议后续清理
 
-P4. 关于你想做GRPO
+- 删除 `docs/arch_lock.md:834` 或 `:836` 的重复 geometry 句。
+- 修 `env/obs.py:23-27` 的 LD chunk 文档，或决定把 `chunk_s` 纳入 LD ID（后者需要重采数据）。
+- `docs/baseline_r3.md` 标注历史 artifact 已移除。
+- `docs/baseline_exact.md` 说明 r3 第一次采集 `96,632/1267 failed=1` 与重采 `96,706/1268` 的来源差异。
+- `data/README.md` 的 mini 路径标注 optional/not collected，或补采。
+- 把 `arch_lock` 的“所有使用端 fail-fast”改成“canonical 入口/窗口构建处 fail-fast”。
+- 清理 `train_wm.py:171` 的 unused `usable` 和 `:187` 忽略返回值的问题。
+- 在 `arch_lock` 说明 WM 训练 `executed_action` 缺失时使用 `action` 的 fallback（IL 数据）。
 
-我其实支持。
+## 7. 最终判定
 
-但是有个前提。
+**代码主线：ACCEPT，可继续推进。**
+**`docs/arch_lock.md`：CONDITIONAL，修完 P1-1/P1-2（以及 P2-1/P2-2）后再锁 pre-RL contract。**
 
-你现在：
-
-action
-=
-(dx,dy,dpsi,v_next)
-
-
-GRPO天然适合：
-
-一次采样G条
-
-
-例如：
-
-G=8
-
-
-然后：
-
-rollout
-
-
-比较：
-
-collision
-progress
-comfort
-
-
-但是这里有个问题。
-
-如果你现在：
-
-single-step action
-
-
-打分。
-
-GRPO意义不大。
-
-因为：
-
-轨迹质量
-
-
-通常需要：
-
-1~3s horizon
-
-
-才能看出来。
-
-所以你的GRPO应该长这样：
-
-Policy
-↓
-sample 8 trajectories
-↓
-rollout 3s
-↓
-group ranking
-↓
-GRPO
-
-
-而不是：
-
-sample 8 actions
-↓
-0.5s reward
-↓
-GRPO
-
-
-后者收益有限。
-
-P5. 关于RealBank
-
-这里我和你站一边。
-
-我不赞成：
-
-Bank:
-OD
-LD
-NAV
-EGO
-
-
-全塞进去。
-
-我更喜欢：
-
-Bank:
-OD
-LD
-
-
-然后：
-
-Nav
-Ego
-
-
-是条件输入。
-
-原因：
-
-WM
-
-
-学的是：
-
-世界变化
-
-
-而：
-
-Nav
-
-
-不是世界状态。
-
-是任务条件。
-
-否则：
-
-换个导航
-
-
-WM状态就变了。
-
-逻辑很怪。
-
-如果我是现在的Adversarial Reviewer
-
-我会给：
-
-✅ 通过
-History memory
-DAgger
-4D action
-GRPO方向
-OD/LD中心表示
-
-⚠️ 必须补
-Pure student success率
-Shield影响量化
-Action consistency gate
-Schema统一
-Trajectory consistency loss
-
-❌ 不建议现在做
-WM
-Dreamer
-Imagined RL
-复杂GRPO reward
-
-
-一句话总结：
-
-当前架构最大的风险已经不是表达能力，而是“你以为61%是学生学会了，但实际上可能有大量 expert/shield 成分”。在确认 pure-student 能稳定达到 50%+ 之前，我不会把主要资源投入 WM，而会先把评估口径、trajectory consistency 和 GRPO 基础打扎实。
-
-=====================================================
-我觉得你已经碰到自动驾驶 WM 最核心的问题了，而且这个问题实际上比：
-
-WM MSE
-WM rollout error
-
-
-更重要。
-
-你说的本质是：
-
-Policy 在真实ENV上训练
-
-WM 在拟合ENV
-
-二者永远不可能完全一致
-
-
-所以目标不应该是：
-
-WM = ENV
-
-
-而应该是：
-
-WM 对 Policy 来说是有用的
-
-
-这是两种完全不同的思路。
-
-1. 你说的其实是“Decision Fidelity”而不是“State Fidelity”
-
-很多项目死在这里：
-
-WM latent loss ↓↓↓
-
-Policy性能 ↓
-
-
-因为他们优化的是：
-
-State Fidelity
-
-
-例如：
-
-L_wm
-=
-MSE(z_hat,z_gt)
-
-
-但是自动驾驶真正需要的是：
-
-Decision Fidelity
-
-
-即：
-
-在同一个状态下
-
-WM给Policy的决策
-
-≈
-
-真实ENV给Policy的决策
-
-
-举例：
-
-真实世界：
-
-前车距离 12m
-
-
-WM：
-
-前车距离 11m
-
-
-MSE不小。
-
-但是：
-
-Policy
-
-都选择刹车
-
-
-那么：
-
-Decision Error ≈ 0
-
-
-反过来：
-
-真实世界：
-
-前车距离 10m
-
-
-WM：
-
-前车距离 10.2m
-
-
-MSE很小。
-
-但：
-
-真实 -> 刹车
-
-WM -> 加速
-
-
-那么：
-
-Decision Error 很大
-
-
-所以我越来越觉得：
-
-Policy Consistency
-
-
-应该是主指标之一。
-
-不是Probe。
-
-而是Loss。
-
-2. 我会怎么解决WM/Policy漂移
-
-我不建议：
-
-先训练WM
-
-训练完
-
-再接Policy
-
-
-因为一定漂。
-
-我的建议：
-
-Phase D1
-
-只训练：
-
-L_wm
-
-
-得到：
-
-one-step WM
-
-Phase D2
-
-冻结Policy。
-
-增加：
-
-L_consistency
-=
-KL(
- Policy(z_real),
- Policy(z_wm)
-)
-
-
-即：
-
-真实状态
-↓
-Policy
-↓
-a_real
-
-
-和：
-
-WM one-step
-↓
-Policy
-↓
-a_wm
-
-
-对齐。
-
-此时：
-
-WM
-
-
-必须学会：
-
-给Policy有意义的latent
-
-
-而不只是：
-
-MSE最小
-
-3. 为什么我觉得这个比Joint更稳
-
-很多人第一反应：
-
-Policy
-+
-WM
-
-一起训练
-
-
-实际上容易变成：
-
-Policy适应WM错误
-
-WM适应Policy错误
-
-
-然后：
-
-一起漂
-
-
-非常像：
-
-GAN collapse
-
-
-所以我更喜欢：
-
-Step1
-
-固定Policy
-
-训练WM
-
-Step2
-
-对齐：
-
-Policy(z_real)
-
-≈
-
-Policy(z_wm)
-
-Step3
-
-最后再Joint。
-
-这样：
-
-Policy
-
-
-相当于：
-
-Teacher
-
-
-WM：
-
-Student
-
-4. 你现在其实有一个天然优势
-
-你和很多Dreamer项目不一样。
-
-因为：
-
-Policy
-
-
-不是从WM里长出来的。
-
-而是：
-
-IL
-↓
-DAgger
-↓
-GRPO
-
-
-在真实ENV里长出来的。
-
-这意味着：
-
-Policy
-
-
-是可信的。
-
-所以：
-
-Policy
-
-
-可以作为：
-
-WM的语义教师
-
-
-而不是：
-
-WM当教师
-Policy当学生
-
-
-这点非常重要。
-
-5. 我会把WM目标改成三层
-
-现在很多人只有：
-
-L_wm
-=
-latent mse
-
-
-我建议：
-
-Layer1
-L_transition
-
-
-普通：
-
-latent loss
-
-Layer2
-L_decision
-
-=
-KL(
- Policy(z_real),
- Policy(z_wm)
-)
-
-Layer3
-L_value
-
-=
-MSE(
- Value(z_real),
- Value(z_wm)
-)
-
-
-这样：
-
-WM必须同时保持：
-
-状态相似
-
-决策相似
-
-价值相似
-
-
-这比只追：
-
-latent mse
-
-
-靠谱得多。
-
-6. 你前面说 a_t rollout 6次得到3s trajectory
-
-这个我同意。
-
-所以我认为现在最大的好消息是：
-
-你的Policy
-
-本身已经是
-
-latent planner
-
-
-而不是：
-
-waypoint predictor
-
-
-因此：
-
-RealBank
-↓
-Policy
-↓
-a1..a6
-
-
-和：
-
-RealBank
-↓
-WM
-↓
-Policy
-↓
-a1..a6
-
-
-天然就能比较。
-
-所以未来我不会只比较：
-
-z_real
-
-vs
-
-z_wm
-
-
-我会比较：
-
-trajectory_real
-
-vs
-
-trajectory_wm
-
-
-甚至：
-
-GRPO reward_real
-
-vs
-
-GRPO reward_wm
-
-最后的结论
-
-你现在最值得关注的已经不是：
-
-WM怎么更准
-
-
-而是：
-
-WM怎么对Policy更有用
-
-
-我建议把未来的WM验收顺序改成：
-
-Latent Fidelity
-      ↓
-Action Consistency
-      ↓
-Value Consistency
-      ↓
-3s Trajectory Consistency
-      ↓
-Joint Training
-
-
-而不是：
-
-Latent Fidelity
-      ↓
-Joint Training
-
-
-因为对于你这种：
-
-IL
-→ DAgger
-→ GRPO
-→ WM
-
-
-路线，
-
-Policy 是老师，WM 是学生。
-
-只要坚持这个原则，WM/Policy 漂移问题会比 Dreamer 系列容易控制很多。
+这次 range 没有推翻 exact execution / stable-ID 方向；主要问题是合同定义和 invalid 分支语义还没有完全收口，不是架构方向错误。

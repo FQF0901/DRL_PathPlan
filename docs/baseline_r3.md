@@ -5,7 +5,7 @@
 > 说明：该 run 的 eval/selection 使用了已移除的 v1 projection / safe-brake；
 > `fallback=0.094` 表示 9.4% episode 发生过动作改写。exact 重跑后由新 baseline 取代。
 > 架构合同见 `docs/arch_lock.md`。
-> 注：旧 checkpoint 与旧 data 已在 exact 重跑后清理；本文件仅保留历史指标。
+> 注：旧 checkpoint、旧 data、旧 logs 和旧 r1 eval metrics 已在 exact 重跑后清理；本文件仅保留历史指标，不能复现。
 
 ## Checkpoint
 

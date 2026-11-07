@@ -286,6 +286,7 @@ def run_episode(
     first_requested_action: Optional[np.ndarray] = None
     executed_action = np.zeros(ACTION_DIM, dtype=np.float64)
     realized_action = np.zeros(ACTION_DIM, dtype=np.float64)
+    execution_unavailable = False
 
     while n < max_steps:
         obs = build_observation(
@@ -315,6 +316,7 @@ def run_episode(
         _add_codes(requested_code_counts, requested_codes)
         if requested_tr is None:
             infeasible_count += 1
+            execution_unavailable = True
             done = True
             termination = "invalid_action"
             break
@@ -329,6 +331,8 @@ def run_episode(
             or not np.all(np.isfinite(speeds))
             or float(speeds.min()) < -1e-6
         ):
+            infeasible_count += 1
+            execution_unavailable = True
             done = True
             termination = "invalid_action"
             break
@@ -347,6 +351,8 @@ def run_episode(
             try:
                 tracker.arm(env, trajectory=tr_exec)
             except (TypeError, ValueError):
+                infeasible_count += 1
+                execution_unavailable = True
                 done = True
                 termination = "invalid_action"
                 break
@@ -521,6 +527,7 @@ def run_episode(
         "control_steps": int(control_steps),
         "requested_action": requested_action.tolist(),
         "executed_action": executed_action.tolist(),
+        "execution_unavailable": bool(execution_unavailable),
         "realized_action": realized_action.tolist(),
         "requested_action_codes": requested_code_counts,
         "executed_action_codes": executed_code_counts,

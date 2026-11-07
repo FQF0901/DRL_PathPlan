@@ -21,8 +21,8 @@ Design facts / assumptions that are intentionally explicit
   time the frame was captured.  Raw history stores each frame in its own ego
   frame; stable-ID alignment and pose deltas happen in BankWindow/TSB.
 * LD chunk anchor: ``floor(s0 / LD_CHUNK_METERS) * LD_CHUNK_METERS`` along the
-  lane.  It is part of the LD stable ID (``ld_chunk_s``) so a local crop-window
-  change does not silently reuse an old same-ID latent as if nothing changed.
+  lane.  It is a feature (``ld_chunk_s``), **not** part of the LD stable ID;
+  the lane identity is stable across chunk windows.
   Polyline points remain ego-relative 0/5/10/20/30 m samples from the current
   longitudinal position; the separately stored chunk anchor makes the crop
   window explicit.
@@ -389,8 +389,9 @@ def validate_stable_ids(
             f"{field}: valid stable_id=0 at frame={int(row)} slot={int(slot)}"
             + (f" ({context})" if context else "")
         )
-    sentinel = np.iinfo(np.int64).min
-    order = np.argsort(np.where(valid_mat, ids_mat, sentinel), axis=-1)
+    # Sort valid slots first, then by ID.  Avoid a sentinel value that could
+    # collide with a legitimate signed int64 stable ID.
+    order = np.lexsort((ids_mat, ~valid_mat))
     sorted_ids = np.take_along_axis(ids_mat, order, axis=-1)
     sorted_valid = np.take_along_axis(valid_mat, order, axis=-1)
     duplicate = (

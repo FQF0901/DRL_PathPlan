@@ -28,10 +28,7 @@ data/
       il_dagger_exact_r3/    # exact DAgger round 3, 1268 medium/hard scenes
     val_500/
       expert_exact/          # exact raw expert labels / closed-loop val
-    mini/
-      il_train_100_raw/      # raw-history IL smoke subset
-      dagger_train_100_raw/  # raw-history DAgger smoke subset
-      val_20_expert_raw/     # raw-history validation smoke subset
+    mini/                    # optional smoke pools; not collected in the exact baseline
   manifests/
     datasets.json            # registry: purpose, size, source
 ```

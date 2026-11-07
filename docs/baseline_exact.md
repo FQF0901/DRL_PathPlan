@@ -150,8 +150,8 @@ runs/bc_dagger_exact_r3_261107031440/closed_loop/best_final.json
 训练/采集日志：
 
 ```text
-runs/logs/exact_pipeline.log
-runs/logs/exact_r3.log
+runs/logs/exact_pipeline.log   # 第一次 r3 采集 96,632 rows / 1267 episodes / failed=1
+runs/logs/exact_r3.log         # 修复后重采 96,706 rows / 1268 episodes / failed=0；当前 baseline 使用此结果
 ```
 
 ## 6. 备注

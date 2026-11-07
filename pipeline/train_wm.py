@@ -26,7 +26,7 @@ from torch import Tensor
 
 from dataset.splits import split_by_scene_seed
 from env.action.config import load_action_contract
-from env.obs import HISTORY_FRAMES
+from env.obs import HISTORY_FRAMES, validate_stable_ids
 from net.encoder import TargetEncoder
 from net.world_model import EgoConditionedLatentWM
 from pipeline.checkpointing import load_drive_model_from_checkpoint
@@ -168,7 +168,11 @@ def _target_hit(ident: int, tgt_ids, tgt_mask) -> int:
 
 
 def _align_by_id(cur, cur_ids, cur_mask, tgt, tgt_ids, tgt_mask) -> Tuple[np.ndarray, np.ndarray]:
-    usable = _usable_current_ids(cur_ids, cur_mask)
+    _usable_current_ids(cur_ids, cur_mask)
+    validate_stable_ids(
+        tgt_ids, np.asarray(tgt_mask) > 0.5,
+        field="target", context="train_wm._align_by_id",
+    )
     out = np.zeros_like(cur, dtype=np.float32)
     mask = np.zeros_like(cur_mask, dtype=np.float32)
     for j in range(cur.shape[0]):
@@ -185,6 +189,10 @@ def _align_by_id(cur, cur_ids, cur_mask, tgt, tgt_ids, tgt_mask) -> Tuple[np.nda
 
 def _align_geometry_by_id(cur_ids, cur_mask, tgt, tgt_ids, tgt_mask) -> Tuple[np.ndarray, np.ndarray]:
     _usable_current_ids(cur_ids, cur_mask)
+    validate_stable_ids(
+        tgt_ids, np.asarray(tgt_mask) > 0.5,
+        field="target", context="train_wm._align_geometry_by_id",
+    )
     out = np.zeros_like(tgt, dtype=np.float32)
     mask = np.zeros_like(cur_mask, dtype=np.float32)
     for j in range(len(cur_ids)):

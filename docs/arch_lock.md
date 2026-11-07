@@ -48,7 +48,7 @@
 11. 没有独立 risk head，也没有 value head；Plan/aux；collision/offroad/timeout 进 aux。
 12. 当前 scope 是当前可见目标、固定 top-16、短时 rollout；不考虑短时遮挡，只保留 `valid`。
 13. Rollout 是 **6 个 policy / 6 个 action / 6 个 imagined transition**；t6 是 terminal state。
-14. 所有 canonical 路径（BC/DAgger、collection、eval、PPO）exact tracking：`requested_action == executed_action`；不做 `v_next` projection、safe-brake、clip 或额外平滑。非有限/不可执行动作直接终止或报错。LQR 是后续阶段，才允许 requested/executed 分离。
+14. 所有 canonical 路径的 student/lift action（BC/DAgger lift 行、eval、PPO）exact tracking：`requested_action == executed_action`；不做 `v_next` projection、safe-brake、clip 或额外平滑。DAgger expert replay 行按设计执行 expert action。非有限/不可执行动作直接终止或报错。LQR 是后续阶段，才允许 requested/executed 分离。
 
 ### 0.1 当前基线（BC/DAgger）
 
@@ -185,7 +185,7 @@ temporal_valid[t, n] = valid[t, n]
 
 slot 复用时清空旧 content/geometry/type，写入新 stable_id，旧历史 temporal mask=0。
 
-valid OD/LD stable ID 必须非零且同帧唯一；违反时生成端和所有使用端都 fail-fast。skipping/padding slot 才允许 ID=0。生产路径不存在 slot-ID fallback。
+valid OD/LD stable ID 必须非零且同帧唯一；canonical 生成端、loader、BankWindow 构建和模型 fast path 都 fail-fast。skipping/padding slot 才允许 ID=0。生产路径不存在 slot-ID fallback。
 
 ---
 
@@ -406,7 +406,8 @@ aux = aux_head(policy_context)
 
 ```text
 h_od_t, h_ld_t              # TSB per-entity context（6 帧历史）
-h_valid                     # current valid mask
+h_valid = current_valid ∪ target_mask   # WM 需要预测/监督的 slot
+current_valid              # 当前帧真实存在的实体，用于 target-only slot cue
 action_t                    # normalized action
 ```
 
@@ -433,7 +434,7 @@ requested_action:  physical (dx,dy,dpsi,v_next)
 executed_action:   physical; 当前 = requested_action
 ```
 
-- WM training：`executed_action` → normalize(bounds) → WM；
+- WM training：有 `executed_action` 时用它，否则用实测 `action`（IL/val expert 数据通常没有 executed_action）→ normalize(bounds) → WM；
 - WM rollout：`policy_action` → WM；
 - ego pose/ego feature：`requested_action` physical；
 - 引入 LQR 后，`executed_action` 才允许与 `requested_action` 不同。
@@ -586,9 +587,10 @@ BC/DAgger policy 训练路径：
 requested_action == executed_action
 ```
 
-canonical collection/eval/PPO 都执行 net 的 requested action；PSTL
-feasibility/comfort 只作为诊断，不改写动作。非有限或无法构造轨迹的动作直接
-终止 episode 或报错，不使用 safe-brake。
+BC/DAgger student/lift 行、canonical eval、PPO 都执行 net 的 requested action；
+PSTL feasibility/comfort 只作为诊断，不改写动作。非有限或无法构造轨迹的动作直接
+终止 episode 或报错，不使用 safe-brake。DAgger 的 expert replay 行按设计执行
+expert action，并记录为 replay，不属于 student exact execution。
 
 ### 9.2 action bounds / limits
 
@@ -659,7 +661,7 @@ real frame t-5..t, t+1
   → L_od_content + L_ld_content + L_od_geo + L_ld_geo
 ```
 
-- WM training action = executed_action normalized；
+- WM training action = `executed_action` if present else measured `action`；normalize(bounds)；
 - target `z*` 不进 Bank/policy；
 - 不做 geometry projection；
 - future map 只做 target。
@@ -740,7 +742,7 @@ LQR 的 executed/requested 分离仍属于 RL 之后的事项，不在当前 bas
 - policy 训练更新 encoder/TSB/planner；WM 训练冻结 encoder/TSB/target，只训练 WM/decoder。
 - WM 训练固定使用 `data/splits/val_500.json` 对应的 held-out val 场景；`--allow-random-val` 是 legacy debug 开关（默认 false），不进入 gate。
 - WM 始终用真实下一帧 observation 的 target encoder 输出；target 不进入 Bank/policy。
-- action condition 训练用 `executed_action`；rollout 用 `policy_action`。
+- action condition 训练优先用 `executed_action`，缺失时用实测 `action`；rollout 用 `policy_action`。
 - one-step 先于 multi-step；6-step plan 不等于执行 6 步。
 - 当前 policy baseline 不读取 WM rollout；WM 只能通过显式 `imagine`/`rollout` 接口进入后续 RL。
 - detach 边界显式，见 §12.5。
@@ -831,9 +833,7 @@ initial_frame:  用 z_t0 作为每个 depth 的 baseline
 previous_step:  用 z_hat_t（下一个 residual 之前的状态）作为 depth d 的 baseline
 ```
 
-当前 probe 同时报告两者；geometry 仍由 decoder 输出。
-
-geometry 仍由 decoder 输出；不存在 geometry base/residual persistence。
+当前 probe 同时报告两者；geometry 仍由 decoder 输出；不存在 geometry base/residual persistence。
 target drift / latent norm / latent collapse 目前是 TODO，不是已实现指标。
 
 ---

@@ -76,7 +76,7 @@ def test_wm_alignment_rejects_zero_and_target_duplicates():
 
     cur = np.zeros((1, 4), dtype=np.float32)
     tgt = np.zeros((2, 4), dtype=np.float32)
-    with pytest.raises(ValueError, match="duplicate target stable ID"):
+    with pytest.raises(ValueError, match="duplicate stable_id"):
         _align_by_id(
             cur, np.array([2]), np.array([1.0]),
             tgt, np.array([2, 2]), np.array([1.0, 1.0]),
