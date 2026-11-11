@@ -172,10 +172,10 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 
 # 2026-11-11 — RL 现状、问题与猜想（deepseekv4p1）
 
-> 更新时间：2026-11-11 11:10（训练已完成 50/50）
+> 更新时间：2026-11-11 11:30（训练完成；owner 决定停止 RL 线）
 > Run：`runs/ppo_group_r3_261111015244`
 > 合同：`docs/arch_lock.md` §12.4（本文件不是合同，只记录现状、问题、猜想和待拍板问题）
-> 结论先行：**实现链路已跑通；最好 holdout 0.688，最终 0.680，较 r3 baseline 0.646 显著提升（paired McNemar p≈0.0099），但仍未达到 72.8%；test500 尚未消费。**
+> 结论先行：**实现链路已跑通；holdout best 0.688 / final 0.680，但 0.688 是 best-of-10 的乐观值，且 holdout 的 medium/hard 全部被 r3 IL 训练见过（P0 exposure confound），不能外推到 test500 的 unseen medium/hard。owner 决定停止 RL 线；test500 未消费。**
 
 ---
 
@@ -272,7 +272,8 @@ device: cuda
 | update 20 vs update 50 | 0.688 | 0.680 | -0.8pp | 0.60 | [-3.0pp, +1.4pp] |
 
 - 按 difficulty（update 20）：easy 0.872→0.904、medium 0.607→0.653、hard 0.388→0.439；三个分层都涨，但 hard 仍只有 0.439。
-- 结论：**r3 → RL 的提升是统计显著的，但幅度只有 3~4pp；update 20 与 update 50 无法区分，0.688 是选择偏差下的乐观值。** 距离 72.8% 仍有约 4pp。
+- **P0 caveat：holdout 不是 IL-clean。** r3 `config.train_seeds` 有 1389 个 scene，与 RL holdout 交集 **350/500**：173 medium + 139 hard + 38 easy；IL-unseen 的 150 个 **全部是 easy**。test500 的 medium/hard 是 IL-unseen，所以当前 holdout 的 medium/hard 增益不能外推到 test500。详见 §4.11。
+- 修正结论：**在这个 IL-exposed holdout 上，r3 → RL 的提升是统计显著的，但幅度只有 3~4pp；update 20 与 50 无法区分，0.688 是 best-of-10 的乐观值。** 它不能证明 unseen medium/hard 会同步提升，也不能证明接近 72.8%。
 
 ### 3.3 训练 rollout（50 个 update 的统计）
 
@@ -358,13 +359,32 @@ device: cuda
 **事实**：`eval.py` 现在显式 `reset(seed=spec.seed)`，并新增 `strict_success = success and not collision and not off_road`。
 **含义**：holdout `0.646` 是新口径；历史 val500 `0.664` 是不同 split、可能不同 reset/终止语义，不能直接说“r3 退化了”。
 - test500 没有历史 baseline；gate 只能报绝对 success + CI，不能伪造 delta。
+- **gate 指标未统一**：`arch_lock` §12.4/§12.8 写 `success >= 72.8%`，而 `eval.py` 的 `success` 是原始 `arrive_dest`；`strict_success` 才排除 collision/off_road。本轮 holdout 的 `success == strict_success`（没有差异），但 test500 协议必须先预注册用 `strict_success`。
 
 ### 4.10 合同执行上的偏差
 
 - calibration 200 没有消费；reward 权重未校准。
 - `entropy_proxy` 命名错误（实际是 log-std）。
-- baseline rows 未落盘，影响 paired 统计。
+- baseline rows 最初未落盘；已用独立进程补跑并精确复现 0.646，paired 统计现在可信。
+- oracle review 的 P2：`evaluate_holdout` rows 丢了 `invalid_action`/`infeasible`/`difficulty`；`_timeout_terminal_transition` 分支没有把 reward 加进 `reward_sum`（正常流程不可达）；`run_meta.json` 没有 git sha / calibration status / eval split sha。
 - 没有 failure-window、没有 cost/Lagrangian、没有 WM 参与，这些是符合合同的。
+
+### 4.11 Holdout IL exposure confound（P0，oracle review 发现）
+
+**事实**：r3 IL checkpoint 的 `config.train_seeds` 有 1389 个 scene；RL holdout 500 中有 **350 个**在 IL 训练集里：
+
+| 子集 | n | baseline | update 20 | update 50 |
+|---|---:|---:|---:|---:|
+| IL-seen | 350 | 0.551 | 0.600 | 0.586 |
+| IL-unseen | 150（全 easy） | 0.867 | 0.893 | 0.900 |
+| easy | 188 | 0.872 | 0.904 | 0.910 |
+| medium | 173 | 0.607 | 0.653 | 0.647 |
+| hard | 139 | 0.388 | 0.439 | 0.410 |
+
+- IL-seen 的 350 = 173 medium + 139 hard + 38 easy；IL-unseen 的 150 全部是 easy。
+- **test500 的 medium/hard 是 IL-unseen**；当前 holdout 的 medium/hard 全部是 IL-seen。
+- 这不是 RL trainer 的 split violation：RL 训练确实没看 holdout seeds；问题在 **初始化 r3 的 IL exposure**。但它意味着 holdout 的 medium/hard 增益不能外推到 test500。
+- 影响：按 holdout per-difficulty 外推 test500 会得到约 0.687，但这是乐观的；真实 unseen medium/hard 可能更低。**不能用当前 holdout 证明 test500 会过 72.8%。**
 
 ---
 
@@ -403,7 +423,7 @@ device: cuda
 ### H5 统计噪声 / winner's curse
 
 - [事实] holdout 10 次评测，best 0.688；baseline rows 已补，paired McNemar：baseline→update 20 **+4.2pp, p=0.0099**；baseline→update 50 +3.4pp, p=0.033；update 20→50 **-0.8pp, p=0.60**。
-- [推断] r3→RL 的提升是真实的，但幅度只有 3~4pp；0.688 是 10 次选择中的最大值，真实期望更接近 0.68；update 20 与 50 无法区分。
+- [推断] 在这个 IL-exposed holdout 上 r3→RL 的提升是真实的，但幅度只有 3~4pp；0.688 是 10 次选择中的最大值，真实期望更接近 0.675；update 20 与 50 无法区分；由于 medium/hard 全部 IL-seen，不能外推到 test500。
 - 验证：已做 paired bootstrap/McNemar；下一步用更多 eval 或 lower-confidence selection 降低 winner's curse。
 - 修法：下一轮保存 baseline rows；selection 用更稳的指标（如 3 次 eval 均值或 lower confidence bound）。
 
@@ -422,14 +442,16 @@ device: cuda
 
 - 训练 pipeline 已跑通；reward/advantage/PPO/eval 都有测试和日志；50/50 正常结束。
 - holdout 最好 0.688（update 20），最终 0.680（update 50），未达到 72.8%。
-- r3→RL 的提升统计显著（+4.2pp，p=0.0099）；update 20 与 50 无法区分。
+- 在这个 IL-exposed holdout 上，r3→RL 的提升统计显著（+4.2pp，p=0.0099）；update 20 与 50 无法区分。
+- **holdout 不是 IL-clean**：350/500 被 r3 IL 训练见过；medium/hard 全部 IL-seen；IL-unseen 只有 easy。test500 的 medium/hard 是 unseen，不能外推。
 - test500 没有跑过，没有被污染。
 - reward 未校准；探索 std 很小；评测很贵；内存/swap 在增长（进程已结束，无法确认是否 leak）。
 
 **不能确定：**
 
 - 平台化到底是探索、reward、数据覆盖、表征还是统计噪声导致；目前没有足够证据把锅扣在单一原因上。
-- 0.688 是选择偏差下的乐观值；真实期望约 0.68，不能声称“接近 72.8%”。
+- 0.688 是选择偏差下的乐观值；真实期望约 0.675，不能声称“接近 72.8%”。
+- 当前 holdout 的 medium/hard 增益有多少是 RL 泛化、多少是 r3 IL exposure 的记忆效应；没有 clean holdout 无法拆分。
 - 内存增长是否是真 leak；没有 profile。
 
 **不要做的事：**
@@ -439,36 +461,50 @@ device: cuda
 
 ---
 
-## 7. 下一步建议
+## 7. 最终决定与交付
 
-1. **当前 run 已完成** 50/50；`best_holdout.pt`（update 20）和 `last.pt`（update 50）已保存。
-2. **结果审计（大部分已做）**：
-   - `train_log.jsonl` 50 条 update 完整；best checkpoint metadata 为 update 20 / 0.688；
-   - 已重跑 r3 baseline holdout 并保存 `baseline_holdout_rows.json`；paired McNemar/bootstrap 已出；
-   - 仍需 oracle 对训练/验证结果做 adversarial review（进行中）。
-3. **不要因为“合同说 test500 是 gate”就立刻消费它**。当前 best holdout 0.688（真实期望约 0.68），距离 72.8% 约 4~5pp；test500 只有一次，建议先由 owner 决定：
-   - 选项 A：本轮视为失败 run，不消费 test500；修 H1/H2/H3 后跑第二轮，再把 test500 留给第二轮；
-   - 选项 B：按合同对当前 best checkpoint 消费 test500，接受“很可能失败且 gate 被用掉”的结果。
-   - 我的倾向：**A**。在没有达到 holdout 目标前消费 test500，信息价值低，还会失去干净的一次性 gate。
-4. **如果决定跑 test500**：只跑一次，用 `best_holdout.pt` + `data/specs/test_500.json` + `data/splits/test_500.json`，读取 `strict_success_rate`；记录 git sha、命令、时间、完整 metrics。不要根据结果调参再跑第二次。
-5. **第二轮训练前**（如果 gate 失败）预注册改动，至少包括：
-   - reward calibration（200 scenes，一次，不扫网格）；
-   - 探索诊断与修法（H1）；
-   - 增大 `scenes_per_update` / updates（H3）；
-   - 降低 eval 成本（例如每 10 update 用 200-scene 子集，最后 full 500）；
-   - 内存 profile；
-   - 保存 baseline per-scene rows。
-6. 无论结果如何，更新 `docs/arch_lock.md` 的 implementation status，并把失败/成功证据写清楚；不要把未跑过的 test500 写成已通过。
+**Owner 决定（2026-11-11）：停止 RL 线；不消费 test500。**
+
+理由（基于 oracle adversarial review + 本文件数据）：
+
+- best holdout 0.688 是 best-of-10 的乐观值；10 次均值 0.6748，诚实估计约 0.675；即使按 0.688 的 Wilson CI，上界 0.727 仍低于 72.8%。
+- holdout 有 IL exposure confound：350/500 被 r3 IL 训练见过，medium/hard 全部 IL-seen，IL-unseen 只有 easy；test500 的 medium/hard 是 unseen。当前 holdout 不能证明 test500 会过 gate。
+- 探索塌缩（std≈0.008，logstd 贴近 clamp -5）使 group-relative 信号主要来自系统混沌，而不是动作质量；这次 run 没有真正测试 group-relative PPO 的设计意图。
+- reward calibration 未执行，comfort 与 progress 抵消，timeout 在高 rc 时几乎免费；这是一次 **uncalibrated baseline run**，不能当作方法上限。
+
+**交付物**：
+
+- run：`runs/ppo_group_r3_261111015244`
+- best：`best_holdout.pt`（update 20，0.688）
+- last：`last.pt`（update 50，0.680）
+- 日志：`train_log.jsonl`（50 updates）、`runs/logs/ppo_group_train.log`、`runs/logs/ppo_group_monitor.log`
+- baseline per-scene rows：`runs/ppo_group_r3_261111015244/baseline_holdout_rows.json`
+- 代码/文档 commits：`19cba26`、`aa45aa8`、`6385292`（`pnp_ilrl`）
+- **test500：未消费，保持干净。**
+
+**如果未来重启 RL 线（预注册清单，未执行）**：
+
+1. 从 `data/specs/source/train_10000.json` seeds 3000–3999 生成 clean holdout，匹配 test500 difficulty mix；先用 r3 和当前 best 保存 baseline rows。
+2. 修探索：logstd 下限从 -5 提高到约 -2.5（或 entropy bonus），记录 group 动作 L2 / clamp 饱和比例 / 同 group terminal 分歧。
+3. 用现有 200-scene calibration manifest 校准 reward 一次；重点检查 comfort vs progress、timeout 高 rc 的 return。
+4. 增大 `scenes_per_update`（8→16）、updates（50→60–80）；eval 降频到 200-scene subset，最后 full clean holdout。
+5. 预注册 selection：报告 3 个候选的均值和 selected，不把 best-of-N 当 headline；gate 指标统一 `strict_success`；checkpoint/run_meta 写入 git sha、calibration status、eval split sha。
 
 ---
 
-## 8. 需要 owner 拍板的问题
+## 8. 已关闭的问题 / 未来重启才需要拍板
 
-1. **test500 是否现在消费？** 当前 best holdout 0.688 < 0.728；paired 证据显示真实提升只有 +3~4pp，距离 gate 仍差约 4pp。我建议保留 test500 给第二轮（选项 A），但这与“本轮结束就跑 gate”的初始计划冲突。
-2. **是否允许探索修法？** entropy bonus / log-std floor / 动作扰动会改变 PPO 合同；需要明确批准。
-3. **reward 是否先校准再跑第二轮？** 我建议必须先校准 comfort/timeout，否则第二轮很可能重复同一失败模式。
-4. **第二轮预算**：`scenes_per_update=16~32`、`updates=100+`、full holdout 评测频率降低，是否可接受？
-5. **H4 的表征问题**：如果 planner-only 已到上限，是否允许提高 TSB lr 或解冻部分 encoder？后者违反当前合同，需要单独决定。
+**已关闭：**
+
+1. **test500 是否现在消费？** Owner 决定：停止 RL 线，不消费 test500；保留给未来可能的 clean run。
+2. **是否继续第二轮？** 本轮不继续；先解决 clean holdout、探索、calibration 三个前提，再谈预算。
+
+**未来重启才需要拍板：**
+
+1. 是否批准新的 clean RL holdout（seeds 3000–3999），替换当前 IL-contaminated holdout 做 selection。
+2. 是否批准 exploration 合同变更（logstd floor / entropy bonus）。
+3. 第二轮预算：`scenes_per_update=16`、`updates=60–80`、eval 每 10 update 一次 200-scene subset。
+4. 是否允许提高 TSB lr 或解冻部分 encoder（H4，合同变更）。
 
 ---
 
@@ -491,7 +527,7 @@ tail -f runs/logs/ppo_group_monitor.log
 tail -f runs/logs/ppo_group_train.log
 ```
 
-test500（**尚未执行**，仅在 owner 批准后跑一次）：
+test500（**未执行**；owner 已决定停止 RL 线，保留给未来 clean run）：
 
 ```bash
 PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \

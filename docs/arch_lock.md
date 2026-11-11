@@ -1126,7 +1126,7 @@ pipeline/
   distributions.py        # TruncatedNormal；boundary sample/log_prob tested
 ```
 
-当前实现状态：one-step WM 已实现；`probe_wm.py` 当前跑 1..H；`train_joint.py` 是 legacy one-step + expert NLL；`train_wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split/loader 已实现；3/6-step WM、新 joint trainer 未实现。旧代码里对 `§12.2` / `§13 Stage C` 的引用已过期，以本文件为准。
+当前实现状态：one-step WM 已实现；`probe_wm.py` 当前跑 1..H；`train_joint.py` 是 legacy one-step + expert NLL；`train_wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split/loader 已实现；3/6-step WM、新 joint trainer 未实现。RL baseline run 已完成 50 updates（holdout best 0.688 / final 0.680，uncalibrated；holdout 有 IL exposure confound），owner 已停止 RL 线；test500 未消费。详细结果/失败分析见 `docs/deepseekv4p1_argue.md`。旧代码里对 `§12.2` / `§13 Stage C` 的引用已过期，以本文件为准。
 
 职责：
 
