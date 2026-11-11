@@ -482,9 +482,13 @@ PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
   --specs data/specs/test_500.json \
   --split-manifest data/splits/test_500.json \
   --split test \
+  --allow-final-test \
+  --limit 500 \
   --ckpt runs/ppo_group_r3_261111015244/best_holdout.pt \
   --device cuda --max-steps 600 \
   --out runs/eval_test500_rl_once
 ```
+
+注意：`--split test` 必须显式 `--allow-final-test`；`--limit` 默认是 10，gate 必须写 `--limit 500`。
 
 跑完后只看 `metrics.json` 的 `strict_success_rate`，不要把 `success_rate` 当 gate。
