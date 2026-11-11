@@ -167,3 +167,324 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 
 因此：**代码主线 ACCEPT；`docs/arch_lock.md` 可以锁为 pre-RL contract。**
 后续真正的工作不是继续补 review 文档，而是 WM gate / RL。
+
+---
+
+# 2026-11-11 — RL 现状、问题与猜想（deepseekv4p1）
+
+> 快照时间：2026-11-11 08:18（训练仍在运行）
+> Run：`runs/ppo_group_r3_261111015244`
+> 合同：`docs/arch_lock.md` §12.4（本文件不是合同，只记录现状、问题、猜想和待拍板问题）
+> 结论先行：**实现链路已跑通，但 holdout 目前最好 0.688，未达到 72.8%；test500 尚未消费。**
+
+---
+
+## 1. 目标和硬约束
+
+- exact DAgger r3 → real-env group-relative PPO → train_2000 holdout 选择 → **test500 one-shot final gate（strict success ≥ 72.8%）**。
+- RL split：train seeds 1000..2499（1500）；holdout seeds 2500..2999（500）；calibration 200（train 子集）；val500 只做 diagnostic；test500 只跑一次。
+- RL 只用 real env；WM 不参与 rollout/reward/advantage。
+- 所有奖励/惩罚进一个规则 reward model；没有 cost vector/Lagrangian。
+- 单流 return；per-step active-set leave-one-out advantage；不用 episode-level advantage 广播。
+- planner + TSB 可训练；encoder/aux 冻结；exact execution，requested == executed。
+- 每个实现阶段都做了 adversarial review；剩余 P0 已清零后才启动正式训练。
+
+---
+
+## 2. 已实现并验证的部分
+
+| 文件 | 内容 | 状态 |
+|---|---|---|
+| `pipeline/reward.py` | 规则 reward：dense + terminal、事件优先级、wrong_route/stuck one-shot、5-substep 事件聚合 | 已实现，单测通过 |
+| `dataset/rl_splits.py` | RL split manifest 加载、role/sha/无重叠校验 | 已实现 |
+| `data/splits/train_2000_rl_train_1500.json` | seeds 1000..2499 | 已实现 |
+| `data/splits/train_2000_rl_holdout_500.json` | seeds 2500..2999 | 已实现 |
+| `data/splits/train_2000_rl_calibration_200.json` | train 内分层 200 scenes | 已实现，**尚未消费** |
+| `pipeline/train_ppo_group.py` | spawn 多进程 rollout、exact 0.5s segment、active-set LOO、PPO、holdout selection | 已实现 |
+| `config/train_ppo_group.yaml` | 50 updates / 8 scenes × 8 group / 4 workers / eval 500 every 5 | 已实现 |
+| `pipeline/eval.py` / `eval_metrics.py` | 新增 `strict_success`；eval 显式 `reset(seed=spec.seed)` | 已实现 |
+
+验证证据：
+
+- 全量测试最后一次结果：`194 passed, 2 skipped`；trainer smoke（`RUN_PPO_GROUP_SMOKE=1`）`11 passed`。
+- PPO old-logprob audit：实测 max abs diff `2e-5 ~ 3.4e-5`，低于 `1e-3` 容差。
+- 对抗 review 已覆盖：文档合同、reward/split、trainer。剩余 P0 已修；没有发现 NaN、非法 ratio、invalid 爆炸。
+- 基线 holdout（新 eval 口径，seed 显式）：`strict_success = 0.646`。
+
+已知偏差/缺口：
+
+- **reward calibration 没有执行**。200-scene calibration manifest 只创建、未消费；正式训练用的是 provisional 默认权重。结果必须标记为 uncalibrated。
+- `entropy_proxy` 实际记录的是 mean log-std，不是 entropy；指标命名有误导，但不影响训练。
+- baseline holdout 只保存了汇总，没有保存 per-scene rows；这会影响后续与 r3 的 paired bootstrap（见 §4.8）。
+- `runs/` 被 gitignore；训练产物不在本次 commit 里，文档只记录快照。
+
+---
+
+## 3. 正式训练快照（40/50 updates）
+
+### 3.1 运行配置
+
+```text
+run: runs/ppo_group_r3_261111015244
+start: 2026-11-11 01:52
+updates: 50
+scenes_per_update: 8
+group_size: 8
+workers: 4
+max_steps: 600 (env step cap)
+max_decisions: 120
+gamma: 0.99
+clip: 0.2
+epochs: 4
+minibatch: 256
+lr: 3e-5 (planner), 3e-6 (TSB)
+eval_every: 5
+eval_limit: 500 (full holdout)
+device: cuda
+```
+
+### 3.2 Holdout 曲线
+
+| update | strict_success | collision | off_road | timeout | route_completion |
+|---:|---:|---:|---:|---:|---:|
+| 0 (r3 baseline) | 0.646 | 0.186 | 0.100 | — | 0.8423 |
+| 5 | 0.672 | 0.174 | 0.090 | 0.066 | 0.8479 |
+| 10 | 0.664 | 0.174 | 0.086 | 0.080 | 0.8490 |
+| 15 | 0.676 | 0.156 | 0.078 | 0.092 | 0.8526 |
+| 20 | **0.688** | 0.136 | 0.090 | 0.086 | 0.8605 |
+| 25 | 0.674 | 0.150 | 0.092 | 0.086 | 0.8570 |
+| 30 | 0.674 | 0.148 | 0.090 | 0.088 | 0.8572 |
+| 35 | 0.676 | 0.148 | 0.092 | 0.084 | 0.8560 |
+| 40 | 0.678 | 0.148 | 0.092 | 0.084 | 0.8561 |
+
+- 最好 `0.688 @ update 20`；此后 4 次在 `0.674 ~ 0.678`。
+- `best_holdout.pt` 初始化自 r3 baseline，所以训练不会 promote 一个比 0.646 更差的 checkpoint。
+- 目前 500-scene 评测的标准误约 `sqrt(0.68*0.32/500) ≈ 2.1pp`；单点差异不能直接当真实提升。
+
+### 3.3 训练 rollout（39 个已记录 update 的统计）
+
+| 指标 | 值 |
+|---|---:|
+| train success mean | 0.521 |
+| train success std | 0.152 |
+| train success range | 0.188 ~ 0.812 |
+| mean decisions / episode | 70.3 |
+| mean reward / episode | -3.65 |
+
+- 训练 scene 上的成功率波动很大，近期最高到 0.81（update 39）；但 holdout 没有同步上升。
+- update 39 的 reward 分量（per transition 均值）：`progress +0.106`、`comfort -0.110`、`terminal +0.164`、`low_speed -0.004`、`wrong_route/stuck = 0`。
+- 同 update 的 terminal 分布：64 episodes 中 success 52、collision 6、timeout 6。
+- PPO：`approx_kl` 0.009~0.018、`clip_frac` 0.11~0.20，均低于 stop 阈值；没有触发提前停 epoch。
+- 日志里的 `entropy_proxy` 约 `-4.84 ~ -4.91`，即访问状态上的 log-std ≈ -4.85，对应 std ≈ **0.008**（normalized action `[0,1]`）。
+
+### 3.4 资源与运行时间
+
+- 进程存活，RSS 峰值约 **8.7GB**，swap 约 **20GB**，GPU 约 1.3GB；未观察到 OOM。
+- holdout 评测耗时在明显变长：相邻两次 eval 的间隔约 `35.5 → 37.6 → 44.5 → 47.4 → 52.6 → 59.3 → 62.8 分钟`。
+- 7 次 eval 合计已消耗约 **5.5 小时**；训练 + eval 到 update 40 已用约 **6.4 小时**。
+- 背景监控脚本每 20 分钟写一次 `runs/logs/ppo_group_monitor.log`；当前已记录 20 次。训练进程与 session 解耦。
+
+---
+
+## 4. 观察到的问题
+
+### 4.1 Holdout 平台化，train rollout 没有平台化
+
+**事实**：train success 从 0.19 到 0.81 大幅波动，且 update 36/39 能到 0.73/0.81；holdout 在 update 20 之后一直 0.674~0.678。
+**含义**：至少有两种可能：策略只记住了部分 train scene；或 group-relative 信号在 holdout 上不迁移；或 holdout 已经接近 r3 表征的能力上限。
+**不能下结论**：现在还不能说“过拟合”，因为训练只覆盖了 286 个 unique scenes，且每 update 只有 8 个 scene。
+
+### 4.2 探索可能已经塌缩（最可疑）
+
+**事实**：PPO 重算时 `action_logstd` 均值约 -4.85，std ≈ 0.008；normalized action 范围是 `[0,1]`。
+**推断**：同一 scene 的 8 个 group 成员动作几乎相同。若真是这样，group 内 terminal 结果差异（success/collision/timeout）更多来自系统混沌放大，而不是动作质量差异；LOO advantage 会变成噪声。
+**目前没有验证**：还没有记录 group 内动作 L2 距离、状态分叉时间、或“同一动作重放”的 terminal 一致性。这是下一步最便宜、最值得做的诊断。
+**潜在修法**：entropy bonus、log-std floor/最小值、增大 group、动作扰动、或先做 deterministic group + 值基线（但 no critic 是合同约束，需要 owner 批准）。
+
+### 4.3 Dense reward 几乎相互抵消，且 comfort 未校准
+
+**事实**：update 39 的 `progress +0.106` 与 `comfort -0.110` 基本抵消；terminal 才是主要信号。
+**推断**：comfort 的 jerk/加速度阈值可能过于敏感，持续惩罚必要的刹车/变道；在未校准的情况下，策略可能学到“少动、慢动”而不是“更快到达”。
+**合同偏差**：config 里 `w_comfort=0.05` 是 provisional，calibration split 没有跑过。不能声称权重已经合理。
+
+### 4.4 Timeout 可能过便宜
+
+**事实**：timeout reward 是 `-w_timeout * (1 - rc_T)`，`w_timeout=10`。训练 rollout 中出现过 31%~33% 的 timeout（update 33/35），holdout timeout 约 8.4%。`low_speed` 的均值只有 -0.004。
+**推断**：当 `rc_T` 较高时，timeout 只罚很少；策略可能选择“慢慢开、别撞”而不是冒险完成。高 timeout 也可能是 scene route 本身很长，需要区分。
+**待验证**：按 route length、timeout 时的 rc、以及 timeout 前的速度分层，确认是策略保守还是 scene 长度。
+
+### 4.5 数据覆盖小、梯度方差大
+
+**事实**：40 个 update × 8 scene = 320 次 draw，unique 286 个 scene（train 共 1500）；difficulty 抽样为 hard 128、medium 113、easy 71（hard 约 41%），符合 `difficulty_weights` 的过采样。
+**推断**：每 update 只看到 8 个 scene，64 条 episode；相对 1500 个 train scene，覆盖不足。策略可能在少量 scene 上反复优化，holdout 泛化有限。
+**代价**：增加 `scenes_per_update` 会线性增加 rollout 时间，但能显著降低方差。
+
+### 4.6 全量 holdout 评测成本过高，且在变慢
+
+**事实**：每 5 个 update 跑一次 500-scene holdout，单次从 35 分钟涨到 63 分钟；7 次已经约 5.5 小时。
+**推断**：评测本身成了主要时间开销，也挤占了 update 数；评测变慢与 RSS/swap 增长相关，可能是内存压力/分配器碎片。
+**运维风险**：8 小时监控窗口可能在训练结束前到期；训练是 detached 的，监控停止不等于训练停止。
+
+### 4.7 内存/swap 持续增长，根因未确认
+
+**事实**：RSS 从启动时约 1.9GB 涨到峰值约 8.7GB；swap 从 6.8GB 涨到 20GB。`evaluate_holdout` 每个 episode 都 `build_env` + `env.close()`，表面上没有保留 env。
+**推断**：可能是 Python/CUDA/分配器碎片，或 MetaDrive/panda3d 的全局状态没有完全释放；也可能有隐藏引用。现在没有证据指向单一 leak 点。
+**风险**：继续跑更长训练可能 OOM 或严重 swap thrash；需要在下一轮前做一次独立的内存 profile。
+
+### 4.8 Selection 的 winner's curse
+
+**事实**：best 是在 8 次 holdout eval 里取最大值；500-scene 评测的 SE 约 2.1pp。
+**推断**：`0.688` 很可能包含 1~2pp 的乐观偏差；真实水平更接近 0.67。用这个 checkpoint 去跑 test500，期望值不高。
+**缺口**：baseline 没有保存 per-scene rows，无法直接做 paired bootstrap；只能做独立样本区间，或者重跑一次 r3 baseline（额外成本）。
+
+### 4.9 评测口径变化，历史数字不可直接比较
+
+**事实**：`eval.py` 现在显式 `reset(seed=spec.seed)`，并新增 `strict_success = success and not collision and not off_road`。
+**含义**：holdout `0.646` 是新口径；历史 val500 `0.664` 是不同 split、可能不同 reset/终止语义，不能直接说“r3 退化了”。
+- test500 没有历史 baseline；gate 只能报绝对 success + CI，不能伪造 delta。
+
+### 4.10 合同执行上的偏差
+
+- calibration 200 没有消费；reward 权重未校准。
+- `entropy_proxy` 命名错误（实际是 log-std）。
+- baseline rows 未落盘，影响 paired 统计。
+- 没有 failure-window、没有 cost/Lagrangian、没有 WM 参与，这些是符合合同的。
+
+---
+
+## 5. 猜想（按优先级，含验证方法）
+
+> 标记：[事实] 有日志/代码证据；[推断] 目前最合理的解释；[待验证] 还没有数据。
+
+### H1（最高）探索塌缩导致 group-relative 信号主要是噪声
+
+- [事实] log-std ≈ -4.85，std ≈ 0.008。
+- [推断] 8 个成员动作几乎相同；terminal 差异由混沌放大，advantage 不反映动作质量。
+- 验证：记录每个 decision 的 group 内动作 L2；统计“动作距离 → 终局差异”的关系；用固定动作重放同 scene，估计纯环境分叉率。
+- 修法：entropy bonus / log-std floor / 更大 group / 动作扰动；需要 owner 批准合同变更。
+
+### H2 Reward 误设（comfort 过强、timeout 过便宜）
+
+- [事实] progress 与 comfort 抵消；timeout 曾达 31%~33%；low_speed 几乎为 0。
+- [推断] 策略可能偏向保守/慢速，或 comfort 抑制必要机动。
+- 验证：在 calibration 200 上分解 success/collision/timeout 的 return；对比 dense 与 terminal 占比；按 timeout 时 rc 分层。
+- 修法：校准一次权重（不扫网格），必要时把 comfort 降为诊断或更小权重；timeout shaping 改为更强的固定惩罚或 `-w_timeout*(1-rc)^2`。需要 owner 批准。
+
+### H3 数据覆盖不足 / 更新太少
+
+- [事实] 286 unique train scenes；每 update 8 scene；50 updates。
+- [推断] 策略在少量 scene 上过拟合，holdout 泛化不足。
+- 验证：在“已见 train scene”与“未见 holdout”上分别评估，比较 gap；统计 scene 重复次数与收益。
+- 修法：`scenes_per_update` 16~32、updates 100+；或 hard-scene curriculum。不改合同方向。
+
+### H4 表征/学习率瓶颈
+
+- [事实] encoder 冻结；TSB lr 是 planner 的 1/10；TSB 可训练 546k，planner 363k。
+- [推断] planner 在固定表征上调整，可能很快到达 r3 特征的上限；TSB 太慢，难以改变表征。
+- 验证：看 TSB/planner 的 grad norm 与参数变化；做 planner-only vs TSB 提高 lr 的短 ablation。
+- 修法：提高 TSB lr 或解冻部分 encoder（后者违反当前合同，需要 owner 批准）。
+
+### H5 统计噪声 / winner's curse
+
+- [事实] holdout 8 次评测，best 0.688；SE ≈ 2.1pp；后 4 次 0.674~0.678。
+- [推断] 真实提升可能只有 2~3pp，甚至更小；0.688 是乐观值。
+- 验证：paired bootstrap（需要 baseline rows）；更多 eval；固定 seed 的置信区间。
+- 修法：下一轮保存 baseline rows；selection 用更稳的指标（如 3 次 eval 均值或 lower confidence bound）。
+
+### H6 Timeout/max_decisions 是 scene 长度伪影
+
+- [事实] holdout timeout 8.4%；训练 rollout 有些 update 31%~33%；平均 70 decisions。
+- [推断] 部分 timeout 是 route 太长/路口等待，不是策略失败；当前 timeout penalty 对这些 scene 不公平。
+- 验证：timeout 按 route length、rc、速度分层；看 timeout 是否集中在长 route。
+- 修法：timeout 归一化到 route length；或对 rc 已很高的 timeout 减小惩罚。需要 owner 批准。
+
+---
+
+## 6. 当前能确定和不能确定的
+
+**能确定：**
+
+- 训练 pipeline 已跑通；reward/advantage/PPO/eval 都有测试和日志。
+- holdout 最好 0.688，当前 0.678，未达到 72.8%。
+- test500 没有跑过，没有被污染。
+- reward 未校准；探索 std 很小；评测很贵；内存/swap 在增长。
+
+**不能确定：**
+
+- 平台化到底是探索、reward、数据覆盖、表征还是统计噪声导致；目前没有足够证据把锅扣在单一原因上。
+- 0.688 是否是真实提升；没有 paired baseline rows。
+- 内存增长是否是真 leak；没有 profile。
+
+**不要做的事：**
+
+- 不要用 test500 反复试错；不要用 val500 调 RL；不要在看到 holdout 0.688 时宣称接近 72.8%。
+- 不要在训练中途改 reward/config；当前 run 只能作为一次“未校准 baseline run”。
+
+---
+
+## 7. 下一步建议
+
+1. **让当前 run 跑完** 41~50，保存所有 holdout rows 和 `best_holdout.pt`。不杀进程，除非 OOM。
+2. **结束后做结果审计**：
+   - 检查 `train_log.jsonl` 的 update 41~50、best checkpoint metadata；
+   - 计算 holdout 的独立样本 CI；如果愿意多花一次 500-scene eval，重跑 r3 baseline 以做 paired bootstrap；
+   - 对训练/验证结果做 adversarial review（不仅看代码，也看曲线和选择偏差）。
+3. **不要因为“合同说 test500 是 gate”就立刻消费它**。当前 holdout 0.688，距离 72.8% 约 4pp；在 winner's curse 下真实水平可能更低。test500 只有一次，建议先由 owner 决定：
+   - 选项 A：本轮视为失败 run，不消费 test500；修 H1/H2/H3 后跑第二轮，再把 test500 留给第二轮；
+   - 选项 B：按合同对当前 best checkpoint 消费 test500，接受“很可能失败且 gate 被用掉”的结果。
+   - 我的倾向：**A**。在没有达到 holdout 目标前消费 test500，信息价值低，还会失去干净的一次性 gate。
+4. **如果决定跑 test500**：只跑一次，用 `best_holdout.pt` + `data/specs/test_500.json` + `data/splits/test_500.json`，读取 `strict_success_rate`；记录 git sha、命令、时间、完整 metrics。不要根据结果调参再跑第二次。
+5. **第二轮训练前**（如果 gate 失败）预注册改动，至少包括：
+   - reward calibration（200 scenes，一次，不扫网格）；
+   - 探索诊断与修法（H1）；
+   - 增大 `scenes_per_update` / updates（H3）；
+   - 降低 eval 成本（例如每 10 update 用 200-scene 子集，最后 full 500）；
+   - 内存 profile；
+   - 保存 baseline per-scene rows。
+6. 无论结果如何，更新 `docs/arch_lock.md` 的 implementation status，并把失败/成功证据写清楚；不要把未跑过的 test500 写成已通过。
+
+---
+
+## 8. 需要 owner 拍板的问题
+
+1. **test500 是否现在消费？** 当前 holdout 0.688 < 0.728；我建议保留 test500 给第二轮（选项 A），但这与“本轮结束就跑 gate”的初始计划冲突。
+2. **是否允许探索修法？** entropy bonus / log-std floor / 动作扰动会改变 PPO 合同；需要明确批准。
+3. **reward 是否先校准再跑第二轮？** 我建议必须先校准 comfort/timeout，否则第二轮很可能重复同一失败模式。
+4. **第二轮预算**：`scenes_per_update=16~32`、`updates=100+`、full holdout 评测频率降低，是否可接受？
+5. **H4 的表征问题**：如果 planner-only 已到上限，是否允许提高 TSB lr 或解冻部分 encoder？后者违反当前合同，需要单独决定。
+
+---
+
+## 9. 复现命令
+
+训练（已在跑）：
+
+```bash
+cd /workspace/01_Proj/DRL_PathPlan
+PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
+  .venv/bin/python pipeline/train_ppo_group.py \
+  --config config/train_ppo_group.yaml \
+  --out runs/ppo_group_r3
+```
+
+监控：
+
+```bash
+tail -f runs/logs/ppo_group_monitor.log
+tail -f runs/logs/ppo_group_train.log
+```
+
+test500（**尚未执行**，仅在 owner 批准后跑一次）：
+
+```bash
+PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
+  .venv/bin/python -m pipeline.eval \
+  --specs data/specs/test_500.json \
+  --split-manifest data/splits/test_500.json \
+  --split test \
+  --ckpt runs/ppo_group_r3_261111015244/best_holdout.pt \
+  --device cuda --max-steps 600 \
+  --out runs/eval_test500_rl_once
+```
+
+跑完后只看 `metrics.json` 的 `strict_success_rate`，不要把 `success_rate` 当 gate。

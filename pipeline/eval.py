@@ -241,7 +241,7 @@ def run_episode(
     model.to(device).eval()
     model_bounds, model_hard, model_comfort = _model_action_contract(model)
 
-    env.reset()
+    env.reset(seed=getattr(spec, "seed", None))
     ego = env.agent
     if controller == "exact":
         tracker: Any = ExactTracker(dt=DECISION_DT, hz=HZ)
@@ -497,6 +497,7 @@ def run_episode(
         "steps": int(n),
         "policy_steps": int(policy_steps),
         "success": bool(success),
+        "strict_success": bool(success and not collision and not off_road),
         "collision": bool(collision),
         "off_road": bool(off_road),
         "wrong_route": bool(wrong_route),

@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 
 BOOL_KEYS = (
-    "success", "collision", "off_road", "wrong_route", "stuck",
+    "success", "strict_success", "collision", "off_road", "wrong_route", "stuck",
     "timeout", "comfort_violation", "feasible",
 )
 FLOAT_KEYS = (

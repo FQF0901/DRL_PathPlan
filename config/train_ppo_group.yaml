@@ -1,0 +1,35 @@
+# Real-env group-relative PPO defaults (docs/arch_lock.md §12.4).
+# CLI flags override every value below.  Reward weights are RewardConfig
+# defaults; only a few optional weights are exposed on the CLI.
+specs: data/specs/train_2000.json
+train_manifest: data/splits/train_2000_rl_train_1500.json
+holdout_manifest: data/splits/train_2000_rl_holdout_500.json
+calibration_manifest: data/splits/train_2000_rl_calibration_200.json
+ckpt: runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt
+out: runs/ppo_group_r3
+
+updates: 50
+scenes_per_update: 8
+group_size: 8
+max_steps: 600
+max_decisions: 120
+
+gamma: 0.99
+clip: 0.2
+epochs: 4
+minibatch: 256
+lr: 0.00003
+tsb_lr: 0.000003
+workers: 4
+device: cuda
+seed: 0
+
+eval_every: 5
+eval_limit: 500
+eval_max_steps: 600
+
+max_grad_norm: 0.5
+kl_stop: 0.02
+clip_frac_stop: 0.3
+adv_std_floor: 0.000001
+logprob_audit_size: 32
