@@ -545,3 +545,74 @@ PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
 注意：`--split test` 必须显式 `--allow-final-test`；`--limit` 默认是 10，gate 必须写 `--limit 500`。
 
 跑完后只看 `metrics.json` 的 `strict_success_rate`，不要把 `success_rate` 当 gate。
+
+---
+
+## 10. 诊断证据：为什么提升有限（2026-11-11）
+
+> 只读诊断，产物在 `runs/analysis/rl_diagnostics/`（README、`metrics.json`、`fixed_scene_sweep.json`、`reward_trends.json`、`traces.pkl`、10 张 `scene_*.png`）。没有跑 test500/val500，没有训练。
+
+### 10.1 训练 reward 曲线
+
+- `reward_mean` slope **+0.437/update**（p=5.9e-8），first10 **-13.80** → last10 **+5.91**；范围 [-26.69, +16.78]。
+- 主要来自 **comfort**：-0.341 → -0.116（p=3.2e-17）；progress 基本不变（0.115→0.108，p=0.11）。
+- success +0.13pp/update（p=0.14）；off-road -0.19pp/update（p=0.026）；collision 与 timeout 的趋势不显著。
+- holdout strict_success 基本持平（slope p=0.656，10 次均值 0.6748，范围 0.664–0.688）。
+
+### 10.2 固定 10 场景 × 8 members 的 checkpoint sweep
+
+同一组 holdout 场景、同一组 sampling seed，只换 checkpoint：
+
+| update | reward | success | collision | off_road | timeout |
+|---:|---:|---:|---:|---:|---:|
+| 1 | -22.16 | 0.350 | 0.300 | 0.275 | 0.063 |
+| 10 | -14.19 | 0.338 | 0.188 | 0.275 | 0.200 |
+| 20 | -5.67 | 0.388 | 0.175 | 0.200 | 0.238 |
+| 30 | -3.17 | 0.412 | 0.175 | 0.200 | 0.212 |
+| 40 | -1.12 | 0.425 | 0.150 | 0.188 | 0.225 |
+| 50 | **+0.89** | **0.425** | **0.125** | **0.175** | **0.275** |
+
+**Reward +23 分，success 只 +7.5pp，timeout +21pp。** 策略主要在用 timeout 换 collision/off-road 的下降，而不是完成路线。
+
+### 10.3 10 个场景的终局
+
+| seed | difficulty | success/8 | terminal |
+|---|---|---:|---|
+| 2500 | easy | 0 | off_road ×8 |
+| 2600 | easy | 0 | timeout ×8 |
+| 2750 | easy | 8 | success ×8 |
+| 2950 | easy | 8 | success ×8 |
+| 2525 | medium | 0 | off_road ×8 |
+| 2675 | medium | 8 | success ×8 |
+| 2900 | medium | 0 | collision ×8 |
+| 2550 | hard | 0 | collision ×2 + timeout ×6 |
+| 2700 | hard | 0 | collision ×3 + timeout ×5 |
+| 2850 | hard | 7 | success ×7 + collision ×1 |
+
+- **9/10 场景的 8 个 member 终局同生共死**；只有 2850 同时有 success 和 failure。
+- 每场景图：`runs/analysis/rl_diagnostics/scene_{seed}.png`（3×3：8 个 member + overlay）。
+
+### 10.4 Policy 坍缩
+
+- rollout mean logstd **-4.818**（normalized std≈0.0081）；训练 `entropy_proxy` -4.699 → -4.889（p=1.7e-14）。
+- **66.3% 的 logstd 元素卡在 clamp 下限 -5.0**；四维饱和比例 59.5% / 63.4% / 70.4% / 72.0%。
+- t=0 时 8 个 member 的 `action_mu` 完全相同（pairwise L2=0）；初始 sampled L2 仅 0.016–0.070，后续分叉是状态混沌，不是主动探索。
+- 物理采样 std 约 accel 0.06 m/s²、steer 0.023、curvature 0.013、speed 0.12 m/s。
+
+### 10.5 组内 advantage 区分度
+
+- 没有 GAE/critic；用的是 per-step active-set LOO advantage。
+- 9/10 场景终局一致 → terminal advantage 对组内成员相同，只能优化 dense reward。
+- 唯一混合场景 2850：success vs failure 的 mean advantage 差 **+31.05**（collision member ≈ -28.55），说明混合终局时 LOO 能强区分。
+- 全样本：success 与 episode mean advantage 的 point-biserial **r=0.19（p=0.09）**，AUC **0.531**；group/global std=0.757，但主要来自 dense 分量，不是 success。
+- skipped（active set <3）1.08%。
+
+### 10.6 结论
+
+这次 RL 的提升有限，主要不是“PPO 没跑通”，而是三个因素叠加：
+
+1. **Reward 结构**：timeout 惩罚远小于 collision/off-road，comfort 又奖励平滑；策略学会“少撞、少越野、更多 timeout”，success 只吃到边际收益。
+2. **探索坍缩**：logstd 贴近 clamp，group 成员几乎是同一策略；没有足够探索去找成功轨迹。
+3. **组内终局同质化**：9/10 场景全成功或全失败，per-step LOO advantage 没有 terminal 对比，只能优化 comfort/progress；这与 reward 的 comfort 项叠加，进一步把策略推向“平滑但慢/超时”。
+
+再叠加 holdout 的 IL exposure confound（§4.11），当前 holdout 的 medium/hard 增益不能外推到 test500 的 unseen medium/hard。故停止 RL 线、保留 test500 是符合数据的决定。
