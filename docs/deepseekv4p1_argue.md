@@ -172,10 +172,10 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 
 # 2026-11-11 — RL 现状、问题与猜想（deepseekv4p1）
 
-> 快照时间：2026-11-11 08:18（训练仍在运行）
+> 更新时间：2026-11-11 11:10（训练已完成 50/50）
 > Run：`runs/ppo_group_r3_261111015244`
 > 合同：`docs/arch_lock.md` §12.4（本文件不是合同，只记录现状、问题、猜想和待拍板问题）
-> 结论先行：**实现链路已跑通，但 holdout 目前最好 0.688，未达到 72.8%；test500 尚未消费。**
+> 结论先行：**实现链路已跑通；最好 holdout 0.688，最终 0.680，较 r3 baseline 0.646 显著提升（paired McNemar p≈0.0099），但仍未达到 72.8%；test500 尚未消费。**
 
 ---
 
@@ -220,7 +220,7 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 
 ---
 
-## 3. 正式训练快照（40/50 updates）
+## 3. 正式训练快照（已完成 50/50 updates）
 
 ### 3.1 运行配置
 
@@ -256,33 +256,49 @@ device: cuda
 | 30 | 0.674 | 0.148 | 0.090 | 0.088 | 0.8572 |
 | 35 | 0.676 | 0.148 | 0.092 | 0.084 | 0.8560 |
 | 40 | 0.678 | 0.148 | 0.092 | 0.084 | 0.8561 |
+| 45 | 0.666 | 0.162 | 0.084 | 0.090 | 0.8506 |
+| 50 | 0.680 | 0.150 | 0.084 | 0.086 | 0.8568 |
 
-- 最好 `0.688 @ update 20`；此后 4 次在 `0.674 ~ 0.678`。
-- `best_holdout.pt` 初始化自 r3 baseline，所以训练不会 promote 一个比 0.646 更差的 checkpoint。
-- 目前 500-scene 评测的标准误约 `sqrt(0.68*0.32/500) ≈ 2.1pp`；单点差异不能直接当真实提升。
+- 最好 `0.688 @ update 20`；此后 6 次在 `0.666 ~ 0.680`。最后 5 次均值与最前 5 次均值相同（0.6748），没有持续上升趋势。
+- `best_holdout.pt` 初始化自 r3 baseline，所以训练不会 promote 一个比 0.646 更差的 checkpoint；最终 best 是 update 20，不是 update 50。
+- 500-scene 单次评测的标准误约 `sqrt(0.68*0.32/500) ≈ 2.1pp`；单点差异不能直接当真实提升。
 
-### 3.3 训练 rollout（39 个已记录 update 的统计）
+**最终 paired 统计（baseline per-scene rows 已补，`baseline_holdout_rows.json`）：**
+
+| 对比 | base | RL | diff | McNemar exact p | bootstrap 95% CI |
+|---|---:|---:|---:|---:|---:|
+| baseline vs update 20 | 0.646 | 0.688 | **+4.2pp** | **0.0099** | [+1.2pp, +7.2pp] |
+| baseline vs update 50 | 0.646 | 0.680 | +3.4pp | 0.033 | [+0.4pp, +6.4pp] |
+| update 20 vs update 50 | 0.688 | 0.680 | -0.8pp | 0.60 | [-3.0pp, +1.4pp] |
+
+- 按 difficulty（update 20）：easy 0.872→0.904、medium 0.607→0.653、hard 0.388→0.439；三个分层都涨，但 hard 仍只有 0.439。
+- 结论：**r3 → RL 的提升是统计显著的，但幅度只有 3~4pp；update 20 与 update 50 无法区分，0.688 是选择偏差下的乐观值。** 距离 72.8% 仍有约 4pp。
+
+### 3.3 训练 rollout（50 个 update 的统计）
 
 | 指标 | 值 |
 |---|---:|
-| train success mean | 0.521 |
-| train success std | 0.152 |
-| train success range | 0.188 ~ 0.812 |
-| mean decisions / episode | 70.3 |
-| mean reward / episode | -3.65 |
+| train success mean | 0.536 |
+| train success std | 0.155 |
+| train success range | 0.188 ~ 0.828 |
+| mean decisions / episode | 71.4 |
+| mean reward / episode | -1.74 |
+| collision mean / max | 0.198 / 0.406 |
+| off-road mean / max | 0.155 / 0.375 |
+| timeout mean / max | 0.099 / 0.328 |
 
-- 训练 scene 上的成功率波动很大，近期最高到 0.81（update 39）；但 holdout 没有同步上升。
-- update 39 的 reward 分量（per transition 均值）：`progress +0.106`、`comfort -0.110`、`terminal +0.164`、`low_speed -0.004`、`wrong_route/stuck = 0`。
-- 同 update 的 terminal 分布：64 episodes 中 success 52、collision 6、timeout 6。
+- 训练 scene 上的成功率波动很大，最高到 0.83；但 holdout 没有同步上升。
+- update 50 的 reward 分量（per transition 均值）：`progress +0.111`、`comfort -0.131`、`terminal -0.039`、`low_speed -0.005`、`wrong_route/stuck = 0`。
+- update 50 的 terminal 分布：64 episodes 中 success 24、collision 24、off_road 9、timeout 7；训练 batch 的终局波动很大。
 - PPO：`approx_kl` 0.009~0.018、`clip_frac` 0.11~0.20，均低于 stop 阈值；没有触发提前停 epoch。
-- 日志里的 `entropy_proxy` 约 `-4.84 ~ -4.91`，即访问状态上的 log-std ≈ -4.85，对应 std ≈ **0.008**（normalized action `[0,1]`）。
+- 日志里的 `entropy_proxy` 约 `-4.83 ~ -4.91`，即访问状态上的 log-std ≈ -4.85，对应 std ≈ **0.008**（normalized action `[0,1]`）。
 
 ### 3.4 资源与运行时间
 
-- 进程存活，RSS 峰值约 **8.7GB**，swap 约 **20GB**，GPU 约 1.3GB；未观察到 OOM。
-- holdout 评测耗时在明显变长：相邻两次 eval 的间隔约 `35.5 → 37.6 → 44.5 → 47.4 → 52.6 → 59.3 → 62.8 分钟`。
-- 7 次 eval 合计已消耗约 **5.5 小时**；训练 + eval 到 update 40 已用约 **6.4 小时**。
-- 背景监控脚本每 20 分钟写一次 `runs/logs/ppo_group_monitor.log`；当前已记录 20 次。训练进程与 session 解耦。
+- 进程已正常退出；RSS 峰值约 **9.3GB**，swap 峰值约 **25GB**，GPU 约 1.3GB；未观察到 OOM 或非零退出。
+- 训练总运行约 **8h40m**（01:52 ~ 10:32）。
+- holdout 评测耗时在明显变长：相邻两次 eval 的间隔 `35.5 → 37.6 → 44.5 → 47.4 → 52.6 → 59.3 → 62.8 → 65.4 → 69.9 分钟`，9 个间隔合计约 **475 分钟**；评测是主要时间开销。
+- 背景监控脚本每 20 分钟写一次 `runs/logs/ppo_group_monitor.log`；记录到 8 小时窗口结束。训练进程与 session 解耦。
 
 ---
 
@@ -386,9 +402,9 @@ device: cuda
 
 ### H5 统计噪声 / winner's curse
 
-- [事实] holdout 8 次评测，best 0.688；SE ≈ 2.1pp；后 4 次 0.674~0.678。
-- [推断] 真实提升可能只有 2~3pp，甚至更小；0.688 是乐观值。
-- 验证：paired bootstrap（需要 baseline rows）；更多 eval；固定 seed 的置信区间。
+- [事实] holdout 10 次评测，best 0.688；baseline rows 已补，paired McNemar：baseline→update 20 **+4.2pp, p=0.0099**；baseline→update 50 +3.4pp, p=0.033；update 20→50 **-0.8pp, p=0.60**。
+- [推断] r3→RL 的提升是真实的，但幅度只有 3~4pp；0.688 是 10 次选择中的最大值，真实期望更接近 0.68；update 20 与 50 无法区分。
+- 验证：已做 paired bootstrap/McNemar；下一步用更多 eval 或 lower-confidence selection 降低 winner's curse。
 - 修法：下一轮保存 baseline rows；selection 用更稳的指标（如 3 次 eval 均值或 lower confidence bound）。
 
 ### H6 Timeout/max_decisions 是 scene 长度伪影
@@ -404,15 +420,16 @@ device: cuda
 
 **能确定：**
 
-- 训练 pipeline 已跑通；reward/advantage/PPO/eval 都有测试和日志。
-- holdout 最好 0.688，当前 0.678，未达到 72.8%。
+- 训练 pipeline 已跑通；reward/advantage/PPO/eval 都有测试和日志；50/50 正常结束。
+- holdout 最好 0.688（update 20），最终 0.680（update 50），未达到 72.8%。
+- r3→RL 的提升统计显著（+4.2pp，p=0.0099）；update 20 与 50 无法区分。
 - test500 没有跑过，没有被污染。
-- reward 未校准；探索 std 很小；评测很贵；内存/swap 在增长。
+- reward 未校准；探索 std 很小；评测很贵；内存/swap 在增长（进程已结束，无法确认是否 leak）。
 
 **不能确定：**
 
 - 平台化到底是探索、reward、数据覆盖、表征还是统计噪声导致；目前没有足够证据把锅扣在单一原因上。
-- 0.688 是否是真实提升；没有 paired baseline rows。
+- 0.688 是选择偏差下的乐观值；真实期望约 0.68，不能声称“接近 72.8%”。
 - 内存增长是否是真 leak；没有 profile。
 
 **不要做的事：**
@@ -424,12 +441,12 @@ device: cuda
 
 ## 7. 下一步建议
 
-1. **让当前 run 跑完** 41~50，保存所有 holdout rows 和 `best_holdout.pt`。不杀进程，除非 OOM。
-2. **结束后做结果审计**：
-   - 检查 `train_log.jsonl` 的 update 41~50、best checkpoint metadata；
-   - 计算 holdout 的独立样本 CI；如果愿意多花一次 500-scene eval，重跑 r3 baseline 以做 paired bootstrap；
-   - 对训练/验证结果做 adversarial review（不仅看代码，也看曲线和选择偏差）。
-3. **不要因为“合同说 test500 是 gate”就立刻消费它**。当前 holdout 0.688，距离 72.8% 约 4pp；在 winner's curse 下真实水平可能更低。test500 只有一次，建议先由 owner 决定：
+1. **当前 run 已完成** 50/50；`best_holdout.pt`（update 20）和 `last.pt`（update 50）已保存。
+2. **结果审计（大部分已做）**：
+   - `train_log.jsonl` 50 条 update 完整；best checkpoint metadata 为 update 20 / 0.688；
+   - 已重跑 r3 baseline holdout 并保存 `baseline_holdout_rows.json`；paired McNemar/bootstrap 已出；
+   - 仍需 oracle 对训练/验证结果做 adversarial review（进行中）。
+3. **不要因为“合同说 test500 是 gate”就立刻消费它**。当前 best holdout 0.688（真实期望约 0.68），距离 72.8% 约 4~5pp；test500 只有一次，建议先由 owner 决定：
    - 选项 A：本轮视为失败 run，不消费 test500；修 H1/H2/H3 后跑第二轮，再把 test500 留给第二轮；
    - 选项 B：按合同对当前 best checkpoint 消费 test500，接受“很可能失败且 gate 被用掉”的结果。
    - 我的倾向：**A**。在没有达到 holdout 目标前消费 test500，信息价值低，还会失去干净的一次性 gate。
@@ -447,7 +464,7 @@ device: cuda
 
 ## 8. 需要 owner 拍板的问题
 
-1. **test500 是否现在消费？** 当前 holdout 0.688 < 0.728；我建议保留 test500 给第二轮（选项 A），但这与“本轮结束就跑 gate”的初始计划冲突。
+1. **test500 是否现在消费？** 当前 best holdout 0.688 < 0.728；paired 证据显示真实提升只有 +3~4pp，距离 gate 仍差约 4pp。我建议保留 test500 给第二轮（选项 A），但这与“本轮结束就跑 gate”的初始计划冲突。
 2. **是否允许探索修法？** entropy bonus / log-std floor / 动作扰动会改变 PPO 合同；需要明确批准。
 3. **reward 是否先校准再跑第二轮？** 我建议必须先校准 comfort/timeout，否则第二轮很可能重复同一失败模式。
 4. **第二轮预算**：`scenes_per_update=16~32`、`updates=100+`、full holdout 评测频率降低，是否可接受？
@@ -457,7 +474,7 @@ device: cuda
 
 ## 9. 复现命令
 
-训练（已在跑）：
+训练（已完成 50/50）：
 
 ```bash
 cd /workspace/01_Proj/DRL_PathPlan
