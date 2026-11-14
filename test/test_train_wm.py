@@ -9,7 +9,7 @@ import torch
 
 from pipeline.common.checkpointing import load_drive_model_from_checkpoint, save_drive_model_checkpoint
 from net.build_net import build_net
-from pipeline.wm.probe import main as probe_main
+from pipeline.eval.wm_probe import main as probe_main
 from pipeline.train.wm import main as wm_main
 from test_train_bc import _write_fixture
 

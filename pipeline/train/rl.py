@@ -11,7 +11,7 @@ It implements the RL contract:
   sampling seed per member;
 * one 0.5 s policy decision = 5 x 0.1 s env steps, only the first segment is
   executed, exact execution (no projection, no safe brake);
-* rule-based dense + terminal reward from ``pipeline.rl.reward``;
+* rule-based dense + terminal reward from ``pipeline.train.rl_reward``;
 * per-step active-set leave-one-out advantages with global normalization;
 * clipped PPO on planner + TSB only (encoder and aux head are frozen);
 * holdout-500 selection using strict success, never test500 / val500.
@@ -52,10 +52,10 @@ from net.mem_bank import BankWindow
 from net.model import DriveModel
 from pipeline.common.checkpointing import save_drive_model_checkpoint
 from pipeline.common.distributions import TruncatedNormal
-from pipeline.eval import load_model, run_episode
+from pipeline.eval.closed_loop import load_model, run_episode
 from pipeline.common.execution import relative_action
 from pipeline.common.live_bank import LiveBankRunner
-from pipeline.rl.reward import (
+from pipeline.train.rl_reward import (
     RewardConfig,
     RewardTracker,
     aggregate_substep_events,
@@ -1214,7 +1214,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Real-env group-relative PPO (arch_lock §12.4)"
     )
-    parser.add_argument("--config", default="config/train_rl_group.yaml")
+    parser.add_argument("--config", default="config/train_rl.yaml")
     parser.add_argument("--specs", default=None)
     parser.add_argument("--train-manifest", default=None)
     parser.add_argument("--holdout-manifest", default=None)
@@ -1357,7 +1357,7 @@ def _checkpoint_extra(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_train_args(build_arg_parser(), argv, "config/train_rl_group.yaml")
+    args = parse_train_args(build_arg_parser(), argv, "config/train_rl.yaml")
     _validate_args(args)
     reward_config = reward_config_from_args(args)
 
@@ -1429,7 +1429,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "trainable": trainable,
         "official_python_files": int(len(official_before)),
         "execution": "exact; only the first 0.5 s segment; no projection/safe-brake",
-        "reward": "pipeline.rl.reward rule model; no cost vector / Lagrangian",
+        "reward": "pipeline.train.rl_reward rule model; no cost vector / Lagrangian",
         "advantage": "per-step active-set leave-one-out + global normalization",
     }
     (out_dir / "run_meta.json").write_text(

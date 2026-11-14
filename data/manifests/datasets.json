@@ -151,10 +151,5 @@
       "note": "mini episode pools are not part of the current canonical baseline"
     }
   },
-  "archive": [
-    "archive/datasets",
-    "archive/specs",
-    "archive/config_splits"
-  ],
-  "updated": "2026-11-07"
+  "updated": "2026-11-14"
 }

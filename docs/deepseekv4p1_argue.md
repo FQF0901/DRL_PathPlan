@@ -176,7 +176,7 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 > Run：`runs/ppo_group_r3_261111015244`
 > 合同：`docs/arch_lock.md` §12.4（本文件不是合同，只记录现状、问题、猜想和待拍板问题）
 > 结论先行：**实现链路已跑通；holdout best 0.688 / final 0.680，但 0.688 是 best-of-10 的乐观值，且 holdout 的 medium/hard 全部被 r3 IL 训练见过（P0 exposure confound），不能外推到 test500 的 unseen medium/hard。owner 决定停止 RL 线；test500 未消费。**
-> 2026-11-14 清理：删除 calibration 200、legacy PPO/joint/selector、`dataset/rl_splits.py`；`pipeline/` 重组为 `common/eval/losses/rl/train/wm` 子包。本文中的旧路径/calibration 内容如与代码冲突，以 `docs/arch_lock.md` 和当前代码为准。
+> 2026-11-14 清理：删除 calibration 200、legacy PPO/joint/selector、`dataset/rl_splits.py`；`pipeline/` 重组为 `common/`、`eval/`、`train/` 子包，`losses.py` 保持单文件。本文中的旧路径/calibration 内容如与代码冲突，以 `docs/arch_lock.md` 和当前代码为准。
 
 ---
 
@@ -196,12 +196,12 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 
 | 文件 | 内容 | 状态 |
 |---|---|---|
-| `pipeline/rl/reward.py` | 规则 reward：dense + terminal、事件优先级、wrong_route/stuck one-shot、5-substep 事件聚合 | 已实现，单测通过 |
+| `pipeline/train/rl_reward.py` | 规则 reward：dense + terminal、事件优先级、wrong_route/stuck one-shot、5-substep 事件聚合 | 已实现，单测通过 |
 | `dataset/splits.py` | RL split manifest 加载、role/sha/无重叠校验（与通用 split 工具合并） | 已实现 |
 | `data/splits/train_2000_rl_train_1500.json` | seeds 1000..2499 | 已实现 |
 | `data/splits/train_2000_rl_holdout_500.json` | seeds 2500..2999 | 已实现 |
-| `pipeline/rl/train_group.py` | spawn 多进程 rollout、exact 0.5s segment、active-set LOO、PPO、holdout selection | 已实现 |
-| `config/train_rl_group.yaml` | 50 updates / 8 scenes × 8 group / 4 workers / eval 500 every 5 | 已实现 |
+| `pipeline/train/rl.py` | spawn 多进程 rollout、exact 0.5s segment、active-set LOO、PPO、holdout selection | 已实现 |
+| `config/train_rl.yaml` | 50 updates / 8 scenes × 8 group / 4 workers / eval 500 every 5 | 已实现 |
 | `pipeline/eval/closed_loop.py` / `pipeline/eval/metrics.py` | 新增 `strict_success`；eval 显式 `reset(seed=spec.seed)` | 已实现 |
 
 验证证据：
@@ -515,8 +515,8 @@ device: cuda
 ```bash
 cd /workspace/01_Proj/DRL_PathPlan
 PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
-  .venv/bin/python -m pipeline.rl.train_group \
-  --config config/train_rl_group.yaml \
+  .venv/bin/python -m pipeline.train.rl \
+  --config config/train_rl.yaml \
   --out runs/ppo_group_r3
 ```
 

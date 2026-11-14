@@ -19,7 +19,7 @@ import torch
 from env.obs import _empty_history
 from net.build_net import build_net
 from pipeline.common.distributions import TruncatedNormal
-from pipeline.rl import train_group
+from pipeline.train import rl
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _tiny_model():
     torch.manual_seed(0)
     model = build_net()
-    train_group.configure_trainable(model)
+    rl.configure_trainable(model)
     model.eval()
     return model
 
@@ -45,9 +45,14 @@ def _state_batch(model):
     hist["nav_mask"][:] = 1.0
     hist["ego_mask"][:] = 1.0
 
-    from pipeline.common.batching import batch_from_history
-
-    batch = batch_from_history(hist, device="cpu")
+    batch = {}
+    for key in (
+        "od", "od_mask", "ld", "ld_mask", "nav", "nav_mask",
+        "ego", "ego_mask", "hist_valid", "od_ids", "ld_ids", "pose",
+    ):
+        dtype = np.int64 if key in ("od_ids", "ld_ids") else np.float32
+        batch[key] = torch.from_numpy(np.asarray(hist[key], dtype=dtype)).unsqueeze(0).to("cpu")
+    batch["history_mode"] = torch.ones((1,), dtype=torch.float32, device="cpu")
     window, encoded = model.build_history_window(batch)
     return {
         "window": window.to("cpu"),
@@ -117,7 +122,7 @@ def test_terminal_reward_enters_last_step_advantage():
         _episode([0.0, 10.0], member=1),
         _episode([0.0, 20.0], member=2),
     ]
-    advantages, stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, stats = rl.compute_active_set_advantages(episodes, gamma=0.99)
     assert advantages[0][1] == pytest.approx(-5.0)
     assert advantages[1][1] == pytest.approx(-5.0)
     assert advantages[2][1] == pytest.approx(10.0)
@@ -130,7 +135,7 @@ def test_identical_group_advantages_are_zero():
     episodes = [
         _episode([0.0, 0.0, 10.0], member=member) for member in range(4)
     ]
-    advantages, _stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, _stats = rl.compute_active_set_advantages(episodes, gamma=0.99)
     for row in advantages:
         for value in row:
             assert value is not None
@@ -143,7 +148,7 @@ def test_leave_one_out_mean_is_exact():
         _episode([2.0], member=1),
         _episode([3.0], member=2),
     ]
-    advantages, _stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, _stats = rl.compute_active_set_advantages(episodes, gamma=0.99)
     assert [row[0] for row in advantages] == pytest.approx([-1.5, 0.0, 1.5])
 
 
@@ -153,7 +158,7 @@ def test_active_set_shrinks_after_early_termination():
         _episode([0.0, 0.0, 0.0, 10.0], member=1),
         _episode([0.0, 0.0, 0.0, 10.0], member=2),
     ]
-    advantages, _stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, _stats = rl.compute_active_set_advantages(episodes, gamma=0.99)
     assert advantages[0][1] is not None  # 3 active at t=1
     assert advantages[1][1] is not None
     assert advantages[1][2] is None  # only 2 active at t=2
@@ -172,7 +177,7 @@ def test_invalid_terminal_excluded_from_ppo_but_included_in_return():
         _episode([0.0, -20.0], member=3, invalid_last=True),
     ]
     gamma = 0.99
-    advantages, stats = train_group.compute_active_set_advantages(episodes, gamma=gamma)
+    advantages, stats = rl.compute_active_set_advantages(episodes, gamma=gamma)
     assert advantages[3][1] is None
     assert advantages[0][1] is not None
     expected = 1.0 - (1.0 + 1.0 - 20.0) / 3.0
@@ -184,14 +189,14 @@ def test_invalid_terminal_excluded_from_ppo_but_included_in_return():
     assert abs(advantages[0][1]) > 1.0
     assert stats["transitions_with_adv"] == 7
 
-    samples = train_group.flatten_ppo_samples(episodes, advantages)
+    samples = rl.flatten_ppo_samples(episodes, advantages)
     assert all(sample["valid_for_ppo"] for sample in samples)
     assert {sample["t"] for sample in samples} == {0, 1}
     assert not any(sample["member"] == 3 and sample["t"] == 1 for sample in samples)
 
 
 def test_normalize_advantages_global_mean_std_and_floor():
-    normalized, stats = train_group.normalize_advantages(
+    normalized, stats = rl.normalize_advantages(
         [[1.0, None], [2.0], [3.0]], floor=1e-6
     )
     values = _values(normalized)
@@ -200,7 +205,7 @@ def test_normalize_advantages_global_mean_std_and_floor():
     assert float(np.std(values)) == pytest.approx(1.0, abs=1e-6)
     assert normalized[0][1] is None
 
-    degenerate, stats2 = train_group.normalize_advantages(
+    degenerate, stats2 = rl.normalize_advantages(
         [[2.0], [2.0], [2.0]], floor=1e-6
     )
     assert stats2["applied"] is False
@@ -228,11 +233,11 @@ def _samples(model, count=6):
 
 def test_rl_update_audits_ratio_and_updates_planner():
     model = _tiny_model()
-    optimizer, _counts = train_group.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
+    optimizer, _counts = rl.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
     samples = _samples(model, count=6)
     before = [p.detach().clone() for p in model.planner.plan.parameters()]
 
-    record = train_group.ppo_update(
+    record = rl.ppo_update(
         model,
         optimizer,
         samples,
@@ -255,13 +260,13 @@ def test_rl_update_audits_ratio_and_updates_planner():
 
 def test_rl_zero_advantage_has_zero_loss_and_no_update():
     model = _tiny_model()
-    optimizer, _counts = train_group.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
+    optimizer, _counts = rl.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
     samples = _samples(model, count=4)
     for sample in samples:
         sample["_advantage"] = 0.0
     before = [p.detach().clone() for p in model.planner.plan.parameters()]
 
-    record = train_group.ppo_update(
+    record = rl.ppo_update(
         model,
         optimizer,
         samples,
@@ -283,14 +288,14 @@ def test_rl_clipped_loss_at_ratio_one_matches_mean_advantage():
     # clipped surrogate is exactly A, so loss == -mean(A).  This is the
     # direct check of the PPO loss formula, separate from the ratio audit.
     model = _tiny_model()
-    optimizer, _counts = train_group.build_optimizer(model, lr=0.0, tsb_lr=0.0)
+    optimizer, _counts = rl.build_optimizer(model, lr=0.0, tsb_lr=0.0)
     samples = _samples(model, count=4)
     advantages = [1.0, 0.0, 0.0, 0.0]
     for sample, advantage in zip(samples, advantages):
         sample["_advantage"] = advantage
     before = [p.detach().clone() for p in model.planner.plan.parameters()]
 
-    record = train_group.ppo_update(
+    record = rl.ppo_update(
         model,
         optimizer,
         samples,
@@ -311,8 +316,8 @@ def test_rl_clipped_loss_at_ratio_one_matches_mean_advantage():
 # Config / split loading
 # ---------------------------------------------------------------------------
 def test_config_and_rl_split_loader():
-    args = train_group.parse_train_args(
-        train_group.build_arg_parser(), [], "config/train_rl_group.yaml"
+    args = rl.parse_train_args(
+        rl.build_arg_parser(), [], "config/train_rl.yaml"
     )
     assert args.specs.endswith("data/specs/train_2000.json")
     assert args.scenes_per_update == 8
@@ -339,7 +344,7 @@ def test_config_and_rl_split_loader():
     assert train_seeds | holdout_seeds == {int(spec.seed) for spec in specs}
 
     rng = np.random.default_rng(0)
-    scenes = train_group.sample_scenes(
+    scenes = rl.sample_scenes(
         split.train, 8, weights=split.difficulty_weights, rng=rng
     )
     assert len(scenes) == 8
@@ -353,8 +358,8 @@ def test_config_and_rl_split_loader():
     os.environ.get("RUN_PPO_GROUP_SMOKE") != "1",
     reason="set RUN_PPO_GROUP_SMOKE=1 to run the spawned-worker real-env smoke",
 )
-def test_rl_group_real_env_smoke(tmp_path):
-    out = tmp_path / "rl_group_smoke"
+def test_train_rl_real_env_smoke(tmp_path):
+    out = tmp_path / "train_rl_smoke"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
     gl = ROOT / ".venv" / "gl" / "usr" / "lib" / "x86_64-linux-gnu"
@@ -365,9 +370,9 @@ def test_rl_group_real_env_smoke(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "pipeline.rl.train_group",
+        "pipeline.train.rl",
         "--config",
-        "config/train_rl_group.yaml",
+        "config/train_rl.yaml",
         "--out",
         str(out),
         "--device",

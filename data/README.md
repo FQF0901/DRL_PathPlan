@@ -65,8 +65,9 @@ do not tune or select on it.
 
 ## Legacy
 
-Superseded data and generated specs are under `archive/` and are not part of
-the canonical path.  Do not use them for new runs.
+Superseded data and generated specs are not kept in-tree.  Use the canonical
+`data/specs` and `data/episodes` paths for new runs; do not recreate legacy
+pools.
 
 ## Raw history only
 
@@ -80,5 +81,5 @@ real per-frame pose
 ```
 
 The loader rejects missing or projected (`history_mode=0`) shards.  Old
-`stack_history` query-frame projected episodes are legacy/archive only and must
+`stack_history` query-frame projected episodes are legacy only and must
 not remain in the canonical `data/episodes` path.

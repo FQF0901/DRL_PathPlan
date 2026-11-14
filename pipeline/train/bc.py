@@ -1136,7 +1136,7 @@ def run_closed_loop_validation(
     """Run fixed val scenes through the real env and LiveBankRunner."""
     from env.metadrive_env import build_env
     from env.scenario.spec import load_specs
-    from pipeline.eval import run_episode
+    from pipeline.eval.closed_loop import run_episode
     from pipeline.eval.metrics import summarize_rows
     from dataset.splits import verify_split_manifest
 

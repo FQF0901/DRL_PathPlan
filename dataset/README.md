@@ -137,4 +137,4 @@ data/episodes/train_2000/il_dagger_exact_r3
 data/episodes/val_500/expert_exact
 ```
 
-旧数据在 `archive/`，不是 canonical 路径；不要用于新训练。
+旧数据不再保留在仓库内；只用 canonical `data/specs` / `data/episodes`。

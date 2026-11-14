@@ -675,7 +675,7 @@ real frame t-5..t, t+1
 
 Canonical training/eval data must be raw per-frame history produced by the
 current collectors (`history_mode=1`, real per-frame pose). Projected
-`stack_history` shards are legacy/archive only and are rejected by the loader;
+`stack_history` shards are legacy and rejected by the loader;
 they are not a training or gate input.
 
 ### 10.4 Imagine
@@ -1058,7 +1058,7 @@ KL ≈ mean_{s in real+imagined} E_{a~π_new}[log π_new(a|s) - log π_old(a|s)]
 6. **exact execution**：所有 canonical 路径保持 `requested_action == executed_action`；不引入 fallback。
 7. **WM 6-step 只预测不执行**：eval 仍只执行 a0；不要把它写成 open-loop 执行 6 步。
 8. **split 隔离**：当前 `pipeline/train/wm.py` 仍用 val500 做 validation/selection；`config/eval_thresholds.yaml` 仍写 `val500: checkpoint_selection`。新代码必须切到 `train_2000` 固定 500-scene holdout；val500 只做 diagnostic；test500 只做 one-shot final gate。
-9. **probe/horizon 对齐**：当前 `pipeline/wm/probe.py` 默认跑 1..H，`net/world_model.py` 接受 1..6；新训练/eval entrypoint 只允许 1/3/6。通用 API 的其他 horizon 不作为支持范围。
+9. **probe/horizon 对齐**：当前 `pipeline/eval/wm_probe.py` 默认跑 1..H，`net/world_model.py` 接受 1..6；新训练/eval entrypoint 只允许 1/3/6。通用 API 的其他 horizon 不作为支持范围。
 10. **reward 事件语义**：`invalid_action > collision > off-road > success > timeout`；success 不允许覆盖 collision/off-road；wrong_route/stuck 是 per-step one-shot，不进 terminal 优先级。必须有单元测试覆盖同帧事件、wrong_route/stuck 可达性、timeout rc shaping。
 11. **aux head**：RL 没有 aux loss；aux head 冻结/排除 optimizer，避免 AdamW weight decay 改动它。
 12. **config/checkpoint**：G、minibatch、lr、clip、gamma、reward weights、adapt_coeff 必须写入 config 和 checkpoint，便于复现。
@@ -1073,7 +1073,7 @@ config/
   env.yaml
   train_bc.yaml
   train_wm.yaml           # current one-step WM; 3/6-step planned; ckpt=r3 policy checkpoint
-  train_rl_group.yaml    # implemented; group-relative PPO / RL config
+  train_rl.yaml           # implemented; group-relative PPO / RL config
   eval_thresholds.yaml
 
 net/
@@ -1104,7 +1104,6 @@ data/splits/
 pipeline/
   README.md               # active/legacy layout and commands
   common/
-    batching.py            # batch_from_history
     checkpointing.py       # checkpoint load/save + strict load
     distributions.py       # TruncatedNormal
     execution.py           # action segment / relative action helpers
@@ -1115,24 +1114,17 @@ pipeline/
     __main__.py
     closed_loop.py         # closed-loop eval；test500 final gate
     metrics.py             # closed-loop summary rows
-  losses/
-    __init__.py
-    core.py                # 纯 policy/WM loss
-  rl/
-    __init__.py
-    reward.py              # rule-based RL reward model + event aggregation
-    train_group.py         # real-env group-relative PPO
+    wm_probe.py            # WM 自回归诊断（不是训练）
+  losses.py                # 纯 policy/WM loss
   train/
-    __init__.py
     bc.py                  # BC/DAgger
+    rl.py                  # real-env group-relative PPO
+    rl_reward.py           # RL rule reward
     scene_batches.py       # scene-level ordered sequence batches
     wm.py                  # one-step WM；3/6-step planned
-  wm/
-    __init__.py
-    probe.py               # depth 1..H content/geometry probe
 ```
 
-当前实现状态：one-step WM 已实现；`pipeline/wm/probe.py` 当前跑 1..H；`pipeline/train/wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split loader 已实现；3/6-step WM、joint trainer 未实现（joint planned）。RL baseline run 已完成 50 updates（holdout best 0.688 / final 0.680，provisional reward weights；holdout 有 IL exposure confound），owner 已停止 RL 线；test500 未消费。详细结果/失败分析见 `docs/deepseekv4p1_argue.md`。
+当前实现状态：one-step WM 已实现；`pipeline/eval/wm_probe.py` 当前跑 1..H；`pipeline/train/wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split loader 已实现；3/6-step WM、joint trainer 未实现（joint planned）。RL baseline run 已完成 50 updates（holdout best 0.688 / final 0.680，provisional reward weights；holdout 有 IL exposure confound），owner 已停止 RL 线；test500 未消费。详细结果/失败分析见 `docs/deepseekv4p1_argue.md`。
 
 职责：
 
@@ -1145,12 +1137,12 @@ pipeline/
 | `model.py` | 顶层组合、forward、rollout、raw-history adapter、FIFO-safe alignment | YAML 解析、训练、env |
 | `build_net.py` | 读 YAML、实例化、维度校验 | per-episode Bank、训练 |
 | `env/action/action_space.py` | normalize/denormalize、PSTL、静态诊断 | 网络、checkpoint、Bank |
-| `pipeline/losses/core.py` | 纯 policy/WM loss | target encoder、数据加载 |
-| `pipeline/rl/reward.py` | 规则 RL reward model、5-step 聚合、terminal event 优先级 | 网络、env step、checkpoint |
+| `pipeline/losses.py` | 纯 policy/WM loss | target encoder、数据加载 |
+| `pipeline/train/rl_reward.py` | 规则 RL reward model、5-step 聚合、terminal event 优先级 | 网络、env step、checkpoint |
 | `pipeline/train/bc.py` | BC/DAgger、raw Bank 序列、closed-loop validation 调度 | 训练数据采集、WM loss |
 | `pipeline/train/wm.py` | 当前 one-step WM；3/6-step WM（planned）；frozen policy/encoder/TSB | policy 更新、closed-loop |
-| `pipeline/wm/probe.py` | 当前 depth 1..H content/geometry；1/3/6 predicted-vs-actual（planned） | policy 训练、env step |
-| `pipeline/rl/train_group.py` | real-env group-relative PPO（implemented） | WM 训练、reward model |
+| `pipeline/eval/wm_probe.py` | 当前 depth 1..H content/geometry；1/3/6 predicted-vs-actual（planned） | policy 训练、env step |
+| `pipeline/train/rl.py` | real-env group-relative PPO（implemented） | WM 训练、reward model |
 | `pipeline/common/live_bank.py` | online BankWindow / FIFO | 网络结构、训练 |
 
 依赖方向：
@@ -1181,7 +1173,7 @@ model.py
 - `model.py` 组合 encoder / mem_bank / planner / world_model；
 - `build_net.py` 依赖 `encoder.py`、`model.py`、`planner.py`、`world_model.py`；
 - `env/action/action_space.py` 不被 mem_bank/world_model 反向依赖；
-- `pipeline/losses/core.py` 不 import model.py。
+- `pipeline/losses.py` 不 import model.py。
 
 ### 13.1 config/model.yaml 边界
 
@@ -1198,7 +1190,7 @@ model.py
 
 - 模型级 rollout：`net/world_model.py`；
 - 顶层调用：`net/model.py` 的 `imagine` / `rollout`；
-- 训练/评测调度：`pipeline/train/wm.py`、`pipeline/wm/probe.py`、`pipeline/eval/closed_loop.py`；
+- 训练/评测调度：`pipeline/train/wm.py`、`pipeline/eval/wm_probe.py`、`pipeline/eval/closed_loop.py`；
 - rollout 只在 `net/world_model.py` / `net/model.py`，不再有独立的 `pipeline/rollout.py`。
 
 ---

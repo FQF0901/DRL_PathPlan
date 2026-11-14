@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from pipeline.rl.reward import RewardConfig, RewardTracker, compute_step_reward
+from pipeline.train.rl_reward import RewardConfig, RewardTracker, compute_step_reward
 
 
 def _step(**overrides):
@@ -288,14 +288,14 @@ def test_real_metrics_non_scalar_keys_are_ignored():
 
 
 def test_info_flag_union_keys():
-    from pipeline.rl.reward import info_flag
+    from pipeline.train.rl_reward import info_flag
     assert info_flag({"crash_vehicle": True}, "crash", "crash_vehicle")
     assert info_flag({"crash": 1}, "crash")
     assert not info_flag({"crash": False}, "crash")
 
 
 def test_aggregate_substep_events_ors_substeps():
-    from pipeline.rl.reward import aggregate_substep_events
+    from pipeline.train.rl_reward import aggregate_substep_events
     infos = [
         {"crash": False},
         {"crash_vehicle": True},

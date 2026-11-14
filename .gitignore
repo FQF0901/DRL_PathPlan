@@ -7,7 +7,6 @@ runs/
 *.pth
 wandb/
 data/episodes/
-archive/
 r3_demo_*.mp4
 r3_demo_manifest.json
 r3_topdown_*.mp4
