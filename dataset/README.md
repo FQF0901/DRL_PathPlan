@@ -49,11 +49,11 @@ data/specs/train_2000.json
 
 data/specs/val_500.json
         │
-        └─ pipeline/eval.py                  → 闭环验证（现场 build_env，不落 NPZ）
+        └─ pipeline/eval/closed_loop.py                  → 闭环验证（现场 build_env，不落 NPZ）
 
 data/specs/test_500.json
         │
-        └─ pipeline/eval.py                  → 最终 held-out 验收
+        └─ pipeline/eval/closed_loop.py                  → 最终 held-out 验收
 ```
 
 ## 常用命令
@@ -113,10 +113,12 @@ NPZ 主要字段：
 - 同一个 scene 的所有 episode 必须落在同一个 split。
 - 固定集合：
   - `train_2000`：2000 scenes，用于 IL / DAgger 训练，也是 RL 的环境 seed 集
-  - `val_500`：500 scenes，用于 checkpoint/model selection
+  - `train_2000_rl_train_1500`：RL 训练子集，seeds 1000..2499
+  - `train_2000_rl_holdout_500`：RL holdout/selection，seeds 2500..2999
+  - `val_500`：500 scenes，用于 BC/WM checkpoint/model selection
   - `test_500`：500 scenes，只用于最终验收，不调参
   - `mini_train_100` / `mini_val_20`：只用于 smoke test
-- `test_500` 没有 episode NPZ；最终评测由 `pipeline/eval.py` 现场生成环境。
+- `test_500` 没有 episode NPZ；最终评测由 `pipeline/eval/closed_loop.py` 现场生成环境。
 - `val_500/expert_exact` 是 exact raw offline BC validation labels，不是闭环 KPI 数据；闭环验证只用 `data/specs/val_500.json` + `data/splits/val_500.json`。
 
 ## 相关路径

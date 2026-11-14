@@ -1,5 +1,5 @@
 import numpy as np
-from pipeline.eval_metrics import bootstrap_ci, paired_bootstrap, summarize_rows, gate_report
+from pipeline.eval.metrics import bootstrap_ci, paired_bootstrap, summarize_rows, gate_report
 
 
 def test_bootstrap_and_paired():

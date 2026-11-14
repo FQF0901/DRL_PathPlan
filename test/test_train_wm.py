@@ -7,10 +7,10 @@ from pathlib import Path
 
 import torch
 
-from pipeline.checkpointing import load_drive_model_from_checkpoint, save_drive_model_checkpoint
+from pipeline.common.checkpointing import load_drive_model_from_checkpoint, save_drive_model_checkpoint
 from net.build_net import build_net
-from pipeline.probe_wm import main as probe_main
-from pipeline.train_wm import main as wm_main
+from pipeline.wm.probe import main as probe_main
+from pipeline.train.wm import main as wm_main
 from test_train_bc import _write_fixture
 
 
@@ -67,7 +67,7 @@ def test_train_wm_and_probe_smoke(tmp_path):
 def test_wm_alignment_rejects_zero_and_target_duplicates():
     import numpy as np
     import pytest
-    from pipeline.train_wm import _align_by_id, _usable_current_ids
+    from pipeline.train.wm import _align_by_id, _usable_current_ids
 
     with pytest.raises(ValueError, match="stable_id=0"):
         _usable_current_ids(np.array([0, 2]), np.array([1.0, 1.0]))

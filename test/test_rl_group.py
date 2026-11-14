@@ -18,8 +18,8 @@ import torch
 
 from env.obs import _empty_history
 from net.build_net import build_net
-from pipeline.distributions import TruncatedNormal
-from pipeline import train_ppo_group as ppo_group
+from pipeline.common.distributions import TruncatedNormal
+from pipeline.rl import train_group
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _tiny_model():
     torch.manual_seed(0)
     model = build_net()
-    ppo_group.configure_trainable(model)
+    train_group.configure_trainable(model)
     model.eval()
     return model
 
@@ -45,9 +45,9 @@ def _state_batch(model):
     hist["nav_mask"][:] = 1.0
     hist["ego_mask"][:] = 1.0
 
-    from pipeline.train_ppo import _batch_from_history
+    from pipeline.common.batching import batch_from_history
 
-    batch = _batch_from_history(hist, device="cpu")
+    batch = batch_from_history(hist, device="cpu")
     window, encoded = model.build_history_window(batch)
     return {
         "window": window.to("cpu"),
@@ -117,7 +117,7 @@ def test_terminal_reward_enters_last_step_advantage():
         _episode([0.0, 10.0], member=1),
         _episode([0.0, 20.0], member=2),
     ]
-    advantages, stats = ppo_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
     assert advantages[0][1] == pytest.approx(-5.0)
     assert advantages[1][1] == pytest.approx(-5.0)
     assert advantages[2][1] == pytest.approx(10.0)
@@ -130,7 +130,7 @@ def test_identical_group_advantages_are_zero():
     episodes = [
         _episode([0.0, 0.0, 10.0], member=member) for member in range(4)
     ]
-    advantages, _stats = ppo_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, _stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
     for row in advantages:
         for value in row:
             assert value is not None
@@ -143,7 +143,7 @@ def test_leave_one_out_mean_is_exact():
         _episode([2.0], member=1),
         _episode([3.0], member=2),
     ]
-    advantages, _stats = ppo_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, _stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
     assert [row[0] for row in advantages] == pytest.approx([-1.5, 0.0, 1.5])
 
 
@@ -153,7 +153,7 @@ def test_active_set_shrinks_after_early_termination():
         _episode([0.0, 0.0, 0.0, 10.0], member=1),
         _episode([0.0, 0.0, 0.0, 10.0], member=2),
     ]
-    advantages, _stats = ppo_group.compute_active_set_advantages(episodes, gamma=0.99)
+    advantages, _stats = train_group.compute_active_set_advantages(episodes, gamma=0.99)
     assert advantages[0][1] is not None  # 3 active at t=1
     assert advantages[1][1] is not None
     assert advantages[1][2] is None  # only 2 active at t=2
@@ -172,7 +172,7 @@ def test_invalid_terminal_excluded_from_ppo_but_included_in_return():
         _episode([0.0, -20.0], member=3, invalid_last=True),
     ]
     gamma = 0.99
-    advantages, stats = ppo_group.compute_active_set_advantages(episodes, gamma=gamma)
+    advantages, stats = train_group.compute_active_set_advantages(episodes, gamma=gamma)
     assert advantages[3][1] is None
     assert advantages[0][1] is not None
     expected = 1.0 - (1.0 + 1.0 - 20.0) / 3.0
@@ -184,14 +184,14 @@ def test_invalid_terminal_excluded_from_ppo_but_included_in_return():
     assert abs(advantages[0][1]) > 1.0
     assert stats["transitions_with_adv"] == 7
 
-    samples = ppo_group.flatten_ppo_samples(episodes, advantages)
+    samples = train_group.flatten_ppo_samples(episodes, advantages)
     assert all(sample["valid_for_ppo"] for sample in samples)
     assert {sample["t"] for sample in samples} == {0, 1}
     assert not any(sample["member"] == 3 and sample["t"] == 1 for sample in samples)
 
 
 def test_normalize_advantages_global_mean_std_and_floor():
-    normalized, stats = ppo_group.normalize_advantages(
+    normalized, stats = train_group.normalize_advantages(
         [[1.0, None], [2.0], [3.0]], floor=1e-6
     )
     values = _values(normalized)
@@ -200,7 +200,7 @@ def test_normalize_advantages_global_mean_std_and_floor():
     assert float(np.std(values)) == pytest.approx(1.0, abs=1e-6)
     assert normalized[0][1] is None
 
-    degenerate, stats2 = ppo_group.normalize_advantages(
+    degenerate, stats2 = train_group.normalize_advantages(
         [[2.0], [2.0], [2.0]], floor=1e-6
     )
     assert stats2["applied"] is False
@@ -226,13 +226,13 @@ def _samples(model, count=6):
     return samples
 
 
-def test_ppo_update_audits_ratio_and_updates_planner():
+def test_rl_update_audits_ratio_and_updates_planner():
     model = _tiny_model()
-    optimizer, _counts = ppo_group.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
+    optimizer, _counts = train_group.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
     samples = _samples(model, count=6)
     before = [p.detach().clone() for p in model.planner.plan.parameters()]
 
-    record = ppo_group.ppo_update(
+    record = train_group.ppo_update(
         model,
         optimizer,
         samples,
@@ -253,15 +253,15 @@ def test_ppo_update_audits_ratio_and_updates_planner():
     )
 
 
-def test_ppo_zero_advantage_has_zero_loss_and_no_update():
+def test_rl_zero_advantage_has_zero_loss_and_no_update():
     model = _tiny_model()
-    optimizer, _counts = ppo_group.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
+    optimizer, _counts = train_group.build_optimizer(model, lr=1e-3, tsb_lr=1e-4)
     samples = _samples(model, count=4)
     for sample in samples:
         sample["_advantage"] = 0.0
     before = [p.detach().clone() for p in model.planner.plan.parameters()]
 
-    record = ppo_group.ppo_update(
+    record = train_group.ppo_update(
         model,
         optimizer,
         samples,
@@ -278,19 +278,19 @@ def test_ppo_zero_advantage_has_zero_loss_and_no_update():
         assert torch.allclose(old, new, atol=1e-9)
 
 
-def test_ppo_clipped_loss_at_ratio_one_matches_mean_advantage():
+def test_rl_clipped_loss_at_ratio_one_matches_mean_advantage():
     # With the update frozen at the old parameters (lr=0, one batch) the
     # clipped surrogate is exactly A, so loss == -mean(A).  This is the
     # direct check of the PPO loss formula, separate from the ratio audit.
     model = _tiny_model()
-    optimizer, _counts = ppo_group.build_optimizer(model, lr=0.0, tsb_lr=0.0)
+    optimizer, _counts = train_group.build_optimizer(model, lr=0.0, tsb_lr=0.0)
     samples = _samples(model, count=4)
     advantages = [1.0, 0.0, 0.0, 0.0]
     for sample, advantage in zip(samples, advantages):
         sample["_advantage"] = advantage
     before = [p.detach().clone() for p in model.planner.plan.parameters()]
 
-    record = ppo_group.ppo_update(
+    record = train_group.ppo_update(
         model,
         optimizer,
         samples,
@@ -311,8 +311,8 @@ def test_ppo_clipped_loss_at_ratio_one_matches_mean_advantage():
 # Config / split loading
 # ---------------------------------------------------------------------------
 def test_config_and_rl_split_loader():
-    args = ppo_group.parse_train_args(
-        ppo_group.build_arg_parser(), [], "config/train_ppo_group.yaml"
+    args = train_group.parse_train_args(
+        train_group.build_arg_parser(), [], "config/train_rl_group.yaml"
     )
     assert args.specs.endswith("data/specs/train_2000.json")
     assert args.scenes_per_update == 8
@@ -323,27 +323,23 @@ def test_config_and_rl_split_loader():
     assert args.device == "cuda"
 
     from env.scenario.spec import load_specs
-    from dataset.rl_splits import load_rl_spec_splits
+    from dataset.splits import load_rl_spec_splits
 
     specs = load_specs(args.specs)
     split = load_rl_spec_splits(
         specs,
         train_manifest=args.train_manifest,
         holdout_manifest=args.holdout_manifest,
-        calibration_manifest=args.calibration_manifest,
     )
     assert len(split.train) == 1500
     assert len(split.holdout) == 500
-    assert len(split.calibration) == 200
     train_seeds = {int(spec.seed) for spec in split.train}
     holdout_seeds = {int(spec.seed) for spec in split.holdout}
-    calibration_seeds = {int(spec.seed) for spec in split.calibration}
     assert train_seeds.isdisjoint(holdout_seeds)
-    assert calibration_seeds <= train_seeds
     assert train_seeds | holdout_seeds == {int(spec.seed) for spec in specs}
 
     rng = np.random.default_rng(0)
-    scenes = ppo_group.sample_scenes(
+    scenes = train_group.sample_scenes(
         split.train, 8, weights=split.difficulty_weights, rng=rng
     )
     assert len(scenes) == 8
@@ -357,8 +353,8 @@ def test_config_and_rl_split_loader():
     os.environ.get("RUN_PPO_GROUP_SMOKE") != "1",
     reason="set RUN_PPO_GROUP_SMOKE=1 to run the spawned-worker real-env smoke",
 )
-def test_ppo_group_real_env_smoke(tmp_path):
-    out = tmp_path / "ppo_group_smoke"
+def test_rl_group_real_env_smoke(tmp_path):
+    out = tmp_path / "rl_group_smoke"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
     gl = ROOT / ".venv" / "gl" / "usr" / "lib" / "x86_64-linux-gnu"
@@ -369,9 +365,9 @@ def test_ppo_group_real_env_smoke(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "pipeline.train_ppo_group",
+        "pipeline.rl.train_group",
         "--config",
-        "config/train_ppo_group.yaml",
+        "config/train_rl_group.yaml",
         "--out",
         str(out),
         "--device",

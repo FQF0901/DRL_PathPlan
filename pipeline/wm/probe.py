@@ -13,10 +13,10 @@ import torch
 from dataset.splits import split_by_scene_seed
 from net.encoder import TargetEncoder
 from net.world_model import EgoConditionedLatentWM
-from pipeline.checkpointing import load_drive_model_from_checkpoint
+from pipeline.common.checkpointing import load_drive_model_from_checkpoint
 from pipeline.losses import masked_l1, masked_mse
-from pipeline.train_bc import load_data
-from pipeline.train_wm import _align_by_id, _align_geometry_by_id, _encode_rows, _history_batch, _load_ids
+from pipeline.train.bc import load_data
+from pipeline.train.wm import _align_by_id, _align_geometry_by_id, _encode_rows, _history_batch, _load_ids
 
 
 def _sequences(data: Dict[str, np.ndarray], horizon: int) -> List[np.ndarray]:

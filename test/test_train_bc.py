@@ -27,7 +27,7 @@ from env.obs import (
     OD_SLOTS,
 )
 from net.build_net import build_net
-from pipeline.train_bc import (
+from pipeline.train.bc import (
     INPUT_KEYS,
     LossConfig,
     _batch_from_indices,
@@ -301,7 +301,7 @@ def test_one_epoch_smoke(tmp_path):
 
     last = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=False)
     assert last["epoch"] == 1
-    from pipeline.checkpointing import load_model_from_checkpoint
+    from pipeline.common.checkpointing import load_model_from_checkpoint
     loaded = load_model_from_checkpoint(str(out_dir / "best.pt"), "cpu", strict=True)
     assert loaded.hidden == 128
 
@@ -336,7 +336,7 @@ def test_missing_history_mode_is_rejected(tmp_path):
 
 def test_fast_history_window_matches_record_path(tmp_path):
     from net.build_net import build_net
-    from pipeline.scene_batches import make_scene_batches
+    from pipeline.train.scene_batches import make_scene_batches
 
     data = load_data([_fixture(tmp_path)])
     cfg = LossConfig()
@@ -453,7 +453,7 @@ def test_fifo_append_safe_detects_reentering_entity(tmp_path):
 
 
 def test_closed_loop_score_is_lexicographic_success_first():
-    from pipeline.train_bc import _closed_loop_score
+    from pipeline.train.bc import _closed_loop_score
 
     good = {
         "success_rate": 0.9,

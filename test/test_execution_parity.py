@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pipeline.execution import DecisionState, relative_action, segment_dt, wrap_angle
+from pipeline.common.execution import DecisionState, relative_action, segment_dt, wrap_angle
 
 
 def test_relative_action_translation_and_rotation():
@@ -46,7 +46,7 @@ def test_segment_dt_for_truncated_segment():
 
 def test_limit_history_masks_older_frames():
     import numpy as np
-    from pipeline.execution import limit_history
+    from pipeline.common.execution import limit_history
     hist = {"hist_valid": np.ones((1, 6), dtype=np.float32)}
     out = limit_history(hist, 2)
     assert out["hist_valid"][0, -2:].tolist() == [1.0, 1.0]

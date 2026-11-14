@@ -743,7 +743,7 @@ RealBank.snapshot()
 4. **MetaDrive 同 seed 确定性**：已排模验证：同 seed/同 action 跨进程 ego/traffic max diff=0；新 trainer 必须显式 `reset(seed=scene_seed)`，group 内 policy sampling seed 独立。
 5. **action distribution 合同检查**：TruncatedNormal 的采样与 log_prob 已做 Monte Carlo 检查，边界 atom=0、CDF KS 在采样噪声内；保留回归测试，不作为 blocker。
 6. **data/eval 冻结**：RL train 1500（seeds 1000..2499）、holdout 500（seeds 2500..2999）、val500 diagnostic、test500 one-shot final；test500 不参与调参。
-7. **reward 权重**：用 BC/DAgger calibration split 校准一次；不做权重网格扫参；`adapt_coeff` 第一版固定 1.0，只在 collision/off-road 漂移时启用。
+7. **reward 权重**：provisional；不做 calibration split，不做权重网格扫参；权重变更必须 owner 批准并记录 commit；`adapt_coeff` 第一版固定 1.0，只在 collision/off-road 漂移时启用。
 
 ### 11.3 不在本阶段
 
@@ -798,7 +798,7 @@ L_policy = NLL(action_mu, action_logstd; a_expert)
          + w_accel     * accel_hinge
 ```
 
-- 每行使用 `plan_weight` 加权；失败 student 状态、shield 行、infeasible 行按 `pipeline/train_bc.py` 的 plan-weight 策略处理。
+- 每行使用 `plan_weight` 加权；失败 student 状态、shield 行、infeasible 行按 `pipeline/train/bc.py` 的 plan-weight 策略处理。
 - 当前默认：`nll_coef=1.0`、`w_point=1.0`、`w_heading=1.0`、`w_velocity=0.2`、`w_curvature=0.1`、`w_accel=0.1`。
 - 当前默认输入是 raw Bank 序列，`history_mode=1`。
 - **没有 WM loss，也没有 value/risk loss。**
@@ -811,7 +811,6 @@ L_policy = NLL(action_mu, action_logstd; a_expert)
 - RL scene split（scene-level，按 seed）：
   - train: `train_2000` seeds 1000..2499（1500 scenes）
   - holdout: `train_2000` seeds 2500..2999（500 scenes）
-  - calibration: train 1500 内固定 stratified 200 scenes（reward 权重校准，不参与 holdout/test）
   - val500: biased diagnostic only，不参与 selection/promotion
   - test500: final gate，只跑一次
 - 训练 scene 按 difficulty 分层；hard/medium 过采样。不做 failure-window / mid-episode reset；每个 rollout 从 scene seed 的 t=0 开始。
@@ -864,7 +863,7 @@ r_k = r_progress_k + r_comfort_k + r_low_speed_k + r_wrong_route_k + r_stuck_k
   ```
   第一版固定 `adapt_coeff=1.0`；不做在线自适应。只有 owner 明确批准后才加 drift 指标和慢更新。
 - 初始权重 provisional：`w_progress=10`、`w_success=20`、`w_collision=20`、`w_offroad=15`、`w_timeout=10`、`w_invalid=20`、`w_low_speed=0.2`、`w_comfort=0.05`、`w_wrong_route=2`、`w_stuck=2`。
-- 权重用 calibration split 校准一次：保证 collision 惩罚 > 提前终止节省的未来 comfort/progress 上界；不跑权重网格，不在 val500/test500 上调。
+- 权重 provisional；不跑权重网格，不在 val500/test500 上调；如需改权重，必须 owner 批准并记录 commit。
 
 **Return / advantage（per-step active-set）**
 
@@ -916,7 +915,7 @@ test500 success >= 72.8%   # one-shot final gate
 ```
 
 - val500 只做 biased diagnostic，不参与 selection/promotion。
-- train holdout 500 做 early stop/rollback；`select_checkpoint.py` 的碰撞硬阈值 selector 标为 historical，不进入 RL promotion。
+- train holdout 500 做 early stop/rollback；RL promotion 不使用 val500 selector。
 - 不设 gate 2/3；collision/off-road 只记录；如果 72.8% 伴随明显恶化，人工 kill switch，不算自动 gate。
 - test500 只跑一次；多次评估会污染。
 - **promoted artifact 是 RL checkpoint**；joint 阶段是 research/non-promotable，不消耗 test500。若 joint 要 promotion，必须另立一次性 test500 协议。
@@ -926,7 +925,7 @@ test500 success >= 72.8%   # one-shot final gate
 
 **One-step**
 
-> 当前 `train_wm.py` 仍用 val500 validation，并保留 legacy target-only free-slot 新实体监督。在切到 train 1500 / holdout 500 split 并删除 free-slot 监督之前，**不能并行跑生产 one-step WM**；只能作为 legacy canary，不进入 selection/diagnostic。
+> 当前 `pipeline/train/wm.py` 仍用 val500 validation，并保留 legacy target-only free-slot 新实体监督。在切到 train 1500 / holdout 500 split 并删除 free-slot 监督之前，**不能并行跑生产 one-step WM**；只能作为 legacy canary，不进入 selection/diagnostic。
 
 ```text
 z_hat_{t+1} = z_hat_t + r_z,t
@@ -947,7 +946,7 @@ L_wm = λ_z * (D(z_hat_od, sg(z*_od)) + D(z_hat_ld, sg(z*_ld)))
 
 - 在 RL 通过 test500 72.8% gate 后做；用 RL on-policy 数据 + exact/DAgger 数据。
 - WM 训练只使用 `train_2000` seeds 1000..2499（1500 scenes）；attention/DAgger/RL 数据加载时按 scene seed 过滤，holdout 500（2500..2999）不得进入训练。
-- WM 验证用固定 500-scene holdout，不用 val500；train_wm/train_joint 加载时 assert 无 holdout 重叠。
+- WM 验证用固定 500-scene holdout，不用 val500；train_wm 加载时 assert 无 holdout 重叠。
 - horizon curriculum：1 → 3 → 6；不允许 2/4/5。WM 训练/eval entrypoint 断言 `horizon in {1,3,6}`；通用 `imagine` API 可以接受 1..6，但 2/4/5 不用于训练/eval。
 - 先用 detached recurrence；稳定后再短 BPTT（2–3 步）。
 - scheduled sampling：训练时以概率 p 用模型自己的 prediction，否则用真实下一帧。
@@ -997,7 +996,7 @@ L_joint = λ_wm * L_state + λ_policy * L_policy + λ_kl * KL(π_new || π_pre_j
 - `L_policy`：在 depth 2..6 用**当前 policy action**在 WM 里 rollout，比较 predicted pose 与 actual（actual 来自同一 collection snapshot）；action 项只作为 small optional weight（WM 误差下 corrective action 可以合理不同）；policy head + shared TSB 收梯度；WM/decoder 参数冻结；actual target stop-grad。这是 policy 对 collection snapshot 的一致性/纠正目标，不是纯 env 拟合。
 - `L_state` 和 `L_policy` 分开 backward；shared TSB 收两边梯度，记录 per-branch grad norm。WM loss 不进入 policy head；policy loss 不进入 WM head。
 - joint 阶段 policy 更新（joint 的定义），用 small lr；encoder/target frozen；TSB 用更小 lr；WM 正常 lr。
-- 不用 expert NLL；joint trainer 必须拒绝 NLL。当前 `train_joint.py` 是 legacy one-step + expert NLL，不作为新 trainer。
+- 不用 expert NLL；joint trainer 必须拒绝 NLL。当前没有 joint trainer，新 joint planned。
 - KL 到 frozen pre-joint policy（encoder/TSB/planner 的 copy）；用 Monte Carlo 估计：
 
 ```text
@@ -1047,7 +1046,7 @@ KL ≈ mean_{s in real+imagined} E_{a~π_new}[log π_new(a|s) - log π_old(a|s)]
 - collision/off-road/timeout/route completion/feasible：只记录，用于 debug；不单独设 pass/fail。若 72.8% 伴随明显恶化，属于人工 review 红线，不是第二个自动 gate。
 - WM 6-step 正确性：predicted vs actual `ŝ2..ŝ6` vs `s2..s6`；只做诊断，不设多级 gate；是否进入 joint 由 owner review 决定。
 - joint rollback：见 §12.6；不是额外 gate。
-- 新 trainer 必须统一 collision/off-road 检测：canonical collision = any of `crash`, `crash_vehicle`, `crash_object`, `crash_building`, `crash_human`, `crash_sidewalk`；off-road = `out_of_road`/`off_road`。`eval.py`、RL trainer、joint rollback 必须共用同一个 `_info_flag` helper；当前 eval 只看 `crash`，old PPO 看多个 key，数字不可直接比较。
+- 新 trainer 必须统一 collision/off-road 检测：canonical collision = any of `crash`, `crash_vehicle`, `crash_object`, `crash_building`, `crash_human`, `crash_sidewalk`；off-road = `out_of_road`/`off_road`。`pipeline/eval/closed_loop.py`、RL trainer、joint rollback 必须共用同一个 `_info_flag` helper；当前 eval 只看 `crash`，旧 PPO 看多个 key，数字不可直接比较。
 
 ### 12.9 开放合同检查
 
@@ -1055,11 +1054,11 @@ KL ≈ mean_{s in real+imagined} E_{a~π_new}[log π_new(a|s) - log π_old(a|s)]
 2. **MetaDrive 同 seed 确定性**：已排模验证：同 seed/同 action 跨进程 ego/traffic max diff=0；新 trainer 必须显式 `reset(seed=scene_seed)`，group 内 policy sampling seed 独立；同 env 长跑有 mm 级漂移时用 fresh env rebuild。
 3. **max_steps=600 是 cap**：不是固定 episode 长度；episode 提前终止；不要按 600 强制 padding。
 4. **gamma**：0.99 起步；60s 末端 success 信号仍弱时试 0.995；不要用 0.95。
-5. **reward 权重/adapt_coeff**：provisional；用 BC/DAgger calibration split 校准一次；不在 val500/test500 上调。
+5. **reward 权重/adapt_coeff**：provisional；不做 calibration split；不在 val500/test500 上调。
 6. **exact execution**：所有 canonical 路径保持 `requested_action == executed_action`；不引入 fallback。
 7. **WM 6-step 只预测不执行**：eval 仍只执行 a0；不要把它写成 open-loop 执行 6 步。
-8. **split 隔离**：当前 `train_wm.py`/`train_joint.py` 仍用 val500 做 validation/selection；`config/eval_thresholds.yaml` 仍写 `val500: checkpoint_selection`，`pipeline/select_checkpoint.py` 仍可在 val500 上选。新代码必须切到 `train_2000` 固定 500-scene holdout；val500 只做 diagnostic；test500 只做 one-shot final gate。
-9. **probe/horizon 对齐**：当前 `probe_wm.py` 默认跑 1..H，`net/world_model.py` 接受 1..6；新训练/eval entrypoint 只允许 1/3/6。通用 API 的其他 horizon 不作为支持范围。
+8. **split 隔离**：当前 `pipeline/train/wm.py` 仍用 val500 做 validation/selection；`config/eval_thresholds.yaml` 仍写 `val500: checkpoint_selection`。新代码必须切到 `train_2000` 固定 500-scene holdout；val500 只做 diagnostic；test500 只做 one-shot final gate。
+9. **probe/horizon 对齐**：当前 `pipeline/wm/probe.py` 默认跑 1..H，`net/world_model.py` 接受 1..6；新训练/eval entrypoint 只允许 1/3/6。通用 API 的其他 horizon 不作为支持范围。
 10. **reward 事件语义**：`invalid_action > collision > off-road > success > timeout`；success 不允许覆盖 collision/off-road；wrong_route/stuck 是 per-step one-shot，不进 terminal 优先级。必须有单元测试覆盖同帧事件、wrong_route/stuck 可达性、timeout rc shaping。
 11. **aux head**：RL 没有 aux loss；aux head 冻结/排除 optimizer，避免 AdamW weight decay 改动它。
 12. **config/checkpoint**：G、minibatch、lr、clip、gamma、reward weights、adapt_coeff 必须写入 config 和 checkpoint，便于复现。
@@ -1074,10 +1073,7 @@ config/
   env.yaml
   train_bc.yaml
   train_wm.yaml           # current one-step WM; 3/6-step planned; ckpt=r3 policy checkpoint
-  train_joint.yaml        # current legacy one-step + expert NLL; new joint planned
-  train_joint_traj.yaml   # planned; 6-step trajectory consistency + KL config
-  train_ppo.yaml          # legacy PPO canary
-  train_ppo_group.yaml    # implemented; group-relative PPO config
+  train_rl_group.yaml    # implemented; group-relative PPO / RL config
   eval_thresholds.yaml
 
 net/
@@ -1104,29 +1100,39 @@ dataset/
 data/splits/
   train_2000_rl_train_1500.json    # implemented: seeds 1000..2499
   train_2000_rl_holdout_500.json   # implemented: seeds 2500..2999
-  train_2000_rl_calibration_200.json # implemented: 200 stratified calibration scenes
 
 pipeline/
-  losses.py               # 纯 loss 函数
-  reward.py               # implemented: rule-based RL reward model + event aggregation
-  train_bc.py             # row-wise / scene-sequence BC+DAgger；闭合选择
-  scene_batches.py        # scene-level ordered sequence batches
-  train_config.py         # YAML + CLI 合并
-  checkpointing.py        # checkpoint load/save + strict load
-  train_wm.py             # current one-step WM；3/6-step planned；policy/encoder/TSB frozen
-  probe_wm.py             # current depth 1..H content/geometry；1/3/6 predicted-vs-actual planned
-  train_joint.py          # legacy one-step + expert NLL；new joint planned
-  train_ppo_group.py      # implemented real-env group-relative PPO
-  train_ppo.py            # legacy PPO canary；不再作为 RL 主线
-  eval.py                 # closed-loop eval；test500 final gate
-  eval_metrics.py         # closed-loop summary rows
-  select_checkpoint.py    # historical safety selector; not for RL promotion
-  live_bank.py            # online RealBank / FIFO runner
-  execution.py            # action segment / relative action helpers
-  distributions.py        # TruncatedNormal；boundary sample/log_prob tested
+  README.md               # active/legacy layout and commands
+  common/
+    batching.py            # batch_from_history
+    checkpointing.py       # checkpoint load/save + strict load
+    distributions.py       # TruncatedNormal
+    execution.py           # action segment / relative action helpers
+    live_bank.py           # online RealBank / FIFO runner
+    train_config.py        # YAML + CLI + timestamped run dir
+  eval/
+    __init__.py
+    __main__.py
+    closed_loop.py         # closed-loop eval；test500 final gate
+    metrics.py             # closed-loop summary rows
+  losses/
+    __init__.py
+    core.py                # 纯 policy/WM loss
+  rl/
+    __init__.py
+    reward.py              # rule-based RL reward model + event aggregation
+    train_group.py         # real-env group-relative PPO
+  train/
+    __init__.py
+    bc.py                  # BC/DAgger
+    scene_batches.py       # scene-level ordered sequence batches
+    wm.py                  # one-step WM；3/6-step planned
+  wm/
+    __init__.py
+    probe.py               # depth 1..H content/geometry probe
 ```
 
-当前实现状态：one-step WM 已实现；`probe_wm.py` 当前跑 1..H；`train_joint.py` 是 legacy one-step + expert NLL；`train_wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split/loader 已实现；3/6-step WM、新 joint trainer 未实现。RL baseline run 已完成 50 updates（holdout best 0.688 / final 0.680，uncalibrated；holdout 有 IL exposure confound），owner 已停止 RL 线；test500 未消费。详细结果/失败分析见 `docs/deepseekv4p1_argue.md`。旧代码里对 `§12.2` / `§13 Stage C` 的引用已过期，以本文件为准。
+当前实现状态：one-step WM 已实现；`pipeline/wm/probe.py` 当前跑 1..H；`pipeline/train/wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split loader 已实现；3/6-step WM、joint trainer 未实现（joint planned）。RL baseline run 已完成 50 updates（holdout best 0.688 / final 0.680，provisional reward weights；holdout 有 IL exposure confound），owner 已停止 RL 线；test500 未消费。详细结果/失败分析见 `docs/deepseekv4p1_argue.md`。
 
 职责：
 
@@ -1139,16 +1145,13 @@ pipeline/
 | `model.py` | 顶层组合、forward、rollout、raw-history adapter、FIFO-safe alignment | YAML 解析、训练、env |
 | `build_net.py` | 读 YAML、实例化、维度校验 | per-episode Bank、训练 |
 | `env/action/action_space.py` | normalize/denormalize、PSTL、静态诊断 | 网络、checkpoint、Bank |
-| `pipeline/losses.py` | 纯 policy/WM loss | target encoder、数据加载 |
-| `pipeline/reward.py` | 规则 RL reward model、5-step 聚合、terminal event 优先级 | 网络、env step、checkpoint |
-| `pipeline/train_bc.py` | BC/DAgger、raw Bank 序列、closed-loop validation 调度 | 训练数据采集、WM loss |
-| `pipeline/train_wm.py` | 当前 one-step WM；3/6-step WM（planned）；frozen policy/encoder/TSB | policy 更新、closed-loop |
-| `pipeline/probe_wm.py` | 当前 depth 1..H content/geometry；1/3/6 predicted-vs-actual（planned） | policy 训练、env step |
-| `pipeline/train_joint.py` | 当前 legacy one-step + expert NLL；新 joint（planned） | 当前不是新 joint |
-| `pipeline/train_ppo_group.py` | real-env group-relative PPO（implemented） | WM 训练、reward model |
-| `pipeline/train_ppo.py` | legacy PPO contract canary | 新 RL 主线、WM 训练 |
-| `pipeline/select_checkpoint.py` | optional hard collision/off-road safety selector | canonical train_bc selection |
-| `pipeline/live_bank.py` | online BankWindow / FIFO | 网络结构、训练 |
+| `pipeline/losses/core.py` | 纯 policy/WM loss | target encoder、数据加载 |
+| `pipeline/rl/reward.py` | 规则 RL reward model、5-step 聚合、terminal event 优先级 | 网络、env step、checkpoint |
+| `pipeline/train/bc.py` | BC/DAgger、raw Bank 序列、closed-loop validation 调度 | 训练数据采集、WM loss |
+| `pipeline/train/wm.py` | 当前 one-step WM；3/6-step WM（planned）；frozen policy/encoder/TSB | policy 更新、closed-loop |
+| `pipeline/wm/probe.py` | 当前 depth 1..H content/geometry；1/3/6 predicted-vs-actual（planned） | policy 训练、env step |
+| `pipeline/rl/train_group.py` | real-env group-relative PPO（implemented） | WM 训练、reward model |
+| `pipeline/common/live_bank.py` | online BankWindow / FIFO | 网络结构、训练 |
 
 依赖方向：
 
@@ -1178,7 +1181,7 @@ model.py
 - `model.py` 组合 encoder / mem_bank / planner / world_model；
 - `build_net.py` 依赖 `encoder.py`、`model.py`、`planner.py`、`world_model.py`；
 - `env/action/action_space.py` 不被 mem_bank/world_model 反向依赖；
-- `pipeline/losses.py` 不 import model.py。
+- `pipeline/losses/core.py` 不 import model.py。
 
 ### 13.1 config/model.yaml 边界
 
@@ -1195,7 +1198,7 @@ model.py
 
 - 模型级 rollout：`net/world_model.py`；
 - 顶层调用：`net/model.py` 的 `imagine` / `rollout`；
-- 训练/评测调度：`pipeline/train_wm.py`、`pipeline/probe_wm.py`、`pipeline/eval.py`；
+- 训练/评测调度：`pipeline/train/wm.py`、`pipeline/wm/probe.py`、`pipeline/eval/closed_loop.py`；
 - rollout 只在 `net/world_model.py` / `net/model.py`，不再有独立的 `pipeline/rollout.py`。
 
 ---

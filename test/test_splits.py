@@ -49,3 +49,70 @@ def test_canonical_train_val_test_sizes_and_disjoint():
     va = {s.seed for s in val}
     te = {s.seed for s in test}
     assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)
+
+
+# ---------------------------------------------------------------------------
+# RL subset manifests
+# ---------------------------------------------------------------------------
+def test_rl_manifest_roles_and_counts():
+    from dataset.splits import load_manifest
+
+    train = load_manifest(
+        "data/splits/train_2000_rl_train_1500.json", expected_role="rl_train"
+    )
+    holdout = load_manifest(
+        "data/splits/train_2000_rl_holdout_500.json", expected_role="rl_holdout"
+    )
+    assert train["n"] == 1500
+    assert holdout["n"] == 500
+
+
+def test_load_rl_spec_splits():
+    from dataset.splits import load_rl_spec_splits
+    from env.scenario.spec import load_specs
+
+    specs = load_specs("data/specs/train_2000.json")
+    split = load_rl_spec_splits(
+        specs,
+        train_manifest="data/splits/train_2000_rl_train_1500.json",
+        holdout_manifest="data/splits/train_2000_rl_holdout_500.json",
+        specs_path="data/specs/train_2000.json",
+    )
+    assert len(split.train) == 1500
+    assert len(split.holdout) == 500
+    train_seeds = {int(spec.seed) for spec in split.train}
+    holdout_seeds = {int(spec.seed) for spec in split.holdout}
+    assert train_seeds.isdisjoint(holdout_seeds)
+    assert train_seeds | holdout_seeds == {int(spec.seed) for spec in specs}
+    assert split.difficulty_weights["hard"] > split.difficulty_weights["easy"]
+
+
+def test_rl_manifest_rejects_wrong_role():
+    import pytest
+    from dataset.splits import load_manifest
+
+    with pytest.raises(ValueError, match="role"):
+        load_manifest(
+            "data/splits/train_2000_rl_holdout_500.json",
+            expected_role="rl_train",
+        )
+
+
+def test_rl_filter_rejects_missing_seed(tmp_path):
+    import json
+    from pathlib import Path
+
+    import pytest
+    from dataset.splits import filter_specs_by_manifest, load_manifest
+    from env.scenario.spec import load_specs
+
+    payload = json.loads(
+        Path("data/splits/train_2000_rl_train_1500.json").read_text(encoding="utf-8")
+    )
+    payload["seeds"] = payload["seeds"] + [999999]
+    payload["n"] = len(payload["seeds"])
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    manifest = load_manifest(path)
+    with pytest.raises(ValueError, match="missing"):
+        filter_specs_by_manifest(load_specs("data/specs/train_2000.json"), manifest)

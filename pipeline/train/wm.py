@@ -12,7 +12,7 @@ if __package__ in (None, ""):
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import argparse
 import json
@@ -29,10 +29,10 @@ from env.action.config import load_action_contract
 from env.obs import HISTORY_FRAMES, validate_stable_ids
 from net.encoder import TargetEncoder
 from net.world_model import EgoConditionedLatentWM
-from pipeline.checkpointing import load_drive_model_from_checkpoint
+from pipeline.common.checkpointing import load_drive_model_from_checkpoint
 from pipeline.losses import wm_losses
-from pipeline.train_bc import _resolve_npz_paths, load_data
-from pipeline.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
+from pipeline.train.bc import _resolve_npz_paths, load_data
+from pipeline.common.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
 
 
 def _load_ids(paths: Sequence[str]) -> Dict[str, np.ndarray]:
@@ -561,7 +561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     if best_state is not None:
         drive.world_model.load_state_dict(best_state, strict=True)
-        from pipeline.checkpointing import save_drive_model_checkpoint
+        from pipeline.common.checkpointing import save_drive_model_checkpoint
         save_drive_model_checkpoint(
             drive, str(out / "best_drive.pt"),
             extra={

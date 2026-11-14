@@ -8,7 +8,7 @@ import torch
 
 from env.action.config import load_action_contract
 from net.model import DriveModel
-from pipeline.checkpointing import (
+from pipeline.common.checkpointing import (
     load_drive_model_from_checkpoint,
     load_model_from_checkpoint,
     save_drive_model_checkpoint,
@@ -59,7 +59,7 @@ def test_legacy_checkpoint_is_rejected(tmp_path):
 
 def test_merge_wm_into_drive_roundtrip(tmp_path):
     from net.world_model import EgoConditionedLatentWM
-    from pipeline.checkpointing import merge_wm_into_drive
+    from pipeline.common.checkpointing import merge_wm_into_drive
 
     drive_path = tmp_path / "drive.pt"
     save_drive_model_checkpoint(_model(), str(drive_path))
@@ -79,7 +79,7 @@ def test_best_drive_loads_as_drive_model(tmp_path):
     assert isinstance(loaded, DriveModel)
 
 def test_bad_schema_is_rejected_in_strict_mode(tmp_path):
-    from pipeline.checkpointing import load_model_from_checkpoint, save_drive_model_checkpoint
+    from pipeline.common.checkpointing import load_model_from_checkpoint, save_drive_model_checkpoint
 
     path = tmp_path / "bad.pt"
     save_drive_model_checkpoint(_model(), str(path))

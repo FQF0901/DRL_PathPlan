@@ -2,17 +2,16 @@
 
 Contract reference: ``docs/arch_lock.md`` §12.4.
 
-This trainer is deliberately *not* the legacy ``pipeline/train_ppo.py``
-contract canary.  It implements the RL contract:
+This trainer is the RL mainline. The old PPO contract canary has been removed.
+It implements the RL contract:
 
-* scene-level RL splits from ``dataset/rl_splits.py`` (train 1500 / holdout 500
-  / calibration 200); calibration is never trained on;
+* scene-level RL splits from ``dataset.splits`` (train 1500 / holdout 500);
 * real-env rollouts in spawned worker processes, 8 scene seeds x 8 policy
   samples per update, identical env seed per scene, independent policy
   sampling seed per member;
 * one 0.5 s policy decision = 5 x 0.1 s env steps, only the first segment is
   executed, exact execution (no projection, no safe brake);
-* rule-based dense + terminal reward from ``pipeline/reward.py``;
+* rule-based dense + terminal reward from ``pipeline.rl.reward``;
 * per-step active-set leave-one-out advantages with global normalization;
 * clipped PPO on planner + TSB only (encoder and aux head are frozen);
 * holdout-500 selection using strict success, never test500 / val500.
@@ -27,7 +26,7 @@ import sys
 from pathlib import Path
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import argparse
 import json
@@ -42,7 +41,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from dataset.rl_splits import RLSpecSplit, load_rl_spec_splits
+from dataset.splits import RLSpecSplit, load_rl_spec_splits
 from env.action.action_space import ActionBounds, DynamicsLimits, action_to_trajectory
 from env.action.config import load_action_contract
 from env.metadrive_env import build_env
@@ -51,18 +50,18 @@ from env.scenario.spec import load_specs
 from env.tracking import ExactTracker
 from net.mem_bank import BankWindow
 from net.model import DriveModel
-from pipeline.checkpointing import save_drive_model_checkpoint
-from pipeline.distributions import TruncatedNormal
+from pipeline.common.checkpointing import save_drive_model_checkpoint
+from pipeline.common.distributions import TruncatedNormal
 from pipeline.eval import load_model, run_episode
-from pipeline.execution import relative_action
-from pipeline.live_bank import LiveBankRunner
-from pipeline.reward import (
+from pipeline.common.execution import relative_action
+from pipeline.common.live_bank import LiveBankRunner
+from pipeline.rl.reward import (
     RewardConfig,
     RewardTracker,
     aggregate_substep_events,
     compute_step_reward,
 )
-from pipeline.train_config import latest_run_alias, parse_train_args, timestamped_run_dir
+from pipeline.common.train_config import latest_run_alias, parse_train_args, timestamped_run_dir
 
 # The stored-log-prob audit compares a batch recompute with the rollout forward.
 # TF32 would silently change the apples-to-apples comparison on CUDA.
@@ -1215,11 +1214,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Real-env group-relative PPO (arch_lock §12.4)"
     )
-    parser.add_argument("--config", default="config/train_ppo_group.yaml")
+    parser.add_argument("--config", default="config/train_rl_group.yaml")
     parser.add_argument("--specs", default=None)
     parser.add_argument("--train-manifest", default=None)
     parser.add_argument("--holdout-manifest", default=None)
-    parser.add_argument("--calibration-manifest", default=None)
     parser.add_argument("--ckpt", default=None)
     parser.add_argument("--out", default=None)
 
@@ -1288,7 +1286,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         "specs": args.specs,
         "train_manifest": args.train_manifest,
         "holdout_manifest": args.holdout_manifest,
-        "calibration_manifest": args.calibration_manifest,
         "ckpt": args.ckpt,
         "out": args.out,
     }
@@ -1325,8 +1322,8 @@ def _checkpoint_extra(
     selection: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
-        "ppo_group": {
-            "schema": "drl_pathplan_ppo_group_v1",
+        "rl_group": {
+            "schema": "drl_pathplan_rl_group_v1",
             "contract": "arch_lock §12.4",
             "update": int(update),
             "updates": int(args.updates),
@@ -1345,7 +1342,6 @@ def _checkpoint_extra(
                 "specs": str(args.specs),
                 "train_manifest": str(args.train_manifest),
                 "holdout_manifest": str(args.holdout_manifest),
-                "calibration_manifest": str(args.calibration_manifest),
             },
             "optimizer": {
                 "name": "AdamW",
@@ -1361,7 +1357,7 @@ def _checkpoint_extra(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_train_args(build_arg_parser(), argv, "config/train_ppo_group.yaml")
+    args = parse_train_args(build_arg_parser(), argv, "config/train_rl_group.yaml")
     _validate_args(args)
     reward_config = reward_config_from_args(args)
 
@@ -1388,7 +1384,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log_file.flush()
         print(line, flush=True)
 
-    print(f"[ppo_group] config={args.config} out={out_dir}", flush=True)
+    print(f"[rl_group] config={args.config} out={out_dir}", flush=True)
 
     official_before = snapshot_official_python()
 
@@ -1399,16 +1395,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         specs,
         train_manifest=args.train_manifest,
         holdout_manifest=args.holdout_manifest,
-        calibration_manifest=args.calibration_manifest,
         specs_path=args.specs,
     )
     train_seeds = {int(spec.seed) for spec in split.train}
     holdout_seeds = {int(spec.seed) for spec in split.holdout}
-    calibration_seeds = {int(spec.seed) for spec in split.calibration}
     if train_seeds & holdout_seeds:
         raise SystemExit("RL train/holdout seed overlap")
-    if not calibration_seeds <= train_seeds:
-        raise SystemExit("RL calibration is not a subset of train")
     if len(split.train) < int(args.scenes_per_update):
         raise SystemExit(
             f"only {len(split.train)} train scenes for scenes_per_update={args.scenes_per_update}"
@@ -1423,38 +1415,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     run_meta = {
-        "schema": "drl_pathplan_ppo_group_run_v1",
+        "schema": "drl_pathplan_rl_group_run_v1",
         "config": str(args.config),
         "args": vars(args),
         "reward_config": asdict(reward_config),
         "split": {
             "train": len(split.train),
             "holdout": len(split.holdout),
-            "calibration": len(split.calibration),
             "difficulty_weights": dict(split.difficulty_weights),
             "train_seed_range": [min(train_seeds), max(train_seeds)],
             "holdout_seed_range": [min(holdout_seeds), max(holdout_seeds)],
-            "calibration_seed_range": (
-                [min(calibration_seeds), max(calibration_seeds)]
-                if calibration_seeds
-                else None
-            ),
-            "calibration_difficulty": {
-                difficulty: sum(
-                    1
-                    for spec in split.calibration
-                    if str(getattr(spec, "difficulty", "")) == difficulty
-                )
-                for difficulty in sorted(
-                    {str(getattr(spec, "difficulty", "")) for spec in split.calibration}
-                )
-            },
-            "calibration_usage": "logging only; never trained on",
         },
         "trainable": trainable,
         "official_python_files": int(len(official_before)),
         "execution": "exact; only the first 0.5 s segment; no projection/safe-brake",
-        "reward": "pipeline.reward rule model; no cost vector / Lagrangian",
+        "reward": "pipeline.rl.reward rule model; no cost vector / Lagrangian",
         "advantage": "per-step active-set leave-one-out + global normalization",
     }
     (out_dir / "run_meta.json").write_text(
@@ -1467,7 +1442,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "out": str(out_dir),
             "train": len(split.train),
             "holdout": len(split.holdout),
-            "calibration": len(split.calibration),
             "trainable": trainable,
             "reward_config": asdict(reward_config),
         }
@@ -1714,7 +1688,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log_file.close()
 
     assert_official_python_untouched(official_before)
-    print(f"[ppo_group] wrote {out_dir / 'last.pt'} and {log_path}", flush=True)
+    print(f"[rl_group] wrote {out_dir / 'last.pt'} and {log_path}", flush=True)
     return 0
 
 

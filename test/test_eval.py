@@ -28,11 +28,11 @@ from env.scenario.spec import load_specs
 from env.action.config import load_action_contract
 from net.build_net import build_net
 from net.model import DriveModel
-from pipeline.checkpointing import save_drive_model_checkpoint
+from pipeline.common.checkpointing import save_drive_model_checkpoint
 
 _C = load_action_contract()
 CLEAN_BOUNDS = _C.bounds
-from pipeline.eval import (
+from pipeline.eval.closed_loop import (
     HARD_LIMITS,
     _batch_from_history,
     _resolve_exact_execution,
@@ -40,7 +40,7 @@ from pipeline.eval import (
     load_model,
     run_episode,
 )
-from pipeline.eval_metrics import summarize_rows
+from pipeline.eval.metrics import summarize_rows
 
 SPEC_PATH = "data/specs/mini_train_100.json"
 

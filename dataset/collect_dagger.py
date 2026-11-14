@@ -81,9 +81,9 @@ _CONTRACT = load_action_contract()
 CLEAN_BOUNDS = _CONTRACT.bounds
 COMFORT_LIMITS = _CONTRACT.comfort
 HARD_LIMITS = _CONTRACT.hard
-from pipeline.checkpointing import load_model_from_checkpoint
-from pipeline.live_bank import LiveBankRunner
-from pipeline.train_config import parse_train_args
+from pipeline.common.checkpointing import load_model_from_checkpoint
+from pipeline.common.live_bank import LiveBankRunner
+from pipeline.common.train_config import parse_train_args
 
 DECISION_DT = 0.5
 SIM_DT = 0.1

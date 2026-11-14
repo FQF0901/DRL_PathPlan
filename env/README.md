@@ -308,7 +308,7 @@ env.reset()
   → env.step()
 ```
 
-使用 `pipeline/live_bank.py`；不保留 projected `stack_history` 路径。
+使用 `pipeline/common/live_bank.py`；不保留 projected `stack_history` 路径。
 
 ### Offline BC / WM
 

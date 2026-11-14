@@ -50,7 +50,7 @@ if __package__ in (None, ""):
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import argparse
 import json
@@ -87,10 +87,10 @@ _CONTRACT = load_action_contract()
 CLEAN_BOUNDS = _CONTRACT.bounds
 COMFORT_LIMITS = _CONTRACT.comfort
 HARD_LIMITS = _CONTRACT.hard
-from pipeline.checkpointing import load_model_from_checkpoint
-from pipeline.distributions import truncated_normal_nll
-from pipeline.scene_batches import SceneBatch, iter_scene_chunks
-from pipeline.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
+from pipeline.common.checkpointing import load_model_from_checkpoint
+from pipeline.common.distributions import truncated_normal_nll
+from pipeline.train.scene_batches import SceneBatch, iter_scene_chunks
+from pipeline.common.train_config import parse_train_args, timestamped_run_dir, latest_run_alias
 
 #: Feature keys fed to the adapter.  IDs are metadata, not policy features.
 INPUT_KEYS: Tuple[str, ...] = (
@@ -1137,7 +1137,7 @@ def run_closed_loop_validation(
     from env.metadrive_env import build_env
     from env.scenario.spec import load_specs
     from pipeline.eval import run_episode
-    from pipeline.eval_metrics import summarize_rows
+    from pipeline.eval.metrics import summarize_rows
     from dataset.splits import verify_split_manifest
 
     all_specs = load_specs(specs_path)
@@ -1466,7 +1466,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     selection_split = "val" if val_mask.any() else "train"
     closed_loop_selectable = bool(args.closed_loop)
     if args.sequence_batch:
-        from pipeline.scene_batches import make_scene_batches
+        from pipeline.train.scene_batches import make_scene_batches
         eval_scene_batches = make_scene_batches(
             data, np.flatnonzero(eval_mask), args.scenes_per_batch,
             clip_length=args.clip_length,
@@ -1481,7 +1481,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for epoch in range(1, args.epochs + 1):
         if args.sequence_batch:
-            from pipeline.scene_batches import make_scene_batches
+            from pipeline.train.scene_batches import make_scene_batches
             train_scene_batches = make_scene_batches(
                 data, np.flatnonzero(train_mask), args.scenes_per_batch,
                 rng=rng, clip_length=args.clip_length,

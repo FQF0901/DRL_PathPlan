@@ -90,7 +90,7 @@ def test_masked_mse_ignores_nan_in_masked_slots():
 
 
 def test_align_by_id_zero_ids_fail_fast():
-    from pipeline.train_wm import _align_by_id, _align_geometry_by_id
+    from pipeline.train.wm import _align_by_id, _align_geometry_by_id
     cur = np.arange(8, dtype=np.float32).reshape(2, 4)
     tgt = cur + 10
     ids = np.zeros(2, dtype=np.int64)
@@ -102,7 +102,7 @@ def test_align_by_id_zero_ids_fail_fast():
 
 
 def test_align_by_id_single_nonzero_id_uses_id_not_slot():
-    from pipeline.train_wm import _align_by_id
+    from pipeline.train.wm import _align_by_id
     cur = np.array([[1.0], [2.0]], dtype=np.float32)
     tgt = np.array([[999.0], [42.0]], dtype=np.float32)
     out, mask = _align_by_id(

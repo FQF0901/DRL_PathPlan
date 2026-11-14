@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.train_bc import build_arg_parser
-from pipeline.train_config import load_train_config, parse_train_args, timestamped_run_dir
+from pipeline.train.bc import build_arg_parser
+from pipeline.common.train_config import load_train_config, parse_train_args, timestamped_run_dir
 
 
 def test_train_bc_yaml_defaults_and_cli_override(tmp_path):
@@ -72,7 +72,7 @@ def test_missing_config_fails(tmp_path):
 
 
 def test_latest_run_alias_creates_missing_parent(tmp_path):
-    from pipeline.train_config import latest_run_alias, timestamped_run_dir
+    from pipeline.common.train_config import latest_run_alias, timestamped_run_dir
 
     run = timestamped_run_dir(tmp_path / "runs" / "example")
     # Target directory need not exist yet; alias should still be created.

@@ -1,6 +1,6 @@
 import math
 import torch
-from pipeline.distributions import TruncatedNormal, truncated_normal_nll
+from pipeline.common.distributions import TruncatedNormal, truncated_normal_nll
 
 
 def test_samples_inside_support_and_logprob_finite():

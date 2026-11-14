@@ -4,9 +4,8 @@
 specs: data/specs/train_2000.json
 train_manifest: data/splits/train_2000_rl_train_1500.json
 holdout_manifest: data/splits/train_2000_rl_holdout_500.json
-calibration_manifest: data/splits/train_2000_rl_calibration_200.json
 ckpt: runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt
-out: runs/ppo_group_r3
+out: runs/rl_group_r3
 
 updates: 50
 scenes_per_update: 8
