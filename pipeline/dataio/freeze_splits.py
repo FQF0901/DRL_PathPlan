@@ -7,8 +7,9 @@ Canonical scene sets:
   test_500   : last 500 scenes from source/val_1000.json (5000500..5000999)
   mini_*     : deterministic smoke-test prefixes of train/val
 
-Raw spec JSON stays gitignored under ``data/specs``; the seed manifests under
-``data/splits`` are tracked and verified by the evaluator.
+Canonical specs encode their own ``split`` field.  Only gate seals
+(``val_500`` / ``test_500``) and the RL subset views are written under
+``data/splits``; there are no per-split seed copies for train/mini.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-from dataset.splits import file_sha256
+from pipeline.dataio.splits import file_sha256
 from env.scenario.spec import load_specs, save_specs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,23 +76,30 @@ def main() -> int:
     mini_train = train2000[:100]
     mini_val = val500[:20]
 
-    outputs = []
-    for name, specs, split, schema in (
-        ("train_2000", train2000, "train", "pnp_data_split_v1"),
-        ("val_500", val500, "val", "pnp_eval_split_v2"),
-        ("test_500", test500, "test", "pnp_eval_split_v2"),
-        ("mini_train_100", mini_train, "train", "pnp_data_split_v1"),
-        ("mini_val_20", mini_val, "val", "pnp_data_split_v1"),
+    # Always write the canonical specs (spec.split is the source of truth).
+    saved = {}
+    for name, specs, split in (
+        ("train_2000", train2000, "train"),
+        ("val_500", val500, "val"),
+        ("test_500", test500, "test"),
+        ("mini_train_100", mini_train, "train"),
+        ("mini_val_20", mini_val, "val"),
     ):
-        path, saved = _save(name, specs, split=split)
-        source = train_source if name.startswith("train") or name.startswith("mini_train") else val_source
-        manifest = _write_manifest(
-            name=name, split=split, specs=saved, spec_path=path, source=source, schema=schema
-        )
-        outputs.append((path, manifest))
+        path, kept = _save(name, specs, split=split)
+        saved[name] = (path, kept)
+        print(f"wrote {path.relative_to(ROOT)}")
 
-    for path, manifest in outputs:
-        print(f"wrote {path.relative_to(ROOT)} -> {manifest.relative_to(ROOT)}")
+    # Only the gate seals need an external SHA/seed record.  Train/mini splits
+    # are already encoded in their spec's split field and are not duplicated.
+    for name, split, source, schema in (
+        ("val_500", "val", val_source, "pnp_eval_split_v2"),
+        ("test_500", "test", val_source, "pnp_eval_split_v2"),
+    ):
+        path, kept = saved[name]
+        manifest = _write_manifest(
+            name=name, split=split, specs=kept, spec_path=path, source=source, schema=schema
+        )
+        print(f"wrote {manifest.relative_to(ROOT)}")
     return 0
 
 

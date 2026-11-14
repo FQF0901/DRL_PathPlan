@@ -5,7 +5,7 @@ Contract reference: ``docs/arch_lock.md`` §12.4.
 This trainer is the RL mainline. The old PPO contract canary has been removed.
 It implements the RL contract:
 
-* scene-level RL splits from ``dataset.splits`` (train 1500 / holdout 500);
+* scene-level RL splits from ``pipeline.dataio.splits`` (train 1500 / holdout 500);
 * real-env rollouts in spawned worker processes, 8 scene seeds x 8 policy
   samples per update, identical env seed per scene, independent policy
   sampling seed per member;
@@ -41,7 +41,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from dataset.splits import RLSpecSplit, load_rl_spec_splits
+from pipeline.dataio.splits import RLSpecSplit, load_rl_spec_splits
 from env.action.action_space import ActionBounds, DynamicsLimits, action_to_trajectory
 from env.action.config import load_action_contract
 from env.metadrive_env import build_env

@@ -19,7 +19,7 @@ invalid-action 语义、target-only ID、PPO 终止回填、registry 和文档�
 | P1-2 invalid `feasible` | 接受，code 已统一 invalid 分支计数 |
 | P2-1 target-only ID | 接受，`train_wm` 已对整个 target frame 校验 |
 | P2-2/P2-3 PPO invalid | 接受，已回填 terminal 并记录 `invalid_action_count` |
-| P2-4 registry | 接受，`data/manifests/datasets.json` 已更新 |
+| P2-4 registry | 历史：该 registry 无代码引用，已删除 |
 | P2-5 “所有使用端” | **部分接受**：doc 已改成 canonical 入口/窗口构建 fail-fast，不宣称 encoder 每一行都校验 |
 | P2-6 DAgger replay | 接受，doc 已限定为 student/lift 行 exact |
 | P2-7 LD chunk | 接受，doc 已改成 chunk anchor 是 feature，不是 ID |
@@ -73,7 +73,7 @@ frame 调用 `validate_stable_ids`，再做 `_target_hit`。target-only zero/dup
 
 ### 1.5 P2-4 registry
 
-`data/manifests/datasets.json` 已改为 exact 路径和当前 rows/success：
+历史记录：`data/manifests/datasets.json` 已删除（无代码引用）；布局以 `data/README.md` 为准。旧内容：
 
 ```text
 il_expert_exact
@@ -197,9 +197,9 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 | 文件 | 内容 | 状态 |
 |---|---|---|
 | `pipeline/train/rl_reward.py` | 规则 reward：dense + terminal、事件优先级、wrong_route/stuck one-shot、5-substep 事件聚合 | 已实现，单测通过 |
-| `dataset/splits.py` | RL split manifest 加载、role/sha/无重叠校验（与通用 split 工具合并） | 已实现 |
-| `data/splits/train_2000_rl_train_1500.json` | seeds 1000..2499 | 已实现 |
-| `data/splits/train_2000_rl_holdout_500.json` | seeds 2500..2999 | 已实现 |
+| `pipeline/dataio/splits.py` | RL split manifest 加载、role/sha/无重叠校验（与通用 split 工具合并） | 已实现 |
+| `data/splits/rl_train_1500.json` | seeds 1000..2499 | 已实现 |
+| `data/splits/rl_holdout_500.json` | seeds 2500..2999 | 已实现 |
 | `pipeline/train/rl.py` | spawn 多进程 rollout、exact 0.5s segment、active-set LOO、PPO、holdout selection | 已实现 |
 | `config/train_rl.yaml` | 50 updates / 8 scenes × 8 group / 4 workers / eval 500 every 5 | 已实现 |
 | `pipeline/eval/closed_loop.py` / `pipeline/eval/metrics.py` | 新增 `strict_success`；eval 显式 `reset(seed=spec.seed)` | 已实现 |

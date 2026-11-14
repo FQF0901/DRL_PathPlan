@@ -1091,18 +1091,19 @@ env/
     __init__.py
     action_space.py       # normalize/denormalize + PSTL + 静态诊断；无 canonical bounds
 
-dataset/
-  collect.py              # expert IL collection
-  collect_dagger.py       # DAgger collection
-  splits.py               # scene-level split helpers
-  freeze_splits.py        # specs/split manifest generation
-
 data/splits/
-  train_2000_rl_train_1500.json    # implemented: seeds 1000..2499
-  train_2000_rl_holdout_500.json   # implemented: seeds 2500..2999
+  val_500.json           # gate seal for BC/WM/eval
+  test_500.json          # final gate seal
+  rl_train_1500.json     # RL train subset: seeds 1000..2499
+  rl_holdout_500.json    # RL holdout: seeds 2500..2999
 
 pipeline/
   README.md               # active/legacy layout and commands
+  dataio/
+    collect_expert.py      # expert IL collection
+    collect_dagger.py      # DAgger collection
+    splits.py              # scene-level split helpers
+    freeze_splits.py       # specs/split manifest generation
   common/
     checkpointing.py       # checkpoint load/save + strict load
     distributions.py       # TruncatedNormal
@@ -1201,4 +1202,4 @@ model.py
 
 ### 14.1 Scene-level split
 
-Train/validation/test leakage is forbidden by **scene seed**, not by episode id. The same scene can be re-collected as multiple BC/DAgger episodes; splitting by episode can put copies of one scene on both sides. `dataset/splits.py` is the single implementation of this rule. RL uses `train_2000` seeds 1000..2499 (1500 train) and seeds 2500..2999 (500 holdout); val500 is diagnostic only; test500 is one-shot final gate. RL/WM/joint loaders must assert no holdout overlap with training data.
+Train/validation/test leakage is forbidden by **scene seed**, not by episode id. The same scene can be re-collected as multiple BC/DAgger episodes; splitting by episode can put copies of one scene on both sides. `pipeline/dataio/splits.py` is the single implementation of this rule. RL uses `train_2000` seeds 1000..2499 (1500 train) and seeds 2500..2999 (500 holdout); val500 is diagnostic only; test500 is one-shot final gate. RL/WM/joint loaders must assert no holdout overlap with training data.

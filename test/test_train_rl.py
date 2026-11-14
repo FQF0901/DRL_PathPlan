@@ -328,7 +328,7 @@ def test_config_and_rl_split_loader():
     assert args.device == "cuda"
 
     from env.scenario.spec import load_specs
-    from dataset.splits import load_rl_spec_splits
+    from pipeline.dataio.splits import load_rl_spec_splits
 
     specs = load_specs(args.specs)
     split = load_rl_spec_splits(

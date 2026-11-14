@@ -13,7 +13,7 @@ Each row is one 0.5 s policy decision:
 * episode outcome backfilled to every row.
 
 The expert is ``PurePursuitIDMPolicy`` and acts through the engine exactly as
-in ``dataset/collect.py``: it is registered once, then each decision calls
+in ``pipeline/dataio/collect_expert.py``: it is registered once, then each decision calls
 ``env.step([0, 0])`` five times.
 
 Notes on limits
@@ -201,7 +201,7 @@ def _safe_float(value: Any, fallback: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Expert 4D lift (copied from dataset/collect_dagger.py:34-49)
+# Expert 4D lift (copied from pipeline/dataio/collect_dagger.py:34-49)
 # ---------------------------------------------------------------------------
 def _lift_action(
     steer: float,
@@ -808,7 +808,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "schema": "pnp_v2",
         "schema_version": 2,
         "dataset": "expert_bc",
-        "collector": "dataset.collect",
+        "collector": "pipeline.dataio.collect_expert",
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "specs": str(args.specs),
         "out": str(out_dir),

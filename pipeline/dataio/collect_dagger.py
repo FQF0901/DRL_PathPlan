@@ -1,7 +1,7 @@
 """Schema-v2 DAgger collection with measured expert replay.
 
 This collector keeps the
-v2 observation/audit/row contract of :mod:`dataset.collect` and adds the
+v2 observation/audit/row contract of :mod:`pipeline.dataio.collect_expert` and adds the
 DAgger roll-in fields:
 
 * the **student** (``net.model.DriveModel``) is rolled in through the
@@ -18,7 +18,7 @@ DAgger roll-in fields:
   label; ``label_valid`` is 0 when the segment did not complete 5 substeps
   (mid-segment termination / budget cutoff) or the endpoint is not finite.
 
-Privileged expert audit fields are copied from :mod:`dataset.collect` and
+Privileged expert audit fields are copied from :mod:`pipeline.dataio.collect_expert` and
 live only in side arrays.  They never enter the student OD/LD/Nav/Ego features.
 The expert is the only consumer of ``current_ref_lanes`` / target-lane state;
 the student observation is built exclusively by
@@ -30,7 +30,7 @@ Rows carry the student roll-in episode outcome (``success`` / ``collision`` /
 row, while ``expert_plan_valid`` follows the *label* validity, so recovery rows
 still teach the expert plan even when the student episode fails.
 
-Artifacts (same names as :mod:`dataset.collect`)::
+Artifacts (same names as :mod:`pipeline.dataio.collect_expert`)::
 
     expert_bc.npz
     expert_bc.meta.json
@@ -536,7 +536,7 @@ def _audit_fields(
 
 
 # ---------------------------------------------------------------------------
-# Shield (copied from dataset/collect_dagger.py; v2 OD columns are identical)
+# Shield (copied from pipeline/dataio/collect_dagger.py; v2 OD columns are identical)
 # ---------------------------------------------------------------------------
 def _needs_shield(obs: Dict[str, np.ndarray], ttc_thresh: float) -> bool:
     if ttc_thresh <= 0:
@@ -1448,7 +1448,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "schema_version": 2,
         "dataset": "expert_bc",
         "variant": "dagger",
-        "collector": "dataset.collect_dagger",
+        "collector": "pipeline.dataio.collect_dagger",
         "obs_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
         "ckpt": str(args.ckpt),
         "specs": str(args.specs),

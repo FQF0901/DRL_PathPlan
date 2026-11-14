@@ -6,7 +6,7 @@ from git history/tag ``pre-consolidation``.
 Data contract
 -------------
 Each input directory (or ``.npz`` file) must contain the arrays written by
-``dataset.collect``: all ``HISTORY_KEYS`` plus the measured ``action`` row,
+``pipeline.dataio.collect_expert``: all ``HISTORY_KEYS`` plus the measured ``action`` row,
 ``scene_seed``, ``episode_id`` and outcome columns.  Only the model feature
 keys below enter the adapter/DriveModel; IDs are metadata needed for stable
 identity alignment, while audit fields and outcomes remain side arrays::
@@ -64,12 +64,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from dataset.collect import (
+from pipeline.dataio.collect_expert import (
     COMFORT_LIMITS,
     HARD_LIMITS,
     HISTORY_KEYS,
 )
-from dataset.splits import assert_disjoint, split_by_scene_seed
+from pipeline.dataio.splits import assert_disjoint, split_by_scene_seed
 from env.obs import (
     EGO_INDEX,
     HISTORY_FRAMES,
@@ -404,13 +404,13 @@ def load_data(
     if "history_mode" not in merged:
         raise ValueError(
             "raw history requires history_mode=1; regenerate shards with the "
-            "current dataset.collect"
+            "current pipeline.dataio.collect_expert"
         )
     mode = np.asarray(merged["history_mode"], dtype=np.float32)
     if not np.all(np.isfinite(mode)) or not np.all(mode == 1.0):
         raise ValueError(
             "projected history is no longer supported; regenerate raw shards "
-            "with the current dataset.collect (history_mode=1)"
+            "with the current pipeline.dataio.collect_expert (history_mode=1)"
         )
     for key in _ALL_OPTIONAL_KEYS:
         if key not in merged:
@@ -1138,7 +1138,7 @@ def run_closed_loop_validation(
     from env.scenario.spec import load_specs
     from pipeline.eval.closed_loop import run_episode
     from pipeline.eval.metrics import summarize_rows
-    from dataset.splits import verify_split_manifest
+    from pipeline.dataio.splits import verify_split_manifest
 
     all_specs = load_specs(specs_path)
     if split_manifest:

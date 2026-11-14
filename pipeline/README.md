@@ -5,6 +5,7 @@ because their data/contracts differ; shared utilities live in `common/`.
 
 | 目录 | 内容 | 状态 |
 |---|---|---|
+| `dataio/` | `collect_expert.py`、`collect_dagger.py`、`freeze_splits.py`、`splits.py` | active |
 | `common/` | checkpointing、distributions、execution、live_bank、train_config | active |
 | `eval/` | `closed_loop.py`、`metrics.py`、`wm_probe.py`；`python -m pipeline.eval` / `pipeline.eval.wm_probe` | active |
 | `losses.py` | 纯 policy/WM loss（单文件，不强行做包） | active |

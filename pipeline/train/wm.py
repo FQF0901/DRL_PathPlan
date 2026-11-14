@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from dataset.splits import split_by_scene_seed
+from pipeline.dataio.splits import split_by_scene_seed
 from env.action.config import load_action_contract
 from env.obs import HISTORY_FRAMES, validate_stable_ids
 from net.encoder import TargetEncoder

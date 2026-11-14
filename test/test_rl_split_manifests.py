@@ -6,8 +6,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC_PATH = ROOT / "data/specs/train_2000.json"
-TRAIN_MANIFEST = ROOT / "data/splits/train_2000_rl_train_1500.json"
-HOLDOUT_MANIFEST = ROOT / "data/splits/train_2000_rl_holdout_500.json"
+TRAIN_MANIFEST = ROOT / "data/splits/rl_train_1500.json"
+HOLDOUT_MANIFEST = ROOT / "data/splits/rl_holdout_500.json"
 
 
 def _load_json(path):
@@ -28,8 +28,8 @@ def test_manifest_schema_and_metadata(manifests):
     train, holdout = manifests
     expected_sha = hashlib.sha256(SPEC_PATH.read_bytes()).hexdigest()
     expected = (
-        (train, "train_2000_rl_train_1500", 1500, [1000, 2499]),
-        (holdout, "train_2000_rl_holdout_500", 500, [2500, 2999]),
+        (train, "rl_train_1500", 1500, [1000, 2499]),
+        (holdout, "rl_holdout_500", 500, [2500, 2999]),
     )
     for manifest, name, n, seed_range in expected:
         assert manifest["schema"] == "pnp_data_split_v1"

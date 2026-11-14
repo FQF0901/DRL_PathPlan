@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dataset import collect
+from pipeline.dataio import collect_expert as collect
 from env.obs import (
     HISTORY_FRAMES,
     NAV_DIM,
@@ -335,7 +335,7 @@ def _reference_lift(
     accel_action_scale,
     brake_action_scale,
 ):
-    """Copy of dataset/collect_dagger.py:34-49 for regression comparison."""
+    """Copy of pipeline/dataio/collect_dagger.py:34-49 for regression comparison."""
     delta = float(steer) * float(max_steer_angle_rad)
     a = float(throttle) * (
         accel_action_scale if throttle >= 0 else brake_action_scale

@@ -8,7 +8,7 @@ echo "--- resources ---"
 nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null || true
 free -h | head -2
 echo "--- active tasks ---"
-ps -eo pid,etime,pcpu,pmem,cmd | grep -E 'dataset.collect|collect_dagger|pipeline.train.bc|pipeline.train.wm|pipeline.train.rl|pipeline.eval|monitor_tasks' | grep -v grep || true
+ps -eo pid,etime,pcpu,pmem,cmd | grep -E 'pipeline.dataio.collect_expert|collect_dagger|pipeline.train.bc|pipeline.train.wm|pipeline.train.rl|pipeline.eval|monitor_tasks' | grep -v grep || true
 echo "--- latest logs ---"
 for f in $(ls -t runs/logs/*.log runs/monitor/tasks_20m.log 2>/dev/null | head -3); do
   [ -f "$f" ] && { echo "## $f"; tail -5 "$f"; }

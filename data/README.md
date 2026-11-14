@@ -1,6 +1,6 @@
 # Data root
 
-This directory is the canonical data layout.  Code lives in `dataset/`;
+This directory is the canonical data layout.  Code lives in `pipeline/dataio/`;
 collected episode tensors live here.
 
 ```
@@ -12,16 +12,13 @@ data/
     train_2000.json          # fixed train scene set, seeds 1000..2999
     val_500.json             # fixed held-out validation scenes, seeds 5000000..5000499
     test_500.json            # fixed final test scenes, seeds 5000500..5000999
-    train_2000_rl_train_1500.json
-    train_2000_rl_holdout_500.json
     mini_train_100.json      # smoke-test subset of train_2000
     mini_val_20.json         # smoke-test subset of val_500
   splits/                    # frozen seed manifests (tracked)
-    train_2000.json
-    val_500.json
-    test_500.json
-    mini_train_100.json
-    mini_val_20.json
+    val_500.json             # gate seal for BC/WM/eval
+    test_500.json            # final gate seal
+    rl_train_1500.json       # RL train subset, seeds 1000..2499
+    rl_holdout_500.json      # RL holdout/selection, seeds 2500..2999
   episodes/                  # collected episode tensors (gitignored; large)
     train_2000/
       il_expert_exact/       # exact-execution raw IL/BC expert data, 2000 scenes
@@ -31,21 +28,19 @@ data/
     val_500/
       expert_exact/          # exact raw expert labels / closed-loop val
     mini/                    # optional smoke pools; not collected in the exact baseline
-  manifests/
-    datasets.json            # registry: purpose, size, source
 ```
 
 ## Fixed scene sets
 
 | name | scenes | seeds | role |
 |---|---:|---|---|
-| train_2000 | 2000 | 1000..2999 | training for IL / DAgger; RL env seeds |
+| train_2000 | 2000 | 1000..2999 | training for IL / DAgger; RL env seeds; split encoded in spec |
 | val_500 | 500 | 5000000..5000499 | held-out model selection / closed-loop validation |
 | test_500 | 500 | 5000500..5000999 | final test only; do not tune |
-| train_2000_rl_train_1500 | 1500 | 1000..2499 | RL training subset |
-| train_2000_rl_holdout_500 | 500 | 2500..2999 | RL holdout / selection |
-| mini_train_100 | 100 | 1000..1099 | smoke tests |
-| mini_val_20 | 20 | 5000000..5000019 | smoke tests |
+| rl_train_1500 | 1500 | 1000..2499 | RL training subset |
+| rl_holdout_500 | 500 | 2500..2999 | RL holdout / selection |
+| mini_train_100 | 100 | 1000..1099 | smoke fixture; split encoded in spec |
+| mini_val_20 | 20 | 5000000..5000019 | smoke fixture; split encoded in spec |
 
 `train_2000` and `val_500` are scene-disjoint.  `val_500` and `test_500`
 are also disjoint.  Never train on validation or test scenes.

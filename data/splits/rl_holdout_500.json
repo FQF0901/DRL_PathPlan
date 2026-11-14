@@ -1,6 +1,6 @@
 {
   "schema": "pnp_data_split_v1",
-  "name": "train_2000_rl_holdout_500",
+  "name": "rl_holdout_500",
   "split": "train",
   "role": "rl_holdout",
   "source": "data/specs/train_2000.json",

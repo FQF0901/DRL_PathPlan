@@ -10,7 +10,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 import torch
 
-from dataset.splits import split_by_scene_seed
+from pipeline.dataio.splits import split_by_scene_seed
 from net.encoder import TargetEncoder
 from net.world_model import EgoConditionedLatentWM
 from pipeline.common.checkpointing import load_drive_model_from_checkpoint

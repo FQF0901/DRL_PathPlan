@@ -16,12 +16,12 @@ for i in $(seq 1 "$CYCLES"); do
     free -h
     echo "--- active task processes ---"
     ps -eo pid,ppid,etime,pcpu,pmem,rss,cmd --sort=-pcpu \
-      | grep -E 'python|metadrive|train_bc|train_wm|train_group|eval_|dataset\.collect|collect_dagger' \
+      | grep -E 'python|metadrive|train_bc|train_wm|train\.rl|eval_|pipeline\.dataio\.collect_expert|collect_dagger' \
       | grep -v -E 'grep|monitor_tasks' | head -20 || true
     echo "--- latest run artifacts ---"
     find "$ROOT/runs" -name metrics.json -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -5 || true
     echo "--- data/run/disk ---"
-    du -sh "$ROOT/datasets" "$ROOT/runs" 2>/dev/null || true
+    du -sh "$ROOT/data" "$ROOT/runs" 2>/dev/null || true
     df -h "$ROOT" | tail -1
     echo
   } >> "$LOG" 2>&1

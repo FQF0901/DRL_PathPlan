@@ -1,6 +1,6 @@
 # Raw DAgger collection defaults. CLI flags override every value.
 # Run from the repository root with no arguments:
-#   python dataset/collect_dagger.py
+#   python -m pipeline.dataio.collect_dagger
 specs: data/specs/train_2000.json
 # Defaults for the next medium/hard DAgger round (round 4).
 difficulties: [medium, hard]

@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dataset import collect_dagger as dagger
-from dataset import collect
+from pipeline.dataio import collect_dagger as dagger
+from pipeline.dataio import collect_expert as collect
 from env.obs import HISTORY_FRAMES, NAV_DIM, _empty_history, raw_history
 from env.action.config import load_action_contract
 

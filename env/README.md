@@ -362,7 +362,7 @@ Canonical 数据只使用 raw collector：`history_mode=1`，TSB 使用真实 `p
 - `validator.py`：场景可实例化性检查；
 - `cli.py`：生成 `data/specs/source/train_10000.json` 和 `val_1000.json`。
 
-canonical 数据由 `dataset/freeze_splits.py` 生成：
+canonical 数据由 `pipeline/dataio/freeze_splits.py` 生成：
 
 ```text
 train_2000   2000 scenes   seeds 1000..2999

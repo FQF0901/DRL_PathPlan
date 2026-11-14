@@ -1,5 +1,5 @@
 import numpy as np
-from dataset.splits import split_by_scene_seed, assert_disjoint
+from pipeline.dataio.splits import split_by_scene_seed, assert_disjoint
 
 
 def test_split_by_scene_seed_groups_duplicates():
@@ -21,7 +21,7 @@ def test_split_is_deterministic_and_disjoint():
 
 
 def test_frozen_val_and_test_manifests_are_verified():
-    from dataset.splits import verify_split_manifest
+    from pipeline.dataio.splits import verify_split_manifest
     from env.scenario.spec import load_specs
 
     val = load_specs("data/specs/val_500.json")
@@ -55,27 +55,27 @@ def test_canonical_train_val_test_sizes_and_disjoint():
 # RL subset manifests
 # ---------------------------------------------------------------------------
 def test_rl_manifest_roles_and_counts():
-    from dataset.splits import load_manifest
+    from pipeline.dataio.splits import load_manifest
 
     train = load_manifest(
-        "data/splits/train_2000_rl_train_1500.json", expected_role="rl_train"
+        "data/splits/rl_train_1500.json", expected_role="rl_train"
     )
     holdout = load_manifest(
-        "data/splits/train_2000_rl_holdout_500.json", expected_role="rl_holdout"
+        "data/splits/rl_holdout_500.json", expected_role="rl_holdout"
     )
     assert train["n"] == 1500
     assert holdout["n"] == 500
 
 
 def test_load_rl_spec_splits():
-    from dataset.splits import load_rl_spec_splits
+    from pipeline.dataio.splits import load_rl_spec_splits
     from env.scenario.spec import load_specs
 
     specs = load_specs("data/specs/train_2000.json")
     split = load_rl_spec_splits(
         specs,
-        train_manifest="data/splits/train_2000_rl_train_1500.json",
-        holdout_manifest="data/splits/train_2000_rl_holdout_500.json",
+        train_manifest="data/splits/rl_train_1500.json",
+        holdout_manifest="data/splits/rl_holdout_500.json",
         specs_path="data/specs/train_2000.json",
     )
     assert len(split.train) == 1500
@@ -89,11 +89,11 @@ def test_load_rl_spec_splits():
 
 def test_rl_manifest_rejects_wrong_role():
     import pytest
-    from dataset.splits import load_manifest
+    from pipeline.dataio.splits import load_manifest
 
     with pytest.raises(ValueError, match="role"):
         load_manifest(
-            "data/splits/train_2000_rl_holdout_500.json",
+            "data/splits/rl_holdout_500.json",
             expected_role="rl_train",
         )
 
@@ -103,11 +103,11 @@ def test_rl_filter_rejects_missing_seed(tmp_path):
     from pathlib import Path
 
     import pytest
-    from dataset.splits import filter_specs_by_manifest, load_manifest
+    from pipeline.dataio.splits import filter_specs_by_manifest, load_manifest
     from env.scenario.spec import load_specs
 
     payload = json.loads(
-        Path("data/splits/train_2000_rl_train_1500.json").read_text(encoding="utf-8")
+        Path("data/splits/rl_train_1500.json").read_text(encoding="utf-8")
     )
     payload["seeds"] = payload["seeds"] + [999999]
     payload["n"] = len(payload["seeds"])

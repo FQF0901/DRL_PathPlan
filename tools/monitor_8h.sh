@@ -11,7 +11,7 @@ for i in $(seq 1 24); do
     echo '--- top cpu ---'
     ps -eo pid,pcpu,pmem,etime,cmd --sort=-pcpu | head -12
     echo '--- data/run sizes ---'
-    du -sh "$ROOT/datasets" "$ROOT/runs" 2>/dev/null || true
+    du -sh "$ROOT/data" "$ROOT/runs" 2>/dev/null || true
     echo '--- latest metrics ---'
     find "$ROOT/runs" -name metrics.json -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -5
     echo
