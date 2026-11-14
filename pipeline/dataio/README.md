@@ -122,21 +122,6 @@ NPZ 主要字段：
 - `test_500` 没有 episode NPZ；最终评测由 `pipeline/eval/closed_loop.py` 现场生成环境。
 - `val_500/expert_exact` 是 exact raw offline BC validation labels，不是闭环 KPI 数据；闭环验证只用 `data/specs/val_500.json` + `data/splits/val_500.json`。
 
-## 相关路径
+## 布局
 
-```text
-data/specs/train_2000.json       # 2000 个训练场景
-data/specs/val_500.json          # 500 个验证场景
-data/specs/test_500.json         # 500 个最终测试场景
-data/splits/val_500.json         # gate seal
-data/splits/test_500.json        # final gate seal
-data/splits/rl_train_1500.json   # RL subset view
-data/splits/rl_holdout_500.json  # RL subset view
-data/episodes/train_2000/il_expert_exact
-data/episodes/train_2000/il_dagger_exact_r1
-data/episodes/train_2000/il_dagger_exact_r2
-data/episodes/train_2000/il_dagger_exact_r3
-data/episodes/val_500/expert_exact
-```
-
-旧数据不再保留在仓库内；只用 canonical `data/specs` / `data/episodes`。
+路径、split 和 episode pool 说明以 `data/README.md` 为准；本文件只描述 collector 行为、命令和字段。

@@ -41,3 +41,9 @@ def test_manifest_spec_path_and_sha_match():
 def test_only_gate_seals_and_rl_views_live_in_splits():
     names = {path.stem for path in _manifests()}
     assert names == {"val_500", "test_500", "rl_train_1500", "rl_holdout_500"}
+
+
+def test_freeze_splits_check_is_clean():
+    from pipeline.dataio import freeze_splits
+
+    assert freeze_splits.main(["--check"]) == 0
