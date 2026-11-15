@@ -326,7 +326,7 @@ def test_config_and_rl_split_loader():
     assert args.gamma == pytest.approx(0.99)
     assert args.workers == 4
     assert args.device == "cuda"
-    assert args.std_min == pytest.approx(0.05)
+    assert args.std_min == pytest.approx([0.005, 0.0, 0.0, 0.005])
     assert args.entropy_coef == pytest.approx(0.01)
     assert args.holdout_specs.endswith("data/specs/val_500.json")
     assert args.easy_weight == pytest.approx(1.0)
@@ -418,12 +418,17 @@ def test_policy_std_floor_is_enforced():
         "action_mu": torch.full((2, 4), 0.5),
         "action_logstd": torch.full((2, 4), -5.0),
     }
-    dist = rl._policy_distribution(out, std_min=0.05)
-    expected = 0.05 + 0.95 * math.exp(-5.0)
-    assert torch.allclose(
-        dist.scale, torch.full_like(dist.scale, expected), atol=1e-7
+    floor = [0.005, 0.0, 0.0, 0.005]
+    dist = rl._policy_distribution(out, std_min=floor)
+    base = math.exp(-5.0)
+    expected = torch.tensor(
+        [f + (1.0 - f) * base for f in floor], dtype=dist.scale.dtype
     )
-    assert float(dist.scale.min()) >= 0.05
+    assert torch.allclose(
+        dist.scale, expected.expand_as(dist.scale), atol=1e-7
+    )
+    assert float(dist.scale.min()) >= 0.0
+    assert float(dist.scale[:, 0].min()) >= 0.005
 
 
 def test_entropy_bonus_changes_loss_without_changing_model():

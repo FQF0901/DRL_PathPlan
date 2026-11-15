@@ -897,7 +897,7 @@ policy loss = -mean(min(ratio * A_t, clip(ratio, 0.8, 1.2) * A_t)) - entropy_coe
 ```
 
 - `gamma=0.99` 起步；60s 末端 success 信号弱时试 0.995；timeout/max_step 按 terminal，bootstrap=0。
-- **exploration contract**：BC/DAgger 学到的 `logstd` 是 expert action likelihood 的残差参数，不直接当 RL 探索宽度。保留可学习 logstd，但有效尺度为 `std = std_min + (1-std_min)*exp(logstd)`，默认 `std_min=0.05`；同时加 entropy bonus `loss = PPO_loss - entropy_coef * entropy`，默认 `entropy_coef=0.01`。不向动作外面额外加噪声，log_prob 仍对应实际采样分布。
+- **exploration contract**：BC/DAgger 学到的 `logstd` 是 expert action likelihood 的残差参数，不直接当 RL 探索宽度。保留可学习 logstd，但有效尺度为 `std = std_min + (1-std_min)*exp(logstd)`；`std_min` 是 4 维向量 `[accel, steer, curvature, speed]`，默认 `[0.005, 0, 0, 0.005]`（纵向给探索，横向不硬加噪声，避免直接 off-road）。同时加 entropy bonus `loss = PPO_loss - entropy_coef * entropy`，默认 `entropy_coef=0.01`。不向动作外面额外加噪声，log_prob 仍对应实际采样分布。
 - 监控 raw/effective logstd、entropy、approx_kl、clip_frac；`approx_kl > 0.02` 或 `clip_frac > 0.3` 提前停该次 inner epochs。
 - 不需要 reward/termination 预测头；reward 是规则函数。
 - `G`、`minibatch`、`lr`、`clip`、`gamma`、`std_min`、`entropy_coef`、reward weights、`adapt_coeff` 冻结进 config/checkpoint。
