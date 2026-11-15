@@ -894,13 +894,14 @@ same scene seed reset G times; env seed same, policy sampling seed independent
 no critic / no value head / no GAE
 PPO clip = 0.2; epochs = 4; minibatch = 256/512
 ratio = pi_new(a|s) / pi_old(a|s)
-policy loss = -mean(min(ratio * A_t, clip(ratio, 0.8, 1.2) * A_t))
+policy loss = -mean(min(ratio * A_t, clip(ratio, 0.8, 1.2) * A_t)) - entropy_coef * H
 ```
 
 - `gamma=0.99` 起步；60s 末端 success 信号弱时试 0.995；timeout/max_step 按 terminal，bootstrap=0。
-- 可选 KL 到 r3 BC policy；监控 logstd/entropy；`approx_kl > 0.02` 或 `clip_frac > 0.3` 提前停该次 inner epochs。
+- **exploration contract**：BC/DAgger 学到的 `logstd` 是 expert action likelihood 的残差参数，不直接当 RL 探索宽度。保留可学习 logstd，但有效尺度为 `std = std_min + (1-std_min)*exp(logstd)`，默认 `std_min=0.05`；同时加 entropy bonus `loss = PPO_loss - entropy_coef * entropy`，默认 `entropy_coef=0.01`。不向动作外面额外加噪声，log_prob 仍对应实际采样分布。
+- 监控 raw/effective logstd、entropy、approx_kl、clip_frac；`approx_kl > 0.02` 或 `clip_frac > 0.3` 提前停该次 inner epochs。
 - 不需要 reward/termination 预测头；reward 是规则函数。
-- `G`、`minibatch`、`lr`、`clip`、`gamma`、reward weights、`adapt_coeff` 冻结进 config/checkpoint。
+- `G`、`minibatch`、`lr`、`clip`、`gamma`、`std_min`、`entropy_coef`、reward weights、`adapt_coeff` 冻结进 config/checkpoint。
 
 **Trainable params**
 
@@ -1061,7 +1062,7 @@ KL ≈ mean_{s in real+imagined} E_{a~π_new}[log π_new(a|s) - log π_old(a|s)]
 9. **probe/horizon 对齐**：当前 `pipeline/eval/wm_probe.py` 默认跑 1..H，`net/world_model.py` 接受 1..6；新训练/eval entrypoint 只允许 1/3/6。通用 API 的其他 horizon 不作为支持范围。
 10. **reward 事件语义**：`invalid_action > collision > off-road > success > timeout`；success 不允许覆盖 collision/off-road；wrong_route/stuck 是 per-step one-shot，不进 terminal 优先级。必须有单元测试覆盖同帧事件、wrong_route/stuck 可达性、timeout rc shaping。
 11. **aux head**：RL 没有 aux loss；aux head 冻结/排除 optimizer，避免 AdamW weight decay 改动它。
-12. **config/checkpoint**：G、minibatch、lr、clip、gamma、reward weights、adapt_coeff 必须写入 config 和 checkpoint，便于复现。
+12. **config/checkpoint**：G、minibatch、lr、clip、gamma、std_min、entropy_coef、reward weights、adapt_coeff 必须写入 config 和 checkpoint，便于复现。
 
 ---
 

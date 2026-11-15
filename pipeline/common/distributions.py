@@ -73,29 +73,30 @@ class TruncatedNormal:
         return torch.where(inside, out, torch.full_like(out, -float("inf")))
 
     def entropy(self) -> Tensor:
-        """Approximate entropy via a fixed 33-point quadrature on [low,high]."""
-        n = 33
-        grid = torch.linspace(self.low, self.high, n, device=self.loc.device, dtype=self.loc.dtype)
-        # expand grid to loc.shape: [*shape, n]
-        view = (1,) * self.loc.ndim + (n,)
-        g = grid.view(*view).expand(*self.loc.shape, n)
-        p = self.log_prob(g).exp()
-        # trapezoid; broad enough for monitoring, not used in gradients
-        dx = (self.high - self.low) / (n - 1)
-        return -(p[..., 1:-1].sum(-1) + 0.5 * p[..., 0] + 0.5 * p[..., -1]) * dx
+        """Analytic differential entropy of the truncated normal."""
+        z0 = (self.low - self.loc) / self.scale
+        z1 = (self.high - self.loc) / self.scale
+        phi0 = torch.exp(-0.5 * z0 * z0) / math.sqrt(2.0 * math.pi)
+        phi1 = torch.exp(-0.5 * z1 * z1) / math.sqrt(2.0 * math.pi)
+        mass = (self._cdf1 - self._cdf0).clamp_min(1e-12)
+        return (
+            0.5 * math.log(2.0 * math.pi * math.e)
+            + torch.log(self.scale)
+            + torch.log(mass)
+            + (z0 * phi0 - z1 * phi1) / (2.0 * mass)
+        )
 
     def mode(self) -> Tensor:
         return self.loc.clamp(self.low, self.high)
 
     def mean(self) -> Tensor:
-        """Numerical mean (33-point quadrature); monitoring only."""
-        n = 33
-        grid = torch.linspace(self.low, self.high, n, device=self.loc.device, dtype=self.loc.dtype)
-        view = (1,) * self.loc.ndim + (n,)
-        g = grid.view(*view).expand(*self.loc.shape, n)
-        p = self.log_prob(g).exp()
-        dx = (self.high - self.low) / (n - 1)
-        return (g * p).sum(-1) * dx
+        """Analytic mean of the truncated normal."""
+        z0 = (self.low - self.loc) / self.scale
+        z1 = (self.high - self.loc) / self.scale
+        phi0 = torch.exp(-0.5 * z0 * z0) / math.sqrt(2.0 * math.pi)
+        phi1 = torch.exp(-0.5 * z1 * z1) / math.sqrt(2.0 * math.pi)
+        mass = (self._cdf1 - self._cdf0).clamp_min(1e-12)
+        return self.loc + self.scale * (phi0 - phi1) / mass
 
 
 def truncated_normal_nll(

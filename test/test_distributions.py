@@ -34,3 +34,16 @@ def test_nll_flags_outside_without_rewriting():
     assert nll.shape == (1,)
     assert outside.tolist() == [[False, True]]
     assert torch.isfinite(nll).all()
+
+
+def test_analytic_entropy_matches_fine_quadrature():
+    loc = torch.tensor([[0.35, 0.8]])
+    scale = torch.tensor([[0.05, 0.2]])
+    d = TruncatedNormal(loc, scale)
+    grid = torch.linspace(1e-5, 1 - 1e-5, 20001)
+    # One row at a time; the grid is 1-D.
+    for i in range(2):
+        di = TruncatedNormal(loc[:, i], scale[:, i])
+        p = di.log_prob(grid).exp()
+        numeric = -torch.trapz(p * torch.log(p.clamp_min(1e-30)), grid)
+        assert abs(float(numeric) - float(d.entropy()[0, i])) < 2e-3

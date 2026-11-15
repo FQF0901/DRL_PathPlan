@@ -32,3 +32,9 @@ kl_stop: 0.02
 clip_frac_stop: 0.3
 adv_std_floor: 0.000001
 logprob_audit_size: 32
+
+# Policy exploration: effective std = std_min + (1-std_min)*exp(logstd)
+# BC logstd is a likelihood parameter, not an RL exploration policy; the floor
+# prevents PPO from collapsing the behavior policy to deterministic.
+std_min: 0.05
+entropy_coef: 0.01

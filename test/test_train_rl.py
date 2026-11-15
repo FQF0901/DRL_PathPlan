@@ -326,6 +326,8 @@ def test_config_and_rl_split_loader():
     assert args.gamma == pytest.approx(0.99)
     assert args.workers == 4
     assert args.device == "cuda"
+    assert args.std_min == pytest.approx(0.05)
+    assert args.entropy_coef == pytest.approx(0.01)
 
     from env.scenario.spec import load_specs
     from pipeline.dataio.splits import load_rl_spec_splits
@@ -404,3 +406,37 @@ def test_train_rl_real_env_smoke(tmp_path):
     assert (out / "train_log.jsonl").is_file()
     lines = (out / "train_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert lines
+
+
+def test_policy_std_floor_is_enforced():
+    out = {
+        "action_mu": torch.full((2, 4), 0.5),
+        "action_logstd": torch.full((2, 4), -5.0),
+    }
+    dist = rl._policy_distribution(out, std_min=0.05)
+    expected = 0.05 + 0.95 * math.exp(-5.0)
+    assert torch.allclose(
+        dist.scale, torch.full_like(dist.scale, expected), atol=1e-7
+    )
+    assert float(dist.scale.min()) >= 0.05
+
+
+def test_entropy_bonus_changes_loss_without_changing_model():
+    model = _tiny_model()
+    optimizer, _counts = rl.build_optimizer(model, lr=0.0, tsb_lr=0.0)
+    samples = _samples(model, count=4)
+    for sample in samples:
+        sample["_advantage"] = 0.0
+    base = rl.ppo_update(
+        model, optimizer, samples, clip=0.2, epochs=1, minibatch=4,
+        device="cpu", seed=0, entropy_coef=0.0,
+    )
+    boosted = rl.ppo_update(
+        model, optimizer, samples, clip=0.2, epochs=1, minibatch=4,
+        device="cpu", seed=0, entropy_coef=0.1,
+    )
+    assert math.isfinite(boosted["entropy"])
+    assert boosted["policy_loss"] == pytest.approx(
+        -0.1 * boosted["entropy"], abs=1e-6
+    )
+    assert boosted["policy_loss"] > base["policy_loss"]

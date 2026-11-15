@@ -332,7 +332,7 @@ device: cuda
 
 ### 4.5 数据覆盖小、梯度方差大
 
-**事实**：40 个 update × 8 scene = 320 次 draw，unique 286 个 scene（train 共 1500）；difficulty 抽样为 hard 128、medium 113、easy 71（hard 约 41%），符合 `difficulty_weights` 的过采样。
+**事实**：40 个 update × 8 scene = 320 次 scene selections，unique 286 个 scene（train 共 1500）；difficulty 抽样为 hard 128、medium 113、easy 71（hard 约 41%），符合 `difficulty_weights` 的过采样。
 **推断**：每 update 只看到 8 个 scene，64 条 episode；相对 1500 个 train scene，覆盖不足。策略可能在少量 scene 上反复优化，holdout 泛化有限。
 **代价**：增加 `scenes_per_update` 会线性增加 rollout 时间，但能显著降低方差。
 

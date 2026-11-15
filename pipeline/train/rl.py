@@ -179,17 +179,42 @@ def _executable(trajectory: Any) -> bool:
     return True
 
 
-def _policy_distribution(out: Mapping[str, Tensor]) -> TruncatedNormal:
+def _policy_scale(out: Mapping[str, Tensor], std_min: float = 0.0) -> Tensor:
+    """Map the learned log-std to a scale with an optional floor.
+
+    BC/DAgger NLL legitimately drives log-std down for near-deterministic
+    expert actions.  RL needs a separate exploration floor, otherwise the
+    PPO policy becomes deterministic before it has tried alternatives.
+    """
+    base = out["action_logstd"].clamp(-5.0, 0.0).exp()
+    floor = float(std_min)
+    if floor <= 0.0:
+        return base
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"std_min must be in (0, 1], got {std_min!r}")
+    # Monotone map [0, 1] -> [std_min, 1].  The gradient is non-zero at the
+    # old clamp floor, so the entropy term can still move log-std upward.
+    return torch.as_tensor(floor, dtype=base.dtype, device=base.device) + (1.0 - floor) * base
+
+
+def _policy_distribution(
+    out: Mapping[str, Tensor],
+    std_min: float = 0.0,
+) -> TruncatedNormal:
     return TruncatedNormal(
         out["action_mu"],
-        out["action_logstd"].clamp(-5.0, 0.0).exp(),
+        _policy_scale(out, std_min),
         low=SUPPORT_LOW,
         high=SUPPORT_HIGH,
     )
 
 
-def _policy_log_prob(out: Mapping[str, Tensor], sampled_norm: Tensor) -> Tensor:
-    return _policy_distribution(out).log_prob(sampled_norm).sum(-1)
+def _policy_log_prob(
+    out: Mapping[str, Tensor],
+    sampled_norm: Tensor,
+    std_min: float = 0.0,
+) -> Tensor:
+    return _policy_distribution(out, std_min).log_prob(sampled_norm).sum(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +477,7 @@ def _worker_rollout(task: Mapping[str, Any]) -> Dict[str, Any]:
         max_steps=int(task["max_steps"]),
         max_decisions=int(task["max_decisions"]),
         reward_config=task["reward_config"],
+        std_min=float(task.get("std_min", 0.0)),
     )
 
 
@@ -547,6 +573,7 @@ def run_rollout_episode(
     max_steps: int = 600,
     max_decisions: int = DEFAULT_MAX_DECISIONS,
     reward_config: RewardConfig = RewardConfig(),
+    std_min: float = 0.0,
 ) -> Dict[str, Any]:
     """Run one real-env on-policy episode and return transitions + summary.
 
@@ -605,7 +632,7 @@ def run_rollout_episode(
             window, nav, ego_hidden = runner.push(obs)
             with torch.no_grad():
                 out = model.forward_window(window, nav, ego_hidden)
-                dist = _policy_distribution(out)
+                dist = _policy_distribution(out, std_min)
                 sampled = dist.sample()
                 old_logp = dist.log_prob(sampled).sum(-1)[0]
 
@@ -859,6 +886,8 @@ def ppo_update(
     kl_stop: float = 0.02,
     clip_frac_stop: float = 0.3,
     logprob_audit_size: int = 32,
+    std_min: float = 0.0,
+    entropy_coef: float = 0.0,
 ) -> Dict[str, Any]:
     """Clipped PPO update on pre-flattened valid transitions."""
     samples = list(samples)
@@ -866,6 +895,10 @@ def ppo_update(
         raise ValueError("ppo_update: no valid samples")
     if int(epochs) < 1 or int(minibatch) < 1:
         raise ValueError("epochs and minibatch must be >= 1")
+    if not 0.0 <= float(std_min) <= 1.0:
+        raise ValueError(f"std_min must be in [0,1], got {std_min!r}")
+    if float(entropy_coef) < 0.0:
+        raise ValueError(f"entropy_coef must be >= 0, got {entropy_coef!r}")
 
     model.to(device)
     audit_count = min(len(samples), max(int(logprob_audit_size), 1))
@@ -878,7 +911,7 @@ def ppo_update(
     with torch.no_grad():
         windows, nav, ego, sampled, old_logp = _collate_batch(audit, device)
         out = model.forward_window(windows, nav, ego)
-        recomputed = _policy_log_prob(out, sampled)
+        recomputed = _policy_log_prob(out, sampled, std_min)
         audit_max_diff = float((recomputed - old_logp).abs().max().item())
     model.train()
     if audit_max_diff > LOGPROB_AUDIT_TOL:
@@ -900,6 +933,8 @@ def ppo_update(
             "grad_norm": 0.0,
             "ratio_mean": 0.0,
             "entropy_proxy": 0.0,
+            "raw_logstd": 0.0,
+            "entropy": 0.0,
             "batches": 0,
         }
         for start in range(0, len(samples), int(minibatch)):
@@ -907,7 +942,9 @@ def ppo_update(
             batch = [samples[i] for i in index]
             windows, nav, ego, sampled, old_logp = _collate_batch(batch, device)
             out = model.forward_window(windows, nav, ego)
-            log_prob = _policy_log_prob(out, sampled)
+            dist = _policy_distribution(out, std_min)
+            log_prob = dist.log_prob(sampled).sum(-1)
+            entropy = dist.entropy().mean()
             advantage = _advantages_tensor(batch, device)
 
             log_ratio = (log_prob - old_logp).clamp(-20.0, 20.0)
@@ -916,7 +953,7 @@ def ppo_update(
                 ratio * advantage,
                 torch.clamp(ratio, 1.0 - float(clip), 1.0 + float(clip)) * advantage,
             )
-            loss = -surrogate.mean()
+            loss = -surrogate.mean() - float(entropy_coef) * entropy
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite PPO loss at epoch {epoch}: {loss.item()}")
 
@@ -934,9 +971,9 @@ def ppo_update(
                 totals["clip_frac"] += float(clip_frac)
                 totals["grad_norm"] += float(grad_norm)
                 totals["ratio_mean"] += float(ratio.mean())
-                totals["entropy_proxy"] += float(
-                    out["action_logstd"].clamp(-5.0, 0.0).mean()
-                )
+                totals["entropy"] += float(entropy.detach())
+                totals["entropy_proxy"] += float(torch.log(dist.scale).mean())
+                totals["raw_logstd"] += float(out["action_logstd"].clamp(-5.0, 0.0).mean())
                 totals["batches"] += 1
 
         batches = max(int(totals["batches"]), 1)
@@ -947,6 +984,8 @@ def ppo_update(
             "grad_norm": totals["grad_norm"] / batches,
             "ratio_mean": totals["ratio_mean"] / batches,
             "entropy_proxy": totals["entropy_proxy"] / batches,
+            "raw_logstd": totals["raw_logstd"] / batches,
+            "entropy": totals["entropy"] / batches,
         }
         epoch_history.append(history)
         if history["approx_kl"] > float(kl_stop) or history["clip_frac"] > float(clip_frac_stop):
@@ -963,6 +1002,8 @@ def ppo_update(
         "grad_norm": last["grad_norm"],
         "ratio_mean": last["ratio_mean"],
         "entropy_proxy": last["entropy_proxy"],
+        "raw_logstd": last["raw_logstd"],
+        "entropy": last["entropy"],
         "logprob_audit_count": int(audit_count),
         "logprob_audit_max_abs_diff": audit_max_diff,
         "epochs": epoch_history,
@@ -1238,6 +1279,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-frac-stop", type=float, default=0.3)
     parser.add_argument("--adv-std-floor", type=float, default=1e-6)
     parser.add_argument("--logprob-audit-size", type=int, default=32)
+    parser.add_argument("--std-min", type=float, default=0.05)
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
 
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--device", default="cuda")
@@ -1306,6 +1349,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--max-decisions must be >= 1")
     if args.epochs < 1 or args.minibatch < 1:
         raise SystemExit("--epochs and --minibatch must be >= 1")
+    if not 0.0 < float(args.std_min) <= 1.0:
+        raise SystemExit("--std-min must be in (0, 1]")
+    if float(args.entropy_coef) < 0.0:
+        raise SystemExit("--entropy-coef must be >= 0")
     if args.eval_every < 1:
         raise SystemExit("--eval-every must be >= 1")
     if not Path(args.ckpt).is_file():
@@ -1338,6 +1385,8 @@ def _checkpoint_extra(
             "lr": float(args.lr),
             "tsb_lr": float(args.tsb_lr),
             "max_grad_norm": float(args.max_grad_norm),
+            "std_min": float(args.std_min),
+            "entropy_coef": float(args.entropy_coef),
             "split": {
                 "specs": str(args.specs),
                 "train_manifest": str(args.train_manifest),
@@ -1443,6 +1492,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "train": len(split.train),
             "holdout": len(split.holdout),
             "trainable": trainable,
+            "std_min": float(args.std_min),
+            "entropy_coef": float(args.entropy_coef),
             "reward_config": asdict(reward_config),
         }
     )
@@ -1510,6 +1561,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "max_steps": int(args.max_steps),
                             "max_decisions": int(args.max_decisions),
                             "reward_config": reward_config,
+                            "std_min": float(args.std_min),
                         }
                     )
 
@@ -1584,6 +1636,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     kl_stop=float(args.kl_stop),
                     clip_frac_stop=float(args.clip_frac_stop),
                     logprob_audit_size=int(args.logprob_audit_size),
+                    std_min=float(args.std_min),
+                    entropy_coef=float(args.entropy_coef),
                 )
                 update_record["ppo"] = ppo_stats
                 update_record["status"] = "updated"
