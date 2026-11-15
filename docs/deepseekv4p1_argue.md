@@ -177,6 +177,7 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 > 合同：`docs/arch_lock.md` §12.4（本文件不是合同，只记录现状、问题、猜想和待拍板问题）
 > 结论先行：**实现链路已跑通；holdout best 0.688 / final 0.680，但 0.688 是 best-of-10 的乐观值，且 holdout 的 medium/hard 全部被 r3 IL 训练见过（P0 exposure confound），不能外推到 test500 的 unseen medium/hard。owner 决定停止 RL 线；test500 未消费。**
 > 2026-11-14 清理：删除 calibration 200、legacy PPO/joint/selector、`dataset/rl_splits.py`；`pipeline/` 重组为 `common/`、`eval/`、`train/` 子包，`losses.py` 保持单文件。本文中的旧路径/calibration 内容如与代码冲突，以 `docs/arch_lock.md` 和当前代码为准。
+> 2026-11-16：r4b 重启（完整 `train_2000` + val500 selection + per-dim std floor），并已消费 test500；结果见 §11。上文的 "test500 未消费" 仅指 11-11 那次 run。
 
 ---
 
@@ -615,3 +616,74 @@ PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
 3. **组内终局同质化**：9/10 场景全成功或全失败，per-step LOO advantage 没有 terminal 对比，只能优化 comfort/progress；这与 reward 的 comfort 项叠加，进一步把策略推向“平滑但慢/超时”。
 
 再叠加 holdout 的 IL exposure confound（§4.11），当前 holdout 的 medium/hard 增益不能外推到 test500 的 unseen medium/hard。故停止 RL 线、保留 test500 是符合数据的决定。
+
+## 11. r4b：per-dim 探索 floor + 完整 train_2000（2026-11-16）
+
+### 11.1 配置
+
+- 初始化：exact DAgger r3 `runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt`。
+- 训练：完整 `train_2000`（2000 scenes）；selection/rollback：`val_500`（500 scenes）。val500 被 BC/DAgger selection 用过，存在初始化偏差。
+- 50 updates，8 scenes × 8 members/update，4 workers，每 5 updates 跑一次完整 val500（500 episodes，exact execution，`max_steps=600`）。
+- reward 权重不变；`std_min = [accel, steer, curvature, speed] = [0.005, 0, 0, 0.005]`，`entropy_coef = 0.01`；不加外部动作噪声。
+- 第一次尝试用 scalar `std_min=0.05`：update 1–4 success 0，off_road 67%→83%，invalid_action 9%→17%，直接停止。原因是横向 steer/curvature 的 i.i.d. 噪声把车推出道路；改为 per-dim floor 后重跑，即本次 r4b。
+
+run 目录：`runs/rl_group_r4_261115205223/`。
+
+### 11.2 val500 holdout 曲线
+
+baseline：strict 0.670 / collision 0.172 / off_road 0.122 / route 0.852。
+
+| update | strict | collision | off_road | timeout | route |
+|---:|---:|---:|---:|---:|---:|
+| 5 | 0.688 | 0.132 | 0.114 | 0.070 | 0.868 |
+| 10 | 0.698 | 0.134 | 0.098 | 0.072 | 0.873 |
+| 15 | 0.722 | 0.118 | 0.088 | 0.072 | 0.880 |
+| 20 | 0.734 | 0.122 | 0.072 | 0.074 | 0.879 |
+| 25 | 0.724 | 0.122 | 0.090 | 0.064 | 0.877 |
+| 30 | 0.742 | 0.104 | 0.088 | 0.066 | 0.885 |
+| 35 | 0.744 | 0.098 | 0.088 | 0.070 | 0.887 |
+| 40 | **0.746** | 0.102 | 0.080 | 0.072 | 0.886 |
+| 45 | 0.716 | 0.128 | 0.082 | 0.074 | 0.874 |
+| 50 | 0.730 | 0.100 | 0.090 | 0.080 | 0.883 |
+
+- best：**0.746 @ update 40**；final：0.730；10 次均值 0.724；后 5 次均值 0.736。
+- baseline→best：success +7.6pp，collision −7.0pp，off_road −4.2pp，route +3.5pp；代价是 timeout 从约 3.6%（残差）升到 7.2%。
+- 训练 rollout success 在 0.23–0.88 间波动，KL 0.008–0.016（< 0.02），clip_frac 0.09–0.19，grad_norm 12–20；没有训练崩坏。
+
+### 11.3 探索行为
+
+- raw logstd：−4.59（u1）→ −4.93（u50）；effective σ ≈ 0.0122（accel/speed，floor 0.005）和 0.0072（steer/curvature，无 floor）。
+- entropy proxy：−2.98 → −3.24；per-dim floor 始终生效，未再出现旧 run 的 66% 元素卡在 clamp −5 的完全坍缩。
+- 但 logstd 仍在缓慢下降，entropy_coef=0.01 只减缓、没有逆转趋势；横向探索仍依赖可学习 logstd 而非 floor。
+
+### 11.4 test500 one-shot
+
+promoted artifact：`best_holdout.pt`（update 40，已核对与 `policy_update_40.pt` 的 state_dict 完全一致）。exact execution，500 scenes，`max_steps=600`，strict checkpoint。
+
+| 指标 | test500 | val500 @ u40 | 差 |
+|---|---:|---:|---:|
+| strict success | **0.708** | 0.746 | −3.8pp |
+| collision | 0.130 | 0.102 | +2.8pp |
+| off_road | 0.070 | 0.080 | −1.0pp |
+| timeout | 0.094 | 0.072 | +2.2pp |
+| route completion | 0.862 | 0.886 | −2.4pp |
+
+按难度：
+
+| 难度 | n | strict | collision | off_road | timeout | route |
+|---|---:|---:|---:|---:|---:|---:|
+| easy | 192 | 0.927 | 0.026 | 0.010 | 0.036 | 0.965 |
+| medium | 162 | 0.716 | 0.062 | 0.154 | 0.068 | 0.884 |
+| hard | 146 | 0.411 | 0.342 | 0.055 | 0.199 | 0.704 |
+
+- 整体 0.708 的 95% Wilson CI 为 [0.667, 0.746]；gate 0.728 落在区间内，统计上不能断言真实水平一定低于 72.8%。
+- 但按预注册的 one-shot 点估计 gate：**0.708 < 0.728，未通过**。
+- val500 高估：best 高估 3.8pp，后 5 次均值（0.736）高估 2.8pp。两个来源叠加：① 从 10 次评测里取 max 的 winner's curse；② val500 被 BC/DAgger selection 用过。
+- 失败结构：hard collision 34.2% 和 timeout 19.9% 是主要瓶颈；medium off_road 15.4% 异常偏高（高于 hard 的 5.5%）；straight 场景 collision 16.8%，curve 只有 5.8%。
+
+### 11.5 结论与后续
+
+- r4b 证明 per-dim floor 能避免 scalar 0.05 的直接 off-road 崩坏，并把 val500 从 0.670 推到 0.746；但 one-shot test500 只有 0.708，gate 失败。
+- test500 已消费，按协议不再用于调参、选 checkpoint 或二次 gate。val500 也不再是干净的 promotion 证据。
+- 若继续 RL 线，必须先定义新的、未消费的评估协议（新场景或 owner 明确批准的新 split）；不能把本次 test500 结果当作调参信号。
+- 本次不调整 reward / 不做 GRPO 过滤 / 不继续 50 updates 之后的训练。后续工作应优先解释 medium off-road 和 hard collision 的结构性失败，再决定是否重开训练。

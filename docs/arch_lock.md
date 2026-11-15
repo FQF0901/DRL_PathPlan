@@ -4,7 +4,7 @@
 > 日期：2026-11-10
 > 范围：Real/Imagine Memory Bank、BankWindow、TemporalSpatialBlock、PolicyHead、OD/LD direct geometry decoder、Ego-conditioned latent WM、BC/DAgger 训练、real-env group-relative PPO、WM 独立训练、joint 6-step trajectory consistency；RL 合同已冻结，代码实现中。
 > 当前基线：exact DAgger r3，val500 success **66.4%** / collision **17.8%**（见 `docs/baseline_exact.md`）。旧 `docs/baseline_r3.md` 是 with safety fallback 的历史记录。
-> RL gate：**test500 success ≥72.8%（one-shot final gate）**；RL 训练用完整 `train_2000`（2000 scenes），`val_500` 做 selection/rollback（注意它被 BC/DAgger selection 用过，存在初始化偏差）；test500 只跑一次。只有一个 hard gate，不设 gate 2/3。
+> RL gate：**test500 success ≥72.8%（one-shot final gate）**；RL 训练用完整 `train_2000`（2000 scenes），`val_500` 做 selection/rollback（注意它被 BC/DAgger selection 用过，存在初始化偏差）；test500 只跑一次。只有一个 hard gate，不设 gate 2/3。2026-11-16 的 r4b 已消费 test500：strict 0.708，**未通过**（见 §13）。
 > 明确不做：不做 failure-window/mid-episode reset；不做独立 cost/Lagrangian（所有惩罚进一个规则 reward model）；WM 不参与 RL；§12 的 RL 合同已冻结，实现和 debug 不改方向。
 > 原则：已经走通并接受的现状写成架构与设计细节；已定的 RL/WM/joint 方案集中在 §12；未实现的代码路径明确标注 planned，不冒充现状。
 
@@ -1123,7 +1123,7 @@ pipeline/
     wm.py                  # one-step WM；3/6-step planned
 ```
 
-当前实现状态：one-step WM 已实现；`pipeline/eval/wm_probe.py` 当前跑 1..H；`pipeline/train/wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split loader 已实现；3/6-step WM、joint trainer 未实现（joint planned）。RL baseline run 已完成 50 updates（holdout best 0.688 / final 0.680，provisional reward weights；holdout 有 IL exposure confound），owner 已停止 RL 线；test500 未消费。详细结果/失败分析见 `docs/deepseekv4p1_argue.md`。
+当前实现状态：one-step WM 已实现；`pipeline/eval/wm_probe.py` 当前跑 1..H；`pipeline/train/wm.py` 仍包含 target-only free-slot 新实体监督（新 contract 要求删除）。group-relative PPO、reward model、RL split loader 已实现；3/6-step WM、joint trainer 未实现（joint planned）。2026-11-16 的 r4b run（完整 `train_2000`、val500 selection、per-dim `std_min` + entropy）完成 50 updates：holdout best **0.746 @ update 40**，final 0.730；one-shot test500 strict **0.708（354/500）< 0.728**，gate 未通过。test500 已消费，不可再用于调参或二次 gate。详细结果/失败分析见 `docs/deepseekv4p1_argue.md` §11。
 
 职责：
 
