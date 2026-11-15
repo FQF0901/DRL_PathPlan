@@ -41,7 +41,6 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from pipeline.dataio.splits import RLSpecSplit, load_rl_spec_splits
 from env.action.action_space import ActionBounds, DynamicsLimits, action_to_trajectory
 from env.action.config import load_action_contract
 from env.metadrive_env import build_env
@@ -1257,8 +1256,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", default="config/train_rl.yaml")
     parser.add_argument("--specs", default=None)
-    parser.add_argument("--train-manifest", default=None)
-    parser.add_argument("--holdout-manifest", default=None)
+    parser.add_argument("--holdout-specs", default=None)
     parser.add_argument("--ckpt", default=None)
     parser.add_argument("--out", default=None)
 
@@ -1285,6 +1283,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
+
+    parser.add_argument("--easy-weight", type=float, default=1.0)
+    parser.add_argument("--medium-weight", type=float, default=1.5)
+    parser.add_argument("--hard-weight", type=float, default=2.0)
 
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--eval-limit", type=int, default=100)
@@ -1327,8 +1329,7 @@ def _sampling_seed(seed: int, update: int, scene_index: int, member: int) -> int
 def _validate_args(args: argparse.Namespace) -> None:
     required = {
         "specs": args.specs,
-        "train_manifest": args.train_manifest,
-        "holdout_manifest": args.holdout_manifest,
+        "holdout_specs": args.holdout_specs,
         "ckpt": args.ckpt,
         "out": args.out,
     }
@@ -1353,6 +1354,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--std-min must be in (0, 1]")
     if float(args.entropy_coef) < 0.0:
         raise SystemExit("--entropy-coef must be >= 0")
+    for name in ("easy_weight", "medium_weight", "hard_weight"):
+        if not np.isfinite(float(getattr(args, name))) or float(getattr(args, name)) <= 0.0:
+            raise SystemExit(f"--{name.replace('_', '-')} must be finite and > 0")
     if args.eval_every < 1:
         raise SystemExit("--eval-every must be >= 1")
     if not Path(args.ckpt).is_file():
@@ -1389,8 +1393,12 @@ def _checkpoint_extra(
             "entropy_coef": float(args.entropy_coef),
             "split": {
                 "specs": str(args.specs),
-                "train_manifest": str(args.train_manifest),
-                "holdout_manifest": str(args.holdout_manifest),
+                "holdout_specs": str(args.holdout_specs),
+                "difficulty_weights": {
+                    "easy": float(args.easy_weight),
+                    "medium": float(args.medium_weight),
+                    "hard": float(args.hard_weight),
+                },
             },
             "optimizer": {
                 "name": "AdamW",
@@ -1437,23 +1445,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     official_before = snapshot_official_python()
 
-    specs = load_specs(args.specs)
-    if not specs:
-        raise SystemExit(f"no specs in {args.specs}")
-    split: RLSpecSplit = load_rl_spec_splits(
-        specs,
-        train_manifest=args.train_manifest,
-        holdout_manifest=args.holdout_manifest,
-        specs_path=args.specs,
-    )
-    train_seeds = {int(spec.seed) for spec in split.train}
-    holdout_seeds = {int(spec.seed) for spec in split.holdout}
+    train_specs = load_specs(args.specs)
+    holdout_specs = load_specs(args.holdout_specs)
+    if not train_specs or not holdout_specs:
+        raise SystemExit("train/holdout specs must both be non-empty")
+    train_seeds = {int(spec.seed) for spec in train_specs}
+    holdout_seeds = {int(spec.seed) for spec in holdout_specs}
     if train_seeds & holdout_seeds:
-        raise SystemExit("RL train/holdout seed overlap")
-    if len(split.train) < int(args.scenes_per_update):
+        raise SystemExit("RL train/holdout scene seed overlap")
+    if len(train_specs) < int(args.scenes_per_update):
         raise SystemExit(
-            f"only {len(split.train)} train scenes for scenes_per_update={args.scenes_per_update}"
+            f"only {len(train_specs)} train scenes for scenes_per_update={args.scenes_per_update}"
         )
+    difficulty_weights = {
+        "easy": float(args.easy_weight),
+        "medium": float(args.medium_weight),
+        "hard": float(args.hard_weight),
+    }
 
     model = load_model(args.ckpt, args.device, strict=True)
     optimizer, trainable = build_optimizer(
@@ -1469,9 +1477,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "args": vars(args),
         "reward_config": asdict(reward_config),
         "split": {
-            "train": len(split.train),
-            "holdout": len(split.holdout),
-            "difficulty_weights": dict(split.difficulty_weights),
+            "train": len(train_specs),
+            "holdout": len(holdout_specs),
+            "difficulty_weights": difficulty_weights,
             "train_seed_range": [min(train_seeds), max(train_seeds)],
             "holdout_seed_range": [min(holdout_seeds), max(holdout_seeds)],
         },
@@ -1489,8 +1497,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         {
             "event": "start",
             "out": str(out_dir),
-            "train": len(split.train),
-            "holdout": len(split.holdout),
+            "train": len(train_specs),
+            "holdout": len(holdout_specs),
             "trainable": trainable,
             "std_min": float(args.std_min),
             "entropy_coef": float(args.entropy_coef),
@@ -1506,7 +1514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # the same holdout subset before any update; never promote a checkpoint
     # that is worse than r3.
     baseline_eval = evaluate_holdout(
-        model, split.holdout,
+        model, holdout_specs,
         device=str(args.device), max_steps=int(args.eval_max_steps),
         limit=int(args.eval_limit),
     )
@@ -1540,9 +1548,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         for update in range(int(args.updates)):
             scenes = sample_scenes(
-                split.train,
+                train_specs,
                 int(args.scenes_per_update),
-                weights=split.difficulty_weights,
+                weights=difficulty_weights,
                 rng=rng,
             )
             scene_seeds = [int(spec.seed) for spec in scenes]
@@ -1671,7 +1679,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if int(update + 1) % int(args.eval_every) == 0 and int(args.eval_limit) > 0:
                 eval_metrics = evaluate_holdout(
                     model,
-                    split.holdout,
+                    holdout_specs,
                     device=str(args.device),
                     max_steps=int(args.eval_max_steps),
                     limit=int(args.eval_limit),

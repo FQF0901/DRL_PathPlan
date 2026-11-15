@@ -4,7 +4,7 @@
 > 日期：2026-11-10
 > 范围：Real/Imagine Memory Bank、BankWindow、TemporalSpatialBlock、PolicyHead、OD/LD direct geometry decoder、Ego-conditioned latent WM、BC/DAgger 训练、real-env group-relative PPO、WM 独立训练、joint 6-step trajectory consistency；RL 合同已冻结，代码实现中。
 > 当前基线：exact DAgger r3，val500 success **66.4%** / collision **17.8%**（见 `docs/baseline_exact.md`）。旧 `docs/baseline_r3.md` 是 with safety fallback 的历史记录。
-> RL gate：**test500 success ≥72.8%（one-shot final gate）**；val500 只做 diagnostic；train_2000 固定 500-scene holdout 做 selection/rollback。只有一个 hard gate，不设 gate 2/3。
+> RL gate：**test500 success ≥72.8%（one-shot final gate）**；RL 训练用完整 `train_2000`（2000 scenes），`val_500` 做 selection/rollback（注意它被 BC/DAgger selection 用过，存在初始化偏差）；test500 只跑一次。只有一个 hard gate，不设 gate 2/3。
 > 明确不做：不做 failure-window/mid-episode reset；不做独立 cost/Lagrangian（所有惩罚进一个规则 reward model）；WM 不参与 RL；§12 的 RL 合同已冻结，实现和 debug 不改方向。
 > 原则：已经走通并接受的现状写成架构与设计细节；已定的 RL/WM/joint 方案集中在 §12；未实现的代码路径明确标注 planned，不冒充现状。
 
@@ -50,7 +50,7 @@
 12. 当前 scope 是当前可见目标、固定 top-16、短时 rollout；不考虑短时遮挡，只保留 `valid`。
 13. Rollout 是 **6 个 policy / 6 个 action / 6 个 imagined transition**；t6 是 terminal state。
 14. 所有 canonical 路径的 student/lift action（BC/DAgger lift 行、eval、PPO）exact tracking：`requested_action == executed_action`；不做 `v_next` projection、safe-brake、clip 或额外平滑。DAgger expert replay 行按设计执行 expert action。非有限/不可执行动作直接终止或报错。LQR 是后续阶段，才允许 requested/executed 分离。
-15. RL 只用 real env + group-relative PPO；WM 不参与 RL。所有奖励/惩罚进一个规则 reward model，不单独维护 cost；per-step active-set group advantage；train 1500 / holdout 500 / test500 one-shot gate；唯一 hard gate 是 test500 success ≥ **72.8%**。WM 独立拟合 env；joint 阶段用 6-step trajectory consistency + KL 让 policy/WM 自洽。
+15. RL 只用 real env + group-relative PPO；WM 不参与 RL。所有奖励/惩罚进一个规则 reward model，不单独维护 cost；per-step active-set group advantage；train 2000 / val500 selection / test500 one-shot gate；唯一 hard gate 是 test500 success ≥ **72.8%**。WM 独立拟合 env；joint 阶段用 6-step trajectory consistency + KL 让 policy/WM 自洽。
 
 ### 0.1 当前基线（BC/DAgger）
 
@@ -59,7 +59,7 @@
 - canonical policy：raw Bank → TSB → ego/nav planner；不使用 projected history，不含 value/risk head。
 - RL 阶段完全不使用 WM；WM 独立训练并拟合 env；joint 阶段才通过显式 `imagine` 接口把 WM 的 6-step 轨迹与 policy 对齐。
 - BC/DAgger closed-loop selection（历史 baseline）：每 5 epoch 跑 100-scene subset，最终跑完整 val500；score 为 success-first lexicographic。
-- RL data split：`train_2000` seeds 1000..2499（1500 train）+ seeds 2500..2999（500 holdout）；val500 只做 diagnostic；test500 只做 one-shot final gate。
+- RL data：完整 `train_2000`（2000 scenes）训练；`val_500` 做 selection/rollback；test500 只做 one-shot final gate。val500 被 BC/DAgger selection 用过，因此不是完全 clean 的 RL holdout。
 - `test500` 不参与调参；raw `history_mode=1` 不回退。
 
 ---
@@ -738,11 +738,11 @@ RealBank.snapshot()
 ### 11.2 RL 前必须完成
 
 1. **exact DAgger r3 baseline**：`runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt`，val500 success 0.664。
-2. **唯一 hard gate**：real-env RL 后 **test500 success ≥72.8%**（one-shot final gate）。val500 只做 diagnostic；不设 gate 2/3，不把 collision/off-road 单独设成 pass/fail。
+2. **唯一 hard gate**：real-env RL 后 **test500 success ≥72.8%**（one-shot final gate）。val500 做 RL selection/rollback；不设 gate 2/3，不把 collision/off-road 单独设成 pass/fail。
 3. **real-env group-relative PPO trainer**：多进程 rollout、同 scene seed 的 G 条 group、per-step active-set advantage、PPO clip、规则 reward model、train-holdout closed-loop eval；不复用旧 PPO canary 的 1-update/2-episode 默认。
 4. **MetaDrive 同 seed 确定性**：已排模验证：同 seed/同 action 跨进程 ego/traffic max diff=0；新 trainer 必须显式 `reset(seed=scene_seed)`，group 内 policy sampling seed 独立。
 5. **action distribution 合同检查**：TruncatedNormal 的采样与 log_prob 已做 Monte Carlo 检查，边界 atom=0、CDF KS 在采样噪声内；保留回归测试，不作为 blocker。
-6. **data/eval 冻结**：RL train 1500（seeds 1000..2499）、holdout 500（seeds 2500..2999）、val500 diagnostic、test500 one-shot final；test500 不参与调参。
+6. **data/eval 冻结**：RL train 完整 `train_2000`（2000 scenes）、val500 selection/rollback、test500 one-shot final；test500 不参与调参。
 7. **reward 权重**：provisional；不做 calibration split，不做权重网格扫参；权重变更必须 owner 批准并记录 commit；`adapt_coeff` 第一版固定 1.0，只在 collision/off-road 漂移时启用。
 
 ### 11.3 不在本阶段
@@ -769,7 +769,7 @@ RealBank.snapshot()
 - WM 始终用真实下一帧 observation 的 target encoder 输出；target 不进入 Bank/policy。
 - action condition 训练优先用 `executed_action`，缺失时用实测 `action`；rollout 用 `policy_action`。
 - one-step 先于 multi-step；6-step plan 不等于执行 6 步；horizon 只允许 1/3/6。
-- RL train 1500 / holdout 500 / val500 diagnostic / test500 one-shot final；raw `history_mode=1` 不回退。
+- RL train 2000 / val500 selection / test500 one-shot final；raw `history_mode=1` 不回退。
 - detach 边界显式，见 §12.7。
 
 ### 12.2 阶段总览
@@ -809,9 +809,8 @@ L_policy = NLL(action_mu, action_logstd; a_expert)
 
 - 从 exact DAgger r3 `best_closed_loop.pt` 初始化。
 - RL scene split（scene-level，按 seed）：
-  - train: `train_2000` seeds 1000..2499（1500 scenes）
-  - holdout: `train_2000` seeds 2500..2999（500 scenes）
-  - val500: biased diagnostic only，不参与 selection/promotion
+  - train: 完整 `train_2000`（2000 scenes）
+  - selection/rollback: `val_500`（500 scenes；被 BC/DAgger selection 用过，存在初始化偏差）
   - test500: final gate，只跑一次
 - 训练 scene 按 difficulty 分层；hard/medium 过采样。不做 failure-window / mid-episode reset；每个 rollout 从 scene seed 的 t=0 开始。
 - 当前没有专门的 r3-fail+hard+random 数据集；如果以后要 mix，必须新建 scene-level split，不能复用 val500/test500。
@@ -822,7 +821,7 @@ L_policy = NLL(action_mu, action_logstd; a_expert)
 - `T_i` 是该 episode 的 **policy decision 数**，最多 120；`gamma` 按 0.5s policy decision 折扣。
 - `max_steps=600` 是 env step cap（60s），不是固定 episode 长度；success/collision/off-road 提前终止。
 - exact execution；非有限/不可执行动作终止 episode，不替换。
-- 训练/选择用 holdout 500；val500 只做诊断；test500 只做最终 gate。
+- 训练用 `train_2000` 全量；选择/rollback 用 `val_500`；test500 只做最终 gate。
 
 **Reward model（规则函数，无 cost 模块）**
 
@@ -915,8 +914,8 @@ policy loss = -mean(min(ratio * A_t, clip(ratio, 0.8, 1.2) * A_t)) - entropy_coe
 test500 success >= 72.8%   # one-shot final gate
 ```
 
-- val500 只做 biased diagnostic，不参与 selection/promotion。
-- train holdout 500 做 early stop/rollback；RL promotion 不使用 val500 selector。
+- val500 做选择/rollback；它被 BC/DAgger selection 用过，因此不是完全 clean 的 RL holdout。
+- 不再维护单独的 train-holdout 500；RL 训练使用完整 `train_2000`。
 - 不设 gate 2/3；collision/off-road 只记录；如果 72.8% 伴随明显恶化，人工 kill switch，不算自动 gate。
 - test500 只跑一次；多次评估会污染。
 - **promoted artifact 是 RL checkpoint**；joint 阶段是 research/non-promotable，不消耗 test500。若 joint 要 promotion，必须另立一次性 test500 协议。
@@ -1093,10 +1092,8 @@ env/
     action_space.py       # normalize/denormalize + PSTL + 静态诊断；无 canonical bounds
 
 data/splits/
-  val_500.json           # gate seal for BC/WM/eval
+  val_500.json           # RL selection + BC/WM/eval gate seal
   test_500.json          # final gate seal
-  rl_train_1500.json     # RL train subset: seeds 1000..2499
-  rl_holdout_500.json    # RL holdout: seeds 2500..2999
 
 pipeline/
   README.md               # active/legacy layout and commands
@@ -1203,4 +1200,4 @@ model.py
 
 ### 14.1 Scene-level split
 
-Train/validation/test leakage is forbidden by **scene seed**, not by episode id. The same scene can be re-collected as multiple BC/DAgger episodes; splitting by episode can put copies of one scene on both sides. `pipeline/dataio/splits.py` is the single implementation of this rule. RL uses `train_2000` seeds 1000..2499 (1500 train) and seeds 2500..2999 (500 holdout); val500 is diagnostic only; test500 is one-shot final gate. RL/WM/joint loaders must assert no holdout overlap with training data.
+Train/validation/test leakage is forbidden by **scene seed**, not by episode id. The same scene can be re-collected as multiple BC/DAgger episodes; splitting by episode can put copies of one scene on both sides. `pipeline/dataio/splits.py` is the single implementation of this rule. RL trains on the full `train_2000` and selects/rolls back on `val_500`; test500 is the one-shot final gate. RL/WM/joint loaders must assert no scene-seed overlap with their validation data.

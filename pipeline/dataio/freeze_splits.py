@@ -27,10 +27,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC_ROOT = ROOT / "data/specs"
 SPLIT_ROOT = ROOT / "data/splits"
 
-RL_TRAIN_COUNT = 1500
-RL_HOLDOUT_COUNT = 500
-RL_DIFFICULTY_WEIGHTS = {"easy": 1.0, "medium": 1.5, "hard": 2.0}
-
 
 def _with_split(specs: Sequence[Any], split: str) -> List[Any]:
     return [dataclasses.replace(spec, split=split) for spec in specs]
@@ -97,11 +93,8 @@ def _manifest_payload(
 
 
 def build_manifests(specs_by_name: Mapping[str, Sequence[Any]]) -> Dict[str, Dict[str, Any]]:
-    """Return the gate seals + RL views; does not write files."""
-    train_source = SPEC_ROOT / "source/train_10000.json"
+    """Return the val/test gate seals; does not write files."""
     val_source = SPEC_ROOT / "source/val_1000.json"
-    train_spec_path = SPEC_ROOT / "train_2000.json"
-    train_specs = specs_by_name["train_2000"]
     manifests: Dict[str, Dict[str, Any]] = {}
     for name, source, schema in (
         ("val_500", val_source, "pnp_eval_split_v2"),
@@ -115,25 +108,6 @@ def build_manifests(specs_by_name: Mapping[str, Sequence[Any]]) -> Dict[str, Dic
             source=source,
             schema=schema,
         )
-    manifests["rl_train_1500"] = _manifest_payload(
-        name="rl_train_1500",
-        split="train",
-        specs=train_specs[:RL_TRAIN_COUNT],
-        spec_path=train_spec_path,
-        source=train_spec_path,
-        schema="pnp_data_split_v1",
-        role="rl_train",
-        difficulty_weights=RL_DIFFICULTY_WEIGHTS,
-    )
-    manifests["rl_holdout_500"] = _manifest_payload(
-        name="rl_holdout_500",
-        split="train",
-        specs=train_specs[RL_TRAIN_COUNT : RL_TRAIN_COUNT + RL_HOLDOUT_COUNT],
-        spec_path=train_spec_path,
-        source=train_spec_path,
-        schema="pnp_data_split_v1",
-        role="rl_holdout",
-    )
     return manifests
 
 

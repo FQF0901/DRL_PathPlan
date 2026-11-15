@@ -198,8 +198,7 @@ invalid row 现在保留 `executed_action = requested_action` 作为审计值，
 |---|---|---|
 | `pipeline/train/rl_reward.py` | 规则 reward：dense + terminal、事件优先级、wrong_route/stuck one-shot、5-substep 事件聚合 | 已实现，单测通过 |
 | `pipeline/dataio/splits.py` | RL split manifest 加载、role/sha/无重叠校验（与通用 split 工具合并） | 已实现 |
-| `data/splits/rl_train_1500.json` | seeds 1000..2499 | 已实现 |
-| `data/splits/rl_holdout_500.json` | seeds 2500..2999 | 已实现 |
+| RL split | 历史 run 使用 1500/500；新设计改为完整 `train_2000` + `val_500` selection | 历史记录 |
 | `pipeline/train/rl.py` | spawn 多进程 rollout、exact 0.5s segment、active-set LOO、PPO、holdout selection | 已实现 |
 | `config/train_rl.yaml` | 50 updates / 8 scenes × 8 group / 4 workers / eval 500 every 5 | 已实现 |
 | `pipeline/eval/closed_loop.py` / `pipeline/eval/metrics.py` | 新增 `strict_success`；eval 显式 `reset(seed=spec.seed)` | 已实现 |

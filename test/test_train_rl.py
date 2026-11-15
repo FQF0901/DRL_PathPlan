@@ -328,26 +328,31 @@ def test_config_and_rl_split_loader():
     assert args.device == "cuda"
     assert args.std_min == pytest.approx(0.05)
     assert args.entropy_coef == pytest.approx(0.01)
+    assert args.holdout_specs.endswith("data/specs/val_500.json")
+    assert args.easy_weight == pytest.approx(1.0)
+    assert args.medium_weight == pytest.approx(1.5)
+    assert args.hard_weight == pytest.approx(2.0)
 
     from env.scenario.spec import load_specs
-    from pipeline.dataio.splits import load_rl_spec_splits
 
-    specs = load_specs(args.specs)
-    split = load_rl_spec_splits(
-        specs,
-        train_manifest=args.train_manifest,
-        holdout_manifest=args.holdout_manifest,
-    )
-    assert len(split.train) == 1500
-    assert len(split.holdout) == 500
-    train_seeds = {int(spec.seed) for spec in split.train}
-    holdout_seeds = {int(spec.seed) for spec in split.holdout}
+    train = load_specs(args.specs)
+    holdout = load_specs(args.holdout_specs)
+    assert len(train) == 2000
+    assert len(holdout) == 500
+    train_seeds = {int(spec.seed) for spec in train}
+    holdout_seeds = {int(spec.seed) for spec in holdout}
     assert train_seeds.isdisjoint(holdout_seeds)
-    assert train_seeds | holdout_seeds == {int(spec.seed) for spec in specs}
 
     rng = np.random.default_rng(0)
     scenes = rl.sample_scenes(
-        split.train, 8, weights=split.difficulty_weights, rng=rng
+        train,
+        8,
+        weights={
+            "easy": args.easy_weight,
+            "medium": args.medium_weight,
+            "hard": args.hard_weight,
+        },
+        rng=rng,
     )
     assert len(scenes) == 8
     assert len({int(spec.seed) for spec in scenes}) == 8
