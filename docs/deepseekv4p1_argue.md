@@ -597,7 +597,7 @@ PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
 - rollout mean logstd **-4.818**（normalized std≈0.0081）；训练 `entropy_proxy` -4.699 → -4.889（p=1.7e-14）。
 - **66.3% 的 logstd 元素卡在 clamp 下限 -5.0**；四维饱和比例 59.5% / 63.4% / 70.4% / 72.0%。
 - t=0 时 8 个 member 的 `action_mu` 完全相同（pairwise L2=0）；初始 sampled L2 仅 0.016–0.070，后续分叉是状态混沌，不是主动探索。
-- 物理采样 std 约 accel 0.06 m/s²、steer 0.023、curvature 0.013、speed 0.12 m/s。
+- 物理采样 std 约 dx 0.060 m、dy 0.023 m、dpsi 0.013 rad、v_next 0.12 m/s（动作维度是 `(dx, dy, dpsi, v_next)`，不是 accel/steer/curvature/speed）。
 
 ### 10.5 组内 advantage 区分度
 
@@ -624,8 +624,8 @@ PYTHONPATH=. LD_LIBRARY_PATH=.venv/gl/usr/lib/x86_64-linux-gnu \
 - 初始化：exact DAgger r3 `runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt`。
 - 训练：完整 `train_2000`（2000 scenes）；selection/rollback：`val_500`（500 scenes）。val500 被 BC/DAgger selection 用过，存在初始化偏差。
 - 50 updates，8 scenes × 8 members/update，4 workers，每 5 updates 跑一次完整 val500（500 episodes，exact execution，`max_steps=600`）。
-- reward 权重不变；`std_min = [accel, steer, curvature, speed] = [0.005, 0, 0, 0.005]`，`entropy_coef = 0.01`；不加外部动作噪声。
-- 第一次尝试用 scalar `std_min=0.05`：update 1–4 success 0，off_road 67%→83%，invalid_action 9%→17%，直接停止。原因是横向 steer/curvature 的 i.i.d. 噪声把车推出道路；改为 per-dim floor 后重跑，即本次 r4b。
+- reward 权重不变；`std_min = [dx, dy, dpsi, v_next] = [0.005, 0, 0, 0.005]`，`entropy_coef = 0.01`；不加外部动作噪声。
+- 第一次尝试用 scalar `std_min=0.05`：update 1–4 success 0，off_road 67%→83%，invalid_action 9%→17%，直接停止。根因不是单纯横向：scalar 0.05 同时放大 `dx/dy/dpsi/v_next`；`dx` 与 `v_next` 的独立噪声破坏 0.5s time law（`dx ≈ v·dt`），触发 `invalid_action`，`dy/dpsi` 噪声则导致 off-road。后续的 floor sweep 显示 0.05 在 u1 批次是 0% success、34% invalid；0.01/0.001 才是第一个安全点。
 
 run 目录：`runs/rl_group_r4_261115205223/`。
 
@@ -652,9 +652,11 @@ baseline：strict 0.670 / collision 0.172 / off_road 0.122 / route 0.852。
 
 ### 11.3 探索行为
 
-- raw logstd：−4.59（u1）→ −4.93（u50）；effective σ ≈ 0.0122（accel/speed，floor 0.005）和 0.0072（steer/curvature，无 floor）。
-- entropy proxy：−2.98 → −3.24；per-dim floor 始终生效，未再出现旧 run 的 66% 元素卡在 clamp −5 的完全坍缩。
-- 但 logstd 仍在缓慢下降，entropy_coef=0.01 只减缓、没有逆转趋势；横向探索仍依赖可学习 logstd 而非 floor。
+- raw logstd：−4.59（u1）→ −4.93（u50）；有效 σ（归一化动作）≈ 0.0122/0.0072/0.0072/0.0122，对应 `(dx, dy, dpsi, v_next)`；物理量约 0.092 m / 0.022 m / 0.012 rad / 0.183 m/s。
+- entropy proxy：−4.396（u1）→ −4.659（u50）；analytic entropy：−3.04 → −3.23（更负 = 更窄）。
+- clamp 比例（固定 hard scene 506）：BC 49% → u10 63% → u30 74% → u50 81%。`logstd` head 的 bias 只从 -1.142 变到 -1.158，权重变化也很小；raw logstd 均值的下降主要来自访问状态分布，而不是 head 参数坍塌。
+- `entropy_coef=0.01` 无法逆转 clamp：`clamp(-5,0)` 在 -5 以下梯度为零，entropy 项拉不动；floor 只提供下限。`dy/dpsi` 没有 floor，仍依赖已 clamp 的 logstd。
+- 行为诊断：6 个失败场景 × 8 members 中只有 2 个组内终局有区分度（568: 4 success/4 collision；610: 7 success/1 collision）；530/500/722/518 都是 0/8 或 8/8 的同质失败。terminal advantage 常常为 0。
 
 ### 11.4 test500 one-shot
 

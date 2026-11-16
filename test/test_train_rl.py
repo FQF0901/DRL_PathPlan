@@ -6,6 +6,7 @@ into the one-update spawned-worker smoke test.
 
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import subprocess
@@ -327,6 +328,10 @@ def test_config_and_rl_split_loader():
     assert args.workers == 4
     assert args.device == "cuda"
     assert args.std_min == pytest.approx([0.005, 0.0, 0.0, 0.005])
+    assert args.std_min_start == pytest.approx([0.01, 0.001, 0.001, 0.01])
+    assert args.std_min_end == pytest.approx([0.005, 0.0, 0.0, 0.005])
+    assert args.std_min_hold_updates == 10
+    assert args.std_min_anneal_updates == 10
     assert args.entropy_coef == pytest.approx(0.01)
     assert args.holdout_specs.endswith("data/specs/val_500.json")
     assert args.easy_weight == pytest.approx(1.0)
@@ -429,6 +434,104 @@ def test_policy_std_floor_is_enforced():
     )
     assert float(dist.scale.min()) >= 0.0
     assert float(dist.scale[:, 0].min()) >= 0.005
+
+
+def _schedule_args(**overrides):
+    values = dict(
+        std_min=[0.005, 0.0, 0.0, 0.005],
+        std_min_start=[0.05, 0.005, 0.005, 0.05],
+        std_min_end=[0.005, 0.0, 0.0, 0.005],
+        std_min_hold_updates=10,
+        std_min_anneal_updates=10,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_std_min_schedule_holds_then_anneals():
+    args = _schedule_args()
+    assert rl._resolve_std_min(args, 0) == pytest.approx([0.05, 0.005, 0.005, 0.05])
+    assert rl._resolve_std_min(args, 1) == pytest.approx([0.05, 0.005, 0.005, 0.05])
+    assert rl._resolve_std_min(args, 10) == pytest.approx([0.05, 0.005, 0.005, 0.05])
+    assert rl._resolve_std_min(args, 11) == pytest.approx(
+        [0.0455, 0.0045, 0.0045, 0.0455]
+    )
+    assert rl._resolve_std_min(args, 15) == pytest.approx(
+        [0.0275, 0.0025, 0.0025, 0.0275]
+    )
+    assert rl._resolve_std_min(args, 20) == pytest.approx([0.005, 0.0, 0.0, 0.005])
+    assert rl._resolve_std_min(args, 50) == pytest.approx([0.005, 0.0, 0.0, 0.005])
+
+
+def test_std_min_schedule_validation():
+    with pytest.raises(ValueError, match="same length"):
+        rl._resolve_std_min(_schedule_args(std_min_end=[0.005, 0.0, 0.0]), 1)
+    with pytest.raises(ValueError, match="set together"):
+        rl._resolve_std_min(_schedule_args(std_min_end=None), 1)
+
+    args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    rl._validate_args(args)
+    args.std_min_end = None
+    with pytest.raises(SystemExit):
+        rl._validate_args(args)
+    args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    args.std_min_start = [0.05, 0.005, 0.005]
+    with pytest.raises(SystemExit):
+        rl._validate_args(args)
+    args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    args.std_min_start = [0.05, 0.005]
+    args.std_min_end = [0.005, 0.0]
+    with pytest.raises(SystemExit):
+        rl._validate_args(args)
+    args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    args.std_min_hold_updates = -1
+    with pytest.raises(SystemExit):
+        rl._validate_args(args)
+
+
+def test_policy_std_floor_accepts_length_one_list():
+    out = {
+        "action_mu": torch.full((2, 4), 0.5),
+        "action_logstd": torch.full((2, 4), -5.0),
+    }
+    dist = rl._policy_distribution(out, std_min=[0.02])
+    expected = 0.02 + 0.98 * math.exp(-5.0)
+    assert torch.allclose(
+        dist.scale, torch.full_like(dist.scale, expected), atol=1e-7
+    )
+
+
+def test_std_min_schedule_edge_cases():
+    constant = _schedule_args(
+        std_min_start=None, std_min_end=None, std_min=[0.02, 0.0, 0.0, 0.02]
+    )
+    assert rl._resolve_std_min(constant, 1) == pytest.approx([0.02, 0.0, 0.0, 0.02])
+    assert rl._resolve_std_min(constant, 50) == pytest.approx([0.02, 0.0, 0.0, 0.02])
+
+    immediate = _schedule_args(std_min_hold_updates=0, std_min_anneal_updates=0)
+    assert rl._resolve_std_min(immediate, 1) == pytest.approx([0.005, 0.0, 0.0, 0.005])
+    assert rl._resolve_std_min(immediate, 50) == pytest.approx([0.005, 0.0, 0.0, 0.005])
+
+    one_step = _schedule_args(std_min_hold_updates=0, std_min_anneal_updates=1)
+    assert rl._resolve_std_min(one_step, 0) == pytest.approx([0.05, 0.005, 0.005, 0.05])
+    assert rl._resolve_std_min(one_step, 1) == pytest.approx([0.005, 0.0, 0.0, 0.005])
+
+
+def test_checkpoint_extra_records_schedule():
+    args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    reward_config = rl.reward_config_from_args(args)
+    current = rl._resolve_std_min(args, 11)
+    extra = rl._checkpoint_extra(
+        args, reward_config, update=11, std_min=current
+    )
+    group = extra["rl_group"]
+    assert group["std_min"] == pytest.approx([0.0095, 0.0009, 0.0009, 0.0095])
+    assert group["std_min_schedule"] == {
+        "start": [0.01, 0.001, 0.001, 0.01],
+        "end": [0.005, 0.0, 0.0, 0.005],
+        "hold_updates": 10,
+        "anneal_updates": 10,
+    }
 
 
 def test_entropy_bonus_changes_loss_without_changing_model():

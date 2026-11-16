@@ -897,10 +897,10 @@ policy loss = -mean(min(ratio * A_t, clip(ratio, 0.8, 1.2) * A_t)) - entropy_coe
 ```
 
 - `gamma=0.99` 起步；60s 末端 success 信号弱时试 0.995；timeout/max_step 按 terminal，bootstrap=0。
-- **exploration contract**：BC/DAgger 学到的 `logstd` 是 expert action likelihood 的残差参数，不直接当 RL 探索宽度。保留可学习 logstd，但有效尺度为 `std = std_min + (1-std_min)*exp(logstd)`；`std_min` 是 4 维向量 `[accel, steer, curvature, speed]`，默认 `[0.005, 0, 0, 0.005]`（纵向给探索，横向不硬加噪声，避免直接 off-road）。同时加 entropy bonus `loss = PPO_loss - entropy_coef * entropy`，默认 `entropy_coef=0.01`。不向动作外面额外加噪声，log_prob 仍对应实际采样分布。
+- **exploration contract**：BC/DAgger 学到的 `logstd` 是 expert action likelihood 的残差参数，不直接当 RL 探索宽度。保留可学习 logstd，但有效尺度为 `std = std_min + (1-std_min)*exp(logstd)`；`std_min` 是 4 维向量，对应动作 `(dx, dy, dpsi, v_next)`（米/弧度/m/s），默认 `[0.005, 0, 0, 0.005]`。注意：`dx` 和 `v_next` 的 i.i.d. 噪声会破坏 0.5 s time law（`dx ≈ v·dt`），floor 不能随意加大；0.05 实测退化（u1 批次 0% success、34% invalid）。训练可选用 per-dim schedule：保持 `std_min_start` 共 `std_min_hold_updates` 个 update，再在 `std_min_anneal_updates` 内线性退火到 `std_min_end`；没有 start/end 时退回常量 `std_min`。eval 始终用 deterministic `action_mu`，不受 schedule 影响。同时加 entropy bonus `loss = PPO_loss - entropy_coef * entropy`，默认 `entropy_coef=0.01`，不随 schedule 改变。`logstd` 的 `clamp(-5,0)` 会零化低于 -5 的梯度，entropy 项无法把已 clamp 的头拉回；不向动作外面额外加噪声，log_prob 仍对应实际采样分布。
 - 监控 raw/effective logstd、entropy、approx_kl、clip_frac；`approx_kl > 0.02` 或 `clip_frac > 0.3` 提前停该次 inner epochs。
 - 不需要 reward/termination 预测头；reward 是规则函数。
-- `G`、`minibatch`、`lr`、`clip`、`gamma`、`std_min`、`entropy_coef`、reward weights、`adapt_coeff` 冻结进 config/checkpoint。
+- `G`、`minibatch`、`lr`、`clip`、`gamma`、`std_min`、`std_min_start/end/hold/anneal`、`entropy_coef`、reward weights、`adapt_coeff` 冻结进 config/checkpoint。
 
 **Trainable params**
 
@@ -1061,7 +1061,7 @@ KL ≈ mean_{s in real+imagined} E_{a~π_new}[log π_new(a|s) - log π_old(a|s)]
 9. **probe/horizon 对齐**：当前 `pipeline/eval/wm_probe.py` 默认跑 1..H，`net/world_model.py` 接受 1..6；新训练/eval entrypoint 只允许 1/3/6。通用 API 的其他 horizon 不作为支持范围。
 10. **reward 事件语义**：`invalid_action > collision > off-road > success > timeout`；success 不允许覆盖 collision/off-road；wrong_route/stuck 是 per-step one-shot，不进 terminal 优先级。必须有单元测试覆盖同帧事件、wrong_route/stuck 可达性、timeout rc shaping。
 11. **aux head**：RL 没有 aux loss；aux head 冻结/排除 optimizer，避免 AdamW weight decay 改动它。
-12. **config/checkpoint**：G、minibatch、lr、clip、gamma、std_min、entropy_coef、reward weights、adapt_coeff 必须写入 config 和 checkpoint，便于复现。
+12. **config/checkpoint**：G、minibatch、lr、clip、gamma、std_min、std_min_start/end/hold/anneal、entropy_coef、reward weights、adapt_coeff 必须写入 config 和 checkpoint，便于复现。
 
 ---
 

@@ -7,7 +7,7 @@ easy_weight: 1.0
 medium_weight: 1.5
 hard_weight: 2.0
 ckpt: runs/bc_dagger_exact_r3_261107031440/best_closed_loop.pt
-out: runs/rl_group_r4
+out: runs/rl_group_r5
 
 updates: 50
 scenes_per_update: 8
@@ -38,7 +38,19 @@ logprob_audit_size: 32
 # Policy exploration: effective std = std_min + (1-std_min)*exp(logstd)
 # BC logstd is a likelihood parameter, not an RL exploration policy; the floor
 # prevents PPO from collapsing the behavior policy to deterministic.
-# Per-dim floor [accel, steer, curvature, speed]: longitudinal exploration is
-# useful, but i.i.d. steering/curvature noise quickly drives the car off-road.
+# Action dims are (dx, dy, dpsi, v_next) in metres / radians / m/s.  Independent
+# i.i.d. noise on dx and v_next breaks the 0.5 s time law (dx ~ v*dt) and can
+# produce invalid_action; 0.05 was measured to be degenerate (0% success, 34%
+# invalid on the u1 batch). 0.01/0.001 is the largest safe i.i.d. floor found.
+#
+# r5 schedule (only exploration changes vs r4b):
+#   updates 1..hold  -> std_min_start
+#   updates hold+1.. -> linear anneal to std_min_end
+#   after anneal     -> std_min_end
+# std_min stays as the constant fallback when start/end are absent.
 std_min: [0.005, 0.0, 0.0, 0.005]
+std_min_start: [0.01, 0.001, 0.001, 0.01]
+std_min_end: [0.005, 0.0, 0.0, 0.005]
+std_min_hold_updates: 10
+std_min_anneal_updates: 10
 entropy_coef: 0.01

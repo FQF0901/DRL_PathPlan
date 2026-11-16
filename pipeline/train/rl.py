@@ -34,6 +34,7 @@ import math
 import multiprocessing as mp
 import shutil
 import sysconfig
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -201,6 +202,57 @@ def _std_min_json(std_min: float | Sequence[float]) -> Any:
     return values[0] if len(values) == 1 else values
 
 
+def _std_min_schedule_json(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+    start = getattr(args, "std_min_start", None)
+    end = getattr(args, "std_min_end", None)
+    if start is None and end is None:
+        return None
+    return {
+        "start": _std_min_json(start),
+        "end": _std_min_json(end),
+        "hold_updates": int(getattr(args, "std_min_hold_updates", 0)),
+        "anneal_updates": int(getattr(args, "std_min_anneal_updates", 0)),
+    }
+
+
+def _resolve_std_min(
+    args: argparse.Namespace, update: int
+) -> float | List[float]:
+    """Return the exploration floor for a 1-based update (0 = pre-RL).
+
+    With ``std_min_start``/``std_min_end`` set, hold the start value for
+    ``std_min_hold_updates``, then linearly anneal to the end value over
+    ``std_min_anneal_updates``.  Without a schedule, ``std_min`` stays constant.
+    """
+    start = getattr(args, "std_min_start", None)
+    end = getattr(args, "std_min_end", None)
+    if start is None and end is None:
+        values = _std_min_values(args.std_min, require_positive=True)
+        return values[0] if len(values) == 1 else values
+    if start is None or end is None:
+        raise ValueError("std_min_start and std_min_end must be set together")
+    start_values = _std_min_values(start, require_positive=True)
+    end_values = _std_min_values(end, require_positive=True)
+    if len(start_values) != len(end_values):
+        raise ValueError(
+            "std_min_start and std_min_end must have the same length, "
+            f"got {len(start_values)} and {len(end_values)}"
+        )
+    hold = int(getattr(args, "std_min_hold_updates", 0))
+    anneal = int(getattr(args, "std_min_anneal_updates", 0))
+    if update <= hold:
+        values = list(start_values)
+    elif anneal <= 0 or update >= hold + anneal:
+        values = list(end_values)
+    else:
+        fraction = float(update - hold) / float(anneal)
+        values = [
+            start_value + fraction * (end_value - start_value)
+            for start_value, end_value in zip(start_values, end_values)
+        ]
+    return values[0] if len(values) == 1 else values
+
+
 def _policy_scale(
     out: Mapping[str, Tensor],
     std_min: float | Sequence[float] = 0.0,
@@ -210,13 +262,13 @@ def _policy_scale(
     BC/DAgger NLL legitimately drives log-std down for near-deterministic
     expert actions.  RL needs a separate exploration floor, otherwise the
     PPO policy becomes deterministic before it has tried alternatives.
-    The four action dimensions have very different sensitivity, so the floor
-    may be a scalar or a 4-vector (accel, steer, curvature, speed).
+    The action dims are ``(dx, dy, dpsi, v_next)``; they have very different
+    sensitivity, so the floor may be a scalar or a 4-vector.
     """
     base = out["action_logstd"].clamp(-5.0, 0.0).exp()
     floor = torch.as_tensor(std_min, dtype=base.dtype, device=base.device)
-    if floor.ndim == 0:
-        floor = floor.expand_as(base)
+    if floor.ndim == 0 or floor.numel() == 1:
+        floor = floor.reshape(1).expand_as(base)
     else:
         if floor.numel() != base.shape[-1]:
             raise ValueError(
@@ -225,8 +277,9 @@ def _policy_scale(
         floor = floor.reshape(1, -1).expand_as(base)
     if torch.any(floor < 0.0) or torch.any(floor > 1.0):
         raise ValueError(f"std_min values must be in [0,1], got {std_min!r}")
-    # Monotone map [0, 1] -> [std_min, 1].  The gradient is non-zero at the
-    # old clamp floor, so the entropy term can still move log-std upward.
+    # Monotone map [0, 1] -> [std_min, 1].  The clamp above zeroes the logstd
+    # gradient below -5, so the entropy term cannot pull a clamped head back
+    # up; the floor is what keeps exploration non-zero.
     return floor + (1.0 - floor) * base
 
 
@@ -967,6 +1020,7 @@ def ppo_update(
             "entropy_proxy": 0.0,
             "raw_logstd": 0.0,
             "entropy": 0.0,
+            "scale_sum": torch.zeros(ACTION_DIM, dtype=torch.float32),
             "batches": 0,
         }
         for start in range(0, len(samples), int(minibatch)):
@@ -1006,6 +1060,7 @@ def ppo_update(
                 totals["entropy"] += float(entropy.detach())
                 totals["entropy_proxy"] += float(torch.log(dist.scale).mean())
                 totals["raw_logstd"] += float(out["action_logstd"].clamp(-5.0, 0.0).mean())
+                totals["scale_sum"] += dist.scale.mean(0).detach().cpu()
                 totals["batches"] += 1
 
         batches = max(int(totals["batches"]), 1)
@@ -1018,6 +1073,7 @@ def ppo_update(
             "entropy_proxy": totals["entropy_proxy"] / batches,
             "raw_logstd": totals["raw_logstd"] / batches,
             "entropy": totals["entropy"] / batches,
+            "scale_mean": (totals["scale_sum"] / batches).tolist(),
         }
         epoch_history.append(history)
         if history["approx_kl"] > float(kl_stop) or history["clip_frac"] > float(clip_frac_stop):
@@ -1036,6 +1092,7 @@ def ppo_update(
         "entropy_proxy": last["entropy_proxy"],
         "raw_logstd": last["raw_logstd"],
         "entropy": last["entropy"],
+        "scale_mean": last["scale_mean"],
         "logprob_audit_count": int(audit_count),
         "logprob_audit_max_abs_diff": audit_max_diff,
         "epochs": epoch_history,
@@ -1311,6 +1368,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adv-std-floor", type=float, default=1e-6)
     parser.add_argument("--logprob-audit-size", type=int, default=32)
     parser.add_argument("--std-min", type=float, nargs="+", default=0.05)
+    parser.add_argument("--std-min-start", type=float, nargs="+", default=None)
+    parser.add_argument("--std-min-end", type=float, nargs="+", default=None)
+    parser.add_argument("--std-min-hold-updates", type=int, default=0)
+    parser.add_argument("--std-min-anneal-updates", type=int, default=0)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
 
     parser.add_argument("--workers", type=int, default=4)
@@ -1385,8 +1446,34 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--epochs and --minibatch must be >= 1")
     try:
         _validate_std_min(args.std_min, require_positive=True)
+        base_std_values = _std_min_values(args.std_min, require_positive=True)
     except ValueError as exc:
         raise SystemExit(str(exc))
+    for name, values in (("std_min", base_std_values),):
+        if len(values) not in (1, ACTION_DIM):
+            raise SystemExit(f"{name} must be a scalar or {ACTION_DIM}-vector")
+    start = getattr(args, "std_min_start", None)
+    end = getattr(args, "std_min_end", None)
+    if (start is None) != (end is None):
+        raise SystemExit("--std-min-start and --std-min-end must be set together")
+    if start is not None:
+        try:
+            start_values = _std_min_values(start, require_positive=True)
+            end_values = _std_min_values(end, require_positive=True)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        if len(start_values) != len(end_values):
+            raise SystemExit(
+                "--std-min-start and --std-min-end must have the same length"
+            )
+        if len(start_values) not in (1, ACTION_DIM):
+            raise SystemExit(
+                f"std_min_start/end must be a scalar or {ACTION_DIM}-vector"
+            )
+        if int(args.std_min_hold_updates) < 0:
+            raise SystemExit("--std-min-hold-updates must be >= 0")
+        if int(args.std_min_anneal_updates) < 0:
+            raise SystemExit("--std-min-anneal-updates must be >= 0")
     if float(args.entropy_coef) < 0.0:
         raise SystemExit("--entropy-coef must be >= 0")
     for name in ("easy_weight", "medium_weight", "hard_weight"):
@@ -1406,7 +1493,12 @@ def _checkpoint_extra(
     *,
     update: int,
     selection: Optional[Mapping[str, Any]] = None,
+    std_min: float | Sequence[float] | None = None,
 ) -> Dict[str, Any]:
+    current_std_min = _std_min_json(
+        _resolve_std_min(args, int(update)) if std_min is None else std_min
+    )
+    schedule = _std_min_schedule_json(args)
     return {
         "rl_group": {
             "schema": "drl_pathplan_rl_group_v1",
@@ -1424,7 +1516,8 @@ def _checkpoint_extra(
             "lr": float(args.lr),
             "tsb_lr": float(args.tsb_lr),
             "max_grad_norm": float(args.max_grad_norm),
-            "std_min": _std_min_json(args.std_min),
+            "std_min": current_std_min,
+            "std_min_schedule": schedule,
             "entropy_coef": float(args.entropy_coef),
             "split": {
                 "specs": str(args.specs),
@@ -1535,7 +1628,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "train": len(train_specs),
             "holdout": len(holdout_specs),
             "trainable": trainable,
-            "std_min": _std_min_json(args.std_min),
+            "std_min": _std_min_json(_resolve_std_min(args, 0)),
+            "std_min_schedule": _std_min_schedule_json(args),
             "entropy_coef": float(args.entropy_coef),
             "reward_config": asdict(reward_config),
         }
@@ -1558,6 +1652,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         model, best_path,
         extra=_checkpoint_extra(
             args, reward_config, update=0,
+            std_min=_resolve_std_min(args, 0),
             selection={
                 **{name: baseline_eval[name] for name in (
                     "strict_success", "legacy_success", "collision", "off_road",
@@ -1582,6 +1677,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         for update in range(int(args.updates)):
+            std_min_now = _resolve_std_min(args, update + 1)
             scenes = sample_scenes(
                 train_specs,
                 int(args.scenes_per_update),
@@ -1604,7 +1700,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "max_steps": int(args.max_steps),
                             "max_decisions": int(args.max_decisions),
                             "reward_config": reward_config,
-                            "std_min": args.std_min,
+                            "std_min": std_min_now,
                         }
                     )
 
@@ -1621,6 +1717,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             summaries = [episode["summary"] for episode in episodes]
             rollout_summary = summarize_episodes(summaries)
+            scene_outcomes: Dict[int, Counter] = defaultdict(Counter)
+            for summary in summaries:
+                scene_outcomes[int(summary["scene_seed"])][
+                    str(summary["terminal_event"])
+                ] += 1
+            mixed_scenes = sum(
+                1
+                for counts in scene_outcomes.values()
+                if 0 < int(counts.get("success", 0)) < int(sum(counts.values()))
+            )
+            scene_success_histogram = Counter(
+                int(counts.get("success", 0)) for counts in scene_outcomes.values()
+            )
             advantages, advantage_stats = compute_active_set_advantages(
                 episodes, float(args.gamma)
             )
@@ -1650,9 +1759,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             update_record: Dict[str, Any] = {
                 "event": "update",
                 "update": int(update + 1),
+                "std_min": _std_min_json(std_min_now),
                 "scene_seeds": scene_seeds,
                 "task_count": int(len(tasks)),
                 "rollout": rollout_summary,
+                "scene_outcomes": {
+                    "scenes": int(len(scene_outcomes)),
+                    "mixed": int(mixed_scenes),
+                    "mixed_fraction": float(
+                        mixed_scenes / max(len(scene_outcomes), 1)
+                    ),
+                    "success_histogram": {
+                        str(key): int(value)
+                        for key, value in sorted(scene_success_histogram.items())
+                    },
+                },
                 "advantage": advantage_stats,
                 "normalization": normalization_stats,
                 "transitions": int(total_transitions),
@@ -1679,7 +1800,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     kl_stop=float(args.kl_stop),
                     clip_frac_stop=float(args.clip_frac_stop),
                     logprob_audit_size=int(args.logprob_audit_size),
-                    std_min=args.std_min,
+                    std_min=std_min_now,
                     entropy_coef=float(args.entropy_coef),
                 )
                 update_record["ppo"] = ppo_stats
@@ -1697,14 +1818,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model,
                 checkpoint_path,
                 extra=_checkpoint_extra(
-                    args, reward_config, update=int(update + 1)
+                    args, reward_config, update=int(update + 1),
+                    std_min=std_min_now,
                 ),
             )
             save_policy_checkpoint(
                 model,
                 out_dir / "last.pt",
                 extra=_checkpoint_extra(
-                    args, reward_config, update=int(update + 1)
+                    args, reward_config, update=int(update + 1),
+                    std_min=std_min_now,
                 ),
             )
             _write_latest_alias(out_dir)
@@ -1750,6 +1873,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             args,
                             reward_config,
                             update=int(update + 1),
+                            std_min=std_min_now,
                             selection={
                                 **{
                                     name: eval_metrics[name]
