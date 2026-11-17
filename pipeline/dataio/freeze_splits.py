@@ -8,8 +8,8 @@ Canonical scene sets:
   mini_*     : deterministic smoke-test prefixes of train/val
 
 The spec's own ``split`` field is the source of truth for train/val/test/mini.
-Only the gate seals (val/test) and the two RL subset views are written under
-``data/splits``.  ``--check`` verifies those files without writing anything.
+Only the gate seals (val/test) are written under ``data/splits``.  ``--check``
+verifies those files without writing anything.
 """
 
 from __future__ import annotations

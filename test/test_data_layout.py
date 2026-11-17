@@ -38,7 +38,7 @@ def test_manifest_spec_path_and_sha_match():
         assert payload["seed_range"] == [payload["seeds"][0], payload["seeds"][-1]]
 
 
-def test_only_gate_seals_and_rl_views_live_in_splits():
+def test_only_gate_seals_live_in_splits():
     names = {path.stem for path in _manifests()}
     assert names == {"val_500", "test_500"}
 
