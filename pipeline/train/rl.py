@@ -5,7 +5,7 @@ Contract reference: ``docs/arch_lock.md`` §12.4.
 This trainer is the RL mainline. The old PPO contract canary has been removed.
 It implements the RL contract:
 
-* scene-level RL splits from ``pipeline.dataio.splits`` (train 1500 / holdout 500);
+* full ``train_2000``; ``val_500`` selection; test500 one-shot only;
 * real-env rollouts in spawned worker processes, 8 scene seeds x 8 policy
   samples per update, identical env seed per scene, independent policy
   sampling seed per member;
@@ -14,10 +14,10 @@ It implements the RL contract:
 * rule-based dense + terminal reward from ``pipeline.train.rl_reward``;
 * per-step active-set leave-one-out advantages with global normalization;
 * clipped PPO on planner + TSB only (encoder and aux head are frozen);
-* holdout-500 selection using strict success, never test500 / val500.
+* ``val_500`` selection using strict success; test500 is one-shot only.
 
-There is no value head, no GAE, no cost vector and no reward-shaping module in
-this trainer.
+There is no value head, no GAE and no cost vector; reward weights are rule-based
+and may be resolved from a schedule.
 """
 
 from __future__ import annotations
@@ -61,6 +61,8 @@ from pipeline.train.rl_reward import (
     aggregate_substep_events,
     compute_step_reward,
 )
+from pipeline.train.reward_schedule import resolve_reward_config, validate_reward_schedule
+from pipeline.train.scene_manifest import load_scene_manifest
 from pipeline.common.train_config import latest_run_alias, parse_train_args, timestamped_run_dir
 
 # The stored-log-prob audit compares a batch recompute with the rollout forward.
@@ -697,6 +699,10 @@ def run_rollout_episode(
         prev_speed: Optional[float] = None
         prev_heading: Optional[float] = None
         rc = _route_completion(ego, {}, 0.0)
+        comfort_a_long: List[float] = []
+        comfort_a_lat: List[float] = []
+        comfort_jerk: List[float] = []
+        speeds: List[float] = []
 
         n = 0
         success = collision = off_road = False
@@ -798,6 +804,10 @@ def run_rollout_episode(
             rc1 = _route_completion(ego, infos[-1], rc0) if infos else rc0
             v_end = float(ego.speed)
             metrics = dict(getattr(tr_exec, "metrics", {}) or {})
+            comfort_a_long.append(_safe_float(metrics.get("max_abs_a_long")))
+            comfort_a_lat.append(_safe_float(metrics.get("max_abs_a_lat")))
+            comfort_jerk.append(_safe_float(metrics.get("max_abs_jerk_long")))
+            speeds.append(v_end)
             events = aggregate_substep_events(
                 infos,
                 rc0=rc0,
@@ -917,6 +927,10 @@ def run_rollout_episode(
             "terminal_event": str(terminal_event),
             "route_completion": float(rc),
             "reward_sum": float(reward_sum),
+            "mean_speed": float(np.mean(speeds)) if speeds else 0.0,
+            "max_abs_a_long_mean": float(np.mean(comfort_a_long)) if comfort_a_long else 0.0,
+            "max_abs_a_lat_mean": float(np.mean(comfort_a_lat)) if comfort_a_lat else 0.0,
+            "max_abs_jerk_long_mean": float(np.mean(comfort_jerk)) if comfort_jerk else 0.0,
             "transitions": int(decision_count),
         }
         return {
@@ -1287,6 +1301,10 @@ def summarize_episodes(summaries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]
             "route_completion": 0.0,
             "decisions_mean": 0.0,
             "reward_mean": 0.0,
+            "mean_speed": 0.0,
+            "max_abs_a_long_mean": 0.0,
+            "max_abs_a_lat_mean": 0.0,
+            "max_abs_jerk_long_mean": 0.0,
         }
     count = float(len(summaries))
 
@@ -1309,6 +1327,18 @@ def summarize_episodes(summaries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]
         ),
         "reward_mean": float(
             sum(float(item["reward_sum"]) for item in summaries) / count
+        ),
+        "mean_speed": float(
+            sum(float(item["mean_speed"]) for item in summaries) / count
+        ),
+        "max_abs_a_long_mean": float(
+            sum(float(item["max_abs_a_long_mean"]) for item in summaries) / count
+        ),
+        "max_abs_a_lat_mean": float(
+            sum(float(item["max_abs_a_lat_mean"]) for item in summaries) / count
+        ),
+        "max_abs_jerk_long_mean": float(
+            sum(float(item["max_abs_jerk_long_mean"]) for item in summaries) / count
         ),
     }
 
@@ -1340,6 +1370,17 @@ def _write_latest_alias(out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # CLI / main
 # ---------------------------------------------------------------------------
+def _parse_reward_schedule(value: Any) -> Any:
+    if value is None or not isinstance(value, str):
+        return value
+    if value.lower() in ("", "none", "null"):
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("reward schedule must be JSON or none") from exc
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Real-env group-relative PPO (arch_lock §12.4)"
@@ -1373,6 +1414,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-min-hold-updates", type=int, default=0)
     parser.add_argument("--std-min-anneal-updates", type=int, default=0)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--reward-schedule", type=_parse_reward_schedule, default=None)
+    parser.add_argument("--scene-manifest", default=None)
+    parser.add_argument("--action-mode", choices=("4d_exact", "3d_derived_dx"), default="4d_exact")
 
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--device", default="cuda")
@@ -1476,6 +1520,15 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise SystemExit("--std-min-anneal-updates must be >= 0")
     if float(args.entropy_coef) < 0.0:
         raise SystemExit("--entropy-coef must be >= 0")
+    if getattr(args, "reward_schedule", None) is not None:
+        try:
+            validate_reward_schedule(args.reward_schedule, int(args.updates))
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+    if getattr(args, "scene_manifest", None) and not Path(args.scene_manifest).is_file():
+        raise SystemExit(f"scene manifest not found: {args.scene_manifest}")
+    if args.action_mode != "4d_exact":
+        raise SystemExit("action_mode 3d_derived_dx is not implemented")
     for name in ("easy_weight", "medium_weight", "hard_weight"):
         if not np.isfinite(float(getattr(args, name))) or float(getattr(args, name)) <= 0.0:
             raise SystemExit(f"--{name.replace('_', '-')} must be finite and > 0")
@@ -1518,6 +1571,8 @@ def _checkpoint_extra(
             "max_grad_norm": float(args.max_grad_norm),
             "std_min": current_std_min,
             "std_min_schedule": schedule,
+            "reward_schedule": getattr(args, "reward_schedule", None),
+            "action_mode": str(getattr(args, "action_mode", "4d_exact")),
             "entropy_coef": float(args.entropy_coef),
             "split": {
                 "specs": str(args.specs),
@@ -1577,6 +1632,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     holdout_specs = load_specs(args.holdout_specs)
     if not train_specs or not holdout_specs:
         raise SystemExit("train/holdout specs must both be non-empty")
+    manifest_meta = None
+    if getattr(args, "scene_manifest", None):
+        try:
+            train_specs, manifest_meta = load_scene_manifest(
+                args.scene_manifest,
+                train_specs,
+                specs_path=args.specs,
+                group_size=int(args.group_size),
+                std_min=_resolve_std_min(args, 1),
+                action_mode=str(args.action_mode),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc))
     train_seeds = {int(spec.seed) for spec in train_specs}
     holdout_seeds = {int(spec.seed) for spec in holdout_specs}
     if train_seeds & holdout_seeds:
@@ -1603,7 +1671,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "schema": "drl_pathplan_rl_group_run_v1",
         "config": str(args.config),
         "args": vars(args),
-        "reward_config": asdict(reward_config),
+        "base_reward_config": asdict(reward_config),
+        "reward_schedule": args.reward_schedule,
+        "scene_manifest": manifest_meta,
+        "action_mode": str(args.action_mode),
         "split": {
             "train": len(train_specs),
             "holdout": len(holdout_specs),
@@ -1631,7 +1702,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "std_min": _std_min_json(_resolve_std_min(args, 0)),
             "std_min_schedule": _std_min_schedule_json(args),
             "entropy_coef": float(args.entropy_coef),
-            "reward_config": asdict(reward_config),
+            "reward_schedule": args.reward_schedule,
+            "scene_manifest": manifest_meta,
+            "base_reward_config": asdict(reward_config),
         }
     )
 
@@ -1648,6 +1721,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         limit=int(args.eval_limit),
     )
     best_key: Optional[Tuple[float, float, float, float]] = _selection_key(baseline_eval)
+    best_update = 0
     save_policy_checkpoint(
         model, best_path,
         extra=_checkpoint_extra(
@@ -1678,6 +1752,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         for update in range(int(args.updates)):
             std_min_now = _resolve_std_min(args, update + 1)
+            reward_config_now = resolve_reward_config(
+                reward_config, args.reward_schedule, update + 1
+            )
             scenes = sample_scenes(
                 train_specs,
                 int(args.scenes_per_update),
@@ -1699,7 +1776,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             ),
                             "max_steps": int(args.max_steps),
                             "max_decisions": int(args.max_decisions),
-                            "reward_config": reward_config,
+                            "reward_config": reward_config_now,
                             "std_min": std_min_now,
                         }
                     )
@@ -1760,6 +1837,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "event": "update",
                 "update": int(update + 1),
                 "std_min": _std_min_json(std_min_now),
+                "reward_config": asdict(reward_config_now),
                 "scene_seeds": scene_seeds,
                 "task_count": int(len(tasks)),
                 "rollout": rollout_summary,
@@ -1818,7 +1896,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model,
                 checkpoint_path,
                 extra=_checkpoint_extra(
-                    args, reward_config, update=int(update + 1),
+                    args, reward_config_now, update=int(update + 1),
                     std_min=std_min_now,
                 ),
             )
@@ -1826,7 +1904,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model,
                 out_dir / "last.pt",
                 extra=_checkpoint_extra(
-                    args, reward_config, update=int(update + 1),
+                    args, reward_config_now, update=int(update + 1),
                     std_min=std_min_now,
                 ),
             )
@@ -1866,12 +1944,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 if improved:
                     best_key = key
+                    best_update = int(update + 1)
                     save_policy_checkpoint(
                         model,
                         best_path,
                         extra=_checkpoint_extra(
                             args,
-                            reward_config,
+                            reward_config_now,
                             update=int(update + 1),
                             std_min=std_min_now,
                             selection={
@@ -1901,6 +1980,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "updates": int(args.updates),
             "best_selection_key": None if best_key is None else list(best_key),
             "best_checkpoint": str(best_path) if best_key is not None else None,
+            "best_is_baseline": int(best_update) == 0,
             "last_checkpoint": str(out_dir / "last.pt"),
             "latest_checkpoint": str(out_dir / "latest.pt"),
         }

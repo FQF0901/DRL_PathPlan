@@ -328,11 +328,12 @@ def test_config_and_rl_split_loader():
     assert args.workers == 4
     assert args.device == "cuda"
     assert args.std_min == pytest.approx([0.005, 0.0, 0.0, 0.005])
-    assert args.std_min_start == pytest.approx([0.01, 0.001, 0.001, 0.01])
-    assert args.std_min_end == pytest.approx([0.005, 0.0, 0.0, 0.005])
-    assert args.std_min_hold_updates == 10
-    assert args.std_min_anneal_updates == 10
+    assert args.std_min_start is None
+    assert args.std_min_end is None
+    assert args.std_min_hold_updates == 0
+    assert args.std_min_anneal_updates == 0
     assert args.entropy_coef == pytest.approx(0.01)
+    assert args.reward_schedule["phases"][0]["w_comfort"] == pytest.approx(0.0)
     assert args.holdout_specs.endswith("data/specs/val_500.json")
     assert args.easy_weight == pytest.approx(1.0)
     assert args.medium_weight == pytest.approx(1.5)
@@ -471,11 +472,13 @@ def test_std_min_schedule_validation():
 
     args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
     rl._validate_args(args)
+    args.std_min_start = [0.01, 0.001, 0.001, 0.01]
     args.std_min_end = None
     with pytest.raises(SystemExit):
         rl._validate_args(args)
     args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
     args.std_min_start = [0.05, 0.005, 0.005]
+    args.std_min_end = [0.005, 0.0, 0.0, 0.005]
     with pytest.raises(SystemExit):
         rl._validate_args(args)
     args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
@@ -484,6 +487,8 @@ def test_std_min_schedule_validation():
     with pytest.raises(SystemExit):
         rl._validate_args(args)
     args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    args.std_min_start = [0.01, 0.001, 0.001, 0.01]
+    args.std_min_end = [0.005, 0.0, 0.0, 0.005]
     args.std_min_hold_updates = -1
     with pytest.raises(SystemExit):
         rl._validate_args(args)
@@ -517,8 +522,59 @@ def test_std_min_schedule_edge_cases():
     assert rl._resolve_std_min(one_step, 1) == pytest.approx([0.005, 0.0, 0.0, 0.005])
 
 
+def test_reward_schedule_interpolates_and_validates():
+    from pipeline.train.rl_reward import RewardConfig
+    from pipeline.train.reward_schedule import (
+        resolve_reward_config,
+        validate_reward_schedule,
+    )
+
+    base = RewardConfig()
+    schedule = {
+        "interpolate": True,
+        "phases": [
+            {"until_update": 15, "w_comfort": 0.0, "w_low_speed": 0.1},
+            {"until_update": 30, "w_comfort": 0.05, "w_low_speed": 0.2},
+            {"until_update": 50, "w_comfort": 0.05, "w_low_speed": 0.2},
+        ],
+    }
+    validate_reward_schedule(schedule, 50)
+    assert resolve_reward_config(base, schedule, 1).w_comfort == pytest.approx(0.0)
+    assert resolve_reward_config(base, schedule, 15).w_comfort == pytest.approx(0.0)
+    assert resolve_reward_config(base, schedule, 16).w_comfort == pytest.approx(0.0)
+    assert resolve_reward_config(base, schedule, 17).w_comfort == pytest.approx(0.05 / 14.0)
+    assert resolve_reward_config(base, schedule, 30).w_comfort == pytest.approx(0.05)
+    assert resolve_reward_config(base, schedule, 30).stuck_window_steps == 20
+    assert isinstance(resolve_reward_config(base, schedule, 30).stuck_window_steps, int)
+    assert resolve_reward_config(base, schedule, 50).w_comfort == pytest.approx(0.05)
+    assert resolve_reward_config(base, schedule, 1).w_low_speed == pytest.approx(0.1)
+    assert resolve_reward_config(base, schedule, 30).w_low_speed == pytest.approx(0.2)
+    assert resolve_reward_config(base, None, 1) == base
+
+    with pytest.raises(ValueError):
+        validate_reward_schedule({"phases": [{"until_update": 10, "nope": 0.0}]}, 10)
+    with pytest.raises(ValueError):
+        validate_reward_schedule({"phases": [{"until_update": 10, "w_comfort": -1.0}]}, 10)
+    with pytest.raises(ValueError):
+        validate_reward_schedule(
+            {"phases": [{"until_update": 10}, {"until_update": 5}]}, 10
+        )
+    with pytest.raises(ValueError):
+        validate_reward_schedule({"phases": [{"until_update": 10}]}, 20)
+    with pytest.raises(ValueError):
+        validate_reward_schedule({"phases": [{"until_update": None}]}, 10)
+    with pytest.raises(ValueError):
+        validate_reward_schedule({"phases": [{"until_update": 10}], "nope": 1}, 10)
+    with pytest.raises(ValueError):
+        validate_reward_schedule({"interpolate": "false", "phases": [{"until_update": 10}]}, 10)
+
+
 def test_checkpoint_extra_records_schedule():
     args = rl.parse_train_args(rl.build_arg_parser(), [], "config/train_rl.yaml")
+    args.std_min_start = [0.01, 0.001, 0.001, 0.01]
+    args.std_min_end = [0.005, 0.0, 0.0, 0.005]
+    args.std_min_hold_updates = 10
+    args.std_min_anneal_updates = 10
     reward_config = rl.reward_config_from_args(args)
     current = rl._resolve_std_min(args, 11)
     extra = rl._checkpoint_extra(
