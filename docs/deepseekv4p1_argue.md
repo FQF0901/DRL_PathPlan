@@ -234,3 +234,19 @@ Trainer 只增加：
 1. scene manifest 放 `runs/`（run artifact）还是 `data/manifests/`（正式训练集）？
 2. structured action 直接做 B（3D policy + 反推 dx），还是先做 A（只约束 `v_next`）？
 3. 目标 scene 数取 400–600 中的哪个值（建议 500）？
+
+## 7. P1 reward curriculum 结果（2026-11-18）
+
+Run：`runs/rl_group_r5_p1_261118000410`，15 updates，只把 `w_comfort` 从 0.05 设为 0；其余权重、`std_min=[0.005,0,0,0.005]`、scene 采样、PPO 超参不变。
+
+| 指标 | P1 u5 | r4b u5 | P1 u10 | r4b u10 | P1 u15 | r4b u15 |
+|---|---:|---:|---:|---:|---:|---:|
+| strict success | 0.660 | 0.688 | 0.676 | 0.698 | **0.692** | **0.722** |
+| collision | 0.172 | 0.132 | 0.162 | 0.134 | 0.160 | 0.118 |
+| off_road | 0.134 | 0.114 | 0.116 | 0.098 | 0.100 | 0.088 |
+| timeout | 0.044 | 0.070 | 0.046 | 0.072 | 0.048 | 0.072 |
+| route | 0.852 | 0.868 | 0.854 | 0.873 | 0.858 | 0.880 |
+
+结论：**comfort=0 不是有效探索。** success 三个检查点全部低于 r4b 同期（−2.8 / −2.2 / −3.0pp），collision/off_road 都更高；timeout 更低只是把失败换成了碰撞。训练 rollout 的 raw `max_abs_a_long_mean` 约 4.2–4.9（comfort 阈值 2.0），说明动作更激进，但没有转化为更高的 success。
+
+决定：**停止在 P1 reward 上叠加 P2/P3。** comfort 保留；P2/P3 若要继续，必须回到 r3 + 默认 reward 单独验证，不能把 P1 当 baseline。
